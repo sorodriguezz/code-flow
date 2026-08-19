@@ -619,7 +619,10 @@ function PullRequestsSection({ project }: { project: Project }) {
   const loadError = usePrStore((s) => s.loadErrorByProject[project.id]);
   const loadPullRequests = usePrStore((s) => s.loadPullRequests);
   const selectPr = usePrStore((s) => s.selectPr);
-  const selectedPr = usePrStore((s) => s.selectedPr);
+  // This section draws *this* repository's pull requests, so only a selection that belongs to it
+  // may tint a row. Read unguarded, a "#42" left selected in another repository lit up this one's
+  // "#42" — two different pull requests that share nothing but a number.
+  const selectedPr = usePrStore((s) => (s.selectedPrProjectId === project.id ? s.selectedPr : null));
   const openAiPanel = useUiStore((s) => s.openAiPanel);
   const openSettings = useUiStore((s) => s.openSettings);
   const settingsOpen = useUiStore((s) => s.settingsOpen);

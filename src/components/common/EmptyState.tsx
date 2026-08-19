@@ -1,13 +1,27 @@
+import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 
 export function EmptyState({
   icon: Icon,
   title,
   subtitle,
+  action,
 }: {
   icon: LucideIcon;
   title: string;
   subtitle?: string;
+  /**
+   * The one thing to do about being empty — a "New note" button, an "Add a connection" button.
+   *
+   * **It goes inside this box rather than beside it**, and that is the whole point of the prop.
+   * This component is `h-full`, so a caller that puts a button next to it in a flex column gets a
+   * box that claims the entire pane and a button stranded at the very bottom of it, a screen away
+   * from the sentence it answers. `ApiView` works around that by wrapping this in a height-less
+   * `div` — which is correct, and is also a piece of CSS reasoning nobody should have to rediscover
+   * to put a button under a message. Passed here, the button is laid out by the same centred
+   * column as the text and the two arrive as one group.
+   */
+  action?: ReactNode;
 }) {
   return (
     // `w-full` as well as `h-full`: this centres its content inside the box it's given, so a
@@ -21,6 +35,9 @@ export function EmptyState({
       <Icon size={28} className="mb-2 shrink-0 text-[var(--cf-text-muted)]" />
       <p className="text-sm font-medium text-[var(--cf-text)]">{title}</p>
       {subtitle && <p className="max-w-xs text-[13px] text-[var(--cf-text-muted)]">{subtitle}</p>}
+      {/* `shrink-0` for the same reason as the icon, and `mt-2` because the gap that separates two
+          lines of prose is too tight to separate prose from a control. */}
+      {action && <div className="mt-2 shrink-0">{action}</div>}
     </div>
   );
 }

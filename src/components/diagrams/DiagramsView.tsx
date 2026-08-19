@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, Sparkles, Undo2, Workflow } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ViewSkeleton } from "../common/ViewSkeleton";
@@ -43,6 +43,18 @@ export function DiagramsView() {
   const undoLastGeneration = useDiagramsStore((s) => s.undoLastGeneration);
   /** A boolean, not the document: this component must not re-render when the drawing changes. */
   const canUndoGeneration = useDiagramsStore((s) => s.undoGeneration !== null);
+  /**
+   * Whether the open diagram has a generation waiting to be looked at. A boolean for the same
+   * reason as the one above it — the graph itself would re-render this component for nothing.
+   *
+   * It exists because a result now outlives the window that asked for it: a run followed from
+   * another workspace lands the user on the right diagram with the answer parked and *nothing on
+   * screen saying so*, since the AI window closed with the workspace it was opened in. This is
+   * what says so, and re-opens the window on the preview rather than applying anything itself.
+   */
+  const hasParkedGeneration = useDiagramsStore(
+    (s) => s.activeId !== null && s.aiByDiagram[s.activeId]?.status === "ready",
+  );
   // Booleans and a string, deliberately, and not `s.draft`. The draft object is replaced on every
   // edit, so subscribing to it would re-render this component — and therefore the whole explorer
   // beside it — once per stroke of the pen.
@@ -210,6 +222,21 @@ export function DiagramsView() {
                   <Undo2 size={14} />
                 </button>
               )}
+              {/* The parked answer's way back onto the screen, and conditional for the same reason
+                  the undo button beside it is: it is here only while there is something waiting on
+                  this diagram, and gone the moment it is applied or replaced. It *opens the
+                  window* rather than applying — nothing goes onto the canvas unread. */}
+              {hasParkedGeneration && !aiOpen && (
+                <button
+                  type="button"
+                  className={ICON_BUTTON}
+                  title={t("diagrams.ai.apply")}
+                  aria-label={t("diagrams.ai.apply")}
+                  onClick={() => setAiOpen(true)}
+                >
+                  <Sparkles size={14} />
+                </button>
+              )}
               <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
                 {openTitle || (
                   <span className="italic text-[var(--cf-text-muted)]">
@@ -236,7 +263,19 @@ export function DiagramsView() {
                 onExport={openExportMenu}
                 onAskAi={() => setAiOpen(true)}
               />
-              {aiOpen && <DiagramAiPanel onClose={() => setAiOpen(false)} />}
+              {/* Keyed on the diagram for the same reason the frame above it is, and told which
+                  one it is drawing for rather than reading "whatever is open" when its answer
+                  lands. Without the key, an instruction typed about one diagram — and the busy
+                  chrome around it — would straddle a switch to the next; without `diagramId`, a
+                  generation could only ever be applied to the diagram that happened to be open
+                  when it came back. */}
+              {aiOpen && (
+                <DiagramAiPanel
+                  key={activeId}
+                  diagramId={activeId}
+                  onClose={() => setAiOpen(false)}
+                />
+              )}
             </div>
           </>
         )}

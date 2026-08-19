@@ -74,13 +74,23 @@ export interface AiRunAbout {
    * Where to go to watch it, in the notification centre's own vocabulary — which is what makes
    * following a *running* run and following a finished one the same landing.
    *
-   * Absent for a run whose place is already on screen. An inline edit in the editor has nowhere to
-   * send anybody: they are looking at it.
+   * Absent only for a run that genuinely has nowhere to be shown. "The user is looking at it right
+   * now" is **not** one of those cases: they are looking at it *until they switch workspace*, and a
+   * run that outlives that switch is precisely the one that needs a way back.
    */
   target?: NotificationTarget;
-  /** The workspace it belongs to, so a target can cross back into it. Stamped from wherever the
-   * run started, since it may well outlive the user's presence there. */
-  workspaceId?: string | null;
+  /**
+   * The workspace the work belongs to — **required**, so a target can cross back into it and so
+   * the status bar can say where each run is living.
+   *
+   * Not optional, and that is the whole point of this field. It used to be, and eleven of the
+   * thirteen call sites simply left it out; the status bar then fell back to "wherever the user is
+   * standing now", which is the one answer that is wrong exactly when it matters — for the run that
+   * outlived the screen it was started from. A run genuinely outside every workspace (an inline
+   * edit in a file opened from disk, a turn driven from a paired phone) passes an explicit `null`,
+   * which the bar renders as such rather than guessing.
+   */
+  workspaceId: string | null;
 }
 
 interface AiRunState {
@@ -231,6 +241,11 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
         if (s.active[event.run_id]) {
           return { engineByRun };
         }
+        // Into the eviction order too, which registering by hand used to skip: `recentRuns` is
+        // what `start` walks to free old buffers, so a run that never enters it is a buffer the cap
+        // can never reclaim. Appended rather than run through `start` because `start` clears
+        // `engineByRun` for the id — which is the very thing this event is delivering.
+        if (!recentRuns.includes(event.run_id)) recentRuns.push(event.run_id);
         return {
           engineByRun,
           active: { ...s.active, [event.run_id]: true },
@@ -239,6 +254,11 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
             [event.run_id]: {
               kindKey: "agents.liveKindRemote" as const,
               detail: event.model ? `${event.engine} · ${event.model}` : event.engine,
+              // Genuinely unknown rather than "wherever we are standing": the engine banner does
+              // not carry one, and the phone that started this may well have been driving another
+              // workspace. An explicit null makes the bar say "no workspace" instead of putting a
+              // name on a row it cannot vouch for.
+              workspaceId: null,
             },
           },
         };

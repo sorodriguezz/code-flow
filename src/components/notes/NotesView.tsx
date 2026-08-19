@@ -100,6 +100,15 @@ export function NotesView() {
           // switch, and remounting `@monaco-editor/react` disposes its model — throwing away the
           // undo history and the view state that `NoteMonaco`'s per-note `path` exists to keep.
           // Switching notes changes the `path` prop instead, which is the swap Monaco is built for.
+          //
+          // The cost of that decision is paid in `NoteEditor.insertAi`, and it is worth naming
+          // here: because one editor instance serves every note, a handle held across a switch
+          // still points at a live editor — just not the one it was taken for. That is how a
+          // generation started on note X came to be written into note Y at Y's caret. Anything
+          // arriving from a background run therefore compares the note and the workspace it was
+          // started for against the store before it touches Monaco; nothing here can make that
+          // comparison unnecessary, and keying the editor would only trade one defect for a worse
+          // one.
           <NoteEditor />
         )}
       </div>

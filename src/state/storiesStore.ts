@@ -182,7 +182,17 @@ interface StoriesState {
    * them — see `setWorkspace` — so without this the elapsed time restarted from zero every time the
    * batch was reopened, which reads as a stalled run rather than a long one. */
   runStartedAt: Record<string, number>;
-  publishingBatchId: string | null;
+  /** Which batches are mid-publish, keyed by batch — same shape and same reasoning as `runByBatch`.
+   *
+   * It was one slot for the whole store, which meant "somebody, somewhere, is publishing". Every
+   * other batch's Publish button stayed enabled and drawn as ready while `publish` returned at its
+   * first line: a click that looked like it worked and wrote nothing. And the slot outlived a
+   * workspace switch without ever matching a batch id there, so the next workspace got the silent
+   * half of that on every row at once — no button drawn busy, and no publish possible either.
+   *
+   * Kept across `setWorkspace` for the same reason `runByBatch` is: the key is a batch UUID and the
+   * value is a fact about a write still in flight, not about the screen. */
+  publishingByBatch: Record<string, true>;
   selectedId: string | null;
   query: string;
   /** Whether the target rail is open. View state, so it lives here rather than in `uiStore`. */
@@ -250,7 +260,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
   runByBatch: {},
   verifyRunByBatch: {},
   runStartedAt: {},
-  publishingBatchId: null,
+  publishingByBatch: {},
   selectedId: null,
   query: "",
   targetOpen: true,
@@ -260,6 +270,8 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     if (get().workspaceId === id) return;
     // Runs still in flight are kept, everything else is dropped — batch ids are UUIDs, so nothing
     // collides across workspaces, and a generation does not stop because the user looked elsewhere.
+    // A publish in flight is listed here for exactly the same reason: it is a fact about a batch,
+    // not about the screen, and dropping it would re-enable the button over a write still going.
     set((s) => ({
       workspaceId: id,
       batches: [],
@@ -268,6 +280,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
       runByBatch: s.runByBatch,
       verifyRunByBatch: s.verifyRunByBatch,
       runStartedAt: s.runStartedAt,
+      publishingByBatch: s.publishingByBatch,
       selectedId: null,
       query: "",
       loading: id !== null,
@@ -384,10 +397,22 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
   generate: async (batchId, agent) => {
     if (get().runByBatch[batchId]) return;
     const runId = newRunId("stories");
+    // The run's home, read off the batch and read before anything is awaited.
+    //
+    // It is the batch's own `workspace_id` rather than the route the rest of the app uses, and that
+    // is forced: `StoryBatch.project_id` is nullable — a batch derived from a wiki names no
+    // repository at all — so resolving the workspace through the project would answer `null` for
+    // exactly the batches that have no other way home. `activeWorkspaceId` is deliberately nowhere
+    // in this chain: a generation routinely outlives the screen it was started from, and by the time
+    // it lands that value names wherever the user wandered to instead.
+    const batch = get().batches.find((b) => b.id === batchId);
+    const startedIn = batch?.workspace_id ?? get().workspaceId;
+    const where = batch?.title ?? "";
     // Before the invoke, or the first lines the engine prints have nowhere to land.
     useAiRunStore.getState().start(runId, {
       kindKey: "agents.liveKindStories",
-      detail: get().batches.find((b) => b.id === batchId)?.title ?? "",
+      detail: where,
+      workspaceId: startedIn,
       target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
     });
     set((s) => ({
@@ -397,8 +422,6 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
         b.id === batchId ? { ...b, status: "generating" as const, last_error: "" } : b,
       ),
     }));
-
-    const where = get().batches.find((b) => b.id === batchId)?.title ?? "";
 
     try {
       const detail = await generateStories(batchId, runId, agent);
@@ -410,6 +433,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
       notify({
         source: "stories",
         titleKey: "notifications.storiesGenerated",
+        workspaceId: startedIn,
         target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
         params: { n: detail.stories.length },
         status: "success",
@@ -423,7 +447,8 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
         notify({
           source: "stories",
           titleKey: "notifications.storiesGenerateFailed",
-        target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
+          workspaceId: startedIn,
+          target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
           status: "error",
           detail: where,
         });
@@ -504,10 +529,16 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
   verify: async (batchId, storyIds = []) => {
     if (get().verifyRunByBatch[batchId]) return;
     const runId = newRunId("story-verify");
-    const where = get().batches.find((b) => b.id === batchId)?.title ?? "";
+    // Stamped off the batch row, before the await, for the reasons spelled out in `generate`: the
+    // batch's repository set is optional, its workspace is not, and where this run lives has to be
+    // decided while the answer is still knowable.
+    const batch = get().batches.find((b) => b.id === batchId);
+    const startedIn = batch?.workspace_id ?? get().workspaceId;
+    const where = batch?.title ?? "";
     useAiRunStore.getState().start(runId, {
       kindKey: "agents.liveKindVerify",
       detail: where,
+      workspaceId: startedIn,
       target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
     });
     set((s) => ({
@@ -524,6 +555,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
       notify({
         source: "stories",
         titleKey: "notifications.storiesVerified",
+        workspaceId: startedIn,
         target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
         status: "success",
         detail: where,
@@ -534,7 +566,8 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
         notify({
           source: "stories",
           titleKey: "notifications.storiesVerifyFailed",
-        target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
+          workspaceId: startedIn,
+          target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
           status: "error",
           detail: where,
         });
@@ -613,10 +646,12 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
   },
 
   publish: async (batchId) => {
-    if (get().publishingBatchId) return;
+    // Per batch, not store-wide: the guard and the button it disables have to be asking the same
+    // question, and "is anything publishing?" is not it.
+    if (get().publishingByBatch[batchId]) return;
     const ids = get().selectionFor(batchId);
     if (ids.length === 0) return;
-    set({ publishingBatchId: batchId });
+    set((s) => ({ publishingByBatch: { ...s.publishingByBatch, [batchId]: true as const } }));
     try {
       const outcome = await publishStories(batchId, ids);
       set((s) => ({
@@ -640,7 +675,12 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     } catch (e: unknown) {
       pushErrorToast(String(e));
     } finally {
-      set({ publishingBatchId: null });
+      // Only this batch's key. Another publish may have started while this one was in flight — they
+      // touch nothing shared — and clearing the map would hand that one's button back early.
+      set((s) => {
+        const { [batchId]: _done, ...publishingByBatch } = s.publishingByBatch;
+        return { publishingByBatch };
+      });
     }
   },
 

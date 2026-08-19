@@ -41,11 +41,17 @@ export function ActivityModal({
   const conversations = useChatHistoryStore((s) => (projectId ? s.byProject[projectId] : undefined) ?? EMPTY_CONVERSATIONS);
   const removeConversation = useChatHistoryStore((s) => s.remove);
   const renameConversation = useChatHistoryStore((s) => s.rename);
-  const selectedPr = usePrStore((s) => s.selectedPr);
+  // Only when the selection belongs to *this* repository, the same guard `ActivitySection` reads
+  // it through. The list being highlighted is this project's, and `findActiveEntryKey`
+  // short-circuits on a non-null PR id — so a selection left over from another repository does not
+  // merely mis-highlight a "#42" row that happens to share the number, it suppresses the chat and
+  // analysis highlights that would otherwise have been correct.
+  const selectedPr = usePrStore((s) => (projectId && s.selectedPrProjectId === projectId ? s.selectedPr : null));
   const linkPr = usePrStore((s) => s.linkPr);
   const selectPr = usePrStore((s) => s.selectPr);
-  const analyzeOpen = useAnalyzeUiStore((s) => s.open);
-  const analyzeJobId = useAnalyzeUiStore((s) => s.selectedJobId);
+  // This project's analysis state, not the app's — the list being highlighted is this project's.
+  const analyzeOpen = useAnalyzeUiStore((s) => (projectId ? s.open[projectId] ?? false : false));
+  const analyzeJobId = useAnalyzeUiStore((s) => (projectId ? s.selectedJobId[projectId] ?? null : null));
   const activeSessionId = useChatStore((s) => (projectId ? s.activeByProject[projectId] : null) ?? null);
   const byConversation = useChatStore((s) => s.byConversation);
   const discardChat = useChatStore((s) => s.discard);
@@ -114,7 +120,10 @@ export function ActivityModal({
       const pr = await usePrStore.getState().ensureProjectPr(projectId, prId);
       if (openReqRef.current !== token || !pr) return;
       useAnalyzeUiStore.getState().hide();
-      selectPr(pr);
+      // Named, because this runs after an awaited fetch: `selectPr`'s own fallback would read the
+      // active project as it stands *then*, and the whole point of the owner stamp is that it
+      // describes the pull request rather than where the user happens to be standing.
+      selectPr(pr, projectId);
     } else if (entry.job.kind === "analyze-changes") {
       selectPr(null);
       useAnalyzeUiStore.getState().showJob(entry.job.id);

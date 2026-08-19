@@ -196,7 +196,12 @@ function PendingPrsSection({ workspaceId }: { workspaceId: string | null }) {
   const workspaceJobs = workspaceId ? jobsByBucket[workspaceActivityKey(workspaceId)] ?? EMPTY_JOBS : EMPTY_JOBS;
 
   const open = (entry: TrackedPr) => {
-    useAnalyzeUiStore.getState().hide();
+    // Put away the analysis of the repository this row is *about*, not of the one currently on
+    // screen: the project switch below happens after this line, so a bare `hide()` would have
+    // closed the section belonging to the repository being left and let the destination's own
+    // stale one sit underneath the pull request, ready to reappear the moment it is closed. A link
+    // row has no project, and there the repository on screen is the right answer.
+    useAnalyzeUiStore.getState().hide(entry.projectId);
     if (entry.kind === "link" && entry.url) {
       openLinkPr({
         url: entry.url,
@@ -223,8 +228,10 @@ function PendingPrsSection({ workspaceId }: { workspaceId: string | null }) {
       workspace.setActiveProject(entry.projectId);
     }
     // From the snapshot: the panel refreshes it from the host anyway, and waiting for the list to
-    // load would make the click do nothing for a second.
-    selectPr(entry.pr);
+    // load would make the click do nothing for a second. The row's own project goes with it — the
+    // switch above may not have settled into `activeProjectId` by the time this reads it, and the
+    // whole point of this selection carrying an owner is that it never has to be guessed at.
+    selectPr(entry.pr, entry.projectId);
   };
 
   if (tracked.length === 0) return null;
@@ -308,11 +315,14 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
   const jobsLoaded = useJobsStore((s) => (projectId ? s.loaded[projectId] : true));
   const workspaceLoaded = useJobsStore((s) => (workspaceBucket ? s.loaded[workspaceBucket] : true));
   const loadJobHistory = useJobsStore((s) => s.load);
-  const selectedPr = usePrStore((s) => s.selectedPr);
+  // Only when the selection is this project's: a pull request left selected in another repository
+  // is not what this list is showing, and highlighting a row for it here is how "#42" in one repo
+  // came to look open while the panel was drawing another.
+  const selectedPr = usePrStore((s) => (projectId && s.selectedPrProjectId === projectId ? s.selectedPr : null));
   const linkPr = usePrStore((s) => s.linkPr);
   const selectPr = usePrStore((s) => s.selectPr);
-  const analyzeOpen = useAnalyzeUiStore((s) => s.open);
-  const analyzeJobId = useAnalyzeUiStore((s) => s.selectedJobId);
+  const analyzeOpen = useAnalyzeUiStore((s) => (projectId ? s.open[projectId] ?? false : false));
+  const analyzeJobId = useAnalyzeUiStore((s) => (projectId ? s.selectedJobId[projectId] ?? null : null));
   const conversations = useChatHistoryStore((s) => (projectId ? s.byProject[projectId] : undefined) ?? EMPTY_CONVERSATIONS);
   const chatLoaded = useChatHistoryStore((s) => (projectId ? s.loaded[projectId] : true));
   const loadChatHistory = useChatHistoryStore((s) => s.load);
@@ -377,9 +387,11 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
     if (entry.type === "chat") {
       if (!projectId) return;
       // Clear whatever else the panel might currently be showing — otherwise the chat
-      // switches underneath a still-visible PR review or analysis section.
+      // switches underneath a still-visible PR review or analysis section. Both are addressed by
+      // this list's own project, never by "whatever is active": this section is drawn per project
+      // and clearing the wrong one would leave the visible thing standing.
       selectPr(null);
-      useAnalyzeUiStore.getState().hide();
+      useAnalyzeUiStore.getState().hide(projectId);
       void switchTo(projectId, entry.conv.session_id);
       return;
     }
@@ -387,7 +399,7 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
     // is no parked session to bring back, and no project list to look the PR up in.
     const rowWorkspaceId = workspaceIdFromBucket(entry.job.projectId);
     if (rowWorkspaceId) {
-      useAnalyzeUiStore.getState().hide();
+      useAnalyzeUiStore.getState().hide(projectId);
       usePrStore.getState().openLinkPrFromMeta(entry.job.meta, rowWorkspaceId);
       return;
     }
@@ -405,12 +417,16 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
           // since owns the panel now, and taking it over from behind is how a chat someone just
           // opened turns back into a pull request under their hands.
           if (openReqRef.current !== token || !pr) return;
-          useAnalyzeUiStore.getState().hide();
-          selectPr(pr);
+          useAnalyzeUiStore.getState().hide(projectId);
+          // Named, because this resolves after two awaits: the pull request belongs to the project
+          // this list was built for, not to whichever one the user has moved to since.
+          selectPr(pr, projectId);
         });
     } else if (entry.job.kind === "analyze-changes") {
       selectPr(null);
-      useAnalyzeUiStore.getState().showJob(entry.job.id);
+      // The row's own bucket — an analyze job is filed under the repository it ran in, which is
+      // the panel that has to show it.
+      useAnalyzeUiStore.getState().showJob(entry.job.id, entry.job.projectId);
     }
   };
 
@@ -511,7 +527,19 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   const posting = usePrStore((s) => s.posting);
   const posted = usePrStore((s) => s.posted);
   const actOnPr = usePrStore((s) => s.actOnPr);
-  const prActionBusy = usePrStore((s) => s.prActionBusy);
+  // This pull request's action, not the app's: keyed the same way the store records it, so a
+  // decision taken on one PR no longer greys out the buttons on every other one.
+  const prActionBusy = usePrStore((s) => s.prActionBusy[prKey] ?? null);
+  /**
+   * The workspace this review belongs to — the one holding the repository, not the one on screen.
+   *
+   * A link session names its own. A project one is resolved *from the project* rather than read off
+   * `activeWorkspaceId`, because everything downstream of it outlives the render that computed it:
+   * the watchlist row written below, and the workspace stamped on whatever a comment card starts
+   * (see `PrCommentCard`). `prStore.watchWorkspace` resolves the same way, so `track`/`untrack` here
+   * and `reconcile` there always address one key rather than two.
+   */
+  const projectWorkspaceId = useWorkspaceStore((s) => (projectId ? s.workspaceOfProject(projectId) : null));
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   // The open link session, when this PR *is* one: it carries the repository label and clone URL
   // that a link PR has and a project PR doesn't need.
@@ -733,7 +761,8 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   // Kept on the "waiting on me" list for as long as it is waiting on me. Written on every look at
   // the PR (so the snapshot stays current) and reconciled against what the host says, which is
   // what takes an approved, merged or closed one off the list without anyone having to remember.
-  const watchWorkspaceId = target.kind === "link" ? target.workspaceId : activeWorkspaceId;
+  const watchWorkspaceId =
+    target.kind === "link" ? target.workspaceId : projectWorkspaceId ?? activeWorkspaceId;
   useEffect(() => {
     if (!watchWorkspaceId) return;
     const watch = usePrWatchStore.getState();
@@ -967,6 +996,9 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
                 key={thread.id}
                 thread={thread}
                 projectId={projectId}
+                // A link review has no project to recover a workspace from, so the card is told
+                // outright — otherwise every draft it starts is filed wherever the user ends up.
+                workspaceId={watchWorkspaceId}
                 prSourceBranch={pr.source_branch}
                 resolutionKey={`pr:${pr.id}:thread:${thread.id}`}
                 onResolveThread={(reply) => resolveThread(thread.id, reply)}
@@ -1688,7 +1720,18 @@ export function AiPanel() {
   const t = useT();
   const project = useWorkspaceStore((s) => s.activeProject());
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const selectedPr = usePrStore((s) => s.selectedPr);
+  /**
+   * The selected pull request, but only while the repository it was selected in is the one open.
+   *
+   * The panel used to take the selection on its own and pair it with `project.id` right here — so
+   * moving to another repository (a plain project switch inside one workspace is enough) silently
+   * re-pointed the whole review at it: `PrReviewSection` mounted with a target naming repo Q and a
+   * PR belonging to repo P, fired `loadPrDecision` at Q's host about P's pull request, and wrote a
+   * persisted "waiting on you" row keyed `Q:42` carrying P's snapshot. The selection now names its
+   * own project (see `prStore.selectedPrProjectId`) and this refuses to draw it anywhere else —
+   * the same guard `linkPr` below has always had, which is where it was copied from.
+   */
+  const selectedPr = usePrStore((s) => (project && s.selectedPrProjectId === project.id ? s.selectedPr : null));
   const openLinkPr = usePrStore((s) => s.linkPr);
   // A link review is a review *of this workspace* — it runs under its review standard, contexts
   // and skills, and it's filed in its Activity. Moving to another workspace therefore takes
@@ -1699,7 +1742,10 @@ export function AiPanel() {
     () => (linkPr ? { kind: "link", url: linkPr.url, workspaceId: linkPr.workspaceId } : null),
     [linkPr],
   );
-  const analyzeOpen = useAnalyzeUiStore((s) => s.open);
+  // This repository's analysis, not the app's. One global flag meant opening an analysis anywhere
+  // put every other repository's panel into the analysis view, where it waited on a run filed in a
+  // bucket it could not see. See `analyzeUiStore.open`.
+  const analyzeOpen = useAnalyzeUiStore((s) => (project ? s.open[project.id] ?? false : false));
   const toggle = useUiStore((s) => s.toggleAiPanel);
   const storedWidth = useLayoutStore((s) => s.sizes.aiPanelWidth);
   const maxWidth = useMaxPanelWidth();
@@ -1722,7 +1768,7 @@ export function AiPanel() {
     if (!project) return;
     usePrStore.getState().selectPr(null);
     usePrStore.getState().closeLinkPr();
-    useAnalyzeUiStore.getState().hide();
+    useAnalyzeUiStore.getState().hide(project.id);
     useChatStore.getState().clear(project.id);
   };
 
@@ -1827,7 +1873,11 @@ export function AiPanel() {
               {selectedPr ? (
                 <PrReviewSection target={{ kind: "project", projectId: project.id }} pr={selectedPr} />
               ) : analyzeOpen ? (
-                <AnalyzeSection projectId={project.id} />
+                // Keyed by project so the section's own mount state — the auto-start guard above
+                // all — is rebuilt when the repository changes instead of being carried across.
+                // Without it, moving to a repository that has never been analysed reuses the
+                // previous one's already-fired guard and shows nothing at all.
+                <AnalyzeSection key={project.id} projectId={project.id} />
               ) : (
                 <ChatSection projectId={project.id} />
               )}

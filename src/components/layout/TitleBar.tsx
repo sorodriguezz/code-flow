@@ -102,7 +102,17 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
   const openAiPanel = useUiStore((s) => s.openAiPanel);
   const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
   const project = useWorkspaceStore((s) => s.activeProject());
-  const selectedPr = usePrStore((s) => s.selectedPr);
+  /**
+   * The selected pull request, but only while its own repository is the one open.
+   *
+   * This menu item built its target from `project.id` and its number from whatever was selected,
+   * which are two different repositories the moment the user switches — so "Review PR #42" would
+   * launch a review of repo Q asking about repo P's pull request, against Q's working copy. The
+   * selection names its project now (`prStore.selectedPrProjectId`); when it isn't this one the
+   * item honestly reads as "no pull request selected" and stays disabled, which is the truth for
+   * the repository on screen.
+   */
+  const selectedPr = usePrStore((s) => (project && s.selectedPrProjectId === project.id ? s.selectedPr : null));
   const reviewPr = usePrStore((s) => s.reviewPr);
 
   const openChat = () => {

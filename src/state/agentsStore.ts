@@ -609,7 +609,17 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         notify({
           source: "agents",
           titleKey: "notifications.agentDone",
-          target: { view: "agents", select: { kind: "agentTask", id: taskId } },
+          // The task's own workspace, not the one on screen when the reply lands. `task` was
+          // captured before the invoke and — for a chain step run on a phone's behalf — may not even
+          // be from the loaded workspace, which is precisely the case the stamp exists for. The
+          // repository rides along on the target as well: it is what `enterWorkspace` recovers the
+          // workspace from when the stamp is stale, and what brings the right repo to the front.
+          workspaceId: task.workspace_id,
+          target: {
+            view: "agents",
+            projectId: task.project_id,
+            select: { kind: "agentTask", id: taskId },
+          },
           status: "success",
           detail: task.title,
         });
@@ -683,7 +693,15 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
           notify({
             source: "agents",
             titleKey: "notifications.agentFailed",
-          target: { view: "agents", select: { kind: "agentTask", id: taskId } },
+            // Same stamp and same target as the success path above: a failure is if anything more
+            // likely to be read from somewhere else, and it is no use naming a task the user cannot
+            // get back to.
+            workspaceId: task.workspace_id,
+            target: {
+              view: "agents",
+              projectId: task.project_id,
+              select: { kind: "agentTask", id: taskId },
+            },
             status: "error",
             detail: task.title,
           });

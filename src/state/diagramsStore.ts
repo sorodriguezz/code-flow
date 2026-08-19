@@ -38,7 +38,11 @@ import { descendantIds } from "../lib/diagrams/tree";
 import { parseTags, serializeTags } from "../lib/notes/tags";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
+import { useAiRunStore } from "./aiRunStore";
 import { useWorkspaceStore } from "./workspaceStore";
+// Type only, so the layout module stays out of this store's runtime graph: `aiByDiagram` keeps
+// what the panel produced, it does not produce it.
+import type { AiGraph } from "../lib/diagrams/aiLayout";
 import type {
   Diagram,
   DiagramFolderRow,
@@ -69,6 +73,41 @@ export interface DiagramDraft {
   /** Whether anything here differs from the row. Drives the status line and the flush-on-close. */
   dirty: boolean;
 }
+
+/**
+ * A "Draw with AI" generation, filed under the diagram it was started on.
+ *
+ * Here rather than in `DiagramAiPanel`'s own state, which is where it lived. That panel is
+ * unmounted by everything: the back-to-gallery button, a workspace switch, leaving the view, the
+ * guided tour. A `useState` dies with it — so a generation that took a minute to arrive was
+ * destroyed by a click on the gallery, while the notification it had already filed went on saying
+ * "Diagram drawn" about shapes that existed nowhere.
+ *
+ * Keyed by diagram rather than held as one slot beside `draft`, for the reason every other feature
+ * in this app now keys its runs: several diagrams can be drawing at once, and a single
+ * `runId`/`result` pair would offer the fourth one's answer on the first one's canvas and let its
+ * Stop button cancel a run the user could not see.
+ *
+ * Each entry carries the workspace it started in, **stamped at the click** and never read back off
+ * the active workspace when the answer lands. That stamp is what lets this map outlive
+ * `setWorkspace` (see `clearedWorkspaceState`): an entry knows where it belongs, so nothing
+ * downstream has to guess.
+ */
+export type DiagramAiRun = {
+  /** The run id, so a panel re-opened long afterwards can still stop what it started — and so a
+   *  late answer can prove it is still the run this diagram is waiting on. */
+  runId: string;
+  /** The workspace the diagram was in when the run began. Never `activeWorkspaceId` at the end. */
+  workspaceId: string;
+  /** When it began. The one fact about a run that cannot be recovered afterwards, and the panel
+   *  that would show it is precisely the thing not guaranteed to have been mounted throughout —
+   *  the same reasoning as `storiesStore.runStartedAt`. */
+  startedAt: number;
+} & (
+  | { status: "running" }
+  /** The validated answer, waiting for the user to look at it and press Add to canvas. */
+  | { status: "ready"; graph: AiGraph }
+);
 
 /** How long after the last edit the document is written. Long enough that a continuous drag is one
  *  write, short enough that walking away from the keyboard has already saved. */
@@ -221,6 +260,14 @@ interface DiagramsState {
    */
   aiOpen: boolean;
 
+  /**
+   * Every generation in flight or waiting to be applied, by diagram id. See `DiagramAiRun`.
+   *
+   * Deliberately **not** cleared by `setWorkspace` — see `clearedWorkspaceState`, which is where
+   * that decision is written down.
+   */
+  aiByDiagram: Record<string, DiagramAiRun>;
+
   /** The search box. Matches titles and tags — there is no document search yet. */
   query: string;
   /** ANDed, not ORed: adding a tag narrows. Two tags means "carries both". */
@@ -270,8 +317,37 @@ interface DiagramsState {
   /** Fetches the pictures of `ids` that aren't already cached. */
   loadThumbnails: (ids: string[]) => Promise<void>;
 
-  /** Adds generated shapes to the open drawing. See `pendingLoad`. */
-  applyGenerated: (doc: string) => void;
+  /**
+   * Adds generated shapes to `diagramId`'s drawing. See `pendingLoad`.
+   *
+   * Takes the diagram it is meant for rather than trusting whatever is open: see the guard in the
+   * implementation for what that stops.
+   *
+   * **Answers whether the shapes landed.** `false` means nothing was written and the caller still
+   * holds the only copy — it must not treat the generation as consumed. The answer is not
+   * decoration: the window can be up over a diagram whose document is still in flight
+   * (`openingId`), which is exactly the state that following a notification into another
+   * workspace leaves it in, and a caller that assumed success there would drop a finished
+   * generation on the floor with nothing drawn and nothing said.
+   */
+  applyGenerated: (diagramId: string, doc: string) => boolean;
+  /**
+   * Records that a generation has started on `diagramId`, and returns the entry it wrote — whose
+   * `workspaceId` is the stamp everything downstream must quote.
+   *
+   * `null` when that diagram already has a run in flight, so the caller stops rather than starting
+   * a second one nothing can attribute. Per diagram, never store-wide: two diagrams generating at
+   * once is a thing the user asked for.
+   */
+  startAiRun: (diagramId: string, runId: string) => DiagramAiRun | null;
+  /**
+   * The end of a generation: `graph` parks the answer against its diagram, `null` drops the entry
+   * — it failed, it was stopped, or it has been put on the canvas.
+   *
+   * Ignored unless `runId` is still the run that diagram is waiting on, which is what keeps a slow
+   * answer from landing on top of a newer one started after it.
+   */
+  settleAiRun: (diagramId: string, runId: string, graph: AiGraph | null) => void;
   /** Called by the frame once it has posted the document. */
   clearPendingLoad: () => void;
   /** Opens or closes the "Draw with AI" window. See `aiOpen`. */
@@ -380,9 +456,22 @@ function scheduleSave(get: () => DiagramsState): void {
  * answer does not belong to a workspace at all. Clearing it by symmetry with its neighbours would
  * make the dialog forget the user's margin every time they changed workspace — a bug that only
  * shows up after a switch, and only to whoever noticed they had set it.
+ *
+ * **`aiByDiagram` is absent for the opposite reason**: it belongs to *its own* workspace, not to
+ * this one. Diagram ids are UUIDs, so nothing in it can collide with the incoming workspace's
+ * rows, and every entry carries the workspace it started in — while clearing it would destroy the
+ * one thing the user is waiting on, and do it precisely for the run that most needed to survive:
+ * the one they walked away from. A generation must outlive a look at another workspace; that is
+ * the whole point of holding it here rather than in the panel.
+ *
+ * `aiOpen`, on the other hand, *is* here. The window it draws opens over whichever diagram is
+ * open and takes the caret as it does (`autoFocus`), so left standing it would pop itself up over
+ * the first diagram opened in the next workspace — a window nobody asked for, about a drawing it
+ * was not written for.
  */
 function clearedWorkspaceState(): Partial<DiagramsState> {
   return {
+    aiOpen: false,
     diagrams: [],
     folders: [],
     templates: [],
@@ -404,6 +493,22 @@ function clearedWorkspaceState(): Partial<DiagramsState> {
   };
 }
 
+/**
+ * Stops any generation still drawing into the diagrams named here.
+ *
+ * The counterpart of `stopNoteAiRuns`, and for the same reason: dropping the `aiByDiagram` entry
+ * when the diagram is deleted left an engine drawing into a document that had ceased to exist, and
+ * its success notification still announced a diagram nobody could open. Cancelling routes the
+ * panel through its `isCancellation` branch, which reports nothing — the right amount to say about
+ * a run the user ended by deleting what it was for.
+ */
+function stopDiagramAiRuns(runs: Record<string, DiagramAiRun>, diagramIds: Iterable<string>): void {
+  for (const diagramId of diagramIds) {
+    const run = runs[diagramId];
+    if (run?.status === "running") void useAiRunStore.getState().cancel(run.runId);
+  }
+}
+
 export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   workspaceId: null,
   loading: false,
@@ -421,6 +526,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   pendingExport: null,
   exportOptions: DEFAULT_EXPORT_OPTIONS,
   aiOpen: false,
+  aiByDiagram: {},
   query: "",
   tagFilter: [],
   folderFilter: null,
@@ -595,7 +701,12 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     // The outgoing diagram's edit, before this one replaces it.
     await get().flush();
 
-    set({ activeId: id, openingId: id, draft: null, savedAt: null });
+    // `undoGeneration` goes with the diagram it was captured on. It holds a whole document — the
+    // one *this* diagram had before its last generation — and `undoLastGeneration` writes it into
+    // whatever `draft` is current, so carrying it across would let the undo button on diagram B
+    // replace B's drawing with A's. The button is drawn from this field, so leaving it set also
+    // offers an undo for something the user never did here.
+    set({ activeId: id, openingId: id, draft: null, savedAt: null, undoGeneration: null });
     try {
       const row = await diagramsGetDiagram(id);
       // The user may have clicked elsewhere while the document was in flight.
@@ -723,19 +834,58 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     }
   },
 
-  applyGenerated: (doc) => {
+  applyGenerated: (diagramId, doc) => {
     const draft = get().draft;
-    // Only into an open diagram. The panel cannot be reached otherwise, but the guard is what keeps
-    // a slow generation from landing in whatever was opened after it was started.
-    if (!draft) return;
+    // **Into the diagram it was generated for, or into nothing.**
+    //
+    // The `!draft` half of this guard was here and the comment above it claimed the rest, which
+    // was not true: a result now survives the panel being closed and the workspace being changed,
+    // so "the open diagram" and "the diagram this was drawn for" are routinely different things.
+    // Without the id comparison, pressing Add to canvas after opening another diagram appends X's
+    // shapes into Y, marks Y dirty and — three seconds later — autosaves them there, with nothing
+    // on screen to say what happened. Ids are UUIDs, so this also covers the cross-workspace case:
+    // a draft belonging to another workspace cannot answer to this id.
+    //
+    // Both refusals are reported rather than swallowed, so the panel can keep its answer parked
+    // instead of consuming one that never reached the canvas.
+    if (!draft || draft.id !== diagramId) return false;
     const combined = appendCells(draft.doc, doc);
-    if (combined === draft.doc) return;
+    if (combined === draft.doc) return false;
     set({
       draft: { ...draft, doc: combined, dirty: true },
       pendingLoad: combined,
       undoGeneration: draft.doc,
     });
     scheduleSave(get);
+    return true;
+  },
+
+  startAiRun: (diagramId, runId) => {
+    // Stamped from the store's own workspace rather than from the active one, and read here — on
+    // the click, before anything is awaited — because this is the last moment at which the two are
+    // guaranteed to be the same answer.
+    const workspaceId = get().workspaceId;
+    if (!workspaceId) return null;
+    // Per diagram. A second run on the *same* diagram would take the first one's slot, leaving its
+    // answer unattributable and its Stop button pointing at a run nobody is waiting on.
+    if (get().aiByDiagram[diagramId]?.status === "running") return null;
+    const entry: DiagramAiRun = { runId, workspaceId, startedAt: Date.now(), status: "running" };
+    set((state) => ({ aiByDiagram: { ...state.aiByDiagram, [diagramId]: entry } }));
+    return entry;
+  },
+
+  settleAiRun: (diagramId, runId, graph) => {
+    const current = get().aiByDiagram[diagramId];
+    // Not "is this diagram open?" but "is this run still the one it is waiting on?" — the
+    // difference being that leaving the screen, or the workspace, no longer discards the answer.
+    // A run whose entry has been taken over by a newer one has nothing left to say.
+    if (current?.runId !== runId) return;
+    set((state) => {
+      const aiByDiagram = { ...state.aiByDiagram };
+      if (graph) aiByDiagram[diagramId] = { ...current, status: "ready", graph };
+      else delete aiByDiagram[diagramId];
+      return { aiByDiagram };
+    });
   },
 
   clearPendingLoad: () => set({ pendingLoad: null }),
@@ -948,6 +1098,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   },
 
   deleteDiagram: async (id) => {
+    stopDiagramAiRuns(get().aiByDiagram, [id]);
     try {
       // The pending write first, and only if it is for a *different* diagram: flushing a draft
       // belonging to the row about to be deleted would resurrect nothing but would spend a write
@@ -964,6 +1115,15 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
         draft: state.draft?.id === id ? null : state.draft,
         thumbnails: Object.fromEntries(
           Object.entries(state.thumbnails).filter(([key]) => key !== id),
+        ),
+        // Dropped with the row it was filed under, like the thumbnail above it. `aiByDiagram` is
+        // the one map here that survives a workspace switch, so an entry left behind for a diagram
+        // that no longer exists is one nothing will ever clear — and a parked generation is a whole
+        // graph, not a flag. A run still in flight was cancelled above (`stopDiagramAiRuns`); one
+        // that beats the cancel settles into a key that is gone and writes nothing, see
+        // `settleAiRun`.
+        aiByDiagram: Object.fromEntries(
+          Object.entries(state.aiByDiagram).filter(([key]) => key !== id),
         ),
       }));
     } catch (error) {
@@ -1226,6 +1386,12 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
 
   deleteFolder: async (id) => {
     const doomed = descendantIds(get().folders, id);
+    stopDiagramAiRuns(
+      get().aiByDiagram,
+      get()
+        .diagrams.filter((d) => d.folder_id !== null && doomed.has(d.folder_id))
+        .map((d) => d.id),
+    );
     try {
       await diagramsDeleteFolder(id);
       set((state) => {
@@ -1239,6 +1405,10 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
           // The open diagram may have been inside what was just deleted.
           activeId: survives(state.activeId) ? state.activeId : null,
           draft: survives(state.draft?.id ?? null) ? state.draft : null,
+          // The same reasoning as `deleteDiagram`'s, applied to everything the folder took with it.
+          aiByDiagram: Object.fromEntries(
+            Object.entries(state.aiByDiagram).filter(([diagramId]) => survives(diagramId)),
+          ),
           folderFilter: doomed.has(state.folderFilter ?? "") ? null : state.folderFilter,
           expanded: state.expanded.filter((f) => !doomed.has(f)),
         };

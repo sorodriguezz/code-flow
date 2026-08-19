@@ -495,6 +495,49 @@ pub struct ChainStepBrief {
     pub phase: String,
 }
 
+/// What one poll of a recovered step found.
+///
+/// Two answers used to share the shape `None`: "the turn is still out there" and "the step no
+/// longer exists". The poller cannot tell them apart, so it treated the second as the first and
+/// went on asking every few seconds — for three quarters of an hour, until its own timeout gave up
+/// — about a row that had been deleted with its chain, or cascaded away with the repository the
+/// chain was filed under. Separating them is what lets a timer stop itself the moment there is
+/// nothing left to wait for, whichever workspace the deletion happened in and whoever asked for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HarvestOutcome {
+    /// The chain, once the step has settled. `None` while its turn is still out there.
+    pub chain: Option<AgentChain>,
+    /// The step is gone, and so is anything there was to collect. Stop polling.
+    pub gone: bool,
+}
+
+/// A plan parked on a human decision, named from **outside** any one workspace.
+///
+/// Every other chain read is scoped to a workspace, because every other chain read feeds a screen
+/// that shows one. The status bar is the exception: it is the app's single answer to "is anything
+/// waiting on me?", and an answer that only counts the workspace you happen to be standing in is
+/// one you have to ask again in every other workspace before you can trust it. A plan stops dead at
+/// a gate — nothing moves until it is answered — so a gate you cannot see is work that has silently
+/// stopped.
+///
+/// Slim on purpose: a row is one line of a 300px panel, so this is what that line needs and nothing
+/// else. The whole chain is one `get_chain_detail` away, after the click has crossed into its
+/// workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatedChain {
+    pub chain_id: String,
+    /// Resolved through `projects` at read time, the way every workspace-scoped chain query does it
+    /// — `agent_chains` carries no `workspace_id` of its own, and adding one would be a second
+    /// copy of a fact the join already answers.
+    pub workspace_id: String,
+    /// The repository to bring to the front, which is the one the step it is *waiting on* runs in —
+    /// not necessarily the chain's first. Falls back to the chain's own when no step is pending,
+    /// which is a chain gated on its last step having just been cleared.
+    pub project_id: String,
+    pub title: String,
+    pub goal: String,
+}
+
 /// One step as the frontend authors it, before anything is snapshotted or persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewChainStep {

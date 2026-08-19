@@ -310,6 +310,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     touchConversation(conversationId);
     const base = existing ?? newSession(projectId, conversationId);
     const runId = newRunId("chat");
+    // The repository's own workspace, read once here and carried by everything this turn raises —
+    // the status-bar row, and both notifications below. Deliberately not re-derived when the reply
+    // lands: this store is built around an answer arriving while the user is looking somewhere
+    // else, so by then "which workspace is in front" is a different question with a different
+    // answer. `null` only for a repository whose workspace list was never loaded.
+    const workspaceId = useWorkspaceStore.getState().workspaceOfProject(projectId);
     // The question, not the conversation: a chat run is identified by what was just asked, and a
     // brand-new conversation has no title yet to name it by. No view — the assistant is a rail over
     // whichever one the user is on, and an answer is not a reason to move them off it.
@@ -321,6 +327,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         projectId,
         select: { kind: "chatConversation", id: conversationId },
       },
+      workspaceId,
     });
 
     const now = Date.now();
@@ -403,9 +410,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             projectId,
             select: { kind: "chatConversation", id: conversationId },
           },
-          // The repository's own workspace, not whichever one is in front when the answer lands:
-          // an answer arriving while the user is elsewhere is precisely what this store is for.
-          workspaceId: useWorkspaceStore.getState().workspaceOfProject(projectId) ?? undefined,
+          // The workspace stamped when the question was asked, not whichever one is in front when
+          // the answer lands: an answer arriving while the user is elsewhere is precisely what this
+          // store is for.
+          workspaceId,
           status: "success",
           detail: base.title || liveTitle(trimmed),
         });
@@ -477,7 +485,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               projectId,
               select: { kind: "chatConversation", id: conversationId },
             },
-            workspaceId: useWorkspaceStore.getState().workspaceOfProject(projectId) ?? undefined,
+            workspaceId,
             status: "error",
             detail: base.title || liveTitle(trimmed),
           });

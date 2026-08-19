@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { GripHorizontal, Sparkles, X } from "lucide-react";
+import { GripHorizontal, Maximize2, Minimize2, Sparkles, X } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
+import { DiagramPreview } from "./DiagramPreview";
 import { AI_PROVIDERS, DEFAULT_AI_PROVIDER } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { diagramsDrawWithAi } from "../../lib/tauri/diagramsCommands";
@@ -38,19 +39,37 @@ const MARGIN = 12;
  *
  * **The engine is not picked here**, the same as in Notes: it routes through the `diagram` task
  * like every other AI call in the app, and this window only *says* what it will run on.
+ *
+ * **The run is not this component's**, which is the thing that changed. It belongs to the diagram,
+ * in `diagramsStore.aiByDiagram`, and this window is a view over that entry — so closing it, going
+ * back to the gallery or changing workspace no longer destroys a generation in flight or an answer
+ * waiting to be applied. Coming back to the diagram finds both, Stop button included. See
+ * `DiagramAiRun`.
  */
-export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
+export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onClose: () => void }) {
   const defaultProvider = useAiProviderStore((s) => s.providerId);
   const routedProvider = useAiProviderStore((s) => s.taskProviders[TASK]);
   const routedModel = useAiProviderStore((s) => s.taskModels[TASK]);
   const applyGenerated = useDiagramsStore((s) => s.applyGenerated);
+  const settleAiRun = useDiagramsStore((s) => s.settleAiRun);
+  /** This diagram's run, and only this diagram's. A stable object reference, so a generation on
+   *  another diagram does not re-render this one's window. */
+  const run = useDiagramsStore((s) => s.aiByDiagram[diagramId]);
+  /** Whether the canvas this window belongs to is actually loaded and is actually this diagram —
+   *  the same pair `applyGenerated` checks before it writes, read here so the button can say so
+   *  instead of being pressed for nothing. */
+  const canApply = useDiagramsStore((s) => s.draft?.id === diagramId);
+  const title = useDiagramsStore((s) => s.diagrams.find((d) => d.id === diagramId)?.title ?? "");
   const t = useT();
 
   const [instruction, setInstruction] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [runId, setRunId] = useState<string | null>(null);
+  /** Whether the preview is drawn at a readable size and scrolled, rather than fitted to the panel.
+   *  Reset with every new answer: a zoom that outlived the diagram it was set for would open the
+   *  next generation halfway down a picture nobody has seen the top of yet. */
+  const [zoomed, setZoomed] = useState(false);
+  const busy = run?.status === "running";
   /** The validated answer, waiting to be applied. `null` until one arrives. */
-  const [result, setResult] = useState<AiGraph | null>(null);
+  const result = run?.status === "ready" ? run.graph : null;
 
   const panel = useRef<HTMLDivElement>(null);
   /** Null until the window is dragged: it sits at its default corner, laid out by the browser, so
@@ -109,33 +128,60 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
   };
 
   useEffect(() => {
+    setZoomed(false);
+  }, [run?.runId]);
+
+  useEffect(() => {
+    // Escape closes even mid-generation, and so does the ✕ — both used to be refused while busy.
+    // They were, back when closing this window was the same thing as throwing the run away; now
+    // the run lives on the diagram, so leaving is just leaving. The Stop button is what stops it,
+    // and it is here again the moment the window is re-opened.
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onClose();
+      if (event.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, busy]);
+  }, [onClose]);
 
   const submit = async () => {
     if (!instruction.trim() || busy) return;
     const state = useDiagramsStore.getState();
     const draft = state.draft;
-    if (!draft) return;
+    // The window is drawn over an open diagram, so these disagree only when the store moved
+    // underneath it — a workspace switched from the palette while the instruction was being
+    // typed. Refusing beats generating an outline of one drawing into another.
+    if (draft?.id !== diagramId) return;
     const id = newRunId("diagram-ai");
-    // Captured before the await: the panel closes on its own way out, and a run that outlives the
-    // screen it was started from has to be able to name the diagram it drew into.
-    const diagram = {
-      id: draft.id,
-      title: state.diagrams.find((d) => d.id === draft.id)?.title ?? "",
-    };
-    const workspaceId = state.workspaceId;
-    setRunId(id);
-    setBusy(true);
-    setResult(null);
-    useAiRunStore.getState().start(id, { kindKey: "diagrams.ai.runKind", detail: diagram.title });
+    // The stamp, taken before the first await and quoted by everything below rather than re-read
+    // at the end: a run that outlives the screen it was started from — which every one of these
+    // now can — has to be able to say which workspace's diagram it drew into. `startAiRun` is also
+    // what refuses a second run on this diagram, so nothing is dispatched until it has agreed.
+    const started = state.startAiRun(diagramId, id);
+    if (!started) return;
+    const workspaceId = started.workspaceId;
+    /**
+     * Whether a toast still has an audience.
+     *
+     * A toast is for the workspace you are standing in. This run can finish minutes after the user
+     * walked away from it, and a red bar over another workspace about a diagram they cannot see
+     * from there is noise — the notification carries `workspaceId` and is the channel that can
+     * take them back. The store's own workspace is what is compared, never the active one: that is
+     * the value that changed underneath us.
+     */
+    const stillInWorkspace = () => useDiagramsStore.getState().workspaceId === workspaceId;
+    /** The answer, if one arrives. Parked against the diagram in the `finally`. */
+    let graph: AiGraph | null = null;
+    useAiRunStore.getState().start(id, {
+      kindKey: "diagrams.ai.runKind",
+      detail: title,
+      workspaceId,
+      // Which makes the status-bar row clickable from anywhere: `followTarget` crosses into the
+      // workspace above and opens this diagram. Without it the row could only say a run existed.
+      target: { view: "diagrams", select: { kind: "diagram", id: diagramId } },
+    });
     try {
       const raw = await diagramsDrawWithAi({
-        title: diagram.title,
+        title,
         // Labels, never the document. See `documentOutline`.
         outline: documentOutline(draft.doc),
         instruction: instruction.trim(),
@@ -151,52 +197,69 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
         // exactly what the bell is for — and leaving it out made the two ways this can fail behave
         // differently for no reason a user could see. The reason travels in `detail`, because "could
         // not draw the diagram" on its own does not say whether to retry or to reword.
-        pushErrorToast(t(`diagrams.ai.error.${parsed.error}`));
+        if (stillInWorkspace()) pushErrorToast(t(`diagrams.ai.error.${parsed.error}`));
         notify({
           source: "diagrams",
           titleKey: "notifications.diagramDrawFailed",
-          target: { view: "diagrams", select: { kind: "diagram", id: diagram.id } },
+          target: { view: "diagrams", select: { kind: "diagram", id: diagramId } },
           status: "error",
-          detail: `${diagram.title} · ${t(`diagrams.ai.error.${parsed.error}`)}`,
+          detail: `${title} · ${t(`diagrams.ai.error.${parsed.error}`)}`,
           workspaceId,
         });
         return;
       }
-      setResult(parsed.graph);
+      graph = parsed.graph;
       notify({
         source: "diagrams",
         titleKey: "notifications.diagramDrawn",
-        target: { view: "diagrams", select: { kind: "diagram", id: diagram.id } },
+        target: { view: "diagrams", select: { kind: "diagram", id: diagramId } },
         status: "success",
-        detail: diagram.title,
+        detail: title,
         workspaceId,
       });
     } catch (error) {
       // Stopping it yourself is not a failure worth a red toast.
       if (!isCancellation(error)) {
-        pushErrorToast(String(error));
+        if (stillInWorkspace()) pushErrorToast(String(error));
         notify({
           source: "diagrams",
           titleKey: "notifications.diagramDrawFailed",
-          target: { view: "diagrams", select: { kind: "diagram", id: diagram.id } },
+          target: { view: "diagrams", select: { kind: "diagram", id: diagramId } },
           status: "error",
-          detail: diagram.title,
+          detail: title,
           workspaceId,
         });
       }
     } finally {
       useAiRunStore.getState().finish(id);
-      setBusy(false);
-      setRunId(null);
+      // Into the store, not into this component: by now the window may well be gone — closed,
+      // left behind by a trip to the gallery, unmounted by a workspace switch — and `setResult`
+      // on an unmounted panel is how a finished generation used to disappear while its
+      // notification went on claiming it existed. `settleAiRun` files it against the diagram, or
+      // clears the slot when there is nothing to keep.
+      useDiagramsStore.getState().settleAiRun(diagramId, id, graph);
     }
   };
 
   const apply = () => {
-    if (!result) return;
+    if (run?.status !== "ready" || !canApply) return;
     // The prefix is what keeps a generated id from landing on a hand-drawn shape with the same
     // name — draw.io's merge matches on id, and a collision replaces silently. Timestamped rather
     // than counted, so two generations in one session cannot collide with each other either.
-    applyGenerated(graphToMxGraph(result, `ai${Date.now().toString(36)}_`));
+    const landed = applyGenerated(
+      diagramId,
+      graphToMxGraph(run.graph, `ai${Date.now().toString(36)}_`),
+    );
+    // Nothing is consumed until it is actually on the canvas. This window can be up over a diagram
+    // whose document has not arrived yet — `openDiagram` sets `activeId` at once and fetches the
+    // row afterwards, which is precisely the state following one of these notifications in from
+    // another workspace lands in, and the header's own button can open this window during it. In
+    // that gap `applyGenerated` writes nothing; dropping the entry anyway would throw away the
+    // generation the user came back for and close the only window that could say so.
+    if (!landed) return;
+    // Consumed: it is on the canvas now, and the undo button in the header is what takes it back
+    // out. Addressed by run id so this cannot clear a generation started since.
+    settleAiRun(diagramId, run.runId, null);
     onClose();
   };
 
@@ -204,7 +267,9 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
     <div
       ref={panel}
       data-tour="diagrams-ai"
-      className="absolute z-30 w-[340px] overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+      // Wider than it was: the window now carries a rendered preview, and 340px of it was a
+      // picture too small to answer the question it exists to answer.
+      className="absolute z-30 w-[392px] overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
       style={pos ? { left: pos.x, top: pos.y } : { right: MARGIN, top: MARGIN }}
     >
       <div
@@ -217,12 +282,13 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
         <GripHorizontal size={12} className="text-[var(--cf-text-muted)]" />
         <Sparkles size={12} />
         <span className="flex-1 font-medium">{t("diagrams.ai.title")}</span>
+        {/* Not disabled while busy — see the Escape handler for why closing is no longer the same
+            thing as abandoning the run. */}
         <button
           type="button"
           onClick={onClose}
-          disabled={busy}
           aria-label={t("diagrams.close")}
-          className="text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)] disabled:opacity-40"
+          className="text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
         >
           <X size={12} />
         </button>
@@ -249,17 +315,42 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
 
         {result && (
           <div className="flex flex-col gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] p-2">
-            <span className="text-[10px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("diagrams.ai.preview", {
-                shapes: String(result.nodes.length),
-                arrows: String(result.edges.length),
-              })}
-            </span>
-            {/* The labels, not a picture. Rendering a preview would mean a second draw.io — and the
-                labels are what tells you whether it understood the question. */}
-            <p className="max-h-24 overflow-y-auto text-[11px] leading-relaxed text-[var(--cf-text)]">
-              {result.nodes.map((node) => node.label).join(" · ")}
-            </p>
+            <div className="flex items-center gap-1.5">
+              <span className="flex-1 truncate text-[10px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+                {t("diagrams.ai.preview", {
+                  shapes: String(result.nodes.length),
+                  arrows: String(result.edges.length),
+                })}
+              </span>
+              <button
+                type="button"
+                onClick={() => setZoomed((on) => !on)}
+                title={t(zoomed ? "diagrams.ai.previewFit" : "diagrams.ai.previewZoom")}
+                aria-label={t(zoomed ? "diagrams.ai.previewFit" : "diagrams.ai.previewZoom")}
+                className="shrink-0 text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
+              >
+                {zoomed ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+              </button>
+            </div>
+            {/* **The picture, not the list of labels.** This is the moment the decision is made,
+                and "did it understand the question?" is a question about the shape of the thing —
+                where it branches, what ended up inside the boundary, which way the arrow points.
+                It is `layoutGraph`'s own output, so what is drawn here is what lands on the canvas.
+
+                Fitted by default and scrolled at a readable size behind the button above: a
+                fifteen-node diagram fitted into a 340px panel has legible geometry and illegible
+                text, and both halves are worth being able to look at. */}
+            <div
+              className={`rounded border border-[var(--cf-border)] bg-[var(--cf-surface)] ${
+                zoomed ? "max-h-[260px] overflow-auto p-1" : "h-[168px] p-1"
+              }`}
+            >
+              <DiagramPreview
+                graph={result}
+                zoom={zoomed ? 0.62 : undefined}
+                className={zoomed ? "block" : "h-full w-full"}
+              />
+            </div>
           </div>
         )}
 
@@ -274,22 +365,46 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
           {busy ? (
             <>
               <ThinkingOrb size="sm" />
+              {/* Re-attachable: `run` comes from the store, so this button is here again when the
+                  window is re-opened over a diagram whose generation is still going. It was the
+                  only stop control this run ever had, and it used to leave with the panel. */}
               <button
                 type="button"
-                onClick={() => runId && void useAiRunStore.getState().cancel(runId)}
+                onClick={() => run && void useAiRunStore.getState().cancel(run.runId)}
                 className="rounded-md border border-[var(--cf-field-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
               >
                 {t("diagrams.ai.cancel")}
               </button>
             </>
           ) : result ? (
-            <button
-              type="button"
-              onClick={apply}
-              className="rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
-            >
-              {t("diagrams.ai.apply")}
-            </button>
+            <>
+              {/* The way past an answer you do not want. It matters now that the answer outlives
+                  the window: closing and re-opening used to be how you got the Generate button
+                  back, and that is exactly the gesture that must no longer throw the result away.
+                  Generating again takes this diagram's slot, which is what discards it. */}
+              <button
+                type="button"
+                onClick={() => void submit()}
+                disabled={!instruction.trim()}
+                className="rounded-md border border-[var(--cf-field-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)] disabled:opacity-40"
+              >
+                {t("diagrams.ai.generate")}
+              </button>
+              <button
+                type="button"
+                onClick={apply}
+                // Off while the document it would draw into has not arrived. `openDiagram` sets
+                // `activeId` at once and fetches the row afterwards, and following one of these
+                // notifications in from another workspace lands squarely in that gap — where
+                // `applyGenerated` writes nothing and returns false. A button that silently does
+                // nothing reads as a broken generation; a disabled one reads as "not yet", which is
+                // what it is, and it becomes live on its own a moment later.
+                disabled={!canApply}
+                className="rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+              >
+                {t("diagrams.ai.apply")}
+              </button>
+            </>
           ) : (
             <button
               type="button"

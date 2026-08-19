@@ -29,6 +29,7 @@ import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore"
 import { AiRunLog } from "./AiRunLog";
 import { Checkbox } from "../common/Checkbox";
 import { useRepoStore } from "../../state/repoStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useResolutionsStore, resolutionRunKey, type RunningResolution } from "../../state/resolutionsStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -79,6 +80,12 @@ export function useResolveWithAi(
   label?: string,
 ) {
   const t = useT();
+  // Which workspace this fix belongs to, resolved from the repository it edits and read *while the
+  // card is on screen* rather than when the run settles. A fix that lands after the user has walked
+  // into another workspace still belongs to the one holding the checkout it wrote to, and that is
+  // the workspace its row in the status bar has to name and its notification has to cross back
+  // into. `null` only for a link review, which has no working copy and so never reaches `resolve`.
+  const workspaceId = useWorkspaceStore((s) => (projectId ? s.workspaceOfProject(projectId) : null));
   const [localResolution, setLocalResolution] = useState<string | null>(null);
   const persisted = useResolutionsStore((s) =>
     projectId && resolutionKey ? s.byProject[projectId]?.[resolutionKey]?.text ?? null : null,
@@ -141,9 +148,21 @@ export function useResolveWithAi(
     // A fix writes to the working tree, so it's the run that most needs to be watchable and
     // stoppable — the id ties both to this particular fix.
     const id = newRunId("fix");
-    // The same one line the finished notification is titled with — see `label`. No target: the
-    // proposal lands on this finding, in the panel the user is already looking at.
-    useAiRunStore.getState().start(id, { kindKey: "agents.liveKindFix", detail: label ?? "" });
+    // The same one line the finished notification is titled with — see `label`.
+    //
+    // This used to carry no target, on the grounds that the proposal lands on the finding in the
+    // panel the user is already looking at. That holds for exactly as long as they keep looking at
+    // it — and this is the run that writes to the working tree and takes minutes, so it is the one
+    // they walk away from. Leaving the repository (or the workspace) unmounts the card with the
+    // only stop button and the only way back on it. Stamped with the workspace it started in and
+    // pointed at the project whose files it is editing, the status-bar row can say where it lives
+    // and click back to it.
+    useAiRunStore.getState().start(id, {
+      kindKey: "agents.liveKindFix",
+      detail: label ?? "",
+      workspaceId,
+      target: { openAiPanel: true, projectId },
+    });
     markRunning({ runId: id, startedAt: Date.now() });
     try {
       const result = await resolveFindingWithAi(projectId, promptText, id);
@@ -153,6 +172,7 @@ export function useResolveWithAi(
       notify({
         source: "review",
         titleKey: "notifications.fixDone",
+        workspaceId,
         target: { openAiPanel: true, projectId },
         status: "success",
         detail: label,
@@ -164,6 +184,7 @@ export function useResolveWithAi(
         notify({
           source: "review",
           titleKey: "notifications.fixFailed",
+          workspaceId,
           target: { openAiPanel: true, projectId },
           status: "error",
           detail: label,

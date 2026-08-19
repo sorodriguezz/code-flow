@@ -40,6 +40,7 @@ import { getSetting, setSetting } from "../lib/tauri/commands";
 // server, this stops a CLI subprocess. The assistant runs on the second and never the first.
 import { isCancellation, newRunId as newAiRunId, useAiRunStore } from "./aiRunStore";
 import { unguardedDelete } from "../lib/db/sqlGuards";
+import { notify } from "./notificationStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -512,6 +513,18 @@ export interface DbSqlLogEntry {
   id: string;
   /** Epoch milliseconds. */
   at: number;
+  /**
+   * The workspace the statement was sent from, captured **before** it left — never read back off
+   * the store when the answer lands.
+   *
+   * A statement outlives the screen that launched it: a count over a large table, a catalog read
+   * on a cold server, a console query that takes minutes. By the time any of those come back the
+   * user may be in another workspace looking at another estate's tree, and an entry appended then
+   * is one workspace's SQL listed under another's connections — the one reading of this panel that
+   * is worse than no panel at all. The stamp is what lets `logSql` recognise the late arrival and
+   * leave it out.
+   */
+  workspaceId: string | null;
   connectionId: string;
   sql: string;
   /** What made it run: a grid, an edit batch, a console. */
@@ -736,6 +749,14 @@ export const useDbStore = create<DbState>((set, get) => ({
     if (pendingLoad?.workspaceId === workspaceId) return pendingLoad.promise;
     // Cleared rather than left to be overwritten: for the length of the load the view would
     // otherwise still show the workspace the user just left — including its tree and its results.
+    //
+    // **Nothing in flight is cancelled here, and that is deliberate.** Walking to another workspace
+    // is not the same decision as closing a tab: four queries and an assistant left running in this
+    // one are meant to still be running when the user comes back, which is why every one of them
+    // carries the workspace it started in (`askConsoleAi`'s run, `recordHistory`'s row, each
+    // `logSql` entry) rather than being identified by whichever tree happens to be loaded. Closing a
+    // tab *is* that decision, and `closeTab` cancels there. The cost is that a result landing after
+    // the switch has no tab left to be drawn into — which is what the run's own notification is for.
     set({
       connections: [],
       groups: [],
@@ -748,6 +769,11 @@ export const useDbStore = create<DbState>((set, get) => ({
       serverInfo: {},
       tabs: [],
       activeTabId: null,
+      // The log is per workspace like everything above it: its rows name connections that are being
+      // emptied on the line before, so keeping them would leave the panel describing statements
+      // against a tree the user can no longer see. Statements still running keep their own stamp —
+      // see `DbSqlLogEntry.workspaceId` — so they cannot refill it from behind either.
+      sqlLog: [],
     });
     const promise = get().init(workspaceId);
     pendingLoad = { workspaceId, promise };
@@ -1284,6 +1310,14 @@ export const useDbStore = create<DbState>((set, get) => ({
       result: null,
     }));
 
+    // Who this statement belongs to, taken now and carried through every write below. A query can
+    // take minutes; reading the workspace — or the connection's name — off the store when it comes
+    // back reads whatever the user has since switched to, which is how a history row ended up filed
+    // under another workspace with an empty `connection_name` (that list is emptied on the switch,
+    // so the lookup found nothing to name).
+    const runWorkspaceId = get().workspaceId;
+    const connectionName = get().connections.find((c) => c.id === tab.connectionId)?.name ?? "";
+
     const started = Date.now();
     try {
       const result = await dbExecute(tab.connectionId, statement, contextOf(tab), runId);
@@ -1299,6 +1333,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       }));
       for (const entry of result.results) {
         get().logSql({
+          workspaceId: runWorkspaceId,
           connectionId: tab.connectionId,
           sql: entry.statement,
           source: "console",
@@ -1307,7 +1342,17 @@ export const useDbStore = create<DbState>((set, get) => ({
           error: entry.error,
         });
       }
-      await recordHistory(get, tab, statement, result, Date.now() - started);
+      if (runWorkspaceId) {
+        await recordHistory(
+          get,
+          tab,
+          statement,
+          result,
+          Date.now() - started,
+          runWorkspaceId,
+          connectionName,
+        );
+      }
     } catch (e) {
       const message = String(e);
       patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({
@@ -1381,6 +1426,12 @@ export const useDbStore = create<DbState>((set, get) => ({
     // `console | data | diagram` and had silently fallen behind: the schema tab grew a `runId` — its
     // catalog read is one of the slowest things the workspace sends — and closing it cancelled
     // nothing. A new cancellable tab kind shouldn't have to remember to come back here.
+    //
+    // The console's assistant is deliberately **not** collected here even though it is a run on the
+    // same tab: it lives in the other registry (`cancel_ai_run`, not `db_cancel`), and this is what
+    // the statement's own Cancel button calls — stopping a query the user regrets must not also kill
+    // the question they asked about it. Its two stops are `cancelConsoleAi` (the ask bar's button)
+    // and `closeTab`, which takes the whole tab and everything on it.
     const runIds = [
       "runId" in tab ? tab.runId : null,
       // The row count is a second run of its own: on a big table it is the full scan while the page
@@ -1419,10 +1470,18 @@ export const useDbStore = create<DbState>((set, get) => ({
     if (!tab || !question || tab.ai?.running) return;
 
     const runId = newAiRunId("db-assist");
-    // No target: the console this answers into is a tab of the API workspace, and there is no
-    // vocabulary in the notification centre for "that tab, in that window". Listing it unclickable
-    // is still the point — a model is running, and the status bar should say so.
-    useAiRunStore.getState().start(runId, { kindKey: "agents.liveKindDb", detail: question });
+    // Which workspace this answer belongs to, captured before anything is awaited. This store *is*
+    // per workspace — its connections, its consoles and this tab all came out of one — so the run
+    // has a home, and stamping it is what lets the status bar say "in <workspace>" for an assistant
+    // the user has since walked away from.
+    const runWorkspaceId = get().workspaceId;
+    // No target even so: the console it answers into is a tab of the Databases workspace, whose tab
+    // ids are minted fresh on every rehydrate, and the notification centre has no vocabulary for
+    // "that tab, in that window". Listing it unclickable is still the point — a model is running,
+    // and the status bar should say so, under the workspace it is running for.
+    useAiRunStore
+      .getState()
+      .start(runId, { kindKey: "agents.liveKindDb", detail: question, workspaceId: runWorkspaceId });
     patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
       current.ai
         ? { ...current, ai: { ...current.ai, running: true, runId, error: null } }
@@ -1448,23 +1507,52 @@ export const useDbStore = create<DbState>((set, get) => ({
         })),
         runId,
       );
+      // `current.ai?.runId === runId`, not just `current.ai`, on this and both writes below. The bar
+      // can be closed and reopened while a question is in flight — closing it cancels, but the CLI
+      // takes a moment to die and the answer can still arrive — and `toggleConsoleAi` rebuilds `ai`
+      // from scratch. Without the identity check a stale answer lands in a bar that is now asking
+      // something else, and the `finally` below flips a *newer* run's `running` to false, hiding its
+      // stop button and letting a third question start on top of it.
       patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
-        current.ai ? { ...current, ai: { ...current.ai, answer, error: null } } : current,
+        current.ai?.runId === runId
+          ? { ...current, ai: { ...current.ai, answer, error: null } }
+          : current,
       );
+      // The only run in this workspace that used to report nothing when it finished. It is also one
+      // of the ones most likely to finish somewhere else: reading a large schema and answering takes
+      // long enough to go and do something in another workspace, and the tab it would have written
+      // into is gone by then. Stamped with the workspace it was asked in, so the bell can say so.
+      notify({
+        source: "db",
+        workspaceId: runWorkspaceId,
+        titleKey: "notifications.chatDone",
+        status: "success",
+        detail: question,
+      });
     } catch (e) {
       // A stop is not a failure. The panel goes back to how it was, with whatever it was showing
-      // before — an error line saying "cancelled" is noise on an action the user just took.
+      // before — an error line saying "cancelled" is noise on an action the user just took, and a
+      // notification about it is worse: it outlives the panel.
       if (!isCancellation(e)) {
         patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
-          current.ai ? { ...current, ai: { ...current.ai, error: String(e) } } : current,
+          current.ai?.runId === runId
+            ? { ...current, ai: { ...current.ai, error: String(e) } }
+            : current,
         );
+        notify({
+          source: "db",
+          workspaceId: runWorkspaceId,
+          titleKey: "notifications.chatFailed",
+          status: "error",
+          detail: question,
+        });
       }
     } finally {
       useAiRunStore.getState().finish(runId);
       // `runId` stays: it is what the answer's engine chip resolves the model through. `running`
       // is what says the run is over, and the cancel button keys off that, not off this id.
       patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
-        current.ai ? { ...current, ai: { ...current.ai, running: false } } : current,
+        current.ai?.runId === runId ? { ...current, ai: { ...current.ai, running: false } } : current,
       );
     }
   },
@@ -1642,6 +1730,10 @@ export const useDbStore = create<DbState>((set, get) => ({
       replaced: {},
       insertedDocs: [],
     }));
+    // Taken before the read, like every other statement here: a page over a large relation can land
+    // long after the user has walked to another workspace, and the log entry has to say which estate
+    // it was actually run against rather than which one is on screen when it arrives.
+    const runWorkspaceId = get().workspaceId;
     try {
       const result = await dbTableData(
         tab.connectionId,
@@ -1659,6 +1751,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       // The statement the server was actually given — see `DbSqlLogEntry` for why it is logged
       // rather than rebuilt here.
       get().logSql({
+        workspaceId: runWorkspaceId,
         connectionId: tab.connectionId,
         sql: result.statement,
         source: "grid",
@@ -1695,6 +1788,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       // A failed page is exactly what the log is for: the message alone rarely says which
       // statement produced it, and the tab only keeps the last one.
       get().logSql({
+        workspaceId: runWorkspaceId,
         connectionId: tab.connectionId,
         sql: "",
         source: "grid",
@@ -1827,12 +1921,14 @@ export const useDbStore = create<DbState>((set, get) => ({
     const edits = buildEdits(tab);
     if (edits.length === 0) return;
 
+    const runWorkspaceId = get().workspaceId;
     await guarded(async () => {
       const outcome = await dbApplyEdits(tab.connectionId, tab.node, edits);
       // Logged whether or not the batch succeeded: a rejected `UPDATE` is the one you most want to
       // read back, and the toast only carries the server's complaint, not the statement.
       for (const sql of outcome.statements) {
         get().logSql({
+          workspaceId: runWorkspaceId,
           connectionId: tab.connectionId,
           sql,
           source: "edit",
@@ -1930,6 +2026,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       runId,
       error: null,
     }));
+    const runWorkspaceId = get().workspaceId;
     const started = Date.now();
     try {
       const objects = await dbSchemaObjects(tab.connectionId, tab.node, runId);
@@ -1937,6 +2034,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       // A catalog query the user never wrote, on the schema they are looking at — the same reason
       // the diagram logs itself. One line: what the panel *is*, not the SQL behind it.
       get().logSql({
+        workspaceId: runWorkspaceId,
         connectionId: tab.connectionId,
         sql: `-- schema objects: ${[tab.node.database, tab.node.schema ?? tab.node.name]
           .filter(Boolean)
@@ -1993,6 +2091,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       runId,
       error: null,
     }));
+    const runWorkspaceId = get().workspaceId;
     const started = Date.now();
     try {
       const diagram = await dbSchemaDiagram(tab.connectionId, tab.node, runId);
@@ -2000,6 +2099,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       // Two catalog queries the user never wrote, on the schema they are looking at — exactly the
       // kind of statement the log exists for. Logged as one line: what the panel *is*.
       get().logSql({
+        workspaceId: runWorkspaceId,
         connectionId: tab.connectionId,
         sql: `-- schema diagram: ${[tab.node.database, tab.node.schema ?? tab.node.name]
           .filter(Boolean)
@@ -2030,6 +2130,13 @@ export const useDbStore = create<DbState>((set, get) => ({
     // panel, so anything still running would otherwise keep the server working on a result nobody
     // can ever see, and keep the session busy for the next statement on that database.
     void get().cancelRun(tabId);
+    // And the assistant, which `cancelRun` cannot reach: it is a CLI subprocess in the AI registry
+    // rather than a statement on the server, and with no query in flight `cancelRun` finds nothing
+    // to stop and returns having cancelled a model that goes on burning tokens for a tab that no
+    // longer exists. Closing a tab is an explicit decision about *this* tab — unlike walking to
+    // another workspace, which `setWorkspace` deliberately lets everything survive.
+    const ai = findTab<DbConsoleTab>(get, tabId, "console")?.ai;
+    if (ai?.running && ai.runId) void useAiRunStore.getState().cancel(ai.runId);
     set((s) => {
       const tabs = s.tabs.filter((tab) => tab.id !== tabId);
       const activeTabId =
@@ -2050,7 +2157,9 @@ export const useDbStore = create<DbState>((set, get) => ({
     const workspaceId = get().workspaceId;
     if (!workspaceId) return;
     const history = await guarded(() => dbListHistory(workspaceId, HISTORY_LIMIT));
-    if (history) set({ history });
+    // The same latch `init` and `recordHistory` use: this list is one workspace's, and the read that
+    // was in flight when the user switched must not publish it over the one they are now looking at.
+    if (history && get().workspaceId === workspaceId) set({ history });
   },
 
   deleteHistory: async (id) => {
@@ -2062,16 +2171,27 @@ export const useDbStore = create<DbState>((set, get) => ({
     const workspaceId = get().workspaceId;
     if (!workspaceId) return;
     await guarded(() => dbClearHistory(workspaceId));
-    set({ history: [] });
+    // Emptied on screen only if the screen is still the one that was emptied on disk. A switch
+    // during the round trip would otherwise blank the *incoming* workspace's history panel — rows
+    // that are still in `db_query_history` and that nothing re-reads until the next load.
+    if (get().workspaceId === workspaceId) set({ history: [] });
   },
 
   logSql: (entry) => {
-    set((s) => ({
-      sqlLog: [
-        ...s.sqlLog.slice(Math.max(0, s.sqlLog.length - SQL_LOG_LIMIT + 1)),
-        { ...entry, id: newRunId(), at: Date.now() },
-      ],
-    }));
+    set((s) => {
+      // Dropped rather than appended when it belongs to a workspace the store has left. The log is
+      // the *loaded* workspace's window on its own session — `setWorkspace` empties it for that
+      // reason — so a statement that was still in flight across the switch would land in a log that
+      // was just cleared for somebody else, as the only row in it, under connections it was never
+      // run against. It is not lost work: the run itself keeps its own reporting.
+      if (entry.workspaceId !== s.workspaceId) return s;
+      return {
+        sqlLog: [
+          ...s.sqlLog.slice(Math.max(0, s.sqlLog.length - SQL_LOG_LIMIT + 1)),
+          { ...entry, id: newRunId(), at: Date.now() },
+        ],
+      };
+    });
   },
 
   clearSqlLog: () => set({ sqlLog: [] }),
@@ -2296,16 +2416,24 @@ export function redactUrl(url: string): string {
   });
 }
 
+/**
+ * Files a finished console statement in the durable query history.
+ *
+ * `workspaceId` and `connectionName` are **passed in**, captured by the caller before the statement
+ * was sent, and are not read back off the store here. This function only ever runs after the await
+ * that took minutes, which is precisely when neither is still true: the workspace is whichever one
+ * the user switched to, and `connections` was emptied by that switch, so the name resolved to `""`
+ * on the row that most needed it.
+ */
 async function recordHistory(
   get: () => DbState,
   tab: DbConsoleTab,
   statement: string,
   result: DbExecuteResult,
   duration: number,
+  workspaceId: string,
+  connectionName: string,
 ) {
-  const workspaceId = get().workspaceId;
-  if (!workspaceId) return;
-  const connection = get().connections.find((c) => c.id === tab.connectionId);
   const failed = result.results.find((entry) => entry.error);
   const rows = result.results.reduce(
     (total, entry) => total + (entry.rows_affected ?? entry.rows.length),
@@ -2315,7 +2443,7 @@ async function recordHistory(
     id: "",
     workspace_id: workspaceId,
     connection_id: tab.connectionId,
-    connection_name: connection?.name ?? "",
+    connection_name: connectionName,
     statement,
     database_name: tab.database,
     duration_ms: duration,
@@ -2325,7 +2453,11 @@ async function recordHistory(
   };
   // A history write that fails must not make a successful query look like it failed.
   const saved = await dbAddHistory(entry).catch(() => null);
-  if (saved) {
+  // The row is persisted under the workspace that ran it whatever happens; the *list* on screen
+  // belongs to whichever workspace is loaded now, so it only receives the row when the two agree.
+  // Otherwise a query started in one workspace prepends itself to another one's history panel and
+  // then disappears the next time that panel is re-read from disk.
+  if (saved && get().workspaceId === workspaceId) {
     useDbStore.setState({ history: [saved, ...get().history].slice(0, HISTORY_LIMIT) });
   }
 }

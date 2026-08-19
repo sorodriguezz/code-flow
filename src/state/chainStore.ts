@@ -14,6 +14,7 @@ import {
   getChainDetail,
   harvestChainStep,
   listAgentChains,
+  listGatedChains,
   listChainTemplates,
   listWorkspaceChainSteps,
   notifyStateChange,
@@ -40,6 +41,7 @@ import type {
   ChainDetail,
   ChainRepo,
   ChainStepBrief,
+  GatedChain,
   ChainTemplate,
   NewChainStep,
   NewStoryWorkItem,
@@ -87,6 +89,24 @@ interface ChainState {
   selectedTemplateId: string | null;
   /** True while the window is hidden to the tray — nothing dispatches then. */
   background: boolean;
+  /**
+   * Every plan parked on a human decision, **across every workspace**.
+   *
+   * The one thing in this store that is not scoped to `workspaceId`, and the exception is the
+   * point. Everything else here feeds the Agents view, which shows one workspace; this feeds the
+   * status bar, which is the app's single answer to "is anything waiting on me?" — and a gate is a
+   * plan that has *stopped*. Scoped like the rest, a plan parked in workspace A vanished from that
+   * bar the moment the user looked at B, and when it was the only row the indicator unmounted
+   * altogether. Nothing else would have said so either: a gate deliberately files no notification,
+   * because it is a state to be resolved rather than an event that happened.
+   *
+   * Read whole from the backend rather than filtered out of `chains`, since `chains` holds one
+   * workspace by construction. Deliberately **not** cleared by `setWorkspace`.
+   */
+  gatedChains: GatedChain[];
+  /** Re-reads the cross-workspace gate list. Cheap and idempotent; called wherever a chain's status
+   *  can have changed, local or remote. */
+  refreshGates: () => Promise<void>;
 
   setWorkspace: (id: string | null) => Promise<void>;
   select: (chainId: string | null) => Promise<void>;
@@ -217,32 +237,52 @@ const inFlight = new Set<string>();
  * it (a gate, a failure, the end of the plan) clears it: a second approval re-marks it.
  */
 const drivenRemotely = new Set<string>();
-/** Poll timers for steps adopted after a reload, keyed by step id. */
-const harvesting = new Map<string, ReturnType<typeof setInterval>>();
+/**
+ * Poll timers for steps adopted after a reload, keyed by step id.
+ *
+ * The chain id travels with the timer rather than being looked up in `stepsByChain`. That lookup is
+ * what used to tie harvesting to the loaded workspace — `stepsByChain` holds one workspace, so
+ * "which timers belong to this chain?" stopped being answerable the moment the user looked
+ * elsewhere, and the blunt answer was to stop all of them on every switch. Two extra words per
+ * entry buy the question an answer that does not depend on where anybody is standing.
+ */
+const harvesting = new Map<string, { timer: ReturnType<typeof setInterval>; chainId: string }>();
 
 /**
- * Stops harvesting the given steps, or all of them.
+ * Stops every timer one chain owns.
  *
  * Harvesting is pure recovery bookkeeping — it exists to collect the result of a run that outlived
  * a webview reload — and it only ever cleared itself from inside its own callback, when the run it
  * was watching finished. A step the user aborts or deletes never reaches that branch, so its timer
  * kept firing every four seconds for the rest of the session, holding its closure and spending an
  * IPC round trip and a database read each time on a chain that no longer exists. Nothing is lost by
- * stopping: there is no result left to collect, and `adoptRunningSteps` re-adopts cleanly if the
- * chain is resumed, since its guard is `harvesting.has(step.id)`.
+ * stopping those: there is no result left to collect, and `adoptRunningSteps` re-adopts cleanly if
+ * the chain is resumed, since its guard is `harvesting.has(step.id)`.
+ *
+ * **Aborting is the only reason to stop one from outside.** Changing workspace is not — see the note
+ * in `setWorkspace` — and a timer whose step has been deleted needs nobody: `harvestChainStep`
+ * answers `gone` and it clears itself, which is what covers a chain destroyed in a workspace this
+ * window is not holding.
+ *
+ * Asked of the timers rather than of `stepsByChain`: that map holds the workspace on screen, so it
+ * answers "no steps" for a chain aborted from anywhere else, which is exactly the case where a
+ * timer would be left behind.
  */
-function stopHarvesting(stepIds?: Iterable<string>): void {
-  for (const id of stepIds ?? [...harvesting.keys()]) {
-    const timer = harvesting.get(id);
-    if (timer === undefined) continue;
-    clearInterval(timer);
-    harvesting.delete(id);
+function stopHarvestingForChain(chainId: string): void {
+  for (const [stepId, entry] of harvesting) {
+    if (entry.chainId !== chainId) continue;
+    clearInterval(entry.timer);
+    harvesting.delete(stepId);
   }
 }
+
+/** Which cross-workspace gate read is the current one. See `refreshGates`. */
+let gatesSeq = 0;
 
 export const useChainStore = create<ChainState>((set, get) => ({
   workspaceId: null,
   chains: [],
+  gatedChains: [],
   templates: [],
   stepsByChain: {},
   briefsByChain: {},
@@ -253,9 +293,21 @@ export const useChainStore = create<ChainState>((set, get) => ({
 
   setWorkspace: async (id) => {
     if (get().workspaceId === id) return;
-    // All of them: `stepsByChain` is being thrown away on the next line, so every timer still
-    // running is watching a step this store can no longer even name.
-    stopHarvesting();
+    // **Harvesting deliberately survives this.**
+    //
+    // Every timer used to be cleared here, on the grounds that `stepsByChain` was about to be
+    // thrown away and a poller would be watching a step this store could no longer name. That was
+    // true of the *bookkeeping* and false of the *work*: a harvest timer is how the result of a run
+    // that outlived a webview reload gets collected at all, and killing it meant a plan recovered
+    // that way simply stopped advancing for as long as the user was looking at another workspace —
+    // silently, since an adopted step has no live promise and nothing else to report it. Which
+    // workspace is on screen is not a fact about whether a result is worth collecting.
+    //
+    // What made it safe to keep is that the callback writes nothing workspace-scoped without a
+    // guard of its own: `refresh` declines a chain the loaded list does not hold, `applyChain`'s
+    // `map` simply matches nothing, and `pump` is workspace-agnostic by design (it is what advances
+    // a chain on a phone's behalf). The one thing that did depend on `stepsByChain` — finding a
+    // chain's timers in order to stop them — now travels with the timer instead.
     set({
       workspaceId: id,
       chains: [],
@@ -266,6 +318,10 @@ export const useChainStore = create<ChainState>((set, get) => ({
       selectedId: null,
       selectedTemplateId: null,
     });
+    // Before the early return below, and unscoped: the gate list spans every workspace, so it is
+    // just as true for a switch to none as for a switch to another one — and this is the call that
+    // populates it at boot.
+    void get().refreshGates();
     if (!id) return;
     const [chains, templates, briefs] = await Promise.all([
       listAgentChains(id).catch(() => [] as AgentChain[]),
@@ -273,12 +329,26 @@ export const useChainStore = create<ChainState>((set, get) => ({
       listWorkspaceChainSteps(id).catch(() => [] as ChainStepBrief[]),
     ]);
     set((s) => (s.workspaceId === id ? { chains, templates, briefsByChain: groupBriefs(briefs) } : s));
+    // Recovery first, and deliberately *before* the guard below.
+    //
+    // A step left running by a webview reload has no live promise anywhere; adopting it is how its
+    // result gets collected at all, and `adoptRunningSteps` guards its own workspace-scoped write.
+    // Three loads and a workspace switch is one keystroke, so skipping this because the user moved
+    // during the load would leave that step with nobody watching for it until they came back — the
+    // same silent stall that clearing the timers on every switch used to cause.
+    for (const chain of chains) {
+      if (chain.status === "running") void adoptRunningSteps(chain.id, id, get, set);
+    }
+    // Starting engines is the other half, and that one *is* worth withholding. `chains` may be a
+    // list this store has already decided not to hold, and a queued chain pumped for a workspace
+    // nobody is in launches a model against a working copy on the strength of a keystroke the user
+    // has already taken back.
+    if (get().workspaceId !== id) return;
     // A chain left `running` by a killed session was already demoted to `paused` by
     // `recover_after_restart`; one that is `queued` here is one the user resumed and then closed
     // the view on, so it is picked up rather than left looking about to start.
     for (const chain of chains) {
       if (chain.status === "queued") void get().pump(chain.id);
-      if (chain.status === "running") void adoptRunningSteps(chain.id, get, set);
     }
   },
 
@@ -297,6 +367,20 @@ export const useChainStore = create<ChainState>((set, get) => ({
     if (templateId) useAgentsStore.setState({ selectedId: null });
   },
 
+  refreshGates: async () => {
+    // Sequenced, because this is fired from several places at once — a chain settling, a list
+    // reload and a workspace switch can all land within a tick of each other, and two reads
+    // resolving out of order would leave the older answer on screen. The counter is bookkeeping,
+    // not state: nothing renders it.
+    const seq = ++gatesSeq;
+    const gates = await listGatedChains().catch(() => null);
+    // A read that did not come back leaves the previous answer standing rather than emptying the
+    // bar. "Nothing is waiting on you" is a claim, and one failed query is not grounds for making
+    // it — the row the user would stop seeing is the one they most need.
+    if (!gates || seq !== gatesSeq) return;
+    set({ gatedChains: gates });
+  },
+
   reloadChains: async () => {
     const id = get().workspaceId;
     if (!id) return;
@@ -307,6 +391,9 @@ export const useChainStore = create<ChainState>((set, get) => ({
     // Templates are deliberately not re-read: nothing reachable from a phone can edit one, so
     // asking for them would be a query per invalidation that can never come back different.
     set((s) => (s.workspaceId === id ? { chains, briefsByChain: groupBriefs(briefs) } : s));
+    // Outside the guard above, because the gate list is not this workspace's: whatever moved the
+    // chains may well have parked — or freed — a plan somewhere else.
+    void get().refreshGates();
   },
 
   refresh: async (chainId) => {
@@ -326,8 +413,11 @@ export const useChainStore = create<ChainState>((set, get) => ({
   },
 
   create: async ({ projectIds, title, goal, steps, agentProjectId, start }) => {
+    // Read before the await, never after: this is the workspace the plan was authored in, and it is
+    // the only moment at which that is still an observable fact. See `adoptDetail`.
+    const startedIn = get().workspaceId;
     const detail = await createAgentChain(projectIds, title, goal, steps, agentProjectId);
-    adoptDetail(detail, set);
+    adoptDetail(detail, startedIn, set);
     // Created parked, then queued in a separate call: nothing in this app starts an engine as a
     // side effect of writing a row.
     if (start) {
@@ -347,6 +437,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
     workItem,
     start,
   }) => {
+    const startedIn = get().workspaceId;
     const detail = await createStoryChain({
       projectIds,
       title,
@@ -356,7 +447,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
       agentProjectId,
       workItem,
     });
-    adoptDetail(detail, set);
+    adoptDetail(detail, startedIn, set);
     if (start) {
       await resumeChain(detail.chain.id).then((chain) => chain && applyChain(chain, set));
       void get().pump(detail.chain.id);
@@ -529,8 +620,8 @@ export const useChainStore = create<ChainState>((set, get) => ({
 
   abort: async (chainId) => {
     // Every timer this chain owns, before anything else: an aborted step has no result to harvest,
-    // and a poller left behind here is one that never stops (see `stopHarvesting`).
-    stopHarvesting((get().stepsByChain[chainId] ?? []).map((s) => s.id));
+    // and a poller left behind here is one that never stops (see `stopHarvestingForChain`).
+    stopHarvestingForChain(chainId);
     // "Stop" is the one answer that cannot be followed by another step, so whoever was driving this
     // remotely is no longer driving anything.
     drivenRemotely.delete(chainId);
@@ -560,6 +651,11 @@ export const useChainStore = create<ChainState>((set, get) => ({
         briefsByChain,
         reposByChain,
         selectedId: s.selectedId === chainId ? null : s.selectedId,
+        // Dropped here as well, so a deleted plan stops asking for an answer. The list above is
+        // this workspace's; this one is every workspace's, and a chain deleted while parked at a
+        // gate would otherwise keep an amber row in the status bar that leads to nothing. Filtered
+        // rather than re-read: the row is gone, and that is knowable without a round trip.
+        gatedChains: s.gatedChains.filter((g) => g.chain_id !== chainId),
       };
     });
   },
@@ -586,6 +682,10 @@ export const useChainStore = create<ChainState>((set, get) => ({
         selectedId: s.selectedId && doomedTasks.has(s.selectedId) ? null : s.selectedId,
       };
     });
+    // The gate list is deliberately *not* refreshed here. The chains this repository takes with it
+    // go by database cascade, which has not happened yet — the caller deletes the row after this
+    // returns — so a read from here would faithfully report every one of them as still waiting.
+    // `removeProject` fires it on the other side of the delete instead.
   },
 
   // Filing and pinning leave `updated_at` alone on both sides — the list is ordered by it, and
@@ -637,8 +737,9 @@ export const useChainStore = create<ChainState>((set, get) => ({
   },
 
   continueFrom: async ({ sourceTaskId, title, goal, steps, agentProjectId, start }) => {
+    const startedIn = get().workspaceId;
     const detail = await createContinuationChain(sourceTaskId, title, goal, steps, agentProjectId);
-    adoptDetail(detail, set);
+    adoptDetail(detail, startedIn, set);
     // The seeded step is already `done`, so starting goes straight to the agent the user picked —
     // it never re-runs the task it came from.
     if (start) {
@@ -678,18 +779,31 @@ function briefOf(step: AgentChainStep): ChainStepBrief {
  *
  * Filtered rather than blindly prepended: the workspace subscription can have reloaded the list
  * while the create was in flight, and a chain listed twice is a duplicate React key — which does
- * not fail loudly, it silently drops one of the two. */
-function adoptDetail(detail: ChainDetail, set: SetState) {
-  set((s) => ({
-    chains: [detail.chain, ...s.chains.filter((c) => c.id !== detail.chain.id)],
-    stepsByChain: { ...s.stepsByChain, [detail.chain.id]: detail.steps },
-    briefsByChain: { ...s.briefsByChain, [detail.chain.id]: detail.steps.map(briefOf) },
-    reposByChain: { ...s.reposByChain, [detail.chain.id]: detail.repos },
-    selectedId: detail.chain.id,
-    // A chain started from a template is authored with that template still open; the new chain is
-    // what the user is now looking at.
-    selectedTemplateId: null,
-  }));
+ * not fail loudly, it silently drops one of the two.
+ *
+ * `startedIn` is the workspace the create was launched from, read before its await. Every caller
+ * reaches here after a round trip, and the authoring modal does not block the app: `workspace.next`
+ * / `workspace.prev` (Mod+Alt+PageDown/PageUp) and the command palette both render above it, so the
+ * user can genuinely be standing somewhere else by the time the chain comes back. Filing it anyway
+ * prepended one workspace's plan into another's list, gave it `selectedId`, and — with `start: true`
+ * — pumped it in front of somebody who never asked for it, naming repositories they cannot see. The
+ * chain itself still runs; `pump` claims by id and is deliberately workspace-agnostic. What this
+ * refuses is drawing it in a list that claims to be a different workspace's. */
+function adoptDetail(detail: ChainDetail, startedIn: string | null, set: SetState) {
+  set((s) =>
+    s.workspaceId !== startedIn
+      ? s
+      : {
+          chains: [detail.chain, ...s.chains.filter((c) => c.id !== detail.chain.id)],
+          stepsByChain: { ...s.stepsByChain, [detail.chain.id]: detail.steps },
+          briefsByChain: { ...s.briefsByChain, [detail.chain.id]: detail.steps.map(briefOf) },
+          reposByChain: { ...s.reposByChain, [detail.chain.id]: detail.repos },
+          selectedId: detail.chain.id,
+          // A chain started from a template is authored with that template still open; the new chain
+          // is what the user is now looking at.
+          selectedTemplateId: null,
+        },
+  );
 }
 
 /** Buckets the workspace-wide load by chain. The backend already ordered it by chain then step
@@ -730,6 +844,12 @@ function applyChain(chain: AgentChain, set: SetState) {
   set((s) => ({
     chains: s.chains.map((c) => (c.id === chain.id ? chain : c)),
   }));
+  // Every local chain transition passes through here, which makes it the one place worth asking the
+  // gate question from: a plan that just parked has to appear in the status bar, and one whose gate
+  // was just answered has to leave it. The `map` above cannot serve for either, because it only
+  // ever touches the workspace this window has loaded — and `pump` advances chains belonging to
+  // others on a phone's behalf, so `chain` here is not always one of them.
+  void useChainStore.getState().refreshGates();
   notifyStateChange("chains");
 }
 
@@ -779,7 +899,14 @@ async function settleStep(
     notify({
       source: "agents",
       titleKey: chain.status === "done" ? "notifications.chainDone" : "notifications.chainFailed",
-      target: { view: "agents", select: { kind: "chain", id: chain.id } },
+      // A chain carries no workspace column of its own — every one of its queries reaches the
+      // workspace through the first repository of its set — so this is where the stamp comes from,
+      // the same route `pump` uses for the run itself. It answers `null` for a workspace this
+      // session has never loaded the projects of, and the target below is what repairs that: the
+      // project id outranks the stamp in `enterWorkspace`, so a row filed under nothing still lands
+      // on the right plan once the workspace it belongs to has been resolved from the repository.
+      workspaceId: useWorkspaceStore.getState().workspaceOfProject(chain.project_id),
+      target: { view: "agents", projectId: chain.project_id, select: { kind: "chain", id: chain.id } },
       status: chain.status === "done" ? "success" : "error",
       detail: chain.title,
     });
@@ -806,16 +933,44 @@ async function settleStep(
  * for until it lands, or until the step has been out there long enough that something is clearly
  * wrong, at which point the run is stopped and the chain parks.
  */
-async function adoptRunningSteps(chainId: string, get: () => ChainState, set: SetState) {
+async function adoptRunningSteps(
+  chainId: string,
+  startedIn: string | null,
+  get: () => ChainState,
+  set: SetState,
+) {
   const detail = await getChainDetail(chainId).catch(() => null);
   if (!detail) return;
-  set((s) => ({ stepsByChain: { ...s.stepsByChain, [chainId]: detail.steps } }));
+  // The read is a round trip and the user may have left in the middle of it, so the two halves of
+  // this function part company here.
+  //
+  // `stepsByChain` is the detail pane's map for the workspace that *is* loaded, so writing another
+  // workspace's steps into it would put a chain on screen that does not belong there — the guard
+  // stays, and the pane fills in again the next time that workspace is opened.
+  //
+  // The timers below are the other half, and they are not workspace state at all: they are how the
+  // result of a run that outlived a webview reload gets collected. Skipping them because the user
+  // walked away mid-load is how a recovered plan used to sit still until somebody came back to
+  // watch it. Nothing here needs to be watched.
+  if (get().workspaceId === startedIn) {
+    set((s) => ({ stepsByChain: { ...s.stepsByChain, [chainId]: detail.steps } }));
+  }
   for (const step of detail.steps) {
     if (step.status !== "running" || harvesting.has(step.id)) continue;
     if (useAiRunStore.getState().active[step.run_id]) continue;
     const timer = setInterval(() => {
       void (async () => {
-        const chain = await harvestChainStep(step.id).catch(() => null);
+        const outcome = await harvestChainStep(step.id).catch(() => null);
+        // Nothing left to wait for: the step was deleted with its chain, or cascaded away with the
+        // repository the chain was filed under — from any workspace, by anyone, including a phone.
+        // This is the only stop that does not need somebody to come and ask for it, which is what
+        // makes it the right one now that a timer outlives the workspace it was armed in.
+        if (outcome?.gone) {
+          clearInterval(timer);
+          harvesting.delete(step.id);
+          return;
+        }
+        const chain = outcome?.chain ?? null;
         if (chain) {
           clearInterval(timer);
           harvesting.delete(step.id);
@@ -834,7 +989,7 @@ async function adoptRunningSteps(chainId: string, get: () => ChainState, set: Se
         }
       })();
     }, HARVEST_POLL_MS);
-    harvesting.set(step.id, timer);
+    harvesting.set(step.id, { timer, chainId });
   }
 }
 

@@ -148,6 +148,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const { useChainStore } = await import("./chainStore");
     await useChainStore.getState().abortForProject(id);
     await api.deleteProject(id);
+    // *After* the delete, which is the only order that can work: the row is what triggers the
+    // cascade — `agent_chains.project_id` is `ON DELETE CASCADE` — so a re-read issued beforehand
+    // sees the chains that are about to disappear and files them as still waiting. That mattered
+    // for exactly one case, which is also the case the cross-workspace gate list exists for: a plan
+    // parked in a workspace this window has not loaded is invisible to `abortForProject`'s own
+    // sweep, so nothing else would ever take its amber row out of the status bar.
+    void useChainStore.getState().refreshGates();
     set((s) => ({
       projectsByWorkspace: {
         ...s.projectsByWorkspace,

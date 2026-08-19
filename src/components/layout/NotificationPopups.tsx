@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { CircleAlert, CircleCheck, Info } from "lucide-react";
 import {
@@ -8,6 +8,8 @@ import {
   type AppNotification,
 } from "../../state/notificationStore";
 import { useT } from "../../state/languageStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
+import { pushErrorToast } from "../../state/toastStore";
 
 /**
  * The small card that slides in when something finishes, and takes itself away again.
@@ -64,7 +66,25 @@ const DWELL_ERROR_MS = 8000;
  */
 const MAX_VISIBLE = 3;
 
-function Popup({ item, onDismiss }: { item: AppNotification; onDismiss: () => void }) {
+function Popup({
+  item,
+  workspace,
+  foreign,
+  onDismiss,
+}: {
+  item: AppNotification;
+  /** The workspace the click will land in, by name and colour — resolved by the parent's
+   *  [`homeOf`], not read off the stamp, so the card names where it is actually going. `null` when
+   *  there is no such workspace to name, and also when the one it resolves to has since been
+   *  deleted — the card has nothing truthful to draw in either case, exactly as the bell's row
+   *  does not. */
+  workspace: { name: string; color: string } | null;
+  /** Finished somewhere other than the workspace on screen. This is the whole reason the card
+   *  carries the attribution at all: without it, work that landed in another workspace is drawn
+   *  identically to work that landed here, and the click moves the window with no warning. */
+  foreign: boolean;
+  onDismiss: () => void;
+}) {
   const t = useT();
   const reduced = useReducedMotion();
   const Icon = STATUS_ICON[item.status];
@@ -91,6 +111,31 @@ function Popup({ item, onDismiss }: { item: AppNotification; onDismiss: () => vo
     return () => clearTimeout(id);
   }, [held, item.status]);
 
+  /**
+   * Whether the card is still offering to take you there — the bell's guard, applied here too.
+   *
+   * `enterWorkspace` throws `notifications.workspaceGone` when the destination workspace has been
+   * deleted since the run finished, and its comment calls that path unreachable because the bell
+   * hides its go button. It counted one of the two ways in: this card followed unconditionally, so
+   * a deleted workspace became a rejected promise nobody was holding while the card slid away as
+   * though the jump had worked — the failure invisible, and the entry already gone from the screen
+   * that reported it. The row stays in the bell either way; it is still a true record.
+   *
+   * Because the parent resolves the destination the same way `enterWorkspace` will, this is the
+   * exact negation of that throw's condition rather than an approximation of it: `foreign` is its
+   * `crossing`, and a `null` workspace is its "not in the list".
+   */
+  const followable = Boolean(item.target) && !(foreign && workspace === null);
+  /* Foreign work says so before the click, because following it moves the whole window — and a card
+     that cannot be followed says why, rather than looking like a button that does nothing. */
+  const goLabel = followable
+    ? foreign && workspace
+      ? t("notifications.goOtherWorkspace", { name: workspace.name })
+      : undefined
+    : item.target
+      ? t("notifications.workspaceGone")
+      : undefined;
+
   return (
     <motion.div
       layout
@@ -104,13 +149,23 @@ function Popup({ item, onDismiss }: { item: AppNotification; onDismiss: () => vo
     >
       <button
         type="button"
+        title={goLabel}
         onClick={() => {
           // Following closes the card: the thing it was pointing at is now on screen, so leaving a
           // duplicate of the pointer floating over it is noise.
-          followNotification(item);
+          //
+          // Awaited through `void … .catch(...)` rather than fired and forgotten: the jump crosses
+          // workspaces and loads the destination's stores, so it can fail long after this handler
+          // has returned, and the only place left to say so is a toast.
+          if (followable) void followNotification(item).catch((e: unknown) => pushErrorToast(String(e)));
           onDismiss();
         }}
-        className="flex w-full items-start gap-2 px-3 py-2.5 text-left hover:bg-[var(--cf-accent)]/6"
+        // A card with nowhere to go is still worth being able to get rid of, so the click stays and
+        // only the jump is dropped — but the accent hover goes with it, since a hover state is a
+        // promise to take you somewhere and this one could not keep it.
+        className={`flex w-full items-start gap-2 px-3 py-2.5 text-left ${
+          followable ? "hover:bg-[var(--cf-accent)]/6" : ""
+        }`}
       >
         <Icon size={14} className="mt-0.5 shrink-0" style={{ color: STATUS_COLOR[item.status] }} />
         <span className="min-w-0 flex-1">
@@ -122,8 +177,38 @@ function Popup({ item, onDismiss }: { item: AppNotification; onDismiss: () => vo
               {item.detail}
             </span>
           )}
-          <span className="mt-0.5 block text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {t(NOTIFICATION_SOURCE_LABEL[item.source])}
+          {/* Where it came from, and — since a run outlives the screen it was started from — where
+              it happened. The workspace closes the line rather than opening it because the source
+              is the field the eye scans; the dot is the workspace's own identity colour, the same
+              one the switcher, the sidebar and the status bar's live rows draw it with, so the two
+              halves of "a wiki page finished, in Cliente B" are recognised without being read.
+
+              Nothing is drawn for a notification stamped with no workspace, matching the bell's
+              row: unlike a *live* row in the status bar, a card that is gone in four seconds has
+              nothing to disambiguate itself against, and an italic "No workspace" on a phone-driven
+              run would be the longest thing on the line. */}
+          <span className="mt-0.5 flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
+            <span className="shrink-0 uppercase tracking-wide">
+              {t(NOTIFICATION_SOURCE_LABEL[item.source])}
+            </span>
+            {workspace && (
+              <>
+                <span
+                  aria-hidden
+                  className="h-1.5 w-1.5 shrink-0 rounded-full"
+                  style={{ background: workspace.color }}
+                />
+                <span className="min-w-0 truncate" title={workspace.name}>
+                  {workspace.name}
+                </span>
+                {foreign && (
+                  // The one thing the name alone cannot say: this is not where you are standing.
+                  <span className="shrink-0 rounded-full bg-[color-mix(in_oklab,var(--cf-text)_10%,transparent)] px-1 text-[9px] font-semibold uppercase tracking-wide">
+                    {t("agents.liveElsewhere")}
+                  </span>
+                )}
+              </>
+            )}
           </span>
         </span>
       </button>
@@ -133,6 +218,53 @@ function Popup({ item, onDismiss }: { item: AppNotification; onDismiss: () => vo
 
 export function NotificationPopups() {
   const items = useNotificationStore((s) => s.items);
+  /* Resolved here rather than in the card so the list is read once per render instead of once per
+     card, and — more to the point — so a workspace renamed or deleted while three cards are on
+     screen updates all of them: they are views of the same selectors, not of a name each one copied
+     when it arrived. */
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  /* Every workspace's project list this session has loaded — the map that turns a target's
+     `projectId` into the workspace it belongs to. Read for the same reason `enterWorkspace` reads
+     it: see [`homeOf`]. */
+  const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
+
+  /**
+   * Where a notification lives, resolved exactly the way following it will resolve it.
+   *
+   * The stamp alone is not that answer. `enterWorkspace` takes `workspaceOfProject(target.projectId)
+   * ?? stamp` — a project knows which workspace it is in, and that outranks a stamp recorded from
+   * wherever the user happened to be standing. A card that resolved only the stamp would get both
+   * of its jobs wrong in the case the stamp is the stale half: it would label a jump "here" that is
+   * about to move the window to the project's workspace, and — worse, because this card acts and
+   * then vanishes — its `followable` guard would refuse a jump that `enterWorkspace` would have
+   * made, on the grounds that a workspace nothing is going to navigate to has been deleted.
+   *
+   * Resolving it here makes the name on the card a promise the click keeps, and makes the guard
+   * below the exact negation of the throw it exists to avoid. `AgentActivity`'s `homeOf` does the
+   * same for the live rows; the bell's row resolves the stamp only, which is survivable there
+   * because the row stays on screen and the arrow is the only thing riding on it.
+   */
+  const homeOf = useMemo(() => {
+    const byId = new Map(workspaces.map((w) => [w.id, w] as const));
+    const workspaceOfProject = (projectId: string): string | null => {
+      for (const [workspaceId, projects] of Object.entries(projectsByWorkspace)) {
+        if (projects.some((p) => p.id === projectId)) return workspaceId;
+      }
+      return null;
+    };
+    return (item: AppNotification) => {
+      const projectId = item.target?.projectId;
+      const home = (projectId ? workspaceOfProject(projectId) : null) ?? item.workspaceId;
+      return {
+        // `null` both for a notification stamped with no workspace and for one naming a workspace
+        // deleted since — the two cases the card has nothing truthful to draw, and the two the
+        // guard below treats alike.
+        workspace: home ? (byId.get(home) ?? null) : null,
+        foreign: home !== null && home !== activeWorkspaceId,
+      };
+    };
+  }, [workspaces, projectsByWorkspace, activeWorkspaceId]);
   const [visible, setVisible] = useState<AppNotification[]>([]);
   /**
    * The newest id this component has already shown.
@@ -168,13 +300,20 @@ export function NotificationPopups() {
     // rather than overlap, and the toast — which is the more urgent of the two — stays on top.
     <div className="pointer-events-none fixed bottom-10 right-3 z-40 flex flex-col items-end gap-2">
       <AnimatePresence initial={false}>
-        {visible.map((item) => (
-          <Popup
-            key={item.id}
-            item={item}
-            onDismiss={() => setVisible((current) => current.filter((entry) => entry.id !== item.id))}
-          />
-        ))}
+        {visible.map((item) => {
+          const { workspace, foreign } = homeOf(item);
+          return (
+            <Popup
+              key={item.id}
+              item={item}
+              workspace={workspace}
+              foreign={foreign}
+              onDismiss={() =>
+                setVisible((current) => current.filter((entry) => entry.id !== item.id))
+              }
+            />
+          );
+        })}
       </AnimatePresence>
     </div>
   );

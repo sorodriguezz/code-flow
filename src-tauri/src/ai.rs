@@ -2031,21 +2031,100 @@ pub async fn write_note(
 /// is the labels, and `diagram_outline` extracts those before this cap ever applies.
 pub const MAX_DIAGRAM_CONTEXT_CHARS: usize = 8_000;
 
-pub const DEFAULT_DIAGRAM_PROMPT: &str =
-    "Describes un diagrama para que otro programa lo dibuje. NO dibujas tú: no devuelves XML, ni \
-     SVG, ni coordenadas, ni posiciones. La colocación la calcula quien te llama.\n\n\
+/// The system prompt behind "Draw with AI".
+///
+/// **This list and `src/lib/diagrams/shapes.ts` are one thing in two files**, and
+/// `tests::prompt_lists_every_shape` fails the build when they drift. That test is not bureaucracy:
+/// a kind the frontend knows and the prompt does not is a shape no engine will ever pick, and a
+/// kind the prompt offers and the frontend does not resolves to a plain box — which is exactly the
+/// failure this catalogue was written to end.
+///
+/// **The engine picks a word, never a style string.** mxGraph has no notion of an unknown shape:
+/// `shape=cylinder4` is not an error, it is a rectangle. So a model allowed to write style strings
+/// invents plausible ones and the diagram comes back as flat grey boxes — which is what "it doesn't
+/// know draw.io's components" actually was. Choosing from a fixed vocabulary is a thing models are
+/// good at; inventing mxGraph is not.
+pub const DEFAULT_DIAGRAM_PROMPT: &str = concat!(
+    "Describes un diagrama para que otro programa lo dibuje en draw.io (mxGraph). NO dibujas tú: \
+     no devuelves XML, ni SVG, ni coordenadas, ni posiciones, ni tamaños, ni estilos. La \
+     colocación y el estilo los calcula quien te llama a partir del `kind` que elijas.\n\n\
      Devuelves EXCLUSIVAMENTE un objeto JSON con esta forma:\n\
-     {\"nodes\":[{\"id\":\"a\",\"label\":\"Texto\",\"kind\":\"process\"}],\
-     \"edges\":[{\"from\":\"a\",\"to\":\"b\",\"label\":\"opcional\"}]}\n\n\
-     Reglas:\n\
+     {\"direction\":\"down\",\
+     \"nodes\":[{\"id\":\"a\",\"label\":\"Texto\",\"kind\":\"process\",\"group\":null,\"fields\":[]}],\
+     \"edges\":[{\"from\":\"a\",\"to\":\"b\",\"label\":\"opcional\",\"kind\":\"flow\"}]}\n\n\
+     REGLAS\n\
      - Nada fuera del JSON: ni saludo, ni explicación, ni ```json alrededor.\n\
-     - `kind` es uno de: start, end, process, decision, data, store, actor, external.\n\
-     - `id` es corto, único y sin espacios. Cada `from`/`to` debe existir en `nodes`.\n\
-     - Etiquetas breves, de 1 a 5 palabras, en el MISMO IDIOMA que la instrucción.\n\
-     - Entre 3 y 25 nodos. Si la instrucción pide más, quédate con lo esencial.\n\
-     - Una arista que sale de un `decision` lleva etiqueta (`sí`/`no`, o la condición).\n\
-     - Si te dan un diagrama existente como contexto y la instrucción es ampliarlo, devuelve \
-     SÓLO lo que hay que añadir, reutilizando los ids que ya existan como extremos.";
+     - `id` corto, único y sin espacios. Cada `from`/`to` debe existir en `nodes`.\n\
+     - Etiquetas de 1 a 6 palabras, en el MISMO IDIOMA que la instrucción.\n\
+     - Entre 3 y 25 nodos (los contenedores no cuentan). Si piden más, quédate con lo esencial.\n\
+     - `direction`: \"down\" para flujos, procesos y decisiones; \"right\" para arquitecturas, \
+     redes, capas y cadenas de servicios.\n\
+     - Toda arista que sale de un `decision` o de un `bpmn-gateway` lleva `label` (sí/no, o la \
+     condición).\n\
+     - `group` es el `id` de un nodo contenedor, o null. UN SOLO nivel: un contenedor no va dentro \
+     de otro. Declara el contenedor como un nodo más, con su `kind` de contenedor y su nombre en \
+     `label`.\n\
+     - `fields` son las líneas del compartimento inferior. Úsalo SÓLO en class, interface, enum, \
+     entity y weak-entity (atributos, columnas, métodos). En el resto va vacío.\n\
+     - Si te dan un diagrama existente como contexto y la instrucción es ampliarlo, devuelve SÓLO \
+     lo que hay que añadir, reutilizando como extremos los ids que ya existan.\n\n\
+     `kind` — ELIGE SIEMPRE UNA PALABRA DE ESTA LISTA. Es lo único que decide la forma real en \
+     draw.io. Una palabra que no esté aquí se dibuja como un rectángulo genérico, así que prefiere \
+     siempre la entrada más parecida antes que inventar.\n\n",
+    // ---- the catalogue. Same order as `SHAPES` in shapes.ts, so a diff of one is a diff of both.
+    "· Diagrama de flujo y genérico: start, end, process, subprocess, decision, data, document, \
+     store, queue, internal-storage, manual-input, manual-operation, preparation, delay, display, \
+     off-page, connector, loop, or, junction, tape, card, note, text, actor, external, error, \
+     cloud.\n\
+     · UML (clases, componentes, estados, casos de uso): class, interface, enum, package, \
+     component, node, usecase, boundary, control, entity-object, state, initial, final, fork.\n\
+     · Entidad-relación: entity, weak-entity, relationship, attribute.\n\
+     · BPMN: bpmn-task, bpmn-gateway, bpmn-start, bpmn-intermediate, bpmn-end, bpmn-data, \
+     bpmn-datastore.\n\
+     · Red e infraestructura: server, web-server, virtual-server, router, switch, firewall, \
+     load-balancer, storage, laptop, pc, mobile, internet.\n\
+     · C4: c4-person, c4-system, c4-container, c4-component, c4-external.\n\
+     · AWS: aws-ec2, aws-lambda, aws-s3, aws-rds, aws-api-gateway, aws-user.\n\
+     · Contenedores (para `group`): group, lane, pool, c4-boundary, aws-vpc.\n\n",
+    "`kind` de una arista, uno de: flow (por defecto), dashed, async, bidirectional, plain, \
+     inheritance, implementation, composition, aggregation, dependency, association, message, \
+     one-to-one, one-to-many, many-to-many, zero-or-one.\n\n\
+     QUÉ FORMA USAR\n\
+     - Un proceso de negocio o un algoritmo: start/end + process + decision + data. Es el caso por \
+     defecto.\n\
+     - Una arquitectura de software: c4-* o bien component/server/store/queue/external, con \
+     `direction`:\"right\" y un `group` por capa o por servicio.\n\
+     - Un modelo de datos: entity + `fields` con las columnas, y aristas one-to-many / \
+     many-to-many entre ellas.\n\
+     - Un modelo de clases: class/interface/enum + `fields`, con aristas inheritance, \
+     implementation, composition, aggregation o dependency.\n\
+     - Una red o un despliegue: internet, firewall, load-balancer, server, store, y un `group` por \
+     subred o por zona.\n\
+     - Un proceso con responsables: un `lane` por responsable y las tareas dentro con `group`.\n\
+     - No mezcles familias sin motivo: un diagrama de clases lleno de `process` es un diagrama de \
+     clases mal dibujado.\n\n\
+     EJEMPLO (arquitectura)\n\
+     {\"direction\":\"right\",\"nodes\":[\
+     {\"id\":\"u\",\"label\":\"Cliente web\",\"kind\":\"actor\"},\
+     {\"id\":\"edge\",\"label\":\"Borde\",\"kind\":\"group\"},\
+     {\"id\":\"lb\",\"label\":\"Balanceador\",\"kind\":\"load-balancer\",\"group\":\"edge\"},\
+     {\"id\":\"api\",\"label\":\"API de pedidos\",\"kind\":\"component\",\"group\":\"edge\"},\
+     {\"id\":\"db\",\"label\":\"Pedidos\",\"kind\":\"entity\",\"fields\":[\"id: uuid\",\"total: numeric\"]}],\
+     \"edges\":[{\"from\":\"u\",\"to\":\"lb\",\"label\":\"HTTPS\"},\
+     {\"from\":\"lb\",\"to\":\"api\"},\
+     {\"from\":\"api\",\"to\":\"db\",\"kind\":\"one-to-many\"}]}\n\n\
+     EJEMPLO (flujo con decisión)\n\
+     {\"direction\":\"down\",\"nodes\":[\
+     {\"id\":\"s\",\"label\":\"Inicio\",\"kind\":\"start\"},\
+     {\"id\":\"v\",\"label\":\"¿Datos válidos?\",\"kind\":\"decision\"},\
+     {\"id\":\"g\",\"label\":\"Guardar pedido\",\"kind\":\"process\"},\
+     {\"id\":\"e\",\"label\":\"Mostrar error\",\"kind\":\"error\"},\
+     {\"id\":\"f\",\"label\":\"Fin\",\"kind\":\"end\"}],\
+     \"edges\":[{\"from\":\"s\",\"to\":\"v\"},\
+     {\"from\":\"v\",\"to\":\"g\",\"label\":\"sí\"},\
+     {\"from\":\"v\",\"to\":\"e\",\"label\":\"no\"},\
+     {\"from\":\"g\",\"to\":\"f\"},{\"from\":\"e\",\"to\":\"v\",\"label\":\"reintentar\"}]}"
+);
 
 /// Asks an engine to describe a diagram, as JSON for the frontend to lay out.
 ///
@@ -4388,6 +4467,162 @@ mod tests {
         let braced = json_answer("usa la sintaxis {clave} para interpolar").expect("a brace pair");
         assert!(serde_json::from_str::<serde_json::Value>(&braced).is_err());
         assert_ne!(braced.as_ref(), "{}");
+    }
+
+    /// The shape catalogue the prompt offers and the one the frontend can draw are the same list.
+    ///
+    /// **They live in two files and two languages, and nothing but this test connects them.** The
+    /// failure it catches is silent in both directions and the same shape either way: a kind only
+    /// `shapes.ts` knows is a shape no engine will ever name, and a kind only the prompt knows
+    /// resolves to a plain rectangle — which is the exact complaint ("it doesn't recognise draw.io's
+    /// components") that the catalogue was written to answer. Adding a shape is therefore a
+    /// two-file edit, and this is what says so.
+    ///
+    /// Reads the TypeScript rather than mirroring it: a mirror is a third copy to keep in step.
+    #[test]
+    fn prompt_lists_every_shape() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("src/lib/diagrams/shapes.ts");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+
+        // The `SHAPES` object literal only — `ALIASES` below it is a map of *synonyms*, which are
+        // deliberately absent from the prompt: listing eighty extra words the engine does not need
+        // would spend the budget teaching it the spellings it already gets right.
+        let body = source
+            .split_once("export const SHAPES = {")
+            .expect("SHAPES literal")
+            .1
+            .split_once("\n} as const")
+            .expect("end of SHAPES")
+            .0;
+
+        // Every entry is `key: { … }` or `"key-with-dashes": { … }` at one indent level.
+        let mut kinds = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            if line.len() - trimmed.len() != 2 || !trimmed.contains(": {") {
+                continue;
+            }
+            let key = trimmed.split(american_colon).next().unwrap_or_default().trim_matches('"');
+            if !key.is_empty() {
+                kinds.push(key.to_string());
+            }
+        }
+        assert!(kinds.len() > 40, "only found {} kinds — the parse is wrong, not the prompt", kinds.len());
+
+        let missing: Vec<&String> = kinds
+            .iter()
+            .filter(|kind| !prompt_lists(DEFAULT_DIAGRAM_PROMPT, kind))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "shapes.ts declares kinds the prompt never offers, so no engine can pick them: {missing:?}"
+        );
+    }
+
+    fn american_colon(c: char) -> bool {
+        c == ':'
+    }
+
+    /// Whether the prompt names this kind as a word of its own — `note` must not be satisfied by
+    /// `off-page` merely containing the letters, and `end` must not be satisfied by `bpmn-end`.
+    fn prompt_lists(prompt: &str, kind: &str) -> bool {
+        prompt.match_indices(kind).any(|(at, _)| {
+            let before = prompt[..at].chars().next_back();
+            let after = prompt[at + kind.len()..].chars().next();
+            let boundary = |c: Option<char>| !matches!(c, Some(c) if c.is_alphanumeric() || c == '-');
+            boundary(before) && boundary(after)
+        })
+    }
+
+    /// Every shape, icon, arrow and perimeter the catalogue names exists in the draw.io build this
+    /// app actually ships.
+    ///
+    /// **mxGraph has no unknown-shape error.** `shape=cylinder4` is not rejected, it is drawn as a
+    /// plain rectangle — so one wrong letter in a style string is a shape that silently stops being
+    /// the shape it says it is, on a canvas nobody looks at until a user complains that the AI
+    /// "doesn't know draw.io". Nothing else in the build catches that; this does, by grepping the
+    /// vendored bundle for every name the catalogue uses.
+    ///
+    /// **Skips when the bundle is absent**, because `public/drawio` is gitignored and produced by
+    /// `scripts/build-drawio-webapp.mjs` — a checkout that has not run it has nothing to check
+    /// against, and failing there would be reporting a missing download as a broken catalogue.
+    #[test]
+    fn every_style_name_exists_in_the_vendored_drawio() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let bundles: Vec<String> = ["app.min.js", "shapes-14-6-5.min.js", "extensions.min.js", "stencils.min.js"]
+            .iter()
+            .filter_map(|name| std::fs::read_to_string(root.join("public/drawio/js").join(name)).ok())
+            .collect();
+        if bundles.is_empty() {
+            eprintln!("skipped: no vendored draw.io — run `pnpm drawio:webapp`");
+            return;
+        }
+
+        let source = std::fs::read_to_string(root.join("src/lib/diagrams/shapes.ts")).expect("shapes.ts");
+        // The two literals only. The prose above them names a deliberately invalid shape to explain
+        // what this test is for, and scanning it would fail the test on its own documentation.
+        let literals = format!(
+            "{}{}",
+            source.split_once("export const SHAPES = {").expect("SHAPES").1,
+            source.split_once("export const EDGE_STYLES = {").expect("EDGE_STYLES").1,
+        );
+
+        let mut missing = Vec::new();
+        for key in ["shape=", "resIcon=", "grIcon=", "endArrow=", "startArrow=", "perimeter="] {
+            for (at, _) in literals.match_indices(key) {
+                let rest = &literals[at + key.len()..];
+                let value: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '.')
+                    .collect();
+                // `none` is mxGraph's own word for "no marker", not the name of anything.
+                if value.is_empty() || value == "none" {
+                    continue;
+                }
+                if !bundles.iter().any(|bundle| bundle.contains(&value)) {
+                    missing.push(format!("{key}{value}"));
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "these render as plain rectangles because the vendored draw.io has no such name: {missing:?}"
+        );
+    }
+
+    /// The same contract for the edge vocabulary, which fails the same way: an arrow kind the
+    /// prompt never mentions is one the engine never asks for.
+    #[test]
+    fn prompt_lists_every_edge_kind() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("src/lib/diagrams/shapes.ts");
+        let source = std::fs::read_to_string(&path).expect("shapes.ts");
+        let body = source
+            .split_once("export const EDGE_STYLES = {")
+            .expect("EDGE_STYLES literal")
+            .1
+            .split_once("\n} as const")
+            .expect("end of EDGE_STYLES")
+            .0;
+
+        let mut missing = Vec::new();
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            if line.len() - trimmed.len() != 2 || !trimmed.contains(": \"") {
+                continue;
+            }
+            let key = trimmed.split(american_colon).next().unwrap_or_default().trim_matches('"');
+            if !key.is_empty() && !prompt_lists(DEFAULT_DIAGRAM_PROMPT, key) {
+                missing.push(key.to_string());
+            }
+        }
+        assert!(missing.is_empty(), "edge kinds the prompt never offers: {missing:?}");
     }
 
     /// Beyond repair is not the same as absent: the caller still needs the text to put in front of

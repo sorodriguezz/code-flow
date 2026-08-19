@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { GitPullRequest, Loader2, Sparkles, X } from "lucide-react";
 import { listBranches, generatePrDescription } from "../../lib/tauri/commands";
+import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { usePrStore } from "../../state/prStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
 import type { BranchInfo, Project } from "../../types/domain";
@@ -69,13 +71,34 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
   const generate = async () => {
     if (!source || !target || sameBranch) return;
     setGenerating(true);
+    // The id is what makes this run exist to the rest of the app. `generate_pr_description` takes it
+    // as an option and the backend's `ai_runs::scoped` wrapper short-circuits without one: no
+    // registry entry, no output events, and `cancel_ai_run` with nothing to reach — so reading a
+    // whole branch diff through a model was the one AI run here that nothing on screen said was
+    // happening and nothing could stop. That matters more than for most: this modal is *torn down*
+    // rather than closed when the section around it collapses, which used to orphan the run outright.
+    const runId = newRunId("pr-desc");
+    // The project's workspace, not the active one. They are normally the same — the modal is opened
+    // from a repository the user is standing in — but the run outlives the modal, and the row in the
+    // status bar has to keep naming where the work belongs after they have moved on. `projectId`
+    // brings that repository to the front when the row is followed, which is what makes the panel it
+    // opens show this PR's project rather than whichever one happens to be selected.
+    useAiRunStore.getState().start(runId, {
+      kindKey: "agents.liveKindPrDescription",
+      detail: `${source} → ${target}`,
+      workspaceId: useWorkspaceStore.getState().workspaceOfProject(project.id),
+      target: { projectId: project.id, openAiPanel: true },
+    });
     try {
-      const draftText = await generatePrDescription(project.id, source, target);
+      const draftText = await generatePrDescription(project.id, source, target, runId);
       if (draftText.title.trim()) setTitle(draftText.title.trim());
       setDescription(draftText.body);
     } catch (e) {
-      pushErrorToast(String(e));
+      // Stopping it from the status bar is now possible, and a stop is a decision rather than a
+      // failure — the form keeps whatever the user had already typed and says nothing.
+      if (!isCancellation(e)) pushErrorToast(String(e));
     } finally {
+      useAiRunStore.getState().finish(runId);
       setGenerating(false);
     }
   };

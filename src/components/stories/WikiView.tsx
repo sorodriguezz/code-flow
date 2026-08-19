@@ -31,7 +31,7 @@ import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { confirmAction } from "../../state/confirmStore";
-import { useDocsStore } from "../../state/docsStore";
+import { NO_DOC_PARAMS, useDocsStore } from "../../state/docsStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { translate, useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
@@ -78,8 +78,11 @@ function bodyOf(page: DocPage, draft: string | null): string {
 }
 
 /**
- * Whether it is all right to leave the open document behind — closing it, opening another, deleting
- * it. Nothing unsaved, or the user was asked and said so.
+ * Whether it is all right to *lose* what is open — deleting the document, or replacing it on screen
+ * with one being created or imported. Nothing unsaved, or the user was asked and said so.
+ *
+ * Not for closing a document or opening another: those go through `select`, which writes the draft
+ * instead of dropping it, and asking about work that is about to be saved would be a lie.
  *
  * Read from the store rather than taken as arguments because every caller is a click handler on a
  * different component, and the one thing they all need to know is a fact about the whole screen.
@@ -756,11 +759,12 @@ function DocumentList({ width }: { width: number }) {
     },
   ];
 
+  // No question asked any more: `select` writes the open document's draft before it moves on, so
+  // there is nothing to lose and nothing to warn about. The dialog stays where the text really does
+  // go — deleting the document, and creating or importing one over it.
   const open = (id: string) => {
     if (id === selectedId) return;
-    void mayLeaveOpenDocument().then((ok) => {
-      if (ok) store().select(id);
-    });
+    void store().select(id);
   };
 
   return (
@@ -951,15 +955,28 @@ function RenameRow({
 function GenerationBar({ page, body }: { page: DocPage; body: string }) {
   const t = useT();
   const repos = useActiveProjects();
-  const picked = useDocsStore((s) => s.projectIds);
-  const instructions = useDocsStore((s) => s.instructions);
-  const useContext = useDocsStore((s) => s.useContext);
-  const runId = useDocsStore((s) => s.runId);
+  // This document's composer and this document's run. Both used to be one slot for the whole store,
+  // so ticking a repository for one document ticked it for all of them and a single generation drew
+  // every other document's button as a Stop — one that cancelled the run it did not belong to.
+  const { projectIds: picked, instructions, useContext } = useDocsStore(
+    (s) => s.paramsByDoc[page.id] ?? NO_DOC_PARAMS,
+  );
+  const myRun = useDocsStore((s) => s.runByDoc[page.id]);
   const [open, setOpen] = useState(false);
 
-  const running = Boolean(runId);
+  const running = Boolean(myRun);
   const isRepo = page.scope === "repo";
   const subject = repos.find((r) => r.id === page.project_id);
+  /**
+   * Whether there is anything for a run to read.
+   *
+   * A repository document is bound to one checkout, and that repository can be removed from the
+   * workspace after the document was written — the chip beside this button already says so. Without
+   * this the button stayed live and answered with "pick at least one repository to read", which is
+   * advice about a picker this scope does not have: `generate` takes the subject from the row, and
+   * the row's repository is what is gone. Stopping at the button says the true thing instead.
+   */
+  const canGenerate = isRepo ? Boolean(subject) : picked.length > 0;
 
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
@@ -1007,7 +1024,10 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
                     key={repo.id}
                     className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                   >
-                    <Checkbox checked={picked.includes(repo.id)} onChange={() => store().toggleProject(repo.id)} />
+                    <Checkbox
+                      checked={picked.includes(repo.id)}
+                      onChange={() => store().toggleProject(page.id, repo.id)}
+                    />
                     <span className="min-w-0 truncate">{repo.name}</span>
                   </label>
                 ))}
@@ -1019,7 +1039,7 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
 
       <button
         type="button"
-        onClick={() => store().setUseContext(!useContext)}
+        onClick={() => store().setUseContext(page.id, !useContext)}
         aria-pressed={useContext}
         title={t("huReview.useContextHint")}
         className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1.5 text-[12px] transition-colors ${
@@ -1034,7 +1054,7 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
 
       <input
         value={instructions}
-        onChange={(e) => store().setInstructions(e.target.value)}
+        onChange={(e) => store().setInstructions(page.id, e.target.value)}
         placeholder={t("docs.instructionsPlaceholder")}
         aria-label={t("docs.instructionsPlaceholder")}
         className={`${FIELD} min-w-[12rem] max-w-md flex-1`}
@@ -1051,20 +1071,23 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
         type="button"
         onClick={() => {
           if (running) {
-            void store().stop();
+            void store().stop(page.id);
             return;
           }
           // Regenerating replaces the body outright, and nothing keeps the previous version — so
           // a document that already says something has to ask first. An empty one does not.
           if (!body.trim()) {
-            void store().generate();
+            void store().generate(page.id);
             return;
           }
           void confirmAction(t("docs.regenerateConfirm")).then((ok) => {
-            if (ok) void store().generate();
+            if (ok) void store().generate(page.id);
           });
         }}
-        title={running ? t("docs.stopHint") : t("docs.generateHint")}
+        // Stop is always available — it acts on a run that is already going, whatever the row can
+        // still read. Only starting one is gated.
+        disabled={!running && !canGenerate}
+        title={running ? t("docs.stopHint") : canGenerate ? t("docs.generateHint") : isRepo ? t("docs.repoGone") : t("docs.pickReposFirst")}
         // Icon only: the toolbar has four controls competing for one row, and this is the one whose
         // label can go without losing meaning — the glyph already carries the state the words did
         // (play against stop), and the name of the action stays in the tooltip and the aria-label.
@@ -1072,7 +1095,7 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
         className={`flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md transition-[filter] ${
           running
             ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-            : "bg-[var(--cf-accent)] text-white hover:brightness-110"
+            : "bg-[var(--cf-accent)] text-white hover:brightness-110 disabled:opacity-40 disabled:hover:brightness-100"
         }`}
       >
         {running ? <Square size={12} /> : <Play size={12} />}
@@ -1247,7 +1270,10 @@ export function WikiView() {
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const pages = useDocsStore((s) => s.pages);
   const selectedId = useDocsStore((s) => s.selectedId);
-  const runId = useDocsStore((s) => s.runId);
+  // The open document's own run, not "is anything generating". The store holds every workspace's
+  // runs at once, so reading a store-wide flag here is what put the thinking orb over documents
+  // nobody had started, and locked their editors while it was there.
+  const myRun = useDocsStore((s) => (selectedId ? s.runByDoc[selectedId] : undefined));
   const draft = useDocsStore((s) => s.draft);
   const saving = useDocsStore((s) => s.saving);
   const listWidth = useLayoutStore((s) => s.sizes.wikiListWidth);
@@ -1262,6 +1288,10 @@ export function WikiView() {
   const page = useMemo(() => pages.find((p) => p.id === selectedId) ?? null, [pages, selectedId]);
   const body = page ? bodyOf(page, draft) : "";
   const dirty = Boolean(page && draft !== null && draft !== page.content);
+  // The row's own status counts as well as the live run: a generation started before this session
+  // — or before a reload — has no entry left in `runByDoc`, and the document should still not be
+  // typed into while the backend believes it is being written.
+  const generating = Boolean(myRun) || page?.status === "generating";
 
   // Mod+S, because this is now a field you save rather than one that saves itself. Bound while
   // this view is mounted — it unmounts when the section switches tab, so nothing else on screen
@@ -1333,11 +1363,7 @@ export function WikiView() {
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  void mayLeaveOpenDocument().then((ok) => {
-                    if (ok) store().select(null);
-                  });
-                }}
+                onClick={() => void store().select(null)}
                 title={t("docs.closeHint")}
                 aria-label={t("docs.close")}
                 className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
@@ -1356,7 +1382,7 @@ export function WikiView() {
             )}
 
             <div className="min-h-0 flex-1 overflow-hidden p-3">
-              {runId && !page.content.trim() ? (
+              {generating && !page.content.trim() ? (
                 <div className="flex h-full flex-col items-center justify-center gap-2">
                   <ThinkingOrb size="lg" />
                   <p className="text-[12px] text-[var(--cf-text-muted)]">
@@ -1371,7 +1397,10 @@ export function WikiView() {
                   ariaLabel={t("docs.contentPlaceholder")}
                   // A run about to replace this text is not a text to type into — and the editor
                   // reads its own lock as "show me what it says", which is what you want to watch.
-                  readOnly={Boolean(runId)}
+                  // This document's run, though: read-only here means the preview replaces the edit
+                  // pane outright (`MarkdownEditor`), so a store-wide flag took every other
+                  // document's editor away as well.
+                  readOnly={generating}
                   historyKey={page.id}
                 />
               )}

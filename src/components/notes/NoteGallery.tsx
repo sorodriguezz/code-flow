@@ -175,21 +175,25 @@ export function NoteGallery() {
       {searching && visible.length === 0 ? (
         <EmptyState icon={Search} title={t("notes.noMatches")} subtitle={t("notes.noMatchesHint")} />
       ) : !searching && shelf.length === 0 && visible.length === 0 ? (
-        <div className="flex h-full flex-col items-center justify-center gap-4">
-          <EmptyState
-            icon={Book}
-            title={openBook ? t("notes.bookEmpty") : t("notes.treeEmpty")}
-            subtitle={t("notes.bookEmptyHint")}
-          />
-          <button
-            type="button"
-            onClick={() => void createNote(openBook?.id ?? null)}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90"
-          >
-            <FilePlus2 size={13} />
-            {t("notes.newNote")}
-          </button>
-        </div>
+        // The button is `EmptyState`'s `action` and not a sibling of it. As a sibling it was laid
+        // out against a box that is `h-full` — so the message centred itself in the whole pane and
+        // the button was pushed to the very bottom edge, reading as a stray control rather than as
+        // the answer to the sentence above it.
+        <EmptyState
+          icon={Book}
+          title={openBook ? t("notes.bookEmpty") : t("notes.treeEmpty")}
+          subtitle={t("notes.bookEmptyHint")}
+          action={
+            <button
+              type="button"
+              onClick={() => void createNote(openBook?.id ?? null)}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90"
+            >
+              <FilePlus2 size={13} />
+              {t("notes.newNote")}
+            </button>
+          }
+        />
       ) : (
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           {/* `auto-fill` and not `auto-fit`: with two notes in a wide window, `auto-fit` stretches

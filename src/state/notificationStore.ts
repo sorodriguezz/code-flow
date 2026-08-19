@@ -22,6 +22,10 @@ export type NotificationSource =
   | "editor"
   | "notes"
   | "diagrams"
+  /** The SQL console's assistant. Its own source rather than being folded into `editor`: the
+   *  Databases workspace is a separate place with its own workspace-scoped state, and a row that
+   *  says "editor" would send the reader looking in the wrong one. */
+  | "db"
   /** Something a paired phone or tablet did. Its own source rather than being filed under the
    *  feature it touched, because *where it came from* is the interesting part: a commit you made
    *  is not news, and the same commit arriving from a device in your pocket is. */
@@ -44,6 +48,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   editor: "tabbar.editor",
   notes: "tabbar.notes",
   diagrams: "tabbar.diagrams",
+  db: "tabbar.databases",
   remote: "remote.title",
 };
 
@@ -129,17 +134,18 @@ export interface AppNotification {
 }
 
 /**
- * What a caller supplies; the store stamps the rest.
+ * What a caller supplies; the store stamps the rest — except the workspace, which it no longer can.
  *
- * `workspaceId` is the one exception, and optional: the store's default of "wherever the user is
- * now" is right for work that finishes while they are still there, but wrong for the work that
- * outlives it. A review generation left running when the user changes workspace belongs to the
- * workspace it was started in — filing it under the new one would hide it from the only history
- * that can open it.
+ * `workspaceId` used to be optional and default to "wherever the user is now". That default was
+ * right for work that finishes while they are still standing there, and wrong for every piece of
+ * work that outlives it — which is the only kind this panel exists for. Nine callers passed it and
+ * twenty-one did not, so twenty-one kinds of finished work were filed under whichever workspace the
+ * user happened to have wandered into.
+ *
+ * Required now, and still nullable: `null` is the honest answer for work that belongs to no
+ * workspace, and the panel renders it as such. What is no longer possible is *forgetting*.
  */
-export type NotificationInput = Omit<AppNotification, "id" | "finishedAt" | "seen" | "workspaceId"> & {
-  workspaceId?: string | null;
-};
+export type NotificationInput = Omit<AppNotification, "id" | "finishedAt" | "seen">;
 
 /** Older entries fall off the end. Nobody scrolls a notification list this far back, and the store
  * lives for the whole session — without a cap a long day of auto-fetches would grow forever. */
@@ -174,11 +180,10 @@ export const useNotificationStore = create<NotificationState>((set) => ({
     set((s) => {
       const item: AppNotification = {
         ...input,
-        // Read here rather than asked of the caller: every one of them is running inside a
-        // workspace already, and a parameter twenty call sites have to remember is one that
-        // nineteen will pass correctly. The twentieth passes it explicitly — see the note on
-        // `NotificationInput` — because it may finish long after the user moved on.
-        workspaceId: input.workspaceId ?? useWorkspaceStore.getState().activeWorkspaceId,
+        // No fallback to the active workspace. It used to be here, and it was the single line that
+        // turned every forgotten stamp into a row filed under the wrong workspace — silently, and
+        // exactly for the work that had outlived the screen it was started from. See
+        // `NotificationInput`: the field is required now, so there is nothing left to default.
         id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         finishedAt: Date.now(),
         seen: false,
@@ -227,7 +232,20 @@ async function enterWorkspace(stampedWorkspaceId: string | null, target: Notific
   // stamp is "wherever the user was standing when this finished", which for work that outlives the
   // screen it was started from is somewhere else entirely — and a right project under a wrong
   // workspace selects an id that resolves to nothing, landing the panel on no project at all.
-  const ownWorkspaceId = target.projectId ? workspaces.workspaceOfProject(target.projectId) : null;
+  //
+  // A **chain** is the exception, and it is the one destination where the project cannot answer.
+  // A chain is filed under its *primary* repository's workspace — that is the join
+  // `list_agent_chains` uses, and `chainStore.refresh` refuses a chain that list does not hold —
+  // while `target.projectId` names the repository of the step it is on, which on a multi-repo plan
+  // is a different one and, after that repository is moved between workspaces, a different
+  // *workspace*. Resolving through the project would then cross into a workspace the chain cannot
+  // be opened in and land on an empty pane. The caller's stamp is the authoritative answer there:
+  // it comes from the same join the list does. The project is still focused below, which is
+  // correct — it is where the work is about to happen, and it is inside this workspace whenever the
+  // two agree.
+  const chainTarget = target.select?.kind === "chain";
+  const ownWorkspaceId =
+    !chainTarget && target.projectId ? workspaces.workspaceOfProject(target.projectId) : null;
   const workspaceId = ownWorkspaceId ?? stampedWorkspaceId;
   if (!workspaceId) return;
   const crossing = workspaceId !== workspaces.activeWorkspaceId;
@@ -263,6 +281,11 @@ async function enterWorkspace(stampedWorkspaceId: string | null, target: Notific
       case "note": {
         const { useNotesStore } = await import("./notesStore");
         await useNotesStore.getState().setWorkspace(workspaceId);
+        break;
+      }
+      case "diagram": {
+        const { useDiagramsStore } = await import("./diagramsStore");
+        await useDiagramsStore.getState().setWorkspace(workspaceId);
         break;
       }
       // `reviewSession` is absent on purpose. Every case above belongs to a store with a
@@ -329,7 +352,13 @@ async function showJobInAiPanel(jobId: string): Promise<void> {
   const pr = await usePrStore.getState().ensureProjectPr(job.projectId, prId);
   if (!pr) return;
   useAnalyzeUiStore.getState().hide();
-  usePrStore.getState().selectPr(pr);
+  // The job's own repository, named rather than left to `selectPr`'s fallback. That fallback reads
+  // the *active* project, and this line runs after a host round trip that the user is free to walk
+  // away from — so a review followed from the bell could arrive stamped against whichever
+  // repository they had wandered into, which is the mis-owned selection `selectedPrProjectId` was
+  // introduced to make impossible. `job.projectId` is a real project here: the workspace-bucket
+  // case returned above.
+  usePrStore.getState().selectPr(pr, job.projectId);
 }
 
 /**
@@ -387,7 +416,11 @@ export async function followTarget(
     await useChainStore.getState().select(id);
   } else if (kind === "docPage") {
     const { useDocsStore } = await import("./docsStore");
-    useDocsStore.getState().select(id);
+    // Awaited, because `select` now persists the document being left before it opens another one.
+    // Firing it and moving on would let this function resolve — and the view re-render onto the new
+    // document — with the previous one's save still in flight, which is the same lost-keystroke
+    // race the save was added to close.
+    await useDocsStore.getState().select(id);
   } else if (kind === "note") {
     // The load is awaited first even though `openNote` fetches its own body, and that is not
     // belt-and-braces: `NotesView`'s mount effect runs the same load, and a first load clears
@@ -401,6 +434,18 @@ export async function followTarget(
     // fetched before the editor has anything to show. Deleted since the run finished is its own
     // case there — it drops the row and lands on the gallery instead of on an empty editor.
     await useNotesStore.getState().openNote(id);
+  } else if (kind === "diagram") {
+    // This branch is the one that was missing. `"diagram"` has been a legal `select.kind` since the
+    // Diagrams AI panel started filing notifications with it, and every one of them opened the
+    // gallery with nothing selected — the target was accepted by the type and then quietly ignored
+    // here, which is the failure mode a closed union is supposed to prevent and does not, because
+    // an `if/else` chain has no exhaustiveness check.
+    const { ensureDiagramsStoreLoaded, useDiagramsStore } = await import("./diagramsStore");
+    // Same ordering as notes: the view's own mount effect loads the tree and a first load clears
+    // `activeId` on its way through, so opening the diagram before that settles would have it
+    // blanked a beat later by the view arriving.
+    await ensureDiagramsStoreLoaded();
+    await useDiagramsStore.getState().openDiagram(id);
   } else if (kind === "reviewSession") {
     const { useWorkItemReviewStore } = await import("./workItemReviewStore");
     await useWorkItemReviewStore.getState().openById(id);
@@ -422,5 +467,15 @@ export async function followTarget(
     await useChatStore.getState().switchTo(target.projectId, id);
   } else if (kind === "job") {
     await showJobInAiPanel(id);
+  } else {
+    // The exhaustiveness check this chain did not have.
+    //
+    // `"diagram"` sat in the union for the whole life of the Diagrams AI panel with no branch to
+    // match it, and nothing said so: an `if/else` chain over a closed union falls off the end in
+    // silence, and the only symptom was a notification that opened the gallery and selected
+    // nothing. Assigning the narrowed `kind` to `never` turns the next such omission into a
+    // compile error at the moment the union grows.
+    const unhandled: never = kind;
+    void unhandled;
   }
 }

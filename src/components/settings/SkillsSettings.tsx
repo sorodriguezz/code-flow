@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, FolderInput, Loader2, PackagePlus, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, FileArchive, FolderInput, Loader2, PackagePlus, Plus, Trash2 } from "lucide-react";
 import {
   createCustomSkill,
   deleteSkillFile,
+  importSkillFromFile,
   importSkillFromFolder,
   installWorkspaceSkill,
   listSkillFiles,
@@ -38,7 +39,22 @@ export function SkillsSettings() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
 
-  const reload = async (id: string) => setSkills(await listWorkspaceSkills(id));
+  /**
+   * Re-reads one workspace's skills — and refuses to publish them into a screen that has moved on.
+   *
+   * Every caller below holds the `workspaceId` of the render it was created in, while the header and
+   * the rows around it are drawn from the live one. An install is the long case (a clone and a copy,
+   * seconds at least) but even a delete is a round trip, so switching workspace while one is in
+   * flight is ordinary. Without the check the answer lands anyway and the panel lists one
+   * workspace's skills under another's header — and the trash button beside each row then deletes
+   * the row and the on-disk directory of a workspace the user is no longer in, having asked them to
+   * confirm by a name that looked local.
+   */
+  const reload = async (id: string) => {
+    const loaded = await listWorkspaceSkills(id);
+    if (useWorkspaceStore.getState().activeWorkspaceId !== id) return;
+    setSkills(loaded);
+  };
 
   useEffect(() => {
     if (workspaceId) void reload(workspaceId);
@@ -89,6 +105,31 @@ export function SkillsSettings() {
     if (typeof dir !== "string") return;
     try {
       await importSkillFromFolder(workspaceId, dir);
+      await reload(workspaceId);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
+  /**
+   * The other half of "get a skill onto this machine": a `.skill` bundle, which is the shape a
+   * skill travels in once it has left a repository — the zipped folder Claude hands back, and the
+   * thing that actually arrives in a chat window or an email.
+   *
+   * `.zip` is in the filter beside it because a bundle re-saved by a browser or a mail client
+   * routinely arrives under that extension instead, and a dialog that refuses to *show* the file
+   * the user is looking straight at reads as the feature being broken. The backend does not care
+   * what it is called: it looks for a `SKILL.md` inside and says so plainly when there isn't one.
+   */
+  const importBundle = async () => {
+    const file = await openDialog({
+      multiple: false,
+      title: t("settings.skillImportBundleTitle"),
+      filters: [{ name: "Skill", extensions: ["skill", "zip"] }],
+    });
+    if (typeof file !== "string") return;
+    try {
+      await importSkillFromFile(workspaceId, file);
       await reload(workspaceId);
     } catch (e) {
       pushErrorToast(String(e));
@@ -197,6 +238,9 @@ export function SkillsSettings() {
               <button onClick={() => setCreating(true)} className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline">
                 <Plus size={13} /> {t("settings.skillCreateCustom")}
               </button>
+              <button onClick={() => void importBundle()} className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline">
+                <FileArchive size={13} /> {t("settings.skillImportBundle")}
+              </button>
               <button onClick={() => void importFolder()} className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline">
                 <FolderInput size={13} /> {t("settings.skillImportFolder")}
               </button>
@@ -212,7 +256,13 @@ export function SkillsSettings() {
               <Checkbox checked={s.enabled} onChange={(enabled) => void toggle(s, enabled)} />
               <span className={`font-medium ${s.enabled ? "" : "text-[var(--cf-text-muted)] line-through"}`}>{s.skill_name}</span>
               <span className="rounded bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-                {s.source_repo === "custom" ? t("settings.skillBadgeCustom") : s.source_repo === "local" ? t("settings.skillBadgeLocal") : s.source_repo}
+                {s.source_repo === "custom"
+                  ? t("settings.skillBadgeCustom")
+                  : s.source_repo === "local"
+                    ? t("settings.skillBadgeLocal")
+                    : s.source_repo === "bundle"
+                      ? t("settings.skillBadgeBundle")
+                      : s.source_repo}
               </span>
               <div className="ml-auto flex items-center gap-2">
                 <button

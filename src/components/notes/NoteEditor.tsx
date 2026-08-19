@@ -75,6 +75,9 @@ export function NoteEditor() {
   const outlineOpen = useNotesStore((s) => s.outlineOpen);
   const saving = useNotesStore((s) => s.saving);
   const savedAt = useNotesStore((s) => s.savedAt);
+  /** The open note's AI run, if it has one. A stable object reference, so this costs nothing on the
+   *  keystrokes that already re-render this component. */
+  const noteRun = useNotesStore((s) => (s.draft ? s.aiByNote[s.draft.id] : undefined));
 
   const editDraft = useNotesStore((s) => s.editDraft);
   const setViewMode = useNotesStore((s) => s.setViewMode);
@@ -151,11 +154,42 @@ export function NoteEditor() {
     () => setAiSelection((current) => (current === null ? (monaco.current?.selectedText() ?? "") : null)),
     [],
   );
-  const closeAi = useCallback(() => setAiSelection(null), []);
-  const insertAi = useCallback(
-    (markdown: string) => monaco.current?.replaceSelection(markdown),
-    [],
-  );
+  const closeAi = useCallback(() => {
+    // A failure the user has now read is not offered again — it would otherwise sit in the map
+    // until the note was next generated on, and reopening the note would reintroduce a red box
+    // about something that went wrong an hour ago. A parked *answer* is left alone: closing this
+    // window is not the same gesture as throwing the text away, and the window has its own Discard
+    // button for that.
+    const state = useNotesStore.getState();
+    const id = state.draft?.id;
+    const run = id ? state.aiByNote[id] : undefined;
+    if (id && run?.status === "failed") state.clearAi(id, run.runId);
+    setAiSelection(null);
+  }, []);
+
+  /**
+   * Puts generated Markdown into the note it was generated for — or refuses, and says so.
+   *
+   * **The refusal is the entire function.** This used to be a bare
+   * `monaco.current?.replaceSelection(markdown)`, and every part of that sentence was a hazard:
+   * `monaco.current` is the *live* editor, and this view deliberately never remounts it between
+   * notes (see `NotesView`), so a run started on note X that landed after the user clicked note Y
+   * wrote X's paragraphs into Y — at Y's caret, marking Y dirty, and eight hundred milliseconds
+   * later autosaving it — while the notification cheerfully pointed at X. The cross-workspace
+   * version was quieter and no better: the editor is unmounted, `monaco.current` is null, and the
+   * generation simply evaporated.
+   *
+   * So the run's own note and workspace, captured before it started, are compared against what the
+   * store says is open *now*. `false` means the caller must park the text rather than write it.
+   */
+  const insertAi = useCallback((noteId: string, workspaceId: string, markdown: string) => {
+    const state = useNotesStore.getState();
+    if (state.workspaceId !== workspaceId || state.draft?.id !== noteId) return false;
+    const editor = monaco.current;
+    if (!editor) return false;
+    editor.replaceSelection(markdown);
+    return true;
+  }, []);
 
   // Scrolling the editor scrolls the preview, one way only. Two-way sync is a feedback loop that
   // needs a suppression flag and still stutters where the two panes' heights disagree — and the
@@ -176,9 +210,29 @@ export function NoteEditor() {
     if (previewPane.current) previewPane.current.scrollTop = 0;
     setCaretHeadingLine(0);
     // The AI window holds the selection it was opened over. That selection belongs to the note that
-    // was on screen, so it goes with it rather than being carried into the next one.
+    // was on screen, so it goes with it rather than being carried into the next one. The effect
+    // below reopens the window — with no selection — when the arriving note has a run of its own.
     setAiSelection(null);
   }, [draft?.id]);
+
+  /**
+   * A note that is still writing, or that is holding an answer nobody could insert while the user
+   * was elsewhere, comes back with its AI window up.
+   *
+   * This is what makes a run re-attachable, and it is not a convenience. The Stop button lives in
+   * that window and is the only one in the app — `AgentActivity` lists the run but offers no
+   * cancel — so before this, closing a note mid-generation orphaned the run for good. And a parked
+   * answer would otherwise be a notification pointing at a note that showed no sign of having one.
+   *
+   * `current ?? ""` rather than a plain open, so a window the user already has up keeps the
+   * selection it captured. Empty is the right value for the reopened case: the selection it was
+   * started over belongs to an editing session that has ended, and a parked insert goes to the
+   * caret. A *failure* is deliberately not reopened — it has already been toasted and filed, and
+   * popping a window over the note to say so again is noise.
+   */
+  useEffect(() => {
+    if (noteRun && noteRun.status !== "failed") setAiSelection((current) => current ?? "");
+  }, [noteRun]);
 
   // Preview-only has no editor for the AI window to float over — and nothing for it to write into.
   // Closing it there rather than hiding it means coming back doesn't restore a window whose typed

@@ -67,6 +67,7 @@ function threadAsText(thread: PrCommentThread): string {
 export function PrCommentCard({
   thread,
   projectId,
+  workspaceId,
   prSourceBranch,
   resolutionKey,
   onResolveThread,
@@ -75,6 +76,16 @@ export function PrCommentCard({
   /** Omitted for a PR reviewed from a link with no clone: there's no working copy for "resolve
    * with AI" to edit, so that action isn't offered. */
   projectId?: string;
+  /**
+   * The workspace this review is running under, so what the card starts can be attributed and
+   * followed once it outlives the panel.
+   *
+   * It has to be a prop because `projectId` cannot answer here: a link review has none *by
+   * construction* (see `targetProjectId`), and that is exactly the review whose runs were being
+   * filed under whichever workspace the user happened to be standing in when they finished, with a
+   * target nothing could act on. A link session names its workspace, and this is that name.
+   */
+  workspaceId: string | null;
   prSourceBranch: string;
   /** Stable id under which this comment thread's "resolve with AI" outcome is persisted. */
   resolutionKey?: string;
@@ -119,10 +130,17 @@ export function PrCommentCard({
    * to edit, never something posted straight to the pull request. */
   const draftReply = async () => {
     const id = newRunId("draft");
-    // No target: the draft lands in this thread's reply box, in the panel that is open.
+    // No target: the draft really does land in this thread's reply box and nowhere else — there is
+    // no `select.kind` for a comment thread, and opening the panel on a review the user has since
+    // left would be a worse answer than none. The workspace is stamped regardless, so the
+    // status-bar row can at least say which one this is running in.
+    //
+    // `threadLabel`, not the bare location: a PR-level comment has no file or line, and a row
+    // reading "Drafting a reply" with nothing after it is indistinguishable from every other one.
     useAiRunStore.getState().start(id, {
       kindKey: "agents.liveKindDraft",
-      detail: locationLabel(thread) ?? "",
+      detail: threadLabel ?? "",
+      workspaceId,
     });
     setDrafting(true);
     try {
@@ -133,6 +151,7 @@ export function PrCommentCard({
       notify({
         source: "review",
         titleKey: "notifications.draftDone",
+        workspaceId,
         target: { openAiPanel: true, projectId },
         status: "success",
         detail: threadLabel,
@@ -143,6 +162,7 @@ export function PrCommentCard({
         notify({
           source: "review",
           titleKey: "notifications.draftFailed",
+          workspaceId,
           target: { openAiPanel: true, projectId },
           status: "error",
           detail: threadLabel,

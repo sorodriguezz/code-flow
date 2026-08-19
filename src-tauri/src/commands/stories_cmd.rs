@@ -28,10 +28,39 @@ use crate::secrets;
 use crate::commands::claude_cmd::{load_ai_config, load_ai_config_for, AiTask};
 use crate::commands::skills_cmd::sync_skills_into_project;
 use crate::db::{
-    models::{StoryBatch, StoryBatchDetail, StoryDraft},
+    models::{Project, StoryBatch, StoryBatchDetail, StoryDraft},
     queries::{self, NewStoryDraft},
     Db,
 };
+
+// ---------- one run, one workspace ----------
+
+/// Refuses a repository that lives in a different workspace than the run reading it.
+///
+/// [`queries::get_project`] addresses a row by id alone — ids are UUIDs and the table is global —
+/// so nothing in the query stops a run stamped with workspace A from arriving with B's
+/// repositories in `project_ids`. The frontend is where that mix happens: the pickers keep their
+/// selection in stores that outlive a workspace switch, and every one of those races ends here,
+/// with contexts, skills and prompt templates loaded from the *passed* workspace while the engine
+/// is pointed at a checkout belonging to another one. That is not a cosmetic mismatch:
+/// [`sync_skills_into_project`] writes the passed workspace's enabled skills into whatever
+/// directory it is given and deletes the ones that workspace has disabled, so the wrong pairing
+/// edits a working copy the user never asked this run to touch.
+///
+/// Checked here rather than by adding a workspace predicate to the query, because "no such
+/// repository" and "that repository is somewhere else" are different things to tell the user and
+/// the second one is the one worth reading. This is defence in depth for a local single-user app,
+/// not an authorization boundary — but it costs one comparison and turns silent corruption into a
+/// message.
+fn ensure_project_in_workspace(project: &Project, workspace_id: &str) -> Result<(), String> {
+    match project.workspace_id == workspace_id {
+        true => Ok(()),
+        false => Err(format!(
+            "«{}» pertenece a otro espacio de trabajo — vuelve a elegir los repositorios",
+            project.name
+        )),
+    }
+}
 
 // ---------- credentials for a board ----------
 
@@ -932,6 +961,7 @@ pub async fn review_work_item(
             let project = queries::get_project(&conn, id)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| "Ese repositorio ya no está en el espacio de trabajo".to_string())?;
+            ensure_project_in_workspace(&project, &workspace_id)?;
             found.push(project);
         }
         found
@@ -1094,6 +1124,25 @@ pub fn list_doc_pages(
 ) -> Result<Vec<crate::db::models::DocPage>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::list_doc_pages(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// One document, re-read.
+///
+/// The row a generation lands on is the only row that changed, and reloading the whole workspace's
+/// list to see it is what forced a finishing run to name a *workspace* — which is exactly the value
+/// that has moved on by the time a long run comes back. Addressed by id alone so the caller can
+/// refresh a document it is no longer looking at, in a workspace it has since left.
+///
+/// Missing is `None` rather than an error: the interesting caller is a run that finished after the
+/// user deleted the document, and "it is gone" is an answer that path can act on (drop the write,
+/// keep the notification), not a failure worth surfacing as a red toast.
+#[tauri::command]
+pub fn get_doc_page(
+    db: State<Db>,
+    id: String,
+) -> Result<Option<crate::db::models::DocPage>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::get_doc_page(&conn, &id).map_err(|e| e.to_string())
 }
 
 /// Creates an empty document. Its content arrives when the generation runs, or when the user types.
@@ -1307,13 +1356,26 @@ pub async fn generate_doc_page(
 
     let (projects, workspace_name) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
+        // The row is read before anything else purely so it can veto the run. `doc_id` is otherwise
+        // only ever written to here — status on the way in, content and provenance on the way out —
+        // so `doc_id`, `workspace_id` and `project_ids` arrived as three unrelated strings this
+        // command was happy to believe: a document belonging to workspace A, sent with a
+        // `workspace_id` of B, was overwritten by a run configured with B's prompts, contexts and
+        // skills. The frontend now takes both from the same row, which is what makes the pairing
+        // checkable rather than assumed.
+        let page = queries::get_doc_page(&conn, &doc_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Ese documento ya no existe".to_string())?;
+        if page.workspace_id != workspace_id {
+            return Err("Ese documento pertenece a otro espacio de trabajo".to_string());
+        }
         let mut found = Vec::with_capacity(project_ids.len());
         for id in &project_ids {
-            found.push(
-                queries::get_project(&conn, id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "Ese repositorio ya no está en el espacio de trabajo".to_string())?,
-            );
+            let project = queries::get_project(&conn, id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Ese repositorio ya no está en el espacio de trabajo".to_string())?;
+            ensure_project_in_workspace(&project, &workspace_id)?;
+            found.push(project);
         }
         // Named from the list rather than by id: there is no single-workspace read, and the list
         // is a handful of rows. The name is only a label inside the prompt, so a workspace renamed
@@ -2496,11 +2558,15 @@ pub async fn verify_stories(
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let mut resolved = Vec::with_capacity(project_ids.len());
         for project_id in &project_ids {
-            resolved.push(
-                queries::get_project(&conn, project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "Ese repositorio ya no existe en este espacio de trabajo".to_string())?,
-            );
+            let project = queries::get_project(&conn, project_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Ese repositorio ya no existe en este espacio de trabajo".to_string())?;
+            // The set is the batch's own saved list, so this only fires when the ids were written
+            // by a picker that was showing another workspace's repositories — but the batch is the
+            // thing that says which workspace the run belongs to, and the verification reads those
+            // checkouts with that workspace's contexts and skills.
+            ensure_project_in_workspace(&project, &batch.workspace_id)?;
+            resolved.push(project);
         }
         resolved
     };
@@ -2679,9 +2745,15 @@ pub fn write_story_feature_file(
             .filter(|id| !id.trim().is_empty())
             .or_else(|| parse_project_ids(&detail.batch.verify_project_ids).into_iter().next())
             .ok_or_else(|| "Elige el repositorio en el que guardar el .feature".to_string())?;
-        queries::get_project(&conn, &project_id)
+        let project = queries::get_project(&conn, &project_id)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Ese repositorio ya no existe en este espacio de trabajo".to_string())?
+            .ok_or_else(|| "Ese repositorio ya no existe en este espacio de trabajo".to_string())?;
+        // The id was read off the batch, so a mismatch means the picker that saved it was showing
+        // another workspace's repositories. Checked here and not only in `verify_stories` because
+        // this is the one path that *writes* into the checkout it resolves: an unguarded run reads
+        // the wrong tree, an unguarded write leaves a file in it.
+        ensure_project_in_workspace(&project, &detail.batch.workspace_id)?;
+        project
     };
 
     let dir = std::path::Path::new(&project.local_path).join("features");

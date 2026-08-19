@@ -2898,11 +2898,21 @@ export function WorkItemReviewView() {
       )}
 
       {!item ? (
-        <div className="cf-fade-in flex min-h-0 flex-1 flex-col items-center justify-center px-8 pb-10">
-          <EmptyState icon={ScanSearch} title={t("huReview.emptyTitle")} subtitle={t("huReview.emptyShort")} />
-          <p className="-mt-2 max-w-md break-all rounded-md border border-dashed border-[var(--cf-border)] px-3 py-2 text-center font-mono text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-            {t("huReview.emptyExample")}
-          </p>
+        <div className="cf-fade-in flex min-h-0 flex-1 flex-col px-8 pb-10">
+          {/* The example is the empty state's `action`, not a sibling: `EmptyState` is `h-full`, so
+              beside it the message centred itself in the whole pane and the example was left at the
+              bottom edge. The `-mt-2` that used to be on this paragraph was the symptom being
+              patched — two hundred pixels of gap that a negative margin cannot close. */}
+          <EmptyState
+            icon={ScanSearch}
+            title={t("huReview.emptyTitle")}
+            subtitle={t("huReview.emptyShort")}
+            action={
+              <p className="max-w-md break-all rounded-md border border-dashed border-[var(--cf-border)] px-3 py-2 text-center font-mono text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+                {t("huReview.emptyExample")}
+              </p>
+            }
+          />
         </div>
       ) : (
         <>

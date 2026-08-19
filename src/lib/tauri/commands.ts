@@ -27,6 +27,8 @@ import type {
   FileBlame,
   FileDiffInfo,
   FileEntry,
+  GatedChain,
+  HarvestOutcome,
   GitIdentity,
   HunkRef,
   DiscardOutcome,
@@ -654,6 +656,10 @@ export const deleteAgentTask = (id: string) => invoke<void>("delete_agent_task",
 export const listAgentChains = (workspaceId: string) =>
   invoke<AgentChain[]>("list_agent_chains", { workspaceId });
 
+/** Every plan waiting on a human, in every workspace — deliberately unscoped, for the status bar.
+ *  See `GatedChain`. */
+export const listGatedChains = () => invoke<GatedChain[]>("list_gated_chains");
+
 export const getChainDetail = (chainId: string) =>
   invoke<ChainDetail | null>("get_chain_detail", { chainId });
 
@@ -738,9 +744,10 @@ export const abortChain = (chainId: string) => invoke<AgentChain | null>("abort_
  * exists until the next workspace load. */
 export const deleteChain = (chainId: string) => invoke<string[]>("delete_chain", { chainId });
 
-/** For a step whose run outlived the webview: `null` until its turn lands. */
+/** For a step whose run outlived the webview. `chain` is null until its turn lands; `gone` says the
+ *  step no longer exists, which is the poller's signal to stop rather than keep asking. */
 export const harvestChainStep = (stepId: string) =>
-  invoke<AgentChain | null>("harvest_chain_step", { stepId });
+  invoke<HarvestOutcome>("harvest_chain_step", { stepId });
 
 /** "Carry on from here": a chain whose first step is `source` — already finished, its answer ready
  * to hand on. */
@@ -965,6 +972,10 @@ export const createCustomSkill = (workspaceId: string, name: string, skillMd: st
 
 export const importSkillFromFolder = (workspaceId: string, srcDir: string) =>
   invoke<WorkspaceSkill>("import_skill_from_folder", { workspaceId, srcDir });
+
+/** Unpacks a `.skill` bundle — the zipped skill folder — into the workspace's skill store. */
+export const importSkillFromFile = (workspaceId: string, filePath: string) =>
+  invoke<WorkspaceSkill>("import_skill_from_file", { workspaceId, filePath });
 
 export const listSkillFiles = (workspaceId: string, skillName: string) =>
   invoke<string[]>("list_skill_files", { workspaceId, skillName });

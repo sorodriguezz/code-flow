@@ -10,7 +10,9 @@ import { followTarget, type NotificationTarget } from "../../state/notificationS
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 
-const PANEL_WIDTH = 268;
+/** Wider than it was, and the workspace line is why: three lines of text in 268px left the middle
+ *  one — the thing the run is *acting on* — truncated on almost every row. */
+const PANEL_WIDTH = 300;
 
 /**
  * One thing a model is doing right now — or one plan waiting on the user to let it carry on.
@@ -25,9 +27,20 @@ interface LiveRun {
   kind: string;
   /** What it is acting on: a task, a batch, a question, a file. */
   detail: string;
-  /** Where following it goes, or `null` for a run whose place is already on screen — an inline
-   * edit in the editor has nowhere to send anybody. */
+  /** Where following it goes, or `null` for a run with genuinely nowhere to land. */
   go: (() => void) | null;
+  /**
+   * The workspace the run is living in, by name and colour — the answer to "where is this
+   * happening?", which a global list has to give or it is only telling half the truth.
+   *
+   * `null` for a run that belongs to no workspace (one driven from a paired phone, an inline edit
+   * in a file opened from disk) **and** for one whose workspace has since been deleted. The two
+   * read the same on the row on purpose: neither is somewhere the user can be sent.
+   */
+  workspace: { id: string; name: string; color: string } | null;
+  /** Running somewhere other than the workspace on screen. Only changes how the row is labelled —
+   * it is still listed, because that is the entire point of a global bar. */
+  foreign: boolean;
   /** Parked on the user rather than on an engine: a gate. It is still in progress — nothing moves
    * until it is answered — which is exactly why it is worth a section of its own. */
   attention: boolean;
@@ -199,13 +212,14 @@ function Section({ label, children }: { label: string; children: React.ReactNode
 }
 
 function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
+  const t = useT();
   const body = (
     <>
       {/* A fixed slot, whatever goes in it. The mark arrives one event after the row does, and a
           6px dot growing into a 14px logo would shunt the title sideways on a panel the user is
           already reading. Sizing the slot for the larger of the two costs nothing and the swap is
           then invisible. */}
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+      <span className="mt-[1px] flex h-3.5 w-3.5 shrink-0 items-center justify-center">
         {run.providerId ? (
           // The engine's own mark, the same one Settings → AI → Providers draws. It replaces the
           // dot rather than joining it: "this is running" is already said by the section heading
@@ -224,6 +238,37 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
         {run.detail && (
           <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{run.detail}</span>
         )}
+        {/* Where it is happening, on every row and not only on the foreign ones.
+
+            A bar that names the workspace only when it differs from the current one is a bar you
+            have to know the rule of before you can read it — and the row that says nothing is then
+            ambiguous between "here" and "we didn't record it". Both states are drawn, so the line
+            always answers the question it exists to answer. The dot is the workspace's own identity
+            colour, the same one the switcher and the sidebar draw it with. */}
+        <span className="mt-[1px] flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
+          {run.workspace ? (
+            <>
+              <span
+                aria-hidden
+                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{ background: run.workspace.color }}
+              />
+              <span className="min-w-0 truncate" title={run.workspace.name}>
+                {run.workspace.name}
+              </span>
+              {run.foreign && (
+                // The one thing the name alone cannot say: this is not where you are standing. It
+                // is what turns the row from a label into a warning that following it will move
+                // the whole window.
+                <span className="shrink-0 rounded-full bg-[color-mix(in_oklab,var(--cf-text)_10%,transparent)] px-1 text-[9px] font-semibold uppercase tracking-wide">
+                  {t("agents.liveElsewhere")}
+                </span>
+              )}
+            </>
+          ) : (
+            <span className="min-w-0 truncate italic">{t("agents.liveNoWorkspace")}</span>
+          )}
+        </span>
       </span>
     </>
   );
@@ -232,7 +277,7 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
   // is running", and a hover state that leads nowhere is a promise the row cannot keep.
   if (!run.go) {
     return (
-      <div title={run.engineLabel || undefined} className="flex w-full items-center gap-2 px-3 py-1.5">
+      <div title={run.engineLabel || undefined} className="flex w-full items-start gap-2 px-3 py-1.5">
         {body}
       </div>
     );
@@ -245,12 +290,18 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
         run.go?.();
       }}
       // The engine and model behind the mark. On the `title` rather than on the row, because the
-      // row is already two lines of text in 268px and a third would be the one that gets truncated.
-      title={run.engineLabel || undefined}
-      className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+      // row is three lines of text already and a fourth would be the one that gets truncated.
+      title={
+        run.foreign && run.workspace
+          ? `${t("notifications.goOtherWorkspace", { name: run.workspace.name })}${
+              run.engineLabel ? ` — ${run.engineLabel}` : ""
+            }`
+          : run.engineLabel || undefined
+      }
+      className="flex w-full items-start gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
     >
       {body}
-      <ArrowUpRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+      <ArrowUpRight size={12} className="mt-[3px] shrink-0 text-[var(--cf-text-muted)]" />
     </button>
   );
 }
@@ -273,40 +324,83 @@ function useLiveRuns(): LiveRun[] {
   // Announced by the backend once per run, just before its first line — so a row drawn in the same
   // tick the run started shows the dot, and picks up its mark a moment later. See `AiRunEngine`.
   const engineByRun = useAiRunStore((s) => s.engineByRun);
-  const chains = useChainStore((s) => s.chains);
-  const briefsByChain = useChainStore((s) => s.briefsByChain);
+  // Every workspace's, not this one's. `chains` holds the loaded workspace by construction, so a
+  // bar built from it stopped listing a parked plan the moment the user looked elsewhere — and a
+  // gate files no notification either, so nothing else would have said so. See
+  // `chainStore.gatedChains`.
+  const gatedChains = useChainStore((s) => s.gatedChains);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  // Every workspace's project list this session has loaded — the map that turns a run's `projectId`
+  // into the workspace it belongs to, for the runs whose home is only recoverable that way.
+  const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
   const t = useT();
 
   return useMemo(() => {
-    const follow = (workspaceId: string | null | undefined, target: NotificationTarget) => () => {
+    /** A project knows which workspace it is in, and that outranks the stamp for the same reason
+     *  `enterWorkspace` prefers it: the stamp can be stale, a project's home cannot. */
+    const workspaceOfProject = (projectId: string): string | null => {
+      for (const [workspaceId, projects] of Object.entries(projectsByWorkspace)) {
+        if (projects.some((p) => p.id === projectId)) return workspaceId;
+      }
+      return null;
+    };
+
+    /** Where a run lives, resolved exactly the way following it will resolve it — so the name on
+     *  the row is a promise the click keeps. */
+    const homeOf = (
+      stamped: string | null | undefined,
+      target: NotificationTarget | undefined,
+    ): string | null => (target?.projectId ? workspaceOfProject(target.projectId) : null) ?? stamped ?? null;
+
+    const named = (workspaceId: string | null) => {
+      if (!workspaceId) return null;
+      // A workspace deleted while its run was going. Drawn as "no workspace" rather than as a name
+      // the app can no longer honour — and `go` is dropped with it, below.
+      const found = workspaces.find((w) => w.id === workspaceId);
+      return found ? { id: found.id, name: found.name, color: found.color } : null;
+    };
+
+    const follow = (workspaceId: string | null, target: NotificationTarget) => () => {
       // A deleted workspace is the one case this throws — the run's home is gone, and carrying on
       // would open the destination view here and look like it worked.
-      void followTarget(workspaceId ?? activeWorkspaceId, target).catch((e: unknown) =>
-        pushErrorToast(String(e)),
-      );
+      void followTarget(workspaceId, target).catch((e: unknown) => pushErrorToast(String(e)));
     };
 
     const rows: LiveRun[] = [];
 
-    for (const chain of chains) {
-      if (chain.status !== "gated") continue;
-      const briefs = briefsByChain[chain.id] ?? [];
-      // A gated chain is parked *before* a step, so the one it is waiting on is the first pending.
-      const at = briefs.find((brief) => brief.status === "pending") ?? null;
+    for (const gate of gatedChains) {
+      const target: NotificationTarget = {
+        // The repository of the step it is *waiting on*, resolved in SQL — a plan parked between a
+        // step in one repository and a step in another is waiting to be let into the second.
+        view: "agents",
+        projectId: gate.project_id || undefined,
+        select: { kind: "chain", id: gate.chain_id },
+      };
+      // Taken straight from the backend, and deliberately **not** through `homeOf`.
+      //
+      // `homeOf` prefers the target's project, which is the right precedence for a run — a project
+      // knows its own workspace and a stamp can go stale. A chain is the exception: it is only
+      // *findable* in the workspace of its primary repository, because that is the join
+      // `list_agent_chains` is keyed on and `chainStore.refresh` refuses a chain that list does not
+      // hold. `gate.project_id` is the repository of the step it is waiting on, which on a
+      // multi-repo plan is a different one — and moving that repository to another workspace makes
+      // the two disagree outright, at which point resolving through the project would name a
+      // workspace the chain cannot be opened in and land the user on an empty pane.
+      const home = gate.workspace_id;
+      const workspace = named(home);
       rows.push({
-        key: `chain:${chain.id}`,
+        key: `chain:${gate.chain_id}`,
         kind: t("agents.liveKindGate"),
-        detail: chain.title || chain.goal,
+        detail: gate.title || gate.goal,
         attention: true,
         // A gate has no engine running behind it — that is what makes it a gate.
         providerId: null,
         engineLabel: "",
-        go: follow(activeWorkspaceId, {
-          view: "agents",
-          projectId: at?.project_id || chain.project_id || undefined,
-          select: { kind: "chain", id: chain.id },
-        }),
+        workspace,
+        foreign: home !== null && home !== activeWorkspaceId,
+        // Same rule as a run's: a workspace that no longer exists is nowhere to be sent.
+        go: workspace ? follow(home, target) : null,
       });
     }
 
@@ -314,6 +408,8 @@ function useLiveRuns(): LiveRun[] {
       if (!running) continue;
       const about = aboutByRun[runId];
       const engine = engineByRun[runId];
+      const home = homeOf(about?.workspaceId, about?.target);
+      const workspace = named(home);
       rows.push({
         key: `run:${runId}`,
         // A run that started without describing itself still counts. It should not happen — every
@@ -326,11 +422,28 @@ function useLiveRuns(): LiveRun[] {
         // The engine's own words, not a lookup: this is what ran, as the backend reported it, and
         // the model is worth saying because routing sends different tasks to different ones.
         engineLabel: engine ? (engine.model ? `${engine.engine} · ${shortModel(engine.model)}` : engine.engine) : "",
-        go: about?.target ? follow(about.workspaceId, about.target) : null,
+        workspace,
+        foreign: home !== null && home !== activeWorkspaceId,
+        // Nowhere to go covers two cases now: a run that filed no target, and one whose workspace
+        // has been deleted since — `followTarget` would throw on the second, and a button that
+        // only ever produces an error toast is worse than no button.
+        go: about?.target && !(home !== null && workspace === null) ? follow(home, about.target) : null,
       });
     }
 
-    // Gates first: they are the only rows waiting on the reader.
-    return rows.sort((a, b) => Number(b.attention) - Number(a.attention));
-  }, [active, aboutByRun, engineByRun, chains, briefsByChain, activeWorkspaceId, t]);
+    // Gates first: they are the only rows waiting on the reader. Then this workspace's runs before
+    // the other workspaces', so the list opens on what the user is actually looking at.
+    return rows.sort(
+      (a, b) => Number(b.attention) - Number(a.attention) || Number(a.foreign) - Number(b.foreign),
+    );
+  }, [
+    active,
+    aboutByRun,
+    engineByRun,
+    gatedChains,
+    activeWorkspaceId,
+    workspaces,
+    projectsByWorkspace,
+    t,
+  ]);
 }

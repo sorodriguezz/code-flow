@@ -503,6 +503,41 @@ export interface ChainRepo {
   position: number;
 }
 
+/**
+ * What one poll of a recovered step found.
+ *
+ * `chain` and `gone` are separate answers because the poller has to tell "the turn is still out
+ * there" from "there is nothing left to wait for". They used to share one `null`, so a step deleted
+ * with its chain — or cascaded away with the repository the chain was filed under — read as
+ * "not yet" and was asked about every few seconds until the poller's own timeout gave up.
+ */
+export interface HarvestOutcome {
+  chain: AgentChain | null;
+  gone: boolean;
+}
+
+/**
+ * A plan parked on a human decision, listed across **every** workspace.
+ *
+ * The one chain shape that is not workspace-scoped, and the status bar is why: it is the app's
+ * single answer to "is anything waiting on me?", so an answer scoped to whichever workspace happens
+ * to be open is one the user has to re-ask everywhere else before they can trust it. A gate is a
+ * plan that has *stopped*, which makes an invisible one the most expensive thing to miss.
+ *
+ * Slim by design — one line of a narrow panel. Everything else is a `getChainDetail` away, after the
+ * click has crossed into its workspace.
+ */
+export interface GatedChain {
+  chain_id: string;
+  /** Resolved through the chain's first repository at read time; `agent_chains` has no workspace
+   *  column of its own. */
+  workspace_id: string;
+  /** The repository of the step it is waiting on — not necessarily the chain's first. */
+  project_id: string;
+  title: string;
+  goal: string;
+}
+
 export interface AgentChainStep {
   id: string;
   chain_id: string;

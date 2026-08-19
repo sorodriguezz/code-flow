@@ -175,9 +175,42 @@ export const useBenchStore = create<BenchState>((set, get) => ({
   hide: () => set({ open: false }),
 
   refresh: async (workspaceId, focus?: string) => {
+    // Whether this read is a *move* or a re-read of where we already are, decided before anything
+    // is committed.
+    const crossing = get().workspaceId !== workspaceId;
+    // The workspace is committed *now*, ahead of its own data, rather than arriving with it. Two
+    // switches in quick succession leave two of these reads in flight, and publishing the id
+    // together with the rows means whichever one lands last wins both: the bench then looks
+    // perfectly consistent — one workspace's id over its own tabs — while being the workspace the
+    // user left. Committing first turns that into a check the loser fails.
+    //
+    // A move takes the outgoing bench with it in the same breath, rather than leaving it on screen
+    // under the incoming workspace's id until the read lands — the shells keep running, this only
+    // stops them being *listed* as this workspace's. Doing it here rather than in the failure branch
+    // below is what keeps a failed read from being destructive: two reads of the same workspace can
+    // be in flight at once (the view's own on `workspaceId`, and `show`'s), and a failure branch
+    // that emptied the bench would throw away rows its sibling had just published successfully.
+    set(
+      crossing
+        ? {
+            workspaceId,
+            tabs: [],
+            terminals: [],
+            layouts: {},
+            activeTabId: null,
+            focusedPane: {},
+            // The inline editor was open on a tab that is not in this workspace. Left set, it would
+            // reopen on whichever tab of the incoming bench happened to take that id back.
+            renamingTabId: null,
+          }
+        : { workspaceId },
+    );
     const bench = await listWorkspaceTerminals(workspaceId).catch(() => null);
+    if (get().workspaceId !== workspaceId) return;
     if (!bench) {
-      set({ workspaceId, loading: false });
+      // Nothing to publish, and nothing of anybody else's left in place to take down: what is on
+      // screen is either this workspace's own last good read or the empty bench cleared above.
+      set({ loading: false });
       return;
     }
     const { tabs, terminals } = bench;
@@ -186,6 +219,9 @@ export const useBenchStore = create<BenchState>((set, get) => ({
     // that says nothing about tabs, so landing on the right tab is this function's job.
     const wantedTab = focus ? (terminals.find((terminal) => terminal.id === focus)?.tab_id ?? null) : null;
     set((s) => {
+      // Re-checked inside the updater and not only above it: `layoutsFor` and the `settle` calls
+      // run between the two, and a switch that happens in that gap would still be overwritten here.
+      if (s.workspaceId !== workspaceId) return s;
       const activeTabId = settle(
         tabs.map((tab) => tab.id),
         wantedTab,
@@ -204,14 +240,23 @@ export const useBenchStore = create<BenchState>((set, get) => ({
     const created = await addWorkspaceTerminal(workspaceId, tab.id, cwd, profileId);
     const node = { kind: "leaf" as const, id: created.id };
     persist(tab.id, node);
-    set((s) => ({
-      workspaceId,
-      tabs: [...s.tabs, tab],
-      terminals: [...s.terminals, created],
-      layouts: { ...s.layouts, [tab.id]: node },
-      activeTabId: tab.id,
-      focusedPane: { ...s.focusedPane, [tab.id]: created.id },
-    }));
+    set((s) => {
+      // Two round trips have happened since the click, and a workspace switch inside them is
+      // ordinary. Publishing anyway did two wrong things at once: it appended this workspace's tab
+      // to the bench of the workspace now on screen, and — worse — it wrote *this* workspace's id
+      // back over it. `refresh` now refuses to publish a read whose workspace has moved on, so that
+      // stale id had no way of being corrected: the incoming workspace's own load failed the check
+      // and its bench stayed empty for good. The shell itself is running either way; it is listed
+      // the next time this workspace is opened, which is where it belongs.
+      if (s.workspaceId !== workspaceId) return s;
+      return {
+        tabs: [...s.tabs, tab],
+        terminals: [...s.terminals, created],
+        layouts: { ...s.layouts, [tab.id]: node },
+        activeTabId: tab.id,
+        focusedPane: { ...s.focusedPane, [tab.id]: created.id },
+      };
+    });
   },
 
   split: async (workspaceId, tabId, cwd, dir, profileId) => {
@@ -221,12 +266,18 @@ export const useBenchStore = create<BenchState>((set, get) => ({
     const created = await addWorkspaceTerminal(workspaceId, tabId, cwd, profileId);
     const node = splitPane(current, target, created.id, dir);
     persist(tabId, node);
-    set((s) => ({
-      terminals: [...s.terminals, created],
-      layouts: { ...s.layouts, [tabId]: node },
-      // Focus follows the new pane. You split in order to use the thing you just made.
-      focusedPane: { ...s.focusedPane, [tabId]: created.id },
-    }));
+    set((s) => {
+      // The same guard `addTab` carries, for the same round trip. A pane split into a tab that
+      // belongs to the workspace the user has just left would be drawn into whichever tab of the
+      // incoming bench happened to inherit that id.
+      if (s.workspaceId !== workspaceId) return s;
+      return {
+        terminals: [...s.terminals, created],
+        layouts: { ...s.layouts, [tabId]: node },
+        // Focus follows the new pane. You split in order to use the thing you just made.
+        focusedPane: { ...s.focusedPane, [tabId]: created.id },
+      };
+    });
   },
 
   closePane: async (tabId, terminalId) => {

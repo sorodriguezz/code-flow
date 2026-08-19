@@ -25,6 +25,7 @@ import { builtInTemplates, toTemplate } from "../lib/notes/templates";
 import { descendantIds } from "../lib/notes/tree";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
+import { useAiRunStore } from "./aiRunStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type {
   Note,
@@ -167,6 +168,37 @@ function parseList(raw: string | null): string[] {
   }
 }
 
+/**
+ * An AI write against one note: the run while it is in flight, and its answer afterwards.
+ *
+ * **Why this lives in the store rather than in the panel that starts it.** It used to be three
+ * `useState`s inside `NoteAiPanel`, and everything wrong with that followed from the panel being
+ * the shortest-lived thing in the feature. It unmounts when the note is closed, when the view is
+ * switched to preview-only, when the workspace changes — and the run does not. A closed panel left
+ * a model burning tokens with no Stop button anywhere in the app, and the Markdown it eventually
+ * produced had nowhere to go, so it was dropped on the floor while the notification cheerfully
+ * said the note had been written.
+ *
+ * Keyed by note id, and never a single `runId` slot: four notes may be writing at once, which is
+ * the entire point, and one flag would both refuse the second run and draw the first one's Stop
+ * button over every other note in every other workspace.
+ */
+interface NoteAiRun {
+  runId: string;
+  /**
+   * The workspace this run belongs to, stamped when it starts and never re-read from whatever is
+   * active when it lands. That is the difference between "the note it was written for" and
+   * "wherever the user happened to be standing a minute later" — and the second answer is wrong
+   * exactly in the case this field exists for.
+   */
+  workspaceId: string;
+  startedAt: number;
+  status: "running" | "ready" | "failed";
+  /** What the engine wrote, kept only when it could not be inserted — see `parkAi`. */
+  markdown?: string;
+  error?: string;
+}
+
 interface NotesState {
   workspaceId: string | null;
   loading: boolean;
@@ -190,6 +222,13 @@ interface NotesState {
   saving: boolean;
   /** When the open note was last written, ISO. `null` before the first save of a session. */
   savedAt: string | null;
+
+  /**
+   * The AI writes, by note id — running ones and answers waiting to be inserted.
+   *
+   * Deliberately **not** cleared by `setWorkspace`; see `clearedWorkspaceState`.
+   */
+  aiByNote: Record<string, NoteAiRun>;
 
   /** Filter over the whole workspace. Session state — a search is something you are doing. */
   query: string;
@@ -247,6 +286,36 @@ interface NotesState {
   editDraft: (patch: Partial<Pick<NoteDraft, "title" | "content" | "tags">>) => void;
   /** Writes the draft now, if it is dirty. Called on close, on switch, and on the debounce. */
   flush: () => Promise<void>;
+
+  /**
+   * Registers an AI write against `noteId`, and refuses a second one on the same note.
+   *
+   * `false` is "not started" and the caller must not go on to invoke anything — either that note is
+   * already writing, or the store has since been pointed at a different workspace than the one the
+   * caller stamped. The guard is per note rather than store-wide on purpose: notes in four
+   * different books, or four different workspaces, may all be writing at once.
+   *
+   * `workspaceId` is passed in rather than read here so the caller's stamp and this entry cannot
+   * disagree. It is the value the run's status-bar row and its notification are filed under, and it
+   * is captured before the first `await` — which is the only moment at which "where this belongs"
+   * is still knowable.
+   */
+  beginAi: (noteId: string, runId: string, workspaceId: string) => boolean;
+  /**
+   * The engine answered, and the answer could not be put into the note — the editor has moved on to
+   * a different note, or to a different workspace altogether.
+   *
+   * Kept rather than dropped, and that is the whole difference between "your text is waiting in
+   * that note" and a minute of model time thrown away in silence. The notification is the route
+   * back to the note; this is what is there when the user arrives.
+   */
+  parkAi: (noteId: string, runId: string, markdown: string) => void;
+  /** The run failed. Recorded rather than only toasted, because the toast is shown wherever the
+   *  user is standing and the failure belongs to a note they may not be looking at. */
+  failAi: (noteId: string, runId: string, error: string) => void;
+  /** Forgets the run: its text landed, it was cancelled, or the user threw the parked answer away.
+   *  Addressed by `runId` so a stale handler cannot delete a newer run's entry. */
+  clearAi: (noteId: string, runId: string) => void;
 
   /**
    * Writes a new note into `bookId`.
@@ -332,6 +401,18 @@ let searchToken = 0;
  * incoming workspace, or it empties the view because there is no incoming workspace — and a field
  * cleared in one path and forgotten in the other is exactly how the new workspace ends up wearing
  * the old one's state. Which is the bug this whole area exists to prevent.
+ *
+ * **`aiByNote` is deliberately absent, and its absence is the point.** Everything listed here is
+ * dropped because it is what the outgoing workspace had on screen — but a generation still in
+ * flight, or an answer that arrived while the user was reading something else, is not on screen and
+ * does not belong to the screen. It belongs to the note it was started on. Clearing it by symmetry
+ * with its neighbours would destroy the one piece of state that exists precisely to outlive the
+ * view: the model would keep running with nothing left anywhere to receive it, its status-bar row
+ * would lose the Stop button that is now the only one, and the Markdown it eventually produced
+ * would be dropped while its notification still claimed the note had been written. Note ids are
+ * UUIDs, so an entry carried across can never be picked up by a note in the incoming workspace —
+ * and each one carries its own `workspaceId` anyway, which is what the editor checks before it
+ * inserts anything.
  */
 function clearedWorkspaceState(): Partial<NotesState> {
   return {
@@ -357,6 +438,22 @@ function clearedWorkspaceState(): Partial<NotesState> {
   };
 }
 
+/**
+ * Stops any generation still writing into the notes named here.
+ *
+ * Deleting a note is a decision about the work as well as about the row. Dropping the `aiByNote`
+ * entry on its own left the engine running against a document that could no longer receive a word
+ * of it — tokens spent on nothing, and then a "note written" notification pointing at a note the
+ * user had deleted. Cancelling sends the panel's own handler down its `isCancellation` branch, so
+ * nothing is toasted and nothing is filed: the run simply stops, which is what deleting meant.
+ */
+function stopNoteAiRuns(runs: Record<string, NoteAiRun>, noteIds: Iterable<string>): void {
+  for (const noteId of noteIds) {
+    const run = runs[noteId];
+    if (run?.status === "running") void useAiRunStore.getState().cancel(run.runId);
+  }
+}
+
 export const useNotesStore = create<NotesState>((set, get) => ({
   workspaceId: null,
   loading: false,
@@ -370,6 +467,7 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   openingId: null,
   saving: false,
   savedAt: null,
+  aiByNote: {},
   query: "",
   bodyHits: {},
   tagFilter: [],
@@ -732,6 +830,70 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     }
   },
 
+  // ---------- the AI writes ----------
+
+  beginAi: (noteId, runId, workspaceId) => {
+    const state = get();
+    // Nothing may start against a workspace this store has already left. Cheap, and it is the half
+    // of the guard that can be checked synchronously — the other half, the one that matters, is on
+    // the way back in, where the answer has to prove it is still landing where it started.
+    if (state.workspaceId !== workspaceId) return false;
+    if (state.aiByNote[noteId]?.status === "running") return false;
+    set({
+      aiByNote: {
+        ...state.aiByNote,
+        // A settled entry for this note — a failure the user has read, an answer they discarded —
+        // is replaced rather than protected: they asked for a new one, on this note, just now.
+        [noteId]: { runId, workspaceId, startedAt: Date.now(), status: "running" as const },
+      },
+    });
+    return true;
+  },
+
+  parkAi: (noteId, runId, markdown) =>
+    set((state) =>
+      // Addressed by id, and only while this run is still the one that owns the note's slot. A
+      // second generation started on the same note while this one was in flight has taken it over,
+      // and overwriting it would replace the answer the user is waiting on with a stale one.
+      state.aiByNote[noteId]?.runId !== runId
+        ? {}
+        : {
+            aiByNote: {
+              ...state.aiByNote,
+              [noteId]: {
+                ...state.aiByNote[noteId],
+                status: "ready" as const,
+                markdown,
+                error: undefined,
+              },
+            },
+          },
+    ),
+
+  failAi: (noteId, runId, error) =>
+    set((state) =>
+      state.aiByNote[noteId]?.runId !== runId
+        ? {}
+        : {
+            aiByNote: {
+              ...state.aiByNote,
+              [noteId]: {
+                ...state.aiByNote[noteId],
+                status: "failed" as const,
+                markdown: undefined,
+                error,
+              },
+            },
+          },
+    ),
+
+  clearAi: (noteId, runId) =>
+    set((state) => {
+      if (state.aiByNote[noteId]?.runId !== runId) return {};
+      const { [noteId]: _done, ...aiByNote } = state.aiByNote;
+      return { aiByNote };
+    }),
+
   // ---------- notes ----------
 
   createNote: async (bookId, template) => {
@@ -765,14 +927,22 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   },
 
   deleteNote: async (id) => {
+    stopNoteAiRuns(get().aiByNote, [id]);
     try {
       await notesDeleteNote(id);
       set((state) => {
         const bodies = { ...state.bodies };
         delete bodies[id];
+        // The one place an `aiByNote` entry is dropped without its run having settled: there is no
+        // longer a note to insert into, so a parked answer could never be offered again and a
+        // running one has nowhere to land. The run itself was stopped above — see
+        // `stopNoteAiRuns` — because leaving it going is not a neutral choice.
+        const aiByNote = { ...state.aiByNote };
+        delete aiByNote[id];
         return {
           notes: state.notes.filter((n) => n.id !== id),
           bodies,
+          aiByNote,
           bodyOrder: state.bodyOrder.filter((bodyId) => bodyId !== id),
           activeId: state.activeId === id ? null : state.activeId,
           // Dropped without flushing: the row is gone, so writing the draft would either fail or
@@ -1059,22 +1229,36 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     // Read before the delete: afterwards the rows are gone and there is no way to ask which books
     // were under this one.
     const doomed = descendantIds(get().books, id);
+    // And the notes inside them, read now for the same reason — `refresh` below is what drops the
+    // rows, and by then nothing can say which notes the book held. This is the *other* way a note
+    // stops existing, so it needs `deleteNote`'s line as well: an `aiByNote` entry is offered by
+    // opening the note it belongs to, so one whose note has been deleted can never be offered
+    // again and would sit in the map for the rest of the session.
+    const doomedNotes = get().notes.filter(
+      (note) => note.book_id !== null && doomed.has(note.book_id),
+    );
+    stopNoteAiRuns(get().aiByNote, doomedNotes.map((note) => note.id));
     try {
       await notesDeleteBook(id);
       // Everything written inside goes with it — there is nowhere for a note to survive to. Re-read
       // rather than patched locally, because working out which notes were in which descendant book
       // is exactly what the query just did.
       await get().refresh();
-      set((state) => ({
-        // The gallery may have been standing inside the book that just went, or inside one of its
-        // subbooks. Either way it is now looking at a shelf that no longer has that book on it.
-        bookFilter: state.bookFilter && doomed.has(state.bookFilter) ? null : state.bookFilter,
-        // And the editor may have had one of the deleted notes open. `refresh` has already dropped
-        // it from `notes`; this drops the draft that would otherwise be written back on the next
-        // debounce and re-create a note the user deleted.
-        activeId: state.notes.some((note) => note.id === state.activeId) ? state.activeId : null,
-        draft: state.notes.some((note) => note.id === state.draft?.id) ? state.draft : null,
-      }));
+      set((state) => {
+        const aiByNote = { ...state.aiByNote };
+        for (const note of doomedNotes) delete aiByNote[note.id];
+        return {
+          // The gallery may have been standing inside the book that just went, or inside one of its
+          // subbooks. Either way it is now looking at a shelf that no longer has that book on it.
+          bookFilter: state.bookFilter && doomed.has(state.bookFilter) ? null : state.bookFilter,
+          // And the editor may have had one of the deleted notes open. `refresh` has already
+          // dropped it from `notes`; this drops the draft that would otherwise be written back on
+          // the next debounce and re-create a note the user deleted.
+          activeId: state.notes.some((note) => note.id === state.activeId) ? state.activeId : null,
+          draft: state.notes.some((note) => note.id === state.draft?.id) ? state.draft : null,
+          aiByNote,
+        };
+      });
     } catch (error) {
       pushErrorToast(String(error));
     }

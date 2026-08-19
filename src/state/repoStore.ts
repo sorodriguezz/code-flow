@@ -4,6 +4,7 @@ import { pushErrorToast, useToastStore } from "./toastStore";
 import { notify } from "./notificationStore";
 import { confirmAction, confirmFlow } from "./confirmStore";
 import { useLanguageStore } from "./languageStore";
+import { useWorkspaceStore } from "./workspaceStore";
 import { translations, type TranslationKey } from "../lib/i18n/translations";
 import type {
   BranchInfo,
@@ -179,6 +180,29 @@ function notificationDetail(state: Pick<RepoState, "repoPath" | "status">): stri
   const repo = state.repoPath?.split(/[/\\]/).filter(Boolean).pop() ?? "";
   const branch = state.status?.current_branch ?? "";
   return [repo, branch].filter(Boolean).join(" · ");
+}
+
+/**
+ * Which workspace the repository a remote operation runs against belongs to.
+ *
+ * Read alongside [`notificationDetail`] and for the same reason: a fetch that also runs on a timer
+ * can land long after the user has moved to another workspace entirely, and a notification filed
+ * under wherever they are *now* would say a branch of workspace A was fetched while sitting in B's
+ * list — and send them nowhere useful when clicked.
+ *
+ * By path rather than by project id, because a path is all this store is ever told: `App` drives it
+ * with `setRepoPath(project.local_path)`, so the string compared here is the very one the project
+ * row supplied. `null` for a checkout that belongs to no loaded workspace — a repository the user
+ * has not opened this session, or one opened outside the project list — which is the honest answer
+ * and renders as such.
+ */
+function repoWorkspaceId(state: Pick<RepoState, "repoPath">): string | null {
+  const path = state.repoPath;
+  if (!path) return null;
+  for (const [workspaceId, projects] of Object.entries(useWorkspaceStore.getState().projectsByWorkspace)) {
+    if (projects.some((p) => p.local_path === path)) return workspaceId;
+  }
+  return null;
 }
 
 /** Translates outside of React (this store isn't a component) using whatever language is
@@ -883,17 +907,19 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     if (!repoPath || remoteOp) return;
     set({ remoteOp: "fetch" });
     // Captured before the work: a fetch is the one remote op that also runs on a timer, so by the
-    // time it lands the user may well be looking at a different repository than the one it was for.
+    // time it lands the user may well be looking at a different repository than the one it was for
+    // — and, just as often, at a different workspace.
     const where = notificationDetail(get());
+    const workspaceId = repoWorkspaceId(get());
     try {
       await api.gitFetch(repoPath);
       await get().refreshBranches();
-      notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail: where });
+      notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail: where, workspaceId });
     } catch (e) {
       const message = String(e);
       set({ error: message });
       pushErrorToast(message);
-      notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail: where });
+      notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail: where, workspaceId });
     } finally {
       set({ remoteOp: null });
     }
@@ -967,6 +993,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     if (!repoPath || remoteOp) return;
     set({ remoteOp: "pull" });
     const where = notificationDetail(get());
+    const workspaceId = repoWorkspaceId(get());
     try {
       const ok = await guarded(set, async () => {
         await api.gitPull(repoPath);
@@ -977,6 +1004,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         titleKey: ok ? "notifications.gitPulled" : "notifications.gitPullFailed",
         status: ok ? "success" : "error",
         detail: where,
+        workspaceId,
       });
     } finally {
       set({ remoteOp: null });
@@ -988,6 +1016,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     if (!repoPath || remoteOp) return;
     set({ remoteOp: "push" });
     const where = notificationDetail(get());
+    const workspaceId = repoWorkspaceId(get());
     try {
       const ok = await guarded(set, async () => {
         await api.gitPush(repoPath, setUpstream);
@@ -1006,6 +1035,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
             : "notifications.gitPushFailed",
         status: ok ? "success" : "error",
         detail: where,
+        workspaceId,
       });
     } finally {
       set({ remoteOp: null });

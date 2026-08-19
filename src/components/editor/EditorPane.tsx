@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Editor, { DiffEditor, type Monaco, type OnMount } from "@monaco-editor/react";
-import type { editor as MonacoEditorNS, IRange } from "monaco-editor";
+import type { editor as MonacoEditorNS } from "monaco-editor";
 // This is the one editor in the app that does not spread `OVERFLOW_SAFE_OPTIONS` (see the note at
 // the `fixedOverflowWidgets` line far below), so it is also the one that would otherwise never
 // reach `monacoSetup` — which since `main.tsx` stopped importing it is what points the loader at
@@ -235,6 +235,41 @@ export interface RevealRequest {
   line: number;
   column?: number;
   nonce: number;
+}
+
+/**
+ * What Ctrl+I was aimed at, captured the instant it was pressed.
+ *
+ * `selection` is captured because the widget's own input steals focus, and Monaco's selection is
+ * long gone by the time an instruction is typed and submitted. Everything beside it is captured for
+ * the opposite reason: the rewrite comes back whenever the provider answers, which can be a minute
+ * later and several tab switches away, so the reply has to be checked against the buffer it was
+ * asked about rather than applied to whatever the pane is showing when it lands.
+ *
+ * `path` and `modelUri` are that identity. The URI is kept as a string rather than as a model
+ * reference so holding onto it can never keep a disposed buffer alive, and so the comparison is
+ * against the one thing that names a buffer uniquely — two projects both have a `src/main.ts`, and
+ * only the URI tells them apart.
+ */
+interface InlineEditTarget {
+  /**
+   * Which press of Ctrl+I this is, the way [`RevealRequest`] counts its own.
+   *
+   * Path and URI say *which buffer*; they say nothing about *which request*, and two presses in
+   * one file are identical under both. That is a reachable pair: the widget's input greys out
+   * while a rewrite is in flight, so the natural next move is to click back into the code and keep
+   * working — select something else, press Ctrl+I again — and the first reply then lands on the
+   * second selection's decoration. Same corruption as the tab-switch bug, one file in.
+   */
+  nonce: number;
+  path: string;
+  modelUri: string;
+  selection: string;
+  /** A styling-free decoration over the selected range, which Monaco carries along as the text
+   *  above it changes. Stored instead of the plain `IRange` it was made from: a range is a pair of
+   *  line numbers, and line numbers mean whatever happens to be sitting at them when the reply
+   *  arrives, which after a minute of typing is not what was asked about. */
+  decorationId: string;
 }
 
 export function previewKindFor(path: string | null): PreviewKind {
@@ -595,9 +630,67 @@ export function EditorPane({
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const scrollSyncGuardRef = useRef<"editor" | "preview" | null>(null);
   const pendingRevealRef = useRef<RevealRequest | null>(null);
-  /** The selection Ctrl+I was pressed on, captured at that moment: the widget's own input steals
-   * focus, and Monaco's selection is gone by the time the instruction is submitted. */
-  const [inlineEdit, setInlineEdit] = useState<{ selection: string; range: IRange } | null>(null);
+  /** What Ctrl+I was pressed on — see [`InlineEditTarget`]. Drives the widget's rendering. */
+  const [inlineEdit, setInlineEdit] = useState<InlineEditTarget | null>(null);
+  /**
+   * The same value, but readable from a closure that was built before it changed.
+   *
+   * `applyInlineEdit` is handed to the widget as a prop, and the widget hangs onto it inside the
+   * `submit` closure that is already awaiting the model. Reading the `inlineEdit` *state* from
+   * there reads whatever it was when the request went out — which is exactly the thing the guard
+   * exists to catch having moved on, so the guard would be checking the answer against itself. The
+   * ref is written eagerly by the two functions below rather than mirrored during render (the way
+   * `activePathRef` above is), because a reply can land and be checked in the same tick the widget
+   * was closed in, before React has re-rendered anything.
+   */
+  const inlineEditRef = useRef<InlineEditTarget | null>(null);
+  /** Mints [`InlineEditTarget.nonce`]. A ref rather than state: nothing renders from it, and it has
+   *  to be readable and bumped inside `openInlineEdit` without scheduling a pass of its own. */
+  const inlineEditNonceRef = useRef(0);
+
+  /**
+   * Takes the widget down and, with it, the decoration that was following its selection around.
+   *
+   * The decoration has to go explicitly: it lives on the *model*, which outlives both the widget
+   * and the tab being switched away from, so leaving it behind would quietly accumulate one hidden
+   * tracked range per Ctrl+I for as long as the file stays open.
+   */
+  const closeInlineEdit = useCallback((nonce?: number) => {
+    const target = inlineEditRef.current;
+    // A close owed to a press that is already over.
+    //
+    // The widget is keyed by nonce, so a second Ctrl+I unmounts the first one — but its in-flight
+    // `submit` is a promise React cannot cancel, and when the reply lands that dead closure still
+    // runs its `onClose`. Unguarded, an old rewrite arriving a second after a new press tore down
+    // the widget the user was typing into and dropped its tracked range with it: `applyInlineEdit`
+    // correctly refused the stale *edit*, and then this correctly-refused reply closed the request
+    // that superseded it. `openInlineEdit` has already retired the old decoration, so there is
+    // genuinely nothing left for that call to do. Callers with no press to name (the escape key,
+    // the ✕, the tab-change cleanup) pass nothing and always close what is open.
+    if (nonce !== undefined && target?.nonce !== nonce) return;
+    const mon = monacoRef.current;
+    if (target && mon) {
+      // Resolved rather than assumed: the model this decoration belongs to is the one the selection
+      // came from, which by now may not be the one on screen — and may have been disposed with its
+      // tab, in which case there is nothing left to clean up and `getModel` says so.
+      mon.editor.getModel(mon.Uri.parse(target.modelUri))?.deltaDecorations([target.decorationId], []);
+    }
+    inlineEditRef.current = null;
+    setInlineEdit(null);
+  }, []);
+
+  /** Opens the widget on a fresh target, retiring whatever the previous Ctrl+I left behind — two
+   *  presses without an apply in between would otherwise strand the first decoration — and stamping
+   *  the new one so a reply still owed to the previous press can be told apart from this one's. */
+  const openInlineEdit = useCallback(
+    (target: Omit<InlineEditTarget, "nonce">) => {
+      closeInlineEdit();
+      const next = { ...target, nonce: ++inlineEditNonceRef.current };
+      inlineEditRef.current = next;
+      setInlineEdit(next);
+    },
+    [closeInlineEdit],
+  );
   // Bumped every time a Monaco instance actually finishes mounting — the code panel remounts
   // Monaco whenever it toggles away and back (preview-only mode), which would otherwise leave
   // effects keyed on `[ranges]`/`[viewMode]` alone reading a stale/disposed `editorRef.current`
@@ -1810,7 +1903,8 @@ export function EditorPane({
       run: () => {
         const model = editorInstance.getModel();
         const selection = editorInstance.getSelection();
-        if (!model || !selection) return;
+        const path = activePathRef.current;
+        if (!model || !selection || !path) return;
         // With nothing selected, the current line is the implied target — asking someone to select
         // a line before rewriting it is a step the editor can take for them.
         const range = selection.isEmpty()
@@ -1823,7 +1917,25 @@ export function EditorPane({
           : selection;
         const text = model.getValueInRange(range);
         if (!text.trim()) return;
-        setInlineEdit({ selection: text, range });
+        // The range is handed to Monaco to track rather than kept as the plain `IRange` it came in
+        // as. The answer can be a minute away, and anything typed above the selection while it is
+        // in flight — by the user once the widget's input greys out, or in the other split showing
+        // this same buffer — shifts those lines down; a decoration is carried along with its text,
+        // so the replacement still lands on what was selected instead of on whatever slid into its
+        // line numbers. `NeverGrowsWhenTypingAtEdges` keeps a character typed against either end
+        // outside the range: it was not part of what the model was asked to rewrite.
+        const [decorationId] = model.deltaDecorations(
+          [],
+          [
+            {
+              range,
+              options: {
+                stickiness: monacoInstance.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+              },
+            },
+          ],
+        );
+        openInlineEdit({ path, modelUri: model.uri.toString(), selection: text, decorationId });
       },
     });
     // Registered as a Monaco action rather than a plain command so it also appears in the
@@ -1877,19 +1989,85 @@ export function EditorPane({
     return () => applied.dispose();
   }, [overrides, editorReady]);
 
-  /** Applies an AI rewrite through Monaco's edit stack, so it joins the undo history and shows
-   * up as an ordinary unsaved change instead of appearing from nowhere. */
-  const applyInlineEdit = useCallback(
-    (replacement: string) => {
-      const ed = editorRef.current;
-      const target = inlineEdit;
-      if (!ed || !target || !ed.getModel()) return;
-      ed.executeEdits("cf-inline-edit", [{ range: target.range, text: replacement, forceMoveMarkers: true }]);
-      ed.pushUndoStop();
-      ed.focus();
-    },
-    [inlineEdit],
-  );
+  /**
+   * Applies an AI rewrite through Monaco's edit stack, so it joins the undo history and shows up as
+   * an ordinary unsaved change instead of appearing from nowhere.
+   *
+   * Everything before that is a proof that the rewrite is landing in the buffer it was asked about.
+   * The reply arrives whenever the provider answers, and by then this pane may be showing a
+   * different file: the widget is gone, but the `submit` closure still in flight holds this
+   * callback and calls it regardless. Applying it to `editorRef.current` at that point wrote one
+   * file's replacement over another file's lines — Monaco *clamps* an out-of-range edit instead of
+   * rejecting it, `onChange` then marked the innocent tab dirty, and the undo stack presented the
+   * corruption as something the user had typed. So the model is resolved from the URI captured at
+   * Ctrl+I, and anything short of "still the same buffer, still the one on screen" is refused.
+   *
+   * Refusing rather than writing to the off-screen model on purpose. The right buffer is reachable
+   * either way, but a rewrite the user never saw arrive, in a file they are no longer looking at,
+   * is an unexplained dirty tab waiting for them — and the parent's `onChange` only follows the
+   * model a mounted `Editor` is bound to, so the tab registry would not even agree with it.
+   *
+   * Returns whether the rewrite actually landed, so the widget can report a discarded edit as
+   * discarded instead of claiming a success no buffer ever received.
+   *
+   * `nonce` is the request's own half of that proof, handed back by the caller from the target it
+   * was started against. Path and URI only establish the buffer; a second Ctrl+I in the same file
+   * while the first is still running passes both of those and would take the first reply onto the
+   * second selection.
+   */
+  const applyInlineEdit = useCallback((replacement: string, nonce: number): boolean => {
+    const target = inlineEditRef.current;
+    const ed = editorRef.current;
+    const mon = monacoRef.current;
+    if (!target || !ed || !mon) return false;
+    if (target.nonce !== nonce || target.path !== activePathRef.current) return false;
+    // `getModel` answers with the one buffer that URI names, so a hit here is the buffer the
+    // selection came out of rather than merely a file with the same name somewhere else. The
+    // identity check against the live editor is what keeps the edit *visible*: a model that is no
+    // longer the one on screen would take the change in silence.
+    const model = mon.editor.getModel(mon.Uri.parse(target.modelUri));
+    if (!model || model.isDisposed() || model !== ed.getModel()) return false;
+    // Where the selection is *now*. A missing answer is a refusal rather than a fall back on the
+    // range Ctrl+I was pressed on: the only thing that drops a decoration is the model being reset
+    // wholesale under us (a `setValue`, a reload from disk), which is precisely the case where the
+    // original line numbers point at somebody else's code. Falling back would fire only when it is
+    // wrong.
+    const range = model.getDecorationRange(target.decorationId);
+    if (!range) return false;
+    // Bracketed by stack elements so Ctrl+Z takes the whole rewrite back in one press, and so the
+    // user's own typing before and after it stays separately undoable.
+    model.pushStackElement();
+    model.pushEditOperations([], [{ range, text: replacement, forceMoveMarkers: true }], () => null);
+    model.pushStackElement();
+    ed.focus();
+    return true;
+  }, []);
+
+  /**
+   * A file leaving the screen takes its inline edit with it.
+   *
+   * Not tidiness. The widget floats over the pane and offers to rewrite "these N lines", so leaving
+   * it up across a tab switch offers to rewrite a selection that is nowhere on screen — and its
+   * `fileContent` prop follows the *new* tab, so submitting it would ask the model to rewrite a
+   * fragment of one file in the context of another. A run already in flight is deliberately left
+   * alone: it finishes, `applyInlineEdit` refuses it, and the notification centre says the edit was
+   * discarded, which is the honest outcome and a far better one than the silent corruption it
+   * replaced.
+   *
+   * Keyed on `activePath` because that is what every way in reduces to — clicking another tab,
+   * opening a file from the tree, closing the active tab, Ctrl+Tab, jumping to a search hit. The
+   * reveal effect just below has always made the same check for the same reason; this call site was
+   * the one that skipped it.
+   *
+   * Also returned as the cleanup, the way the peek effect above does it and for the same reason:
+   * that is what covers this pane being closed or the whole group unmounting, neither of which is a
+   * change of `activePath` and both of which would otherwise leave a tracked range on a model that
+   * is still open in the other split.
+   */
+  useEffect(() => {
+    closeInlineEdit();
+    return closeInlineEdit;
+  }, [activePath, closeInlineEdit]);
 
   // Jumping to a search hit can't reveal the line until the file has finished loading *and*
   // Monaco has (re)mounted on it, which is several renders after the click — so the request is
@@ -2232,13 +2410,29 @@ export function EditorPane({
             ) : (
               editorPane
             )}
-            {inlineEdit && (
+            {/* The path check is what the effect above enforces, asserted here so the render can
+                never disagree with it: the effect runs *after* the commit that changed `activePath`,
+                so for exactly one frame `inlineEdit` still names the file that just left while
+                `content` is already the new one's. One frame is enough to hand the widget a
+                mismatched path/content pair, which is the pair it would submit. */}
+            {inlineEdit && inlineEdit.path === activeTab.path && (
               <InlineEditWidget
-                filePath={activeTab.path}
+                // A press is a new widget, not the old one re-pointed. Without this, pressing Ctrl+I
+                // again while a rewrite is in flight leaves the previous instance's state in place —
+                // its `running` flag still set, so the input for the *new* selection is greyed out
+                // and unusable until an answer nobody is waiting for arrives.
+                key={inlineEdit.nonce}
+                editNonce={inlineEdit.nonce}
+                filePath={inlineEdit.path}
                 fileContent={content}
                 selection={inlineEdit.selection}
+                workspaceId={project.workspace_id}
                 onApply={applyInlineEdit}
-                onClose={() => setInlineEdit(null)}
+                // Bound to *this* press. An unmounted widget keeps the props of its last render,
+                // so the reply a superseded request is still owed closes itself by a nonce that no
+                // longer matches — and `closeInlineEdit` ignores it instead of closing its
+                // successor. See the guard there.
+                onClose={() => closeInlineEdit(inlineEdit.nonce)}
               />
             )}
             {/* The change peek lives *inside* Monaco — a view zone's DOM node, reached by a portal — so

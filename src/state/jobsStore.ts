@@ -246,24 +246,37 @@ function toJob(projectId: string, row: ActivityRow): Job {
 }
 
 /**
+ * Which workspace a bucket's runs belong to.
+ *
+ * Two bucket shapes answer the same question, which is why this is a function and not a pair of
+ * lookups written out wherever they are needed: a workspace bucket *is* the answer (a PR reviewed
+ * from a link belongs to no repository here, only to the workspace it was pasted into), and a
+ * project bucket answers it through its project. `null` only for a project whose workspace list was
+ * never loaded — the honest answer, and one the status bar and the notification centre both render
+ * as such rather than guessing around.
+ *
+ * What it deliberately never consults is `activeWorkspaceId`. A review is the archetypal run that
+ * outlives the screen it was started from, so "wherever the user is now" is wrong exactly when
+ * this matters: the row would be filed under a workspace the run has nothing to do with, and the
+ * button on it would then send the user there.
+ */
+function jobWorkspaceId(bucket: string): string | null {
+  return workspaceIdFromBucket(bucket) ?? useWorkspaceStore.getState().workspaceOfProject(bucket);
+}
+
+/**
  * Files a finished job in the notification centre.
  *
  * `pr-action` is skipped: it is a decision the user just made (approve, close), not work that ran
  * while they were elsewhere, and it settles in the same instant they click. Telling them it
  * happened would be telling them what they did.
+ *
+ * `workspaceId` is passed in rather than looked up here: this runs after the task has resolved,
+ * and the whole point of the stamp is that it was taken before it started. See `run`.
  */
-function notifyJobSettled(job: Job, ok: boolean): void {
+function notifyJobSettled(job: Job, ok: boolean, workspaceId: string | null): void {
   if (job.kind === "pr-action") return;
   const analyzing = job.kind === "analyze-changes";
-  // A run filed under a workspace is a PR reviewed from a link: there is no project to bring to the
-  // front, and the workspace it belongs to is the bucket's own rather than whichever one the user
-  // has wandered into since. A run filed under a project answers the same question through the
-  // project — a review is exactly the kind of work that outlives the screen it was started from,
-  // and the store's default ("wherever the user is now") would file it under the wrong workspace
-  // and then send the button there.
-  const linkWorkspaceId = workspaceIdFromBucket(job.projectId);
-  const workspaceId =
-    linkWorkspaceId ?? useWorkspaceStore.getState().workspaceOfProject(job.projectId);
   notify({
     source: analyzing ? "changes" : "review",
     titleKey: analyzing
@@ -275,13 +288,14 @@ function notifyJobSettled(job: Job, ok: boolean): void {
         : "notifications.reviewFailed",
     // Where the result is: this run, in the assistant panel, on the project it ran for. No view —
     // the panel is a rail over whichever one the user is on, and a review is not a reason to move
-    // them off it.
+    // them off it. A PR reviewed from a link has no project to bring to the front, and naming its
+    // bucket as one would focus a project that does not exist.
     target: {
       openAiPanel: true,
-      projectId: linkWorkspaceId ? undefined : job.projectId,
+      projectId: isWorkspaceBucket(job.projectId) ? undefined : job.projectId,
       select: { kind: "job", id: job.id },
     },
-    workspaceId: workspaceId ?? undefined,
+    workspaceId,
     status: ok ? "success" : "error",
     detail: job.label,
   });
@@ -320,6 +334,12 @@ export const useJobsStore = create<JobsState>((set, get) => ({
 
   run: ({ projectId, kind, label, meta = {}, task }) => {
     const id = `job-${Date.now()}-${seq++}`;
+    // The workspace this run belongs to, read here and never again — this is the last moment at
+    // which it is certainly the one the user meant. A review takes minutes and the user is free to
+    // leave for another workspace the instant it starts, so a lookup done when it settles would
+    // answer a question nobody asked. Everything downstream (the status-bar row's label and its
+    // click target, the notification the settled job files) reads this one value.
+    const workspaceId = jobWorkspaceId(projectId);
     const job: Job = {
       id,
       projectId,
@@ -359,12 +379,13 @@ export const useJobsStore = create<JobsState>((set, get) => ({
         projectId: isWorkspaceBucket(projectId) ? undefined : projectId,
         select: { kind: "job", id },
       },
+      workspaceId,
     });
 
     void task(id)
       .then((result) => {
         settle({ status: "done", result, finishedAt: Date.now() });
-        notifyJobSettled(job, true);
+        notifyJobSettled(job, true, workspaceId);
       })
       .catch((e) => {
         const cancelled = isCancellation(e);
@@ -373,7 +394,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
             ? { status: "cancelled", finishedAt: Date.now() }
             : { status: "error", error: parseClaudeError(String(e)), finishedAt: Date.now() },
         );
-        if (!cancelled) notifyJobSettled(job, false);
+        if (!cancelled) notifyJobSettled(job, false, workspaceId);
       })
       .finally(() => useAiRunStore.getState().finish(id));
 

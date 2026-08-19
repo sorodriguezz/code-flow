@@ -1519,8 +1519,16 @@ const en = {
   "notifications.draftDone": "Comment drafted",
   "notifications.draftFailed": "The comment could not be drafted",
   "notifications.inlineEditDone": "Inline edit finished",
+  /** The rewrite came back after the user had moved to another file, so it was not applied.
+   *  Said out loud rather than dropped in silence: the tokens were spent, and an edit that
+   *  quietly never arrived is indistinguishable from one that never ran. */
+  "notifications.inlineEditDiscarded": "Inline edit discarded — its file was no longer on screen",
   "notifications.inlineEditFailed": "The inline edit failed",
   "notifications.noteWritten": "Written into the note",
+  /** The generation landed while the note it was written for was not the one on screen, so it
+   *  could not be inserted. It is waiting on the note itself; following this row is what
+   *  offers it. Distinct from `noteWritten` on purpose — that one would be a row that lies. */
+  "notifications.noteReady": "Ready to insert into the note",
   "notifications.noteWriteFailed": "The note could not be written",
 
   "settings.appearance": "Appearance",
@@ -2158,8 +2166,11 @@ const en = {
   "settings.skillCreateCustom": "Create custom skill",
   "settings.skillImportFolder": "Import from folder",
   "settings.skillImportTitle": "Pick a skill folder (with a SKILL.md)",
+  "settings.skillImportBundle": "Import .skill",
+  "settings.skillImportBundleTitle": "Pick a .skill bundle",
   "settings.skillBadgeCustom": "custom",
   "settings.skillBadgeLocal": "imported",
+  "settings.skillBadgeBundle": "bundle",
   "settings.skillEdit": "Edit",
   "settings.skillNewFile": "new-file.md",
   "settings.skillDeleteFile": "Delete file",
@@ -2309,6 +2320,10 @@ const en = {
   "analyze.button": "Analyze changes with AI",
   "analyze.title": "Change analysis",
   "analyze.reanalyze": "Re-analyze",
+  /** The section is open on a repository that has no analysis to show — never analysed, or its run
+   *  deleted from Activity since. Its own string rather than the Activity search's "no matching
+   *  entries", which is an answer to a question nobody asked here. */
+  "analyze.nothingYet": "No analysis of these changes yet",
   "analyze.noFindings": "No issues found — looks good.",
   "analyze.critical": "critical",
   "analyze.warning": "warning",
@@ -3026,6 +3041,8 @@ const en = {
   "diagrams.ai.defaultModel": "default model",
   "diagrams.ai.runKind": "Drawing a diagram",
   "diagrams.ai.preview": "{shapes} shapes · {arrows} arrows",
+  "diagrams.ai.previewZoom": "See it bigger",
+  "diagrams.ai.previewFit": "Fit to the panel",
   "diagrams.ai.error.empty": "The engine answered with nothing. Try again, or rephrase the instruction.",
   "diagrams.ai.error.json": "The engine's answer was not a diagram description. Try again.",
   "diagrams.ai.error.nodes": "The answer described no shapes. Try being more specific about what to draw.",
@@ -3168,6 +3185,11 @@ const en = {
   "notes.ai.write": "Write",
   "notes.ai.writing": "Writing\u2026",
   "notes.ai.stop": "Stop",
+  /** Over an answer the run parked because the note was not open when it came back. */
+  "notes.ai.ready": "Ready to insert",
+  "notes.ai.insert": "Insert",
+  /** Throws the parked answer away. Closing the window deliberately keeps it. */
+  "notes.ai.discard": "Discard",
   "notes.ai.undoHint":
     "What comes back is inserted at the caret \u2014 or over the selection \u2014 as a single edit, so one undo takes it back out. Nothing is saved over.",
   "notes.ai.action": "Write with AI",
@@ -4506,7 +4528,13 @@ const en = {
   "agents.liveN": "{n} run(s)",
   "agents.liveRunning": "Running",
   "agents.liveNeedsAttention": "Needs attention",
-  "agents.liveHint": "Pick one to go to where it is working.",
+  "agents.liveHint": "Pick one to go to where it is working — including into another workspace.",
+  /** On a row whose workspace is not the one on screen. Following it moves the whole window, and
+   *  this is the only warning the row can give before it does. */
+  "agents.liveElsewhere": "elsewhere",
+  /** A run that belongs to no workspace — one driven from a paired device, or an edit in a file
+   *  opened straight from disk. Said rather than left blank: an empty line reads as "here". */
+  "agents.liveNoWorkspace": "No workspace",
   // What each kind of run is called in that list. One per place in the app that starts an engine
   // — a new one has to be added here, which is the point: an unnamed run is a bug you can see.
   "agents.liveKindAgent": "Agent task",
@@ -4521,6 +4549,9 @@ const en = {
   "agents.liveKindFix": "Fix with AI",
   "agents.liveKindDraft": "Drafting a reply",
   "agents.liveKindInline": "Inline edit",
+  /** The "write my pull request description" run. It used to be invisible here — the modal invoked
+   *  the engine without a run id at all, so nothing could show it and nothing could stop it. */
+  "agents.liveKindPrDescription": "Pull request description",
   "agents.liveKindDb": "Database assistant",
   "agents.liveKindUnknown": "AI run",
   /** A run this window did not start — kicked off from a paired phone or tablet. Registered from
@@ -5517,7 +5548,7 @@ const en = {
     "The sparkle opens this window over the canvas — drag it by its header if it covers what you are looking at. Write what you want in a sentence: *\"the review pipeline: fetch the diff, scan for secrets, send it to the engine, comment on the PR\"*. Enter sends, Shift+Enter breaks the line, and while it is thinking the button becomes Stop — it is a normal run, so it shows up with your other AI work and can be abandoned. Which engine answers is set once, in Settings → AI, per task.",
   "tour.diagrams.aiApply.title": "Nothing is drawn until you say so",
   "tour.diagrams.aiApply.body":
-    "The answer comes back as a count — *12 shapes · 9 arrows* — and stays there. The canvas is untouched until you press **Add to canvas**, so an answer you do not like costs you a rephrase and nothing else. And it *adds*: what is already drawn is never replaced, and the new shapes are given ids of their own so they cannot land on top of a box you drew by hand. Laying out a rough shape yourself and asking for the rest is a perfectly good way to use it.",
+    "The answer comes back as a **picture** — the shapes, arranged exactly as they will land, above a count of them — and stays there. The canvas is untouched until you press **Add to canvas**, so an answer you do not like costs you a rephrase and nothing else. The preview is fitted to the window; the button beside the count draws it at a size you can read. And it *adds*: what is already drawn is never replaced, and the new shapes are given ids of their own so they cannot land on top of a box you drew by hand. Laying out a rough shape yourself and asking for the rest is a perfectly good way to use it.",
   "tour.diagrams.aiPrivacy.title": "What actually leaves the machine",
   "tour.diagrams.aiPrivacy.body":
     "Three things: the diagram's title, the sentence you wrote, and a list of the **labels** already on the canvas — the words in the boxes, so the answer connects to what is there instead of drawing a second copy of it. The document itself is never sent. Nothing is uploaded when you simply draw, either; the editor is local, and the only moment anything is transmitted is the one where you press Generate.",

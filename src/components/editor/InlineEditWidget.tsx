@@ -15,16 +15,39 @@ import { useT } from "../../state/languageStore";
  * be routed to any provider (a local model included) and carries no risk to the working tree.
  */
 export function InlineEditWidget({
+  editNonce,
   filePath,
   fileContent,
   selection,
+  workspaceId,
   onApply,
   onClose,
 }: {
+  /**
+   * Which Ctrl+I this widget is showing, handed straight back to `onApply`.
+   *
+   * The editor cannot tell two requests in the same file apart by anything else, and it has to:
+   * pressing Ctrl+I again while a rewrite is still running is an ordinary thing to do — the input
+   * here is disabled for the duration, so carrying on in the code is the only thing left — and the
+   * first reply would otherwise be applied to the second selection.
+   */
+  editNonce: number;
   filePath: string;
   fileContent: string;
   selection: string;
-  onApply: (replacement: string) => void;
+  /**
+   * The workspace the file being rewritten lives in — the pane's own `project.workspace_id`.
+   *
+   * A prop rather than a read of whichever workspace is active when the reply lands, which is the
+   * difference between a run the status bar can attribute and one it files wherever the user
+   * happens to be standing. A rewrite over a large selection outlives a workspace switch easily,
+   * and that run is precisely the one whose home nobody can reconstruct afterwards.
+   */
+  workspaceId: string;
+  /** Applies the rewrite, and answers whether it actually landed: the editor refuses a reply whose
+   *  file — or whose request — has moved on since Ctrl+I, and a refusal must not be reported as a
+   *  success. */
+  onApply: (replacement: string, editNonce: number) => boolean;
   onClose: () => void;
 }) {
   const t = useT();
@@ -50,20 +73,29 @@ export function InlineEditWidget({
     const runId = newRunId("inline");
     runIdRef.current = runId;
     setRunId(runId);
-    // No target: this rewrites the selection in the editor the user is typing into.
-    useAiRunStore.getState().start(runId, { kindKey: "agents.liveKindInline", detail: filePath });
+    // No target: the notification centre's `select.kind` has no vocabulary for a file in an editor
+    // group, so there is nothing more specific to navigate to than the workspace itself — which is
+    // stamped here, before the request goes out, and is the same value both notifications below
+    // carry however long the answer takes.
+    useAiRunStore.getState().start(runId, { kindKey: "agents.liveKindInline", detail: filePath, workspaceId });
     setRunning(true);
     try {
       const replacement = await inlineEditWithAi(filePath, fileContent, selection, text, runId);
-      onApply(replacement);
+      // The editor refuses a rewrite whose file is no longer the one on screen, or whose request
+      // has been superseded by a later Ctrl+I — see `applyInlineEdit`; `editNonce` is what names
+      // this request to it, read out of the closure this call started in rather than off a later
+      // render. Reporting a refusal as finished would put a success in the panel for an edit that
+      // no buffer ever received, and send the user looking for a change that is not there.
+      const applied = onApply(replacement, editNonce);
       onClose();
       // The shortest-lived run of the lot, and the one most likely to land while the user is still
       // watching — but an edit over a large selection can take a while, and closing the widget on
       // apply means there is nothing left on screen to say it worked.
       notify({
         source: "editor",
-        titleKey: "notifications.inlineEditDone",
-        status: "success",
+        workspaceId,
+        titleKey: applied ? "notifications.inlineEditDone" : "notifications.inlineEditDiscarded",
+        status: applied ? "success" : "info",
         detail: filePath,
       });
     } catch (e) {
@@ -71,6 +103,7 @@ export function InlineEditWidget({
         pushErrorToast(String(e));
         notify({
           source: "editor",
+          workspaceId,
           titleKey: "notifications.inlineEditFailed",
           status: "error",
           detail: filePath,

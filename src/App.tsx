@@ -600,6 +600,11 @@ export default function App() {
           // belonging elsewhere it would be a round trip whose answer cannot contain the row that
           // moved. The id is what advances it; the list is what this window draws.
           const here = !e.workspace || e.workspace === store.workspaceId;
+          // Outside the `here` guard, and that is the point of it: the gate list spans every
+          // workspace, so a plan parked — or freed — by a phone working somewhere else is exactly
+          // the case the status bar has to keep up with. `reloadChains` asks for this too, so the
+          // `here` branch below does not repeat it.
+          if (!here) void store.refreshGates();
           if (here) {
             await store.reloadChains();
             // The open chain as well as the list: the gate that was just answered is very likely
@@ -688,6 +693,13 @@ export default function App() {
             e.job && e.project
               ? { openAiPanel: true, projectId: e.project, select: { kind: "job", id: e.job } }
               : undefined,
+          // Whatever the frame itself says, and nothing more. Only `Invalidate::Chains` carries a
+          // workspace today (see `StateInvalidateEvent.workspace`), so most of these are honestly
+          // `null`: the action happened on a phone, and this window has no business deciding it
+          // belongs to whichever workspace happens to be in front of it here. Where a project *is*
+          // named the target carries it, which is the route the notification centre already uses to
+          // recover a workspace on its own.
+          workspaceId: e.workspace ?? null,
         });
       }
     });

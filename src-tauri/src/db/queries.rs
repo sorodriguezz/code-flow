@@ -5,6 +5,7 @@ use uuid::Uuid;
 use super::models::{
     ActivityLogEntry, AgentChain, AgentChainStep, AgentProject, AgentTask, BenchTab, ChainClaim, ChainDetail,
     ChainRepo, ChainStepBrief, ChainTemplate, ChainTemplateStep, ChatConversationSummary, DocPage,
+    GatedChain, HarvestOutcome,
     JobHistoryEntry, NewChainStep, NewProject, NewStoryWorkItem, Project, ReviewContext, ReviewRunDetail,
     ReviewRunSummary, StoryBatch, StoryBatchDetail, StoryDraft, Workspace, WorkspaceActivityEntry,
     WorkspaceAgent, WorkspaceSkill, WorkspaceTerminal, WorkItemReviewRow,
@@ -1536,6 +1537,45 @@ pub fn list_agent_chains(conn: &Connection, workspace_id: &str) -> rusqlite::Res
     rows.collect()
 }
 
+/// Every plan parked on a human decision, in **every** workspace.
+///
+/// The one chain read that is deliberately not workspace-scoped. `list_agent_chains` answers "what
+/// is on this screen"; this answers "is anything waiting on me anywhere", which is a different
+/// question and the only one the status bar can usefully ask — a gate is a plan that has *stopped*,
+/// and one you can only find by guessing which workspace to switch to first is one you find after
+/// it mattered.
+///
+/// The workspace comes from the same `projects` join every other chain query uses, so a chain whose
+/// primary repository has left the app drops out of this list exactly as it drops out of the others.
+/// The project, though, is the one the *pending* step runs in: a plan gated between a step in
+/// `api-gateway` and one in `web` is waiting to be let into `web`, and landing the user on
+/// `api-gateway` because it happens to be the chain's first repository would be answering a
+/// question they did not ask.
+pub fn list_gated_chains(conn: &Connection) -> rusqlite::Result<Vec<GatedChain>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, p.workspace_id, c.title, c.goal,
+                COALESCE(
+                    (SELECT s.project_id FROM agent_chain_steps s
+                      WHERE s.chain_id = c.id AND s.status = 'pending' AND s.project_id <> ''
+                      ORDER BY s.step_index DESC LIMIT 1),
+                    c.project_id
+                )
+         FROM agent_chains c JOIN projects p ON p.id = c.project_id
+         WHERE c.status = 'gated'
+         ORDER BY c.updated_at DESC, c.created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(GatedChain {
+            chain_id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            title: row.get(2)?,
+            goal: row.get(3)?,
+            project_id: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// Which workspace a chain belongs to, through the same join [`list_agent_chains`] uses.
 ///
 /// Exists for the invalidation a phone's chain action raises: the desktop window has exactly one
@@ -2683,16 +2723,31 @@ fn harvest_row(conn: &Connection, step: &AgentChainStep) -> rusqlite::Result<Opt
 
 /// Polled by the frontend for a step whose run outlived the webview. Completes it the moment its
 /// turn lands, so a reload costs the log but never the work.
-pub fn harvest_chain_step(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<AgentChain>> {
-    let Some(step) = step_row(conn, step_id)? else { return Ok(None) };
+///
+/// Answers `gone` rather than a bare `None` when there is no step left to wait for — see
+/// [`HarvestOutcome`]. The caller is a timer, and a timer that cannot tell "not yet" from "never"
+/// keeps asking.
+pub fn harvest_chain_step(conn: &Connection, step_id: &str) -> rusqlite::Result<HarvestOutcome> {
+    let waiting = HarvestOutcome { chain: None, gone: false };
+    let gone = HarvestOutcome { chain: None, gone: true };
+    let Some(step) = step_row(conn, step_id)? else { return Ok(gone) };
     if step.status != "running" {
-        return chain_row(conn, &step.chain_id);
+        // Settled by something else — another window, a phone, `recover_after_restart`. The chain
+        // is the answer; its absence means the whole plan has been deleted since, which is the same
+        // "stop polling" as a missing step.
+        let chain = chain_row(conn, &step.chain_id)?;
+        return Ok(match chain {
+            Some(chain) => HarvestOutcome { chain: Some(chain), gone: false },
+            None => gone,
+        });
     }
-    match harvest_row(conn, &step)? {
-        Some((answer, false)) => complete_chain_step(conn, &step.id, "done", &answer, ""),
-        Some((answer, true)) => complete_chain_step(conn, &step.id, "error", "", &answer),
-        None => Ok(None),
-    }
+    let settled = match harvest_row(conn, &step)? {
+        Some((answer, false)) => complete_chain_step(conn, &step.id, "done", &answer, "")?,
+        Some((answer, true)) => complete_chain_step(conn, &step.id, "error", "", &answer)?,
+        // The turn is still out there. This is the one honest "ask me again".
+        None => return Ok(waiting),
+    };
+    Ok(HarvestOutcome { chain: settled, gone: false })
 }
 
 /// Run once per launch, from `db::init`, before any UI exists.
@@ -4352,6 +4407,278 @@ mod tests {
         )
         .unwrap();
         (conn, project.id)
+    }
+
+
+    /// The distinction the poller is built on: a step still working and a step that no longer
+    /// exists must not answer the same thing. They did — both were a bare `None` — and a timer that
+    /// cannot tell them apart keeps asking about a deleted row until its own 45-minute timeout.
+    #[test]
+    fn harvesting_tells_a_step_still_working_apart_from_one_that_is_gone() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, project) = workspace_with_project(&conn, "alpha");
+        let agent =
+            upsert_workspace_agent(&conn, None, &ws, "Bot", "role", "claude", "sonnet", "", true).unwrap();
+        let detail = create_agent_chain(
+            &conn,
+            &[project.clone()],
+            "plan",
+            "objetivo",
+            &[NewChainStep { agent_id: agent.id, instruction: "trabaja".into(), ..Default::default() }],
+            "",
+        )
+        .unwrap();
+        resume_chain(&conn, &detail.chain.id).unwrap();
+        let step = claim_next_chain_step(&conn, &detail.chain.id, "run-1").unwrap().step.unwrap();
+
+        // Dispatched, nothing written back yet: the honest "ask me again".
+        let waiting = harvest_chain_step(&conn, &step.id).unwrap();
+        assert!(!waiting.gone, "a step still working is not gone");
+        assert!(waiting.chain.is_none(), "and it has no chain to hand back yet");
+
+        // The repository goes, and the chain and its steps cascade with it.
+        delete_project(&conn, &project).unwrap();
+        let gone = harvest_chain_step(&conn, &step.id).unwrap();
+        assert!(gone.gone, "a deleted step must say so rather than read as 'not yet'");
+        assert!(gone.chain.is_none());
+    }
+
+    /// A workspace with one repository, for the cross-workspace tests below — `fixture` makes one
+    /// and these need two.
+    fn workspace_with_project(conn: &Connection, name: &str) -> (String, String) {
+        let ws = create_workspace(conn, name, "folder", "#fff").unwrap();
+        let project = create_project(
+            conn,
+            crate::db::models::NewProject {
+                workspace_id: ws.id.clone(),
+                name: format!("{name}-proj"),
+                local_path: format!("/tmp/{name}"),
+                remote_url: None,
+                color: "#fff".into(),
+                icon: "folder".into(),
+                ado_org: None,
+                ado_project: None,
+                ado_repo_id: None,
+                github_owner: None,
+                github_repo: None,
+                github_host: None,
+                gitlab_project: None,
+                gitlab_host: None,
+            },
+        )
+        .unwrap();
+        (ws.id, project.id)
+    }
+
+    fn step(instruction: &str, project_id: &str) -> NewChainStep {
+        NewChainStep {
+            instruction: instruction.into(),
+            project_id: project_id.into(),
+            ..Default::default()
+        }
+    }
+
+    fn park_at_gate(conn: &Connection, chain_id: &str) {
+        conn.execute(
+            "UPDATE agent_chains SET status = 'gated' WHERE id = ?1",
+            params![chain_id],
+        )
+        .unwrap();
+    }
+
+    /// The whole reason this query exists: the status bar is one list for the app, so a plan parked
+    /// in a workspace nobody is standing in still has to be in it. Every other chain read is scoped
+    /// to one workspace, and a bar built from those went quiet the moment the user looked elsewhere.
+    #[test]
+    fn gated_chains_are_listed_across_every_workspace() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws_a, project_a) = workspace_with_project(&conn, "alpha");
+        let (ws_b, project_b) = workspace_with_project(&conn, "beta");
+
+        let a = create_agent_chain(&conn, &[project_a.clone()], "plan A", "goal A", &[step("one", "")], "")
+            .unwrap();
+        let b = create_agent_chain(&conn, &[project_b.clone()], "plan B", "goal B", &[step("one", "")], "")
+            .unwrap();
+        park_at_gate(&conn, &a.chain.id);
+        park_at_gate(&conn, &b.chain.id);
+
+        let gates = list_gated_chains(&conn).unwrap();
+        assert_eq!(gates.len(), 2);
+        let mut homes: Vec<_> = gates.iter().map(|g| g.workspace_id.clone()).collect();
+        homes.sort();
+        let mut expected = vec![ws_a, ws_b];
+        expected.sort();
+        assert_eq!(homes, expected);
+    }
+
+    /// Only the parked ones. A running plan is already represented in the bar by the engine burning
+    /// behind it; listing it here as well would ask the user for a decision nobody is waiting on.
+    #[test]
+    fn a_chain_that_is_not_gated_is_not_listed() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (_, project) = workspace_with_project(&conn, "alpha");
+        create_agent_chain(&conn, &[project], "plan", "goal", &[step("one", "")], "").unwrap();
+
+        assert!(list_gated_chains(&conn).unwrap().is_empty());
+    }
+
+    /// A plan parked between a step in one repository and a step in another is waiting to be let
+    /// into the *second*. Following its row has to land there — sending the user to the chain's
+    /// first repository, which is simply where the plan began, answers a question they did not ask.
+    #[test]
+    fn the_row_names_the_repository_of_the_step_it_is_waiting_on() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, first) = workspace_with_project(&conn, "alpha");
+        let second = create_project(
+            &conn,
+            crate::db::models::NewProject {
+                workspace_id: ws,
+                name: "second".into(),
+                local_path: "/tmp/second".into(),
+                remote_url: None,
+                color: "#fff".into(),
+                icon: "folder".into(),
+                ado_org: None,
+                ado_project: None,
+                ado_repo_id: None,
+                github_owner: None,
+                github_repo: None,
+                github_host: None,
+                gitlab_project: None,
+                gitlab_host: None,
+            },
+        )
+        .unwrap()
+        .id;
+
+        let detail = create_agent_chain(
+            &conn,
+            &[first.clone(), second.clone()],
+            "plan",
+            "goal",
+            &[step("done first", &first), step("waiting", &second)],
+            "",
+        )
+        .unwrap();
+        // The opening step has already run; the plan is parked before the one in the other repo.
+        conn.execute(
+            "UPDATE agent_chain_steps SET status = 'done' WHERE chain_id = ?1 AND step_index = 0",
+            params![detail.chain.id],
+        )
+        .unwrap();
+        park_at_gate(&conn, &detail.chain.id);
+
+        let gates = list_gated_chains(&conn).unwrap();
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].project_id, second, "must point at the step it is waiting on");
+    }
+
+    /// The same property, but with the gate produced by the scheduler rather than written by hand.
+    ///
+    /// The tests above assemble the state they assert on, which pins the SQL and nothing else. This
+    /// one drives `claim_next_chain_step` — the only thing in the app that ever writes
+    /// `status = 'gated'` — so the subquery here and `next_pending_step` there have to agree about
+    /// which step the plan is parked before. They are two separate pieces of SQL answering one
+    /// question, and the day they disagree is the day the status bar sends the user to a repository
+    /// the plan is not waiting on.
+    #[test]
+    fn a_chain_parked_by_the_scheduler_names_the_step_the_scheduler_stopped_at() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, first) = workspace_with_project(&conn, "alpha");
+        let second = create_project(
+            &conn,
+            crate::db::models::NewProject {
+                workspace_id: ws.clone(),
+                name: "second".into(),
+                local_path: "/tmp/second".into(),
+                remote_url: None,
+                color: "#fff".into(),
+                icon: "folder".into(),
+                ado_org: None,
+                ado_project: None,
+                ado_repo_id: None,
+                github_owner: None,
+                github_repo: None,
+                github_host: None,
+                gitlab_project: None,
+                gitlab_host: None,
+            },
+        )
+        .unwrap()
+        .id;
+
+        // A real agent, because the scheduler refuses a step it cannot route — see the runnable
+        // check in `claim_next_chain_step`. That refusal is the whole reason this test drives the
+        // scheduler instead of writing the status by hand.
+        let agent =
+            upsert_workspace_agent(&conn, None, &ws, "Bot", "role", "claude", "sonnet", "", true).unwrap();
+        let detail = create_agent_chain(
+            &conn,
+            &[first.clone(), second.clone()],
+            "plan",
+            "objetivo",
+            &[
+                NewChainStep {
+                    agent_id: agent.id.clone(),
+                    instruction: "abre".into(),
+                    project_id: first.clone(),
+                    ..Default::default()
+                },
+                // The gate itself: the plan stops *before* this step, in the other repository.
+                NewChainStep {
+                    agent_id: agent.id.clone(),
+                    instruction: "sigue".into(),
+                    project_id: second.clone(),
+                    gate: true,
+                    ..Default::default()
+                },
+            ],
+            "",
+        )
+        .unwrap();
+        resume_chain(&conn, &detail.chain.id).unwrap();
+
+        // Step one, dispatched and finished for real.
+        let claim = claim_next_chain_step(&conn, &detail.chain.id, "run-1").unwrap();
+        let opening = claim.step.expect("the first step is runnable");
+        complete_chain_step(&conn, &opening.id, "done", "listo", "").unwrap();
+        // And the claim that parks it: nothing is handed back to run, because a human has to say so.
+        let parked = claim_next_chain_step(&conn, &detail.chain.id, "run-2").unwrap();
+        assert!(parked.step.is_none(), "a gate hands back no step");
+        assert_eq!(parked.chain.status, "gated");
+
+        let gates = list_gated_chains(&conn).unwrap();
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].chain_id, detail.chain.id);
+        assert_eq!(
+            gates[0].project_id, second,
+            "the row must name the repository the scheduler stopped before, not the chain's first"
+        );
+    }
+
+    /// A chain whose primary repository has left the app leaves the bar with it.
+    ///
+    /// The mechanism is the **foreign key**, not the join: `agent_chains.project_id` is
+    /// `ON DELETE CASCADE`, so the chain row is gone before this query runs. Worth pinning anyway —
+    /// the status bar is the one list that outlives the workspace it belongs to, so "the plan is
+    /// deleted, the amber row goes with it" is exactly the property that has no other guard.
+    #[test]
+    fn a_chain_whose_repository_is_gone_drops_out_of_the_gate_list() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (_, project) = workspace_with_project(&conn, "alpha");
+        let detail =
+            create_agent_chain(&conn, &[project.clone()], "plan", "goal", &[step("one", "")], "").unwrap();
+        park_at_gate(&conn, &detail.chain.id);
+        assert_eq!(list_gated_chains(&conn).unwrap().len(), 1);
+
+        delete_project(&conn, &project).unwrap();
+        assert!(list_gated_chains(&conn).unwrap().is_empty());
     }
 
     fn log(conn: &Connection, project: &str, conversation: &str, engine_session: &str, question: &str) {

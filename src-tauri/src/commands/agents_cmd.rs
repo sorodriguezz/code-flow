@@ -11,7 +11,7 @@ use tauri::State;
 use crate::db::{
     models::{
         AgentChain, AgentProject, AgentTask, ChainClaim, ChainDetail, ChainStepBrief, ChainTemplate,
-        NewChainStep, NewStoryWorkItem, StepCheck,
+        GatedChain, HarvestOutcome, NewChainStep, NewStoryWorkItem, StepCheck,
     },
     queries, Db,
 };
@@ -177,6 +177,18 @@ pub fn delete_agent_task(db: State<Db>, id: String) -> Result<(), String> {
 pub fn list_agent_chains(db: State<Db>, workspace_id: String) -> Result<Vec<AgentChain>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::list_agent_chains(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// Every plan waiting on a human decision, across every workspace.
+///
+/// No `workspace_id` parameter, and that is the whole point — see [`queries::list_gated_chains`].
+/// The status bar is one list for the whole app, so a gate parked in the workspace the user is not
+/// standing in still has to be listed there; the row carries its own workspace and crosses back
+/// into it when followed.
+#[tauri::command]
+pub fn list_gated_chains(db: State<Db>) -> Result<Vec<GatedChain>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_gated_chains(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -419,7 +431,7 @@ pub fn delete_chain(db: State<Db>, chain_id: String) -> Result<Vec<String>, Stri
 
 /// Polled for a step whose run outlived the webview. `None` means its turn has not landed yet.
 #[tauri::command]
-pub fn harvest_chain_step(db: State<Db>, step_id: String) -> Result<Option<AgentChain>, String> {
+pub fn harvest_chain_step(db: State<Db>, step_id: String) -> Result<HarvestOutcome, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::harvest_chain_step(&conn, &step_id).map_err(|e| e.to_string())
 }

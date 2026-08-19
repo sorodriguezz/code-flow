@@ -55,7 +55,7 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
   const runStartedAt = useStoriesStore((s) => s.runStartedAt);
   const generating = runId !== undefined;
   const verifying = verifyRunId !== undefined;
-  const publishing = useStoriesStore((s) => s.publishingBatchId === batchId);
+  const publishing = useStoriesStore((s) => s.publishingByBatch[batchId] !== undefined);
   const [showSource, setShowSource] = useState(false);
   const [answering, setAnswering] = useState(false);
   const [runLogOpen, setRunLogOpen] = useState(false);
@@ -346,23 +346,26 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
             happening, with the model and the elapsed time behind it. This used to carry its own
             centred "Writing the stories…", which put the same sentence on screen twice. */}
         {list.length === 0 && generating ? null : list.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2">
-            <EmptyState
-              icon={Sparkles}
-              title={t("stories.noStories")}
-              subtitle={t("stories.noStoriesHint")}
-            />
-            {/* Unconditional now: this branch is only reached when the list is empty *and* nothing
-                is generating — the generating case returned null above. */}
-            <button
-              type="button"
-              onClick={generate}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-            >
-              <Sparkles size={13} />
-              {t("stories.generate")}
-            </button>
-          </div>
+          // The button is the empty state's `action` and not a sibling of it: `EmptyState` is
+          // `h-full`, so beside it the message centred itself in the whole scrollport and the
+          // button was pushed to the bottom edge, a screen away from the sentence it answers.
+          <EmptyState
+            icon={Sparkles}
+            title={t("stories.noStories")}
+            subtitle={t("stories.noStoriesHint")}
+            action={
+              /* Unconditional: this branch is only reached when the list is empty *and* nothing is
+                 generating — the generating case returned null above. */
+              <button
+                type="button"
+                onClick={generate}
+                className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+              >
+                <Sparkles size={13} />
+                {t("stories.generate")}
+              </button>
+            }
+          />
         ) : (
           <div className="space-y-2">
             {list.map((story, i) => (
