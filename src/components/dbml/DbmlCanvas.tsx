@@ -143,7 +143,7 @@ export const DbmlCanvas = forwardRef<
   const viewRef = useRef(view);
   const commitTimer = useRef<number | null>(null);
   const dragRef = useRef<
-    | { kind: "canvas"; x: number; y: number; viewX: number; viewY: number }
+    | { kind: "canvas"; x: number; y: number; viewX: number; viewY: number; moved: boolean }
     | { kind: "node"; id: string; x: number; y: number; nodeX: number; nodeY: number; moved: boolean }
     | null
   >(null);
@@ -286,6 +286,7 @@ export const DbmlCanvas = forwardRef<
           y: event.clientY,
           viewX: viewRef.current.x,
           viewY: viewRef.current.y,
+          moved: false,
         };
     // The press selects, not the release: the highlight should be up before the drag starts, so
     // dragging a box also shows you what it is attached to while you place it.
@@ -298,6 +299,7 @@ export const DbmlCanvas = forwardRef<
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
     if (drag.kind === "canvas") {
+      if (dx !== 0 || dy !== 0) drag.moved = true;
       applyView({ ...viewRef.current, x: drag.viewX + dx, y: drag.viewY + dy });
       return;
     }
@@ -308,7 +310,14 @@ export const DbmlCanvas = forwardRef<
   };
 
   const endDrag = () => {
-    if (dragRef.current?.kind === "canvas") commitView();
+    const drag = dragRef.current;
+    if (drag?.kind === "canvas") commitView();
+    // A gesture that actually moved almost certainly left the line it started on — and it cannot
+    // tell us so itself, because while the pointer is captured the browser stops delivering
+    // enter/leave to the elements underneath. Without this the line stays lit for good. A press
+    // that did *not* move is left alone: the pointer is still on the line, and clearing there would
+    // put the highlight out and give it no way back, for the same reason.
+    if (drag?.moved) setHoveredLink(null);
     dragRef.current = null;
   };
 
@@ -353,7 +362,6 @@ export const DbmlCanvas = forwardRef<
       onWheel={onWheel}
       onPointerDown={(event) => {
         onPointerDown(event);
-        setHoveredLink(null);
         // A press on the background clears the selection, which is the only way back to seeing the
         // whole schema at full contrast once a table has been clicked.
         onSelect(null);
@@ -361,6 +369,10 @@ export const DbmlCanvas = forwardRef<
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
+      onPointerLeave={() => {
+        setHovered(null);
+        setHoveredLink(null);
+      }}
       // `select-none` on the class *and* the property here, and a `preventDefault` on the press
       // below. Any one of the three left out and dragging a box runs the browser's own text
       // selection across the SVG instead: every label in the schema comes back wearing the system
