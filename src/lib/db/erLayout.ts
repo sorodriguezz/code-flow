@@ -71,6 +71,41 @@ const MAX_ROWS = 24;
 const CHAR_WIDTH = 6.4;
 const NAME_CHAR_WIDTH = 6.9;
 
+/**
+ * How big one box is, as a parameter rather than as constants.
+ *
+ * Two canvases draw these boxes and they do not draw a row the same way. The Database workspace
+ * prints a column's type as plain text at the right edge; the Diagrams workspace's DBML canvas puts
+ * it in a pill and hangs PK / FK / unique badges after it, which needs both a taller row and room in
+ * the gutter that a bare label never asked for. Measuring both against one set of numbers left one
+ * of the two permanently wrong — text overrunning its box on one side, or acres of dead space on
+ * the other — so the geometry travels with the caller and each canvas passes the shape it draws.
+ */
+export interface NodeMetrics {
+  header: number;
+  row: number;
+  /** The "+N more" line under a table that has more columns than are drawn. */
+  overflow: number;
+  minWidth: number;
+  maxWidth: number;
+  /** Pixels a row needs on top of its own text: padding, the key glyph, whatever badges follow. */
+  rowPadding: (column: DbDiagramColumn) => number;
+  /** And the same for the header, which holds the name and whatever sits beside it. */
+  namePadding: number;
+}
+
+/** What the Database workspace's panel has always drawn. Anything that does not pass metrics keeps
+ * exactly the geometry it had before there was a second canvas. */
+export const DEFAULT_METRICS: NodeMetrics = {
+  header: HEADER_HEIGHT,
+  row: ROW_HEIGHT,
+  overflow: OVERFLOW_HEIGHT,
+  minWidth: NODE_MIN_WIDTH,
+  maxWidth: NODE_MAX_WIDTH,
+  rowPadding: () => 44,
+  namePadding: 34,
+};
+
 export type DiagramColumnMode = "all" | "keys";
 
 // ---------------------------------------------------------------------------
@@ -231,9 +266,10 @@ export function layoutDiagram(
   mode: DiagramColumnMode,
   pinned: Record<string, { x: number; y: number }> = {},
   density: DiagramDensity = "roomy",
+  metrics: NodeMetrics = DEFAULT_METRICS,
 ): DiagramLayout {
   const gap = SPACING[density];
-  const nodes = buildNodes(diagram, mode);
+  const nodes = buildNodes(diagram, mode, metrics);
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const links = buildLinks(diagram, byId);
 
@@ -251,6 +287,7 @@ export function layoutDiagram(
     layers,
     gap,
     density === "compact" ? compactHeight(flowing, gap) : Infinity,
+    metrics.minWidth,
   );
 
   if (loose.length > 0) {
@@ -293,13 +330,14 @@ function placeLayers(
   layers: DiagramNode[][],
   gap: Spacing,
   maxHeight: number,
+  minWidth: number,
 ): { right: number; bottom: number } {
   // `width` is the layer's widest box, not the stack's, so a wrapped layer's sub-columns stay on a
   // common grid instead of stepping in and out.
   const columns: { stack: DiagramNode[]; width: number; endsLayer: boolean }[] = [];
   for (const layer of layers) {
     if (layer.length === 0) continue;
-    const width = Math.max(...layer.map((node) => node.width), NODE_MIN_WIDTH);
+    const width = Math.max(...layer.map((node) => node.width), minWidth);
     const stacks = wrapStacks(layer, maxHeight, gap.rowGap);
     stacks.forEach((stack, index) =>
       columns.push({ stack, width, endsLayer: index === stacks.length - 1 }),
@@ -398,7 +436,11 @@ function packLoose(
   }
 }
 
-function buildNodes(diagram: DbSchemaDiagram, mode: DiagramColumnMode): DiagramNode[] {
+function buildNodes(
+  diagram: DbSchemaDiagram,
+  mode: DiagramColumnMode,
+  metrics: NodeMetrics,
+): DiagramNode[] {
   // Which columns are the far end of a relationship — they earn their place in "keys only" even
   // when they aren't this table's primary key.
   const referenced = new Set(
@@ -424,7 +466,7 @@ function buildNodes(diagram: DbSchemaDiagram, mode: DiagramColumnMode): DiagramN
       visible: kept.slice(0, MAX_ROWS),
       hidden: table.columns.length - Math.min(kept.length, MAX_ROWS),
       rowEstimate: table.row_estimate,
-    });
+    }, metrics);
   });
 
   // Stubs for whatever is pointed at from outside this schema.
@@ -452,7 +494,7 @@ function buildNodes(diagram: DbSchemaDiagram, mode: DiagramColumnMode): DiagramN
         ],
         hidden: 0,
         rowEstimate: null,
-      }),
+      }, metrics),
     );
   }
 
@@ -462,27 +504,32 @@ function buildNodes(diagram: DbSchemaDiagram, mode: DiagramColumnMode): DiagramN
 /** Fills in the size and the per-row offsets a node needs before it can be placed or drawn. */
 function measure(
   node: Omit<DiagramNode, "x" | "y" | "width" | "height" | "rowY">,
+  metrics: NodeMetrics,
 ): DiagramNode {
-  const nameWidth = node.name.length * NAME_CHAR_WIDTH + 34;
+  const nameWidth = node.name.length * NAME_CHAR_WIDTH + metrics.namePadding;
   const rowWidth = node.visible.reduce((widest, column) => {
-    const width = (column.name.length + column.data_type.length) * CHAR_WIDTH + 44;
+    const width =
+      (column.name.length + column.data_type.length) * CHAR_WIDTH + metrics.rowPadding(column);
     return Math.max(widest, width);
   }, 0);
   const width = Math.min(
-    NODE_MAX_WIDTH,
-    Math.max(NODE_MIN_WIDTH, Math.ceil(Math.max(nameWidth, rowWidth))),
+    metrics.maxWidth,
+    Math.max(metrics.minWidth, Math.ceil(Math.max(nameWidth, rowWidth))),
   );
 
   const rowY: Record<string, number> = {};
   node.visible.forEach((column, index) => {
-    rowY[column.name] = HEADER_HEIGHT + index * ROW_HEIGHT + ROW_HEIGHT / 2;
+    rowY[column.name] = metrics.header + index * metrics.row + metrics.row / 2;
   });
 
   return {
     ...node,
     width,
     height:
-      HEADER_HEIGHT + node.visible.length * ROW_HEIGHT + (node.hidden > 0 ? OVERFLOW_HEIGHT : 0) + 4,
+      metrics.header +
+      node.visible.length * metrics.row +
+      (node.hidden > 0 ? metrics.overflow : 0) +
+      4,
     rowY,
     x: 0,
     y: 0,

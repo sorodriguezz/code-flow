@@ -3,6 +3,7 @@ import { loader } from "@monaco-editor/react";
 import { ALL_THEMES, monacoThemeName, tokenRulesFor } from "./codeThemes";
 import { installGoToDefinition } from "./goToDefinition";
 import { installSnippets } from "./monacoSnippets";
+import { registerDbmlLanguage } from "./monacoDbml";
 import { registerObjectScript } from "./monacoObjectScript";
 // Subpaths go through the package's own `exports` map (`./*` → `./esm/vs/*.js`), so these are
 // the mapped specifiers, not the on-disk paths.
@@ -161,6 +162,9 @@ export { monaco };
 // which snapshots the language list at call time — a language registered after it gets no
 // Ctrl/Cmd+click, which is exactly why `graphql` has none.
 registerObjectScript();
+// DBML, for `.dbml` files in the editor and for the Diagrams workspace's schema editor. Cheap:
+// a Monarch grammar and four snippets, with no dependency on `@dbml/core`. See `monacoDbml.ts`.
+registerDbmlLanguage();
 
 // Ctrl/Cmd+click to jump to a definition. Registered here, once, because both halves of it (the
 // definition provider and the editor opener) are global to Monaco rather than per-instance —

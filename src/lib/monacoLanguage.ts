@@ -36,6 +36,9 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   rb: "ruby",
   php: "php",
   sql: "sql",
+  // Registered by `monacoDbml`, not shipped by Monaco. Mapping it here is what makes a `.dbml`
+  // file open highlighted in the editor as well as in the Diagrams workspace's schema editor.
+  dbml: "dbml",
   yaml: "yaml",
   yml: "yaml",
   toml: "toml",

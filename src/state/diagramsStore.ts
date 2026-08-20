@@ -23,7 +23,10 @@ import {
   diagramsUpdateTemplate,
 } from "../lib/tauri/diagramsCommands";
 import { builtInTemplates, toTemplate } from "../lib/diagrams/builtinTemplates";
-import { DEFAULT_FORMAT, emptyDoc } from "../lib/diagrams/doc";
+import { DEFAULT_FORMAT, emptyDoc, FORMAT_MXGRAPH } from "../lib/diagrams/doc";
+// The schema dialect's half of `appendCells`. Light — `lib/dbml`'s index deliberately does not
+// reach the parser, so importing it here costs nothing at startup. See `lib/dbml/index.ts`.
+import { mergeDbml } from "../lib/dbml/merge";
 import {
   DEFAULT_EXPORT_OPTIONS,
   parseExportOptions,
@@ -93,6 +96,17 @@ export interface DiagramDraft {
  * `setWorkspace` (see `clearedWorkspaceState`): an entry knows where it belongs, so nothing
  * downstream has to guess.
  */
+/**
+ * What an engine came back with, in the dialect of the diagram it was asked about.
+ *
+ * A union rather than a graph, because the two editors cannot be given the same answer: draw.io
+ * needs shapes to lay out and the schema workbench needs DBML text. The `format` tag is what the
+ * panel branches on to preview it and what `applyGenerated` checks before writing anything.
+ */
+export type DiagramAiResult =
+  | { format: "mxgraph"; graph: AiGraph }
+  | { format: "dbml"; dbml: string };
+
 export type DiagramAiRun = {
   /** The run id, so a panel re-opened long afterwards can still stop what it started — and so a
    *  late answer can prove it is still the run this diagram is waiting on. */
@@ -106,7 +120,7 @@ export type DiagramAiRun = {
 } & (
   | { status: "running" }
   /** The validated answer, waiting for the user to look at it and press Add to canvas. */
-  | { status: "ready"; graph: AiGraph }
+  | { status: "ready"; result: DiagramAiResult }
 );
 
 /** How long after the last edit the document is written. Long enough that a continuous drag is one
@@ -347,7 +361,7 @@ interface DiagramsState {
    * Ignored unless `runId` is still the run that diagram is waiting on, which is what keeps a slow
    * answer from landing on top of a newer one started after it.
    */
-  settleAiRun: (diagramId: string, runId: string, graph: AiGraph | null) => void;
+  settleAiRun: (diagramId: string, runId: string, result: DiagramAiResult | null) => void;
   /** Called by the frame once it has posted the document. */
   clearPendingLoad: () => void;
   /** Opens or closes the "Draw with AI" window. See `aiOpen`. */
@@ -382,7 +396,17 @@ interface DiagramsState {
   updateTemplate: (row: DiagramTemplateRow) => Promise<void>;
   deleteTemplate: (id: string) => Promise<void>;
 
-  createDiagram: (folderId: string | null, title?: string) => Promise<string | null>;
+  /**
+   * A new diagram, in `format` — the drawing dialect unless the caller says otherwise.
+   *
+   * The format is decided here, at creation, and never again: it is a column on the row, and which
+   * editor opens is read off it. See `types/diagrams.ts`.
+   */
+  createDiagram: (
+    folderId: string | null,
+    title?: string,
+    format?: DiagramFormat,
+  ) => Promise<string | null>;
   renameDiagram: (id: string, title: string) => Promise<void>;
   setTags: (id: string, tags: string[]) => Promise<void>;
   deleteDiagram: (id: string) => Promise<void>;
@@ -849,11 +873,16 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     // Both refusals are reported rather than swallowed, so the panel can keep its answer parked
     // instead of consuming one that never reached the canvas.
     if (!draft || draft.id !== diagramId) return false;
-    const combined = appendCells(draft.doc, doc);
+    // **The merge is the format's, and so is the redraw.** mxGraph cells are appended into the XML
+    // and the frame has to be *told* — it holds the document, not the store. A schema workbench
+    // renders `draft.doc` directly, so writing it here is the whole of putting it on screen; a
+    // `pendingLoad` set for it would sit there uncleared and be posted into the next drawing opened.
+    const isDrawing = draft.format === FORMAT_MXGRAPH;
+    const combined = isDrawing ? appendCells(draft.doc, doc) : mergeDbml(draft.doc, doc);
     if (combined === draft.doc) return false;
     set({
       draft: { ...draft, doc: combined, dirty: true },
-      pendingLoad: combined,
+      pendingLoad: isDrawing ? combined : null,
       undoGeneration: draft.doc,
     });
     scheduleSave(get);
@@ -874,7 +903,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     return entry;
   },
 
-  settleAiRun: (diagramId, runId, graph) => {
+  settleAiRun: (diagramId, runId, result) => {
     const current = get().aiByDiagram[diagramId];
     // Not "is this diagram open?" but "is this run still the one it is waiting on?" — the
     // difference being that leaving the screen, or the workspace, no longer discards the answer.
@@ -882,7 +911,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     if (current?.runId !== runId) return;
     set((state) => {
       const aiByDiagram = { ...state.aiByDiagram };
-      if (graph) aiByDiagram[diagramId] = { ...current, status: "ready", graph };
+      if (result) aiByDiagram[diagramId] = { ...current, status: "ready", result };
       else delete aiByDiagram[diagramId];
       return { aiByDiagram };
     });
@@ -897,7 +926,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     if (!draft || undoGeneration === null) return;
     set({
       draft: { ...draft, doc: undoGeneration, dirty: true },
-      pendingLoad: undoGeneration,
+      // Only the frame needs telling — see `applyGenerated` for why the schema workbench does not.
+      pendingLoad: draft.format === FORMAT_MXGRAPH ? undoGeneration : null,
       undoGeneration: null,
     });
     scheduleSave(get);
@@ -1031,7 +1061,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     }
   },
 
-  createDiagram: async (folderId, title) => {
+  createDiagram: async (folderId, title, format = DEFAULT_FORMAT) => {
     const workspaceId = get().workspaceId;
     if (!workspaceId) return null;
     try {
@@ -1039,8 +1069,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
         workspaceId,
         folderId,
         title?.trim() || translate("diagrams.untitled"),
-        emptyDoc(),
-        DEFAULT_FORMAT,
+        emptyDoc(format),
+        format,
         serializeTags([]),
       );
       // The draft is built here rather than fetched back: the document is the empty one just
@@ -1049,7 +1079,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
       set((state) => ({
         diagrams: [...state.diagrams, toDiagram(row)],
         activeId: row.id,
-        draft: { id: row.id, doc: emptyDoc(), format: DEFAULT_FORMAT, thumbnail: "", dirty: false },
+        draft: { id: row.id, doc: emptyDoc(format), format, thumbnail: "", dirty: false },
         openingId: null,
         savedAt: null,
       }));

@@ -172,9 +172,17 @@ export const diagramsDeleteTemplate = (id: string) =>
  */
 export const diagramsDrawWithAi = (args: {
   title: string;
-  /** The labels of the open diagram, or empty. Never the document — see `documentOutline`. */
+  /**
+   * What is already there, as context. For a drawing that is its *labels* and never its document —
+   * see `documentOutline`. For a schema it is the DBML itself, which is already nothing but names.
+   */
   outline: string;
   instruction: string;
+  /**
+   * The diagram's dialect, which decides the prompt and the shape of the answer: `mxgraph` comes
+   * back as a JSON graph to lay out, `dbml` as a schema in text. Omitted means the drawing one.
+   */
+  format?: string;
   runId?: string;
 }) => invoke<string>("diagrams_draw_with_ai", args);
 

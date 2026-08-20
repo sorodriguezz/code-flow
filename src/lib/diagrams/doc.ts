@@ -7,15 +7,22 @@ import type { DiagramFormat } from "../../types/diagrams";
  * contract, and keeping it this small is the point — the choice of editor is then a decision in one
  * place instead of a shape baked into the store, the tree, the gallery and every query.
  *
- * The dialect today is mxGraph XML, because the workspace embeds draw.io. If that changes, what
- * changes is this file and the editor: a row written under the old dialect keeps its own `format`
- * and stays readable, which is exactly what the column is for.
+ * There are two dialects. mxGraph XML, which the embedded draw.io reads and writes, and DBML — a
+ * database schema as text, which `DbmlWorkbench` edits. Adding the second one changed this file and
+ * added an editor, and nothing else: the store, the tree, the gallery, the backup and every query
+ * still carry a string and a name for it.
  */
 
 /** The dialect an embedded draw.io reads and writes. Mirrors `FORMAT_MXGRAPH` in Rust. */
 export const FORMAT_MXGRAPH: DiagramFormat = "mxgraph";
 
-/** The format a new diagram is created in. One constant, so "which editor is current" is one edit. */
+/**
+ * The dialect the schema workbench reads and writes: DBML, plus a trailing comment carrying the
+ * boxes the user has dragged. Mirrors `FORMAT_DBML` in Rust. See `lib/dbml/layout.ts`.
+ */
+export const FORMAT_DBML: DiagramFormat = "dbml";
+
+/** The format a new diagram is created in when nothing says otherwise — the drawing one. */
 export const DEFAULT_FORMAT = FORMAT_MXGRAPH;
 
 /**
@@ -35,7 +42,18 @@ export const EMPTY_MXGRAPH_DOC =
   'arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" ' +
   'shadow="0"><root><mxCell id="0" /><mxCell id="1" parent="0" /></root></mxGraphModel>';
 
-/** The blank document for a format. Falls back to mxGraph, which is the only one that exists. */
+/**
+ * The blank document for a format.
+ *
+ * mxGraph needs its two skeleton cells to be a *graph* at all; DBML's blank is genuinely the empty
+ * string, and the canvas says so in words rather than showing an empty grid. An unknown format gets
+ * the empty string too — a document this app cannot write is one it should not invent.
+ */
 export function emptyDoc(format: DiagramFormat = DEFAULT_FORMAT): string {
   return format === FORMAT_MXGRAPH ? EMPTY_MXGRAPH_DOC : "";
+}
+
+/** Whether a diagram's document is a schema rather than a drawing. The one branch on `format`. */
+export function isSchemaFormat(format: DiagramFormat): boolean {
+  return format === FORMAT_DBML;
 }

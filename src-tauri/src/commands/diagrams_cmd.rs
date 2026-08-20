@@ -290,6 +290,9 @@ pub async fn diagrams_draw_with_ai(
     title: String,
     outline: String,
     instruction: String,
+    // The diagram's dialect. Decides which prompt runs and how the reply is unwrapped — see
+    // `ai::draw_diagram`. `None` is the drawing one, which is what an older frontend sends.
+    format: Option<String>,
     run_id: Option<String>,
 ) -> Result<String, String> {
     let config = {
@@ -299,8 +302,16 @@ pub async fn diagrams_draw_with_ai(
     // `scoped` is what puts the run in the AI run log and makes it cancellable, the same way every
     // other long call in the app is.
     ai_runs::scoped(app, run_id, async {
-        ai::draw_diagram(&*config.engine, &config.binary, &config.model, &title, &outline, &instruction)
-            .await
+        ai::draw_diagram(
+            &*config.engine,
+            &config.binary,
+            &config.model,
+            &title,
+            &outline,
+            &instruction,
+            format.as_deref().unwrap_or("mxgraph"),
+        )
+        .await
     })
     .await
 }

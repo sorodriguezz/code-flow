@@ -12,8 +12,14 @@ import { writeFileBytes } from "../tauri/commands";
  * URI; this module's job is turning that into bytes and putting them somewhere.
  */
 
-/** What a diagram can be saved as. */
-export type ExportFormat = "png" | "svg" | "pdf" | "drawio";
+/**
+ * What a diagram can be saved as.
+ *
+ * Two of these are documents rather than pictures, and each belongs to one editor: `.drawio` is the
+ * mxGraph dialect and `.dbml` is the schema one. A diagram can only ever be offered the one its own
+ * format is written in — see `DiagramsView`'s export menu, which is built per format.
+ */
+export type ExportFormat = "png" | "svg" | "pdf" | "drawio" | "dbml";
 
 /** The dialog's filter and the extension, per format. */
 const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
@@ -21,6 +27,7 @@ const FILTERS: Record<ExportFormat, { name: string; extensions: string[] }> = {
   svg: { name: "SVG", extensions: ["svg"] },
   pdf: { name: "PDF", extensions: ["pdf"] },
   drawio: { name: "draw.io", extensions: ["drawio", "xml"] },
+  dbml: { name: "DBML", extensions: ["dbml"] },
 };
 
 /**

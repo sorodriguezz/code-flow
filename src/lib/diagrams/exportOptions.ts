@@ -49,8 +49,8 @@ import type { ExportFormat } from "./exportFile";
  * whether anything is selected anyway.)
  */
 
-/** The formats that produce a picture, which is to say every one but `.drawio`. */
-export type ImageExportFormat = Exclude<ExportFormat, "drawio">;
+/** The formats that produce a picture, which is to say every one that is not a document. */
+export type ImageExportFormat = Exclude<ExportFormat, "drawio" | "dbml">;
 
 /** The choices the export dialog collects. */
 export interface ImageExportOptions {

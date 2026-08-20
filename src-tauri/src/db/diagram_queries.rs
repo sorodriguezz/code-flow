@@ -40,6 +40,8 @@ const TEMPLATE_COLUMNS: &str = "id, workspace_id, name, description, icon, doc, 
 
 /// The dialect an embedded draw.io reads and writes. The only one [`derive`] knows how to count.
 const FORMAT_MXGRAPH: &str = "mxgraph";
+/// The schema dialect. Mirrors `FORMAT_DBML` in `lib/diagrams/doc.ts`.
+const FORMAT_DBML: &str = "dbml";
 
 fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<DiagramFolderRow> {
     Ok(DiagramFolderRow {
@@ -115,14 +117,46 @@ fn map_template(row: &rusqlite::Row) -> rusqlite::Result<DiagramTemplateRow> {
 /// gallery shows a count that stopped being true.
 ///
 /// **Counted by substring, not by parsing.** An mxGraph document marks its cells with `vertex="1"`
-/// and `edge="1"`, and this layer has no business holding an XML parser for one integer. A format
-/// it does not recognise counts zero rather than guessing — a wrong number in a caption is worse
-/// than none, and the gallery hides the caption when the count is zero.
+/// and `edge="1"`, and a DBML one opens a block with `Table` or `Enum` at the start of a line and
+/// declares a relationship with `Ref:` or an inline `ref:`. This layer has no business holding
+/// either an XML parser or a DBML one for a single integer. A format it does not recognise counts
+/// zero rather than guessing — a wrong number in a caption is worse than none, and the gallery
+/// hides the caption when the count is zero.
 fn derive(doc: &str, format: &str) -> i64 {
-    if format != FORMAT_MXGRAPH {
-        return 0;
+    match format {
+        FORMAT_MXGRAPH => {
+            (doc.matches("vertex=\"1\"").count() + doc.matches("edge=\"1\"").count()) as i64
+        }
+        FORMAT_DBML => count_dbml(doc),
+        _ => 0,
     }
-    let count = doc.matches("vertex=\"1\"").count() + doc.matches("edge=\"1\"").count();
+}
+
+/// Tables, enums and relationships in a DBML document.
+///
+/// Line-oriented, and deliberately so: a `Table` inside a note or a comment is text, not a table,
+/// and anchoring on the start of the line is what tells the two apart without parsing. Inline
+/// `[ref: > …]` counts as well as a standalone `Ref:`, because both are one relationship — that is
+/// exactly what the frontend draws.
+fn count_dbml(doc: &str) -> i64 {
+    let mut count = 0usize;
+    for line in doc.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("table ")
+            || lower.starts_with("enum ")
+            || lower.starts_with("ref:")
+            || lower.starts_with("ref ")
+        {
+            count += 1;
+        } else if lower.contains("ref:") {
+            // An inline reference in a column's settings — `author_id integer [ref: > users.id]`.
+            count += 1;
+        }
+    }
     count as i64
 }
 
@@ -600,6 +634,33 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// The caption under a gallery card, for both dialects.
+    ///
+    /// It matters more than a caption normally would because [`derive`] is what *writes*
+    /// `shape_count`, on every save: a format whose count is wrong shows a wrong number on every
+    /// card in the workspace, and a format that counts zero shows no caption at all — which is what
+    /// a DBML diagram did before this branch existed.
+    #[test]
+    fn a_document_is_counted_in_its_own_dialect() {
+        let drawing = r#"<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="a" vertex="1"/><mxCell id="b" vertex="1"/><mxCell id="e" edge="1"/>
+            </root></mxGraphModel>"#;
+        assert_eq!(derive(drawing, FORMAT_MXGRAPH), 3);
+
+        let schema = "// a comment mentioning Table and Ref:\n\
+             Table users {\n  id integer [pk]\n}\n\
+             Table posts {\n  id integer [pk]\n  author_id integer [ref: > users.id]\n}\n\
+             Enum role { admin }\n\
+             Ref: posts.id > users.id\n";
+        // Two tables, one enum, one inline reference and one standalone: five.
+        assert_eq!(derive(schema, FORMAT_DBML), 5);
+
+        // A document in neither dialect counts nothing rather than guessing — the gallery hides a
+        // zero, and a wrong number is worse than none.
+        assert_eq!(derive(drawing, "something-else"), 0);
+        assert_eq!(derive("", FORMAT_DBML), 0);
     }
 
     /// Every read in this module is filtered by workspace, and this is the test that says so out

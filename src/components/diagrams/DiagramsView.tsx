@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { ArrowLeft, Sparkles, Undo2, Workflow } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -6,11 +6,21 @@ import { ViewSkeleton } from "../common/ViewSkeleton";
 import { DiagramExplorer } from "./DiagramExplorer";
 import { DiagramGallery } from "./DiagramGallery";
 import { DrawioFrame } from "./DrawioFrame";
+/**
+ * The schema editor, behind a `lazy` boundary for the reason `NoteEditor` puts Monaco behind one:
+ * it carries the code editor and four panels, and a workspace of drawings should not pay for it.
+ * `DrawioFrame` needs no such treatment — its weight is an iframe, which is already only fetched
+ * when one is mounted.
+ */
+const DbmlWorkbench = lazy(() =>
+  import("../dbml/DbmlWorkbench").then((module) => ({ default: module.DbmlWorkbench })),
+);
 import { DiagramAiPanel } from "./DiagramAiPanel";
 import { ExportImageModal } from "./ExportImageModal";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { CARD, ICON_BUTTON } from "./diagramsChrome";
 import { relativeTime } from "../notes/notesChrome";
+import { FORMAT_DBML } from "../../lib/diagrams/doc";
 import { ensureDiagramsStoreLoaded, useDiagramsStore } from "../../state/diagramsStore";
 import type { ImageExportFormat } from "../../lib/diagrams/exportOptions";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -64,6 +74,17 @@ export function DiagramsView() {
   const openTitle = useDiagramsStore(
     (s) => s.diagrams.find((d) => d.id === s.activeId)?.title ?? "",
   );
+  /**
+   * Which editor the open diagram calls for.
+   *
+   * Read from the *row* rather than from the draft, so it is known before the document arrives —
+   * the editor is mounted on `activeId`, and waiting for `draft.format` would flash the drawing
+   * editor over a schema for as long as the fetch takes.
+   */
+  const openFormat = useDiagramsStore(
+    (s) => s.diagrams.find((d) => d.id === s.activeId)?.format ?? "",
+  );
+  const isSchema = openFormat === FORMAT_DBML;
 
   const sidebarWidth = useLayoutStore((s) => s.sizes.diagramsSidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
@@ -256,13 +277,29 @@ export function DiagramsView() {
                 pane — rather than against the window. Dragging it can then be clamped to the canvas
                 it is written about. */}
             <div className="relative min-h-0 flex-1">
-              <DrawioFrame
-                key={activeId}
-                diagramId={activeId}
-                onSaveAsTemplate={saveAsTemplate}
-                onExport={openExportMenu}
-                onAskAi={() => setAiOpen(true)}
-              />
+              {/* The one place the format decides anything. Both editors take the same two
+                  callbacks and write through the same store; what differs is the dialect they
+                  read — see `types/diagrams.ts`. The schema workbench carries its own toolbar, so
+                  it needs no `onExport`: draw.io's export lives in draw.io's toolbar, and this
+                  one's lives in its own. */}
+              {isSchema ? (
+                <Suspense fallback={<ViewSkeleton />}>
+                  <DbmlWorkbench
+                    key={activeId}
+                    diagramId={activeId}
+                    onSaveAsTemplate={saveAsTemplate}
+                    onAskAi={() => setAiOpen(true)}
+                  />
+                </Suspense>
+              ) : (
+                <DrawioFrame
+                  key={activeId}
+                  diagramId={activeId}
+                  onSaveAsTemplate={saveAsTemplate}
+                  onExport={openExportMenu}
+                  onAskAi={() => setAiOpen(true)}
+                />
+              )}
               {/* Keyed on the diagram for the same reason the frame above it is, and told which
                   one it is drawing for rather than reading "whatever is open" when its answer
                   lands. Without the key, an instruction typed about one diagram — and the busy

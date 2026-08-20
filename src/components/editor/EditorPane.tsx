@@ -31,7 +31,7 @@ import type { CodeSnapTarget } from "./CodeSnapModal";
 import { modelPathFor } from "../../lib/editorModel";
 import { languageForPath } from "../../lib/monacoLanguage";
 import { FileGlyph } from "../common/FileGlyph";
-import type { DbmlSchema } from "../../lib/dbml";
+import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
 import { changeBlocksOf, sameHunk, type ChangeBlock, type GutterMark } from "../../lib/diffBlocks";
 import { diffSignature, reconstructSides } from "../../lib/diffText";
 import { getCommitFileDiff, getFileDiff } from "../../lib/tauri/commands";
@@ -800,7 +800,7 @@ export function EditorPane({
       return;
     }
     let cancelled = false;
-    void import("../../lib/dbml")
+    void import("../../lib/dbml/parse")
       .then((module) => {
         dbmlParser = module.parseDbml;
         if (!cancelled) setParseDbml(() => module.parseDbml);
@@ -818,7 +818,7 @@ export function EditorPane({
     // A parser that arrived wins over an earlier failure: opening a second `.dbml` file retries
     // the chunk, and a retry that succeeded must not keep showing the error from the one before.
     if (parseDbml) return parseDbml(content);
-    if (dbmlLoadError) return { tables: [], refs: [], error: dbmlLoadError };
+    if (dbmlLoadError) return { ...EMPTY_SCHEMA, error: dbmlLoadError };
     return null;
   }, [previewKind, content, parseDbml, dbmlLoadError]);
   /** `null` schema on a `.dbml` file means the parser hasn't landed yet — the one case the diagram

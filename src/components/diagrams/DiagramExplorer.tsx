@@ -9,6 +9,7 @@ import {
   Pin,
   PinOff,
   Plus,
+  Table2,
   Search,
   Trash2,
   X,
@@ -18,6 +19,7 @@ import { DiagramTreeRow } from "./DiagramTreeRow";
 import { TemplatePickerModal } from "./TemplatePickerModal";
 import { ICON_BUTTON } from "./diagramsChrome";
 import { TREE_COLORS } from "../../lib/swatchColors";
+import { FORMAT_DBML } from "../../lib/diagrams/doc";
 import { buildFolderTree, descendantIds, flattenTree } from "../../lib/diagrams/tree";
 import type { DiagramTreeRow as DiagramTreeRowData } from "../../types/diagrams";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
@@ -422,6 +424,11 @@ export function DiagramExplorer() {
         label: t("diagrams.newDiagramHere"),
         icon: Plus,
         onClick: () => void createDiagram(folderId),
+      },
+      {
+        label: t("diagrams.newDbmlDiagramHere"),
+        icon: Table2,
+        onClick: () => void createDiagram(folderId, undefined, FORMAT_DBML),
       },
       {
         label: t("diagrams.newFromTemplate"),

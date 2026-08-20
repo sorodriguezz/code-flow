@@ -25,6 +25,21 @@
   --cf-success: #16a34a;
   --cf-danger: #dc2626;
   --cf-warning: #d97706;
+  /* The violet the schema canvas draws an enum and a `unique` column in. Its own token because it
+     has to be the one colour on that canvas the accent can never become — an enum drawn in the
+     accent is indistinguishable from a table the moment somebody picks Purple — and because, like
+     every other colour here, it has to be two values: a shade that carries white text on the light
+     theme and a lighter one that carries dark text on the dark. Same pair as the accent picker's
+     Purple, so the two never look like different purples. */
+  /* The blue a foreign key is badged in on the schema canvas, beside the amber of a primary key and
+     the violet of a unique column. Three fixed hues rather than three accent-derived ones, and that
+     is deliberate even though the rest of that canvas follows the accent: the badges sit *next to
+     each other on one row*, so what they have to be is distinct from each other. Tied to the accent,
+     FK and unique were the same colour on the default indigo, and FK and PK were the same colour the
+     moment somebody picked Amber. The accent still draws the headers, the lines, the glow and the
+     selection — the badges are a legend, and a legend has fixed colours. */
+  --cf-violet: #9333ea;
+  --cf-blue: #2563eb;
   /* BSON value colours for the document list. Their own tokens rather than borrowed semantics:
      `--cf-danger` happens to be the right red for an ObjectId today, and the day someone retunes
      what "danger" means, every id in every document would move with it. Chosen to sit at similar
@@ -69,6 +84,8 @@
   --cf-success: #4ade80;
   --cf-danger: #f87171;
   --cf-warning: #fbbf24;
+  --cf-violet: #c084fc;
+  --cf-blue: #60a5fa;
   /* Same five, lifted for a dark background — see the light theme's note. */
   --cf-bson-string: #6ee7a8;
   --cf-bson-number: #93b4fd;
@@ -104,6 +121,8 @@
     --cf-success: #4ade80;
     --cf-danger: #f87171;
     --cf-warning: #fbbf24;
+    --cf-violet: #c084fc;
+    --cf-blue: #60a5fa;
     /* Same as the explicit dark theme above. */
     --cf-bson-string: #6ee7a8;
     --cf-bson-number: #93b4fd;

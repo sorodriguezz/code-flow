@@ -49,6 +49,15 @@
   --cf-success: #16a34a;
   --cf-danger: #dc2626;
   --cf-warning: #d97706;
+  /* The blue a foreign key is badged in on the schema canvas, beside the amber of a primary key and
+     the violet of a unique column. Three fixed hues rather than three accent-derived ones, and that
+     is deliberate even though the rest of that canvas follows the accent: the badges sit *next to
+     each other on one row*, so what they have to be is distinct from each other. Tied to the accent,
+     FK and unique were the same colour on the default indigo, and FK and PK were the same colour the
+     moment somebody picked Amber. The accent still draws the headers, the lines, the glow and the
+     selection — the badges are a legend, and a legend has fixed colours. */
+  --cf-violet: #9333ea;
+  --cf-blue: #2563eb;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -64,6 +73,9 @@
     --cf-success: #4ade80;
     --cf-danger: #f87171;
     --cf-warning: #fbbf24;
+    --cf-violet: #c084fc;
+    --cf-blue: #60a5fa;
+  --cf-blue: #60a5fa;
   }
 }
 

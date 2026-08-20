@@ -1,7 +1,8 @@
 import { translate } from "../../state/languageStore";
 import type { TranslationKey } from "../i18n/translations";
 import type { DiagramTemplate, DiagramTemplateRow } from "../../types/diagrams";
-import { DEFAULT_FORMAT } from "./doc";
+import type { DiagramFormat } from "../../types/diagrams";
+import { DEFAULT_FORMAT, FORMAT_DBML } from "./doc";
 import { anchors, edge, model, vertex } from "./mxgraph";
 import { parseTags } from "../notes/tags";
 
@@ -348,6 +349,39 @@ function network(): string {
   ]);
 }
 
+/**
+ * A schema, in DBML rather than in mxGraph.
+ *
+ * The one shipped template that is not a drawing, and the reason the list below carries a `format`
+ * at all. Two tables and the key between them: enough that opening it teaches the syntax — a column
+ * with settings, an inline reference, a default expression — without arriving as a finished model
+ * nobody wants to edit.
+ *
+ * **The identifiers are not translated**, unlike every other template's labels, and that is the
+ * distinction rather than an oversight: a drawing's boxes are *prose* — words a reader reads — while
+ * these are column names in a database, which are code. The card's name and description in the
+ * picker are translated, because those are what somebody chooses between.
+ */
+function schema(): string {
+  return [
+    "Table authors {",
+    "  id         integer      [pk, increment]",
+    "  name       varchar(120) [not null]",
+    "  email      varchar(160) [not null, unique]",
+    "  created_at timestamp    [default: `now()`]",
+    "}",
+    "",
+    "Table posts {",
+    "  id        integer      [pk, increment]",
+    "  author_id integer      [not null, ref: > authors.id]",
+    "  title     varchar(200) [not null]",
+    "  body      text",
+    "  published boolean      [not null, default: false]",
+    "}",
+    "",
+  ].join("\n");
+}
+
 /** `as const` so the ids are literal types — see `lib/notes/templates.ts` for the same trick. */
 const BUILT_INS = [
   { id: "flow", icon: "workflow", tags: ["flujo"], build: flowchart },
@@ -355,11 +389,14 @@ const BUILT_INS = [
   { id: "seq", icon: "list-ordered", tags: ["uml", "secuencia"], build: sequence },
   { id: "er", icon: "database", tags: ["er", "datos"], build: entityRelationship },
   { id: "net", icon: "network", tags: ["red", "infra"], build: network },
+  { id: "dbml", icon: "database", tags: ["dbml", "datos"], build: schema, format: FORMAT_DBML },
 ] as const satisfies readonly {
   id: string;
   icon: string;
   tags: readonly string[];
   build: () => string;
+  /** The dialect the document is written in. Absent means the drawing one. */
+  format?: DiagramFormat;
 }[];
 
 /**
@@ -368,15 +405,15 @@ const BUILT_INS = [
  * language for nothing.
  */
 export function builtInTemplates(): DiagramTemplate[] {
-  return BUILT_INS.map(({ id, icon, tags, build }) => ({
-    id: `builtin:${id}`,
+  return BUILT_INS.map((entry) => ({
+    id: `builtin:${entry.id}`,
     workspace_id: "",
-    name: translate(`diagrams.tpl.${id}.name` satisfies TranslationKey),
-    description: translate(`diagrams.tpl.${id}.desc` satisfies TranslationKey),
-    icon,
-    doc: build(),
-    format: DEFAULT_FORMAT,
-    tags: [...tags],
+    name: translate(`diagrams.tpl.${entry.id}.name` satisfies TranslationKey),
+    description: translate(`diagrams.tpl.${entry.id}.desc` satisfies TranslationKey),
+    icon: entry.icon,
+    doc: entry.build(),
+    format: "format" in entry ? entry.format : DEFAULT_FORMAT,
+    tags: [...entry.tags],
     sort_order: -1,
     created_at: "",
     updated_at: "",

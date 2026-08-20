@@ -11,6 +11,7 @@ import {
   Pin,
   PinOff,
   Trash2,
+  Table2,
   Workflow,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
@@ -24,7 +25,8 @@ import { filterDiagrams, useDiagramsStore } from "../../state/diagramsStore";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import type { Diagram, DiagramSort } from "../../types/diagrams";
+import { FORMAT_DBML } from "../../lib/diagrams/doc";
+import type { Diagram, DiagramFormat, DiagramSort } from "../../types/diagrams";
 
 /** The orderings offered, in the order the menu lists them. */
 const SORTS: DiagramSort[] = ["manual", "updated", "created", "title"];
@@ -486,6 +488,17 @@ function Crumb({
 }
 
 /**
+ * The glyph that stands for a diagram when there is no picture of it.
+ *
+ * Two, because the workspace holds two kinds of document and telling them apart matters *before*
+ * you open one: which editor a card leads to is decided by its format, and a gallery that draws
+ * them identically makes that a surprise. See `types/diagrams.ts`.
+ */
+function formatGlyph(format: DiagramFormat) {
+  return format === FORMAT_DBML ? Table2 : Workflow;
+}
+
+/**
  * The picture on a card.
  *
  * `src` is the `data:` URI draw.io exported — a PNG at a fixed width, see `THUMBNAIL_EXPORT` for
@@ -496,11 +509,12 @@ function Crumb({
  * Empty is the ordinary state of a diagram nobody has drawn in yet, not a failure — hence a glyph
  * rather than a broken-image box.
  */
-function Thumbnail({ src, alt }: { src: string; alt: string }) {
+function Thumbnail({ src, alt, format }: { src: string; alt: string; format: DiagramFormat }) {
   if (!src) {
+    const Glyph = formatGlyph(format);
     return (
       <div className="flex h-full w-full items-center justify-center text-[var(--cf-text-muted)]">
-        <Workflow size={22} />
+        <Glyph size={22} />
       </div>
     );
   }
@@ -531,7 +545,7 @@ function Card({
       }`}
     >
       <span className="h-[104px] border-b border-[var(--cf-border)] bg-[var(--cf-field)]">
-        <Thumbnail src={thumbnail} alt={diagram.title || untitled} />
+        <Thumbnail src={thumbnail} alt={diagram.title || untitled} format={diagram.format} />
       </span>
       <span className="flex flex-col gap-1 p-2">
         <span className="flex items-center gap-1">
@@ -572,7 +586,10 @@ function Row({ diagram, active, locale, untitled, shapesLabel, onSelect, onMenu 
           : "hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
       }`}
     >
-      <Workflow size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+      {(() => {
+        const Glyph = formatGlyph(diagram.format);
+        return <Glyph size={13} className="shrink-0 text-[var(--cf-text-muted)]" />;
+      })()}
       <span className="min-w-0 flex-1 truncate">
         {diagram.title || <span className="italic text-[var(--cf-text-muted)]">{untitled}</span>}
       </span>

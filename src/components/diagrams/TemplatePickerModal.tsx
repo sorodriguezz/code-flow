@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { LayoutTemplate, Plus, Trash2, X } from "lucide-react";
+import { LayoutTemplate, Plus, Table2, Trash2, X } from "lucide-react";
 import { TagPill } from "../notes/notesChrome";
 import { ICON_BUTTON } from "./diagramsChrome";
 import { templateIcon } from "../../lib/diagrams/templateIcons";
-import type { DiagramTemplate } from "../../types/diagrams";
+import { FORMAT_DBML } from "../../lib/diagrams/doc";
+import type { DiagramFormat, DiagramTemplate } from "../../types/diagrams";
 import { useDiagramsStore } from "../../state/diagramsStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -55,10 +56,10 @@ export function TemplatePickerModal({
     onClose();
   };
 
-  const blank = async () => {
+  const blank = async (format?: DiagramFormat) => {
     if (busy) return;
     setBusy(true);
-    await createDiagram(folderId);
+    await createDiagram(folderId, undefined, format);
     onClose();
   };
 
@@ -104,6 +105,27 @@ export function TemplatePickerModal({
                 </span>
                 <span className="text-[11px] text-[var(--cf-text-muted)]">
                   {t("diagrams.blankDiagramDesc")}
+                </span>
+              </span>
+            </button>
+
+            {/* The second empty start, and the only place in the app where the *dialect* of a new
+                diagram is chosen. It has to be a card of its own rather than a toggle on the one
+                above: which editor opens is decided here and never again, so it is a choice
+                between two things and not a setting on one. */}
+            <button
+              type="button"
+              onClick={() => void blank(FORMAT_DBML)}
+              disabled={busy}
+              className="flex items-start gap-2.5 rounded-lg border border-dashed border-[var(--cf-field-border)] p-3 text-left transition-colors hover:border-[var(--cf-accent)] disabled:opacity-50"
+            >
+              <Table2 size={15} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+              <span className="flex min-w-0 flex-col gap-0.5">
+                <span className="truncate text-[12px] font-medium">
+                  {t("diagrams.newDbmlDiagram")}
+                </span>
+                <span className="text-[11px] text-[var(--cf-text-muted)]">
+                  {t("diagrams.tpl.dbml.desc")}
                 </span>
               </span>
             </button>

@@ -2126,6 +2126,49 @@ pub const DEFAULT_DIAGRAM_PROMPT: &str = concat!(
      {\"from\":\"g\",\"to\":\"f\"},{\"from\":\"e\",\"to\":\"v\",\"label\":\"reintentar\"}]}"
 );
 
+/// The system prompt behind "Draw with AI" for a diagram whose format is `dbml`.
+///
+/// **A different question, so a different prompt.** The mxGraph one forbids the engine from drawing
+/// anything and asks for a graph to be laid out; here the *document is the answer* — DBML is text,
+/// the workbench parses it and lays the boxes out itself. So this asks for DBML and nothing else,
+/// and the frontend validates it by parsing it before a single table reaches the canvas.
+///
+/// The rules that matter are the ones whose absence produces a document that will not parse:
+/// one column per line, settings in brackets, and — the one models get wrong most often — a
+/// relationship declared once. An inline `[ref: > …]` and a `Ref:` for the same pair is a duplicate,
+/// which `@dbml/core` rejects outright, taking the whole schema with it.
+pub const DEFAULT_DBML_PROMPT: &str = concat!(
+    "Escribes el esquema de una base de datos en DBML. Devuelves EXCLUSIVAMENTE DBML: ni saludo, \
+     ni explicación, ni ```dbml alrededor.\n\n\
+     REGLAS\n\
+     - Una tabla por bloque: `Table nombre {` … `}`. Una columna por línea.\n\
+     - Forma de una columna: `nombre tipo [ajustes]`. Los ajustes van entre corchetes y separados \
+     por comas.\n\
+     - Ajustes válidos: pk, increment, unique, not null, note: 'texto', default: valor.\n\
+     - Un valor por defecto de texto lleva comillas simples (`default: 'user'`); una expresión va \
+     entre acentos graves (`default: `now()`).\n\
+     - Tipos SQL normales: integer, bigint, varchar(n), text, boolean, decimal(p,s), date, \
+     timestamp, uuid, json.\n\
+     - Toda tabla lleva clave primaria, normalmente `id integer [pk, increment]`.\n\
+     - Las relaciones se declaran UNA sola vez: o en línea con `[ref: > otra.id]` en la columna que \
+     guarda la clave, o aparte con `Ref: tabla.columna > otra.id`. Nunca las dos.\n\
+     - `>` significa muchos-a-uno desde la columna que la lleva; `-` es uno-a-uno; `<>` es \
+     muchos-a-muchos.\n\
+     - Los enums se declaran ANTES de la tabla que los usa: `Enum estado { activo inactivo }`, un \
+     valor por línea.\n\
+     - Nombres de tabla en plural y en snake_case; nombres de columna en snake_case.\n\
+     - Los nombres, las notas y los enums, en el MISMO IDIOMA que la instrucción.\n\
+     - Entre 1 y 12 tablas. Si piden más, quédate con lo esencial.\n\
+     - Si te dan un esquema existente como contexto y la instrucción es ampliarlo, devuelve SÓLO \
+     las tablas, enums y relaciones NUEVAS. No repitas las que ya existen: se añaden a las que hay.\n\n\
+     EJEMPLO\n\
+     Enum estado_pedido {\n  pendiente\n  pagado\n  enviado\n}\n\n\
+     Table clientes {\n  id integer [pk, increment]\n  email varchar(120) [not null, unique]\n  \
+     creado_en timestamp [default: `now()`]\n}\n\n\
+     Table pedidos {\n  id integer [pk, increment]\n  cliente_id integer [not null, ref: > clientes.id]\n  \
+     estado estado_pedido [not null, default: 'pendiente']\n  total decimal(10,2) [not null]\n}"
+);
+
 /// Asks an engine to describe a diagram, as JSON for the frontend to lay out.
 ///
 /// **The engine never places anything.** Models are poor at coordinates and worse at being
@@ -2135,7 +2178,13 @@ pub const DEFAULT_DIAGRAM_PROMPT: &str = concat!(
 /// picture, which matters the second time somebody presses the button.
 ///
 /// `outline` is the labels of the diagram as it stands, or empty. Not the document: see
-/// [`MAX_DIAGRAM_CONTEXT_CHARS`].
+/// [`MAX_DIAGRAM_CONTEXT_CHARS`]. For a `dbml` diagram it *is* the document — DBML is already
+/// nothing but names, so there is no geometry to strip out.
+///
+/// `format` names the diagram's dialect and decides both halves of this: which system prompt is
+/// sent, and what is done to the reply. A drawing's answer is a JSON object that has to be dug out
+/// of whatever prose surrounds it; a schema's answer is text, and the only thing that can be
+/// wrapped around it is a code fence.
 pub async fn draw_diagram(
     engine: &dyn AiEngine,
     binary: &str,
@@ -2143,13 +2192,21 @@ pub async fn draw_diagram(
     title: &str,
     outline: &str,
     instruction: &str,
+    format: &str,
 ) -> Result<String, String> {
     if instruction.trim().is_empty() {
         return Err("Escribe qué diagrama quieres".to_string());
     }
+    let schema_dialect = format == "dbml";
     let context: String = outline.chars().take(MAX_DIAGRAM_CONTEXT_CHARS).collect();
     let existing = if context.trim().is_empty() {
-        "\n\n(El lienzo está vacío.)".to_string()
+        if schema_dialect {
+            "\n\n(El esquema está vacío.)".to_string()
+        } else {
+            "\n\n(El lienzo está vacío.)".to_string()
+        }
+    } else if schema_dialect {
+        format!("\n\n=== ESQUEMA ACTUAL (contexto) ===\n{context}")
     } else {
         format!("\n\n=== DIAGRAMA ACTUAL (contexto) ===\n{context}")
     };
@@ -2157,10 +2214,15 @@ pub async fn draw_diagram(
         format!("TÍTULO DEL DIAGRAMA: {title}{existing}\n\n=== INSTRUCCIÓN ===\n{instruction}");
 
     let mut inv = AiInvocation::new(
-        "Describe el diagrama pedido como JSON de nodos y aristas.",
+        if schema_dialect {
+            "Escribe en DBML el esquema pedido."
+        } else {
+            "Describe el diagrama pedido como JSON de nodos y aristas."
+        },
         &stdin_payload,
     );
-    inv.system_prompt = Some(DEFAULT_DIAGRAM_PROMPT);
+    inv.system_prompt =
+        Some(if schema_dialect { DEFAULT_DBML_PROMPT } else { DEFAULT_DIAGRAM_PROMPT });
     inv.model = model;
     inv.task = task::DIAGRAM_DRAW;
     let run = run(engine, binary, inv).await?;
@@ -2177,6 +2239,11 @@ pub async fn draw_diagram(
     // than as an empty string. What comes back is still only *probably* JSON — the frontend
     // validates it against the schema before anything is drawn.
     let text = strip_code_fence(&run.text);
+    // A schema's answer is the text itself: there is no object to dig out, and `json_answer` run
+    // over DBML would find the first `{` — a table body — and hand back half a table.
+    if schema_dialect {
+        return Ok(text.trim().to_string());
+    }
     Ok(json_answer(&text).map(|json| json.into_owned()).unwrap_or(text).trim().to_string())
 }
 

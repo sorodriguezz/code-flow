@@ -192,6 +192,14 @@ export interface DbDiagramColumn {
   primary_key: boolean;
   /** Derived from the edge list on the backend, so the flag and the line can never disagree. */
   foreign_key: boolean;
+  /**
+   * Declared unique — the DBML canvas draws a badge for it and measures the row wider to fit one.
+   *
+   * Optional because no catalog query fills it in: a live database describes uniqueness with
+   * indexes and constraints, which the diagram endpoint does not carry. Only the DBML translator
+   * sets it, and everything reading it treats `undefined` as "not stated".
+   */
+  unique?: boolean;
 }
 
 export interface DbDiagramTable {

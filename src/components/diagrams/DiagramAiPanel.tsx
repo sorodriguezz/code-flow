@@ -2,13 +2,17 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { GripHorizontal, Maximize2, Minimize2, Sparkles, X } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { DiagramPreview } from "./DiagramPreview";
+import { DbmlCanvas } from "../dbml/DbmlCanvas";
 import { AI_PROVIDERS, DEFAULT_AI_PROVIDER } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { diagramsDrawWithAi } from "../../lib/tauri/diagramsCommands";
-import { documentOutline, graphToMxGraph, parseAiGraph, type AiGraph } from "../../lib/diagrams/aiLayout";
+import { documentOutline, graphToMxGraph, parseAiGraph } from "../../lib/diagrams/aiLayout";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { useAiProviderStore } from "../../state/aiProviderStore";
-import { useDiagramsStore } from "../../state/diagramsStore";
+import { FORMAT_DBML } from "../../lib/diagrams/doc";
+import { readLayout } from "../../lib/dbml/layout";
+import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
+import { useDiagramsStore, type DiagramAiResult } from "../../state/diagramsStore";
 import { notify } from "../../state/notificationStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
@@ -40,6 +44,11 @@ const MARGIN = 12;
  * **The engine is not picked here**, the same as in Notes: it routes through the `diagram` task
  * like every other AI call in the app, and this window only *says* what it will run on.
  *
+ * **It speaks both of the workspace's dialects.** A drawing's answer is a graph, previewed by
+ * `DiagramPreview` and merged as mxGraph cells; a schema's is DBML, previewed by the same canvas
+ * the workbench draws on and merged by `mergeDbml`. Which one is asked for is the diagram's own
+ * `format`, read below — the window itself is the same window, opened from the same sparkle.
+ *
  * **The run is not this component's**, which is the thing that changed. It belongs to the diagram,
  * in `diagramsStore.aiByDiagram`, and this window is a view over that entry — so closing it, going
  * back to the gallery or changing workspace no longer destroys a generation in flight or an answer
@@ -60,6 +69,9 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
    *  instead of being pressed for nothing. */
   const canApply = useDiagramsStore((s) => s.draft?.id === diagramId);
   const title = useDiagramsStore((s) => s.diagrams.find((d) => d.id === diagramId)?.title ?? "");
+  /** The dialect this diagram is written in, which decides what is asked for and how it is shown. */
+  const format = useDiagramsStore((s) => s.diagrams.find((d) => d.id === diagramId)?.format ?? "");
+  const isSchema = format === FORMAT_DBML;
   const t = useT();
 
   const [instruction, setInstruction] = useState("");
@@ -69,7 +81,29 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
   const [zoomed, setZoomed] = useState(false);
   const busy = run?.status === "running";
   /** The validated answer, waiting to be applied. `null` until one arrives. */
-  const result = run?.status === "ready" ? run.graph : null;
+  const result = run?.status === "ready" ? run.result : null;
+  /**
+   * The generated DBML, parsed, for the preview.
+   *
+   * Held here rather than in the store, and re-derived on mount: the store keeps the *document*,
+   * which is the thing that has to survive this window being closed. A parsed schema is a
+   * derivative of it and re-parsing costs a millisecond, while storing it would put a whole model
+   * into a map that outlives every workspace switch.
+   */
+  const [preview, setPreview] = useState<DbmlSchema>(EMPTY_SCHEMA);
+  useEffect(() => {
+    if (result?.format !== "dbml") {
+      setPreview(EMPTY_SCHEMA);
+      return;
+    }
+    let cancelled = false;
+    void import("../../lib/dbml/parse").then((module) => {
+      if (!cancelled) setPreview(module.parseDbml(result.dbml));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [result]);
 
   const panel = useRef<HTMLDivElement>(null);
   /** Null until the window is dragged: it sits at its default corner, laid out by the browser, so
@@ -170,9 +204,9 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
      */
     const stillInWorkspace = () => useDiagramsStore.getState().workspaceId === workspaceId;
     /** The answer, if one arrives. Parked against the diagram in the `finally`. */
-    let graph: AiGraph | null = null;
+    let answer: DiagramAiResult | null = null;
     useAiRunStore.getState().start(id, {
-      kindKey: "diagrams.ai.runKind",
+      kindKey: isSchema ? "diagrams.ai.runKindSchema" : "diagrams.ai.runKind",
       detail: title,
       workspaceId,
       // Which makes the status-bar row clickable from anywhere: `followTarget` crosses into the
@@ -182,12 +216,15 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
     try {
       const raw = await diagramsDrawWithAi({
         title,
-        // Labels, never the document. See `documentOutline`.
-        outline: documentOutline(draft.doc),
+        // For a drawing: labels, never the document — see `documentOutline`. For a schema: the DBML
+        // itself, minus the layout comment, because DBML *is* names and there is no geometry in it
+        // to spend the engine's context on.
+        outline: isSchema ? readLayout(draft.doc).source : documentOutline(draft.doc),
         instruction: instruction.trim(),
+        format,
         runId: id,
       });
-      const parsed = parseAiGraph(raw);
+      const parsed = isSchema ? await validateDbml(raw) : asDrawing(parseAiGraph(raw));
       if ("error" in parsed) {
         // A model answering with something unusable is an ordinary outcome, so it is a message in
         // the panel rather than a thrown error: the instruction is still there to be adjusted.
@@ -208,7 +245,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
         });
         return;
       }
-      graph = parsed.graph;
+      answer = parsed.result;
       notify({
         source: "diagrams",
         titleKey: "notifications.diagramDrawn",
@@ -237,18 +274,23 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
       // on an unmounted panel is how a finished generation used to disappear while its
       // notification went on claiming it existed. `settleAiRun` files it against the diagram, or
       // clears the slot when there is nothing to keep.
-      useDiagramsStore.getState().settleAiRun(diagramId, id, graph);
+      useDiagramsStore.getState().settleAiRun(diagramId, id, answer);
     }
   };
 
   const apply = () => {
     if (run?.status !== "ready" || !canApply) return;
-    // The prefix is what keeps a generated id from landing on a hand-drawn shape with the same
-    // name — draw.io's merge matches on id, and a collision replaces silently. Timestamped rather
-    // than counted, so two generations in one session cannot collide with each other either.
+    // Each dialect is handed the document its own merge understands. For a drawing, the id prefix
+    // is what keeps a generated shape from landing on a hand-drawn one with the same name —
+    // draw.io's merge matches on id, and a collision replaces silently. Timestamped rather than
+    // counted, so two generations in one session cannot collide with each other either. A schema
+    // needs no such prefix: `mergeDbml` matches on declared *names*, and a name that already exists
+    // is a table the user has already written, which is exactly the one not to overwrite.
     const landed = applyGenerated(
       diagramId,
-      graphToMxGraph(run.graph, `ai${Date.now().toString(36)}_`),
+      run.result.format === "dbml"
+        ? run.result.dbml
+        : graphToMxGraph(run.result.graph, `ai${Date.now().toString(36)}_`),
     );
     // Nothing is consumed until it is actually on the canvas. This window can be up over a diagram
     // whose document has not arrived yet — `openDiagram` sets `activeId` at once and fetches the
@@ -309,7 +351,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
           rows={3}
           autoFocus
           disabled={busy}
-          placeholder={t("diagrams.ai.placeholder")}
+          placeholder={t(isSchema ? "diagrams.ai.dbmlPlaceholder" : "diagrams.ai.placeholder")}
           className="w-full resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[11.5px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:opacity-60"
         />
 
@@ -317,10 +359,15 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
           <div className="flex flex-col gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] p-2">
             <div className="flex items-center gap-1.5">
               <span className="flex-1 truncate text-[10px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
-                {t("diagrams.ai.preview", {
-                  shapes: String(result.nodes.length),
-                  arrows: String(result.edges.length),
-                })}
+                {result.format === "dbml"
+                  ? t("diagrams.ai.previewSchema", {
+                      tables: String(preview.tables.length),
+                      refs: String(preview.refs.length),
+                    })
+                  : t("diagrams.ai.preview", {
+                      shapes: String(result.graph.nodes.length),
+                      arrows: String(result.graph.edges.length),
+                    })}
               </span>
               <button
                 type="button"
@@ -345,11 +392,26 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
                 zoomed ? "max-h-[260px] overflow-auto p-1" : "h-[168px] p-1"
               }`}
             >
-              <DiagramPreview
-                graph={result}
-                zoom={zoomed ? 0.62 : undefined}
-                className={zoomed ? "block" : "h-full w-full"}
-              />
+              {result.format === "dbml" ? (
+                // The same canvas the workbench draws on, read-only and un-selectable: a preview
+                // rendered by a second renderer would be a picture of something other than what
+                // Add-to-canvas is about to produce.
+                <DbmlCanvas
+                  schema={preview}
+                  positions={{}}
+                  selected={null}
+                  onSelect={() => {}}
+                  mode="keys"
+                  density="compact"
+                  className="h-full w-full"
+                />
+              ) : (
+                <DiagramPreview
+                  graph={result.graph}
+                  zoom={zoomed ? 0.62 : undefined}
+                  className={zoomed ? "block" : "h-full w-full"}
+                />
+              )}
             </div>
           </div>
         )}
@@ -419,4 +481,37 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
       </div>
     </div>
   );
+}
+
+/**
+ * `parseAiGraph`'s answer in the shape the panel works in.
+ *
+ * The graph parser predates there being two dialects and returns `{ graph }`; everything downstream
+ * now takes a tagged `DiagramAiResult`. Tagging it here rather than changing `parseAiGraph` keeps
+ * the layout module — which knows nothing about diagrams having formats — unaware of it still.
+ */
+function asDrawing(
+  parsed: ReturnType<typeof parseAiGraph>,
+): { result: DiagramAiResult } | { error: "empty" | "json" | "nodes" } {
+  return "error" in parsed ? parsed : { result: { format: "mxgraph", graph: parsed.graph } };
+}
+
+/**
+ * The generated DBML, checked before it is offered.
+ *
+ * The same contract `parseAiGraph` has for the drawing dialect: a discriminated result, never a
+ * throw, with an error key the panel can turn into a sentence. Nothing reaches the canvas that has
+ * not been through the *real* parser first — an unparseable schema appended to a working one takes
+ * the working one down with it, since DBML is all-or-nothing.
+ */
+async function validateDbml(
+  raw: string,
+): Promise<{ result: DiagramAiResult } | { error: "empty" | "dbml" | "tables" }> {
+  const text = raw.trim();
+  if (!text) return { error: "empty" };
+  const { parseDbml } = await import("../../lib/dbml/parse");
+  const parsed = parseDbml(text);
+  if (parsed.error) return { error: "dbml" };
+  if (parsed.tables.length === 0 && parsed.enums.length === 0) return { error: "tables" };
+  return { result: { format: "dbml", dbml: text } };
 }
