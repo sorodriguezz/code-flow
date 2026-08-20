@@ -2,8 +2,10 @@ import { importer, Parser } from "@dbml/core";
 import { readLayout } from "./layout";
 import { sqlToDbml } from "./sqlToDbml";
 import {
+  EMPTY_SCHEMA,
   qualify,
   type DbmlCardinality,
+  type DbmlGroup,
   type DbmlEnum,
   type DbmlField,
   type DbmlIndex,
@@ -93,6 +95,14 @@ interface CoreSchema {
   tables?: CoreTable[];
   enums?: CoreEnum[];
   refs?: CoreRef[];
+  tableGroups?: CoreTableGroup[];
+}
+
+/** A `TableGroup`. Its `tables` are the table objects themselves, not references to them. */
+interface CoreTableGroup {
+  name?: unknown;
+  note?: unknown;
+  tables?: CoreTable[];
 }
 
 function text(value: unknown, fallback = ""): string {
@@ -176,6 +186,7 @@ function parseWithCore(source: string): DbmlSchema | null {
    * nothing. See `resolveEndpoint`.
    */
   const pending: { from: CoreEndpoint; to: CoreEndpoint; scope: string }[] = [];
+  const groups: DbmlGroup[] = [];
 
   for (const schema of database.schemas ?? []) {
     const scope = text(schema.name, "public");
@@ -207,6 +218,27 @@ function parseWithCore(source: string): DbmlSchema | null {
       if (!from || !to) continue;
       pending.push({ from, to, scope });
     }
+    for (const group of schema.tableGroups ?? []) {
+      const label = text(group.name);
+      if (!label) continue;
+      const [owner, name] = splitQualified(label);
+      // A group's members arrive as the *table objects themselves*, each carrying the schema it was
+      // declared in — so unlike a ref endpoint there is nothing to guess at here, and no reason to
+      // hold them back until every table is read.
+      groups.push({
+        id: qualify(owner || scope, name),
+        schema: owner || scope,
+        name,
+        note: text(group.note),
+        tables: [
+          ...new Set(
+            (group.tables ?? []).map((member) =>
+              qualify(text(member.schema?.name, scope), text(member.name)),
+            ),
+          ),
+        ],
+      });
+    }
   }
 
   const known = new Set(tables.map((table) => table.id));
@@ -230,7 +262,12 @@ function parseWithCore(source: string): DbmlSchema | null {
     });
   }
 
-  return { tables, enums, refs, error: null };
+  // A member naming no declared table is dropped rather than kept as a dangling id: the boundary is
+  // drawn from where its members ended up, and a member with no box has no position to contribute —
+  // it would stretch the group over empty canvas.
+  for (const group of groups) group.tables = group.tables.filter((id: string) => known.has(id));
+
+  return { tables, enums, refs, groups, error: null };
 }
 
 /**
@@ -411,6 +448,30 @@ function parseWithRegex(source: string): DbmlSchema {
     tables.push({ id, schema: scope, name, alias: match[2] ?? null, note: "", fields, indexes: [] });
   }
 
+  // `TableGroup billing { a\n b }` — a flat list of names, one per line. Same shape as an enum
+  // body, so the same `[^}]*` bound applies: a group cannot contain a nested block, and stopping at
+  // the first `}` is therefore exactly right here even though it would be wrong for a table.
+  const groups: DbmlGroup[] = [];
+  const groupBlock = /\btablegroup\s+("[^"]+"|[\w.]+)\s*(?:\[[^\]]*\]\s*)?\{([^}]*)\}/gi;
+  while ((match = groupBlock.exec(clean)) !== null) {
+    const [scope, name] = splitQualified(named(match[1]));
+    const members = match[2]
+      .split("\n")
+      .map((line) => line.trim().replace(/\s*\[.*$/, ""))
+      .filter((line) => line && !/^note\b/i.test(line))
+      .map((line) => {
+        const [memberScope, memberName] = splitQualified(named(line));
+        return qualify(memberScope, memberName);
+      });
+    groups.push({
+      id: qualify(scope, name),
+      schema: scope || "public",
+      name,
+      note: "",
+      tables: [...new Set(members)],
+    });
+  }
+
   const standalone = /\bref\s*[\w]*\s*:\s*([\w.]+)\.(\w+)\s*([<>-]|<>)\s*([\w.]+)\.(\w+)/gi;
   while ((match = standalone.exec(clean)) !== null) {
     const [fromScope, fromName] = splitQualified(match[1]);
@@ -437,7 +498,11 @@ function parseWithRegex(source: string): DbmlSchema {
   // same pair — and a duplicate would be drawn twice, in the same place, with the same id.
   const seen = new Set<string>();
   const unique = refs.filter((ref) => (seen.has(ref.id) ? false : (seen.add(ref.id), true)));
-  return { tables, enums, refs: unique, error: null };
+  // Same rule as the real parser's: a group member that names no recovered table has no box to be
+  // drawn around, so it cannot contribute to the boundary.
+  const declared = new Set(tables.map((table) => table.id));
+  for (const group of groups) group.tables = group.tables.filter((id) => declared.has(id));
+  return { tables, enums, refs: unique, groups, error: null };
 }
 
 /** `core.users` → `["core", "users"]`; `users` → `["public", "users"]`. */
@@ -460,9 +525,9 @@ function splitQualified(raw: string): [string, string] {
  */
 export function parseDbml(doc: string): DbmlSchema {
   const { source } = readLayout(doc);
-  if (!source.trim()) return { tables: [], enums: [], refs: [], error: null };
+  if (!source.trim()) return { ...EMPTY_SCHEMA };
   try {
-    return parseWithCore(source) ?? { tables: [], enums: [], refs: [], error: null };
+    return parseWithCore(source) ?? { ...EMPTY_SCHEMA };
   } catch (error) {
     // The recovered schema, with the *real* parser's complaint attached. Both halves matter: the
     // tables are what keeps the canvas drawn, and the message is the only thing that says why the

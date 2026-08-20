@@ -92,6 +92,16 @@ export interface NodeMetrics {
   rowPadding: (column: DbDiagramColumn) => number;
   /** And the same for the header, which holds the name and whatever sits beside it. */
   namePadding: number;
+  /** The width of one character of the face the *title* is set in. */
+  nameAdvance: number;
+  /**
+   * Whether the title is drawn schema-qualified.
+   *
+   * It decides how much title there is to fit, and getting it wrong truncates a name that had room:
+   * measuring `orders` and then drawing `shop.orders` is five characters of overrun, which the
+   * renderer's clip turns into an ellipsis on a box that was never too small.
+   */
+  qualifiedName: boolean;
 }
 
 /** What the Database workspace's panel has always drawn. Anything that does not pass metrics keeps
@@ -104,6 +114,8 @@ export const DEFAULT_METRICS: NodeMetrics = {
   maxWidth: NODE_MAX_WIDTH,
   rowPadding: () => 44,
   namePadding: 34,
+  nameAdvance: NAME_CHAR_WIDTH,
+  qualifiedName: false,
 };
 
 export type DiagramColumnMode = "all" | "keys";
@@ -267,6 +279,9 @@ export function layoutDiagram(
   pinned: Record<string, { x: number; y: number }> = {},
   density: DiagramDensity = "roomy",
   metrics: NodeMetrics = DEFAULT_METRICS,
+  /** The group a table belongs to, if the caller has any. Members are pulled together within their
+   *  layer so a group's boundary encloses a block rather than a scatter. */
+  groupOf?: (id: string) => string | null,
 ): DiagramLayout {
   const gap = SPACING[density];
   const nodes = buildNodes(diagram, mode, metrics);
@@ -282,7 +297,7 @@ export function layoutDiagram(
   const flowing = loose.length === 0 ? nodes : nodes.filter((node) => wired.has(node.id));
 
   const depths = assignDepths(flowing, links);
-  const layers = orderLayers(flowing, links, depths);
+  const layers = orderLayers(flowing, links, depths, groupOf);
   const flow = placeLayers(
     layers,
     gap,
@@ -506,7 +521,9 @@ function measure(
   node: Omit<DiagramNode, "x" | "y" | "width" | "height" | "rowY">,
   metrics: NodeMetrics,
 ): DiagramNode {
-  const nameWidth = node.name.length * NAME_CHAR_WIDTH + metrics.namePadding;
+  const title =
+    metrics.qualifiedName && node.schema ? `${node.schema}.${node.name}` : node.name;
+  const nameWidth = title.length * metrics.nameAdvance + metrics.namePadding;
   const rowWidth = node.visible.reduce((widest, column) => {
     const width =
       (column.name.length + column.data_type.length) * CHAR_WIDTH + metrics.rowPadding(column);
@@ -596,6 +613,7 @@ function orderLayers(
   nodes: DiagramNode[],
   links: DiagramLink[],
   depths: Map<string, number>,
+  groupOf?: (id: string) => string | null,
 ): DiagramNode[][] {
   const depth = Math.max(...nodes.map((node) => depths.get(node.id) ?? 0), 0);
   const layers: DiagramNode[][] = Array.from({ length: depth + 1 }, () => []);
@@ -618,19 +636,52 @@ function orderLayers(
     const order = forward ? [...layers.keys()] : [...layers.keys()].reverse();
     for (const position of order) {
       const side = forward ? "left" : "right";
-      layers[position] = [...layers[position]].sort((a, b) => {
-        const weight = (node: DiagramNode) => {
-          const around = neighbours(node.id, side)
-            .map((id) => index.get(id))
-            .filter((value): value is number => value !== undefined);
-          // A table with nothing on that side keeps its current place rather than being swept to
-          // the top, which is what an unconnected table sorting as 0 would do.
-          return around.length === 0
+      // Computed up front rather than inside the comparator. Identical results — `index` does not
+      // move during a single sort — and it is what makes the group pass below possible at all,
+      // since that needs every weight in the layer before it can average any of them.
+      const weights = new Map<string, number>();
+      for (const node of layers[position]) {
+        const around = neighbours(node.id, side)
+          .map((id) => index.get(id))
+          .filter((value): value is number => value !== undefined);
+        // A table with nothing on that side keeps its current place rather than being swept to
+        // the top, which is what an unconnected table sorting as 0 would do.
+        weights.set(
+          node.id,
+          around.length === 0
             ? (index.get(node.id) ?? 0)
-            : around.reduce((total, value) => total + value, 0) / around.length;
-        };
-        return weight(a) - weight(b) || a.name.localeCompare(b.name);
-      });
+            : around.reduce((total, value) => total + value, 0) / around.length,
+        );
+      }
+
+      // Group members are pulled halfway towards their group's average place in this layer. Halfway
+      // rather than all the way on purpose: at full strength the groups would sort as blocks and
+      // throw away the crossing reduction the weights just bought, and a group is a note about the
+      // model, not a constraint on it. What it buys is that a group's boundary — drawn later, from
+      // wherever its members land — encloses a block instead of a scatter across the canvas.
+      if (groupOf) {
+        const sums = new Map<string, { total: number; count: number }>();
+        for (const node of layers[position]) {
+          const key = groupOf(node.id);
+          if (!key) continue;
+          const bucket = sums.get(key) ?? { total: 0, count: 0 };
+          bucket.total += weights.get(node.id) ?? 0;
+          bucket.count += 1;
+          sums.set(key, bucket);
+        }
+        for (const node of layers[position]) {
+          const key = groupOf(node.id);
+          const bucket = key ? sums.get(key) : undefined;
+          if (!bucket || bucket.count < 2) continue;
+          const mean = bucket.total / bucket.count;
+          weights.set(node.id, ((weights.get(node.id) ?? 0) + mean) / 2);
+        }
+      }
+
+      layers[position] = [...layers[position]].sort(
+        (a, b) =>
+          (weights.get(a.id) ?? 0) - (weights.get(b.id) ?? 0) || a.name.localeCompare(b.name),
+      );
       reindex();
     }
   }

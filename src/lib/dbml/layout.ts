@@ -5,6 +5,7 @@ import {
   type DiagramLayout,
   type NodeMetrics,
 } from "../db/erLayout";
+import type { DiagramNode } from "../db/erLayout";
 import type { DbDiagramColumn, DbSchemaDiagram } from "../../types/database";
 import { qualify, type DbmlSchema } from "./types";
 
@@ -109,7 +110,41 @@ export function toSchemaDiagram(schema: DbmlSchema, mode: DiagramColumnMode): Db
  */
 export interface DbmlLayout extends DiagramLayout {
   enumIds: Set<string>;
+  /** One boundary per `TableGroup` that has at least one placed member. */
+  groups: DbmlGroupBox[];
 }
+
+/**
+ * A `TableGroup`, drawn.
+ *
+ * One rectangle when the group's members happen to sit together, several — one per member — when
+ * they do not. See `groupBoxes` for why it is allowed to be either.
+ */
+export interface DbmlGroupBox {
+  id: string;
+  name: string;
+  /** True when `rects` is a single hull rather than one outline per member. */
+  enclosed: boolean;
+  rects: { x: number; y: number; width: number; height: number }[];
+  /**
+   * Where the name is written — one position per rect, inside its top-left clearance.
+   *
+   * Every outline is labelled, not just the first. A group split into three outlines with the name
+   * on one of them is three dashed boxes, one of which happens to say `billing`; with the name on
+   * all three it is one group in three places, which is what it is.
+   */
+  labels: { x: number; y: number }[];
+}
+
+/**
+ * The clearance between a member table and the boundary drawn around it.
+ *
+ * Per density, and it has to be: `compact` stacks boxes twelve pixels apart, so a twenty-pixel halo
+ * around one of them reaches over the top of its neighbour — and if that neighbour is not in the
+ * group, the outline drawn to say "these tables and no others" has just gone round one more.
+ * Smaller than the gap the density itself leaves, in both cases.
+ */
+const GROUP_PAD: Record<DiagramDensity, number> = { roomy: 20, compact: 6 };
 
 /**
  * The size of a box on *this* canvas.
@@ -125,13 +160,17 @@ export const DBML_METRICS: NodeMetrics = {
   row: 22,
   overflow: 18,
   minWidth: 212,
-  maxWidth: 392,
-  // The engine measures a name against its own sans-serif estimate and the canvas sets it in a
-  // monospace, which is a shade wider per character. The slack lives in the padding rather than in
-  // a second character-width constant: over-measuring costs a few pixels of air, and the renderer's
-  // clip is computed from the real geometry either way, so a name can only ever truncate early —
-  // never overrun the box it was measured for.
+  // Wide enough that a long name is a wide box rather than an ellipsis. A schema-qualified
+  // `analytics.subscription_events` is 29 characters, and at the header's own advance that alone is
+  // 209px before the glyph and the count are allowed for.
+  maxWidth: 470,
   namePadding: 62,
+  // The header is drawn in the same monospace as the rows, at 12px. Measuring it against the
+  // engine's sans estimate lost a third of a pixel per character, which is invisible on a short
+  // name and clips the last letter off a long one.
+  nameAdvance: 12 * 0.6,
+  // And it is drawn schema-qualified, so `shop.` is part of what has to fit.
+  qualifiedName: true,
   rowPadding: (column) =>
     46 +
     (column.primary_key ? 36 : 0) +
@@ -149,10 +188,115 @@ export function layoutDbml(
   },
 ): DbmlLayout {
   const diagram = toSchemaDiagram(schema, options.mode);
+  const groupBy = new Map<string, string>();
+  for (const group of schema.groups) {
+    for (const id of group.tables) groupBy.set(id, group.id);
+  }
   // `"all"` and not `options.mode`: the column filter has already been applied above, where it
   // could leave the enums alone. Passing it on would run it a second time over what survived.
-  const laid = layoutDiagram(diagram, "all", options.pinned, options.density, DBML_METRICS);
-  return { ...laid, enumIds: new Set(schema.enums.map((entry) => entry.id)) };
+  const laid = layoutDiagram(
+    diagram,
+    "all",
+    options.pinned,
+    options.density,
+    DBML_METRICS,
+    groupBy.size === 0 ? undefined : (id) => groupBy.get(id) ?? null,
+  );
+
+  const groups = groupBoxes(schema, laid, options.density);
+  return {
+    ...laid,
+    enumIds: new Set(schema.enums.map((entry) => entry.id)),
+    groups,
+    // A boundary may want a few pixels more clearance than the layout's own padding left it — at
+    // `compact` density it always does. Growing the canvas is the whole fix: the alternative is a
+    // group whose right edge is outside the viewBox and therefore missing from every export.
+    width: Math.max(
+      laid.width,
+      ...groups.flatMap((box) => box.rects.map((rect) => rect.x + rect.width + 4)),
+    ),
+    height: Math.max(
+      laid.height,
+      ...groups.flatMap((box) => box.rects.map((rect) => rect.y + rect.height + 4)),
+    ),
+  };
+}
+
+/**
+ * Boundaries, measured from where the members actually landed.
+ *
+ * Drawn *after* the layout, never as a constraint on it: the tables follow the foreign keys and the
+ * user's own dragging, and the boundary follows the tables.
+ *
+ * Which means the obvious drawing — one rectangle around the members' bounding box — is a rectangle
+ * that can contain tables that are not in the group. The layout is layered by foreign-key depth, so
+ * a group whose members sit at two different depths spans horizontally, and whatever is at the depth
+ * in between goes inside the box with them. A container that says `billing` and encloses four tables
+ * when the group has two is not a rougher answer than the truth; it is a different, wrong one.
+ *
+ * So the hull is drawn **only when it holds nothing else**. When it would swallow a stranger, the
+ * same dashed line is drawn around each member instead: less pretty, and it still says exactly
+ * which tables are in the group and no more. Dragging the members together turns it back into a
+ * container, which is the arrangement anyone who bothered to declare a group probably wanted.
+ */
+function groupBoxes(
+  schema: DbmlSchema,
+  laid: DiagramLayout,
+  density: DiagramDensity,
+): DbmlGroupBox[] {
+  const pad = GROUP_PAD[density];
+  const byId = new Map(laid.nodes.map((node) => [node.id, node]));
+  const boxes: DbmlGroupBox[] = [];
+
+  for (const group of schema.groups) {
+    const members = group.tables
+      .map((id) => byId.get(id))
+      .filter((node): node is DiagramNode => node !== undefined);
+    if (members.length === 0) continue;
+
+    const around = (nodes: DiagramNode[]) => {
+      const left = Math.min(...nodes.map((node) => node.x)) - pad;
+      const top = Math.min(...nodes.map((node) => node.y)) - pad;
+      const right = Math.max(...nodes.map((node) => node.x + node.width)) + pad;
+      const bottom = Math.max(...nodes.map((node) => node.y + node.height)) + pad;
+      // Clamped at the origin: nothing may sit at a negative coordinate, or the export's viewBox
+      // cuts it off and "fit to window" centres the diagram against a canvas it does not fill. The
+      // clamp shrinks the clearance on that one edge and never moves a table — which matters,
+      // because the tables are laid out from `pinned` and a shift here would be written back into
+      // the document by the next drag.
+      const x = Math.max(0, left);
+      const y = Math.max(0, top);
+      return { x, y, width: right - x, height: bottom - y };
+    };
+
+    const hull = around(members);
+    const own = new Set(members.map((node) => node.id));
+    const clean = laid.nodes.every(
+      (node) =>
+        own.has(node.id) ||
+        node.x + node.width <= hull.x ||
+        node.x >= hull.x + hull.width ||
+        node.y + node.height <= hull.y ||
+        node.y >= hull.y + hull.height,
+    );
+
+    const rects = clean ? [hull] : members.map((node) => around([node]));
+    boxes.push({
+      id: group.id,
+      name: group.name,
+      enclosed: clean,
+      rects,
+      labels: rects.map((rect) => ({
+        x: rect.x + Math.max(6, pad - 9),
+        y: rect.y + Math.max(9, pad - 6),
+      })),
+    });
+  }
+
+  // Biggest first, so a group nested inside another does not disappear underneath it.
+  const area = (box: DbmlGroupBox) =>
+    box.rects.reduce((total, rect) => total + rect.width * rect.height, 0);
+  return boxes.sort((a, b) => area(b) - area(a));
 }
 
 /** The schema half of a qualified id, or `null` for the default schema. `erLayout` wants them apart. */

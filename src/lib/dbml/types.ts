@@ -79,6 +79,24 @@ export interface DbmlEnum {
   values: DbmlEnumValue[];
 }
 
+/**
+ * A `TableGroup` — a named set of tables drawn inside one boundary.
+ *
+ * Part of DBML proper (dbdiagram.io draws it as a labelled container), and purely presentational:
+ * it declares no keys and constrains nothing. It is carried through anyway because dropping it
+ * would silently lose a line the author wrote, and because "which of these forty tables are the
+ * billing ones" is exactly the question a diagram is being asked when someone bothers to group them.
+ */
+export interface DbmlGroup {
+  /** `qualify(schema, name)`, like every other id here. */
+  id: string;
+  schema: string;
+  name: string;
+  note: string;
+  /** Qualified table ids. A name that resolves to no table is dropped at parse time. */
+  tables: string[];
+}
+
 export interface DbmlRef {
   /** Stable across a re-parse of the same document, so a hover or a selection survives a keystroke. */
   id: string;
@@ -97,12 +115,19 @@ export interface DbmlSchema {
   tables: DbmlTable[];
   enums: DbmlEnum[];
   refs: DbmlRef[];
+  groups: DbmlGroup[];
   /** `null` when the document parsed. Multi-line when the parser reported several diagnostics. */
   error: string | null;
 }
 
 /** An empty schema. One literal, so "nothing parsed yet" and "parsed to nothing" are the same shape. */
-export const EMPTY_SCHEMA: DbmlSchema = { tables: [], enums: [], refs: [], error: null };
+export const EMPTY_SCHEMA: DbmlSchema = {
+  tables: [],
+  enums: [],
+  refs: [],
+  groups: [],
+  error: null,
+};
 
 /**
  * The id of a table or enum: `name` in the default schema, `schema.name` anywhere else.
@@ -119,6 +144,11 @@ export function qualify(schema: string | null | undefined, name: string): string
 /** The table an endpoint names, or `undefined`. The lookup every consumer would otherwise write. */
 export function tableOf(schema: DbmlSchema, id: string): DbmlTable | undefined {
   return schema.tables.find((table) => table.id === id);
+}
+
+/** The group a table belongs to, or `undefined`. A table may be in at most one. */
+export function groupOfTable(schema: DbmlSchema, id: string): DbmlGroup | undefined {
+  return schema.groups.find((group) => group.tables.includes(id));
 }
 
 /**

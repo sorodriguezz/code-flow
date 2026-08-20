@@ -13,6 +13,7 @@ import {
   Maximize2,
   Search,
   Shrink,
+  X,
   Sparkles,
   Table2,
   Wand2,
@@ -117,6 +118,17 @@ export function DbmlWorkbench({
   /** Only so the canvas's chip can print it. Updated when the rounded percentage actually moves,
    *  or a pinch would re-render the workbench once per frame for a number that did not change. */
   const [zoom, setZoom] = useState(1);
+  /** How many tables the query hit. `null` when there is no query. */
+  const [hits, setHits] = useState<number | null>(null);
+  /**
+   * The selection, held.
+   *
+   * A pin makes the inspector stop following the canvas: clicks on a box or on the background no
+   * longer change what is being read. Deliberate navigation — a relation in the inspector — still
+   * moves it, and the pin comes along, because that is walking the schema rather than losing your
+   * place in it.
+   */
+  const [pinned, setPinned] = useState(false);
   const [mode, setMode] = useState<DiagramColumnMode>("all");
   /** The two side panes. Both on by default and both closable from the canvas's own edges, because
    *  three columns is a lot of window and which one you want depends on whether you are writing the
@@ -128,6 +140,7 @@ export function DbmlWorkbench({
   const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
 
   const canvas = useRef<DbmlCanvasHandle>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
 
   /** The document, split. Recomputed on every keystroke, which is a string scan and nothing more. */
@@ -181,10 +194,24 @@ export function DbmlWorkbench({
     const exists =
       schema.tables.some((table) => table.id === selected) ||
       schema.enums.some((entry) => entry.id === selected);
-    if (!exists) setSelected(null);
+    if (!exists) {
+      // The pin goes with it. A pin held on a table that no longer exists would lock the inspector
+      // on the empty state with no way back except un-pinning something that is not there.
+      setSelected(null);
+      setPinned(false);
+    }
   }, [schema, selected]);
 
   // ---- writing -------------------------------------------------------------
+
+  /** What the *canvas* is allowed to do to the selection. The inspector calls `setSelected`. */
+  const selectFromCanvas = useCallback(
+    (id: string | null) => {
+      if (pinned) return;
+      setSelected(id);
+    },
+    [pinned],
+  );
 
   /** One edit to the DBML itself, with the dragged boxes carried through untouched. */
   const writeSource = useCallback(
@@ -481,8 +508,9 @@ export function DbmlWorkbench({
                     positions={positions}
                     onMoveTable={moveTable}
                     selected={selected}
-                    onSelect={setSelected}
+                    onSelect={selectFromCanvas}
                     onOpen={revealTable}
+                    onMatchCount={setHits}
                     onZoom={(scale) =>
                       setZoom((current) =>
                         Math.round(scale * 100) === Math.round(current * 100) ? current : scale,
@@ -508,14 +536,46 @@ export function DbmlWorkbench({
                         className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
                       />
                       <input
+                        ref={searchRef}
                         value={query}
                         onChange={(event) => setQuery(event.target.value)}
                         onKeyDown={(event) => {
-                          if (event.key === "Escape") setQuery("");
+                          if (event.key === "Escape") {
+                            setQuery("");
+                            event.currentTarget.blur();
+                          }
+                          // Enter walks the hits left to right rather than re-running the search,
+                          // which is what a search box that has already found everything is for.
+                          if (event.key === "Enter") canvas.current?.nextMatch();
                         }}
                         placeholder={t("dbml.searchPlaceholder")}
-                        className="w-52 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 py-[5px] pl-[26px] pr-2 text-[11px] shadow-[var(--cf-shadow)] outline-none backdrop-blur transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+                        className={`w-56 rounded-lg border bg-[var(--cf-surface-raised)]/90 py-[5px] pl-[26px] text-[11px] shadow-[var(--cf-shadow)] outline-none backdrop-blur transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] ${
+                          query ? "pr-[52px]" : "pr-2"
+                        } ${
+                          query && hits === 0
+                            ? "border-[var(--cf-danger)]"
+                            : "border-[var(--cf-border)]"
+                        }`}
                       />
+                      {query && (
+                        <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                          <span className="text-[9.5px] tabular-nums text-[var(--cf-text-muted)]">
+                            {hits ?? 0}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setQuery("");
+                              searchRef.current?.focus();
+                            }}
+                            title={t("dbml.clearSearch")}
+                            aria-label={t("dbml.clearSearch")}
+                            className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
+                          >
+                            <X size={11} />
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -578,8 +638,13 @@ export function DbmlWorkbench({
                     schema={schema}
                     id={selected}
                     onSelect={setSelected}
-                    onClose={() => setSelected(null)}
+                    onClose={() => {
+                      setPinned(false);
+                      setSelected(null);
+                    }}
                     onOpen={revealTable}
+                    pinned={pinned}
+                    onTogglePin={() => setPinned((held) => !held)}
                   />
                 )}
               </div>

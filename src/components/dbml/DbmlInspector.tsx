@@ -1,5 +1,11 @@
-import { Link2, ListOrdered, MousePointerClick, X } from "lucide-react";
-import { neighboursOf, tableOf, type DbmlRef, type DbmlSchema } from "../../lib/dbml/types";
+import { Link2, ListOrdered, MousePointerClick, Pin, X } from "lucide-react";
+import {
+  groupOfTable,
+  neighboursOf,
+  tableOf,
+  type DbmlRef,
+  type DbmlSchema,
+} from "../../lib/dbml/types";
 import { ICON_BUTTON } from "../diagrams/diagramsChrome";
 import { useT } from "../../state/languageStore";
 
@@ -26,6 +32,8 @@ export function DbmlInspector({
   onSelect,
   onClose,
   onOpen,
+  pinned = false,
+  onTogglePin,
 }: {
   schema: DbmlSchema;
   /** The selected table or enum. `null` draws the empty state. */
@@ -34,6 +42,9 @@ export function DbmlInspector({
   onClose: () => void;
   /** Jumps to the declaration in the editor. */
   onOpen?: (id: string) => void;
+  /** Held: the canvas can no longer change what is being read. */
+  pinned?: boolean;
+  onTogglePin?: () => void;
 }) {
   const t = useT();
   const table = id ? tableOf(schema, id) : null;
@@ -42,6 +53,7 @@ export function DbmlInspector({
   const outgoing = id ? schema.refs.filter((ref) => ref.from.table === id) : [];
   const incoming = id ? schema.refs.filter((ref) => ref.to.table === id) : [];
   const related = id ? neighboursOf(schema, id).tables.size : 0;
+  const group = id ? groupOfTable(schema, id) : undefined;
 
   return (
     <aside className="flex w-[236px] shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)] bg-[var(--cf-surface)]">
@@ -49,6 +61,21 @@ export function DbmlInspector({
         <span className="min-w-0 flex-1 truncate text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
           {t("dbml.inspector.title")}
         </span>
+        {id && onTogglePin && (
+          <button
+            type="button"
+            className={ICON_BUTTON}
+            style={pinned ? { color: "var(--cf-accent)" } : undefined}
+            title={t(pinned ? "dbml.inspector.unpin" : "dbml.inspector.pin")}
+            aria-label={t(pinned ? "dbml.inspector.unpin" : "dbml.inspector.pin")}
+            aria-pressed={pinned}
+            onClick={onTogglePin}
+          >
+            {/* One glyph in two states rather than two glyphs: a crossed-out pin on the button
+                that *applies* the pin reads as "pinning is off limits here". */}
+            <Pin size={12} fill={pinned ? "currentColor" : "none"} />
+          </button>
+        )}
         {id && (
           <button
             type="button"
@@ -77,16 +104,26 @@ export function DbmlInspector({
           <h2 className="mt-0.5 truncate font-mono text-[14px] font-semibold text-[var(--cf-text)]">
             {table ? table.name : asEnum?.name}
           </h2>
-          {related > 0 && (
-            <p className="mt-0.5 text-[10px] text-[var(--cf-text-muted)]">
-              {t("dbml.relatedCount", { count: String(related) })}
-            </p>
-          )}
+          <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10px] text-[var(--cf-text-muted)]">
+            {related > 0 && <span>{t("dbml.relatedCount", { count: String(related) })}</span>}
+            {group && (
+              <span className="rounded bg-[var(--cf-text-muted)]/15 px-1.5 py-[1px] font-mono text-[9.5px]">
+                {group.name}
+              </span>
+            )}
+            {pinned && (
+              <span className="text-[9.5px] uppercase tracking-wide text-[var(--cf-accent)]">
+                {t("dbml.inspector.pinned")}
+              </span>
+            )}
+          </p>
 
           {table?.note && (
-            <p className="mt-2 rounded-md bg-[var(--cf-field)] px-2 py-1.5 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
-              {table.note}
-            </p>
+            <Section label={t("dbml.inspector.note")}>
+              <p className="whitespace-pre-wrap rounded-md bg-[var(--cf-field)] px-2 py-1.5 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+                {table.note}
+              </p>
+            </Section>
           )}
 
           {asEnum && (
@@ -107,20 +144,36 @@ export function DbmlInspector({
           {table && (
             <Section label={t("dbml.inspector.fieldsCount", { count: String(table.fields.length) })}>
               {table.fields.map((field) => (
-                <div key={field.name} className="flex items-center gap-1.5 py-[3px]">
-                  <span
-                    className="min-w-0 flex-1 truncate font-mono text-[11px]"
-                    style={{
-                      color: field.pk ? "var(--cf-warning)" : undefined,
-                      fontStyle: field.notNull || field.pk ? undefined : "italic",
-                      opacity: field.notNull || field.pk ? 1 : 0.7,
-                    }}
-                  >
-                    {field.name}
-                  </span>
-                  {field.pk && <Badge label="PK" tone="key" />}
-                  {field.unique && !field.pk && <Badge label="U" tone="unique" />}
-                  {field.type && <Badge label={field.type} tone="type" />}
+                <div key={field.name} className="py-[3px]">
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className="min-w-0 flex-1 truncate font-mono text-[11px]"
+                      style={{
+                        color: field.pk ? "var(--cf-warning)" : undefined,
+                        fontStyle: field.notNull || field.pk ? undefined : "italic",
+                        opacity: field.notNull || field.pk ? 1 : 0.7,
+                      }}
+                    >
+                      {field.name}
+                    </span>
+                    {field.pk && <Badge label="PK" tone="key" />}
+                    {field.unique && !field.pk && <Badge label="U" tone="unique" />}
+                    {field.type && <Badge label={field.type} tone="type" />}
+                  </div>
+                  {/* The `[note: '…']` on the column. This panel is the only place it is ever
+                      readable: on the canvas the row is a name, a type and its badges, and there is
+                      no width left for a sentence — which is why a note written in the document used
+                      to be invisible everywhere but the document. */}
+                  {field.note && (
+                    <p className="mt-[1px] border-l border-[var(--cf-border)] pl-1.5 text-[9.5px] leading-snug text-[var(--cf-text-muted)]">
+                      {field.note}
+                    </p>
+                  )}
+                  {field.default !== null && (
+                    <p className="mt-[1px] pl-1.5 font-mono text-[9.5px] leading-snug text-[var(--cf-text-muted)]">
+                      {t("dbml.inspector.default", { value: field.default })}
+                    </p>
+                  )}
                 </div>
               ))}
             </Section>

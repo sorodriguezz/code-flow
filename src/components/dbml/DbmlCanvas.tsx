@@ -49,6 +49,8 @@ import type { DiagramColumnMode, DiagramDensity, DiagramNode } from "../../lib/d
 
 const ZOOM_MIN = 0.15;
 const ZOOM_MAX = 2.5;
+/** The scale a table found by searching is at least brought to. */
+const READABLE_ZOOM = 0.85;
 
 /** The id of the panned group, so `standaloneSvg` can put the export back to 1:1. */
 export const DBML_CANVAS_ID = "cf-dbml-canvas";
@@ -93,6 +95,10 @@ export interface DbmlCanvasHandle {
   /** Scales and centres the whole schema in the frame. */
   fit: () => void;
   zoomBy: (factor: number) => void;
+  /** Puts one table in the middle of the frame, zooming in far enough to read it. */
+  focusTable: (id: string) => void;
+  /** Centres the next table matching the search, wrapping at the end. */
+  nextMatch: () => void;
   /** The live `<svg>`, for the export and the thumbnail. `null` before the first paint. */
   element: () => SVGSVGElement | null;
   /** The laid-out diagram, which the export needs for its viewBox. */
@@ -116,8 +122,10 @@ export const DbmlCanvas = forwardRef<
     onZoom?: (scale: number) => void;
     mode: DiagramColumnMode;
     density: DiagramDensity;
-    /** Dims everything that does not match. Empty means "no search". */
+    /** Dims everything that does not match, and centres on the first hit. Empty means "no search". */
     query?: string;
+    /** How many tables the query matched, for a toolbar that wants to say so. */
+    onMatchCount?: (count: number) => void;
     className?: string;
   }
 >(function DbmlCanvas(
@@ -132,6 +140,7 @@ export const DbmlCanvas = forwardRef<
     mode,
     density,
     query = "",
+    onMatchCount,
     className,
   },
   ref,
@@ -149,8 +158,12 @@ export const DbmlCanvas = forwardRef<
   >(null);
   /** The table under the pointer, which previews the selection its click would make. */
   const [hovered, setHovered] = useState<string | null>(null);
-  /** The *line* under the pointer, by ref id. Its own state because it outranks both of the above. */
+  /** The *line* under the pointer, by ref id. Its own state because it feeds a different question. */
   const [hoveredLink, setHoveredLink] = useState<string | null>(null);
+  /** The current search hits and which one Enter last landed on. Refs, not state: they drive an
+   *  imperative move and nothing on screen reads them. */
+  const matchRef = useRef<string[]>([]);
+  const matchAt = useRef(0);
 
   const layout = useMemo(
     () => layoutDbml(schema, { mode, density, pinned: positions }),
@@ -161,9 +174,11 @@ export const DbmlCanvas = forwardRef<
     [layout.nodes],
   );
 
-  // Held in a ref so the zoom readout is not a dependency of every callback that pans.
+  // Held in refs so the two readouts are not dependencies of every callback that pans or searches.
   const zoomSink = useRef(onZoom);
   zoomSink.current = onZoom;
+  const matchSink = useRef(onMatchCount);
+  matchSink.current = onMatchCount;
 
   const applyView = useCallback((next: { x: number; y: number; k: number }) => {
     const changed = viewRef.current.k !== next.k;
@@ -223,10 +238,47 @@ export const DbmlCanvas = forwardRef<
     [applyView, scheduleCommit],
   );
 
+  /**
+   * One table, centred.
+   *
+   * Zoomed to at least `READABLE_ZOOM` on the way, because centring a schema that is scaled to 20%
+   * to fit two hundred tables puts the answer in the middle of the window at four pixels tall.
+   * Never zooms *out*: if you are already in close, the search is a way of moving, not of leaving.
+   */
+  const focusTable = useCallback(
+    (id: string) => {
+      const frame = frameRef.current;
+      const node = nodeById.get(id);
+      if (!frame || !node) return;
+      const k = Math.max(viewRef.current.k, READABLE_ZOOM);
+      applyView({
+        k,
+        x: frame.clientWidth / 2 - (node.x + node.width / 2) * k,
+        y: frame.clientHeight / 2 - (node.y + node.height / 2) * k,
+      });
+      commitView();
+    },
+    [applyView, commitView, nodeById],
+  );
+
+  const nextMatch = useCallback(() => {
+    const ids = matchRef.current;
+    if (ids.length === 0) return;
+    matchAt.current = (matchAt.current + 1) % ids.length;
+    focusTable(ids[matchAt.current]);
+  }, [focusTable]);
+
   useImperativeHandle(
     ref,
-    () => ({ fit, zoomBy, element: () => svgRef.current, layout: () => layout }),
-    [fit, zoomBy, layout],
+    () => ({
+      fit,
+      zoomBy,
+      focusTable,
+      nextMatch,
+      element: () => svgRef.current,
+      layout: () => layout,
+    }),
+    [fit, zoomBy, focusTable, nextMatch, layout],
   );
 
   /**
@@ -248,27 +300,48 @@ export const DbmlCanvas = forwardRef<
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [density]);
 
-  const onWheel = (event: React.WheelEvent) => {
+  /**
+   * The wheel zooms, on its own, anywhere inside this frame — and nowhere else.
+   *
+   * A **native** listener rather than React's `onWheel`, and that is the whole point of the effect:
+   * React registers wheel handlers as passive, so `preventDefault` inside one is ignored and the
+   * pane behind the canvas scrolls away underneath the pointer while the diagram zooms. Bound to
+   * the frame element, so the rest of the workbench — the editor, the panels — keeps its ordinary
+   * scrolling.
+   *
+   * Shift pans sideways instead, which is the one thing the wheel used to do that dragging does not
+   * already do better.
+   */
+  useEffect(() => {
     const frame = frameRef.current;
     if (!frame) return;
-    if (event.ctrlKey || event.metaKey) {
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      if (event.shiftKey) {
+        const current = viewRef.current;
+        applyView({ ...current, x: current.x - (event.deltaY || event.deltaX), y: current.y });
+        scheduleCommit();
+        return;
+      }
       const box = frame.getBoundingClientRect();
       zoomBy(Math.pow(0.999, event.deltaY), {
         x: event.clientX - box.left,
         y: event.clientY - box.top,
       });
-      return;
-    }
-    const current = viewRef.current;
-    applyView({ ...current, x: current.x - event.deltaX, y: current.y - event.deltaY });
-    scheduleCommit();
-  };
+    };
+    frame.addEventListener("wheel", onWheel, { passive: false });
+    return () => frame.removeEventListener("wheel", onWheel);
+  }, [applyView, scheduleCommit, zoomBy]);
 
   const onPointerDown = (event: React.PointerEvent, node?: DiagramNode) => {
     if (event.button !== 0) return;
     event.stopPropagation();
     // Stops the press from starting a native text selection over the labels. See the frame's style.
     event.preventDefault();
+    // ...which also stops the browser moving focus for us, so it is moved here — for a press on a
+    // box as much as on the background. Without it the caret stays in the search field for the rest
+    // of the session and every keystroke aimed at the canvas lands in the query.
+    frameRef.current?.focus({ preventScroll: true });
     frameRef.current?.setPointerCapture?.(event.pointerId);
     dragRef.current = node
       ? {
@@ -326,40 +399,65 @@ export const DbmlCanvas = forwardRef<
    *
    * Three gestures can ask the question and they are ranked, most specific first:
    *
-   * 1. **A line under the pointer** lights exactly the two tables it joins, itself, and the columns
-   *    it is made of. It outranks a selected table deliberately: once a table is selected you are
-   *    looking at five lines leaving it, and "which one is this" is a question only the line can
-   *    answer. Nothing is dimmed permanently by it — let go and the selection comes back.
-   * 2. **A selected table** lights its whole neighbourhood, and stays lit.
-   * 3. **A hovered table** does the same but only while nothing is selected, so the neighbourhood
-   *    can be previewed by moving the pointer — which is how you find the table you meant to click.
+   * 1. **A selected table** wins outright, and stays lit until it is deselected. A selection is a
+   *    committed state — the inspector is open on it — and hover is not allowed to fight it. It
+   *    used to be the other way round, on the theory that a line is the more specific question; in
+   *    use that just meant the picture you had asked for kept dissolving as the pointer crossed the
+   *    lines leading to it.
+   * 2. **A line under the pointer**, when nothing is selected: exactly the two tables it joins,
+   *    itself, and the columns it is made of.
+   * 3. **A hovered table**, when neither of the above applies, so the neighbourhood can be previewed
+   *    by moving the pointer — which is how you find the table you meant to click.
    */
-  const focusKind = hoveredLink ? "ref" : "table";
-  const focusId = hoveredLink ?? selected ?? hovered;
+  const focusKind = !selected && hoveredLink ? "ref" : "table";
+  const focusId = selected ?? hoveredLink ?? hovered;
   const highlight = useMemo(
     () => highlightFor(schema, focusId ? { kind: focusKind, id: focusId } : null),
     [focusKind, focusId, schema],
   );
 
-  const matches = useMemo(() => {
+  /** The tables the query hits, in the order they are laid out — which is the order `nextMatch`
+   *  walks, so pressing Enter moves left to right rather than at random. */
+  const matchIds = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return null;
-    return new Set(
-      layout.nodes
-        .filter(
-          (node) =>
-            node.name.toLowerCase().includes(needle) ||
-            node.columns.some((column) => column.name.toLowerCase().includes(needle)),
-        )
-        .map((node) => node.id),
-    );
+    return layout.nodes
+      .filter(
+        (node) =>
+          node.name.toLowerCase().includes(needle) ||
+          node.columns.some((column) => column.name.toLowerCase().includes(needle)),
+      )
+      .map((node) => node.id);
   }, [layout.nodes, query]);
+  const matches = useMemo(() => (matchIds ? new Set(matchIds) : null), [matchIds]);
+
+  /**
+   * Centres on the first hit as the query changes — and only when the *set of hits* changes.
+   *
+   * Keyed on the ids rather than on the array, because the layout is rebuilt on every keystroke of
+   * the document as well as of the query: reacting to the array's identity would re-centre the
+   * canvas once per character typed in the editor, which is the diagram walking away under the
+   * reader for no reason at all.
+   */
+  const matchKey = matchIds?.join("\u0000") ?? "";
+  useEffect(() => {
+    const ids = matchKey ? matchKey.split("\u0000") : [];
+    matchRef.current = ids;
+    matchAt.current = 0;
+    matchSink.current?.(ids.length);
+    if (ids.length > 0) focusTable(ids[0]);
+    // `focusTable` is stable per layout; re-running on it alone would re-centre on every relayout.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchKey]);
 
   return (
     <div
       ref={frameRef}
-      className={`relative min-h-0 select-none overflow-hidden bg-[var(--cf-bg)] ${className ?? ""}`}
-      onWheel={onWheel}
+      className={`relative min-h-0 select-none overflow-hidden bg-[var(--cf-bg)] outline-none ${className ?? ""}`}
+      // Focusable, but not in the tab order. A press moves focus here, which is the only way the
+      // search box above ever gives it up: without this the caret stays in the field for the rest
+      // of the session, and every keystroke meant for the canvas goes into the query.
+      tabIndex={-1}
       onPointerDown={(event) => {
         onPointerDown(event);
         // A press on the background clears the selection, which is the only way back to seeing the
@@ -436,6 +534,43 @@ export const DbmlCanvas = forwardRef<
             fill="url(#cf-dbml-dots)"
             pointerEvents="none"
           />
+
+          {/* `TableGroup` boundaries, drawn first so every table and line sits on top of them.
+              Deliberately *not* in the accent: a group is a note about the model rather than part of
+              its structure, and the accent on this canvas means "relationship". */}
+          {layout.groups.map((box) => (
+            <g key={`group-${box.id}`} pointerEvents="none">
+              {box.rects.map((rect, at) => (
+                <rect
+                  key={at}
+                  x={rect.x}
+                  y={rect.y}
+                  width={rect.width}
+                  height={rect.height}
+                  rx={14}
+                  fill="var(--cf-text-muted)"
+                  fillOpacity={0.05}
+                  stroke="var(--cf-text-muted)"
+                  strokeOpacity={0.3}
+                  strokeWidth={1}
+                  strokeDasharray="7 5"
+                />
+              ))}
+              {box.labels.map((at, index) => (
+                <text
+                  key={index}
+                  x={at.x}
+                  y={at.y}
+                  fontSize={10}
+                  fontFamily={MONO}
+                  fontWeight={600}
+                  fill="var(--cf-text-muted)"
+                >
+                  {box.name}
+                </text>
+              ))}
+            </g>
+          ))}
 
           {layout.links.map((link) => {
             const from = nodeById.get(link.from);

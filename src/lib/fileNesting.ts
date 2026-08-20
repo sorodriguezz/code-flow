@@ -92,31 +92,58 @@ export const EMPTY_NESTS: ReadonlyMap<string, FileEntry[]> = new Map();
 export const EMPTY_PARENTS: ReadonlyMap<string, string> = new Map();
 
 /**
- * Whether `name` is a parent under `pattern`, and what the `*` captured.
+ * Whether `name` is a parent under `pattern`, and what the first `*` captured.
  *
  * Returns the captured text, `""` for a pattern with no `*` that matched exactly, or `null` for no
  * match — so callers test against `null` rather than against emptiness, since an exact-name parent
  * legitimately captures nothing.
+ *
+ * **More than one `*` is allowed**, and the extra ones are what make "a name with a role segment in
+ * it" expressible: `*.*.ts` is every `x.controller.ts` and no `user.ts`, which is the difference
+ * between a file that is a by-product of its neighbour and one that is its sibling. Only the first
+ * star is captured — the rest are anonymous — because `${capture}` is one hole and numbering them
+ * would be a small language in a settings field. A rule that needs the whole stem uses
+ * `${basename}`, which is what the shipped `n-suffix-ts` does.
  *
  * Compared case-insensitively, on the same reasoning as `ruleMatches`: macOS and Windows do not
  * distinguish either, so a pattern that worked on one machine and not on a colleague's would be a
  * difference nobody could see by reading the two.
  */
 export function matchParent(pattern: string, name: string): string | null {
-  const star = pattern.indexOf("*");
-  if (star < 0) return pattern.toLowerCase() === name.toLowerCase() ? "" : null;
-  const head = pattern.slice(0, star);
-  const tail = pattern.slice(star + 1);
+  const parts = pattern.toLowerCase().split("*");
+  if (parts.length === 1) return pattern.toLowerCase() === name.toLowerCase() ? "" : null;
+
+  const lower = name.toLowerCase();
+  const head = parts[0];
+  const tail = parts[parts.length - 1];
   // The length guard is what stops head and tail from overlapping: without it `a*a` would "match"
   // the name `a` by reading the same character twice and capture a negative slice.
   if (name.length < head.length + tail.length) return null;
-  const lower = name.toLowerCase();
-  if (!lower.startsWith(head.toLowerCase())) return null;
-  if (!lower.endsWith(tail.toLowerCase())) return null;
+  if (!lower.startsWith(head)) return null;
+  if (!lower.endsWith(tail)) return null;
+
+  const end = lower.length - tail.length;
+  let at = head.length;
+  // Where the first star's run stops: the start of the first literal that follows it, or the tail
+  // when there is nothing in between.
+  let capturedTo = end;
+  let firstLiteral = true;
+  for (let index = 1; index < parts.length - 1; index += 1) {
+    const part = parts[index];
+    if (!part) continue;
+    const found = lower.indexOf(part, at);
+    if (found < 0 || found + part.length > end) return null;
+    if (firstLiteral) {
+      capturedTo = found;
+      firstLiteral = false;
+    }
+    at = found + part.length;
+  }
+
   // Sliced out of the original, not the lowercased copy: the capture is fed back into child names
   // (which are matched case-insensitively anyway) and into the panel's preview line, where seeing
   // your own casing is the point.
-  return name.slice(head.length, name.length - tail.length);
+  return name.slice(head.length, capturedTo);
 }
 
 /**
@@ -239,6 +266,36 @@ export function resolveNesting(entries: FileEntry[], patterns: NestingPattern[])
   // which no pattern could have told apart anyway.
   for (const file of files) byName.set(file.name.toLowerCase(), file);
 
+  /**
+   * The listing sorted by name, so a glob child can be answered without walking all of it.
+   *
+   * A glob only ever matches names that **start with its leading literal** — `globMatches` says so
+   * in its first line — so the candidates for `user.controller.*.ts` are a contiguous run of the
+   * sorted names, found by binary search. Without this the glob branch below is a full scan per
+   * parent, which is quadratic and stops being theoretical the moment a rule's parent is a shape
+   * most of the directory has: a folder of 3,000 role-suffixed files took 608ms to arrange, and one
+   * of 9,000 took five and a half seconds, all of it between the click and the tree appearing.
+   */
+  const sorted = [...files].sort((a, b) => {
+    const left = a.name.toLowerCase();
+    const right = b.name.toLowerCase();
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  const keys = sorted.map((file) => file.name.toLowerCase());
+  const withPrefix = (prefix: string): FileEntry[] => {
+    if (!prefix) return sorted;
+    let low = 0;
+    let high = keys.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (keys[mid] < prefix) low = mid + 1;
+      else high = mid;
+    }
+    const found: FileEntry[] = [];
+    for (let at = low; at < keys.length && keys[at].startsWith(prefix); at += 1) found.push(sorted[at]);
+    return found;
+  };
+
   const claims = new Map<string, Claim>();
   const claim = (child: FileEntry, parent: FileEntry) => {
     // A file is never its own child — reachable with a template like `${capture}.ts` under `*.ts`.
@@ -258,10 +315,11 @@ export function resolveNesting(entries: FileEntry[], patterns: NestingPattern[])
       for (const template of pattern.children) {
         const expanded = expandTemplate(template.trim(), capture, parent.name);
         if (!expanded) continue;
-        if (expanded.includes("*")) {
-          // The rare shape (`tsconfig.*.json`, `.env.*`): no single name to look up, so the
-          // listing has to be walked.
-          for (const candidate of files) {
+        const star = expanded.indexOf("*");
+        if (star >= 0) {
+          // A glob child (`tsconfig.*.json`, `${basename}.*.ts`): no single name to look up, so the
+          // candidates are the run of names sharing its leading literal — see `withPrefix`.
+          for (const candidate of withPrefix(expanded.slice(0, star).toLowerCase())) {
             if (globMatches(expanded, candidate.name)) claim(candidate, parent);
           }
         } else {
@@ -307,16 +365,30 @@ export function resolveNesting(entries: FileEntry[], patterns: NestingPattern[])
  * lockfile of", "the compiled output of" — because that is the line this list has to stay on. A
  * pattern that groups files which merely *look* related is the reason people turn the feature off.
  *
- * Which is exactly why `${capture}.*.ts` is **not** here, though VS Code ships something like it
- * for a couple of languages: it would have `user.ts` swallow `user.model.ts`, and a model is a
- * sibling module, not a by-product of its neighbour. If it is ever added, it should be added
- * disabled, not on.
+ * Which is why `*.ts` taking in `${capture}.*.ts` is **not** here, though VS Code ships something
+ * like it: it would have `user.ts` swallow `user.model.ts`, and a model is a sibling module, not a
+ * by-product of its neighbour.
+ *
+ * `n-suffix-ts` is the same idea with that objection designed out, and the difference is one star.
+ * Its parent is `*.*.ts` — a name that *already carries a role segment* — so `user.ts` never
+ * matches it and `user.model.ts` is never claimed by anything. What does match is
+ * `user.controller.ts`, and what it takes in is `user.controller.<anything>.ts`: the docs for that
+ * controller, its spec, its mock. Those are by-products by the same test as the rest of this list,
+ * and enumerating the suffixes one at a time — `.docs.ts`, then the next one somebody invents —
+ * is a list that is always one convention behind the codebase it is describing.
  */
 export const DEFAULT_NESTING_PATTERNS: NestingPattern[] = [
   {
     id: "n-ts",
     parent: "*.ts",
-    children: ["${capture}.spec.ts", "${capture}.test.ts", "${capture}.js", "${capture}.d.ts", "${capture}.js.map"],
+    children: [
+      "${capture}.spec.ts",
+      "${capture}.test.ts",
+      "${capture}.e2e-spec.ts",
+      "${capture}.js",
+      "${capture}.d.ts",
+      "${capture}.js.map",
+    ],
     enabled: true,
   },
   {
@@ -342,6 +414,15 @@ export const DEFAULT_NESTING_PATTERNS: NestingPattern[] = [
       "${capture}.component.scss",
       "${capture}.component.spec.ts",
     ],
+    enabled: true,
+  },
+  {
+    // Everything hanging off a file that already names its role: `user.controller.docs.ts` and
+    // `user.controller.spec.ts` under `user.controller.ts`. See the note above for why the parent
+    // needs the second star, and `matchParent` for what it means.
+    id: "n-suffix-ts",
+    parent: "*.*.ts",
+    children: ["${basename}.*.ts"],
     enabled: true,
   },
   { id: "n-vue", parent: "*.vue", children: ["${capture}.spec.ts", "${capture}.stories.ts"], enabled: true },

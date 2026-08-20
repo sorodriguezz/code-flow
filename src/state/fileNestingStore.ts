@@ -47,6 +47,46 @@ const KEY = "editor_file_nesting";
 interface StoredNesting {
   enabled: boolean;
   patterns: NestingPattern[];
+  /** Which generation of `DEFAULT_NESTING_PATTERNS` this row has already been offered. See
+   *  `PATTERN_GENERATION`. Absent on every row written before there was one, which reads as 0. */
+  generation?: number;
+}
+
+/**
+ * Bumped whenever a rule is **added** to `DEFAULT_NESTING_PATTERNS`.
+ *
+ * The list is saved into the user's settings the first time the switch is touched, and after that
+ * the saved copy wins — which is right for a list the user can edit, and wrong for one they cannot:
+ * the panel that edited these was removed, so a new default would reach a fresh install and nobody
+ * else, forever. `n-suffix-ts` was exactly that: the fix for "`.controller.docs.ts` does not nest"
+ * shipped, and every existing install carried on not nesting it.
+ *
+ * So a row from an older generation gets the rules added since, appended in order, and is written
+ * back at the new generation. Only rules *added* — an existing id is never touched, so an edited
+ * pattern stays edited and a disabled one stays disabled.
+ */
+const PATTERN_GENERATION = 1;
+
+/** Which generation first shipped each rule. Anything unlisted is generation 0 — original. */
+const PATTERN_ADDED_IN: Record<string, number> = { "n-suffix-ts": 1 };
+
+/**
+ * The stored list plus whatever defaults it has never been offered.
+ *
+ * Matched by id, so a rule the user changed keeps their version of it. Returns the same array when
+ * there is nothing to add, which keeps the common path free of a pointless re-render.
+ */
+function withNewDefaults(patterns: NestingPattern[], generation: number): NestingPattern[] {
+  if (generation >= PATTERN_GENERATION) return patterns;
+  // An empty list is the one unmistakable sign of a curated row — see `parse`, which goes out of
+  // its way to keep "emptied on purpose" distinct from "nothing saved". Handing that row a rule
+  // back would undo the only edit it has.
+  if (patterns.length === 0) return patterns;
+  const present = new Set(patterns.map((pattern) => pattern.id));
+  const added = DEFAULT_NESTING_PATTERNS.filter(
+    (pattern) => !present.has(pattern.id) && (PATTERN_ADDED_IN[pattern.id] ?? 0) > generation,
+  );
+  return added.length === 0 ? patterns : [...patterns, ...added];
 }
 
 interface FileNestingState {
@@ -82,6 +122,7 @@ function parse(stored: string | null): StoredNesting | null {
     if (!Array.isArray(row.patterns)) return null;
     return {
       enabled: row.enabled === true,
+      generation: typeof row.generation === "number" ? row.generation : 0,
       patterns: row.patterns.filter(
         (entry): entry is NestingPattern =>
           typeof entry === "object" &&
@@ -103,8 +144,10 @@ function parse(stored: string | null): StoredNesting | null {
 export const useFileNestingStore = create<FileNestingState>((set, get) => {
   /** Fire-and-forget, like every write in `hiddenFilesStore`: the state on screen is already
    *  correct, and a settings write that fails must not take the interaction down with it. */
-  const persist = (next: StoredNesting) => {
-    void setSetting(KEY, JSON.stringify(next)).catch(() => {});
+  const persist = (next: Omit<StoredNesting, "generation">) => {
+    void setSetting(KEY, JSON.stringify({ ...next, generation: PATTERN_GENERATION })).catch(
+      () => {},
+    );
   };
 
   return {
@@ -114,12 +157,17 @@ export const useFileNestingStore = create<FileNestingState>((set, get) => {
 
     init: async () => {
       const stored = parse(await getSetting(KEY).catch(() => null));
-      set({
-        enabled: stored?.enabled ?? false,
-        // See `parse`: only a genuinely absent or unreadable row falls back to the defaults.
-        patterns: stored ? stored.patterns : DEFAULT_NESTING_PATTERNS,
-        loaded: true,
-      });
+      // See `parse`: only a genuinely absent or unreadable row falls back to the defaults.
+      const patterns = stored
+        ? withNewDefaults(stored.patterns, stored.generation ?? 0)
+        : DEFAULT_NESTING_PATTERNS;
+      set({ enabled: stored?.enabled ?? false, patterns, loaded: true });
+      // Written back so the migration settles instead of running on every launch — and only when
+      // there was a row to migrate, so a first run still leaves the settings untouched until the
+      // user actually turns something on.
+      if (stored && (stored.generation ?? 0) < PATTERN_GENERATION) {
+        persist({ enabled: stored.enabled, patterns });
+      }
     },
 
     setEnabled: (value) => {
