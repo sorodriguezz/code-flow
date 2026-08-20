@@ -117,7 +117,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
     () =>
       tab.diagram
         ? layoutDiagram(tab.diagram, mode, pinned, density)
-        : { nodes: [], links: [], width: 0, height: 0 },
+        : { nodes: [], links: [], minX: 0, minY: 0, width: 0, height: 0 },
     [tab.diagram, mode, pinned, density],
   );
   const stats = useMemo(() => (tab.diagram ? diagramStats(tab.diagram) : null), [tab.diagram]);
@@ -170,10 +170,12 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
       1,
     );
     const scale = Math.max(ZOOM_MIN, k);
+    // Offset by the content's own origin: a box dragged left of it makes `minX` negative, and
+    // centring the *size* alone would leave the diagram sitting that far off to one side.
     applyView({
       k: scale,
-      x: (frame.clientWidth - layout.width * scale) / 2,
-      y: (frame.clientHeight - layout.height * scale) / 2,
+      x: (frame.clientWidth - layout.width * scale) / 2 - layout.minX * scale,
+      y: (frame.clientHeight - layout.height * scale) / 2 - layout.minY * scale,
     });
     commitView();
   };

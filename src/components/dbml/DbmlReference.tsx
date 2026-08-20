@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
+import { CopyButton } from "./CopyButton";
 import { ICON_BUTTON } from "../diagrams/diagramsChrome";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -136,13 +137,25 @@ export function DbmlReference({ onClose }: { onClose: () => void }) {
             {t("dbml.ref.intro")}
           </p>
           {ENTRIES.map((entry) => (
-            <section key={entry.label} className="mb-2.5 last:mb-1">
+            <section key={entry.label} className="group/example mb-2.5 last:mb-1">
               <h3 className="mb-1 text-[9px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-accent)]">
                 {t(entry.label)}
               </h3>
-              <pre className="overflow-x-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] px-2 py-1.5 font-mono text-[10.5px] leading-[1.5] text-[var(--cf-text-muted)]">
-                {entry.code}
-              </pre>
+              {/* The point of a reference is to be taken from, so every block is one click from
+                  the clipboard. Dimmed rather than hidden until hover: a control nobody can see is
+                  a control nobody uses, and this one exists because it was asked for by name. */}
+              <div className="relative">
+                <pre className="overflow-x-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] py-1.5 pl-2 pr-8 font-mono text-[10.5px] leading-[1.5] text-[var(--cf-text-muted)]">
+                  {entry.code}
+                </pre>
+                <div className="absolute right-1 top-1 opacity-55 transition-opacity focus-within:opacity-100 group-hover/example:opacity-100">
+                  <CopyButton
+                    text={entry.code}
+                    compact
+                    className="flex items-center rounded border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[3px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
+                  />
+                </div>
+              </div>
             </section>
           ))}
         </div>

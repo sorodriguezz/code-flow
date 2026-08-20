@@ -37,7 +37,8 @@ export type LayoutKey =
   | "notesSidebarWidth"
   | "notesOutlineWidth"
   | "diagramsSidebarWidth"
-  | "dbmlEditorWidth";
+  | "dbmlEditorWidth"
+  | "dbmlInspectorWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -76,6 +77,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   notesOutlineWidth: "layout_notes_outline_width",
   diagramsSidebarWidth: "layout_diagrams_sidebar_width",
   dbmlEditorWidth: "layout_dbml_editor_width",
+  dbmlInspectorWidth: "layout_dbml_inspector_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -143,6 +145,10 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // Wide enough for a column line with its settings — `id integer [pk, increment]` — without
   // wrapping, which is what the schema editor is read in.
   dbmlEditorWidth: 380,
+  // Narrow, because what it holds is a column list: a name, a type chip and up to two badges. Wider
+  // than this and the badges drift away from the names they mark; the seam is there for the schema
+  // that has a `varchar` long enough to need it.
+  dbmlInspectorWidth: 236,
 };
 
 /**

@@ -9,6 +9,7 @@ import {
   Columns3,
   Download,
   FileCode2,
+  History,
   LayoutGrid,
   Maximize2,
   Search,
@@ -24,6 +25,7 @@ import "../../lib/monacoSetup";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { DbmlCanvas, DBML_CANVAS_ID, type DbmlCanvasHandle } from "./DbmlCanvas";
 import { DbmlInspector } from "./DbmlInspector";
+import { DbmlHistory } from "./DbmlHistory";
 import { DbmlReference } from "./DbmlReference";
 import { DbmlConvertPanel } from "./DbmlConvertPanel";
 import { DbmlDiffPanel } from "./DbmlDiffPanel";
@@ -36,6 +38,7 @@ import { ToolbarButton } from "../db/dbChrome";
 import { formatDbml } from "../../lib/dbml/format";
 import { hintFor } from "../../lib/dbml/errors";
 import { mergeDbml } from "../../lib/dbml/merge";
+import { pushRevision, type Revision, type RevisionCause } from "../../lib/dbml/history";
 import { readLayout, writeLayout } from "../../lib/dbml/layout";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
 import type { SqlImportDialect } from "../../lib/dbml/parse";
@@ -84,6 +87,10 @@ import { useT } from "../../state/languageStore";
 const PARSE_DEBOUNCE_MS = 260;
 /** And how long after the last change the gallery's picture is redrawn. Longer: it rasterises. */
 const THUMBNAIL_DEBOUNCE_MS = 1400;
+/** How long a document has to sit still before the change to it is recorded as one. Between the
+ *  parse and the thumbnail: long enough that a sentence is one revision, short enough that a
+ *  revision is still there when you reach for it. */
+const REVISION_DEBOUNCE_MS = 900;
 
 type Surface = "diagram" | "convert" | "import" | "diff";
 
@@ -109,6 +116,7 @@ export function DbmlWorkbench({
   const editDoc = useDiagramsStore((s) => s.editDoc);
 
   const editorWidth = useLayoutStore((s) => s.sizes.dbmlEditorWidth);
+  const inspectorWidth = useLayoutStore((s) => s.sizes.dbmlInspectorWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
 
@@ -136,11 +144,19 @@ export function DbmlWorkbench({
   const [inspector, setInspector] = useState(true);
   const [editorOpen, setEditorOpen] = useState(true);
   const [reference, setReference] = useState(false);
+  const [history, setHistory] = useState(false);
+  const [revisions, setRevisions] = useState<Revision[]>([]);
   const [density, setDensity] = useState<DiagramDensity>("roomy");
   const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
 
   const canvas = useRef<DbmlCanvasHandle>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  /** The document as of the last recorded revision, and what caused the change now in flight. Refs
+   *  because neither is drawn: they are the two things the capture effect below needs to remember
+   *  between renders it does not trigger. */
+  const recorded = useRef<string | null>(null);
+  const cause = useRef<RevisionCause>("edited");
+  const nextRevision = useRef(1);
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
 
   /** The document, split. Recomputed on every keystroke, which is a string scan and nothing more. */
@@ -221,14 +237,17 @@ export function DbmlWorkbench({
 
   /** One box moved. Only the layout comment changes, so Monaco's value does not — see the header. */
   const moveTable = useCallback(
-    (id: string, x: number, y: number) =>
-      editDoc(writeLayout(source, { ...positions, [id]: { x, y } })),
+    (id: string, x: number, y: number) => {
+      cause.current = "moved";
+      editDoc(writeLayout(source, { ...positions, [id]: { x, y } }));
+    },
     [editDoc, source, positions],
   );
 
   const tidy = () => {
     const formatted = formatDbml(source);
     if (formatted === source) return;
+    cause.current = "formatted";
     writeSource(formatted);
     useToastStore.getState().pushToast(t("dbml.formatted"), "success");
   };
@@ -239,8 +258,16 @@ export function DbmlWorkbench({
       canvas.current?.fit();
       return;
     }
+    cause.current = "rearranged";
     editDoc(writeLayout(source, {}));
     useToastStore.getState().pushToast(t("dbml.layoutReset"), "success");
+  };
+
+  /** Puts the document back to how it was before one recorded change. */
+  const revert = (doc: string) => {
+    cause.current = "reverted";
+    editDoc(doc);
+    useToastStore.getState().pushToast(t("dbml.history.done"), "success");
   };
 
   /** Puts the cursor on a table's declaration. What double-clicking a box does. */
@@ -268,6 +295,55 @@ export function DbmlWorkbench({
     },
     [],
   );
+
+  // ---- the change history --------------------------------------------------
+
+  /**
+   * A revision per settled change.
+   *
+   * Watching the *document* rather than instrumenting each write is what makes this complete: every
+   * path that can change a schema ends up in `draft.doc`, including the ones added later and the
+   * ones that go around this component entirely (the AI panel merges its answer straight into the
+   * store). A list of call sites would be a list somebody has to remember to add to.
+   *
+   * Debounced, because a change to the document is a change per keystroke and per frame of a drag.
+   * The delay is what turns "a hundred edits" into "you typed", and `pushRevision` folds what is
+   * left. `recorded` deliberately does not move until the burst settles, so a revision's `before`
+   * is the document as it stood before the whole burst rather than before its last character.
+   */
+  useEffect(() => {
+    if (doc === null || draftId !== diagramId) return;
+    // The first document for this diagram is the baseline, not a change.
+    if (recorded.current === null) {
+      recorded.current = doc;
+      return;
+    }
+    if (recorded.current === doc) return;
+    const timer = window.setTimeout(() => {
+      const before = recorded.current ?? doc;
+      recorded.current = doc;
+      setRevisions((list) =>
+        pushRevision(list, {
+          id: nextRevision.current++,
+          cause: cause.current,
+          at: Date.now(),
+          before,
+          after: doc,
+        }),
+      );
+      cause.current = "edited";
+    }, REVISION_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [doc, draftId, diagramId]);
+
+  // A history belongs to one document. Carrying it across would offer to revert diagram B to a
+  // state diagram A was in, which is a data-loss button wearing an undo icon.
+  useEffect(() => {
+    recorded.current = null;
+    cause.current = "edited";
+    setRevisions([]);
+    setHistory(false);
+  }, [diagramId]);
 
   // ---- the gallery's picture ----------------------------------------------
 
@@ -382,7 +458,21 @@ export function DbmlWorkbench({
         </span>
 
         <ToolbarButton
-          onClick={() => setReference((open) => !open)}
+          onClick={() => {
+            setReference(false);
+            setHistory((open) => !open);
+          }}
+          title={t("dbml.history")}
+          active={history}
+          disabled={revisions.length === 0}
+        >
+          <History size={12} />
+        </ToolbarButton>
+        <ToolbarButton
+          onClick={() => {
+            setHistory(false);
+            setReference((open) => !open);
+          }}
           title={t("dbml.reference")}
           active={reference}
         >
@@ -634,7 +724,22 @@ export function DbmlWorkbench({
                 </div>
 
                 {inspector && (
+                  <ResizeHandle
+                    axis="x"
+                    // The seam is to the *left* of the panel it sizes, so dragging left has to make
+                    // it wider — which is what `invert` is for.
+                    invert
+                    value={inspectorWidth}
+                    min={200}
+                    max={520}
+                    onChange={(value) => setSize("dbmlInspectorWidth", value)}
+                    onCommit={(value) => commitSize("dbmlInspectorWidth", value)}
+                  />
+                )}
+
+                {inspector && (
                   <DbmlInspector
+                    width={inspectorWidth}
                     schema={schema}
                     id={selected}
                     onSelect={setSelected}
@@ -656,8 +761,14 @@ export function DbmlWorkbench({
             (parser ? (
               <DbmlImportPanel
                 convert={parser.sqlToDbmlWithCore}
-                onReplace={(dbml) => writeSource(dbml)}
-                onAppend={(dbml) => editDoc(mergeDbml(doc, dbml))}
+                onReplace={(dbml) => {
+                  cause.current = "imported";
+                  writeSource(dbml);
+                }}
+                onAppend={(dbml) => {
+                  cause.current = "merged";
+                  editDoc(mergeDbml(doc, dbml));
+                }}
               />
             ) : (
               <ViewSkeleton />
@@ -673,6 +784,14 @@ export function DbmlWorkbench({
       </div>
 
       {reference && <DbmlReference onClose={() => setReference(false)} />}
+
+      {history && (
+        <DbmlHistory
+          revisions={revisions}
+          onRevert={revert}
+          onClose={() => setHistory(false)}
+        />
+      )}
 
       {exportAt && (
         <ContextMenu

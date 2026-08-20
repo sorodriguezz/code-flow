@@ -208,18 +208,28 @@ export function layoutDbml(
     ...laid,
     enumIds: new Set(schema.enums.map((entry) => entry.id)),
     groups,
-    // A boundary may want a few pixels more clearance than the layout's own padding left it — at
-    // `compact` density it always does. Growing the canvas is the whole fix: the alternative is a
-    // group whose right edge is outside the viewBox and therefore missing from every export.
-    width: Math.max(
-      laid.width,
-      ...groups.flatMap((box) => box.rects.map((rect) => rect.x + rect.width + 4)),
-    ),
-    height: Math.max(
-      laid.height,
-      ...groups.flatMap((box) => box.rects.map((rect) => rect.y + rect.height + 4)),
-    ),
+    // A boundary reaches a few pixels further than the tables it wraps — at `compact` density
+    // always, and in *any* direction once a member has been dragged. Both edges have to move for
+    // it: growing the size alone leaves a group hanging off the left of the viewBox, and moving the
+    // origin alone leaves one hanging off the right. Either way it is missing from every export.
+    ...extend(laid, groups),
   };
+}
+
+/** The canvas, grown in whichever directions the group boundaries reach past the tables. */
+function extend(
+  laid: DiagramLayout,
+  groups: DbmlGroupBox[],
+): { minX: number; minY: number; width: number; height: number } {
+  const rects = groups.flatMap((box) => box.rects);
+  if (rects.length === 0) {
+    return { minX: laid.minX, minY: laid.minY, width: laid.width, height: laid.height };
+  }
+  const minX = Math.min(laid.minX, ...rects.map((rect) => rect.x - 4));
+  const minY = Math.min(laid.minY, ...rects.map((rect) => rect.y - 4));
+  const right = Math.max(laid.minX + laid.width, ...rects.map((rect) => rect.x + rect.width + 4));
+  const bottom = Math.max(laid.minY + laid.height, ...rects.map((rect) => rect.y + rect.height + 4));
+  return { minX, minY, width: right - minX, height: bottom - minY };
 }
 
 /**
@@ -259,14 +269,14 @@ function groupBoxes(
       const top = Math.min(...nodes.map((node) => node.y)) - pad;
       const right = Math.max(...nodes.map((node) => node.x + node.width)) + pad;
       const bottom = Math.max(...nodes.map((node) => node.y + node.height)) + pad;
-      // Clamped at the origin: nothing may sit at a negative coordinate, or the export's viewBox
-      // cuts it off and "fit to window" centres the diagram against a canvas it does not fill. The
-      // clamp shrinks the clearance on that one edge and never moves a table — which matters,
-      // because the tables are laid out from `pinned` and a shift here would be written back into
-      // the document by the next drag.
-      const x = Math.max(0, left);
-      const y = Math.max(0, top);
-      return { x, y, width: right - x, height: bottom - y };
+      // Never clamped at the origin. It was, on the theory that nothing may sit at a negative
+      // coordinate — and that clamp is exactly what made the boundary *vanish*: drag a member left
+      // of the origin and `right` goes negative too, so `right - 0` is a negative width, and an SVG
+      // rect with a negative width is an error that draws nothing at all. The rest of the canvas
+      // already handled negatives correctly — a dragged table is drawn wherever it was dragged — so
+      // the boundary does now as well, and `DiagramLayout.minX` is what keeps the export and "fit
+      // to window" honest about it.
+      return { x: left, y: top, width: right - left, height: bottom - top };
     };
 
     const hull = around(members);

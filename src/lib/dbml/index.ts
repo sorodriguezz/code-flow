@@ -13,6 +13,7 @@ export * from "./types";
 export * from "./layout";
 export * from "./format";
 export * from "./diff";
+export * from "./history";
 export * from "./merge";
 export * from "./errors";
 export { sqlToDbml } from "./sqlToDbml";

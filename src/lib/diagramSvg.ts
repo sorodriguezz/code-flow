@@ -131,7 +131,13 @@ export function standaloneSvg(
   clone.setAttribute("font-family", getComputedStyle(source).fontFamily || "system-ui, sans-serif");
   clone.setAttribute("width", String(Math.ceil(layout.width)));
   clone.setAttribute("height", String(Math.ceil(layout.height)));
-  clone.setAttribute("viewBox", `0 0 ${Math.ceil(layout.width)} ${Math.ceil(layout.height)}`);
+  // Anchored on the layout's own origin, not on `0 0`. They are the same until a box is dragged
+  // above or to the left of where the engine put it, and from that moment a `0 0` viewBox is a pair
+  // of scissors: everything at a negative coordinate is simply absent from the file.
+  clone.setAttribute(
+    "viewBox",
+    `${Math.floor(layout.minX)} ${Math.floor(layout.minY)} ${Math.ceil(layout.width)} ${Math.ceil(layout.height)}`,
+  );
   clone.removeAttribute("class");
 
   // An opaque background, prepended so it sits behind everything: an SVG with a transparent ground

@@ -214,13 +214,14 @@ export const DbmlCanvas = forwardRef<
       ZOOM_MIN,
       Math.min((frame.clientWidth - 24) / layout.width, (frame.clientHeight - 24) / layout.height, 1),
     );
+    // Offset by the content's own origin — see `DiagramLayout.minX`.
     applyView({
       k: scale,
-      x: (frame.clientWidth - layout.width * scale) / 2,
-      y: (frame.clientHeight - layout.height * scale) / 2,
+      x: (frame.clientWidth - layout.width * scale) / 2 - layout.minX * scale,
+      y: (frame.clientHeight - layout.height * scale) / 2 - layout.minY * scale,
     });
     commitView();
-  }, [applyView, commitView, layout.width, layout.height]);
+  }, [applyView, commitView, layout.width, layout.height, layout.minX, layout.minY]);
 
   const zoomBy = useCallback(
     (factor: number, origin?: { x: number; y: number }) => {
@@ -527,8 +528,8 @@ export const DbmlCanvas = forwardRef<
           transform={`translate(${view.x} ${view.y}) scale(${view.k})`}
         >
           <rect
-            x={-2400}
-            y={-2400}
+            x={layout.minX - 2400}
+            y={layout.minY - 2400}
             width={layout.width + 4800}
             height={layout.height + 4800}
             fill="url(#cf-dbml-dots)"

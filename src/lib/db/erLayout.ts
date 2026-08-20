@@ -164,6 +164,18 @@ export interface DiagramLink {
 export interface DiagramLayout {
   nodes: DiagramNode[];
   links: DiagramLink[];
+  /**
+   * The top-left of the content, which is `0, 0` until something is dragged above or left of it.
+   *
+   * A pinned position is whatever the user dragged the box to, and nothing stops that being
+   * negative. Everything downstream used to assume the content started at the origin: "fit to
+   * window" centred against a box the diagram did not fill, and the export's `viewBox` began at
+   * `0 0` and simply cut off whatever was outside it. Carrying the origin is what makes a diagram
+   * somebody rearranged export as the diagram they rearranged.
+   */
+  minX: number;
+  minY: number;
+  /** The *size* of the content, measured from `minX, minY` — not the right edge. */
   width: number;
   height: number;
 }
@@ -325,11 +337,19 @@ export function layoutDiagram(
 
   // Guarded, because `Math.max()` of nothing is `-Infinity` and an empty schema would hand the
   // panel a canvas it then tries to scale itself to.
+  if (nodes.length === 0) return { nodes, links, minX: 0, minY: 0, width: 0, height: 0 };
+
+  // Capped at zero on the way down, so a diagram nobody dragged keeps the exact origin and size it
+  // has always had — the padding on the left is the layout's own, not a margin added here.
+  const minX = Math.min(0, ...nodes.map((n) => n.x - gap.padding));
+  const minY = Math.min(0, ...nodes.map((n) => n.y - gap.padding));
   return {
     nodes,
     links,
-    width: nodes.length === 0 ? 0 : Math.max(...nodes.map((n) => n.x + n.width)) + gap.padding,
-    height: nodes.length === 0 ? 0 : Math.max(...nodes.map((n) => n.y + n.height)) + gap.padding,
+    minX,
+    minY,
+    width: Math.max(...nodes.map((n) => n.x + n.width)) + gap.padding - minX,
+    height: Math.max(...nodes.map((n) => n.y + n.height)) + gap.padding - minY,
   };
 }
 

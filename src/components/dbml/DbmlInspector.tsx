@@ -34,6 +34,7 @@ export function DbmlInspector({
   onOpen,
   pinned = false,
   onTogglePin,
+  width,
 }: {
   schema: DbmlSchema;
   /** The selected table or enum. `null` draws the empty state. */
@@ -45,6 +46,8 @@ export function DbmlInspector({
   /** Held: the canvas can no longer change what is being read. */
   pinned?: boolean;
   onTogglePin?: () => void;
+  /** Set by the workbench, which owns the seam. Omitted by the read-only callers, which have none. */
+  width?: number;
 }) {
   const t = useT();
   const table = id ? tableOf(schema, id) : null;
@@ -56,7 +59,10 @@ export function DbmlInspector({
   const group = id ? groupOfTable(schema, id) : undefined;
 
   return (
-    <aside className="flex w-[236px] shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)] bg-[var(--cf-surface)]">
+    <aside
+      style={{ width: width ?? 236 }}
+      className="flex shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)] bg-[var(--cf-surface)]"
+    >
       <header className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2.5 py-[7px]">
         <span className="min-w-0 flex-1 truncate text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
           {t("dbml.inspector.title")}
