@@ -17,7 +17,7 @@
  */
 
 import { useState } from "react";
-import { KeyRound, ShieldAlert, Trash2 } from "lucide-react";
+import { KeyRound, Lock, ShieldAlert, Trash2 } from "lucide-react";
 
 import { ApiModal } from "../api/ApiModal";
 import { useT } from "../../state/languageStore";
@@ -30,6 +30,24 @@ const MIN_LENGTH = 10;
 
 /** The idle windows offered. `0` is never — a real choice on a desktop that locks itself. */
 const AUTOLOCK_CHOICES = [0, 5, 15, 30, 60];
+
+/**
+ * Why half this dialog is greyed out.
+ *
+ * Both sections that need the current master password are inert when this is opened from the lock
+ * screen — a legitimate way to reach it, and the only way for somebody who has forgotten the
+ * password. Dimmed and unexplained, they read as broken rather than as not-yet; and the sentence
+ * belongs at the top, once, rather than repeated under each of them.
+ */
+function LockedNote() {
+  const t = useT();
+  return (
+    <p className="flex items-center gap-1.5 rounded-md bg-black/[0.03] px-2.5 py-2 text-[11px] text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
+      <Lock size={11} className="shrink-0" />
+      {t("vault.settingsLocked")}
+    </p>
+  );
+}
 
 export function VaultSettingsModal({ onClose }: { onClose: () => void }) {
   const t = useT();
@@ -85,9 +103,11 @@ export function VaultSettingsModal({ onClose }: { onClose: () => void }) {
       dismissOnBackdrop={!changing && !resetting}
       onClose={onClose}
     >
-      <div className="flex flex-col gap-5">
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3">
+        {!unlocked && <LockedNote />}
+
         {/* ---- auto-lock ---- */}
-        <section className={unlocked ? "" : "pointer-events-none opacity-40"}>
+        <section className={unlocked ? "" : "opacity-40"}>
           <h3 className="mb-1 text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("vault.autolock")}
           </h3>
@@ -96,6 +116,7 @@ export function VaultSettingsModal({ onClose }: { onClose: () => void }) {
               <button
                 key={minutes}
                 type="button"
+                disabled={!unlocked}
                 onClick={() => void useVaultStore.getState().setAutolock(minutes)}
                 className={`rounded-md border px-2.5 py-1 text-[11.5px] transition-colors ${
                   autolockMinutes === minutes
@@ -113,11 +134,11 @@ export function VaultSettingsModal({ onClose }: { onClose: () => void }) {
         </section>
 
         {/* ---- remembered password ---- */}
-        <section>
+        <section className="border-t border-[var(--cf-border)] pt-4">
           <h3 className="mb-1 text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("vault.remember")}
           </h3>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="min-w-0 flex-1 text-[11.5px] text-[var(--cf-text)]">
               {t(remembered ? "vault.rememberedOn" : "vault.rememberedOff")}
             </span>
@@ -125,7 +146,7 @@ export function VaultSettingsModal({ onClose }: { onClose: () => void }) {
               <button
                 type="button"
                 onClick={() => void useVaultStore.getState().forgetPassword()}
-                className={BUTTON_QUIET}
+                className={`${BUTTON_QUIET} shrink-0`}
               >
                 {t("vault.forgetPassword")}
               </button>
@@ -137,7 +158,9 @@ export function VaultSettingsModal({ onClose }: { onClose: () => void }) {
         </section>
 
         {/* ---- change the master password ---- */}
-        <section className={unlocked ? "" : "pointer-events-none opacity-40"}>
+        <section
+          className={`border-t border-[var(--cf-border)] pt-4 ${unlocked ? "" : "opacity-40"}`}
+        >
           <h3 className="mb-1 text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("vault.changePassword")}
           </h3>
@@ -146,6 +169,7 @@ export function VaultSettingsModal({ onClose }: { onClose: () => void }) {
               type="password"
               value={current}
               onChange={(event) => setCurrent(event.target.value)}
+              disabled={!unlocked}
               placeholder={t("vault.currentPassword")}
               autoComplete="current-password"
               className={INPUT}
@@ -154,6 +178,7 @@ export function VaultSettingsModal({ onClose }: { onClose: () => void }) {
               type="password"
               value={next}
               onChange={(event) => setNext(event.target.value)}
+              disabled={!unlocked}
               placeholder={t("vault.newPassword")}
               autoComplete="new-password"
               className={INPUT}
@@ -195,12 +220,12 @@ export function VaultSettingsModal({ onClose }: { onClose: () => void }) {
           <p className="mb-2 text-[11.5px] leading-relaxed text-[var(--cf-text)]">
             {t("vault.reset.body")}
           </p>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <input
               value={confirmWord}
               onChange={(event) => setConfirmWord(event.target.value)}
               placeholder={t("vault.reset.typeWord", { word: resetWord })}
-              className={INPUT}
+              className={`${INPUT} min-w-[150px] flex-1`}
             />
             <button
               type="button"

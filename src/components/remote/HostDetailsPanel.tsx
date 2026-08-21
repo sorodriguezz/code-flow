@@ -5,6 +5,7 @@ import {
   Loader2,
   EyeOff,
   FolderPlus,
+  KeyRound,
   Monitor,
   Plus,
   Server,
@@ -28,7 +29,11 @@ import {
   remoteParseAzureConnection,
   remoteSetPassword,
 } from "../../lib/tauri/remoteCommands";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { confirmAction } from "../../state/confirmStore";
+import { VaultPicker } from "../vault/VaultPicker";
+import { remoteFillFrom } from "../../lib/vault/fill";
+import type { VaultItem, VaultSecret } from "../../types/vault";
 import { useT } from "../../state/languageStore";
 import {
   KIND_LABEL,
@@ -149,6 +154,7 @@ export function HostDetailsPanel() {
   const [password, setPassword] = useState("");
   const [passwordLoaded, setPasswordLoaded] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [picking, setPicking] = useState(false);
 
   /** What a flush would write. A ref so the flush on unmount sees the last edit rather than the
    *  values captured when the effect was set up. */
@@ -382,6 +388,62 @@ export function HostDetailsPanel() {
     dirty.current = true;
     setSpec({ ...spec, ...changes });
   };
+  /**
+   * A keyring entry, applied to this host.
+   *
+   * It goes through `patch` and the panel's own password setter rather than writing anything
+   * itself, so the debounced save and the "this panel changed it" bookkeeping work exactly as they
+   * do for a typed edit — a fill is an edit, and a second path to the row would be a second set of
+   * rules about when it is written.
+   *
+   * The clash check ignores `auth` and `ftp.anonymous`. Those are not data being overwritten: they
+   * are the consequence of the credential that just arrived — a host handed a password authenticates
+   * with a password — and asking about them would put a confirmation in front of nearly every fill.
+   */
+  const applyVaultEntry = async (secret: VaultSecret, item: VaultItem) => {
+    if (!spec) return;
+    const fill = remoteFillFrom(secret, spec);
+    const toast = useToastStore.getState().pushToast;
+    if (fill.filled === 0) {
+      toast(t("vault.pick.nothing", { name: item.title }), "info");
+      return;
+    }
+
+    const isSet = (value: unknown) =>
+      typeof value === "string" ? value.trim() !== "" : typeof value === "number" ? value !== 0 : false;
+    const clashes = (Object.keys(fill.patch) as (keyof RemoteHostSpec)[]).some((key) => {
+      if (key === "auth" || key === "ftp") return false;
+      const next = fill.patch[key];
+      const current = spec[key];
+      if (next !== null && typeof next === "object" && !Array.isArray(next)) {
+        const before = current as unknown as Record<string, unknown>;
+        return Object.entries(next as unknown as Record<string, unknown>).some(([sub, value]) => {
+          if (sub === "auth") return false;
+          return isSet(before[sub]) && before[sub] !== value;
+        });
+      }
+      return isSet(current) && current !== next;
+    });
+    const passwordClash = fill.password !== null && password !== "";
+    if (clashes || passwordClash) {
+      const replace = await confirmAction(t("vault.pick.overwrite"), false, t("vault.pick.replace"));
+      if (!replace) return;
+    }
+
+    patch(fill.patch);
+    if (fill.password !== null) {
+      passwordDirty.current = true;
+      setPassword(fill.password);
+    }
+    toast(
+      fill.filled === 1
+        ? t("vault.pick.filledOne", { name: item.title })
+        : t("vault.pick.filled", { n: fill.filled, name: item.title }),
+      "success",
+    );
+    if (fill.privateKeyIgnored) toast(t("vault.pick.privateKeyIgnored"), "info");
+  };
+
   /** An edit to one of the three fields the row carries directly. Marks it as this panel's, so the
    *  next write includes it and the resync above stops overwriting it. */
   const editRow =
@@ -475,6 +537,7 @@ export function HostDetailsPanel() {
                 setPassword(value);
               }}
               onToggleShowPassword={() => setShowPassword((value) => !value)}
+              onFillFromVault={() => setPicking(true)}
             />
           )}
           {tab === "forwards" && <ForwardsTab spec={spec} onPatch={patch} />}
@@ -584,6 +647,16 @@ export function HostDetailsPanel() {
           )}
         </div>
       </div>
+
+      {picking && (
+        <VaultPicker
+          // A cloud account wants a storage entry; a machine wants a server one. `key` and `login`
+          // trail both, for the credentials that were filed before either kind existed.
+          kinds={isCloudKind(spec.kind) ? ["storage", "key", "login"] : ["server", "key", "login"]}
+          onPick={(secret, item) => void applyVaultEntry(secret, item)}
+          onClose={() => setPicking(false)}
+        />
+      )}
     </>
   );
 }
@@ -605,6 +678,7 @@ function ConnectionTab({
   onPatch,
   onPassword,
   onToggleShowPassword,
+  onFillFromVault,
 }: {
   name: string;
   group: string;
@@ -618,6 +692,7 @@ function ConnectionTab({
   onPatch: (changes: Partial<RemoteHostSpec>) => void;
   onPassword: (value: string) => void;
   onToggleShowPassword: () => void;
+  onFillFromVault: () => void;
 }) {
   // Selected raw and derived with `useMemo`, never derived *inside* the selector. A zustand
   // selector runs on every store read and is compared by reference, so one that builds a fresh
@@ -706,6 +781,18 @@ function ConnectionTab({
       </Row>
 
       <GroupPicker group={group} groups={groups} onGroup={onGroup} />
+
+      {/* Above the address block rather than beside the password box, because what it fills is the
+          whole block — an address and a credential are one answer here, and a button attached to
+          the last field of it would read as filling only that one. */}
+      <button
+        type="button"
+        onClick={onFillFromVault}
+        className="flex items-center gap-1.5 self-start rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+      >
+        <KeyRound size={12} />
+        {t("vault.pick.action")}
+      </button>
 
       {/* A cloud account replaces the whole address-and-credential block below, rather than hiding
           field by field: there is no host, no port and no `ssh`, and what takes their place —

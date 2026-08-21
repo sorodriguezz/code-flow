@@ -102,7 +102,7 @@ export function VaultImportModal({ onClose }: { onClose: () => void }) {
         </div>
       }
     >
-      <div className="flex flex-col gap-3">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
         <div className="flex items-center gap-2">
           <button type="button" onClick={() => void choose()} disabled={reading} className={BUTTON_QUIET}>
             {reading ? t("vault.import.reading") : t("vault.import.chooseFile")}

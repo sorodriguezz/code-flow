@@ -93,25 +93,30 @@ export function VaultView() {
             <KeyRound size={13} className="text-[var(--cf-text-muted)]" />
             {t("tabbar.vault")}
           </span>
-          <button
-            type="button"
-            title={t("vault.settings")}
-            aria-label={t("vault.settings")}
-            onClick={() => useVaultModalStore.getState().openVaultModal({ kind: "settings" })}
-            className={ICON_BUTTON}
-          >
-            <Settings2 size={13} />
-          </button>
-          <button
-            type="button"
-            title={t("vault.lockNow")}
-            aria-label={t("vault.lockNow")}
-            onClick={() => void useVaultStore.getState().lock()}
-            className={ICON_BUTTON}
-            data-tour="vault-lock-button"
-          >
-            <Lock size={13} />
-          </button>
+          {/* Their own group. As three loose children of a `justify-between` row the two buttons
+              were spread across the header — settings stranded in the middle, between the title and
+              the lock — which read as an unrelated control rather than as this panel's toolbar. */}
+          <div className="flex shrink-0 items-center gap-0.5">
+            <button
+              type="button"
+              title={t("vault.lockNow")}
+              aria-label={t("vault.lockNow")}
+              onClick={() => void useVaultStore.getState().lock()}
+              className={ICON_BUTTON}
+              data-tour="vault-lock-button"
+            >
+              <Lock size={13} />
+            </button>
+            <button
+              type="button"
+              title={t("vault.settings")}
+              aria-label={t("vault.settings")}
+              onClick={() => useVaultModalStore.getState().openVaultModal({ kind: "settings" })}
+              className={ICON_BUTTON}
+            >
+              <Settings2 size={13} />
+            </button>
+          </div>
         </div>
         <div className="min-h-0 flex-1">
           <VaultExplorer />

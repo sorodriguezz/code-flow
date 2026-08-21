@@ -58,17 +58,40 @@ const MAX_1PUX_ENTRIES: usize = 20_000;
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn keyvault_status(db: State<Db>, session: State<VaultSession>) -> Result<VaultStatus, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let meta = queries::get_meta(&conn).map_err(|e| e.to_string())?;
-    Ok(VaultStatus {
-        initialised: meta.is_some(),
-        unlocked: session.is_unlocked(),
-        autolock_minutes: meta.as_ref().map(|m| m.autolock_minutes).unwrap_or(15),
-        remembered: secrets::get_secret(&master_password_key())
+pub async fn keyvault_status(
+    db: State<'_, Db>,
+    session: State<'_, VaultSession>,
+) -> Result<VaultStatus, String> {
+    // The guard is dropped at the end of this block, before the keychain read below, and that is
+    // the whole reason the block exists. On macOS the first read of an item in the credential
+    // store pops a system permission dialog and **blocks until it is answered** — which may be a
+    // long time, because the dialog can open behind the app's own window. Holding
+    // `Mutex<Connection>` across that freezes every other command in the app behind a prompt the
+    // user has not necessarily noticed. Same rule as Argon2; see `keyvault_unlock`.
+    let (initialised, autolock_minutes) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let meta = queries::get_meta(&conn).map_err(|e| e.to_string())?;
+        (
+            meta.is_some(),
+            meta.as_ref().map(|m| m.autolock_minutes).unwrap_or(15),
+        )
+    };
+    let unlocked = session.is_unlocked();
+    // And off the runtime's worker, for the same reason: a blocking call of unbounded duration.
+    let remembered = tokio::task::spawn_blocking(|| {
+        secrets::get_secret(&master_password_key())
             .ok()
             .flatten()
-            .is_some(),
+            .is_some()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(VaultStatus {
+        initialised,
+        unlocked,
+        autolock_minutes,
+        remembered,
     })
 }
 

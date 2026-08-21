@@ -23,6 +23,12 @@ export type VaultItemKind =
   | "identity"
   /** The developer's bread and butter: API keys, SSH keys, tokens, connection strings. */
   | "key"
+  /** A database: engine, host, port, database, and the login that reaches it. */
+  | "database"
+  /** A machine reached over SSH/SFTP/FTP: host, port, and a password or a private key. */
+  | "server"
+  /** Object storage — S3, Azure, GCS, MinIO: an endpoint, a bucket and a key pair. */
+  | "storage"
   /** An entry that is mostly its attachments — a certificate, a licence file. */
   | "file";
 
@@ -48,8 +54,33 @@ export interface VaultSecret {
   privateKey?: string;
   passphrase?: string;
   connectionString?: string;
+  /** Shared with `database` and `server`: where the thing lives. */
   host?: string;
   port?: string;
+
+  // database, server, storage — the infrastructure kinds
+  /** `postgres`, `mysql`, `oracle`, … Free text on purpose: the keyring holds credentials for
+   *  engines this app does not itself speak, and a select would refuse to store them. */
+  engine?: string;
+  /** Database, schema or namespace. */
+  database?: string;
+  /** `disable`, `require`, `verify_full` — or whatever the driver in question calls it. */
+  sslMode?: string;
+  /** `ssh`, `sftp`, `ftp`, `ftps`, … — what the server is reached over. */
+  protocol?: string;
+  /** `s3`, `azure`, `gcs`, `minio`, `r2`, … */
+  provider?: string;
+  /** The service endpoint, for anything not on the provider's default. */
+  endpoint?: string;
+  region?: string;
+  /** Bucket, container or share. */
+  bucket?: string;
+  /** Access key id, or the storage account name. An identifier rather than a secret — it travels in
+   *  request URLs and logs already, which is why it is not in `SECRET_FIELDS`. */
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  /** A SAS or session token. */
+  token?: string;
 
   // card
   cardholder?: string;
@@ -196,6 +227,9 @@ export type VaultSort = "recent" | "title" | "created";
 export const SECRET_FIELDS: Record<VaultItemKind, (keyof VaultSecret)[]> = {
   login: ["password", "totp", "recoveryCodes"],
   key: ["apiKey", "privateKey", "passphrase", "connectionString"],
+  database: ["password", "connectionString"],
+  server: ["password", "privateKey", "passphrase"],
+  storage: ["secretAccessKey", "token", "connectionString"],
   card: ["cardNumber", "cvv", "pin"],
   identity: ["documentNumber"],
   note: ["notes"],
@@ -206,8 +240,67 @@ export const SECRET_FIELDS: Record<VaultItemKind, (keyof VaultSecret)[]> = {
 export const KIND_FIELDS: Record<VaultItemKind, (keyof VaultSecret)[]> = {
   login: ["username", "password", "totp", "recoveryCodes", "notes"],
   key: ["username", "apiKey", "privateKey", "passphrase", "connectionString", "host", "port", "notes"],
+  // Ordered the way the fields are filled in, not alphabetically: what the thing is, where it is,
+  // then who you are to it. It is also the order a connection dialog asks for them in, which is what
+  // makes an entry readable side by side with the form it was copied from.
+  database: [
+    "engine",
+    "host",
+    "port",
+    "database",
+    "username",
+    "password",
+    "sslMode",
+    "connectionString",
+    "notes",
+  ],
+  server: ["protocol", "host", "port", "username", "password", "privateKey", "passphrase", "notes"],
+  storage: [
+    "provider",
+    "endpoint",
+    "region",
+    "bucket",
+    "accessKeyId",
+    "secretAccessKey",
+    "token",
+    "connectionString",
+    "notes",
+  ],
   card: ["cardholder", "cardNumber", "expiry", "cvv", "pin", "notes"],
   identity: ["fullName", "documentNumber", "nationality", "issued", "expires", "notes"],
   note: ["notes"],
   file: ["notes"],
 };
+
+/**
+ * Which payload field the list's second line is taken from, per kind.
+ *
+ * The subtitle is **derived, not typed**. It used to be its own box in the editor, sitting directly
+ * above the `username` field and labelled "Username" as well — two boxes with the same label, and
+ * whichever one you filled, the other stayed empty. It is not a field the user has an opinion
+ * about: it is "who am I on this thing", which every kind already has a field for.
+ *
+ * It is stored **in the clear**, like the title, so a locked keyring can still say what is in it.
+ * That is why `storage` takes the bucket rather than the access key id, and why `card` takes the
+ * cardholder rather than any part of the number: the value here is one an over-the-shoulder glance
+ * is welcome to. `null` is a kind with nothing worth putting there.
+ */
+export const SUBTITLE_FIELD: Record<VaultItemKind, keyof VaultSecret | null> = {
+  login: "username",
+  key: "username",
+  database: "username",
+  server: "username",
+  storage: "bucket",
+  card: "cardholder",
+  identity: "fullName",
+  note: null,
+  file: null,
+};
+
+/** The subtitle an entry should carry, given what is in it. Empty is a valid answer. */
+export function deriveSubtitle(kind: VaultItemKind, secret: VaultSecret): string {
+  const field = SUBTITLE_FIELD[kind];
+  if (!field) return "";
+  const value = secret[field];
+  return typeof value === "string" ? value.trim() : "";
+}

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Editor from "@monaco-editor/react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
-import { Eye, EyeOff, Loader2, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Loader2, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
 import { Select, type SelectItems } from "../common/Select";
 import { Checkbox } from "../common/Checkbox";
 import { VariableInput } from "./VariableInput";
@@ -12,6 +12,10 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { applyAuth, fetchOAuth2Token, isOAuth2TokenExpired, resolveEffectiveAuth } from "../../lib/api/auth";
 import { resolve, type VariableContext } from "../../lib/api/variables";
 import { defaultAuth } from "../../types/api";
+import { confirmAction } from "../../state/confirmStore";
+import { VaultPicker } from "../vault/VaultPicker";
+import { authFillFrom, authFillSupported } from "../../lib/vault/fill";
+import type { VaultItem, VaultSecret } from "../../types/vault";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type {
   ApiCollection,
@@ -286,6 +290,7 @@ export function AuthEditor({
   types?: AuthType[];
 }) {
   const t = useT();
+  const [picking, setPicking] = useState(false);
   const collections = useApiStore((s) => s.collections);
   const environments = useApiStore((s) => s.environments);
   const activeEnvironmentId = useApiStore((s) => s.activeEnvironmentId);
@@ -301,20 +306,78 @@ export function AuthEditor({
   const source = ancestors.find((entry) => entry.auth !== null && entry.auth.type !== "inherit") ?? null;
   const inherited = resolveEffectiveAuth(ancestors.map((entry) => entry.auth));
 
+  /**
+   * A keyring entry, applied to whichever auth type is on screen.
+   *
+   * The type itself is never changed — see `authFillFrom`. What the server expects is a fact about
+   * the request, and an entry carrying both a username and an API key would otherwise get a vote
+   * on it.
+   */
+  const applyVaultEntry = async (secret: VaultSecret, item: VaultItem) => {
+    const fill = authFillFrom(auth, secret);
+    const toast = useToastStore.getState().pushToast;
+    if (fill.filled === 0) {
+      toast(t("vault.pick.nothing", { name: item.title }), "info");
+      return;
+    }
+    const slot = auth.type as keyof AuthConfig;
+    const before = auth[slot] as unknown as Record<string, unknown>;
+    const after = fill.auth[slot] as unknown as Record<string, unknown>;
+    const clashes = Object.keys(after).some(
+      (key) => typeof before[key] === "string" && before[key] !== "" && before[key] !== after[key],
+    );
+    if (clashes) {
+      const replace = await confirmAction(t("vault.pick.overwrite"), false, t("vault.pick.replace"));
+      if (!replace) return;
+    }
+    onChange(fill.auth);
+    toast(
+      fill.filled === 1
+        ? t("vault.pick.filledOne", { name: item.title })
+        : t("vault.pick.filled", { n: fill.filled, name: item.title }),
+      "success",
+    );
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto p-3">
       <Grid>
         <Row label={t("api.auth.type")}>
-          <Select
-            size="sm"
-            className="max-w-[240px]"
-            ariaLabel={t("api.auth.type")}
-            value={auth.type}
-            onChange={(value) => onChange({ ...auth, type: value as AuthType })}
-            options={types.map((type) => ({ value: type, label: t(TYPE_LABELS[type]) }))}
-          />
+          <div className="flex items-center gap-2">
+            <Select
+              size="sm"
+              className="max-w-[240px]"
+              ariaLabel={t("api.auth.type")}
+              value={auth.type}
+              onChange={(value) => onChange({ ...auth, type: value as AuthType })}
+              options={types.map((type) => ({ value: type, label: t(TYPE_LABELS[type]) }))}
+            />
+            {/* Only for the types that have somewhere to put a credential. `oauth2` and `jwt` are
+                left out on purpose: filling two boxes of a six-box flow looks like a finished form
+                and is not one. A button that could only ever report "nothing to fill" is worse than
+                no button. */}
+            {authFillSupported(auth.type) && (
+              <button
+                type="button"
+                onClick={() => setPicking(true)}
+                title={t("vault.pick.action")}
+                className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+              >
+                <KeyRound size={12} />
+                {t("vault.pick.action")}
+              </button>
+            )}
+          </div>
         </Row>
       </Grid>
+
+      {picking && (
+        <VaultPicker
+          kinds={auth.type === "awsv4" ? ["storage", "key"] : ["login", "key"]}
+          onPick={(secret, item) => void applyVaultEntry(secret, item)}
+          onClose={() => setPicking(false)}
+        />
+      )}
 
       {auth.type === "inherit" ? (
         <div className="flex flex-col gap-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] p-3">

@@ -71,6 +71,7 @@ import { vaultErrorKey } from "../lib/vault/errors";
 import { useWorkspaceStore } from "./workspaceStore";
 import {
   DEFAULT_RECIPE,
+  deriveSubtitle,
   type PasswordRecipe,
   type TotpCode,
   type VaultAuditRow,
@@ -198,10 +199,10 @@ interface VaultState {
   setEditing: (editing: boolean) => void;
   setDirty: (dirty: boolean) => void;
   createItem: (kind: VaultItemKind, title: string, folderId: string | null) => Promise<string | null>;
+  /** No `subtitle`: it is derived from the payload — see `deriveSubtitle`. */
   saveItem: (args: {
     id: string;
     title: string;
-    subtitle: string;
     site: string;
     tags: string[];
     secret: VaultSecret;
@@ -522,13 +523,16 @@ export const useVaultStore = create<VaultState>((set, get) => ({
     }
   },
 
-  saveItem: async ({ id, title, subtitle, site, tags, secret }) => {
+  saveItem: async ({ id, title, site, tags, secret }) => {
     set({ saving: true });
     try {
+      const kind = get().items.find((item) => item.id === id)?.kind ?? "login";
       const saved = await keyvaultUpdateItem({
         id,
         title,
-        subtitle,
+        // Derived here rather than in the panel so every future caller gets it too. It is the one
+        // piece of an entry that is stored in the clear and not typed by anyone.
+        subtitle: deriveSubtitle(kind, secret),
         site,
         tags: serializeTags(tags),
         secret,
@@ -949,9 +953,19 @@ export function filterVaultItems(
   return ordered;
 }
 
-/** Hydrates the store the first time the view mounts — and, if this machine remembers the master
- *  password, opens the vault. Once per session: the guard below is what makes "remembered" a
- *  convenience at startup rather than something that defeats the lock button. */
+/**
+ * Hydrates the store the first time anything needs it — and, if this machine remembers the master
+ * password, opens the vault. Once per session: the guard below is what makes "remembered" a
+ * convenience at startup rather than something that defeats the lock button.
+ *
+ * **Called by every entry point into the keyring, not just the keyring app.** `VaultView` was the
+ * only caller once, which meant `initialised` stayed `null` — and anything rendering off it stayed
+ * on "Checking…" — for anyone who reached the vault another way. `VaultPicker` is the other door.
+ *
+ * Not called at app startup on purpose: the status read asks the OS credential store a question,
+ * and on macOS the first one pops a permission dialog. That belongs to the moment the user asks for
+ * the keyring, not to every launch.
+ */
 let loaded = false;
 export function ensureVaultStoreLoaded(): void {
   if (loaded) return;

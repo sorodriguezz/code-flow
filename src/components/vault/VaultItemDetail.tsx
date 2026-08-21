@@ -80,7 +80,6 @@ export function VaultItemDetail({ item }: { item: VaultItem }) {
   /** The form's copy of the entry. Only ever written in edit mode; Cancel throws it away. */
   const [draft, setDraft] = useState<VaultSecret>({});
   const [title, setTitle] = useState(item.title);
-  const [subtitle, setSubtitle] = useState(item.subtitle);
   const [site, setSite] = useState(item.site);
   const [generatorFor, setGeneratorFor] = useState<keyof VaultSecret | null>(null);
   // In the store, not here: `openItem` has to be able to ask before it throws the form away.
@@ -95,7 +94,6 @@ export function VaultItemDetail({ item }: { item: VaultItem }) {
   reseed.current = () => {
     setDraft(secret ?? {});
     setTitle(item.title);
-    setSubtitle(item.subtitle);
     setSite(item.site);
     setDirty(false);
   };
@@ -141,7 +139,6 @@ export function VaultItemDetail({ item }: { item: VaultItem }) {
     void useVaultStore.getState().saveItem({
       id: item.id,
       title,
-      subtitle,
       site,
       tags: item.tags,
       secret: draft,
@@ -255,13 +252,8 @@ export function VaultItemDetail({ item }: { item: VaultItem }) {
             fields={fields}
             secretFields={secretFields}
             draft={draft}
-            subtitle={subtitle}
             site={site}
             onPatch={patch}
-            onSubtitle={(next) => {
-              setSubtitle(next);
-              setDirty(true);
-            }}
             onSite={(next) => {
               setSite(next);
               setDirty(true);
@@ -334,11 +326,12 @@ function ReadView({
     return typeof raw === "string" && raw.trim().length > 0;
   });
   const custom = secret?.custom?.filter((entry) => entry.value.trim().length > 0) ?? [];
-  const bare = filled.length === 0 && custom.length === 0 && !item.subtitle && !item.site;
+  const bare = filled.length === 0 && custom.length === 0 && !item.site;
 
   return (
     <div className="flex flex-col gap-3">
-      {item.subtitle && <ReadRow label={t("vault.field.username")} value={item.subtitle} />}
+      {/* No row for `item.subtitle`: it is derived from one of the fields below (see
+          `SUBTITLE_FIELD`), so drawing it here would print the same value twice. */}
       {item.site && <ReadRow label={t("vault.field.site")} value={item.site} />}
 
       {filled.map((field) =>
@@ -478,10 +471,8 @@ function EditView({
   fields,
   secretFields,
   draft,
-  subtitle,
   site,
   onPatch,
-  onSubtitle,
   onSite,
   onGenerate,
 }: {
@@ -489,10 +480,8 @@ function EditView({
   fields: (keyof VaultSecret)[];
   secretFields: Set<keyof VaultSecret>;
   draft: VaultSecret;
-  subtitle: string;
   site: string;
   onPatch: (next: Partial<VaultSecret>) => void;
-  onSubtitle: (next: string) => void;
   onSite: (next: string) => void;
   onGenerate: (field: keyof VaultSecret) => void;
 }) {
@@ -500,10 +489,6 @@ function EditView({
 
   return (
     <div className="flex flex-col gap-3">
-      <Field label={t("vault.field.username")}>
-        <input value={subtitle} onChange={(event) => onSubtitle(event.target.value)} className={INPUT} />
-      </Field>
-
       {(item.kind === "login" || item.kind === "key") && (
         <Field label={t("vault.field.site")}>
           <input value={site} onChange={(event) => onSite(event.target.value)} className={INPUT} />

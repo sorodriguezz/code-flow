@@ -4,6 +4,7 @@ import {
   Copy,
   Database,
   FolderOpen,
+  KeyRound,
   Link2,
   Loader2,
   Minus,
@@ -27,6 +28,10 @@ import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { UNGROUPED, parseSpec, redactUrl, urlHasPassword, useDbStore } from "../../state/dbStore";
 import { dbHasPassword, dbSchemaCatalog } from "../../lib/tauri/dbCommands";
 import { confirmAction } from "../../state/confirmStore";
+import { useToastStore } from "../../state/toastStore";
+import { VaultPicker } from "../vault/VaultPicker";
+import { dbFillFrom } from "../../lib/vault/fill";
+import type { VaultItem, VaultSecret } from "../../types/vault";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import {
@@ -189,6 +194,9 @@ export function ConnectionModal({
     { ok: true; info: DbServerInfo } | { ok: false; error: string } | null
   >(null);
   const [saving, setSaving] = useState(false);
+  /** Whether the keyring picker is up. Also passed to the dialog as `busy`, which is what stops
+   *  Escape from closing this form out from under it. */
+  const [picking, setPicking] = useState(false);
 
   const engine = engineInfo(config.kind);
   const row = connections.find((c) => c.id === selected) ?? null;
@@ -206,6 +214,55 @@ export function ConnectionModal({
   const patch = (partial: Partial<DbConnectionConfig>) => {
     setConfig((current) => ({ ...current, ...partial }));
     setOutcome(null);
+  };
+
+  /**
+   * A keyring entry, applied to this form.
+   *
+   * Two things it is careful about. It **asks before replacing** anything that is not still at the
+   * engine's default — filling an empty form is what the button is for, but overwriting a host
+   * someone typed thirty seconds ago is not, and the two are indistinguishable from the button
+   * itself. And it **says what it did**, with a count: a fill that silently answered one box out of
+   * six looks exactly like a fill that worked.
+   *
+   * The engine is never changed — see `DbFill.engineMismatch` for why.
+   */
+  const applyVaultEntry = async (secret: VaultSecret, item: VaultItem) => {
+    const fill = dbFillFrom(secret, config.kind, mode);
+    const toast = useToastStore.getState().pushToast;
+    if (fill.filled === 0) {
+      toast(t("vault.pick.nothing", { name: item.title }), "info");
+      return;
+    }
+
+    // Against the engine's defaults rather than against "empty", because several of these fields
+    // have a non-empty default — `ssl` always holds one of three values, and a port of 0 is this
+    // app's word for "the engine's own". Anything still at its default was never answered.
+    const base = defaultConnectionConfig(config.kind);
+    const keys = Object.keys(fill.patch) as (keyof DbConnectionConfig)[];
+    const clashes = keys.some(
+      (key) => config[key] !== base[key] && config[key] !== fill.patch[key],
+    );
+    const passwordClash = fill.password !== null && (hasStored || password !== "");
+    if (clashes || passwordClash) {
+      const replace = await confirmAction(t("vault.pick.overwrite"), false, t("vault.pick.replace"));
+      if (!replace) return;
+    }
+
+    patch(fill.patch);
+    if (fill.password !== null) {
+      setPassword(fill.password);
+      setPasswordTouched(true);
+    }
+    toast(
+      fill.filled === 1
+        ? t("vault.pick.filledOne", { name: item.title })
+        : t("vault.pick.filled", { n: fill.filled, name: item.title }),
+      "success",
+    );
+    if (fill.engineMismatch) {
+      toast(t("vault.pick.engineMismatch", { engine: fill.engineMismatch }), "info");
+    }
   };
 
   /** Switching engine keeps what is engine-independent — a host and user typed before the switch. */
@@ -430,7 +487,7 @@ export function ConnectionModal({
       tourAnchor="db-data-sources"
       width="max-w-4xl"
       height="h-[78vh]"
-      busy={saving}
+      busy={saving || picking}
       // A dozen fields and a password, none of it drafted anywhere: a click on the backdrop must not
       // be what throws it away. Close, Cancel and Escape stay.
       dismissOnBackdrop={false}
@@ -575,13 +632,23 @@ export function ConnectionModal({
                 <>
                   {/* Fields or URL — alternatives, so only one is on screen. */}
                   <div>
-                    <ModeSwitch
-                      mode={mode}
-                      onChange={(next) => {
-                        setMode(next);
-                        setOutcome(null);
-                      }}
-                    />
+                    {/* The keyring sits on the row that starts the credentials, because that is the
+                        question it answers. It fills whichever half is on screen: the two are
+                        alternatives where the URL silently wins, so writing both would leave the
+                        visible fields not being the ones used. */}
+                    <div className="flex items-center justify-between gap-2">
+                      <ModeSwitch
+                        mode={mode}
+                        onChange={(next) => {
+                          setMode(next);
+                          setOutcome(null);
+                        }}
+                      />
+                      <GhostButton onClick={() => setPicking(true)} title={t("vault.pick.action")}>
+                        <KeyRound size={12} />
+                        {t("vault.pick.action")}
+                      </GhostButton>
+                    </div>
 
                     {mode === "url" ? (
                       <div className="mt-2">
@@ -978,6 +1045,16 @@ export function ConnectionModal({
           y={engineMenu.y}
           onPick={(kind) => void select(null, kind)}
           onClose={() => setEngineMenu(null)}
+        />
+      )}
+
+      {picking && (
+        <VaultPicker
+          // `key` and `login` after `database`, not instead of it: a connection's credentials were
+          // being kept in the keyring long before there was a kind that said so.
+          kinds={["database", "key", "login"]}
+          onPick={(secret, item) => void applyVaultEntry(secret, item)}
+          onClose={() => setPicking(false)}
         />
       )}
     </ApiModal>

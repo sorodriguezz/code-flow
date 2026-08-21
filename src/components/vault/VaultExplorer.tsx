@@ -37,7 +37,19 @@ import { filterVaultItems, useVaultStore } from "../../state/vaultStore";
 import type { VaultFolderRow, VaultItem, VaultItemKind } from "../../types/vault";
 import { ICON_BUTTON, ROW, ROW_ACTIVE, ROW_IDLE, kindIcon } from "./vaultChrome";
 
-const KINDS: VaultItemKind[] = ["login", "key", "card", "identity", "note", "file"];
+/** What the "new entry" menu offers, in the order it offers it: the three everyday ones, then the
+ *  three that describe a piece of infrastructure, then the two documents and the file drawer. */
+const KINDS: VaultItemKind[] = [
+  "login",
+  "key",
+  "database",
+  "server",
+  "storage",
+  "card",
+  "identity",
+  "note",
+  "file",
+];
 
 /** The folders as a tree, so the sidebar can indent without re-scanning the array per level. */
 function tree(folders: VaultFolderRow[], parent: string | null): VaultFolderRow[] {

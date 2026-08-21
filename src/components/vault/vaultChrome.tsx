@@ -7,11 +7,14 @@
  */
 
 import {
+  Cloud,
   CreditCard,
+  Database,
   FileLock2,
   IdCard,
   KeyRound,
   Paperclip,
+  Server,
   StickyNote,
   type LucideIcon,
 } from "lucide-react";
@@ -55,6 +58,11 @@ export const MASK = "••••••••••••";
 const KIND_ICONS: Record<VaultItemKind, LucideIcon> = {
   login: KeyRound,
   key: FileLock2,
+  // The same three glyphs the Remote and Database workspaces use for these things, so an entry and
+  // the connection it belongs to are recognisably the same object in two lists.
+  database: Database,
+  server: Server,
+  storage: Cloud,
   card: CreditCard,
   identity: IdCard,
   note: StickyNote,

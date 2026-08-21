@@ -417,7 +417,16 @@ function onePuxKind(category: unknown): VaultItemKind {
       return "identity";
     case "005": // Password
     case "100": // Software licence
+    case "112": // API credential
       return "key";
+    // The two infrastructure categories. Their own fields — server, port, database, SSL — live in
+    // 1Password's `sections`, so they arrive as custom fields rather than in the typed ones: the
+    // section field ids are not documented and guessing at them would silently drop values that
+    // the custom list keeps verbatim.
+    case "102":
+      return "database";
+    case "110":
+      return "server";
     case "006": // Document
       return "file";
     default:
