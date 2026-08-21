@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import { Battery, BatteryCharging, BatteryFull, BatteryLow, BatteryWarning, Plug } from "lucide-react";
 import { useT } from "../../state/languageStore";
+import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { batterySeverity, formatRunway, usePowerStore } from "../../state/powerStore";
 
 const PANEL_WIDTH = 216;
@@ -79,23 +80,12 @@ export function BatteryMeter() {
     return () => clearTimeout(done);
   }, [pluggedIn]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (panelRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
-      setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  // The shared hook rather than a listener of this component's own, which is what this used to be:
+  // it is the one that hears a press on a canvas — the diagram editor, the schema canvas — and a
+  // panel left hanging over a drawing the user has gone back to is exactly the case that made it
+  // shared. See `useDismissOnOutside`.
+  const dismiss = useCallback(() => setOpen(false), []);
+  useDismissOnOutside(open, dismiss, [panelRef, triggerRef]);
 
   if (!status) return null;
 

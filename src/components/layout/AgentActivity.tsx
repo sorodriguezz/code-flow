@@ -6,6 +6,7 @@ import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useChainStore } from "../../state/chainStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { followTarget, type NotificationTarget } from "../../state/notificationStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
@@ -108,23 +109,10 @@ export function AgentActivity() {
     };
   }, [open, reposition]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (panelRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
-      setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  // The shared hook, like the two meters beside it — see `useDismissOnOutside` for why a press on a
+  // canvas needs one listener written once rather than four written four times.
+  const dismiss = useCallback(() => setOpen(false), []);
+  useDismissOnOutside(open, dismiss, [panelRef, triggerRef]);
 
   // The last run finishing while the panel is open. Closing it is right: what it was listing has
   // gone, and an empty panel left hanging over the bar is a panel the user has to dismiss by hand.

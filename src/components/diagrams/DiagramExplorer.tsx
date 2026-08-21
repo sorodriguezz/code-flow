@@ -74,7 +74,6 @@ export function DiagramExplorer() {
   const folderFilter = useDiagramsStore((s) => s.folderFilter);
   const importDrawio = useDiagramsStore((s) => s.importDrawio);
   const openDiagram = useDiagramsStore((s) => s.openDiagram);
-  const closeDiagram = useDiagramsStore((s) => s.closeDiagram);
   const createDiagram = useDiagramsStore((s) => s.createDiagram);
   const createFolder = useDiagramsStore((s) => s.createFolder);
   const renameDiagram = useDiagramsStore((s) => s.renameDiagram);
@@ -339,14 +338,14 @@ export function DiagramExplorer() {
       // click that appears to do nothing and quietly rearranges the tree once the box is cleared.
       if (!filtering) toggleFolder(row.id);
       // And the gallery goes to that folder, so clicking a folder in the sidebar means the same
-      // thing as clicking its card.
+      // thing as clicking its card. It takes effect behind an open diagram rather than closing it:
+      // a click on a folder is navigation, not a request to put the drawing away — and the whole
+      // row is the twisty, so anything else would mean the editor could not survive being expanded
+      // or collapsed. The gallery is not on screen to be contradicted while the editor is up, and
+      // `folderFilter` is read by nothing else that is; see `NoteExplorer`, which does the same.
       setFolderFilter(row.id);
-      // Back to the gallery: clicking a folder is navigation, and leaving the editor open over a
-      // folder the user has just navigated away from would show them a diagram from somewhere else.
-      // `closeDiagram` writes anything pending first.
-      void closeDiagram();
     },
-    [toggleFolder, setFolderFilter, closeDiagram, filtering],
+    [toggleFolder, setFolderFilter, filtering],
   );
 
   /**

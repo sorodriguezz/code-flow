@@ -40,6 +40,7 @@ import {
 import { EmptyState } from "../common/EmptyState";
 import { badgeColor, badgeShort, statusColor } from "./methodStyle";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
+import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { canDrop, useApiDragStore, type ApiDrag, type ApiDropZone } from "../../state/apiDragStore";
 import { useApiStore } from "../../state/apiStore";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
@@ -228,22 +229,18 @@ export function ContextMenu({
     });
   }, [x, y, items.length, heading]);
 
+  // The press and Escape go through the shared hook — this menu is the one every tree in the app
+  // opens, the diagrams explorer included, so it is the single place that decides whether a press
+  // on a canvas dismisses a right-click menu. There is no trigger ref to pass: a context menu has
+  // no button to re-open it from, so the panel is the whole of "inside".
+  useDismissOnOutside(true, onClose, [ref]);
+
   useEffect(() => {
-    const onPointerDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", onClose);
     // Capture phase: the scroll that matters happens inside the sidebar, not on the window, and
     // a menu left floating over rows that have moved on points at the wrong node.
     window.addEventListener("scroll", onClose, true);
     return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", onClose);
       window.removeEventListener("scroll", onClose, true);
     };

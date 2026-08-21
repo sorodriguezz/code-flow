@@ -11,6 +11,7 @@ import {
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { playNotificationSound, previewNotificationSound } from "../../lib/notificationSound";
+import { useDismissOnOutside, type DismissReason } from "../../lib/useDismissOnOutside";
 import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { riseDelay } from "../../lib/rise";
@@ -206,26 +207,18 @@ export function NotificationBell() {
     };
   }, [open, reposition]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (triggerRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+  // The shared hook, like the meters beside it — see `useDismissOnOutside`. The reason is what this
+  // one needs it for: Escape puts focus back on the bell, because a keyboard user who dismisses the
+  // panel has nowhere else to be, while doing that after an outside press would drag focus back
+  // here from wherever the user just clicked.
+  const dismiss = useCallback(
+    (reason: DismissReason) => {
       close();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      e.preventDefault();
-      close();
-      triggerRef.current?.focus();
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open, close]);
+      if (reason === "escape") triggerRef.current?.focus();
+    },
+    [close],
+  );
+  useDismissOnOutside(open, dismiss, [triggerRef, panelRef]);
 
   return (
     <>

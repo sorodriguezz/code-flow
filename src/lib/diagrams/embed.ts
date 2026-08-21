@@ -464,9 +464,21 @@ export const THUMBNAIL_MAX_CHARS = 128_000;
  *   nothing left for a `preventDefault` to prevent, and saying so keeps a listener from believing
  *   it suppressed a press it never had.
  *
- * `mousedown` only, and deliberately not `click`: `startExternalLinks` opens anchors on a
- * document-level click, and an echo carrying the iframe as its target has no business anywhere near
- * that. Dismissal is what this is for, and dismissal is a `mousedown`.
+ * **What is listened for inside the frame is `pointerdown`; what is echoed out is a `mousedown`.**
+ * The two are not the same choice and neither is arbitrary.
+ *
+ * Inbound it has to be `pointerdown`, because on Windows and Linux there is no `mousedown` to hear.
+ * mxGraph binds whichever family `mxClient.IS_POINTER` selects — and that flag is
+ * `window.PointerEvent != null && !(navigator.appVersion.indexOf('Mac') > 0)`, so it is false on
+ * macOS and true everywhere else. On those platforms draw.io takes the press as a `pointerdown` and
+ * consumes it, and a cancelled `pointerdown` suppresses the compatibility `mousedown` outright:
+ * listening for one would work on the developer's Mac and silently do nothing on every other build.
+ * `pointerdown` is dispatched for every press on every platform and nothing can suppress it.
+ *
+ * Outbound it stays a `mousedown`, and deliberately not a `click`: `startExternalLinks` opens
+ * anchors on a document-level click, and an echo carrying the iframe as its target has no business
+ * anywhere near that. It is also what the listeners on this side are written against — see
+ * `useDismissOnOutside`, which hears both.
  *
  * Returns the unsubscribe.
  */
@@ -474,7 +486,7 @@ export function forwardFramePresses(frame: HTMLIFrameElement | null): () => void
   const doc = frame?.contentDocument;
   if (!frame || !doc) return () => {};
 
-  const echo = (event: MouseEvent) => {
+  const echo = (event: PointerEvent) => {
     const box = frame.getBoundingClientRect();
     frame.dispatchEvent(
       new MouseEvent("mousedown", {
@@ -491,8 +503,8 @@ export function forwardFramePresses(frame: HTMLIFrameElement | null): () => void
     );
   };
 
-  doc.addEventListener("mousedown", echo, true);
-  return () => doc.removeEventListener("mousedown", echo, true);
+  doc.addEventListener("pointerdown", echo, true);
+  return () => doc.removeEventListener("pointerdown", echo, true);
 }
 
 // ---------------------------------------------------------------------------

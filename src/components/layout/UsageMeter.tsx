@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import { Gauge, RefreshCw } from "lucide-react";
 import { useT } from "../../state/languageStore";
+import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { formatUsed, pillLimit, severityOf, useQuotaStore } from "../../state/quotaStore";
 import { QuotaLimits, limitTitle } from "../ai/QuotaLimits";
 
@@ -85,23 +86,11 @@ export function UsageMeter() {
     };
   }, [open, reposition]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (panelRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
-      setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  // The shared hook, for the reason `BatteryMeter` states beside it: a press on a canvas — the
+  // diagram editor, the schema canvas — never reaches an ordinary document listener, and this panel
+  // is one of the two the user most often has open over one.
+  const dismiss = useCallback(() => setOpen(false), []);
+  useDismissOnOutside(open, dismiss, [panelRef, triggerRef]);
 
   const shown = pillLimit(quotaProviders, quotaRouted, quotaPick);
   // Which window it is, for the tooltip only. It stays out of the pill itself: on the automatic
