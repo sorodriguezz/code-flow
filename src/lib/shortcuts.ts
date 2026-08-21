@@ -39,6 +39,7 @@ export type ShortcutId =
   | "view.stories"
   | "view.notes"
   | "view.diagrams"
+  | "view.vault"
   | "db.newConsole"
   | "db.connections"
   | "db.refresh"
@@ -146,6 +147,9 @@ const VIEW_ORDER: { view: MainView; workspace?: ApiWorkspace }[] = [
   // Diagrams are here because they are document views like the six above them.
   { view: "notes" },
   { view: "diagrams" },
+  // The keyring is deliberately absent, for a sharper version of `remote`'s reason: cycling into it
+  // by accident would put a lock screen — or worse, an open vault — on screen in the middle of
+  // moving between documents. It has its own chord.
 ];
 
 /** Goes to a destination, using whichever setter can express it. */
@@ -368,6 +372,14 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "tabbar.diagrams",
     defaultChord: "Mod+9",
     run: () => useUiStore.getState().setActiveView("diagrams"),
+  },
+  {
+    id: "view.vault",
+    group: "views",
+    labelKey: "tabbar.vault",
+    // Mod+1..7 are the views above, Mod+8 notes, Mod+9 diagrams — 0 is the last free digit.
+    defaultChord: "Mod+0",
+    run: () => useUiStore.getState().setActiveView("vault"),
   },
   {
     id: "view.next",

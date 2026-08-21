@@ -3,6 +3,7 @@ pub mod api_queries;
 pub mod api_sync;
 pub mod datasource_queries;
 pub mod diagram_queries;
+pub mod keyvault_queries;
 pub mod migrations;
 pub mod models;
 pub mod note_queries;

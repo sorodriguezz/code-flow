@@ -145,6 +145,29 @@ export const ENGINE_RECORD_MODELS: Record<DbKind, EngineRecordModel> = {
     // follows one is never the right control here.
     references: false,
   },
+  redis: {
+    // A Redis grid holds the *entries* of one value — a hash's fields, a list's items — or the keys
+    // under a namespace. Neither is a row and neither is a document, so it gets its own vocabulary
+    // rather than borrowing either.
+    countLabel: "db.countEntries",
+    itemLabel: "db.entryN",
+    counts: {
+      n: "db.entriesN",
+      ofTotal: "db.entriesOfTotal",
+      affected: "db.entriesAffected",
+      selected: "db.entriesSelectedN",
+      empty: "db.noFields",
+    },
+    // What identifies an entry depends on the key's type — `field` in a hash, `member` in a set,
+    // `index` in a list — so the label is the general word and the driver marks the actual column
+    // with `primary_key` per type.
+    identity: { label: "db.redisKeyField", badge: "KEY" },
+    conventionalIdentity: ["key", "field", "member", "index", "id"],
+    // Off the value: Redis stores bytes and the driver reports whether they decoded as text.
+    fieldTypes: "record",
+    // Redis declares no relationships, so the "follow the reference" arrow would never fire.
+    references: false,
+  },
 };
 
 /**

@@ -16,7 +16,9 @@ import {
   notesReorderNotes,
   notesSaveNote,
   notesSearch,
+  notesMoveBookToWorkspace,
   notesSetBookColor,
+  notesSetBookScope,
   notesSetPinned,
   notesUpdateTemplate,
 } from "../lib/tauri/notesCommands";
@@ -347,6 +349,11 @@ interface NotesState {
   createBook: (parentId: string | null, name: string) => Promise<string | null>;
   renameBook: (id: string, name: string) => Promise<void>;
   setBookColor: (id: string, color: string) => Promise<void>;
+  /** Puts a book — subtree and notes included — on every workspace's shelf, or takes it back off. */
+  setBookScope: (id: string, global: boolean) => Promise<void>;
+  /** Moves a book and everything under it to another workspace. Not optimistic: the book leaves
+   *  the visible set, so there is nothing to patch — the tree is reloaded instead. */
+  moveBookToWorkspace: (id: string, workspaceId: string) => Promise<void>;
   moveBook: (id: string, parentId: string | null) => Promise<void>;
   /** The books' half of `dropNote`. Refuses, silently, to put a book inside its own subtree. */
   dropBook: (
@@ -1148,6 +1155,40 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       await notesSetBookColor(id, color);
     } catch (error) {
       set({ books: previous });
+      pushErrorToast(String(error));
+    }
+  },
+
+  setBookScope: async (id, global) => {
+    const previousBooks = get().books;
+    const previousNotes = get().notes;
+    // The whole subtree, and the notes in it — the same reach `set_book_scope` has in SQL. A
+    // half-patched tree would show a global book with workspace-only children for as long as the
+    // round trip takes, which is exactly the state the backend goes out of its way to prevent.
+    const subtree = descendantIds(previousBooks, id);
+    const scope = global ? "global" : "workspace";
+    set({
+      books: previousBooks.map((book) => (subtree.has(book.id) ? { ...book, scope } : book)),
+      notes: previousNotes.map((note) =>
+        note.book_id && subtree.has(note.book_id) ? { ...note, scope } : note,
+      ),
+    });
+    try {
+      await notesSetBookScope(id, global);
+    } catch (error) {
+      set({ books: previousBooks, notes: previousNotes });
+      pushErrorToast(String(error));
+    }
+  },
+
+  moveBookToWorkspace: async (id, workspaceId) => {
+    // Whatever is being typed goes to disk first: the note may be inside the book that is about to
+    // leave this workspace, and `refresh` would drop the draft on the floor.
+    await get().flush();
+    try {
+      await notesMoveBookToWorkspace(id, workspaceId);
+      await get().refresh();
+    } catch (error) {
       pushErrorToast(String(error));
     }
   },

@@ -95,6 +95,27 @@ export const dbDeleteGroup = (workspaceId: string, name: string) =>
 export const dbSetConnectionGroup = (id: string, groupName: string) =>
   invoke<void>("db_set_connection_group", { id, groupName });
 
+// ---------- scope ----------
+
+/** Puts a connection on every workspace's shelf, or takes it back off. Leaves any open session and
+ *  its SSH tunnel alone, for the same reason `dbSetConnectionGroup` does. */
+export const dbSetConnectionScope = (id: string, global: boolean) =>
+  invoke<void>("db_set_connection_scope", { id, global });
+
+/** Moves a connection to another workspace and files it there. */
+export const dbMoveConnectionToWorkspace = (id: string, workspaceId: string) =>
+  invoke<void>("db_move_connection_to_workspace", { id, workspaceId });
+
+/** Puts a group **and its member connections** on every workspace's shelf, or takes them back off.
+ *  The members always travel with it — a group is a name, not a container, so one whose members
+ *  stayed behind would render as an empty folder everywhere else. */
+export const dbSetGroupScope = (workspaceId: string, name: string, global: boolean) =>
+  invoke<void>("db_set_group_scope", { workspaceId, name, global });
+
+/** Moves a group and its members to another workspace. */
+export const dbMoveGroupToWorkspace = (from: string, name: string, to: string) =>
+  invoke<void>("db_move_group_to_workspace", { from, name, to });
+
 // ---------- passwords ----------
 
 /** An empty string clears the stored password. */

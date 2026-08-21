@@ -161,3 +161,15 @@ export const notesWriteWithAi = (args: {
     instruction: args.instruction,
     runId: args.runId ?? null,
   });
+
+// ---------- scope ----------
+
+/** Puts a book — and its subtree, and the notes in it — on every workspace's shelf, or takes it
+ *  back off. */
+export const notesSetBookScope = (id: string, global: boolean) =>
+  invoke<void>("notes_set_book_scope", { id, global });
+
+/** Moves a book and everything under it to another workspace, and files it there rather than
+ *  leaving it global. It lands at the root of its new home. */
+export const notesMoveBookToWorkspace = (id: string, workspaceId: string) =>
+  invoke<void>("notes_move_book_to_workspace", { id, workspaceId });

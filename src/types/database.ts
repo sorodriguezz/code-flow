@@ -12,8 +12,10 @@
  * statement. See the module docs in `datasource/mod.rs` for why that beats decoding types here.
  */
 
+import type { RowScope } from "./domain";
+
 /** Which engine a connection speaks. `supabase` is Postgres with different connection defaults. */
-export type DbKind = "postgres" | "supabase" | "sqlserver" | "iris" | "mongodb";
+export type DbKind = "postgres" | "supabase" | "sqlserver" | "iris" | "mongodb" | "redis";
 
 export type DbSslMode = "disable" | "require" | "verify_full";
 
@@ -505,6 +507,8 @@ export interface DbConnectionRow {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  /** Whether this row is on one workspace's shelf or on every one of them. */
+  scope: RowScope;
 }
 
 export interface DbConsole {
@@ -545,6 +549,8 @@ export interface DbGroupRow {
   name: string;
   sort_order: number;
   created_at: string;
+  /** Whether this row is on one workspace's shelf or on every one of them. */
+  scope: RowScope;
 }
 
 export interface DbWorkspaceTree {
@@ -565,8 +571,25 @@ export interface DbEngineInfo {
   kind: DbKind;
   label: string;
   defaultPort: number;
-  /** SQL engines get a schema level in the tree and a SQL console; Mongo gets neither. */
+  /** SQL engines get a schema level in the tree and a SQL console; Mongo and Redis get neither. */
   sql: boolean;
+  /**
+   * What this engine's console actually speaks.
+   *
+   * Separate from `sql` because that boolean quietly came to mean *MongoDB* rather than *not SQL*:
+   * four call sites branch on `!sql` and produce Mongo shell syntax. A second non-SQL engine
+   * inheriting that would be handed `db.mykey.find({}).limit(50)` as its generated statement. This
+   * is the three-way answer; mirrored by `DbKind::console_language` in Rust.
+   */
+  consoleLanguage: "sql" | "javascript" | "redis";
+  /**
+   * Whether a record here is a *document* — which drives the document list, the JSON editor and the
+   * query-options panel.
+   *
+   * Also split out of `sql`, and the more dangerous half: `documentStore = !engine.sql` would have
+   * given Redis Mongo's whole document UI. Only MongoDB sets this.
+   */
+  documents: boolean;
   /** What the "database" field is called for this engine — the word the server itself uses. */
   databaseLabel: string;
   /** Shown under the URL field. */
@@ -582,6 +605,8 @@ export const DB_ENGINES: DbEngineInfo[] = [
     label: "PostgreSQL",
     defaultPort: 5432,
     sql: true,
+    consoleLanguage: "sql",
+    documents: false,
     databaseLabel: "Database",
     urlPlaceholder: "postgres://user:password@host:5432/database",
     defaultSsl: "disable",
@@ -592,6 +617,8 @@ export const DB_ENGINES: DbEngineInfo[] = [
     label: "Supabase",
     defaultPort: 5432,
     sql: true,
+    consoleLanguage: "sql",
+    documents: false,
     databaseLabel: "Database",
     // The string Supabase's dashboard hands out verbatim, so it can be pasted as-is.
     urlPlaceholder: "postgresql://postgres.<ref>:password@aws-0-<region>.pooler.supabase.com:5432/postgres",
@@ -604,6 +631,8 @@ export const DB_ENGINES: DbEngineInfo[] = [
     label: "SQL Server",
     defaultPort: 1433,
     sql: true,
+    consoleLanguage: "sql",
+    documents: false,
     databaseLabel: "Database",
     urlPlaceholder: "Server=host,1433;Database=db;User Id=sa;Password=…;Encrypt=true",
     defaultSsl: "require",
@@ -616,6 +645,8 @@ export const DB_ENGINES: DbEngineInfo[] = [
     // driver used to go when it spoke the Atelier REST API.
     defaultPort: 1972,
     sql: true,
+    consoleLanguage: "sql",
+    documents: false,
     databaseLabel: "Namespace",
     urlPlaceholder: "jdbc:IRIS://host:1972/USER",
     defaultSsl: "disable",
@@ -626,10 +657,28 @@ export const DB_ENGINES: DbEngineInfo[] = [
     label: "MongoDB",
     defaultPort: 27017,
     sql: false,
+    consoleLanguage: "javascript",
+    documents: true,
     databaseLabel: "Database",
     urlPlaceholder: "mongodb+srv://user:password@cluster.mongodb.net/database",
     defaultSsl: "disable",
     defaultUser: "",
+  },
+  {
+    kind: "redis",
+    label: "Redis",
+    defaultPort: 6379,
+    sql: false,
+    consoleLanguage: "redis",
+    // A Redis record is a value under a key, not a document: there is no JSON body to edit and no
+    // Mongo-shaped options panel to fill in. See the field's comment.
+    documents: false,
+    // Redis numbers its databases rather than naming them, and the field takes the index.
+    databaseLabel: "Database",
+    urlPlaceholder: "rediss://default:password@host:6379/0",
+    defaultSsl: "disable",
+    // The ACL user every Redis has out of the box.
+    defaultUser: "default",
   },
 ];
 
@@ -644,7 +693,9 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     kind,
     host: "localhost",
     port: 0,
-    database: kind === "iris" ? "USER" : "",
+    // IRIS names its namespaces and Redis numbers its databases; everything else takes the
+    // server's own default when the field is left empty.
+    database: kind === "iris" ? "USER" : kind === "redis" ? "0" : "",
     user: engine.defaultUser,
     password: "",
     auth_method: "password",

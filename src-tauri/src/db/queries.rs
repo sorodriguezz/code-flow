@@ -451,9 +451,85 @@ pub fn reorder_workspaces(conn: &Connection, ids: &[String]) -> rusqlite::Result
     tx.commit()
 }
 
-pub fn delete_workspace(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
+/// Moves every *global* row that calls this workspace home into a surviving one.
+///
+/// This exists because "global" is a visibility flag layered over a column that is still a real
+/// foreign key with a real cascade. A global collection is on every workspace's shelf, but the row
+/// remembers the workspace it was made in — and without this sweep, deleting *that* workspace
+/// would delete a collection the user had explicitly put everywhere. The failure is silent and
+/// total, which is why the sweep runs inside the delete rather than being left to a caller.
+///
+/// Which workspace it lands in is deliberately unremarkable: the first survivor in the order the
+/// switcher lists them. A global row is not *in* a workspace in any sense the user sees, so any
+/// surviving home is as good as another, and asking would be a question about bookkeeping.
+fn rehome_global_rows(conn: &Connection, from: &str) -> rusqlite::Result<()> {
+    let into: Option<String> = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE id != ?1 ORDER BY sort_order, created_at LIMIT 1",
+            params![from],
+            |row| row.get(0),
+        )
+        .optional()?;
+    // Nothing left to be global *to*. The cascade is the right answer here.
+    let Some(into) = into else { return Ok(()) };
+
+    for table in ["note_books", "notes", "api_collections", "db_connections"] {
+        conn.execute(
+            &format!(
+                "UPDATE {table} SET workspace_id = ?2 WHERE workspace_id = ?1 AND scope = 'global'"
+            ),
+            params![from, into],
+        )?;
+    }
+    // `OR IGNORE` because `idx_db_groups_name` is UNIQUE on (workspace_id, name): a global group
+    // whose name is already taken in the destination cannot be re-homed. Letting the cascade take
+    // that one row is right — its connections have already moved, and they render their own group
+    // heading from `group_name` whether a `db_groups` row exists or not.
+    conn.execute(
+        "UPDATE OR IGNORE db_groups SET workspace_id = ?2 WHERE workspace_id = ?1 AND scope = 'global'",
+        params![from, into],
+    )?;
+    // A share row denormalises its collection's workspace and has no foreign key to catch it. It
+    // is what `supabase_sync` hands to `apply_items`, so one left pointing at a deleted workspace
+    // files every future pull nowhere.
+    conn.execute(
+        "UPDATE api_shared_collections SET workspace_id = ?2 \
+         WHERE workspace_id = ?1 \
+           AND collection_id IN (SELECT id FROM api_collections WHERE workspace_id = ?2)",
+        params![from, into],
+    )?;
+    rehome_vault_rows(conn, from)?;
     Ok(())
+}
+
+/// Moves the keyring's rows out of a workspace that is going away — to **global**, not to another
+/// workspace.
+///
+/// Its own function, and called on every delete rather than only when a survivor exists, because
+/// the keyring's rules are different from everything above. Those rows have foreign keys and a
+/// cascade; these deliberately have neither (see the `vault_*` block in `migrations`). So nothing
+/// here would *delete* a filed password — it would do something quieter and worse: leave it
+/// pointing at a workspace id that no longer exists, which is a row no view can reach and no
+/// search can find. A password nobody can get to is a password that is gone.
+///
+/// Global rather than "the first surviving workspace" because that is the meaning the user will
+/// recognise: the entry stops being filed anywhere, which is exactly true, instead of silently
+/// reappearing under a workspace they never put it in.
+fn rehome_vault_rows(conn: &Connection, from: &str) -> rusqlite::Result<()> {
+    for table in ["vault_items", "vault_folders"] {
+        conn.execute(
+            &format!("UPDATE {table} SET workspace_id = '' WHERE workspace_id = ?1"),
+            params![from],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn delete_workspace(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    rehome_global_rows(&tx, id)?;
+    tx.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
+    tx.commit()
 }
 
 pub fn update_workspace_color(conn: &Connection, id: &str, color: &str) -> rusqlite::Result<()> {
@@ -4409,6 +4485,98 @@ mod tests {
         (conn, project.id)
     }
 
+
+    /// A migrated database with foreign keys **on** and two workspaces.
+    ///
+    /// `fixture()` above leaves them off, which is the default and is fine for what it tests. It is
+    /// not fine here: the whole point of these two tests is the `ON DELETE CASCADE` on
+    /// `workspace_id`, and with foreign keys off the cascade never fires and both would pass
+    /// against a `delete_workspace` that did nothing at all.
+    fn two_workspaces() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        migrations::run(&conn).unwrap();
+        for (id, order) in [("w1", 0), ("w2", 1)] {
+            conn.execute(
+                "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at) \
+                 VALUES (?1, ?1, '', '', ?2, 't')",
+                params![id, order],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    /// Deleting a workspace must not delete the things the user put on *every* workspace's shelf.
+    ///
+    /// This is the hole "global" opens: visibility is a flag, but `workspace_id` is still a real
+    /// foreign key with a real cascade, so a global row whose home workspace is deleted would go
+    /// with it — silently, and with no way back. `rehome_global_rows` is the fix and this is what
+    /// proves it fires.
+    #[test]
+    fn deleting_a_workspace_rehomes_its_global_rows() {
+        let conn = two_workspaces();
+        conn.execute_batch(
+            "INSERT INTO note_books (id, workspace_id, name, sort_order, created_at, updated_at, scope) \
+               VALUES ('b1', 'w1', 'Runbooks', 0, 't', 't', 'global');
+             INSERT INTO notes (id, workspace_id, book_id, title, created_at, updated_at, scope) \
+               VALUES ('n1', 'w1', 'b1', 'Deploy', 't', 't', 'global');
+             INSERT INTO api_collections (id, workspace_id, name, created_at, updated_at, scope) \
+               VALUES ('c1', 'w1', 'Billing', 't', 't', 'global');
+             INSERT INTO db_connections (id, workspace_id, name, kind, created_at, updated_at, scope) \
+               VALUES ('d1', 'w1', 'Prod', 'postgres', 't', 't', 'global');
+             INSERT INTO note_books (id, workspace_id, name, sort_order, created_at, updated_at, scope) \
+               VALUES ('b2', 'w1', 'Just here', 0, 't', 't', 'workspace');",
+        )
+        .unwrap();
+
+        delete_workspace(&conn, "w1").unwrap();
+
+        for (table, id) in
+            [("note_books", "b1"), ("notes", "n1"), ("api_collections", "c1"), ("db_connections", "d1")]
+        {
+            let home: Option<String> = conn
+                .query_row(
+                    &format!("SELECT workspace_id FROM {table} WHERE id = ?1"),
+                    params![id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            assert_eq!(
+                home.as_deref(),
+                Some("w2"),
+                "the global row in {table} should have been re-homed, not cascaded away"
+            );
+        }
+
+        let survivors: i64 = conn
+            .query_row("SELECT COUNT(*) FROM note_books WHERE id = 'b2'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(survivors, 0, "a workspace-scoped book still goes with its workspace");
+    }
+
+    /// The other end of the same rule: with nothing left to be global *to*, the cascade is right.
+    #[test]
+    fn deleting_the_last_workspace_takes_its_global_rows_with_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at) \
+               VALUES ('only', 'Only', '', '', 0, 't');
+             INSERT INTO api_collections (id, workspace_id, name, created_at, updated_at, scope) \
+               VALUES ('c1', 'only', 'Billing', 't', 't', 'global');",
+        )
+        .unwrap();
+
+        delete_workspace(&conn, "only").unwrap();
+
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM api_collections", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
 
     /// The distinction the poller is built on: a step still working and a step that no longer
     /// exists must not answer the same thing. They did — both were a bare `None` — and a timer that

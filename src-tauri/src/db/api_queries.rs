@@ -27,7 +27,7 @@ const HISTORY_HARD_CAP: i64 = 2000;
 const MAX_FOLDER_DEPTH: usize = 256;
 
 const COLLECTION_COLUMNS: &str =
-    "id, workspace_id, name, description, auth, pre_script, post_script, variables, sort_order, pinned, created_at, updated_at";
+    "id, workspace_id, name, description, auth, pre_script, post_script, variables, sort_order, pinned, created_at, updated_at, scope";
 const FOLDER_COLUMNS: &str =
     "id, collection_id, parent_id, name, description, auth, pre_script, post_script, sort_order, created_at, updated_at";
 const REQUEST_COLUMNS: &str =
@@ -53,6 +53,7 @@ fn map_collection(row: &rusqlite::Row) -> rusqlite::Result<ApiCollection> {
         pinned: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        scope: row.get(12)?,
     })
 }
 
@@ -142,10 +143,13 @@ fn map_cookie(row: &rusqlite::Row) -> rusqlite::Result<ApiCookie> {
 /// Folders and requests have no `workspace_id` of their own, so they are scoped through the
 /// collections they hang off: anything else would hand the UI every workspace's rows at once.
 pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<ApiTree> {
-    const IN_WORKSPACE: &str = "collection_id IN (SELECT id FROM api_collections WHERE workspace_id = ?1)";
+    // A global collection is on every workspace's shelf, so its folders and requests come with it
+    // — which they do here for free, because they were never scoped by anything but this subquery.
+    const IN_WORKSPACE: &str =
+        "collection_id IN (SELECT id FROM api_collections WHERE workspace_id = ?1 OR scope = 'global')";
     let collections = {
         let mut stmt = conn.prepare(&format!(
-            "SELECT {COLLECTION_COLUMNS} FROM api_collections WHERE workspace_id = ?1 ORDER BY sort_order, created_at"
+            "SELECT {COLLECTION_COLUMNS} FROM api_collections WHERE workspace_id = ?1 OR scope = 'global' ORDER BY sort_order, created_at"
         ))?;
         let rows = stmt.query_map(params![workspace_id], map_collection)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -209,8 +213,8 @@ fn insert_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Result<(
     conn.execute(
         "INSERT INTO api_collections
             (id, workspace_id, name, description, auth, pre_script, post_script, variables, sort_order,
-             pinned, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             pinned, created_at, updated_at, scope)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             c.id,
             c.workspace_id,
@@ -224,6 +228,7 @@ fn insert_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Result<(
             c.pinned,
             c.created_at,
             c.updated_at,
+            c.scope,
         ],
     )?;
     Ok(())
@@ -244,6 +249,9 @@ pub fn create_collection(conn: &Connection, workspace_id: &str, name: &str) -> r
         pinned: false,
         created_at: ts.clone(),
         updated_at: ts,
+        // Every collection starts on one shelf. Going global is a deliberate act from the tree's
+        // context menu, never a default.
+        scope: "workspace".to_string(),
     };
     insert_collection(conn, &collection)?;
     Ok(collection)
@@ -260,6 +268,10 @@ fn next_collection_order(conn: &Connection, workspace_id: &str) -> rusqlite::Res
 
 /// Saves the editable fields only. `sort_order` is owned by `reorder_collections`, so writing it
 /// back from a client that hasn't seen a concurrent reorder would silently scramble the sidebar.
+///
+/// `scope` is left out for a sharper version of the same reason: this runs on every debounced edit
+/// of the collection's settings, and a scope that could ride along with a renamed header is a
+/// scope that moves by accident. It is owned by `set_collection_scope` alone.
 pub fn update_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE api_collections
@@ -472,10 +484,51 @@ pub fn reorder_collections(conn: &Connection, workspace_id: &str, ids: &[String]
     let tx = conn.unchecked_transaction()?;
     for (index, id) in ids.iter().enumerate() {
         tx.execute(
-            "UPDATE api_collections SET sort_order = ?3 WHERE id = ?1 AND workspace_id = ?2",
+            // `OR scope = 'global'`: a global collection's home is some other workspace, and
+            // without this the drag that reordered it here would silently no-op.
+            "UPDATE api_collections SET sort_order = ?3 \
+             WHERE id = ?1 AND (workspace_id = ?2 OR scope = 'global')",
             params![id, workspace_id, index as i64],
         )?;
     }
+    tx.commit()
+}
+
+/// Puts a collection on every workspace's shelf, or takes it back off.
+///
+/// Its own statement rather than a field on [`update_collection`] — see that function for why.
+pub fn set_collection_scope(conn: &Connection, id: &str, global: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE api_collections SET scope = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, if global { "global" } else { "workspace" }, now()],
+    )?;
+    Ok(())
+}
+
+/// Moves a collection to another workspace and files it there.
+///
+/// Deliberately not routed through `move_node`, which refuses a cross-workspace move by design:
+/// that refusal is about a request ending up somewhere its owner cannot see it, and this is the
+/// deliberate act that says otherwise.
+pub fn move_collection_to_workspace(
+    conn: &Connection,
+    id: &str,
+    workspace_id: &str,
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let sort_order = next_collection_order(&tx, workspace_id)?;
+    tx.execute(
+        "UPDATE api_collections SET workspace_id = ?2, scope = 'workspace', sort_order = ?3, \
+         updated_at = ?4 WHERE id = ?1",
+        params![id, workspace_id, sort_order, now()],
+    )?;
+    // The share row denormalises its collection's workspace with no foreign key to catch it, and
+    // it is what `supabase_sync` hands to `apply_items`. Left behind, every future pull would file
+    // its rows in the workspace the collection just left.
+    tx.execute(
+        "UPDATE api_shared_collections SET workspace_id = ?2 WHERE collection_id = ?1",
+        params![id, workspace_id],
+    )?;
     tx.commit()
 }
 
@@ -793,16 +846,20 @@ pub fn move_node(
     let source_workspace = node_workspace(&tx, table, id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Unknown {kind} {id}"))?;
-    let destination_workspace: String = tx
+    let (destination_workspace, destination_scope): (String, String) = tx
         .query_row(
-            "SELECT workspace_id FROM api_collections WHERE id = ?1",
+            "SELECT workspace_id, scope FROM api_collections WHERE id = ?1",
             params![collection_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Unknown collection {collection_id}"))?;
-    if source_workspace != destination_workspace {
+    // A global collection is on every workspace's shelf, so a node dragged into it from any of
+    // them is already "here" — the refusal below is about two *workspace-scoped* collections in
+    // different workspaces, which is the case that would move a request somewhere its owner can no
+    // longer see it.
+    if destination_scope != "global" && source_workspace != destination_workspace {
         return Err("A node cannot be moved to a collection in another workspace".to_string());
     }
 

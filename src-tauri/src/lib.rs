@@ -50,6 +50,7 @@ mod shell_profiles;
 mod sigv4;
 mod supabase;
 mod sysload;
+mod keyvault;
 mod terminal;
 mod tsserver;
 mod tray;
@@ -225,6 +226,9 @@ pub fn run() {
         .manage(TerminalRegistry::default())
         .manage(ApiRegistry::default())
         .manage(DbRegistry::default())
+        // The keyring's unlocked data key. Managed state rather than a value passed around, so
+        // there is exactly one place it exists — see `keyvault::session`.
+        .manage(keyvault::session::VaultSession::default())
         .manage(WatcherRegistry::default())
         .manage(tray::QuittingFlag::default())
         .manage(window_state::WindowTracker::default())
@@ -260,6 +264,10 @@ pub fn run() {
             // The scheduled backup. Ticks on the clock rather than on every edit, and an unchanged
             // configuration costs it a hash — see `backup::auto`.
             backup::auto::spawn(app.handle().clone());
+            // Locks the keyring when it has been left idle. Not what *enforces* auto-lock — every
+            // read checks the idle window itself — but what makes the lock visible on screen
+            // rather than at the user's next click. See `keyvault::session::spawn_autolock`.
+            keyvault::session::spawn_autolock(app.handle().clone());
             // The agent console's terminal bench writes down what its shells printed, on a timer.
             // Here for the same reason as everything above it — `setup` is where the `AppHandle`
             // is — and cheap when the bench is empty, which is most installs most of the time.
@@ -739,6 +747,44 @@ pub fn run() {
             commands::remote_cmd::remote_update_snippet,
             commands::remote_cmd::remote_delete_snippet,
             // ---- Notes (workspace-scoped, like Remote above it) ----
+            // ---- The keyring ("Llavero"). Global — no workspace scoping on the vault itself. ----
+            commands::keyvault_cmd::keyvault_status,
+            commands::keyvault_cmd::keyvault_initialise,
+            commands::keyvault_cmd::keyvault_unlock,
+            commands::keyvault_cmd::keyvault_unlock_remembered,
+            commands::keyvault_cmd::keyvault_lock,
+            commands::keyvault_cmd::keyvault_touch,
+            commands::keyvault_cmd::keyvault_change_password,
+            commands::keyvault_cmd::keyvault_set_autolock,
+            commands::keyvault_cmd::keyvault_forget_password,
+            commands::keyvault_cmd::keyvault_reset,
+            commands::keyvault_cmd::keyvault_load_tree,
+            commands::keyvault_cmd::keyvault_list_trash,
+            commands::keyvault_cmd::keyvault_get_item,
+            commands::keyvault_cmd::keyvault_create_item,
+            commands::keyvault_cmd::keyvault_update_item,
+            commands::keyvault_cmd::keyvault_move_item,
+            commands::keyvault_cmd::keyvault_set_item_workspace,
+            commands::keyvault_cmd::keyvault_set_favorite,
+            commands::keyvault_cmd::keyvault_delete_item,
+            commands::keyvault_cmd::keyvault_restore_item,
+            commands::keyvault_cmd::keyvault_purge_item,
+            commands::keyvault_cmd::keyvault_empty_trash,
+            commands::keyvault_cmd::keyvault_create_folder,
+            commands::keyvault_cmd::keyvault_rename_folder,
+            commands::keyvault_cmd::keyvault_set_folder_color,
+            commands::keyvault_cmd::keyvault_set_folder_workspace,
+            commands::keyvault_cmd::keyvault_move_folder,
+            commands::keyvault_cmd::keyvault_delete_folder,
+            commands::keyvault_cmd::keyvault_list_blobs,
+            commands::keyvault_cmd::keyvault_add_blob,
+            commands::keyvault_cmd::keyvault_read_blob,
+            commands::keyvault_cmd::keyvault_save_blob,
+            commands::keyvault_cmd::keyvault_delete_blob,
+            commands::keyvault_cmd::keyvault_generate_password,
+            commands::keyvault_cmd::keyvault_totp_code,
+            commands::keyvault_cmd::keyvault_audit,
+            commands::keyvault_cmd::keyvault_read_import_file,
             commands::notes_cmd::notes_load_tree,
             commands::notes_cmd::notes_get_note,
             commands::notes_cmd::notes_create_note,
@@ -759,6 +805,8 @@ pub fn run() {
             commands::notes_cmd::notes_delete_template,
             commands::notes_cmd::notes_search,
             commands::notes_cmd::notes_write_with_ai,
+            commands::notes_cmd::notes_set_book_scope,
+            commands::notes_cmd::notes_move_book_to_workspace,
             // ---- Diagrams (workspace-scoped, like Notes above it) ----
             commands::diagrams_cmd::diagrams_load_tree,
             commands::diagrams_cmd::diagrams_get_diagram,
@@ -813,6 +861,10 @@ pub fn run() {
             commands::db_cmd::db_rename_group,
             commands::db_cmd::db_delete_group,
             commands::db_cmd::db_set_connection_group,
+            commands::db_cmd::db_set_connection_scope,
+            commands::db_cmd::db_move_connection_to_workspace,
+            commands::db_cmd::db_set_group_scope,
+            commands::db_cmd::db_move_group_to_workspace,
             commands::db_cmd::db_set_password,
             commands::db_cmd::db_has_password,
             commands::db_cmd::db_create_console,
@@ -843,6 +895,8 @@ pub fn run() {
             commands::api_cmd::api_update_collection,
             commands::api_cmd::api_delete_collection,
             commands::api_cmd::api_duplicate_collection,
+            commands::api_cmd::api_set_collection_scope,
+            commands::api_cmd::api_move_collection_to_workspace,
             commands::api_cmd::api_create_folder,
             commands::api_cmd::api_update_folder,
             commands::api_cmd::api_delete_folder,

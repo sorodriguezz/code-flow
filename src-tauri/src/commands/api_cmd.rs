@@ -50,6 +50,25 @@ pub fn api_duplicate_collection(db: State<Db>, id: String) -> Result<ApiCollecti
     api_queries::duplicate_collection(&conn, &id).map_err(|e| e.to_string())
 }
 
+/// Puts a collection on every workspace's shelf, or takes it back off.
+#[tauri::command]
+pub fn api_set_collection_scope(db: State<Db>, id: String, global: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::set_collection_scope(&conn, &id, global).map_err(|e| e.to_string())
+}
+
+/// Moves a collection to another workspace and files it there. Carries the share row's denormalised
+/// workspace with it — see the query.
+#[tauri::command]
+pub fn api_move_collection_to_workspace(
+    db: State<Db>,
+    id: String,
+    workspace_id: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::move_collection_to_workspace(&conn, &id, &workspace_id).map_err(|e| e.to_string())
+}
+
 // ---------- tree: folders ----------
 
 #[tauri::command]

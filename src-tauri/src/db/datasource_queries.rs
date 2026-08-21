@@ -22,8 +22,8 @@ use super::queries::now;
 const HISTORY_HARD_CAP: i64 = 2000;
 
 const CONNECTION_COLUMNS: &str =
-    "id, workspace_id, name, group_name, kind, spec, color, sort_order, created_at, updated_at";
-const GROUP_COLUMNS: &str = "id, workspace_id, name, sort_order, created_at";
+    "id, workspace_id, name, group_name, kind, spec, color, sort_order, created_at, updated_at, scope";
+const GROUP_COLUMNS: &str = "id, workspace_id, name, sort_order, created_at, scope";
 const CONSOLE_COLUMNS: &str =
     "id, connection_id, name, body, database_name, schema_name, sort_order, created_at, updated_at";
 const HISTORY_COLUMNS: &str = "id, workspace_id, connection_id, connection_name, statement, \
@@ -41,6 +41,7 @@ fn map_connection(row: &rusqlite::Row) -> rusqlite::Result<DbConnectionRow> {
         sort_order: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        scope: row.get(10)?,
     })
 }
 
@@ -51,6 +52,7 @@ fn map_group(row: &rusqlite::Row) -> rusqlite::Result<DbGroupRow> {
         name: row.get(2)?,
         sort_order: row.get(3)?,
         created_at: row.get(4)?,
+        scope: row.get(5)?,
     })
 }
 
@@ -96,7 +98,7 @@ fn map_history(row: &rusqlite::Row) -> rusqlite::Result<DbQueryHistoryEntry> {
 /// dragged into a name nobody created. The tree unions them.
 pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<DbWorkspaceTree> {
     let mut statement = conn.prepare(&format!(
-        "SELECT {CONNECTION_COLUMNS} FROM db_connections WHERE workspace_id = ?1 \
+        "SELECT {CONNECTION_COLUMNS} FROM db_connections WHERE workspace_id = ?1 OR scope = 'global' \
          ORDER BY sort_order, name"
     ))?;
     let connections = statement
@@ -104,7 +106,8 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<DbWo
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut statement = conn.prepare(&format!(
-        "SELECT {GROUP_COLUMNS} FROM db_groups WHERE workspace_id = ?1 ORDER BY sort_order, name"
+        "SELECT {GROUP_COLUMNS} FROM db_groups WHERE workspace_id = ?1 OR scope = 'global' \
+         ORDER BY sort_order, name"
     ))?;
     let groups = statement
         .query_map(params![workspace_id], map_group)?
@@ -116,7 +119,7 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<DbWo
     let mut statement = conn.prepare(&format!(
         "SELECT {} FROM db_consoles c \
          JOIN db_connections n ON n.id = c.connection_id \
-         WHERE n.workspace_id = ?1 ORDER BY c.sort_order, c.created_at",
+         WHERE n.workspace_id = ?1 OR n.scope = 'global' ORDER BY c.sort_order, c.created_at",
         CONSOLE_COLUMNS.split(", ").map(|c| format!("c.{c}")).collect::<Vec<_>>().join(", ")
     ))?;
     let consoles = statement
@@ -153,10 +156,20 @@ pub fn create_connection(
             |row| row.get(0),
         )
         .unwrap_or(0);
+    // A connection made inside a group that is already global is global too — otherwise it would
+    // be filed in a folder every workspace can see and be invisible from all but one of them.
+    let scope: String = conn
+        .query_row(
+            "SELECT scope FROM db_groups WHERE (workspace_id = ?1 OR scope = 'global') AND name = ?2",
+            params![workspace_id, group_name],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "workspace".to_string());
     conn.execute(
-        "INSERT INTO db_connections (id, workspace_id, name, group_name, kind, spec, color, sort_order, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
-        params![id, workspace_id, name, group_name, kind, spec, color, sort_order, timestamp],
+        "INSERT INTO db_connections (id, workspace_id, name, group_name, kind, spec, color, sort_order, created_at, updated_at, scope) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, ?10)",
+        params![id, workspace_id, name, group_name, kind, spec, color, sort_order, timestamp, scope],
     )?;
     Ok(DbConnectionRow {
         id,
@@ -169,6 +182,7 @@ pub fn create_connection(
         sort_order,
         created_at: timestamp.clone(),
         updated_at: timestamp,
+        scope,
     })
 }
 
@@ -266,8 +280,8 @@ pub fn create_group(
         |row| row.get(0),
     )?;
     conn.execute(
-        &format!("INSERT OR IGNORE INTO db_groups ({GROUP_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5)"),
-        params![Uuid::new_v4().to_string(), workspace_id, name, sort_order, now()],
+        &format!("INSERT OR IGNORE INTO db_groups ({GROUP_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"),
+        params![Uuid::new_v4().to_string(), workspace_id, name, sort_order, now(), "workspace"],
     )?;
     conn.query_row(
         &format!("SELECT {GROUP_COLUMNS} FROM db_groups WHERE workspace_id = ?1 AND name = ?2"),
@@ -284,6 +298,12 @@ pub fn create_group(
 ///
 /// **Renaming onto an existing name merges.** The alternative is a unique-index failure the user
 /// reads as "you can't call it that", when what they almost always meant was "put these together".
+///
+/// Every clause here addresses `(workspace_id = ?1 OR scope = 'global')` rather than the workspace
+/// alone, and that is not defensive coding — it is what makes the rename match what is on screen.
+/// `idx_db_groups_name` is unique per *workspace*, so a global "Prod" and a local "Prod" are two
+/// legal rows; `groupConnections` merges them into one bucket in the tree. Addressed by workspace
+/// alone, this function would rename half of that bucket and leave the other half behind.
 pub fn rename_group(
     conn: &Connection,
     workspace_id: &str,
@@ -292,24 +312,29 @@ pub fn rename_group(
 ) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE db_connections SET group_name = ?3, updated_at = ?4 \
-         WHERE workspace_id = ?1 AND group_name = ?2",
+         WHERE (workspace_id = ?1 OR scope = 'global') AND group_name = ?2",
         params![workspace_id, from, to, now()],
     )?;
 
     let target_exists: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM db_groups WHERE workspace_id = ?1 AND name = ?2",
+        "SELECT COUNT(*) > 0 FROM db_groups WHERE (workspace_id = ?1 OR scope = 'global') AND name = ?2",
         params![workspace_id, to],
         |row| row.get(0),
     )?;
     if target_exists {
         // The members are already there; the source folder is now a duplicate of the target.
         conn.execute(
-            "DELETE FROM db_groups WHERE workspace_id = ?1 AND name = ?2",
+            "DELETE FROM db_groups WHERE (workspace_id = ?1 OR scope = 'global') AND name = ?2",
             params![workspace_id, from],
         )?;
     } else {
+        // `OR IGNORE`: with two scopes in play the rename can still collide on the unique index —
+        // a global "Staging" renamed to "Prod" while this workspace has its own "Prod". The
+        // members have already moved, which is what the user sees; skipping the folder row leaves
+        // the surviving one to render the bucket.
         conn.execute(
-            "UPDATE db_groups SET name = ?3 WHERE workspace_id = ?1 AND name = ?2",
+            "UPDATE OR IGNORE db_groups SET name = ?3 \
+             WHERE (workspace_id = ?1 OR scope = 'global') AND name = ?2",
             params![workspace_id, from, to],
         )?;
     }
@@ -325,14 +350,103 @@ pub fn rename_group(
 pub fn delete_group(conn: &Connection, workspace_id: &str, name: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE db_connections SET group_name = '', updated_at = ?3 \
-         WHERE workspace_id = ?1 AND group_name = ?2",
+         WHERE (workspace_id = ?1 OR scope = 'global') AND group_name = ?2",
         params![workspace_id, name, now()],
     )?;
     conn.execute(
-        "DELETE FROM db_groups WHERE workspace_id = ?1 AND name = ?2",
+        "DELETE FROM db_groups WHERE (workspace_id = ?1 OR scope = 'global') AND name = ?2",
         params![workspace_id, name],
     )?;
     Ok(())
+}
+
+/// Puts a connection on every workspace's shelf, or takes it back off.
+///
+/// Its own statement rather than a field on [`update_connection`], and for the reason
+/// [`set_connection_group`] gives: this must not disturb the session. Nothing about the server has
+/// changed, so a live connection — and the SSH tunnel under it — survives being re-scoped.
+pub fn set_connection_scope(conn: &Connection, id: &str, global: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE db_connections SET scope = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, if global { "global" } else { "workspace" }, now()],
+    )?;
+    Ok(())
+}
+
+/// Moves a connection to another workspace and files it there.
+pub fn move_connection_to_workspace(
+    conn: &Connection,
+    id: &str,
+    workspace_id: &str,
+) -> rusqlite::Result<()> {
+    let sort_order: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM db_connections WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    conn.execute(
+        "UPDATE db_connections SET workspace_id = ?2, scope = 'workspace', sort_order = ?3, \
+         updated_at = ?4 WHERE id = ?1",
+        params![id, workspace_id, sort_order, now()],
+    )?;
+    Ok(())
+}
+
+/// Puts a group and its members on every workspace's shelf, or takes them back off.
+///
+/// The members go with it, always. A group is a *name*, not a container — `db_connections.
+/// group_name` is the sole record of membership — so a group row that went global while its
+/// connections did not would render, from every other workspace, as a folder that is there and
+/// empty. That is not a lesser version of the feature; it is a bug that looks like one.
+pub fn set_group_scope(
+    conn: &Connection,
+    workspace_id: &str,
+    name: &str,
+    global: bool,
+) -> rusqlite::Result<()> {
+    let scope = if global { "global" } else { "workspace" };
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE db_connections SET scope = ?3, updated_at = ?4 \
+         WHERE (workspace_id = ?1 OR scope = 'global') AND group_name = ?2",
+        params![workspace_id, name, scope, now()],
+    )?;
+    tx.execute(
+        "UPDATE db_groups SET scope = ?3 WHERE (workspace_id = ?1 OR scope = 'global') AND name = ?2",
+        params![workspace_id, name, scope],
+    )?;
+    tx.commit()
+}
+
+/// Moves a group and its members to another workspace, and files them there.
+pub fn move_group_to_workspace(
+    conn: &Connection,
+    from: &str,
+    name: &str,
+    to: &str,
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE db_connections SET workspace_id = ?3, scope = 'workspace', updated_at = ?4 \
+         WHERE (workspace_id = ?1 OR scope = 'global') AND group_name = ?2",
+        params![from, name, to, now()],
+    )?;
+    // `OR IGNORE` then a conditional delete: the destination may already have a folder of this
+    // name, and the unique index would refuse the move. The members are there either way — the
+    // surviving row is the destination's own, which is the same merge `rename_group` performs.
+    tx.execute(
+        "UPDATE OR IGNORE db_groups SET workspace_id = ?3, scope = 'workspace' \
+         WHERE (workspace_id = ?1 OR scope = 'global') AND name = ?2",
+        params![from, name, to],
+    )?;
+    tx.execute(
+        "DELETE FROM db_groups WHERE workspace_id = ?1 AND name = ?2 \
+           AND EXISTS (SELECT 1 FROM db_groups WHERE workspace_id = ?3 AND name = ?2)",
+        params![from, name, to],
+    )?;
+    tx.commit()
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +649,107 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].connection_name, "Prod", "the name is all that still identifies it");
         assert!(!history[0].ran_at.is_empty(), "an empty timestamp is stamped on insert");
+    }
+
+    fn second_workspace(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at) \
+             VALUES ('w2', 'Other', '', '', 1, 't')",
+            [],
+        )
+        .unwrap();
+    }
+
+    /// A global connection is on every workspace's shelf — and so are its consoles, which reach
+    /// their workspace through it and so have their own way to be missed.
+    #[test]
+    fn a_global_connection_brings_its_consoles_to_every_workspace() {
+        let conn = setup();
+        second_workspace(&conn);
+        let connection = create_connection(&conn, "w1", "Prod", "", "postgres", "{}", "").unwrap();
+        create_console(&conn, &connection.id, "scratch", "", "", "").unwrap();
+
+        assert!(load_tree(&conn, "w2").unwrap().connections.is_empty(), "not global yet");
+
+        set_connection_scope(&conn, &connection.id, true).unwrap();
+
+        let other = load_tree(&conn, "w2").unwrap();
+        assert_eq!(other.connections.len(), 1);
+        assert_eq!(other.consoles.len(), 1, "the console came through the join");
+    }
+
+    /// The `idx_db_groups_name` trap, exactly as it is reachable from the UI: a global "Prod" and a
+    /// local "Prod" are two legal rows that the tree merges into one bucket. Renaming that bucket
+    /// has to move both halves, or the user renames a folder and half its contents stay behind
+    /// under the old name.
+    #[test]
+    fn renaming_a_bucket_moves_the_global_half_as_well_as_the_local_one() {
+        let conn = setup();
+        second_workspace(&conn);
+        // A global group with a member, homed in w2.
+        create_group(&conn, "w2", "Prod").unwrap();
+        let shared = create_connection(&conn, "w2", "Shared", "Prod", "postgres", "{}", "").unwrap();
+        set_group_scope(&conn, "w2", "Prod", true).unwrap();
+        // …and a local group of the same name in w1, with its own member.
+        create_group(&conn, "w1", "Prod").unwrap();
+        let local = create_connection(&conn, "w1", "Local", "Prod", "postgres", "{}", "").unwrap();
+
+        rename_group(&conn, "w1", "Prod", "Producción").unwrap();
+
+        for id in [&shared.id, &local.id] {
+            let group: String = conn
+                .query_row("SELECT group_name FROM db_connections WHERE id = ?1", params![id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(group, "Producción", "both halves of the bucket move together");
+        }
+    }
+
+    /// Re-scoping a group has to carry its members, or it renders as a folder that is there and
+    /// empty from every workspace but its home.
+    #[test]
+    fn making_a_group_global_takes_its_connections_with_it() {
+        let conn = setup();
+        second_workspace(&conn);
+        create_group(&conn, "w1", "Prod").unwrap();
+        create_connection(&conn, "w1", "Local", "Prod", "postgres", "{}", "").unwrap();
+
+        set_group_scope(&conn, "w1", "Prod", true).unwrap();
+
+        let other = load_tree(&conn, "w2").unwrap();
+        assert_eq!(other.groups.len(), 1);
+        assert_eq!(other.connections.len(), 1, "the folder is not empty on the other shelf");
+    }
+
+    /// A connection created inside an already-global group is global too.
+    #[test]
+    fn a_connection_inherits_the_scope_of_the_group_it_is_made_in() {
+        let conn = setup();
+        second_workspace(&conn);
+        create_group(&conn, "w1", "Prod").unwrap();
+        set_group_scope(&conn, "w1", "Prod", true).unwrap();
+
+        let made = create_connection(&conn, "w1", "Nueva", "Prod", "postgres", "{}", "").unwrap();
+        assert_eq!(made.scope, "global");
+        assert_eq!(load_tree(&conn, "w2").unwrap().connections.len(), 1);
+    }
+
+    /// "Move to workspace" files a group and its members there rather than leaving them everywhere.
+    #[test]
+    fn moving_a_group_to_another_workspace_takes_its_members() {
+        let conn = setup();
+        second_workspace(&conn);
+        create_group(&conn, "w1", "Prod").unwrap();
+        create_connection(&conn, "w1", "Local", "Prod", "postgres", "{}", "").unwrap();
+
+        move_group_to_workspace(&conn, "w1", "Prod", "w2").unwrap();
+
+        assert!(load_tree(&conn, "w1").unwrap().connections.is_empty());
+        let destination = load_tree(&conn, "w2").unwrap();
+        assert_eq!(destination.connections.len(), 1);
+        assert_eq!(destination.groups.len(), 1);
+        assert!(destination.connections.iter().all(|c| c.scope == "workspace"));
     }
 
     /// The whole reason `db_groups` exists: a folder with nothing in it survives a reload.

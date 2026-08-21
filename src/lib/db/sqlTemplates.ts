@@ -53,7 +53,13 @@ export function createTemplate(
   kind: DbKind,
   schema: string | null,
 ): string {
-  if (!engineInfo(kind).sql) {
+  const language = engineInfo(kind).consoleLanguage;
+  if (language === "redis") {
+    // Redis has neither schemas nor tables. A namespace comes into being the moment a key is
+    // written under it, so the honest draft is the write itself.
+    return `# A namespace exists as soon as a key is written under it.\nSET nuevo:1 "value"`;
+  }
+  if (language === "javascript") {
     // Mongo makes a collection by writing to it; there is no DDL to draft.
     return `db.createCollection("nueva_coleccion")`;
   }
@@ -104,9 +110,18 @@ function qualify(node: DbNode, kind: DbKind): string {
  * that silently starts resolving against a different schema is worse than a redundant prefix.
  */
 export function objectReference(node: DbNode, kind: DbKind): string {
-  // Mongo names a collection through `db`, exactly as every Mongo draft above does; the bare name
-  // is not valid anywhere in that shell.
-  return engineInfo(kind).sql ? qualify(node, kind) : `db.${node.name}`;
+  switch (engineInfo(kind).consoleLanguage) {
+    // A Redis key is named by itself — it *is* the identifier, prefix and all. `node.schema` holds
+    // the namespace prefix and `node.name` the last segment; see `full_key` in `redis.rs`.
+    case "redis":
+      return node.schema ? `${node.schema}:${node.name}` : node.name;
+    // Mongo names a collection through `db`, exactly as every Mongo draft above does; the bare
+    // name is not valid anywhere in that shell.
+    case "javascript":
+      return `db.${node.name}`;
+    default:
+      return qualify(node, kind);
+  }
 }
 
 /** A placeholder that is obviously one, so an unfinished draft can't be mistaken for a finished one. */
@@ -123,8 +138,36 @@ export function sqlTemplate(
   columns: string[],
 ): string {
   const target = qualify(node, kind);
-  const isSql = engineInfo(kind).sql;
-  if (!isSql) {
+  const language = engineInfo(kind).consoleLanguage;
+
+  if (language === "redis") {
+    // The same intents, as Redis commands. Note what `truncate` and `drop` are *not*: FLUSHDB.
+    // "Empty this namespace" means the keys under it, and a draft that reached for the whole
+    // database would be one keystroke from an outage — the driver refuses FLUSHDB anyway.
+    const key = objectReference(node, kind);
+    switch (template) {
+      case "select":
+        return `SCAN 0 MATCH ${key}* COUNT 100`;
+      case "count":
+        return `# DBSIZE counts the whole database; there is no count for one namespace.\nDBSIZE`;
+      case "insert":
+        return `SET ${key} "value"`;
+      case "update":
+        return `HSET ${key} field "value"`;
+      case "delete":
+      case "drop":
+        return `DEL ${key}`;
+      case "truncate":
+        return `# Delete the keys under ${key}, one SCAN page at a time.\n# FLUSHDB would take the whole database and is refused by this console.\nSCAN 0 MATCH ${key}:* COUNT 100`;
+      case "create":
+        return `# A key comes into being by writing a value into it.\nSET ${key} "value"`;
+      case "grant":
+      case "revoke":
+        return `# Redis grants permissions per ACL user, not per key.\n# ACL SETUSER <user> on >password ~${key}* +@read`;
+    }
+  }
+
+  if (language === "javascript") {
     // Mongo: the same intents, in the shell syntax the console speaks.
     switch (template) {
       case "insert":

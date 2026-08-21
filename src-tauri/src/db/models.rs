@@ -811,6 +811,19 @@ pub struct ApiCollection {
     pub pinned: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// `"workspace"` or `"global"` — whether this collection is on one workspace's shelf or all of
+    /// them.
+    ///
+    /// The `#[serde(default)]` is load-bearing here in a way it is not on the other rows that have
+    /// this column: this struct crosses the *network*. `api_sync::push_live` deserialises a peer's
+    /// payload with `serde_json::from_value` and silently skips one it cannot read, so without the
+    /// default, every collection shared by a machine on an older build would never arrive and
+    /// nothing would say so.
+    ///
+    /// Treated as local placement by the sync layer — `comparable` strips it, `localise_collection`
+    /// restores the local value. See both.
+    #[serde(default = "scope_workspace")]
+    pub scope: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -924,6 +937,10 @@ pub struct DbConnectionRow {
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// `"workspace"` or `"global"` — whether this row is on one workspace's shelf or on all of
+    /// them. See `migrations::add_scope_to_scoped_tables`.
+    #[serde(default = "scope_workspace")]
+    pub scope: String,
 }
 
 /// A saved SQL (or Mongo) console, bound to one connection.
@@ -967,6 +984,10 @@ pub struct DbGroupRow {
     pub name: String,
     pub sort_order: i64,
     pub created_at: String,
+    /// `"workspace"` or `"global"` — whether this row is on one workspace's shelf or on all of
+    /// them. See `migrations::add_scope_to_scoped_tables`.
+    #[serde(default = "scope_workspace")]
+    pub scope: String,
 }
 
 /// Everything the database workspace needs on load, in one round trip.
@@ -1053,6 +1074,19 @@ pub struct RemoteWorkspaceTree {
     pub snippets: Vec<RemoteSnippet>,
 }
 
+/// The wire default for `scope` on every row that has one.
+///
+/// It exists for one case and it is not a theoretical one: `api_sync::push_live` deserialises a
+/// peer's `ApiCollection` with `serde_json::from_value` and **silently skips a payload it cannot
+/// read**. Without this default, every collection shared by a machine on an older build would
+/// simply never arrive, and nothing anywhere would say so.
+///
+/// Unrelated to `DocPage::scope` above, which is a different question (`repo` | `workspace`) about
+/// a different table.
+pub(crate) fn scope_workspace() -> String {
+    "workspace".to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Notes workspace
 // ---------------------------------------------------------------------------
@@ -1068,6 +1102,11 @@ pub struct NoteBookRow {
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// `"workspace"` or `"global"` — whether this row is on one workspace's shelf or on all of
+    /// them. Defaulted on the wire so a payload written by a build without the column still
+    /// deserialises; see `migrations::add_scope_to_scoped_tables`.
+    #[serde(default = "scope_workspace")]
+    pub scope: String,
 }
 
 /// A note **without its body** — every column of `notes` except `content`.
@@ -1092,6 +1131,11 @@ pub struct NoteMeta {
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// `"workspace"` or `"global"` — whether this row is on one workspace's shelf or on all of
+    /// them. Defaulted on the wire so a payload written by a build without the column still
+    /// deserialises; see `migrations::add_scope_to_scoped_tables`.
+    #[serde(default = "scope_workspace")]
+    pub scope: String,
 }
 
 /// One note, body included. Fetched one at a time by [`super::note_queries::get_note`].
@@ -1109,6 +1153,11 @@ pub struct NoteRow {
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// `"workspace"` or `"global"` — whether this row is on one workspace's shelf or on all of
+    /// them. Defaulted on the wire so a payload written by a build without the column still
+    /// deserialises; see `migrations::add_scope_to_scoped_tables`.
+    #[serde(default = "scope_workspace")]
+    pub scope: String,
 }
 
 /// A note skeleton the user saved to start from again.
@@ -1251,4 +1300,103 @@ pub struct DiagramThumbnail {
     pub id: String,
     /// A `data:` URI, exactly as the editor exported it. Empty for a diagram never saved.
     pub thumbnail: String,
+}
+
+// ---------------------------------------------------------------------------
+// The keyring
+// ---------------------------------------------------------------------------
+//
+// Note what these types do *not* carry across the IPC bridge. `VaultStatus` never holds the wrapped
+// key, and `VaultItemMeta` never holds the ciphertext — the meta/full split is the same
+// compiler-enforced rule `NoteMeta`/`NoteRow` and `DiagramMeta` use, and here it is the difference
+// between a list of four hundred entries costing a few kilobytes and costing every sealed payload
+// and photo in the vault.
+
+/// What the UI needs to decide between the setup screen, the lock screen and the vault.
+///
+/// Deliberately says nothing about *what is in* the vault, and carries no part of the key. A locked
+/// app knows only that a vault exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultStatus {
+    pub initialised: bool,
+    pub unlocked: bool,
+    pub autolock_minutes: u32,
+    /// Whether this machine has been asked to remember the master password in the OS store.
+    pub remembered: bool,
+}
+
+/// A folder in the keyring's tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultFolderRow {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub color: String,
+    /// `""` is every workspace. Not a foreign key — see the `vault_folders` table comment.
+    pub workspace_id: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One entry, **without its secret**. What the list is built from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultItemMeta {
+    pub id: String,
+    pub folder_id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub subtitle: String,
+    pub site: String,
+    /// JSON array of strings, verbatim as stored.
+    pub tags: String,
+    pub favorite: bool,
+    pub workspace_id: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Empty unless the entry is in the trash.
+    pub deleted_at: String,
+    /// How many files are attached, so the row can say so without reading any of them.
+    #[serde(default)]
+    pub attachments: i64,
+}
+
+/// One entry with its secret **decrypted** — the only shape that carries one.
+///
+/// `secret` is a JSON object whose shape depends on `kind`; the driver does not interpret it beyond
+/// sealing and opening it. Produced only by `keyvault_cmd::keyvault_get_item`, one at a time, and
+/// never held in a list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultItemPlain {
+    #[serde(flatten)]
+    pub meta: VaultItemMeta,
+    pub secret: serde_json::Value,
+}
+
+/// An attachment's description, without its bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultBlobMeta {
+    pub id: String,
+    pub item_id: String,
+    pub name: String,
+    pub mime: String,
+    /// The plaintext length, so a list can say "2.4 MB" without decrypting anything.
+    pub size_bytes: i64,
+    pub created_at: String,
+}
+
+/// Everything the keyring needs on load — and not one sealed payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultTree {
+    pub folders: Vec<VaultFolderRow>,
+    pub items: Vec<VaultItemMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultAuditRow {
+    pub id: String,
+    pub item_id: String,
+    pub action: String,
+    pub at: String,
 }

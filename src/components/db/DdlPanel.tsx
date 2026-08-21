@@ -41,6 +41,13 @@ export function DdlPanel({ tab }: { tab: DbDdlTab }) {
   const connection = useDbStore((s) => s.connections.find((c) => c.id === tab.connectionId));
   const store = useDbStore.getState();
   const isSql = connection ? engineInfo(connection.kind).sql : true;
+  /** Mongo's definition is JSON; Redis's is a block of `#`-commented commands, which `shell`
+   *  tokenises correctly and `json` would paint as one long error. */
+  const definitionLanguage = isSql
+    ? "sql"
+    : connection && engineInfo(connection.kind).consoleLanguage === "redis"
+      ? "shell"
+      : "json";
 
   /**
    * Whether this definition is a statement you can run to change the object.
@@ -119,8 +126,8 @@ export function DdlPanel({ tab }: { tab: DbDdlTab }) {
         ) : (
           <Editor
             height="100%"
-            path={`cf-db:/ddl/${tab.id}.${isSql ? "sql" : "js"}`}
-            language={isSql ? "sql" : "json"}
+            path={`cf-db:/ddl/${tab.id}.${definitionLanguage}`}
+            language={definitionLanguage}
             value={tab.text}
             theme={monacoTheme}
             options={OPTIONS}

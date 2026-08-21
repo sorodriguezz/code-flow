@@ -37,6 +37,7 @@ export type LayoutKey =
   | "notesSidebarWidth"
   | "notesOutlineWidth"
   | "diagramsSidebarWidth"
+  | "vaultSidebarWidth"
   | "dbmlEditorWidth"
   | "dbmlInspectorWidth";
 
@@ -76,6 +77,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   notesSidebarWidth: "layout_notes_sidebar_width",
   notesOutlineWidth: "layout_notes_outline_width",
   diagramsSidebarWidth: "layout_diagrams_sidebar_width",
+  vaultSidebarWidth: "layout_vault_sidebar_width",
   dbmlEditorWidth: "layout_dbml_editor_width",
   dbmlInspectorWidth: "layout_dbml_inspector_width",
 };
@@ -142,6 +144,7 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // shape at the same indent, and two workspaces whose sidebars start eight pixels apart look
   // misaligned rather than distinct.
   diagramsSidebarWidth: 288,
+  vaultSidebarWidth: 300,
   // Wide enough for a column line with its settings — `id integer [pk, increment]` — without
   // wrapping, which is what the schema editor is read in.
   dbmlEditorWidth: 380,

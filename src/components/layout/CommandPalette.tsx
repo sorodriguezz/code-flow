@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   Bot,
+  KeyRound,
   Briefcase,
   ClipboardList,
   NotebookPen,
@@ -54,6 +55,7 @@ const VIEW_ITEMS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBran
   { id: "stories", labelKey: "tabbar.stories", icon: ClipboardList },
   { id: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
   { id: "diagrams", labelKey: "tabbar.diagrams", icon: Workflow },
+  { id: "vault", labelKey: "tabbar.vault", icon: KeyRound },
 ];
 
 const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [

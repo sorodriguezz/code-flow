@@ -29,11 +29,11 @@ use super::queries::now;
 
 /// Every column *except* `content`. See the module comment.
 const NOTE_META_COLUMNS: &str = "id, workspace_id, book_id, title, excerpt, tags, pinned, \
-                                 word_count, sort_order, created_at, updated_at";
+                                 word_count, sort_order, created_at, updated_at, scope";
 const NOTE_COLUMNS: &str = "id, workspace_id, book_id, title, content, excerpt, tags, pinned, \
-                            word_count, sort_order, created_at, updated_at";
+                            word_count, sort_order, created_at, updated_at, scope";
 const BOOK_COLUMNS: &str =
-    "id, workspace_id, parent_id, name, color, sort_order, created_at, updated_at";
+    "id, workspace_id, parent_id, name, color, sort_order, created_at, updated_at, scope";
 const TEMPLATE_COLUMNS: &str = "id, workspace_id, name, description, icon, content, tags, \
                                 sort_order, created_at, updated_at";
 
@@ -55,6 +55,7 @@ fn map_book(row: &rusqlite::Row) -> rusqlite::Result<NoteBookRow> {
         sort_order: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+        scope: row.get(8)?,
     })
 }
 
@@ -71,6 +72,7 @@ fn map_meta(row: &rusqlite::Row) -> rusqlite::Result<NoteMeta> {
         sort_order: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        scope: row.get(11)?,
     })
 }
 
@@ -88,6 +90,7 @@ fn map_note(row: &rusqlite::Row) -> rusqlite::Result<NoteRow> {
         sort_order: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        scope: row.get(12)?,
     })
 }
 
@@ -285,7 +288,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// One workspace's notes, books and templates in a single round trip — and no note bodies.
 pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<NotesWorkspaceTree> {
     let mut statement = conn.prepare(&format!(
-        "SELECT {NOTE_META_COLUMNS} FROM notes WHERE workspace_id = ?1 \
+        "SELECT {NOTE_META_COLUMNS} FROM notes WHERE workspace_id = ?1 OR scope = 'global' \
          ORDER BY pinned DESC, updated_at DESC"
     ))?;
     let notes = statement
@@ -293,7 +296,7 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Note
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut statement = conn.prepare(&format!(
-        "SELECT {BOOK_COLUMNS} FROM note_books WHERE workspace_id = ?1 \
+        "SELECT {BOOK_COLUMNS} FROM note_books WHERE workspace_id = ?1 OR scope = 'global' \
          ORDER BY sort_order, name"
     ))?;
     let books = statement
@@ -359,9 +362,20 @@ pub fn create_note(
         params![workspace_id, book_id],
         |row| row.get(0),
     )?;
+    // Inherited from the book, never passed in: `notes.scope` is a copy of the book's, and a note
+    // written into a global book has to be global or it would be invisible from every workspace
+    // but this one — inside a book that is on all of their shelves.
+    let scope: String = conn
+        .query_row(
+            "SELECT scope FROM note_books WHERE id = ?1",
+            params![book_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "workspace".to_string());
     conn.execute(
         &format!("INSERT INTO notes ({NOTE_COLUMNS}) \
-                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
         params![
             id,
             workspace_id,
@@ -374,7 +388,8 @@ pub fn create_note(
             word_count,
             sort_order,
             timestamp,
-            timestamp
+            timestamp,
+            scope
         ],
     )?;
     Ok(NoteMeta {
@@ -389,6 +404,7 @@ pub fn create_note(
         sort_order,
         created_at: timestamp.clone(),
         updated_at: timestamp,
+        scope,
     })
 }
 
@@ -433,8 +449,14 @@ pub fn move_note(
     )?;
     // `updated_at` is deliberately untouched: moving a note is filing, not writing, and letting it
     // jump to the top of "recently edited" would make a tidy-up look like a week of work.
+    //
+    // `scope` is re-inherited in the same statement, because it is a copy of the destination
+    // book's and the destination just changed. Dragging a note into a global book puts it on every
+    // shelf; dragging it back out takes it off again.
     let changed = conn.execute(
-        "UPDATE notes SET book_id = ?2, sort_order = ?3 WHERE id = ?1",
+        "UPDATE notes SET book_id = ?2, sort_order = ?3, \
+         scope = COALESCE((SELECT scope FROM note_books WHERE id = ?2), 'workspace') \
+         WHERE id = ?1",
         params![id, book_id, sort_order],
     )?;
     if changed == 0 {
@@ -527,11 +549,33 @@ pub fn create_book(
         params![workspace_id, parent_id],
         |row| row.get(0),
     )?;
+    // A sub-book inherits its parent's scope: a workspace-only book inside a global one would be
+    // a folder that is present and empty from every workspace but its home. A book made at the
+    // root is workspace-scoped, which is where every book starts.
+    let scope: String = match parent_id {
+        Some(parent) => conn
+            .query_row("SELECT scope FROM note_books WHERE id = ?1", params![parent], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .unwrap_or_else(|| "workspace".to_string()),
+        None => "workspace".to_string(),
+    };
     conn.execute(
         &format!(
-            "INSERT INTO note_books ({BOOK_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            "INSERT INTO note_books ({BOOK_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
         ),
-        params![id, workspace_id, parent_id, name, color, sort_order, timestamp, timestamp],
+        params![
+            id,
+            workspace_id,
+            parent_id,
+            name,
+            color,
+            sort_order,
+            timestamp,
+            timestamp,
+            scope
+        ],
     )?;
     Ok(NoteBookRow {
         id,
@@ -542,6 +586,7 @@ pub fn create_book(
         sort_order,
         created_at: timestamp.clone(),
         updated_at: timestamp,
+        scope,
     })
 }
 
@@ -615,7 +660,97 @@ pub fn move_book(
         "UPDATE note_books SET parent_id = ?2, sort_order = ?3, updated_at = ?4 WHERE id = ?1",
         params![id, parent_id, sort_order, now()],
     )?;
+    // Dropping a book into a global one makes it global, and dragging it back to the root takes it
+    // off every other shelf — the subtree follows either way. Routed through `set_book_scope`
+    // rather than an UPDATE here so there is one place that knows a scope change has to reach the
+    // notes as well as the books.
+    let scope: String = match parent_id {
+        Some(parent) => conn
+            .query_row("SELECT scope FROM note_books WHERE id = ?1", params![parent], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .unwrap_or_else(|| "workspace".to_string()),
+        None => "workspace".to_string(),
+    };
+    set_book_scope(conn, id, scope == "global")?;
     Ok(true)
+}
+
+/// Puts a book — and everything under it — on every workspace's shelf, or takes it back off.
+///
+/// The whole subtree, for the reason [`create_book`] inherits: a global book whose sub-book is not
+/// global renders, from every workspace but its home, as a folder that is there and empty. The
+/// notes go too, because `notes.scope` is what [`load_tree`]'s notes query filters on — it is
+/// denormalised from here precisely so that read stays one statement with no join, and this is the
+/// function that owes it.
+///
+/// One transaction: a subtree half on the shelf is a state no user asked for and none can see.
+pub fn set_book_scope(conn: &Connection, id: &str, global: bool) -> rusqlite::Result<()> {
+    let scope = if global { "global" } else { "workspace" };
+    const SUBTREE: &str = "WITH RECURSIVE subtree(id) AS ( \
+             SELECT ?1 \
+             UNION ALL \
+             SELECT book.id FROM note_books book JOIN subtree ON book.parent_id = subtree.id \
+         ) ";
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        &format!("{SUBTREE} UPDATE notes SET scope = ?2 WHERE book_id IN (SELECT id FROM subtree)"),
+        params![id, scope],
+    )?;
+    tx.execute(
+        &format!(
+            "{SUBTREE} UPDATE note_books SET scope = ?2, updated_at = ?3 \
+             WHERE id IN (SELECT id FROM subtree)"
+        ),
+        params![id, scope, now()],
+    )?;
+    tx.commit()
+}
+
+/// Moves a book and everything under it to another workspace, and files it *there* rather than
+/// leaving it global — "move to workspace" is the answer to "this belongs somewhere else", not a
+/// second way to spell "everywhere".
+///
+/// Deliberately not routed through [`move_book`], which is about the tree and refuses to think
+/// about workspaces at all. The book lands at the root of its new home, because the parent it had
+/// belongs to the workspace it just left.
+pub fn move_book_to_workspace(
+    conn: &Connection,
+    id: &str,
+    workspace_id: &str,
+) -> rusqlite::Result<()> {
+    const SUBTREE: &str = "WITH RECURSIVE subtree(id) AS ( \
+             SELECT ?1 \
+             UNION ALL \
+             SELECT book.id FROM note_books book JOIN subtree ON book.parent_id = subtree.id \
+         ) ";
+    let tx = conn.unchecked_transaction()?;
+    let sort_order: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM note_books \
+         WHERE workspace_id = ?1 AND parent_id IS NULL",
+        params![workspace_id],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        &format!(
+            "{SUBTREE} UPDATE notes SET workspace_id = ?2, scope = 'workspace' \
+             WHERE book_id IN (SELECT id FROM subtree)"
+        ),
+        params![id, workspace_id],
+    )?;
+    tx.execute(
+        &format!(
+            "{SUBTREE} UPDATE note_books SET workspace_id = ?2, scope = 'workspace', \
+             updated_at = ?3 WHERE id IN (SELECT id FROM subtree)"
+        ),
+        params![id, workspace_id, now()],
+    )?;
+    tx.execute(
+        "UPDATE note_books SET parent_id = NULL, sort_order = ?2 WHERE id = ?1",
+        params![id, sort_order],
+    )?;
+    tx.commit()
 }
 
 /// The books' half of [`reorder_notes`]: one parent's children, in the order the user arranged them.
@@ -768,7 +903,7 @@ pub fn search_notes(
     }
 
     let mut statement = conn.prepare(
-        "SELECT id, content FROM notes WHERE workspace_id = ?1 \
+        "SELECT id, content FROM notes WHERE workspace_id = ?1 OR scope = 'global' \
          ORDER BY pinned DESC, updated_at DESC",
     )?;
     let mut rows = statement.query(params![workspace_id])?;
@@ -864,6 +999,117 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// A second workspace beside `w1`, for the scope tests.
+    fn with_second_workspace(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                 VALUES ('w2', 'Otro', 'book', '#222', 1, '2026-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+    }
+
+    /// The point of the feature: a global book, and the notes in it, are on the other workspace's
+    /// shelf too — while a workspace-scoped one stays where it was made.
+    #[test]
+    fn a_global_book_and_its_notes_show_up_in_every_workspace() {
+        let conn = workspace();
+        with_second_workspace(&conn);
+        create_note(&conn, "w1", "b1", "Runbook", "cuerpo", "[]").unwrap();
+
+        assert!(load_tree(&conn, "w2").unwrap().books.is_empty(), "not global yet");
+
+        set_book_scope(&conn, "b1", true).unwrap();
+
+        let other = load_tree(&conn, "w2").unwrap();
+        assert_eq!(other.books.len(), 1, "the global book is on w2's shelf");
+        assert_eq!(other.notes.len(), 1, "and so is the note inside it");
+        assert_eq!(other.notes[0].scope, "global");
+
+        // And back off again, which must reach the note as well as the book.
+        set_book_scope(&conn, "b1", false).unwrap();
+        let other = load_tree(&conn, "w2").unwrap();
+        assert!(other.books.is_empty() && other.notes.is_empty());
+    }
+
+    /// `set_book_scope` walks the subtree. A sub-book left behind would render, from every other
+    /// workspace, as a folder that is there and empty.
+    #[test]
+    fn making_a_book_global_reaches_the_whole_subtree() {
+        let conn = workspace();
+        with_second_workspace(&conn);
+        let child = create_book(&conn, "w1", Some("b1"), "Sub", "").unwrap();
+        create_note(&conn, "w1", &child.id, "Dentro", "x", "[]").unwrap();
+
+        set_book_scope(&conn, "b1", true).unwrap();
+
+        let other = load_tree(&conn, "w2").unwrap();
+        assert_eq!(other.books.len(), 2, "parent and child both travel");
+        assert_eq!(other.notes.len(), 1, "and the note under the child");
+    }
+
+    /// A note written into a global book has to be global, or it would be invisible from every
+    /// workspace but one — inside a book that is on all of their shelves.
+    #[test]
+    fn a_note_inherits_the_scope_of_the_book_it_is_written_into() {
+        let conn = workspace();
+        with_second_workspace(&conn);
+        set_book_scope(&conn, "b1", true).unwrap();
+
+        let note = create_note(&conn, "w1", "b1", "Nueva", "cuerpo", "[]").unwrap();
+        assert_eq!(note.scope, "global");
+        assert_eq!(load_tree(&conn, "w2").unwrap().notes.len(), 1);
+    }
+
+    /// Filing a note into a global book puts it on every shelf; dragging it back out takes it off.
+    #[test]
+    fn moving_a_note_re_inherits_the_destination_books_scope() {
+        let conn = workspace();
+        with_second_workspace(&conn);
+        let global = create_book(&conn, "w1", None, "Compartido", "").unwrap();
+        set_book_scope(&conn, &global.id, true).unwrap();
+        let note = create_note(&conn, "w1", "b1", "Local", "x", "[]").unwrap();
+
+        let moved = move_note(&conn, &note.id, &global.id).unwrap().unwrap();
+        assert_eq!(moved.scope, "global");
+
+        let back = move_note(&conn, &note.id, "b1").unwrap().unwrap();
+        assert_eq!(back.scope, "workspace");
+    }
+
+    /// Search reads its own statement rather than `load_tree`'s, so it has its own way to miss the
+    /// global rows.
+    #[test]
+    fn search_finds_notes_in_a_global_book_from_another_workspace() {
+        let conn = workspace();
+        with_second_workspace(&conn);
+        create_note(&conn, "w1", "b1", "Runbook", "el procedimiento de despliegue", "[]").unwrap();
+        set_book_scope(&conn, "b1", true).unwrap();
+
+        let hits = search_notes(&conn, "w2", "despliegue", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    /// "Move to workspace" files the book *there* rather than leaving it everywhere — and takes the
+    /// subtree and the notes with it.
+    #[test]
+    fn moving_a_book_to_another_workspace_files_it_there() {
+        let conn = workspace();
+        with_second_workspace(&conn);
+        let child = create_book(&conn, "w1", Some("b1"), "Sub", "").unwrap();
+        create_note(&conn, "w1", &child.id, "Dentro", "x", "[]").unwrap();
+
+        move_book_to_workspace(&conn, "b1", "w2").unwrap();
+
+        let source = load_tree(&conn, "w1").unwrap();
+        assert!(source.books.is_empty() && source.notes.is_empty(), "it left w1");
+        let destination = load_tree(&conn, "w2").unwrap();
+        assert_eq!(destination.books.len(), 2);
+        assert_eq!(destination.notes.len(), 1);
+        assert!(destination.books.iter().all(|b| b.scope == "workspace"), "filed, not global");
+        let root = destination.books.iter().find(|b| b.id == "b1").unwrap();
+        assert!(root.parent_id.is_none(), "it lands at the root of its new home");
     }
 
     #[test]

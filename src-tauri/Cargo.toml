@@ -185,6 +185,13 @@ zip = { version = "4", default-features = false, features = ["deflate"] }
 # Wipes the derived key and the decrypted plaintext once they've served their purpose, so a
 # passphrase-derived key doesn't linger in freed memory for the rest of the session.
 zeroize = "1"
+# Base32, for the keyring's TOTP secrets: an `otpauth://` URI carries its shared secret base32
+# encoded, and that is the only place in the app that needs the alphabet. Already in the lockfile as
+# a transitive dependency, so naming it here adds a line to the manifest rather than a build.
+#
+# No TOTP crate: the algorithm is HMAC over a counter, and `hmac`/`sha1`/`sha2` are all already
+# above for the API client's auth schemes. See `keyvault::totp`.
+data-encoding = "2"
 # gRPC without a `protoc` binary on the user's machine: `protox` is a pure-Rust .proto compiler
 # producing a FileDescriptorSet, `prost-reflect` turns that into dynamic messages at runtime, and
 # `tonic` carries them over the wire through a hand-written codec (there is no generated stub —
@@ -197,7 +204,7 @@ prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "0.9"
 
 # ---------------- Database client ----------------
-# One driver per engine, and four of the five are pure Rust: the app installs nothing on the user's
+# One driver per engine, and five of the six are pure Rust: the app installs nothing on the user's
 # machine, so there is no ODBC manager and no vendor client library to make a prerequisite.
 #
 # IRIS is the exception, and it costs no crate. It has no Rust driver and no third-party
@@ -244,6 +251,32 @@ mongodb = { version = "3", default-features = false, features = [
     "compat-3-3-0",
     "dns-resolver",
     "rustls-tls",
+] }
+# Redis. Pure Rust, no C and no vendor library, like the other four.
+#
+# `connection-manager` is the load-bearing feature and not a convenience: it hands out a `Clone`
+# multiplexed handle that reconnects behind your back, and — the part that matters here — its
+# background actor tags responses and consumes them whether or not a caller is still waiting. That
+# is what makes dropping a cancelled request future *safe*, so `Session::poisoned_by_cancel` can
+# keep returning false for Redis. A plain `redis::aio::Connection` would have exactly the TDS
+# problem SQL Server has (see `mssql.rs`): the socket left mid-response, the next command reading
+# the previous answer. Never swap it for one.
+#
+# `tls-rustls-insecure` is what `DbSslMode::Require` means everywhere else in this module —
+# encrypt, but do not verify — and it is a separate feature here rather than a runtime flag.
+#
+# Deliberately NOT enabled: `cluster`/`cluster-async` (a cluster client rewrites key routing and
+# would make the explorer's per-node view a lie), `json`/`bloom`/`vector-sets`/`search_unfinished`
+# (module commands the console can already send as plain commands), `sentinel`, and both
+# `*-native-tls-comp` variants, which would pull OpenSSL on Linux.
+redis = { version = "1.6", default-features = false, features = [
+    "tokio-comp",
+    "connection-manager",
+    "tokio-rustls-comp",
+    "tls-rustls-insecure",
+    "acl",
+    "script",
+    "streams",
 ] }
 tauri-plugin-single-instance = "2.4.3"
 

@@ -777,6 +777,13 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS api_collections (
             id           TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- 'workspace' or 'global' — see `note_books.scope`, which states the whole design.
+            --
+            -- Collections are the one scoped thing that also travels between machines, so this
+            -- column has a second rule: it is *local placement*, never the host's decision.
+            -- `api_sync::comparable` strips it before diffing and `localise_collection` restores
+            -- the local value on every pull, the same way `sort_order` and `pinned` are handled.
+            scope        TEXT NOT NULL DEFAULT 'workspace',
             name        TEXT NOT NULL,
             description TEXT NOT NULL DEFAULT '',
             -- JSON AuthConfig; '' = nothing configured (children fall through to "none").
@@ -998,24 +1005,39 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             id           TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
             name         TEXT NOT NULL,
+            -- 'workspace' or 'global' — see `note_books.scope`.
+            --
+            -- A group is a *name*, not a container, so re-scoping one only means anything if its
+            -- members go with it: `set_group_scope` rewrites the connections too, because a group
+            -- whose members are invisible renders as an empty folder rather than as a group.
+            scope        TEXT NOT NULL DEFAULT 'workspace',
             sort_order   INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL
         );
         -- One row per name per workspace. The tree renders a group once whether it is here, implied
         -- by a connection, or both, so a duplicate would be invisible in the UI and confusing in
         -- the data.
+        --
+        -- Note what this does *not* say now that groups can be global: a global group "Prod" and a
+        -- workspace group "Prod" are two rows with different `workspace_id`, so the index permits
+        -- both, and `groupConnections` merges them into one bucket on screen. That is why the three
+        -- group writers address `(workspace_id = ?1 OR scope = 'global')` rather than
+        -- `workspace_id = ?1` — otherwise a rename would move half of a bucket. Making the index
+        -- span both scopes instead would mean rebuilding the table, which SQLite has no ALTER for.
         CREATE UNIQUE INDEX IF NOT EXISTS idx_db_groups_name
             ON db_groups (workspace_id, name);
 
         CREATE TABLE IF NOT EXISTS db_connections (
             id           TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- 'workspace' or 'global' — see `note_books.scope`.
+            scope        TEXT NOT NULL DEFAULT 'workspace',
             name         TEXT NOT NULL,
             -- Free text, and the sole record of *membership* — see `db_groups` above for what that
             -- table adds and why it deliberately isn't a foreign key. Empty means ungrouped, which
             -- the tree shows as a bucket of its own rather than as a group named "".
             group_name   TEXT NOT NULL DEFAULT '',
-            -- postgres | supabase | sqlserver | iris | mongodb
+            -- postgres | supabase | sqlserver | iris | mongodb | redis
             kind         TEXT NOT NULL,
             -- JSON: host, port, database, user, url, ssl, options, read_only, timeout. One blob
             -- rather than columns for the same reason `api_requests` keeps a `spec` — a new engine
@@ -1161,6 +1183,15 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS note_books (
             id           TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- 'workspace' (the default, and what every row was before this column) or 'global'.
+            --
+            -- A global book sits on every workspace's shelf. `workspace_id` keeps its foreign key
+            -- and its cascade and becomes the book's *home*: where it was made, and what
+            -- `queries::rehome_global_rows` moves it out of when that workspace is deleted. There
+            -- is no third spelling — a global row cannot be `workspace_id = ''`, because the
+            -- column references `workspaces(id)` and SQLite will not take a non-null value with
+            -- no parent row.
+            scope        TEXT NOT NULL DEFAULT 'workspace',
             -- Null is the root of the tree, which is a real place: an unfiled note is the normal
             -- state of a note that was just written, not an error to be corrected.
             parent_id    TEXT REFERENCES note_books(id) ON DELETE CASCADE,
@@ -1192,6 +1223,15 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS notes (
             id           TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- Denormalised from the book this note is in, and the only column here that is a copy
+            -- of something else. It buys the property `load_tree` is built on: the notes read
+            -- stays one statement with no join, which is what makes the whole workspace's note
+            -- list affordable to hold at once.
+            --
+            -- The cost is an invariant, and it is narrow: exactly three writers set it —
+            -- `create_note` and `move_note` inherit it from the destination book, and
+            -- `set_book_scope` rewrites the subtree. Nothing else may write it.
+            scope        TEXT NOT NULL DEFAULT 'workspace',
             -- Every note belongs to a book: the Notes view browses books and shows what is inside
             -- them, so a note outside every book is a note with no surface to be reached from.
             -- `file_loose_notes_into_a_book` brought the rows written under the old rule inside,
@@ -1338,6 +1378,130 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_diagram_templates_workspace
             ON diagram_templates (workspace_id, sort_order);
 
+        -- ---------------- The keyring ("Llavero") ----------------
+        --
+        -- CodeFlow's own password manager. Read `keyvault/crypto.rs` before changing anything here;
+        -- the key hierarchy is stated there and these columns are its storage.
+        --
+        -- **No foreign key to `workspaces`, anywhere in these five tables.** That is the single most
+        -- important decision in this block. Items may be *filed* under a workspace — `workspace_id`
+        -- is a plain string where `''` means "everywhere" — but a cascade would mean a password
+        -- disappearing as a side effect of tidying up a workspace, and there is no version of that
+        -- which is acceptable in a vault. `queries::rehome_global_rows` moves a deleted workspace's
+        -- items back to global instead.
+
+        -- Exactly one row, `id = 'vault'`: the wrapped data key and the parameters needed to unwrap
+        -- it.
+        --
+        -- Nothing here can verify a password by comparison. A wrong password fails the GCM tag on
+        -- `dek_wrapped`, and that failure *is* the check — so a copy of this file gives an attacker
+        -- no way to test guesses faster than by running Argon2 at the cost recorded below. (Contrast
+        -- `backup_cmd::backup_passphrase_matches`, which compares a stored string. Not that.)
+        CREATE TABLE IF NOT EXISTS vault_meta (
+            id             TEXT PRIMARY KEY,
+            kdf            TEXT NOT NULL DEFAULT 'argon2id',
+            -- Recorded rather than assumed, exactly as the backup header records them, so raising
+            -- the cost later cannot strand a vault created today.
+            kdf_memory_kib INTEGER NOT NULL,
+            kdf_iterations INTEGER NOT NULL,
+            kdf_lanes      INTEGER NOT NULL,
+            kdf_salt       TEXT NOT NULL,
+            dek_nonce      TEXT NOT NULL,
+            dek_wrapped    TEXT NOT NULL,
+            -- Minutes of inactivity before the vault locks itself. 0 is off, which is a setting a
+            -- desktop user is entitled to.
+            autolock_minutes INTEGER NOT NULL DEFAULT 15,
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS vault_folders (
+            id           TEXT PRIMARY KEY,
+            parent_id    TEXT REFERENCES vault_folders(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            color        TEXT NOT NULL DEFAULT '',
+            -- `''` is everywhere. See the block comment above for why this is not a foreign key.
+            workspace_id TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vault_folders_tree
+            ON vault_folders (parent_id, sort_order);
+
+        -- One entry.
+        --
+        -- The columns above `secret_*` are deliberately in the clear, and that is a decision rather
+        -- than an oversight: a *locked* vault still has to be able to say what is in it. A title
+        -- that needed the key to render would turn the list into a wall of bullets, and the user
+        -- would have to unlock to find out whether the thing they are looking for is even here.
+        -- What is secret is the payload, and only the payload.
+        CREATE TABLE IF NOT EXISTS vault_items (
+            id          TEXT PRIMARY KEY,
+            folder_id   TEXT REFERENCES vault_folders(id) ON DELETE SET NULL,
+            -- login | card | note | identity | key | file
+            kind        TEXT NOT NULL DEFAULT 'login',
+            title       TEXT NOT NULL DEFAULT '',
+            -- The account line under the title — a username, the last four of a card. Not a secret.
+            subtitle    TEXT NOT NULL DEFAULT '',
+            site        TEXT NOT NULL DEFAULT '',
+            tags        TEXT NOT NULL DEFAULT '[]',
+            favorite    INTEGER NOT NULL DEFAULT 0,
+            workspace_id TEXT NOT NULL DEFAULT '',
+            -- Everything secret, as one AES-256-GCM ciphertext over a JSON object.
+            --
+            -- One blob rather than a column per field, for two reasons. The shape differs per
+            -- `kind`, so columns would be mostly NULL; and a schema that named the fields would
+            -- leak which ones an entry *has* — that a login carries a TOTP secret, that an identity
+            -- carries a passport number — to anyone reading the file without the key.
+            secret_nonce TEXT NOT NULL DEFAULT '',
+            secret_blob  TEXT NOT NULL DEFAULT '',
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            -- Set when the entry is deleted, so a mis-click is recoverable from the trash. The row
+            -- is only really gone when it is purged.
+            deleted_at  TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_vault_items_folder
+            ON vault_items (folder_id, sort_order);
+        CREATE INDEX IF NOT EXISTS idx_vault_items_live
+            ON vault_items (deleted_at, updated_at DESC);
+
+        -- Attachments: a photo of a document, a `.pem`, a recovery-codes PDF.
+        --
+        -- In a table rather than as files on disk, and the reason is `backup::snapshot`: it copies
+        -- tables and knows nothing about files, so an attachment on disk would be the one thing a
+        -- restore silently lost. The cost is that the row holds base64 of ciphertext — about 1.37×
+        -- the file — which is why `keyvault_cmd` caps the size.
+        --
+        -- `size_bytes` is the *plaintext* length, so the list can say "2.4 MB" while locked.
+        CREATE TABLE IF NOT EXISTS vault_blobs (
+            id         TEXT PRIMARY KEY,
+            item_id    TEXT NOT NULL REFERENCES vault_items(id) ON DELETE CASCADE,
+            name       TEXT NOT NULL,
+            mime       TEXT NOT NULL DEFAULT 'application/octet-stream',
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            nonce      TEXT NOT NULL,
+            data       TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vault_blobs_item ON vault_blobs (item_id);
+
+        -- An append-only record of what was opened and when.
+        --
+        -- Not a security control on its own — anyone who can edit the database can edit this. It is
+        -- the answer to "did I copy that password on the laptop last Tuesday", which is a question
+        -- people actually ask after an incident.
+        CREATE TABLE IF NOT EXISTS vault_audit (
+            id        TEXT PRIMARY KEY,
+            item_id   TEXT NOT NULL DEFAULT '',
+            -- unlock | lock | reveal | copy | create | update | delete | restore | purge
+            action    TEXT NOT NULL,
+            at        TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vault_audit_time ON vault_audit (at DESC);
+
         -- A phone or tablet that has been paired with the remote-control server.
         --
         -- Deliberately NOT scoped to a workspace: pairing is a property of this *install* — the
@@ -1410,6 +1574,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_repos_to_agent_chains(conn)?;
     add_ai_usage(conn)?;
     add_group_name_to_db_connections(conn)?;
+    add_scope_to_scoped_tables(conn)?;
     add_tab_to_workspace_terminals(conn)?;
     align_project_ado_org_with_connections(conn)?;
     file_loose_notes_into_a_book(conn)?;
@@ -1748,6 +1913,31 @@ fn add_group_name_to_db_connections(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(
             "ALTER TABLE db_connections ADD COLUMN group_name TEXT NOT NULL DEFAULT '';",
         )?;
+    }
+    Ok(())
+}
+
+/// A note book, an API collection, a database connection and a connection group can now be
+/// *global* — on every workspace's shelf rather than only the one they were made in.
+///
+/// The default is the whole migration: `'workspace'` is what every existing row already was, so an
+/// upgraded database shows exactly what it showed before. Nothing is backfilled and nothing moves.
+///
+/// Five tables, not three. `notes` is here because `notes.scope` is denormalised from its book —
+/// see that column's comment for the property it buys and the three writers that owe it. `db_groups`
+/// is here because a group whose members went global while it did not renders as an empty folder.
+///
+/// What is deliberately *not* here: `api_environments`, `api_history`, `api_cookies` and
+/// `db_query_history` stay workspace-scoped. A global collection uses the current workspace's
+/// environment and files its history there, which is the right reading of "global" — the
+/// collection is shared, the run is local.
+fn add_scope_to_scoped_tables(conn: &Connection) -> rusqlite::Result<()> {
+    for table in ["note_books", "notes", "api_collections", "db_connections", "db_groups"] {
+        if table_exists(conn, table)? && !has_column(conn, table, "scope")? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN scope TEXT NOT NULL DEFAULT 'workspace';"
+            ))?;
+        }
     }
     Ok(())
 }

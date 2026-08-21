@@ -144,6 +144,24 @@ pub fn notes_set_book_color(db: State<Db>, id: String, color: String) -> Result<
     note_queries::set_book_color(&conn, &id, &color).map_err(|e| e.to_string())
 }
 
+/// Puts a book and everything under it on every workspace's shelf, or takes it back off.
+#[tauri::command]
+pub fn notes_set_book_scope(db: State<Db>, id: String, global: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::set_book_scope(&conn, &id, global).map_err(|e| e.to_string())
+}
+
+/// Moves a book and everything under it to another workspace, and files it there.
+#[tauri::command]
+pub fn notes_move_book_to_workspace(
+    db: State<Db>,
+    id: String,
+    workspace_id: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::move_book_to_workspace(&conn, &id, &workspace_id).map_err(|e| e.to_string())
+}
+
 /// `false` means the drop was refused: it would have put the book inside its own subtree. Not an
 /// error — a drag can reasonably attempt it, and the answer is that nothing moved.
 #[tauri::command]

@@ -6,6 +6,7 @@ import {
   Folder,
   Hash,
   KeyRound,
+  KeySquare,
   Layers,
   Leaf,
   ListOrdered,
@@ -108,6 +109,7 @@ const ENGINE_COLORS: Record<DbKind, string> = {
   sqlserver: "#ef4444",
   iris: "#8b5cf6",
   mongodb: "#22c55e",
+  redis: "#dc382d",
 };
 
 export function engineColor(kind: DbKind): string {
@@ -120,7 +122,8 @@ export function engineColor(kind: DbKind): string {
  * Deliberately not brand logos: lucide ships none of them, and five trademarks redrawn by hand is a
  * licensing question rather than a design one. These are the shapes each engine's own mark suggests
  * — Mongo's leaf, Supabase's bolt — or what the engine plainly is: a server for SQL Server, layers
- * for IRIS's multi-model store. Five distinct silhouettes is all a list of five rows needs.
+ * for IRIS's multi-model store, a key for Redis. Six distinct silhouettes is all a list of six
+ * rows needs.
  *
  * Tinted with `engineColor` wherever they are drawn, so the glyph in the picker and the dot beside a
  * connection in the explorer are the same colour for the same engine.
@@ -131,6 +134,9 @@ const ENGINE_ICONS: Record<DbKind, LucideIcon> = {
   sqlserver: Server,
   iris: Layers,
   mongodb: Leaf,
+  // A key, because that is plainly what Redis is — and every shape closer to "fast store"
+  // (`Database`, `Zap`, `Server`, `Layers`, `Leaf`) is already taken by one of the five above.
+  redis: KeySquare,
 };
 
 export function engineIcon(kind: DbKind): LucideIcon {

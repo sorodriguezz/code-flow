@@ -123,6 +123,21 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 
   const engine = connection ? engineInfo(connection.kind) : null;
   const isSql = engine?.sql ?? true;
+  /**
+   * Which Monaco language the console gets.
+   *
+   * Monaco ships no `redis` language, and writing a Monarch grammar for one is a separate piece of
+   * work. `shell` is the honest stand-in: it tokenises `SET key "value"` the way a person reads it
+   * — command, argument, quoted string — which is most of what highlighting is for here.
+   */
+  const monacoLanguage =
+    engine?.consoleLanguage === "redis"
+      ? "shell"
+      : engine?.consoleLanguage === "javascript"
+        ? "javascript"
+        : "sql";
+  const monacoExtension =
+    engine?.consoleLanguage === "redis" ? "redis" : isSql ? "sql" : "js";
   /** The connection's folder, shown ahead of its name in the toolbar. Trimmed and empty for the
    *  ungrouped bucket, which is the same `""` the tree keys that bucket by — see `UNGROUPED`. */
   const group = connection?.group_name.trim() ?? "";
@@ -464,8 +479,8 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
           // One model per tab, so two consoles keep their own undo history and cursor. The scheme
           // is this panel's own — `cf-editor` URIs are file models and would be offered to
           // "go to definition".
-          path={`cf-db:/console/${tab.id}.${isSql ? "sql" : "js"}`}
-          language={isSql ? "sql" : "javascript"}
+          path={`cf-db:/console/${tab.id}.${monacoExtension}`}
+          language={monacoLanguage}
           value={tab.body}
           theme={monacoTheme}
           onChange={(value) => store.updateConsole(tab.id, { body: value ?? "", dirty: true })}

@@ -1,5 +1,6 @@
 import {
   Bot,
+  KeyRound,
   ClipboardList,
   Database,
   Layers,
@@ -108,6 +109,16 @@ const APPS: WorkspaceApp[] = [
     icon: Workflow,
     labelKey: "tabbar.diagrams",
     descriptionKey: "tabbar.diagramsDescription",
+  },
+  // Last, and the only app here that is *not* scoped to the workspace: a password does not belong
+  // to the workspace it was typed in, and losing one because a workspace was tidied up is not a
+  // trade worth making. Its list narrows by workspace; the vault itself does not. See
+  // `vaultStore`'s closing comment.
+  {
+    id: "vault",
+    icon: KeyRound,
+    labelKey: "tabbar.vault",
+    descriptionKey: "tabbar.vaultDescription",
   },
 ];
 

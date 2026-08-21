@@ -148,6 +148,51 @@ pub fn db_set_connection_group(
     queries::set_connection_group(&conn, &id, group_name.trim()).map_err(|e| e.to_string())
 }
 
+/// Puts a connection on every workspace's shelf, or takes it back off.
+///
+/// Like [`db_set_connection_group`], and for the same reason, this deliberately does not touch the
+/// registry: a live session and its SSH tunnel survive being re-scoped.
+#[tauri::command]
+pub fn db_set_connection_scope(db: State<Db>, id: String, global: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_connection_scope(&conn, &id, global).map_err(|e| e.to_string())
+}
+
+/// Moves a connection to another workspace and files it there.
+#[tauri::command]
+pub fn db_move_connection_to_workspace(
+    db: State<Db>,
+    id: String,
+    workspace_id: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::move_connection_to_workspace(&conn, &id, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// Puts a group and its members on every workspace's shelf, or takes them back off.
+#[tauri::command]
+pub fn db_set_group_scope(
+    db: State<Db>,
+    workspace_id: String,
+    name: String,
+    global: bool,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_group_scope(&conn, &workspace_id, name.trim(), global).map_err(|e| e.to_string())
+}
+
+/// Moves a group and its members to another workspace.
+#[tauri::command]
+pub fn db_move_group_to_workspace(
+    db: State<Db>,
+    from: String,
+    name: String,
+    to: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::move_group_to_workspace(&conn, &from, name.trim(), &to).map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Passwords
 // ---------------------------------------------------------------------------
@@ -799,7 +844,7 @@ pub async fn db_ai_assist(
     };
 
     let outcome = render_outcome(&last_results);
-    let language = if config.kind.sql() { "sql" } else { "javascript" };
+    let language = config.kind.console_language();
 
     // The catalog read is inside the run's scope, not before it. On a wide schema it is the slow
     // part of this whole call, and a stop pressed while it is going has to be observed — otherwise

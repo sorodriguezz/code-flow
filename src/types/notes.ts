@@ -17,6 +17,8 @@
  * reasoning; this is the frontend half of the same rule.
  */
 
+import type { RowScope } from "./domain";
+
 // ---------------------------------------------------------------------------
 // Wire — exact mirrors of `db::models`
 // ---------------------------------------------------------------------------
@@ -36,6 +38,8 @@ export interface NoteMetaRow {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  /** Denormalised from the note's book — see the `notes.scope` column comment. */
+  scope: RowScope;
 }
 
 /** One note, body included. The only shape that carries `content`. */
@@ -53,6 +57,7 @@ export interface NoteBookRow {
   sort_order: number;
   created_at: string;
   updated_at: string;
+  scope: RowScope;
 }
 
 export interface NoteTemplateRow {

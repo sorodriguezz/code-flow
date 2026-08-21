@@ -1,3 +1,14 @@
+/**
+ * Whether a row is on one workspace's shelf or on every one of them.
+ *
+ * The mirror of the `scope` column that `note_books`, `notes`, `api_collections`, `db_connections`
+ * and `db_groups` carry. `"global"` does not mean the row has no workspace: it keeps the one it was
+ * made in as its *home*, which is what `queries::rehome_global_rows` moves it out of when that
+ * workspace is deleted. A global row cannot be spelled with an empty `workspace_id` — the column is
+ * a foreign key.
+ */
+export type RowScope = "workspace" | "global";
+
 export interface Workspace {
   id: string;
   name: string;

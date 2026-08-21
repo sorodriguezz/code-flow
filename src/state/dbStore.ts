@@ -29,7 +29,11 @@ import {
   dbRowCount,
   dbSchemaDiagram,
   dbSchemaObjects,
+  dbMoveConnectionToWorkspace,
+  dbMoveGroupToWorkspace,
   dbSetConnectionGroup,
+  dbSetConnectionScope,
+  dbSetGroupScope,
   dbSetPassword,
   dbTableData,
   dbUpdateConnection,
@@ -40,6 +44,7 @@ import { getSetting, setSetting } from "../lib/tauri/commands";
 // server, this stops a CLI subprocess. The assistant runs on the second and never the first.
 import { isCancellation, newRunId as newAiRunId, useAiRunStore } from "./aiRunStore";
 import { unguardedDelete } from "../lib/db/sqlGuards";
+import { firstRefusedRedisCommand } from "../lib/db/redisGuards";
 import { notify } from "./notificationStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
@@ -400,6 +405,15 @@ interface DbState {
   deleteGroup: (name: string) => Promise<void>;
   /** Files a connection under a group, or under none with `UNGROUPED`. */
   setConnectionGroup: (id: string, group: string) => Promise<void>;
+  /** Puts a connection on every workspace's shelf, or takes it back off. Leaves any open session
+   *  and its SSH tunnel alone. */
+  setConnectionScope: (id: string, global: boolean) => Promise<void>;
+  /** Moves a connection to another workspace and files it there. */
+  moveConnectionToWorkspace: (id: string, workspaceId: string) => Promise<void>;
+  /** Puts a group **and its members** on every workspace's shelf, or takes them back off. */
+  setGroupScope: (name: string, global: boolean) => Promise<void>;
+  /** Moves a group and its members to another workspace. */
+  moveGroupToWorkspace: (name: string, workspaceId: string) => Promise<void>;
   /** A dragged connection released somewhere: into `group`, ahead of `beforeConnectionId` (or last
    * in that group when it is `null`). Reorder and move-between-groups are the same gesture. */
   dropConnection: (id: string, group: string, beforeConnectionId: string | null) => Promise<void>;
@@ -954,6 +968,50 @@ export const useDbStore = create<DbState>((set, get) => ({
     if (!(await guarded(() => dbDeleteGroup(workspaceId, name)))) void get().init(workspaceId);
   },
 
+  setConnectionScope: async (id, global) => {
+    const previous = get().connections;
+    const scope = global ? "global" : "workspace";
+    set({ connections: previous.map((c) => (c.id === id ? { ...c, scope } : c)) });
+    if (!(await guarded(() => dbSetConnectionScope(id, global)))) set({ connections: previous });
+  },
+
+  moveConnectionToWorkspace: async (id, workspaceId) => {
+    const from = get().workspaceId;
+    if (!from) return;
+    if (!(await guarded(() => dbMoveConnectionToWorkspace(id, workspaceId)))) return;
+    // The connection leaves this workspace's tree entirely, taking its consoles with it, so the
+    // honest move is to reload rather than to patch a row out of three lists.
+    void get().init(from);
+  },
+
+  setGroupScope: async (name, global) => {
+    const workspaceId = get().workspaceId;
+    // `UNGROUPED` is the absence of a group, not a group called "". Re-scoping it would ask the
+    // backend to write a literal empty name onto every deliberately-ungrouped connection.
+    if (!workspaceId || name === UNGROUPED) return;
+    const previousGroups = get().groups;
+    const previousConnections = get().connections;
+    const scope = global ? "global" : "workspace";
+    // The members move with the folder, exactly as `set_group_scope` does in SQL: a group whose
+    // connections stayed behind renders as an empty folder on every other workspace's shelf.
+    set({
+      groups: previousGroups.map((group) => (group.name === name ? { ...group, scope } : group)),
+      connections: previousConnections.map((c) =>
+        c.group_name === name ? { ...c, scope } : c,
+      ),
+    });
+    if (!(await guarded(() => dbSetGroupScope(workspaceId, name, global)))) {
+      set({ groups: previousGroups, connections: previousConnections });
+    }
+  },
+
+  moveGroupToWorkspace: async (name, workspaceId) => {
+    const from = get().workspaceId;
+    if (!from || name === UNGROUPED) return;
+    if (!(await guarded(() => dbMoveGroupToWorkspace(from, name, workspaceId)))) return;
+    void get().init(from);
+  },
+
   setConnectionGroup: async (id, group) => {
     const target = group.trim();
     if (get().connections.find((c) => c.id === id)?.group_name === target) return;
@@ -1297,6 +1355,16 @@ export const useDbStore = create<DbState>((set, get) => ({
       const unguarded = unguardedDelete(statement);
       if (unguarded) {
         pushErrorToast(translate("db.deleteNeedsWhere", { statement: unguarded }));
+        return;
+      }
+    }
+    // Redis's equivalent, and a copy of the driver's own check — the backend refuses these too and
+    // is what actually protects the server. This one only makes the refusal instant. See
+    // `redisGuards`.
+    if (kind && engineInfo(kind).consoleLanguage === "redis") {
+      const refused = firstRefusedRedisCommand(statement);
+      if (refused) {
+        pushErrorToast(translate("db.redisRefused", { command: refused }));
         return;
       }
     }

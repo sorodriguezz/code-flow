@@ -14,6 +14,8 @@
  * is what lets a new protocol or a new auth scheme ship without a table migration.
  */
 
+import type { RowScope } from "./domain";
+
 // ---------------------------------------------------------------------------
 // Protocols
 // ---------------------------------------------------------------------------
@@ -466,6 +468,8 @@ export interface ApiCollection {
   pinned: boolean;
   created_at: string;
   updated_at: string;
+  /** Whether this row is on one workspace's shelf or on every one of them. */
+  scope: RowScope;
 }
 
 export interface ApiFolder {

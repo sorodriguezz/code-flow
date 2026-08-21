@@ -71,6 +71,12 @@ export interface BackupInclude {
    *  carries a rendered thumbnail per row, which makes this the group most able to dominate a
    *  backup's size. */
   diagrams: boolean;
+  /** The keyring: its wrapped key, folders, entries, attachments and audit log.
+   *
+   *  Safe to carry — every payload is sealed and the master password is deliberately *not* in the
+   *  backup — but it gets its own switch anyway, because someone keeping backups on a shared drive
+   *  may reasonably want everything except this. */
+  vault: boolean;
   requestHistory: boolean;
   conversations: boolean;
   reviews: boolean;
@@ -87,6 +93,7 @@ export const INCLUDE_KEYS: readonly (keyof BackupInclude)[] = [
   "authored",
   "notes",
   "diagrams",
+  "vault",
   "requestHistory",
   "conversations",
   "reviews",

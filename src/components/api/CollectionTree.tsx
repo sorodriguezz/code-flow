@@ -13,6 +13,7 @@ import { createPortal } from "react-dom";
 import {
   Bookmark,
   Boxes,
+  Globe,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -44,6 +45,7 @@ import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { canDrop, useApiDragStore, type ApiDrag, type ApiDropZone } from "../../state/apiDragStore";
 import { useApiStore } from "../../state/apiStore";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
+import { scopeMenuItems } from "../../lib/scopeMenu";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore, type ShareHealth } from "../../state/collabStore";
 import { useUiStore } from "../../state/uiStore";
@@ -359,6 +361,8 @@ interface TreeRowProps {
   /** Collections only: current pin state, and the toggle for it. */
   pinned?: boolean;
   onTogglePin?: (node: NodeRef) => void;
+  /** Collections only: on every workspace's shelf. Drawn, not actionable — the act is in the menu. */
+  global?: boolean;
   /** Collections only: `null` when the collection isn't shared. */
   share?: ShareHealth | null;
   /** Requests only: this record is frozen waiting for a decision. */
@@ -397,6 +401,7 @@ function TreeRowBase({
   onToggle,
   pinned,
   onTogglePin,
+  global,
   share,
   conflicted,
   protocol,
@@ -586,6 +591,14 @@ function TreeRowBase({
           className="flex h-4 w-4 shrink-0 items-center justify-center text-[var(--cf-warning)]"
         >
           <ShieldAlert size={12} />
+        </span>
+      )}
+      {global && (
+        <span
+          title={t("scope.globalBadge")}
+          className="flex h-4 w-4 shrink-0 items-center justify-center text-[var(--cf-text-muted)]"
+        >
+          <Globe size={12} />
         </span>
       )}
 
@@ -834,6 +847,14 @@ export function CollectionTree() {
     y: number;
     requestId: string;
     example: SavedExample;
+  } | null>(null);
+  /** The workspace chooser, opened in place of the node menu. Its own state rather than a mode on
+   *  `menu`, because it carries its own items and heading rather than a node to derive them from. */
+  const [scopeMenu, setScopeMenu] = useState<{
+    x: number;
+    y: number;
+    items: MenuItem[];
+    heading: string;
   } | null>(null);
   const openModal = useApiModalStore((s) => s.openApiModal);
   const pushToast = useToastStore((s) => s.pushToast);
@@ -1142,9 +1163,27 @@ export function CollectionTree() {
         separated: true,
         onClick: () => void useApiStore.getState().toggleCollectionPinned(node.id),
       });
+      // Scope, right after the pin: both are decisions about where the collection sits rather than
+      // about what is in it.
+      const scope = collections.find((c) => c.id === node.id)?.scope ?? "workspace";
+      items.push(
+        ...scopeMenuItems({
+          scope,
+          anchor: { x: menu?.x ?? 0, y: menu?.y ?? 0 },
+          openMenu: (next) => {
+            setMenu(null);
+            setScopeMenu(next);
+          },
+          onSetGlobal: (global) =>
+            void useApiStore.getState().setCollectionScope(node.id, global),
+          onMoveToWorkspace: (workspaceId) =>
+            void useApiStore.getState().moveCollectionToWorkspace(node.id, workspaceId),
+        }),
+      );
       items.push({
         label: t("api.export.title"),
         icon: Share2,
+        separated: true,
         onClick: () => openModal({ kind: "export", collectionId: node.id }),
       });
       items.push({
@@ -1554,6 +1593,7 @@ export function CollectionTree() {
                   expanded={isExpanded}
                   onToggle={handleToggle}
                   pinned={collection.pinned}
+                  global={collection.scope === "global"}
                   onTogglePin={handleTogglePin}
                   share={sharedIds.has(collection.id) ? shareHealth(collection.id) : null}
                   renaming={renaming?.id === collection.id}
@@ -1583,6 +1623,16 @@ export function CollectionTree() {
           y={exampleMenu.y}
           items={exampleMenuItems(exampleMenu.requestId, exampleMenu.example)}
           onClose={() => setExampleMenu(null)}
+        />
+      )}
+
+      {scopeMenu && (
+        <ContextMenu
+          x={scopeMenu.x}
+          y={scopeMenu.y}
+          items={scopeMenu.items}
+          heading={scopeMenu.heading}
+          onClose={() => setScopeMenu(null)}
         />
       )}
 

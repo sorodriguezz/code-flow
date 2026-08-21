@@ -1066,6 +1066,10 @@ function startupScriptExample(kind: DbKind): string {
       return "SET OPTION SUPPORT_DELIMITED_IDENTIFIERS = 1";
     case "mongodb":
       return "";
+    // Names the connection in `CLIENT LIST` and in the slowlog, which is the one thing worth doing
+    // on connect here — Redis has no session settings to establish.
+    case "redis":
+      return "CLIENT SETNAME codeflow";
     default:
       return "SET search_path TO app, public;";
   }
@@ -1582,6 +1586,11 @@ function DriverOptions({
     // TLS configuration is selected.
     iris: ["SSL configuration name", "TransactionIsolationLevel", "NetworkTimeout"],
     mongodb: ["authSource", "application_name"],
+    // `protocol=3` opts into RESP3, which renders much better in the console (maps stay maps) but
+    // needs Redis 6+ and is refused by some proxies. `namespace_separator` is what the tree splits
+    // keys on — `:` by convention, but a keyspace built on `/` or `.` would otherwise come back as
+    // one flat list.
+    redis: ["protocol", "namespace_separator", "client_name"],
   };
   const unused = suggestions[kind].filter(
     (suggestion) => !options.some(([key]) => key === suggestion),

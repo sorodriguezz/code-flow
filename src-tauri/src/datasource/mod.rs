@@ -34,6 +34,7 @@ pub mod jvm;
 pub mod mongo;
 pub mod mssql;
 pub mod postgres;
+pub mod redis;
 pub mod sqlgen;
 /// Expanding `mongodb+srv://` by hand when the driver's own resolver can't read the system's
 /// DNS configuration. See the module for why that happens on an ordinary Mac.
@@ -63,6 +64,10 @@ pub enum DbKind {
     Sqlserver,
     Iris,
     Mongodb,
+    /// A key-value store, not a database of tables — the second engine here with no catalog to
+    /// query and no statement language to generate. See `datasource::redis` for how a keyspace is
+    /// presented as a tree without ever enumerating it.
+    Redis,
 }
 
 /// Which SQL to generate — identifier quoting, paging, `EXPLAIN`, and the catalog queries the
@@ -85,6 +90,7 @@ impl DbKind {
             // server, and it is where this driver used to go when it spoke the Atelier REST API.
             DbKind::Iris => 1972,
             DbKind::Mongodb => 27017,
+            DbKind::Redis => 6379,
         }
     }
 
@@ -101,13 +107,23 @@ impl DbKind {
             DbKind::Sqlserver => "SQL Server",
             DbKind::Iris => "InterSystems IRIS",
             DbKind::Mongodb => "MongoDB",
+            DbKind::Redis => "Redis",
         }
     }
 
-    /// Whether its console speaks SQL. Mongo's speaks JavaScript, which changes what a generated
-    /// statement should even look like.
-    pub fn sql(self) -> bool {
-        !matches!(self, DbKind::Mongodb)
+    /// What the console speaks.
+    ///
+    /// This replaced a `sql() -> bool`, and the reason is worth keeping: while MongoDB was the only
+    /// exception, `sql == false` came to mean *MongoDB* rather than *not SQL* — so a second
+    /// non-SQL engine inheriting it would have been handed Mongo's shell syntax as its generated
+    /// statements. A boolean cannot answer a three-way question. Mirrored by
+    /// `DbEngineInfo.consoleLanguage` in `src/types/database.ts`.
+    pub fn console_language(self) -> &'static str {
+        match self {
+            DbKind::Postgres | DbKind::Supabase | DbKind::Sqlserver | DbKind::Iris => "sql",
+            DbKind::Mongodb => "javascript",
+            DbKind::Redis => "redis",
+        }
     }
 }
 
@@ -1093,6 +1109,7 @@ pub enum Session {
     Mssql(mssql::MssqlSession),
     Mongo(mongo::MongoSession),
     Iris(iris::IrisSession),
+    Redis(redis::RedisSession),
 }
 
 impl Session {
@@ -1139,6 +1156,9 @@ impl Session {
             DbKind::Iris => iris::IrisSession::open(config, database)
                 .await
                 .map(Session::Iris),
+            DbKind::Redis => redis::RedisSession::open(config, database)
+                .await
+                .map(Session::Redis),
         }?;
         session.run_startup_script(config).await?;
         Ok(session)
@@ -1175,6 +1195,11 @@ impl Session {
         match self {
             // `{ ping: 1 }` is the command Mongo's own drivers use for exactly this.
             Session::Mongo(_) => self.execute("{ \"ping\": 1 }", &ctx).await.map(|_| ()),
+            // Its own arm, and not an oversight that it cannot share the `SELECT 1` below: the
+            // Redis driver refuses `SELECT` *locally*, before any bytes are sent (it would
+            // re-point every tab sharing the multiplexed connection), so falling through would
+            // make keep-alive silently do nothing at all — the worst of both outcomes to debug.
+            Session::Redis(_) => self.execute("PING", &ctx).await.map(|_| ()),
             _ => self.execute("SELECT 1", &ctx).await.map(|_| ()),
         }
     }
@@ -1185,6 +1210,7 @@ impl Session {
             Session::Mssql(s) => s.info(),
             Session::Mongo(s) => s.info(),
             Session::Iris(s) => s.info(),
+            Session::Redis(s) => s.info(),
         }
     }
 
@@ -1205,6 +1231,11 @@ impl Session {
             Session::Iris(s) => s.is_alive(),
             Session::Mssql(s) => s.is_alive(),
             Session::Mongo(_) => true,
+            // Same bargain as Mongo's, for the same reason: `ConnectionManager` reconnects behind
+            // the handle, so a server that restarted is already recovered inside the client.
+            // Throwing the session away would discard a healthy multiplexed connection to build an
+            // identical one.
+            Session::Redis(_) => true,
         }
     }
 
@@ -1214,6 +1245,7 @@ impl Session {
             Session::Mssql(s) => s.children(node).await,
             Session::Mongo(s) => s.children(node).await,
             Session::Iris(s) => s.children(node).await,
+            Session::Redis(s) => s.children(node).await,
         }
     }
 
@@ -1223,6 +1255,7 @@ impl Session {
             Session::Mssql(s) => s.execute(sql, ctx).await,
             Session::Mongo(s) => s.execute(sql, ctx).await,
             Session::Iris(s) => s.execute(sql, ctx).await,
+            Session::Redis(s) => s.execute(sql, ctx).await,
         }
     }
 
@@ -1235,6 +1268,7 @@ impl Session {
             Session::Mssql(s) => s.table_data(request).await,
             Session::Mongo(s) => s.table_data(request).await,
             Session::Iris(s) => s.table_data(request).await,
+            Session::Redis(s) => s.table_data(request).await,
         }
     }
 
@@ -1248,6 +1282,9 @@ impl Session {
             // Mongo has no foreign keys to read: a reference between collections is a convention
             // held by the application, and guessing at one would send the user to a wrong document.
             Session::Mongo(_) => Ok(Vec::new()),
+            // Redis declares no relationships between keys either. Guessing at one would mean
+            // matching on values, which sends the user to a wrong key as often as a right one.
+            Session::Redis(_) => Ok(Vec::new()),
             Session::Iris(s) => s.foreign_keys(node).await,
         }
     }
@@ -1268,6 +1305,7 @@ impl Session {
             Session::Mssql(s) => s.schema_objects(node).await,
             Session::Mongo(s) => s.schema_objects(node).await,
             Session::Iris(s) => s.schema_objects(node).await,
+            Session::Redis(s) => s.schema_objects(node).await,
         }
     }
 
@@ -1277,6 +1315,7 @@ impl Session {
             Session::Mssql(s) => s.schema_diagram(node).await,
             Session::Mongo(s) => s.schema_diagram(node).await,
             Session::Iris(s) => s.schema_diagram(node).await,
+            Session::Redis(s) => s.schema_diagram(node).await,
         }?;
         mark_foreign_keys(&mut diagram.tables, &diagram.edges);
         Ok(diagram)
@@ -1296,6 +1335,7 @@ impl Session {
             Session::Mssql(s) => s.row_count(node, filter).await,
             Session::Mongo(s) => s.row_count(node, filter, options).await,
             Session::Iris(s) => s.row_count(node, filter).await,
+            Session::Redis(s) => s.row_count(node, filter).await,
         }
     }
 
@@ -1309,6 +1349,7 @@ impl Session {
             Session::Mssql(s) => s.apply_edits(node, edits).await,
             Session::Mongo(s) => s.apply_edits(node, edits).await,
             Session::Iris(s) => s.apply_edits(node, edits).await,
+            Session::Redis(s) => s.apply_edits(node, edits).await,
         }
     }
 
@@ -1318,6 +1359,7 @@ impl Session {
             Session::Mssql(s) => s.object_ddl(node).await,
             Session::Mongo(s) => s.object_ddl(node).await,
             Session::Iris(s) => s.object_ddl(node).await,
+            Session::Redis(s) => s.object_ddl(node).await,
         }
     }
 
@@ -1327,6 +1369,7 @@ impl Session {
             Session::Mssql(s) => s.explain(sql, ctx).await,
             Session::Mongo(s) => s.explain(sql, ctx).await,
             Session::Iris(s) => s.explain(sql, ctx).await,
+            Session::Redis(s) => s.explain(sql, ctx).await,
         }
     }
 
@@ -1341,6 +1384,11 @@ impl Session {
         match self {
             Session::Postgres(s) => s.cancel_running().await,
             Session::Iris(s) => s.cancel_running().await,
+            // Mongo and Redis fall here, and for Redis it is a decision rather than a gap: there is
+            // no per-request cancel, and `CLIENT KILL` from a second connection would kill every
+            // other tab's in-flight commands on the shared multiplexer. `DbRegistry::run` dropping
+            // the future is the whole cancel — safe here precisely because the connection is
+            // multiplexed. See `poisoned_by_cancel`.
             _ => {}
         }
     }
@@ -1348,6 +1396,11 @@ impl Session {
     /// Whether abandoning a call leaves the connection unusable. TDS interleaves a result set with
     /// the request stream, so a query dropped mid-flight leaves unread tokens that the next
     /// statement would misread as its own answer — the session has to go.
+    ///
+    /// Redis stays `false`, and that is load-bearing rather than incidental: its driver uses a
+    /// *multiplexed* connection whose background actor tags responses and consumes them whether or
+    /// not a caller is still waiting. A plain `redis::aio::Connection` would have exactly the TDS
+    /// problem and would have to be listed here — which is why `redis.rs` says never to swap it.
     pub fn poisoned_by_cancel(&self) -> bool {
         matches!(self, Session::Mssql(_))
     }

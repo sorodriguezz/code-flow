@@ -54,6 +54,19 @@ export const apiDeleteCollection = (id: string) => invoke<void>("api_delete_coll
 export const apiDuplicateCollection = (id: string) =>
   invoke<ApiCollection>("api_duplicate_collection", { id });
 
+/** Puts a collection on every workspace's shelf, or takes it back off.
+ *
+ *  Its own command rather than a field on `apiUpdateCollection`, which fires on every debounced
+ *  edit of the collection's settings — a scope that could ride along with a renamed header is a
+ *  scope that moves by accident. */
+export const apiSetCollectionScope = (id: string, global: boolean) =>
+  invoke<void>("api_set_collection_scope", { id, global });
+
+/** Moves a collection to another workspace and files it there. Carries the share row's workspace
+ *  with it, so a shared collection keeps syncing into the right place. */
+export const apiMoveCollectionToWorkspace = (id: string, workspaceId: string) =>
+  invoke<void>("api_move_collection_to_workspace", { id, workspaceId });
+
 // ---------- tree: folders ----------
 
 export const apiCreateFolder = (collectionId: string, parentId: string | null, name: string) =>

@@ -14,6 +14,8 @@ import {
   apiDeleteHistory,
   apiDeleteRequest,
   apiDuplicateCollection,
+  apiMoveCollectionToWorkspace,
+  apiSetCollectionScope,
   apiDuplicateEnvironment,
   apiDuplicateRequest,
   apiListCookies,
@@ -196,6 +198,10 @@ interface ApiState {
   toggleCollectionPinned: (id: string) => Promise<void>;
   deleteCollection: (id: string) => Promise<void>;
   duplicateCollection: (id: string) => Promise<void>;
+  /** Puts a collection on every workspace's shelf, or takes it back off. */
+  setCollectionScope: (id: string, global: boolean) => Promise<void>;
+  /** Moves a collection to another workspace and files it there. */
+  moveCollectionToWorkspace: (id: string, workspaceId: string) => Promise<void>;
   reorderCollections: (ids: string[]) => Promise<void>;
 
   createFolder: (collectionId: string, parentId: string | null, name: string) => Promise<ApiFolder | null>;
@@ -538,6 +544,32 @@ export const useApiStore = create<ApiState>((set, get) => ({
       await apiDuplicateCollection(id);
       // A deep copy creates folders and requests too, so only a full reload is truthful.
       await get().reloadTree();
+    });
+  },
+
+  setCollectionScope: async (id, global) => {
+    const previous = get().collections;
+    const scope = global ? "global" : "workspace";
+    set({ collections: previous.map((c) => (c.id === id ? { ...c, scope } : c)) });
+    try {
+      await apiSetCollectionScope(id, global);
+    } catch (error) {
+      set({ collections: previous });
+      pushErrorToast(String(error));
+    }
+  },
+
+  moveCollectionToWorkspace: async (id, workspaceId) => {
+    await guarded(async () => {
+      await apiMoveCollectionToWorkspace(id, workspaceId);
+      // The collection leaves the visible set along with its folders and requests, so only a full
+      // reload is truthful — the same reason `duplicateCollection` reloads rather than patching.
+      await get().reloadTree();
+      // The share row's workspace moved with it. The collaboration panel reads that column, so it
+      // is showing a stale answer until it is asked again. Imported here rather than at the top of
+      // the file for the reason the workspace switch above gives: `collabStore` imports this one.
+      const { useCollabStore } = await import("./collabStore");
+      void useCollabStore.getState().refresh();
     });
   },
 

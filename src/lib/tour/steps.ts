@@ -2,6 +2,7 @@ import {
   Bot,
   ClipboardList,
   Database,
+  KeyRound,
   MonitorSmartphone,
   NotebookPen,
   Send,
@@ -77,7 +78,8 @@ export type TourId =
   | "stories"
   | "remote"
   | "notes"
-  | "diagrams";
+  | "diagrams"
+  | "vault";
 
 /**
  * The one-screen tour of the main window.
@@ -933,6 +935,175 @@ const DIAGRAMS_TOUR: TourStep[] = [
   ),
 ];
 
+/**
+ * The keyring's stage — the view, and nothing else.
+ *
+ * **Deliberately does not touch a single thing inside the vault**, and that is the one rule this
+ * tour has that the others don't: a stage is applied on every step, in both directions, and a tour
+ * that could unlock a vault would be a tour that unlocks it by walking backwards past step three.
+ * The steps therefore describe what is on screen rather than arranging it, and every one of them is
+ * written to read whether the keyring is open or locked.
+ */
+const VAULT_STAGE: TourStage = { view: "vault" };
+
+/**
+ * The Llavero tour.
+ *
+ * Weighted towards the two things a password manager cannot show you by being looked at: **what
+ * happens if you forget the master password** (nothing — it is unrecoverable, and that has to be
+ * said before someone trusts the thing with their life's logins), and **that copying is safer than
+ * revealing**, which is the opposite of what the eye reaches for.
+ *
+ * The rest of it is ordinary: the tree, the search box, the generator, 2FA, attachments, the trash.
+ * They are here because a keyring that turns out to also do TOTP and hold a photo of a passport is
+ * a keyring people use for those things, and nothing on screen says so until you go looking.
+ */
+const VAULT_TOUR: TourStep[] = [
+  {
+    id: "vault.intro",
+    chapterKey: "tour.chapter.vault",
+    titleKey: "tour.vault.intro.title",
+    bodyKey: "tour.vault.intro.body",
+    anchors: ['[data-tour="vault-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.master",
+    chapterKey: "tour.chapter.vault",
+    titleKey: "tour.vault.master.title",
+    bodyKey: "tour.vault.master.body",
+    // The lock screen when it is up, the whole view when the vault is already open. The copy is the
+    // same either way: it is about the password, not about the box.
+    anchors: ['[data-tour="vault-lock"]', '[data-tour="vault-view"]'],
+    placement: "inside",
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.tree",
+    chapterKey: "tour.chapter.vault",
+    titleKey: "tour.vault.tree.title",
+    bodyKey: "tour.vault.tree.body",
+    anchors: ['[data-tour="vault-tree"]', '[data-tour="vault-view"]'],
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.search",
+    chapterKey: "tour.chapter.vault",
+    titleKey: "tour.vault.search.title",
+    bodyKey: "tour.vault.search.body",
+    anchors: ['[data-tour="vault-search"]', '[data-tour="vault-tree"]', '[data-tour="vault-view"]'],
+    padding: 6,
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.new",
+    chapterKey: "tour.chapter.vault",
+    titleKey: "tour.vault.new.title",
+    bodyKey: "tour.vault.new.body",
+    anchors: ['[data-tour="vault-new"]', '[data-tour="vault-tree"]', '[data-tour="vault-view"]'],
+    padding: 6,
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.drag",
+    chapterKey: "tour.chapter.vault",
+    titleKey: "tour.vault.drag.title",
+    bodyKey: "tour.vault.drag.body",
+    anchors: ['[data-tour="vault-tree"]', '[data-tour="vault-view"]'],
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.reveal",
+    chapterKey: "tour.chapter.vaultEntry",
+    titleKey: "tour.vault.reveal.title",
+    bodyKey: "tour.vault.reveal.body",
+    // Only on screen with an entry open. From the empty state this lands on the pane, which is
+    // where the fields would be.
+    anchors: ['[data-tour="vault-item"]', '[data-tour="vault-view"]'],
+    placement: "inside",
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.generator",
+    chapterKey: "tour.chapter.vaultEntry",
+    titleKey: "tour.vault.generator.title",
+    bodyKey: "tour.vault.generator.body",
+    anchors: ['[data-tour="vault-item"]', '[data-tour="vault-view"]'],
+    placement: "inside",
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.totp",
+    chapterKey: "tour.chapter.vaultEntry",
+    titleKey: "tour.vault.totp.title",
+    bodyKey: "tour.vault.totp.body",
+    anchors: ['[data-tour="vault-item"]', '[data-tour="vault-view"]'],
+    placement: "inside",
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.attachments",
+    chapterKey: "tour.chapter.vaultEntry",
+    titleKey: "tour.vault.attachments.title",
+    bodyKey: "tour.vault.attachments.body",
+    anchors: ['[data-tour="vault-item"]', '[data-tour="vault-view"]'],
+    placement: "inside",
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.scope",
+    chapterKey: "tour.chapter.vaultEntry",
+    titleKey: "tour.vault.scope.title",
+    bodyKey: "tour.vault.scope.body",
+    anchors: ['[data-tour="vault-tree"]', '[data-tour="vault-view"]'],
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.import",
+    chapterKey: "tour.chapter.vaultSafety",
+    titleKey: "tour.vault.import.title",
+    bodyKey: "tour.vault.import.body",
+    anchors: ['[data-tour="vault-import"]', '[data-tour="vault-tree"]', '[data-tour="vault-view"]'],
+    padding: 6,
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.trash",
+    chapterKey: "tour.chapter.vaultSafety",
+    titleKey: "tour.vault.trash.title",
+    bodyKey: "tour.vault.trash.body",
+    anchors: ['[data-tour="vault-trash"]', '[data-tour="vault-tree"]', '[data-tour="vault-view"]'],
+    padding: 6,
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.lock",
+    chapterKey: "tour.chapter.vaultSafety",
+    titleKey: "tour.vault.lock.title",
+    bodyKey: "tour.vault.lock.body",
+    anchors: ['[data-tour="vault-lock-button"]', '[data-tour="vault-view"]'],
+    padding: 6,
+    stage: VAULT_STAGE,
+  },
+  {
+    id: "vault.backup",
+    chapterKey: "tour.chapter.vaultSafety",
+    titleKey: "tour.vault.backup.title",
+    bodyKey: "tour.vault.backup.body",
+    anchors: ['[data-tour="vault-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: VAULT_STAGE,
+  },
+  closingStep(
+    "vault",
+    "tour.chapter.vaultSafety",
+    "tour.vault.done.title",
+    "tour.vault.done.body",
+    VAULT_STAGE,
+  ),
+];
+
 export const TOURS: Record<TourId, TourStep[]> = {
   main: MAIN_TOUR,
   api: API_TOUR,
@@ -942,6 +1113,7 @@ export const TOURS: Record<TourId, TourStep[]> = {
   remote: REMOTE_TOUR,
   notes: NOTES_TOUR,
   diagrams: DIAGRAMS_TOUR,
+  vault: VAULT_TOUR,
 };
 
 /**
@@ -978,6 +1150,7 @@ export const APP_TOURS: AppTour[] = [
   { tour: "remote", view: "remote", labelKey: "tabbar.remote", icon: MonitorSmartphone },
   { tour: "notes", view: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
   { tour: "diagrams", view: "diagrams", labelKey: "tabbar.diagrams", icon: Workflow },
+  { tour: "vault", view: "vault", labelKey: "tabbar.vault", icon: KeyRound },
 ];
 
 /** The app tour for the current view, or `null` on the three repository views — which are what the

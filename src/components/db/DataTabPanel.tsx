@@ -144,7 +144,11 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
    * returns no documents and is still a collection, and the one thing you want to do with an empty
    * collection is put the first document in it.
    */
-  const documentStore = engine ? !engine.sql : false;
+  // `engine.documents`, not `!engine.sql`. The two were the same thing only while MongoDB was the
+  // only non-SQL engine; written the old way, Redis would inherit the whole document UI — the
+  // document list, the JSON editor and the Mongo-shaped options panel — for a store that has no
+  // documents in it.
+  const documentStore = engine?.documents ?? false;
   /** Whether the query's own sort is what these documents came back in — see the grid below. */
   const sortedByOptions = tab.options.sort.trim() !== "";
   /**
@@ -1151,13 +1155,19 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               whatever width is left over, so it grows while everything else stays its own size. */}
           <div className="flex min-w-[140px] flex-1 items-center gap-1">
             <span className="shrink-0 text-[10px] uppercase tracking-wide">
-              {engine?.sql ? "WHERE" : t("db.filter")}
+              {engine?.sql ? "WHERE" : engine?.consoleLanguage === "redis" ? "MATCH" : t("db.filter")}
             </span>
             <input
               ref={filterRef}
               value={tab.filterDraft}
               onChange={(e) => store.updateData(tab.id, { filterDraft: e.target.value })}
-              placeholder={engine?.sql ? t("db.wherePlaceholder") : t("db.filterPlaceholder")}
+              placeholder={
+                engine?.sql
+                  ? t("db.wherePlaceholder")
+                  : engine?.consoleLanguage === "redis"
+                    ? t("db.matchPlaceholder")
+                    : t("db.filterPlaceholder")
+              }
               spellCheck={false}
               className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-[2px] font-mono text-[12px] text-[var(--cf-text)] outline-none placeholder:font-sans focus:border-[var(--cf-accent)]"
             />

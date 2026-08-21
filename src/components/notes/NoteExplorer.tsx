@@ -21,8 +21,10 @@ import { NoteTreeRow } from "./NoteTreeRow";
 import { TemplatePickerModal } from "./TemplatePickerModal";
 import { ICON_BUTTON, TagPill } from "./notesChrome";
 import { TREE_COLORS } from "../../lib/swatchColors";
+import { scopeMenuItems } from "../../lib/scopeMenu";
 import { buildBookTree, descendantIds, flattenTree } from "../../lib/notes/tree";
 import type { NoteTreeRow as NoteTreeRowData } from "../../types/notes";
+import type { RowScope } from "../../types/domain";
 import { tagCounts, tagHue } from "../../lib/notes/tags";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -472,7 +474,7 @@ export function NoteExplorer() {
   /** `event` is needed for its coordinates: the colour entry replaces the menu in place, at the
    *  same point the first one opened at. */
   const bookMenu = useCallback(
-    (event: React.MouseEvent, bookId: string, name: string): MenuItem[] => {
+    (event: React.MouseEvent, bookId: string, name: string, scope: RowScope): MenuItem[] => {
       return [
         {
           label: t("notes.newNoteHere"),
@@ -522,6 +524,19 @@ export function NoteExplorer() {
             });
           },
         },
+        // Scope, between filing and deleting: it is a decision about where the book lives, which
+        // is the same kind of act as renaming and recolouring it above.
+        ...scopeMenuItems({
+          scope,
+          anchor: { x: event.clientX, y: event.clientY },
+          openMenu: setMenu,
+          // Read off the store at click time rather than closed over, so this callback's identity
+          // stays stable — `NoteTreeRow`'s hand-written memo comparator compares `onMenu`.
+          onSetGlobal: (global) => void useNotesStore.getState().setBookScope(bookId, global),
+          onMoveToWorkspace: (workspaceId) =>
+            void useNotesStore.getState().moveBookToWorkspace(bookId, workspaceId),
+          separated: true,
+        }),
         {
           label: t("notes.deleteBook"),
           icon: Trash2,
@@ -588,7 +603,7 @@ export function NoteExplorer() {
         y: event.clientY,
         items:
           row.kind === "book"
-            ? bookMenu(event, row.book.id, row.book.name)
+            ? bookMenu(event, row.book.id, row.book.name, row.book.scope)
             : noteMenu(row.note.id, row.note.title, row.note.pinned),
       });
     },

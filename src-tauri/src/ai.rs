@@ -2442,6 +2442,10 @@ fn runnable_block(text: &str, language: &str) -> Option<String> {
 
     let aliases: &[&str] = match language {
         "javascript" => &["javascript", "js", "mongodb", "mongo", "node"],
+        // Redis commands are not a language any highlighter knows, so a model asked for them
+        // fences them as whatever looks closest — `redis` if it is being literal, otherwise a
+        // shell. All four spellings mean the same block here.
+        "redis" => &["redis", "redis-cli", "shell", "sh", "bash"],
         _ => &["sql", "postgresql", "postgres", "pgsql", "tsql", "mssql", "plsql", "mysql"],
     };
     blocks

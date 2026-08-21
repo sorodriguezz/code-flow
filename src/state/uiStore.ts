@@ -5,11 +5,14 @@ import type { ApiSettingsTab } from "./apiModalStore";
 // its commands. Erased at compile time; there is no runtime cycle.
 import type { ShortcutGroup } from "../lib/shortcuts";
 
-/** `api`, `agents`, `stories`, `remote`, `notes` and `diagrams` are the odd ones out: the built-in
- * API client, the agent console, the user-stories workspace, the SSH host manager, the Markdown
- * notebook and the diagram library are scoped to the *workspace* rather than to a repo, so they
- * render whether or not a project is open (see `App.tsx`). All six are reached from the app rail
- * down the right edge rather than from the tab bar. */
+/** `api`, `agents`, `stories`, `remote`, `notes`, `diagrams` and `vault` are the odd ones out: the
+ * built-in API client, the agent console, the user-stories workspace, the SSH host manager, the
+ * Markdown notebook, the diagram library and the keyring all render whether or not a project is
+ * open (see `App.tsx`), and all seven are reached from the app rail down the right edge rather than
+ * from the tab bar.
+ *
+ * Six of them are scoped to the *workspace*. The keyring is not — it is global, and its list merely
+ * narrows by workspace. See `vaultStore`'s closing comment for why that difference matters. */
 export type MainView =
   | "graph"
   | "changes"
@@ -19,7 +22,8 @@ export type MainView =
   | "stories"
   | "remote"
   | "notes"
-  | "diagrams";
+  | "diagrams"
+  | "vault";
 
 /** The three directions the stories section works in. Its own sub-tab, one level under the view. */
 export type StoriesMode = "batches" | "review" | "wiki";

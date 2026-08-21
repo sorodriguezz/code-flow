@@ -12,6 +12,7 @@ import {
   FileCode2,
   FolderCode,
   FolderOpen,
+  Globe,
   FolderPlus,
   Hash,
   KeyRound,
@@ -40,6 +41,7 @@ import { CARD, ConnectionDot, ToolbarButton, engineColor, engineIcon, nodeIcon }
 import { DbHistoryList } from "./DbHistoryList";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { effectiveObjectFilter, schemaIsNarrowed } from "../../lib/db/objectFilter";
+import { scopeMenuItems } from "../../lib/scopeMenu";
 import {
   describeConnection,
   groupConnections,
@@ -57,6 +59,7 @@ import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import type { RowScope } from "../../types/domain";
 import { dbChildren } from "../../lib/tauri/dbCommands";
 import { riseDelay } from "../../lib/rise";
 import {
@@ -362,6 +365,8 @@ function NodeSubtree({
   /** Whether this connection's console speaks SQL — which decides what the generator menu is even
    *  called, and which of its rows describe an operation this engine has. */
   const generatesSql = engineInfo(connectionRow?.kind ?? "postgres").sql;
+  /** Which non-SQL dialect this connection speaks, for the menu labels and the starter statement. */
+  const consoleLanguage = engineInfo(connectionRow?.kind ?? "postgres").consoleLanguage;
   /**
    * What is narrowing whatever this node lists, or `null` when nothing is.
    *
@@ -448,7 +453,11 @@ function NodeSubtree({
     menuItems.push({ label: t("db.showDdl"), icon: FileCode2, onClick: showDdl });
     menuItems.push({
       // The draft this opens is a `find()` on Mongo, so the row does not promise a SELECT.
-      label: generatesSql ? t("db.selectRows") : t("db.findDocuments"),
+      label: generatesSql
+        ? t("db.selectRows")
+        : consoleLanguage === "redis"
+          ? t("db.scanKeysInConsole")
+          : t("db.findDocuments"),
       icon: Play,
       onClick: () =>
         store.newConsole(
@@ -715,13 +724,26 @@ function NodeSubtree({
           y={generateMenu.y}
           // "Generate SQL" over a Mongo collection was naming a language that connection does not
           // speak. What the menu produces is a draft in whatever the console runs.
-          heading={generatesSql ? t("db.generateSql") : t("db.generateMql")}
+          heading={
+            generatesSql
+              ? t("db.generateSql")
+              : consoleLanguage === "redis"
+                ? t("db.generateRedis")
+                : t("db.generateMql")
+          }
           items={GENERATED.filter(
             (entry) =>
               (!entry.appliesTo || entry.appliesTo.includes(node.kind)) &&
               (generatesSql || !entry.sqlOnly),
           ).map((entry) => ({
-            label: t(generatesSql ? entry.label : entry.mongoLabel ?? entry.label),
+            label: t(
+              // `generatesSql` already excludes "sql" here, but the compiler cannot see that
+              // through the union, and narrowing it explicitly is what keeps the map's key type
+              // honest rather than widening it to every language.
+              generatesSql || consoleLanguage === "sql"
+                ? entry.label
+                : entry.altLabel?.[consoleLanguage] ?? entry.label,
+            ),
             icon: entry.icon,
             separated: entry.separated,
             onClick: () => void generate(entry.template),
@@ -745,14 +767,18 @@ function NodeSubtree({
  * **The rows are named after what they produce, not after SQL.** A collection's menu offering
  * `SELECT COUNT(*)` and `CREATE TABLE` was describing statements Mongo cannot run: two of them
  * (`GRANT`/`REVOKE`) had no Mongo draft at all and fell through to a `find()`, which is a menu row
- * that quietly does something else. So `mongoLabel` renames the ones that exist in both, and
+ * that quietly does something else. So `altLabel` renames the ones that exist elsewhere, and
  * `sqlOnly` removes the ones that do not.
+ *
+ * `altLabel` is keyed by *language* rather than being a single "the non-SQL name", because there
+ * are now two non-SQL engines and `drop()` is not what Redis calls `DEL`. A row with no entry for
+ * the language keeps its SQL name, which is only ever right for a row every engine spells the same.
  */
 const GENERATED: {
   template: SqlTemplate;
   label: TranslationKey;
-  /** What this row is called on an engine with no SQL. Absent means the name is the same. */
-  mongoLabel?: TranslationKey;
+  /** What this row is called on each engine that has no SQL. Absent means the SQL name stands. */
+  altLabel?: Partial<Record<"javascript" | "redis", TranslationKey>>;
   icon: LucideIcon;
   separated?: boolean;
   /** Node kinds the draft makes sense for. Absent means every relation this menu opens on. */
@@ -765,11 +791,11 @@ const GENERATED: {
    */
   sqlOnly?: boolean;
 }[] = [
-  { template: "select", label: "db.sql.select", mongoLabel: "db.mql.find", icon: Search },
-  { template: "count", label: "db.sql.count", mongoLabel: "db.mql.count", icon: Hash },
-  { template: "insert", label: "db.sql.insert", mongoLabel: "db.mql.insert", icon: Plus },
-  { template: "update", label: "db.sql.update", mongoLabel: "db.mql.update", icon: Pencil },
-  { template: "delete", label: "db.sql.delete", mongoLabel: "db.mql.delete", icon: Trash2 },
+  { template: "select", label: "db.sql.select", altLabel: { javascript: "db.mql.find", redis: "db.redis.scan" }, icon: Search },
+  { template: "count", label: "db.sql.count", altLabel: { javascript: "db.mql.count", redis: "db.redis.dbsize" }, icon: Hash },
+  { template: "insert", label: "db.sql.insert", altLabel: { javascript: "db.mql.insert", redis: "db.redis.set" }, icon: Plus },
+  { template: "update", label: "db.sql.update", altLabel: { javascript: "db.mql.update", redis: "db.redis.hset" }, icon: Pencil },
+  { template: "delete", label: "db.sql.delete", altLabel: { javascript: "db.mql.delete", redis: "db.redis.del" }, icon: Trash2 },
   { template: "create", label: "db.sql.create", icon: FileCode2, separated: true, sqlOnly: true },
   // Not offered on a view: a view holds no rows of its own, so `TRUNCATE` against one is an error
   // rather than a statement worth drafting. `DROP` is offered — it just becomes `DROP VIEW`.
@@ -778,11 +804,11 @@ const GENERATED: {
     label: "db.sql.truncate",
     // `deleteMany({})` — the filterless delete that empties a collection and keeps it. Same intent
     // as TRUNCATE, and the draft says so in a comment above it.
-    mongoLabel: "db.mql.truncate",
+    altLabel: { javascript: "db.mql.truncate", redis: "db.redis.empty" },
     icon: Eraser,
     appliesTo: ["table", "collection"],
   },
-  { template: "drop", label: "db.sql.drop", mongoLabel: "db.mql.drop", icon: Trash },
+  { template: "drop", label: "db.sql.drop", altLabel: { javascript: "db.mql.drop", redis: "db.redis.del" }, icon: Trash },
   { template: "grant", label: "db.sql.grant", icon: KeyRound, separated: true, sqlOnly: true },
   { template: "revoke", label: "db.sql.revoke", icon: KeyRound, sqlOnly: true },
 ];
@@ -801,7 +827,14 @@ function diagramLabel(node: DbNode): string {
 /** The starter statement "Select rows" drops into a new console. */
 function selectStarFor(connectionId: string, node: DbNode): string {
   const connection = useDbStore.getState().connections.find((c) => c.id === connectionId);
-  if (connection && !engineInfo(connection.kind).sql) {
+  const language = connection ? engineInfo(connection.kind).consoleLanguage : "sql";
+  if (language === "redis") {
+    // A bounded scan, never `KEYS` — which the driver refuses anyway. The prefix is the key's own
+    // namespace: `node.schema` holds it and `node.name` the last segment.
+    const key = node.schema ? `${node.schema}:${node.name}` : node.name;
+    return `SCAN 0 MATCH ${key}* COUNT 100`;
+  }
+  if (language === "javascript") {
     return `db.${node.name}.find({}).limit(50)`;
   }
   const target = qualifiedName(node);
@@ -857,6 +890,13 @@ function ConnectionBranch({
   /** Where to put it. A second menu rather than a submenu: `ContextMenu` has no nesting, and the
    * list of groups is exactly the sort of thing that would need one. */
   const [groupMenu, setGroupMenu] = useState<{ x: number; y: number } | null>(null);
+  /** The workspace chooser, same reasoning as `groupMenu` — it carries its own items and heading. */
+  const [scopeMenu, setScopeMenu] = useState<{
+    x: number;
+    y: number;
+    items: MenuItem[];
+    heading: string;
+  } | null>(null);
 
   const store = useDbStore.getState();
   const selected = useDbStore((s) => s.selectedConnectionId === row.id);
@@ -930,6 +970,17 @@ function ConnectionBranch({
       // pointer drifted to while reading.
       onClick: () => setGroupMenu(menu),
     },
+    ...scopeMenuItems({
+      scope: row.scope,
+      anchor: menu ?? { x: 0, y: 0 },
+      openMenu: (next) => {
+        setMenu(null);
+        setScopeMenu(next);
+      },
+      onSetGlobal: (global) => void useDbStore.getState().setConnectionScope(row.id, global),
+      onMoveToWorkspace: (workspaceId) =>
+        void useDbStore.getState().moveConnectionToWorkspace(row.id, workspaceId),
+    }),
   ];
   if (index > 0) {
     menuItems.push({ label: t("db.moveUp"), icon: ArrowUp, onClick: () => move(-1), separated: true });
@@ -988,6 +1039,14 @@ function ConnectionBranch({
         color={engineColor(row.kind)}
         name={row.name}
         detail={undefined}
+        // The same mark the notes shelf and the collection tree use, in the slot that already
+        // exists for it — so "this one is on every workspace's shelf" reads identically in all
+        // three trees.
+        badge={
+          row.scope === "global" ? (
+            <Globe size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+          ) : undefined
+        }
         // Where it points, on hover rather than on a line of its own. A connection URL is long
         // enough to wrap the sidebar and repeat under every connection, which crowded out the names
         // — the thing you actually read the tree for. The row's own colour dot already says whether
@@ -1043,6 +1102,16 @@ function ConnectionBranch({
           items={groupItems}
           heading={t("db.moveToGroup")}
           onClose={() => setGroupMenu(null)}
+        />
+      )}
+
+      {scopeMenu && (
+        <ContextMenu
+          x={scopeMenu.x}
+          y={scopeMenu.y}
+          items={scopeMenu.items}
+          heading={scopeMenu.heading}
+          onClose={() => setScopeMenu(null)}
         />
       )}
     </>
@@ -1256,7 +1325,29 @@ function GroupSection({
   const commitDrop = useDbDrop();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
+  const [scopeMenu, setScopeMenu] = useState<{
+    x: number;
+    y: number;
+    items: MenuItem[];
+    heading: string;
+  } | null>(null);
   const [renaming, setRenaming] = useState(false);
+  const groups = useDbStore((s) => s.groups);
+
+  /**
+   * Whether this folder is on every workspace's shelf.
+   *
+   * Read off the `db_groups` row when there is one, and off the members when there is not — a group
+   * can be implied by a connection's `group_name` alone, with no row of its own, and that one is
+   * global exactly when the connections carrying its name are. `every` rather than `some`: a folder
+   * drawn as global whose contents are half invisible elsewhere would be lying about the more
+   * important half.
+   */
+  const groupScope: RowScope =
+    groups.find((entry) => entry.name.trim() === group)?.scope ??
+    (members.length > 0 && members.every((member) => member.scope === "global")
+      ? "global"
+      : "workspace");
 
   const label = group || t("db.ungrouped");
   // `FolderOpen` for the bucket that is the *absence* of a group, `FolderCode` for a real one — see
@@ -1298,7 +1389,25 @@ function GroupSection({
         separated: true,
         onClick: () => setRenaming(true),
       },
-      { label: t("db.deleteGroup"), icon: Trash2, danger: true, onClick: () => void removeGroup() },
+      ...scopeMenuItems({
+        scope: groupScope,
+        anchor: menu ?? { x: 0, y: 0 },
+        openMenu: (next) => {
+          setMenu(null);
+          setScopeMenu(next);
+        },
+        onSetGlobal: (global) => void useDbStore.getState().setGroupScope(group, global),
+        onMoveToWorkspace: (workspaceId) =>
+          void useDbStore.getState().moveGroupToWorkspace(group, workspaceId),
+        separated: true,
+      }),
+      {
+        label: t("db.deleteGroup"),
+        icon: Trash2,
+        danger: true,
+        separated: true,
+        onClick: () => void removeGroup(),
+      },
     );
   }
 
@@ -1377,6 +1486,15 @@ function GroupSection({
           y={engineMenu.y}
           onPick={(engine) => openModal({ kind: "newConnection", engine, group })}
           onClose={() => setEngineMenu(null)}
+        />
+      )}
+      {scopeMenu && (
+        <ContextMenu
+          x={scopeMenu.x}
+          y={scopeMenu.y}
+          items={scopeMenu.items}
+          heading={scopeMenu.heading}
+          onClose={() => setScopeMenu(null)}
         />
       )}
     </div>

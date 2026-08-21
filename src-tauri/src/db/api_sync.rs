@@ -440,9 +440,14 @@ fn local_records(
 /// Drops the fields that are allowed to differ between two copies of the "same" record, so a
 /// cosmetic difference never freezes a request.
 ///
-/// `updated_at` is the clock itself. For a collection, `workspace_id`, `sort_order` and `pinned`
-/// are *local placement* — which workspace it was dropped into, where it sits in the sidebar,
-/// whether this person pinned it — and none of that is anyone else's business.
+/// `updated_at` is the clock itself. For a collection, `workspace_id`, `sort_order`, `pinned` and
+/// `scope` are *local placement* — which workspace it was dropped into, where it sits in the
+/// sidebar, whether this person pinned it, whether they keep it on every shelf — and none of that
+/// is anyone else's business.
+///
+/// `scope` in particular has to be stripped rather than merely tolerated: two machines that
+/// disagree about it would otherwise read as a simultaneous edit on every single sync round, and
+/// freeze the collection as a conflict that no amount of resolving clears.
 fn comparable(kind: &str, payload: &serde_json::Value) -> serde_json::Value {
     let mut value = payload.clone();
     if let Some(object) = value.as_object_mut() {
@@ -452,6 +457,7 @@ fn comparable(kind: &str, payload: &serde_json::Value) -> serde_json::Value {
             object.remove("workspace_id");
             object.remove("sort_order");
             object.remove("pinned");
+            object.remove("scope");
         }
     }
     value
@@ -464,6 +470,9 @@ fn localise_collection(mut c: ApiCollection, workspace_id: &str, local: Option<&
     if let Some(local) = local {
         c.sort_order = local.sort_order;
         c.pinned = local.pinned;
+        // Local placement, like the two above it: whether *this* person keeps the collection on
+        // every workspace's shelf is not the host's decision to push.
+        c.scope = local.scope.clone();
     }
     c
 }
@@ -1460,5 +1469,61 @@ mod tests {
         assert_eq!(result.conflicts, 0);
         assert_eq!(scalar(&peer, "SELECT pinned FROM api_collections WHERE id = 'c1'"), 1);
         assert_eq!(scalar(&peer, "SELECT sort_order FROM api_collections WHERE id = 'c1'"), 7);
+    }
+
+    /// `scope` is local placement, like `pinned` and `sort_order` beside it — and it is the one
+    /// where getting this wrong is unrecoverable rather than merely wrong. Two machines that
+    /// disagree about whether a shared collection sits on every workspace's shelf would otherwise
+    /// read as a simultaneous edit on *every* sync round, freezing the collection as a conflict
+    /// that resolving does not clear, because the next round recreates it.
+    #[test]
+    fn a_collection_being_global_here_and_not_there_is_not_a_conflict() {
+        let (mut peer, mut items) = synced_peer();
+        peer.execute(
+            "UPDATE api_collections SET scope = 'global', \
+             updated_at = '2027-06-01T00:00:00+00:00' WHERE id = 'c1'",
+            [],
+        )
+        .unwrap();
+        for item in &mut items {
+            if item.kind == "collection" {
+                item.updated_at = "2027-01-01T00:00:00+00:00".into();
+            }
+        }
+
+        let result = apply_items(&mut peer, "c1", "w2", items).unwrap();
+
+        assert_eq!(result.conflicts, 0);
+        assert_eq!(
+            text(&peer, "SELECT scope FROM api_collections WHERE id = 'c1'"),
+            "global",
+            "a pull must not re-scope the collection to the host's choice"
+        );
+    }
+
+    /// The `#[serde(default)]` on `ApiCollection::scope`, from the direction that actually bites.
+    ///
+    /// `push_live` deserialises a peer's payload with `serde_json::from_value` and **silently
+    /// skips** one it cannot read. Without the default, every collection shared by a machine on a
+    /// build without this column would simply never arrive, and nothing anywhere would say so.
+    #[test]
+    fn a_payload_from_a_build_without_scope_still_deserialises() {
+        let payload = serde_json::json!({
+            "id": "c1",
+            "workspace_id": "w1",
+            "name": "Billing",
+            "description": "",
+            "auth": "",
+            "pre_script": "",
+            "post_script": "",
+            "variables": "[]",
+            "sort_order": 0,
+            "pinned": false,
+            "created_at": "t",
+            "updated_at": "t"
+        });
+        let collection: ApiCollection =
+            serde_json::from_value(payload).expect("an older peer's collection must still parse");
+        assert_eq!(collection.scope, "workspace");
     }
 }

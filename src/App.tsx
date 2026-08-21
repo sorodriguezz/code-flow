@@ -92,6 +92,7 @@ const AgentsView = lazy(() => import("./components/agents/AgentsView").then((m) 
 const StoriesView = lazy(() => import("./components/stories/StoriesView").then((m) => ({ default: m.StoriesView })));
 const RemoteView = lazy(() => import("./components/remote/RemoteView").then((m) => ({ default: m.RemoteView })));
 const NotesView = lazy(() => import("./components/notes/NotesView").then((m) => ({ default: m.NotesView })));
+const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => ({ default: m.VaultView })));
 const DiagramsView = lazy(() =>
   import("./components/diagrams/DiagramsView").then((m) => ({ default: m.DiagramsView })),
 );
@@ -253,6 +254,10 @@ const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "remote", render: () => <RemoteView /> },
   { id: "notes", render: () => <NotesView /> },
   { id: "diagrams", render: () => <DiagramsView /> },
+  // In this list because it renders with no project open, not because it follows the workspace —
+  // the keyring is global. Membership here is what exempts a view from the "no project" empty
+  // state, and the gate is `workspaceId !== null`, which is true whenever the app is usable.
+  { id: "vault", render: () => <VaultView /> },
 ];
 
 function MainContent() {

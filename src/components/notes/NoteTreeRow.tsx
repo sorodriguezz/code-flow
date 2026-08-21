@@ -5,6 +5,7 @@ import {
   FileText,
   Book,
   BookOpen,
+  Globe,
   Pin,
   type LucideIcon,
 } from "lucide-react";
@@ -178,6 +179,13 @@ export const NoteTreeRow = memo(function NoteTreeRow({
 
       {!isBook && row.note.pinned && (
         <Pin size={10} className="shrink-0 text-[var(--cf-accent)]" fill="currentColor" />
+      )}
+
+      {/* Read off `row.book`, not passed in as a prop: `sameRow` compares the book by identity and
+          the store replaces that object on a scope change, so the mark appears without the
+          hand-written comparator below needing a new field. */}
+      {isBook && row.book.scope === "global" && (
+        <Globe size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
       )}
 
       {isBook && row.noteCount > 0 && (

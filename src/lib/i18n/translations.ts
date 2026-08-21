@@ -888,6 +888,233 @@ const en = {
     "Markdown notes, their books and your saved templates. Separate from the documents above because a notebook is the most personal thing here \u2014 you may reasonably carry your specs and not your journal.",
   "backup.include.diagrams": "Diagrams",
   "backup.include.diagramsHint": "Diagrams, their folders and their templates. Its own switch because each diagram carries a rendered picture as well as its document, which makes this the group most likely to dominate the file's size.",
+  // ---------------- Llavero, the keyring ----------------
+  "tabbar.vault": "Keyring",
+  "tabbar.vaultDescription": "Passwords, keys, cards and documents, encrypted under a master password only you know",
+
+  // Setup and unlocking
+  "vault.setupTitle": "Set up your keyring",
+  "vault.setupBody": "Everything you keep here is encrypted with a key derived from a master password. CodeFlow never stores that password, which is what makes the keyring safe — and what makes it unrecoverable.",
+  "vault.setupWarning": "If you forget this password, nothing and nobody can open the keyring again. There is no reset and no back door.",
+  "vault.masterPassword": "Master password",
+  "vault.confirmPassword": "Type it again",
+  "vault.passwordsDiffer": "The two passwords are not the same.",
+  "vault.tooShort": "A master password needs at least {n} characters.",
+  "vault.create": "Create the keyring",
+  "vault.checking": "Checking…",
+  "vault.forgotPassword": "I have lost my master password",
+  "vault.unlockTitle": "Keyring locked",
+  "vault.unlockBody": "Enter your master password to open it.",
+  "vault.unlock": "Unlock",
+  "vault.unlocking": "Opening…",
+  "vault.lock": "Lock",
+  "vault.lockNow": "Lock now",
+  "vault.remember": "Remember on this machine",
+  "vault.rememberHint": "Keeps the master password in this computer's credential store, so the keyring opens without asking. It then protects your entries exactly as well as your operating system account does — a good trade on a laptop that locks itself, a poor one on a shared machine.",
+  "vault.forgetPassword": "Stop remembering it here",
+  "vault.strengthWeak": "Weak",
+  "vault.strengthFair": "Fair",
+  "vault.strengthGood": "Good",
+  "vault.strengthStrong": "Strong",
+
+  // Settings
+  "vault.settings": "Keyring settings",
+  "vault.autolock": "Lock after",
+  "vault.autolockNever": "Never",
+  "vault.autolockMinutes": "{n} minutes",
+  "vault.autolockHint": "Idle time before the keyring closes itself. It also closes when the check happens on your next action, so a sleeping laptop wakes up locked.",
+  "vault.changePassword": "Change master password",
+  "vault.currentPassword": "Current password",
+  "vault.newPassword": "New password",
+  "vault.passwordChanged": "Master password changed.",
+
+  // The list
+  "vault.rememberedOn": "This machine remembers your master password.",
+  "vault.rememberedOff": "This machine does not remember your master password.",
+  "vault.changePasswordHint":
+    "Only the key is re-wrapped, so this is instant however much is in the keyring — and it cannot half-succeed.",
+  "vault.reset.title": "Reset the keyring",
+  "vault.reset.body":
+    "Deletes the keyring and everything in it: every entry, every attachment, every folder. There is no undo and no backup of it here. This exists for one situation — the master password is lost, and without this the app would refuse to make a new keyring forever.",
+  "vault.reset.word": "DELETE",
+  "vault.reset.typeWord": "Type {word} to confirm",
+  "vault.reset.action": "Delete the keyring",
+  "vault.reset.running": "Deleting…",
+  "vault.reset.done": "The keyring was deleted. You can create a new one.",
+
+  "vault.searchPlaceholder": "Search titles, accounts and sites",
+  "vault.newEntry": "New entry",
+  "vault.newFolder": "New folder",
+  "vault.newFolderPrompt": "Name for the folder",
+  "vault.renameFolder": "Rename folder",
+  "vault.deleteFolder": "Delete folder",
+  "vault.deleteFolderConfirm": "Delete “{name}”? The entries in it are kept and moved out of the folder.",
+  "vault.empty": "Nothing in the keyring yet",
+  "vault.emptyBody": "Add a login, an API key, a card or a document. Everything is encrypted before it touches the disk.",
+  "vault.noMatches": "Nothing matches that",
+  "vault.allItems": "Everything",
+  "vault.favorites": "Favourites",
+  "vault.trash": "Trash",
+  "vault.emptyTrash": "Empty the trash",
+  "vault.emptyTrashConfirm": "Permanently delete everything in the trash? This cannot be undone.",
+  "vault.restore": "Restore",
+  "vault.deleteForever": "Delete permanently",
+  "vault.deleteForeverConfirm": "Permanently delete “{name}”? This cannot be undone.",
+  "vault.movedToTrash": "Moved to the trash — you can restore it from there.",
+  "vault.delete": "Move to trash",
+  "vault.pin": "Add to favourites",
+  "vault.unpin": "Remove from favourites",
+  "vault.sortRecent": "Recently changed",
+  "vault.sortTitle": "By title",
+  "vault.sortCreated": "Recently added",
+  "vault.entriesN": "{n} entries",
+
+  // Kinds
+  "vault.kind.login": "Login",
+  "vault.kind.key": "Key or token",
+  "vault.kind.card": "Card",
+  "vault.kind.identity": "Identity document",
+  "vault.kind.note": "Secure note",
+  "vault.kind.file": "Files",
+
+  // Fields
+  "vault.field.title": "Title",
+  "vault.field.username": "Username",
+  "vault.field.password": "Password",
+  "vault.field.site": "Website",
+  "vault.field.totp": "2FA secret",
+  "vault.field.totpHint": "Paste the otpauth:// link from the QR code, or the base32 code the site shows beside it. The secret stays in CodeFlow's backend — only the six-digit code is ever shown.",
+  "vault.field.recoveryCodes": "Recovery codes",
+  "vault.field.apiKey": "API key",
+  "vault.field.privateKey": "Private key",
+  "vault.field.passphrase": "Passphrase",
+  "vault.field.connectionString": "Connection string",
+  "vault.field.host": "Host",
+  "vault.field.port": "Port",
+  "vault.field.cardholder": "Cardholder",
+  "vault.field.cardNumber": "Card number",
+  "vault.field.expiry": "Expires",
+  "vault.field.cvv": "Security code",
+  "vault.field.pin": "PIN",
+  "vault.field.fullName": "Full name",
+  "vault.field.documentNumber": "Document number",
+  "vault.field.issued": "Issued",
+  "vault.field.expires": "Expires",
+  "vault.field.nationality": "Nationality",
+  "vault.field.notes": "Notes",
+  "vault.field.tags": "Tags",
+  "vault.customFields": "Other fields",
+  "vault.addField": "Add a field",
+  "vault.fieldName": "Name",
+  "vault.fieldValue": "Value",
+  "vault.markSecret": "Hide this value",
+
+  // Actions on a value
+  "vault.edit": "Edit",
+  "vault.save": "Save",
+  "vault.cancel": "Cancel",
+  "vault.close": "Close",
+  "vault.saving": "Saving…",
+  "vault.saved": "Saved",
+  "vault.discardChanges": "Discard the changes to this entry?",
+  "vault.discard": "Discard",
+  "vault.entryEmpty": "Nothing has been filled in yet. Press Edit to add it.",
+  "vault.reveal": "Show",
+  "vault.hide": "Hide",
+  "vault.copy": "Copy",
+  "vault.copiedClears": "Copied. The clipboard is cleared in {seconds} seconds.",
+  "vault.generate": "Generate",
+  "vault.generator": "Password generator",
+  "vault.length": "Length",
+  "vault.useUppercase": "Capitals",
+  "vault.useDigits": "Digits",
+  "vault.useSymbols": "Symbols",
+  "vault.useAmbiguous": "Allow lookalike characters (l1IO0)",
+  "vault.useAmbiguousHint": "Off by default, because the password you type by hand is usually the one you are reading off another screen.",
+  "vault.use": "Use this one",
+
+  // 2FA
+  "vault.totpCode": "2FA code",
+  "vault.totpSeconds": "{n}s",
+  "vault.totpNone": "No 2FA secret on this entry",
+
+  // Attachments
+  "vault.attachments": "Files",
+  "vault.addFile": "Add a file",
+  "vault.saveFile": "Save a copy",
+  "vault.deleteFile": "Remove",
+  "vault.deleteFileConfirm": "Remove “{name}” from this entry?",
+  "vault.attachmentsHint": "Files are encrypted one by one and travel inside your backups.",
+  "vault.noAttachments": "No files attached",
+
+  // Scope
+  "vault.scopeGlobal": "In every workspace",
+  "vault.scopeWorkspace": "Only in {workspace}",
+  "vault.fileHere": "Only in this workspace",
+  "vault.fileEverywhere": "Make available everywhere",
+
+  // Audit
+  // ---------------- Llavero: importing ----------------
+  // Backend failures, translated. See `lib/vault/errors.ts` for why these are codes rather than
+  // prose on the wire.
+  "vault.error.wrongPassword": "That is not the master password for this keyring.",
+  "vault.error.locked": "The keyring is locked. Unlock it and try again.",
+  "vault.error.notInitialised": "There is no keyring on this machine yet.",
+  "vault.error.alreadyInitialised":
+    "There is already a keyring on this machine. Unlock it with its master password — or, if that password is lost, reset the keyring from its settings.",
+  "vault.error.tooShort": "A master password needs at least 10 characters.",
+
+  "vault.import.title": "Import a keyring",
+  "vault.import.button": "Import…",
+  "vault.import.body":
+    "Reads Bitwarden's JSON and CSV exports, and 1Password's CSV and .1pux. Nothing is written until you press Import.",
+  "vault.import.chooseFile": "Choose a file…",
+  "vault.import.reading": "Reading…",
+  "vault.import.format": "Format",
+  "vault.import.formatBitwardenJson": "Bitwarden (JSON)",
+  "vault.import.formatBitwardenCsv": "Bitwarden (CSV)",
+  "vault.import.formatOnePasswordCsv": "1Password (CSV)",
+  "vault.import.formatOnePux": "1Password (.1pux)",
+  "vault.import.formatUnknown": "Not recognised",
+  "vault.import.summary": "{items} entries in {folders} folders",
+  "vault.import.summaryNoFolders": "{items} entries",
+  "vault.import.run": "Import {n} entries",
+  "vault.import.running": "Importing…",
+  "vault.import.done": "Imported {n} entries.",
+  "vault.import.nothing": "There is nothing in that file to import.",
+  "vault.import.warnings": "Worth knowing",
+  "vault.import.deleteTheFile":
+    "That export file is your whole vault in plain text on disk. Delete it now that the import is done.",
+
+  // Parser warnings
+  "vault.import.unknownFormat":
+    "This file was not recognised. Export from Bitwarden as JSON or CSV, or from 1Password as CSV or .1pux.",
+  "vault.import.notJson": "This file is not readable JSON.",
+  "vault.import.emptyFile": "This file has nothing in it.",
+  "vault.import.bitwardenEncrypted":
+    "This is an encrypted Bitwarden export, which cannot be read without your Bitwarden key. Export again with encryption turned off.",
+  "vault.import.notBitwardenCsv": "This CSV has no `name` column, so it is not a Bitwarden export.",
+  "vault.import.notOnePasswordCsv": "This CSV has no `Title` column, so it is not a 1Password export.",
+  "vault.import.missingColumns": "Some columns were missing and their values were left out: {columns}.",
+  "vault.import.skippedUnnamed": "{n} entries had no name and were left out — there would be no way to find them again.",
+  "vault.import.archivedTagged": "{n} archived entries were brought across and tagged “archived”.",
+  "vault.import.csvNoFolders": "A 1Password CSV carries no folders, so everything arrives at the top level.",
+  "vault.import.attachmentsSkipped":
+    "{n} entries had files attached in 1Password. Those are not in the export in a form that can be read, so the entries arrive without them.",
+
+  "vault.activity": "Activity",
+  "vault.activityHint": "What was opened and when, on this machine. Not a security control — anyone who can edit the database can edit this — but it is the answer to “did I copy that password last Tuesday”.",
+  "vault.action.unlock": "Opened the keyring",
+  "vault.action.lock": "Locked the keyring",
+  "vault.action.reveal": "Opened an entry",
+  "vault.action.create": "Added an entry",
+  "vault.action.update": "Changed an entry",
+  "vault.action.delete": "Moved to the trash",
+  "vault.action.restore": "Restored from the trash",
+  "vault.action.purge": "Deleted permanently",
+
+  "backup.include.vault": "Keyring",
+  "backup.include.vaultHint": "The keyring: its entries, folders, attachments and its encrypted key. Everything in it stays sealed inside the backup, and the master password is deliberately not included — a restored machine gets the keyring back and asks for the password.",
   "backup.include.requestHistory": "Request and query history",
   "backup.include.requestHistoryHint":
     "Every request sent from the API client and every statement run in a SQL console. Useful to carry, and usually the first thing worth leaving out — on a busy install it is the largest part of the file and it changes constantly, which makes the scheduled backup re-upload everything far more often.",
@@ -2861,6 +3088,19 @@ const en = {
   "branch.lockedCannotPush": '"{name}" is locked — unlock it to push it',
   "branch.lockedBlocked":
     '"{name}" is locked: merging and pushing stay blocked. Lift it with the branch\'s padlock, or in Settings → Git behavior.',
+
+  // ---------------- Row scope (one workspace, or every one of them) ----------------
+  // Shared by the notes shelf, the API collection tree and the database connection tree, so the
+  // same act reads the same way wherever it is offered.
+  "scope.makeGlobal": "Make available everywhere",
+  "scope.restrictToWorkspace": "Only in this workspace",
+  "scope.moveToWorkspace": "Move to workspace…",
+  "scope.chooseWorkspace": "Move to which workspace?",
+  "scope.globalBadge": "Available in every workspace",
+  "scope.madeGlobal": '"{name}" is now available in every workspace',
+  "scope.restricted": '"{name}" is now only in this workspace',
+  "scope.moved": '"{name}" moved to {workspace}',
+  "scope.noOtherWorkspaces": "No other workspace",
 
   "confirm.mergeTitle": 'Merge "{source}" into "{target}"?',
   "confirm.mergeNote": "Commits from {source} are added to {target}. {target} is the branch that changes.",
@@ -5299,6 +5539,20 @@ const en = {
   "db.viewRecordsSelected": "Read the selected rows down the page",
   "db.viewRecordsAll": "Read the rows down the page",
   "db.countRows": "{n} row(s)",
+  // ---------------- Redis ----------------
+  // A Redis grid holds the entries of one value (a hash's fields, a list's items) or the keys
+  // under a namespace — neither a row nor a document, so it gets its own words.
+  "db.countEntries": "{n} entr(y/ies)",
+  "db.entryN": "Entry {n}",
+  "db.entriesN": "{n} entries",
+  "db.entriesOfTotal": "{n} of {total} entries",
+  "db.entriesAffected": "{n} entries affected",
+  "db.entriesSelectedN": "{n} selected",
+  "db.redisKeyField": "Entry key",
+  "db.matchPlaceholder": "user:* — a MATCH pattern",
+  "db.scanKeys": "Scan keys",
+  "db.generateRedis": "Redis commands",
+
   "db.countDocuments": "{n} document(s)",
   "db.queryResult": "Query result",
   "db.generateSql": "Generate SQL…",
@@ -5323,6 +5577,14 @@ const en = {
   "db.mql.delete": "deleteMany()",
   "db.mql.truncate": "Empty the collection",
   "db.mql.drop": "drop()",
+  "db.redis.scan": "SCAN",
+  "db.redis.dbsize": "DBSIZE",
+  "db.redis.set": "SET",
+  "db.redis.hset": "HSET",
+  "db.redis.del": "DEL",
+  "db.redis.empty": "Delete the keys under it",
+  "db.redisRefused": "{command} is refused here: it would block the server or break the connection this tab shares. Run it from redis-cli if you mean it.",
+  "db.scanKeysInConsole": "Scan keys in a console",
   "db.sqlLog": "Statements run",
   "db.sqlLogEmpty": "Nothing has run yet. Opening a table, turning a page or applying an edit shows the statement it sent here.",
   "db.sqlLogNoStatement": "(the server was never reached)",
@@ -5663,6 +5925,60 @@ const en = {
   "tour.notes.done.title": "That's Notes",
   "tour.notes.done.body":
     "Anything you write is saved as you go and travels with your backups. A note can be exported as a plain `.md` from its ⋯ menu, so nothing here is locked in. This tour is always in the cap beside the app rail if you want it again.",
+  // ---------------- Tour: Llavero ----------------
+  "tour.chapter.vault": "Keyring",
+  "tour.chapter.vaultEntry": "An entry",
+  "tour.chapter.vaultSafety": "Keeping it safe",
+
+  "tour.vault.intro.title": "Your keyring",
+  "tour.vault.intro.body":
+    "Passwords, API keys, cards, documents and the files that go with them — encrypted on this machine and readable only with your master password. It is the one app on this rail that is **not** tied to a workspace: a password does not belong to the repository you were looking at when you saved it.",
+  "tour.vault.master.title": "The master password is the whole design",
+  "tour.vault.master.body":
+    "CodeFlow never stores it. It derives a key from it, uses that key to unwrap the one your entries are actually encrypted with, and forgets it again. That is what makes a copy of the database useless to anyone else — and it is also why **nobody can recover a forgotten master password**. There is no reset. Write it down somewhere real, once.",
+  "tour.vault.tree.title": "Folders on the left, entries under them",
+  "tour.vault.tree.body":
+    "Folders are for tidiness, not for finding things — the search box above them is how anyone actually finds a password. Right-click a folder or an entry to rename it, file it under one workspace, or move it to another.",
+  "tour.vault.search.title": "Search is the way in",
+  "tour.vault.search.body":
+    "Two letters of a site name is usually enough. It matches titles, account lines, sites and tags — never the secrets themselves, which are not held in memory to match against and would mean decrypting the whole keyring on every keystroke.",
+  "tour.vault.new.title": "Six kinds of entry",
+  "tour.vault.new.body":
+    "A login, a key or token, a card, an identity document, a secure note, or an entry that is mostly its attachments. The kind decides which fields you get and which of them are treated as secret.",
+  "tour.vault.drag.title": "Drag an entry into a folder",
+  "tour.vault.drag.body":
+    "Pick an entry up and drop it on a folder to file it there. Dropping it on **Everything** takes it back out of every folder. Filing does not count as editing, so a tidy-up does not reshuffle your \"recently changed\" order.",
+  "tour.vault.reveal.title": "Copy first, reveal second",
+  "tour.vault.reveal.body":
+    "The copy button takes a value without ever drawing it on screen, and the clipboard is wiped 30 seconds later. Reveal is there for the times you have to read something out or type it somewhere else — and it hides itself again after 30 seconds, in case you walked away.",
+  "tour.vault.generator.title": "A real generator",
+  "tour.vault.generator.body":
+    "The refresh button beside a password field opens it. Every character comes from the operating system's random number generator, and characters that are easy to misread — l, 1, I, O, 0 — are left out unless you ask for them, because the password you type by hand is usually one you are reading off another screen.",
+  "tour.vault.totp.title": "2FA codes live here too",
+  "tour.vault.totp.body":
+    "Paste the otpauth:// link behind a QR code, or the base32 code the site shows beside it, and the six digits appear with their countdown. The shared secret stays in CodeFlow's backend — only the code itself is ever shown, so nothing in the window can walk away with something that generates codes forever.",
+  "tour.vault.attachments.title": "Files, encrypted one by one",
+  "tour.vault.attachments.body":
+    "A photo of a passport, a .pem, a PDF of recovery codes. Each one is encrypted separately and travels inside your backups, so a restore brings them back with the entry rather than leaving it pointing at a file that is gone.",
+  "tour.vault.scope.title": "Everywhere, or just here",
+  "tour.vault.scope.body":
+    "Entries are available in every workspace by default. Right-click one to file it under the workspace you are in, which is worth doing for the credentials that only mean something on one client's project. Deleting that workspace later makes them global again — it never deletes them.",
+  "tour.vault.import.title": "Bringing a keyring across",
+  "tour.vault.import.body":
+    "The import button reads Bitwarden's JSON and CSV exports, and 1Password's CSV and .1pux. You see exactly what will be added before anything is written. One thing to remember afterwards: that export file is your entire vault in plain text on disk — delete it once the import looks right.",
+  "tour.vault.trash.title": "Deleting is recoverable",
+  "tour.vault.trash.body":
+    "Deleting an entry moves it to the trash, where it stays until you empty it. A password removed by a mis-click and gone for good is the one failure this app refuses to have.",
+  "tour.vault.lock.title": "Locking, on purpose and on its own",
+  "tour.vault.lock.body":
+    "The padlock closes the keyring now. It also closes itself after the idle time you set — and it checks that on your next action as well as on a timer, so a laptop that was asleep for two hours wakes up locked rather than open.",
+  "tour.vault.backup.title": "It travels with your backups",
+  "tour.vault.backup.body":
+    "The keyring is its own switch in Settings → Backup. Everything in it stays sealed inside the file, and the master password is deliberately left out — a backup holding both the vault and the key to it would be a backup with no encryption at all. A restored machine gets the keyring back and asks you for the password.",
+  "tour.vault.done.title": "That is the keyring",
+  "tour.vault.done.body":
+    "The habit worth picking up: let the generator make the password, copy rather than reveal, and let the thing lock itself. This tour is always here, in the graduation cap beside the app rail.",
+
   "tour.chapter.diagrams": "Diagrams",
   "tour.chapter.diagramsAi": "Drawing with AI",
 

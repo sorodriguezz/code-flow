@@ -72,6 +72,17 @@ pub const TABLES: &[&str] = &[
     "diagram_folders",
     "diagrams",
     "diagram_templates",
+    // The keyring. Meta first — the wrapped key, without which every row below it is unreadable —
+    // then folders before items (an item points at a folder), then blobs, which point at an item.
+    //
+    // Safe to carry because every payload in here is sealed and the password that opens it is
+    // deliberately *not* in the backup (see `keyvault::master_password_key`). A restored machine
+    // gets the vault back and asks for the master password, which is the correct exchange.
+    "vault_meta",
+    "vault_folders",
+    "vault_items",
+    "vault_blobs",
+    "vault_audit",
     // The API client, its sync bookkeeping and its jar. The three sync tables travel so the
     // restored machine resumes the shared collection exactly where this one left it, rather than
     // re-deriving a base by pulling — see the note in [`apply`] about merging.
@@ -224,6 +235,13 @@ pub const GROUPS: &[Group] = &[
         key: "diagrams",
         tables: &["diagram_folders", "diagrams", "diagram_templates"],
     },
+    Group {
+        // Its own switch, and the one whose *absence* is as much the point as its presence: the
+        // vault is unreadable without the master password, so it is safe to carry — but somebody
+        // keeping backups on a shared drive may still want everything except this.
+        key: "vault",
+        tables: &["vault_meta", "vault_folders", "vault_items", "vault_blobs", "vault_audit"],
+    },
     Group { key: "requestHistory", tables: &["api_history", "db_query_history"] },
     Group {
         // `ai_usage` rides here rather than in a switch of its own: it is the token account of
@@ -262,6 +280,7 @@ pub struct Selection {
     pub authored: bool,
     pub notes: bool,
     pub diagrams: bool,
+    pub vault: bool,
     pub request_history: bool,
     pub conversations: bool,
     pub reviews: bool,
@@ -279,6 +298,7 @@ impl Default for Selection {
             authored: true,
             notes: true,
             diagrams: true,
+            vault: true,
             request_history: true,
             conversations: true,
             reviews: true,
@@ -297,6 +317,7 @@ impl Selection {
             "authored" => self.authored,
             "notes" => self.notes,
             "diagrams" => self.diagrams,
+            "vault" => self.vault,
             "requestHistory" => self.request_history,
             "conversations" => self.conversations,
             "reviews" => self.reviews,
