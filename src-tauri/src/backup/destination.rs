@@ -122,10 +122,19 @@ pub fn sync_folders() -> Vec<SyncFolder> {
     found
 }
 
-/// Where a backup goes when the user hasn't chosen anywhere: a `Backups` folder beside the
-/// database, which is inside the directory the installer already knows to keep or wipe.
+/// Where a backup goes when the user hasn't chosen anywhere: a `Backups` folder under the user
+/// root — `~/CodeFlow/Backups`, or `%USERPROFILE%\CodeFlow\Backups`.
+///
+/// The user root and not beside the database, which is where this used to be. Two reasons, and the
+/// second is the one that matters: a backup is the user's file rather than the app's, so it must
+/// survive "Reset app data" — which used to delete it, in the same sweep that created the need for
+/// it. And on Windows the old location was `C:\CodeFlow\Backups`, shared by every account on the
+/// machine, where each one wrote the same `codeflow-backup.cfbackup` filename and `prune()`'s
+/// five-copy limit counted them all together: two users evicted each other's backups within hours,
+/// and neither could decrypt what the other left, because each file is sealed with a passphrase
+/// held only in its author's own credential store.
 pub fn default_folder() -> PathBuf {
-    crate::paths::base_dir().join("Backups")
+    crate::paths::backups_dir()
 }
 
 // ---------------------------------------------------------------------------

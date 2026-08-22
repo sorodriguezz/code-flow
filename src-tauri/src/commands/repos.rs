@@ -132,12 +132,43 @@ pub fn scan_folder(path: String) -> Result<FolderScan, String> {
     Ok(FolderScan { is_repo: false, remote_url: None, repos, empty: seen == 0, truncated })
 }
 
-/// Where a "Clone repository" flow should default to: `C:\CodeFlow\repos\<name>` on
-/// Windows (same root as the rest of the app's persisted state), OS app-data equivalent
-/// elsewhere. The frontend appends the repo name itself.
+/// Where a "Clone repository" flow should default to, and how to append a name to it.
+#[derive(serde::Serialize)]
+pub struct CloneRoot {
+    pub root: String,
+    /// `\` or `/`.
+    ///
+    /// Sent rather than inferred because the frontend used to build the destination as
+    /// `${baseDir}/${name}` — a forward slash, unconditionally, onto a root that on Windows was
+    /// `C:\CodeFlow\repos`. It happened to work, because Windows accepts either separator in most
+    /// places, and it produced a mixed path that then appeared in the modal, in the duplicate
+    /// check, and in `projects.local_path` forever after. The alternative to this field is a
+    /// platform branch in TSX, which is the thing being removed everywhere else in this change.
+    pub separator: String,
+}
+
+/// The default clone destination: `<user root>/repos`, unless this install carries a `clone_root`
+/// row.
+///
+/// That row exists for exactly one situation and is written by the layout migration: a Windows
+/// machine upgrading from the shared `C:\CodeFlow`, where `C:\CodeFlow\repos` already held clones.
+/// Those are working copies that may carry uncommitted work, so they are adopted where they stand
+/// rather than moved — see `paths::backups_dir` for why the backup folder gets the opposite
+/// treatment.
 #[tauri::command]
-pub fn default_clone_dir() -> String {
-    paths::clone_root().to_string_lossy().to_string()
+pub fn default_clone_dir(db: State<Db>) -> CloneRoot {
+    let configured = db
+        .0
+        .lock()
+        .ok()
+        .and_then(|conn| queries::get_setting(&conn, "clone_root").ok().flatten())
+        .filter(|value| !value.trim().is_empty());
+
+    let root = configured.map(std::path::PathBuf::from).unwrap_or_else(paths::clone_root);
+    CloneRoot {
+        root: root.to_string_lossy().into_owned(),
+        separator: std::path::MAIN_SEPARATOR.to_string(),
+    }
 }
 
 #[tauri::command]

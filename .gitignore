@@ -47,3 +47,12 @@ src-tauri/resources/mobile/*
 # runtime above — vendored third-party code has no business in the history, and `pnpm drawio:webapp`
 # reproduces it byte for byte.
 public/drawio/
+
+# SQLite databases. The app's live one is under the OS app-data directory (see src-tauri/src/paths.rs)
+# and never in the tree — but a `cargo run` on a machine where `dirs::home_dir()` returns None used
+# to fall back to a *relative* path, which is the most plausible origin of the zero-byte
+# `CodeFlowcodeflow.db` that sat in this repository's root from its very first commit until v1.19.
+# `paths::resolve` cannot produce a relative root any more; this is the second lock on the door.
+*.db
+*.db-wal
+*.db-shm

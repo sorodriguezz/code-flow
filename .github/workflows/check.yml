@@ -1,0 +1,57 @@
+# The cheap half of a test gate, and deliberately only the cheap half.
+#
+# What is here runs on Ubuntu in about two minutes with no Rust toolchain: a TypeScript typecheck
+# and a translation-key parity check. Between them they catch the two regressions this repository
+# actually produces — a type error that would otherwise surface twenty minutes into the release job
+# on a Windows runner, and an English string added without its Spanish twin.
+#
+# What is NOT here, and why: `cargo test`.
+#
+#   * On `ubuntu-latest`, the obvious cheap runner, this crate has never been built. The release
+#     matrix is Windows and macOS only, `vendored-openssl` is scoped to macOS so git2 would need
+#     libssl-dev and pkg-config, `keyring 3` selects `windows-native`/`apple-native` per platform
+#     and has no Linux backend chosen, and Tauri needs webkit2gtk and libsoup development packages.
+#     That is an unknown number of days porting to a platform nobody ships, and every breakage found
+#     would be a breakage no user can have.
+#   * On `macos-latest` or `windows-latest` it is a 10-25 minute debug build per pull request — the
+#     release workflow's own comments record 11 minutes warm and 26 cold — and macOS runner minutes
+#     bill at ten times the Linux rate.
+#   * Two tests in `debugger::live_tests` fail on a clean tree, so the gate would have to be written
+#     around a known-failing baseline before it could gate anything.
+#
+# `cargo test` is run by hand before a release. If that ever stops being true, the place to add it
+# is a step inside the existing release job, where the toolchain and `rust-cache` are already warm —
+# not a second job that pays for both from cold.
+
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.5.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # `--ignore-scripts`: nothing here builds or runs the Tauri app, and the postinstall steps of
+      # a desktop toolchain are the slowest part of an install that otherwise takes seconds.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Before `tsc`, because it is the faster of the two and its failure is the more common one —
+      # and because reading "you forgot the Spanish string" is more useful than reading the type
+      # error that same omission produces.
+      - run: node scripts/check-translations.mjs
+
+      - run: pnpm exec tsc --noEmit

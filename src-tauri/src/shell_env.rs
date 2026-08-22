@@ -156,11 +156,13 @@ fn adopt(imported: &str) {
 /// database first or reordering `run()` around it. Neither is worth it for one string: a file costs
 /// no connection, needs no schema and cannot deadlock against one.
 ///
-/// It lives in `paths::base_dir()` so that "wipe everything" takes it with it, like the rest of the
-/// app's state. `run()` does that wipe *before* calling in here, on purpose — see the comment there.
+/// It lives under `paths::cache_dir()` — cache and not state, because losing it costs exactly one
+/// slow launch while the login shell is re-probed, which is what regenerable means. "Wipe
+/// everything" still takes it, since a reset clears the cache root whole; `run()` does that wipe
+/// *before* calling in here, on purpose — see the comment there.
 #[cfg(not(target_os = "windows"))]
 fn cache_path() -> std::path::PathBuf {
-    crate::paths::base_dir().join(".shell-path")
+    crate::paths::shell_path_cache()
 }
 
 /// The cached `PATH`, or `None` if there isn't a usable one.

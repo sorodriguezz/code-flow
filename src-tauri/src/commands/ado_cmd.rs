@@ -848,7 +848,7 @@ fn link_review_workspace(
             slugify(&format!("azure-{org}-{project}-{repo}-{number}"))
         }
     };
-    let dir = paths::base_dir().join("pr-link-reviews").join(slug);
+    let dir = paths::pr_link_review_dir(&slug);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let description = if pr.description.trim().is_empty() { "(sin descripción)" } else { &pr.description };
