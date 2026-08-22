@@ -105,11 +105,10 @@ export function PipelinesView() {
     void load(projectId);
   }, [activeView, projectId, fetched, load]);
 
-  // The poll runs only while this is the view on screen. Mounted is not the same as visible here.
-  useEffect(() => {
-    if (activeView !== "pipelines") return;
-    return watch();
-  }, [activeView, watch]);
+  // Started on the first visit and never stopped, because leaving the tab is exactly when the poll
+  // earns its keep: it is what notices a run finishing and files the notification. `watch` decides
+  // for itself how much to do while the tab is off screen — see the note in `ciStore.watch`.
+  useEffect(() => watch(), [watch]);
 
   useEffect(() => {
     setNow(Date.now());

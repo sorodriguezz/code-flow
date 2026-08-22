@@ -444,7 +444,7 @@ export const useCiStore = create<CiState>((set, get) => ({
       if (document.visibilityState !== "visible") return;
       // The view is never unmounted, only hidden (`App.tsx` keeps visited views mounted), so
       // "am I on screen" has to be asked rather than assumed from being mounted.
-      if (useUiStore.getState().activeView !== "pipelines") return;
+      const onTab = useUiStore.getState().activeView === "pipelines";
 
       const projectId = useWorkspaceStore.getState().activeProjectId;
       if (!projectId) return;
@@ -452,6 +452,27 @@ export const useCiStore = create<CiState>((set, get) => ({
 
       const runs = useCiStore.getState().runsByProject[projectId] ?? [];
       const anyLive = runs.some(isLive);
+      /**
+       * **Off the tab, this keeps polling — but only for work that is actually moving.**
+       *
+       * Being on the Pipelines tab used to be a hard precondition, and that quietly disabled the
+       * one feature the poll exists for. `announceTransitions` runs inside `load`, so a run
+       * finishing is only ever noticed by a poll; no poll, no notification. Which meant the bell
+       * could only tell you a build had finished while you were *watching the build finish*. The
+       * elapsed times went the same way — they are recomputed from `now`, which is restamped when a
+       * poll lands — so leaving the tab froze every clock on it until you came back.
+       *
+       * A live run is the whole justification and also the whole bound: nothing running, nothing
+       * polled, and a repository whose Pipelines tab has never been opened has no run list to call
+       * live, so it is never fetched behind the user's back. Twenty minutes of release at five
+       * seconds a poll is 240 requests against GitHub's 5,000/hour — the cost of the answer to
+       * "tell me when it's done".
+       *
+       * Still gated on visibility above: the notifications are in-app (`notificationStore`), so
+       * there is nothing for a minimised window to deliver, and `wake` forces a poll the moment it
+       * comes back.
+       */
+      if (!onTab && !anyLive) return;
       sinceLastPoll += TICK_MS;
       if (sinceLastPoll < (anyLive ? LIVE_MS : IDLE_MS)) return;
       // A round that hasn't landed yet must not be joined by another. Azure's job logs are fetched
@@ -469,7 +490,10 @@ export const useCiStore = create<CiState>((set, get) => ({
         .finally(() => polling.delete(projectId));
 
       // The open run is refreshed alongside the list while it is still moving, so its jobs and its
-      // log grow on screen instead of freezing at whatever they were when it was opened.
+      // log grow on screen instead of freezing at whatever they were when it was opened. Only while
+      // the tab is on screen: off it, the list alone answers "has it finished yet", and a job log
+      // nobody can see is a request spent on nothing.
+      if (!onTab) return;
       const selection = useCiStore.getState().selection;
       if (!selection || selection.projectId !== projectId) return;
       const open = runs.find((r) => r.id === selection.runId && r.provider === selection.provider);
