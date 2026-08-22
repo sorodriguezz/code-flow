@@ -17,11 +17,16 @@
 //!   contain the word "git". That is the worst shape a missing dependency can have: it looks
 //!   installed.
 //!
-//! * **The data directory.** `~/CodeFlow` (or `C:\CodeFlow`) holds the database, and `lib.rs` opens
-//!   it with an `expect` — so if it cannot be created or written, the process panics before there
-//!   is any window to say so. On a locked-down Windows where the root of `C:` is not writable, that
-//!   is an application that does nothing at all when you double-click it, with no message anywhere.
-//!   Checked here so that at least the *next* launch explains it.
+//! * **The data directories.** The state root holds the database, and `lib.rs` opens it with an
+//!   `expect` — so if it cannot be created or written, the process panics before there is any
+//!   window to say so. That is an application that does nothing at all when you double-click it,
+//!   with no message anywhere. Checked here so that at least the *next* launch explains it.
+//!
+//!   All three roots are probed, not just the one holding the database, and the failure names which
+//!   one it was. Before the roots split there was one directory and "the data directory" was
+//!   unambiguous; now a machine can perfectly well allow `%LOCALAPPDATA%` and refuse
+//!   `%USERPROFILE%`, and a message that said only "the data directory" would send the user to look
+//!   at the wrong one.
 //!
 //! Adding a third is one entry in [`check`]; the frontend renders whatever comes back.
 
@@ -70,27 +75,54 @@ fn git() -> Requirement {
     }
 }
 
-/// Creates the data directory and writes a file in it.
+/// Probes all three roots and reports the first one that cannot hold data.
+///
+/// All three rather than only the database's, because they no longer share a parent: a machine can
+/// allow `%LOCALAPPDATA%` and refuse `%USERPROFILE%`, and the user needs to be told which. The
+/// `detail` carries the offending path so the message names something they can act on.
+fn data_dir() -> Requirement {
+    let state = crate::paths::state_dir();
+
+    // Reported before any probe, because every probe below would *pass*: the fallback roots live
+    // under the temp directory, which is writable on every machine ever made. The app would come up
+    // looking healthy and lose the user's work at the next reboot, which is the one failure this
+    // check exists to make impossible.
+    if !crate::paths::roots_resolved() {
+        return Requirement {
+            id: "dataDir".into(),
+            ok: false,
+            detail: format!("{}: home directory could not be resolved", state.to_string_lossy()),
+        };
+    }
+
+    for dir in [state.clone(), crate::paths::cache_dir(), crate::paths::user_dir()] {
+        if let Err(e) = probe(&dir) {
+            return Requirement {
+                id: "dataDir".into(),
+                ok: false,
+                detail: format!("{}: {e}", dir.to_string_lossy()),
+            };
+        }
+    }
+
+    // The state root on success: it is the one the user is sent to by "Show in folder", and the one
+    // a support conversation is about.
+    Requirement { id: "dataDir".into(), ok: true, detail: state.to_string_lossy().to_string() }
+}
+
+/// Create-then-write, against one directory.
 ///
 /// Both halves are needed and neither is redundant. `create_dir_all` succeeding says the path can
 /// exist; it says nothing about whether this user may write there, which is exactly the failure on
 /// a machine where the directory was created once by an administrator. The probe file is removed
 /// again — and its removal is not checked, because a directory that accepted the write and refuses
 /// the delete is still a directory the database can live in.
-fn data_dir() -> Requirement {
-    let dir = crate::paths::base_dir();
-    let shown = dir.to_string_lossy().to_string();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return Requirement { id: "dataDir".into(), ok: false, detail: format!("{shown}: {e}") };
-    }
+fn probe(dir: &std::path::Path) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(dir)?;
     let probe = dir.join(".write-test");
-    match std::fs::write(&probe, b"") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&probe);
-            Requirement { id: "dataDir".into(), ok: true, detail: shown }
-        }
-        Err(e) => Requirement { id: "dataDir".into(), ok: false, detail: format!("{shown}: {e}") },
-    }
+    std::fs::write(&probe, b"")?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 #[cfg(test)]
