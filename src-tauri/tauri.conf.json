@@ -4,9 +4,9 @@
   "version": "../package.json",
   "identifier": "com.codeflow.app",
   "build": {
-    "beforeDevCommand": "pnpm iris:runtime:dev && pnpm drawio:webapp:dev && pnpm build:mobile && pnpm dev",
+    "beforeDevCommand": "pnpm iris:runtime:dev && pnpm llama:runtime:dev && pnpm drawio:webapp:dev && pnpm build:mobile && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm drawio:webapp && pnpm build && pnpm build:mobile && pnpm iris:runtime",
+    "beforeBuildCommand": "pnpm drawio:webapp && pnpm build && pnpm build:mobile && pnpm iris:runtime && pnpm llama:runtime",
     "frontendDist": "../dist"
   },
   "app": {
@@ -39,7 +39,8 @@
     "createUpdaterArtifacts": true,
     "resources": {
       "resources/iris/": "iris/",
-      "resources/mobile/": "mobile/"
+      "resources/mobile/": "mobile/",
+      "resources/llama/": "llama/"
     },
     "icon": [
       "icons/32x32.png",

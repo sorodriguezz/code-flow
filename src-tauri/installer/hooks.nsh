@@ -61,10 +61,19 @@
     ${If} $R0 == "0"
       ; This account's own app data. Everything the app owns and can recreate; nothing the user
       ; authored outside it.
+      ;
+      ; The AI completion models are named explicitly, and they have to be: `RMDir /r` takes
+      ; `models\` with everything else, and that subdirectory alone can be eight gigabytes the user
+      ; waited twenty minutes for. "Database, settings and password vault" sounds like kilobytes.
+      ; Understating what a delete takes is precisely the bug the rest of this file exists to fix —
+      ; see problem 2 above — so a new multi-gigabyte thing under this root gets its own clause
+      ; rather than being quietly covered by the old wording.
       ${If} ${FileExists} "$LOCALAPPDATA\CodeFlow\*.*"
         MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 /SD IDNO \
           "Delete CodeFlow's database, settings and password vault?$\n$\n\
            Location: $LOCALAPPDATA\CodeFlow$\n$\n\
+           This also deletes any AI autocomplete models you downloaded, which can be several \
+           gigabytes.$\n$\n\
            This does NOT delete your cloned repositories or your backups. Those are in \
            $PROFILE\CodeFlow and will be left alone.$\n$\n\
            Passwords saved in Windows Credential Manager are also left alone; remove them there if \

@@ -180,14 +180,22 @@ pub async fn keyvault_unlock_remembered(
     db: State<'_, Db>,
     session: State<'_, VaultSession>,
 ) -> Result<bool, String> {
-    let Some(password) = secrets::get_secret(&master_password_key())? else {
+    // Off the runtime's worker threads, for the same reason `keyvault_status` does it: reading an
+    // item from the OS credential store is a blocking call of unbounded duration — on macOS the
+    // first one puts a permission dialog in front of the answer and waits for it, and that dialog
+    // can open behind the app's window. This is the app's first act on a launch where the password
+    // is remembered, so a stall here is a stall in front of everything else.
+    let stored = tokio::task::spawn_blocking(|| secrets::get_secret(&master_password_key()))
+        .await
+        .map_err(|e| e.to_string())??;
+    let Some(password) = stored else {
         return Ok(false);
     };
-    let stored = read_meta(&db)?;
-    let autolock = stored.autolock_minutes;
-    let kdf = stored.kdf();
-    let nonce = stored.dek_nonce.clone();
-    let wrapped = stored.dek_wrapped.clone();
+    let meta = read_meta(&db)?;
+    let autolock = meta.autolock_minutes;
+    let kdf = meta.kdf();
+    let nonce = meta.dek_nonce.clone();
+    let wrapped = meta.dek_wrapped.clone();
 
     let dek = match blocking(move || crypto::unwrap_dek(&kdf, &nonce, &wrapped, &password)).await? {
         Ok(dek) => dek,

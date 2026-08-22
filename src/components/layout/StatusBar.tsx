@@ -1,6 +1,7 @@
 import { ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, Lock, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
 import { NotificationBell } from "./NotificationBell";
 import { AgentActivity } from "./AgentActivity";
+import { CompletionActivity } from "./CompletionActivity";
 import { BatteryMeter } from "./BatteryMeter";
 import { SystemMeter } from "./SystemMeter";
 import { UsageMeter } from "./UsageMeter";
@@ -179,6 +180,7 @@ export function StatusBar() {
             workspace, not to a repository, so they can finish while this bar is in its empty state. */}
         <div className="cf-bar-group ml-auto flex items-center">
           <AgentActivity />
+          <CompletionActivity />
           <SystemMeter />
           <BatteryMeter />
           <UsageMeter />
@@ -354,6 +356,7 @@ export function StatusBar() {
           are actually on screen, which is why it is a sibling rule and not six separators. */}
       <div className="cf-bar-group ml-auto flex shrink-0 items-center">
         <AgentActivity />
+        <CompletionActivity />
         <SystemMeter />
         <BatteryMeter />
         <UsageMeter />

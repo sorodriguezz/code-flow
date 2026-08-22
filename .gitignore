@@ -42,6 +42,18 @@ src-tauri/resources/iris/*
 src-tauri/resources/mobile/*
 !src-tauri/resources/mobile/README.md
 
+# Built by scripts/build-llama-runtime.mjs: a pinned llama.cpp release, trimmed to `llama-server`
+# and the libraries it resolves (~22 MB on macOS, ~38 MB on Windows). A build output like the ones
+# above, reproducible from `pnpm llama:runtime` — and unlike them it needs no toolchain, only a
+# network connection.
+#
+# The model weights are NOT here and are not a build output: they are gigabytes, they are optional,
+# and the app downloads the one the user picks into `paths::models_dir()` at runtime.
+#
+# Same contents-not-directory shape as the two blocks above, for the same reason.
+src-tauri/resources/llama/*
+!src-tauri/resources/llama/README.md
+
 # Built by scripts/build-drawio-webapp.mjs: the draw.io webapp the Diagrams workspace embeds
 # (~98 MB, Apache-2.0, pinned by version and hash in that script). A build output like the IRIS
 # runtime above — vendored third-party code has no business in the history, and `pnpm drawio:webapp`

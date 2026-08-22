@@ -122,6 +122,21 @@ interface VaultState {
    */
   initialised: boolean | null;
   unlocked: boolean;
+  /**
+   * The keyring is letting itself in — **and no door may be drawn while it is true**.
+   *
+   * The companion to `initialised`'s three states, and it exists because answering *is there a
+   * vault?* is not the same as knowing *which screen the user should end up on*. Learning that a
+   * locked vault exists used to be published on its own, so the unlock form appeared — fully typed
+   * into, if you were quick — for the half second it then took the remembered password to open it.
+   * The keyring flashed locked and unlocked itself in front of the user, which is alarming in a
+   * password manager in a way it would not be anywhere else.
+   *
+   * So it is set in the *same* update as `initialised`, covers both ways a session resumes (the
+   * remembered password, and a backend that was already open), and is only dropped once the tree is
+   * loaded — the screen that follows it is the real one, with its contents already in it.
+   */
+  resuming: boolean;
   remembered: boolean;
   autolockMinutes: number;
   /** The unlock attempt is in flight — Argon2 takes ~100 ms and the button has to say so. */
@@ -129,6 +144,12 @@ interface VaultState {
   loading: boolean;
   /** Set when an unlock failed, cleared on the next attempt. */
   unlockError: string | null;
+  /**
+   * Set when the status read itself failed — the one error that cannot be shown on a door, because
+   * it is the reason we do not know which door to open. It used to be a toast over a spinner that
+   * then span for ever; it is now the panel's own message, with the way to try again.
+   */
+  statusError: string | null;
 
   // ---- contents
   folders: VaultFolderRow[];
@@ -179,9 +200,10 @@ interface VaultState {
   unlock: (password: string, remember: boolean) => Promise<boolean>;
   /** Opens the vault with the password this machine remembers.
    *
-   *  **Called once per app session, from `ensureVaultStoreLoaded`, and nowhere else.** Locking is
-   *  meant to lock: a caller that ran this when the lock screen appeared would undo every lock the
-   *  moment it happened, manual or idle. */
+   *  **Called once per app session, from `refreshStatus`, and nowhere else.** Locking is meant to
+   *  lock: a caller that ran this when the lock screen appeared would undo every lock the moment it
+   *  happened, manual or idle. It runs under `resuming`, which is what keeps the lock screen from
+   *  being drawn for the moment this takes. */
   tryRemembered: () => Promise<boolean>;
   lock: () => Promise<void>;
   changePassword: (oldPassword: string, newPassword: string) => Promise<boolean>;
@@ -252,6 +274,9 @@ interface VaultState {
 function clearedOnLock() {
   return {
     unlocked: false,
+    // A lock ends any resume. Without this a vault that locked mid-boot would leave the gate down
+    // and the app on a spinner with nothing left to wait for.
+    resuming: false,
     folders: [] as VaultFolderRow[],
     items: [] as VaultItem[],
     trash: [] as VaultItem[],
@@ -275,11 +300,13 @@ let lastTouch = 0;
 export const useVaultStore = create<VaultState>((set, get) => ({
   initialised: null,
   unlocked: false,
+  resuming: false,
   remembered: false,
   autolockMinutes: 15,
   unlocking: false,
   loading: false,
   unlockError: null,
+  statusError: null,
 
   folders: [],
   items: [],
@@ -306,23 +333,40 @@ export const useVaultStore = create<VaultState>((set, get) => ({
   // ---------- the vault itself ----------
 
   refreshStatus: async () => {
+    set({ statusError: null });
     try {
       const status = await keyvaultStatus();
+      // Both branches below end with the keyring open, so neither may let a screen be drawn while
+      // it is still working: `resuming` goes out in the *same* update as `initialised`, and the two
+      // are read together. Publishing "there is a vault and it is locked" on its own is what put an
+      // unlock form on screen a moment before the remembered password opened it.
+      const resuming = status.unlocked || (status.initialised && status.remembered);
       set({
         initialised: status.initialised,
         unlocked: status.unlocked,
         autolockMinutes: status.autolock_minutes,
         remembered: status.remembered,
+        resuming,
       });
-      if (status.unlocked) {
-        await get().refresh();
-      } else if (status.initialised && status.remembered) {
-        // The one place the remembered password is used. Here rather than on the lock screen's
-        // mount, because that screen appears every time the vault *locks* — see the comment there.
-        await get().tryRemembered();
+      if (!resuming) return;
+      try {
+        if (status.unlocked) {
+          await get().refresh();
+        } else {
+          // The one place the remembered password is used. Here rather than on the lock screen's
+          // mount, because that screen appears every time the vault *locks* — see the comment there.
+          await get().tryRemembered();
+        }
+      } finally {
+        // Dropped only now, with the tree already loaded: the explorer arrives with its entries in
+        // it rather than empty and then filling.
+        set({ resuming: false });
       }
     } catch (error) {
-      pushErrorToast(String(error));
+      // Shown in the panel rather than as a toast over a spinner that never stops. `initialised`
+      // stays `null` on purpose — a failed read is not evidence that there is no keyring, and
+      // guessing `false` here is what drew a *create a keyring* form to people who had one.
+      set({ statusError: String(error), resuming: false });
     }
   },
 
@@ -970,7 +1014,16 @@ let loaded = false;
 export function ensureVaultStoreLoaded(): void {
   if (loaded) return;
   loaded = true;
-  void useVaultStore.getState().refreshStatus();
+  void useVaultStore
+    .getState()
+    .refreshStatus()
+    .then(() => {
+      // A read that *failed* has told us nothing, so it must not count as the one attempt this
+      // session gets — the next door to open tries again. This cannot defeat a lock: reaching the
+      // remembered password requires the status read to have succeeded, and then `statusError` is
+      // null and this flag stays set for good.
+      if (useVaultStore.getState().statusError) loaded = false;
+    });
 }
 
 // The backend locked the vault — because the idle window passed, or because another window asked

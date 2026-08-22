@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "1.18.5",
+  "version": "1.18.6",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -12,6 +12,8 @@
     "build:mobile": "vite build --config vite.mobile.config.ts",
     "tauri": "tauri",
     "iris:runtime": "node scripts/build-iris-runtime.mjs",
+    "llama:runtime": "node scripts/build-llama-runtime.mjs",
+    "llama:runtime:dev": "node scripts/build-llama-runtime.mjs --optional",
     "iris:runtime:dev": "node scripts/build-iris-runtime.mjs --optional",
     "drawio:webapp": "node scripts/build-drawio-webapp.mjs",
     "drawio:webapp:dev": "node scripts/build-drawio-webapp.mjs --optional"

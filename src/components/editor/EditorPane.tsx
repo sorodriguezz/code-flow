@@ -56,6 +56,7 @@ import { usePackageJsonLens } from "./usePackageJsonLens";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { useTypeScript } from "./useTypeScript";
 import { useLanguageServer } from "./useLanguageServer";
+import { useInlineCompletion } from "./useInlineCompletion";
 import { useImportCost } from "./useImportCost";
 import { useManagerFor } from "../../lib/useManagerFor";
 import {
@@ -720,6 +721,10 @@ export function EditorPane({
     repoPath: project.local_path,
     projectId: project.id,
   });
+
+  // Ghost text from the local model, when the user has turned it on and downloaded one. Also no
+  // editor instance and for the same reason: `registerInlineCompletionsProvider` is global.
+  useInlineCompletion(editorReady ? monacoRef.current : null);
 
   useTypeScript(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {
     repoPath: project.local_path,
@@ -2193,6 +2198,19 @@ export function EditorPane({
           minimap: { enabled: true },
           fontSize: 13,
           automaticLayout: true,
+          /**
+           * Ghost text. On for every editor, because the provider — not this flag — is what decides
+           * whether there is anything to draw: with the feature off, no model downloaded, or a
+           * buffer that is not a repository file, `useInlineCompletion` returns nothing and this
+           * costs a branch.
+           *
+           * `subwordSmart` rather than the `prefix` default: it keeps the suggestion on screen when
+           * the user types a character the model also predicted but in a different position within
+           * the word, which with a small model is most of the time. `keepOnBlur` is deliberately
+           * left off — a suggestion still hanging there after you click away is a suggestion you
+           * accept by accident.
+           */
+          inlineSuggest: { enabled: true, mode: "subwordSmart", showToolbar: "onHover" },
           /**
            * Ctrl/Cmd+click jumps, it never opens the peek list.
            *

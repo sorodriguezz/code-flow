@@ -1,14 +1,21 @@
 /**
- * The keyring's front door: first-run setup, or the unlock prompt.
+ * The keyring's front door: first-run setup, or the unlock prompt — or, before either, the moment
+ * of working out which of the two it is.
  *
- * One component for both, because they are the same screen with a different number of boxes and it
- * is the same decision being asked about. What is *not* shared is the warning: setup says, in as
- * many words, that a forgotten master password cannot be recovered. That sentence has to be on the
- * screen where the password is chosen, not buried in a settings panel someone finds later.
+ * One component for both forms, because they are the same screen with a different number of boxes
+ * and it is the same decision being asked about. What is *not* shared is the warning: setup says,
+ * in as many words, that a forgotten master password cannot be recovered. That sentence has to be
+ * on the screen where the password is chosen, not buried in a settings panel someone finds later.
+ *
+ * The third state, `VaultBooting`, is not decoration. Deciding which form to draw means asking the
+ * database whether a keyring exists *and* the operating system whether it is holding the master
+ * password — two questions that can take a noticeable moment, and one of which can put a system
+ * prompt in front of the answer. Drawing a form before both are answered is how this screen used to
+ * show a locked keyring that then unlocked itself, unasked, a moment later.
  */
 
 import { useEffect, useRef, useState } from "react";
-import { KeyRound, Lock, ShieldAlert } from "lucide-react";
+import { KeyRound, Loader2, Lock, ShieldAlert, Unplug } from "lucide-react";
 
 import { useVaultStore } from "../../state/vaultStore";
 import { useVaultModalStore } from "../../state/vaultModalStore";
@@ -20,6 +27,7 @@ const MIN_LENGTH = 10;
 
 export function VaultLockScreen() {
   const initialised = useVaultStore((s) => s.initialised);
+  const resuming = useVaultStore((s) => s.resuming);
   const unlocking = useVaultStore((s) => s.unlocking);
   const unlockError = useVaultStore((s) => s.unlockError);
   const remembered = useVaultStore((s) => s.remembered);
@@ -34,6 +42,15 @@ export function VaultLockScreen() {
     inputRef.current?.focus();
   }, [initialised]);
 
+  // The box follows the answer, rather than only the value it had at mount. This component is on
+  // screen *before* the backend has said whether this machine remembers anything — and it is also
+  // the screen the settings dialog's "stop remembering it here" is clicked from. Both used to leave
+  // the box saying the opposite of the truth, and a box that says "remember" while unchecked is not
+  // cosmetic here: unlocking with it unchecked is what *deletes* the stored password.
+  useEffect(() => {
+    setRemember(remembered);
+  }, [remembered]);
+
   // There is deliberately NO "try the remembered password" effect here, and this comment is where
   // one used to be. Mounting is the wrong trigger: this screen mounts every time the vault locks,
   // so an attempt here re-opened the vault the instant it closed — "Lock now" flashed a lock screen
@@ -43,15 +60,13 @@ export function VaultLockScreen() {
   // The remembered password is a convenience for *starting the app*, not a way around a lock. It is
   // tried once per session, from `ensureVaultStoreLoaded`.
 
-  // `null` means the backend has not answered yet. Nothing is drawn until it has — see the field's
-  // comment in `vaultStore`: guessing `false` here is what showed a *create a keyring* form to
-  // people who already had one, and let them type a password into it.
-  if (initialised === null) {
-    return (
-      <div className="flex h-full items-center justify-center p-8">
-        <span className="text-[12px] text-[var(--cf-text-muted)]">{t("vault.checking")}</span>
-      </div>
-    );
+  // No door until the app knows which one. `initialised === null` is *we have not asked yet*, and
+  // `resuming` is *we asked, and the answer was that this machine opens the keyring itself* — see
+  // both fields in `vaultStore`. Guessing at either produced a screen that was wrong for a moment
+  // and then corrected itself: a setup form to someone who already had a keyring, or an unlock form
+  // that unlocked on its own a breath later.
+  if (initialised === null || resuming) {
+    return <VaultBooting resuming={resuming} />;
   }
 
   const strength = passwordStrength(password);
@@ -200,6 +215,100 @@ export function VaultLockScreen() {
             </button>
           )}
         </form>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The keyring deciding where to send you.
+ *
+ * Two questions are in flight behind this, and it says which: whether a keyring exists here, and
+ * then — when it does and this machine remembers the master password — the opening itself. Naming
+ * the second one matters. A password manager that flashes *locked* and then lets itself in without
+ * being asked reads as something having gone wrong, even though it is exactly what the user asked
+ * for when they ticked "remember on this machine"; a line of text saying so turns the same second
+ * into the app doing its job.
+ *
+ * No "I lost my master password" way out and no form: there is nothing here to be stuck on, and an
+ * escape hatch offered mid-decision is one offered to people whose only problem is waiting.
+ */
+function VaultBooting({ resuming }: { resuming: boolean }) {
+  const statusError = useVaultStore((s) => s.statusError);
+  const t = useT();
+  /** Whether this has taken long enough to be worth explaining. See below. */
+  const [slow, setSlow] = useState(false);
+
+  // Reading the credential store pops a system permission dialog on macOS the first time, and that
+  // dialog can open *behind* the app window — a spinner with no explanation is indistinguishable
+  // from a hang, which is what it looked like. Nothing is said for the first 1.2 s, because on the
+  // ordinary path the whole thing is over well before then and a warning about a dialog that never
+  // appeared is worse than silence.
+  useEffect(() => {
+    if (statusError) return;
+    // Reset as well as arm, so a retry after a failure starts its own 1.2 s rather than showing the
+    // hint the instant it is clicked.
+    setSlow(false);
+    const timer = window.setTimeout(() => setSlow(true), 1200);
+    return () => window.clearTimeout(timer);
+  }, [statusError]);
+
+  return (
+    <div className="flex h-full items-center justify-center p-8">
+      <div className="flex w-full max-w-sm flex-col items-center text-center">
+        {/* The same tile, in the same place, as the lock and setup screens draw their icon in: what
+            follows this panel should look like it replaced one glyph, not like a different page. */}
+        <div
+          className={`mb-3 flex h-12 w-12 items-center justify-center rounded-xl ${
+            statusError
+              ? "bg-[var(--cf-danger)]/10 text-[var(--cf-danger)]"
+              : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+          }`}
+        >
+          {statusError ? <Unplug size={22} /> : <Loader2 size={22} className="animate-spin" />}
+        </div>
+
+        <h2 className="text-[15px] font-semibold text-[var(--cf-text)]">
+          {t(
+            statusError
+              ? "vault.statusFailedTitle"
+              : resuming
+                ? "vault.resumingTitle"
+                : "vault.checkingTitle",
+          )}
+        </h2>
+        <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
+          {t(
+            statusError
+              ? "vault.statusFailedBody"
+              : resuming
+                ? "vault.resumingBody"
+                : "vault.checkingBody",
+          )}
+        </p>
+
+        {statusError ? (
+          <>
+            {/* The backend's own words, kept: "it did not work" without saying what happened is not
+                something anyone can act on, and this is the one failure with no door behind it. */}
+            <p className="mt-2 max-w-xs break-words text-[11.5px] leading-relaxed text-[var(--cf-danger)]">
+              {statusError}
+            </p>
+            <button
+              type="button"
+              onClick={() => void useVaultStore.getState().refreshStatus()}
+              className={`${BUTTON} mt-4`}
+            >
+              {t("vault.retry")}
+            </button>
+          </>
+        ) : (
+          slow && (
+            <p className="cf-fade-in mt-3 max-w-xs text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+              {t("vault.checkingSlow")}
+            </p>
+          )
+        )}
       </div>
     </div>
   );

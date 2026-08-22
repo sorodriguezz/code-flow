@@ -37,6 +37,30 @@ export interface RemoteTransferEvent {
 export const onRemoteTransfer = (handler: (event: RemoteTransferEvent) => void) =>
   listen<RemoteTransferEvent>("remote:transfer", (e) => handler(e.payload));
 
+/** How a model download is going. One event carries every phase — see `localai::download::Phase`. */
+export interface LocalAiDownloadEvent {
+  model_id: string;
+  phase: "downloading" | "verifying" | "done" | "failed" | "cancelled";
+  done: number;
+  total: number;
+  /** Only on `failed`, and already a sentence a person can act on. */
+  error?: string;
+}
+
+export const onLocalAiDownload = (handler: (event: LocalAiDownloadEvent) => void) =>
+  listen<LocalAiDownloadEvent>("localai:download", (e) => handler(e.payload));
+
+/** Every move the local completion engine makes: off → warming → ready, or a failure.
+ *  Mirrors `localai::engine::Status`, which serializes with `#[serde(tag = "kind")]`. */
+export type LocalAiEngineEvent =
+  | { kind: "off" }
+  | { kind: "starting"; model_id: string }
+  | { kind: "ready"; model_id: string }
+  | { kind: "failed"; message: string };
+
+export const onLocalAiEngine = (handler: (event: LocalAiEngineEvent) => void) =>
+  listen<LocalAiEngineEvent>("localai:engine", (e) => handler(e.payload));
+
 export const onRepoFsChanged = (handler: (event: { repo_path: string }) => void) =>
   listen<{ repo_path: string }>("repo:fs-changed", (e) => handler(e.payload));
 

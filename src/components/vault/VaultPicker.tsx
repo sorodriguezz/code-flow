@@ -22,7 +22,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { KeyRound, Lock, Search } from "lucide-react";
+import { KeyRound, Loader2, Lock, Search, Unplug } from "lucide-react";
 
 import { ApiModal } from "../api/ApiModal";
 import { keyvaultGetItem } from "../../lib/tauri/keyvaultCommands";
@@ -47,6 +47,8 @@ export function VaultPicker({
 }) {
   const t = useT();
   const initialised = useVaultStore((s) => s.initialised);
+  const resuming = useVaultStore((s) => s.resuming);
+  const statusError = useVaultStore((s) => s.statusError);
   const unlocked = useVaultStore((s) => s.unlocked);
   const unlocking = useVaultStore((s) => s.unlocking);
   const unlockError = useVaultStore((s) => s.unlockError);
@@ -69,15 +71,21 @@ export function VaultPicker({
     ensureVaultStoreLoaded();
   }, []);
 
+  // Both halves of the boot are waited out here, not just the first: `initialised === null` is the
+  // status read, and `resuming` is this machine letting itself in with the password it remembers.
+  // Drawing the password box in between is how this dialog used to ask for a master password it was
+  // three hundred milliseconds away from not needing.
+  const booting = initialised === null || resuming;
+
   // The status read asks the OS credential store whether this machine remembers the master
   // password, and on macOS the first such read pops a system permission dialog that can open
   // *behind* this window. A spinner with no explanation is indistinguishable from a hang — which is
   // exactly what it looked like — so after a moment it says where to look.
   useEffect(() => {
-    if (initialised !== null) return;
+    if (!booting) return;
     const timer = window.setTimeout(() => setSlow(true), 1200);
     return () => window.clearTimeout(timer);
-  }, [initialised]);
+  }, [booting]);
 
   // The list is only as fresh as the last time something loaded it, and this dialog is often the
   // first thing to want it in a session.
@@ -85,10 +93,14 @@ export function VaultPicker({
     if (unlocked) void useVaultStore.getState().refresh();
   }, [unlocked]);
 
+  // `booting` is in the list because the box being focused does not exist until it clears: the
+  // password field is only rendered once the app has stopped deciding, and a focus call aimed at it
+  // before then lands on nothing and is never retried.
   useEffect(() => {
+    if (booting) return;
     if (unlocked) searchRef.current?.focus();
     else passwordRef.current?.focus();
-  }, [unlocked, initialised]);
+  }, [unlocked, initialised, booting]);
 
   const ranked = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -166,13 +178,43 @@ export function VaultPicker({
           flex column whose list does its own scrolling, and a scrolling parent around a scrolling
           child is how a list ends up with two scrollbars and no bottom. `min-h` keeps the dialog
           from resizing under the pointer as it moves between states. */}
-      {initialised === null ? (
+      {booting ? (
         <div className="flex min-h-[180px] flex-col items-center justify-center gap-2 px-4 py-6">
-          <p className="text-[12px] text-[var(--cf-text-muted)]">{t("vault.checking")}</p>
-          {slow && (
-            <p className="max-w-xs text-center text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-              {t("vault.pick.checkingSlow")}
-            </p>
+          {/* The spinner goes when the error arrives: a spinner beside a failure says the app is
+              still trying, and it is not. */}
+          {statusError ? (
+            <Unplug size={18} className="text-[var(--cf-danger)]" />
+          ) : (
+            <Loader2 size={18} className="animate-spin text-[var(--cf-text-muted)]" />
+          )}
+          <p className="text-[12px] text-[var(--cf-text-muted)]">
+            {t(
+              statusError
+                ? "vault.statusFailedTitle"
+                : resuming
+                  ? "vault.resumingTitle"
+                  : "vault.checkingTitle",
+            )}
+          </p>
+          {statusError ? (
+            <>
+              <p className="max-w-xs break-words text-center text-[11.5px] leading-relaxed text-[var(--cf-danger)]">
+                {statusError}
+              </p>
+              <button
+                type="button"
+                onClick={() => void useVaultStore.getState().refreshStatus()}
+                className={`${BUTTON} mt-1`}
+              >
+                {t("vault.retry")}
+              </button>
+            </>
+          ) : (
+            slow && (
+              <p className="cf-fade-in max-w-xs text-center text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+                {t("vault.checkingSlow")}
+              </p>
+            )
           )}
         </div>
       ) : !initialised ? (

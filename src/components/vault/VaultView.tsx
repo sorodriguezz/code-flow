@@ -28,6 +28,7 @@ import { BUTTON_QUIET, CARD, ICON_BUTTON } from "./vaultChrome";
 
 export function VaultView() {
   const unlocked = useVaultStore((s) => s.unlocked);
+  const resuming = useVaultStore((s) => s.resuming);
   const activeId = useVaultStore((s) => s.activeId);
   const items = useVaultStore((s) => s.items);
   const trashOpen = useVaultStore((s) => s.trashOpen);
@@ -70,7 +71,11 @@ export function VaultView() {
     </>
   );
 
-  if (!unlocked) {
+  // `resuming` as well as `!unlocked`, and it is the lock screen that gets to draw it: the keyring
+  // opening itself with the remembered password is still the front door being answered, and this
+  // side of the swap must not appear until the tree behind it is loaded. Without it the explorer
+  // arrived first and empty, which is the same startled second as the lock screen flashing.
+  if (!unlocked || resuming) {
     return (
       <div className={`flex h-full min-h-0 ${CARD}`} data-tour="vault-view">
         <VaultLockScreen />

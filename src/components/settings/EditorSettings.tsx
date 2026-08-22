@@ -1,15 +1,16 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { Braces, Palette, Scissors, type LucideIcon } from "lucide-react";
+import { Braces, Palette, Scissors, Sparkles, type LucideIcon } from "lucide-react";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import { useT } from "../../state/languageStore";
 import { SnippetsSettings } from "./SnippetsSettings";
 import { LanguageServersSettings } from "./LanguageServersSettings";
 import { IconRulesSettings } from "./IconRulesSettings";
+import { AiCompletionSettings } from "./AiCompletionSettings";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
 
-type EditorTab = "snippets" | "languageServers" | "icons";
+type EditorTab = "snippets" | "languageServers" | "completion" | "icons";
 
 /**
  * What the editor does while you type, and what it draws while you read, behind one rail.
@@ -29,6 +30,11 @@ type EditorTab = "snippets" | "languageServers" | "icons";
 const TABS: { id: EditorTab; labelKey: TranslationKey; hintKey: TranslationKey; icon: LucideIcon }[] = [
   { id: "snippets", labelKey: "snippets.title", hintKey: "snippets.hint", icon: Scissors },
   { id: "languageServers", labelKey: "settings.lspTitle", hintKey: "settings.lspHint", icon: Braces },
+  // Third, and it belongs with the two above rather than under the AI section: those answer "where
+  // do my completions come from", and so does this — the difference is only that this source is a
+  // model rather than a snippet file or a compiler. Putting it beside the cloud review engines
+  // would file it by *what it is* instead of by what it does to the editor.
+  { id: "completion", labelKey: "localai.title", hintKey: "localai.hint", icon: Sparkles },
   // Last, and a little apart in kind from the two above: they answer "where do my completions come
   // from", this one answers "why does that file look like that". It is here rather than under
   // Appearance because it is the editor's tree it repaints, and because it belongs with the other
@@ -91,6 +97,7 @@ export function EditorSettings() {
 
             {tab === "snippets" && <SnippetsSettings />}
             {tab === "languageServers" && <LanguageServersSettings />}
+            {tab === "completion" && <AiCompletionSettings />}
             {tab === "icons" && <IconRulesSettings />}
           </Panel>
         </div>

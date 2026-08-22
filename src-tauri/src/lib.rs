@@ -27,6 +27,7 @@ mod grok;
 mod github;
 mod gitlab;
 mod npm;
+mod localai;
 mod lsp;
 mod migrate;
 mod oauth;
@@ -209,6 +210,12 @@ pub fn run() {
         applog::info("layout: a reset ran on this launch, so there was nothing to migrate");
     }
 
+    // Any `llama-server` this app left behind last time. Only ever finds one when the previous run
+    // was killed outright — Force Quit, End Task, a crash — because every path that runs Rust
+    // destructors kills the child and clears the note. See the comment block in `localai::engine`
+    // for why this checks the executable path before it kills a pid.
+    localai::engine::sweep_stale();
+
     // Before anything can spawn a thread, and it has to be: this writes a process-wide environment
     // variable, which is only sound while this is still the only thread. Everything after it — the
     // AI CLIs, the pty, `git`, `ssh` — resolves programs against the `PATH` it leaves behind, so a
@@ -269,6 +276,9 @@ pub fn run() {
         // there is exactly one place it exists — see `keyvault::session`.
         .manage(keyvault::session::VaultSession::default())
         .manage(WatcherRegistry::default())
+        // The cancel channels for model downloads and in-flight completions. Same shape
+        // and same neighbourhood as `ApiRegistry` above; see `localai::LocalAiRegistry`.
+        .manage(localai::LocalAiRegistry::default())
         .manage(tray::QuittingFlag::default())
         .manage(window_state::WindowTracker::default())
         .manage(remotectl::RemoteCtl::default())
@@ -283,6 +293,10 @@ pub fn run() {
             // with an `AppHandle`, and the recording point is deep inside `ai::run`, where threading
             // one down would mean an extra argument on every operation in `ai.rs`.
             ai_usage::attach(app.handle().clone());
+            // The same trick for the local completion engine: it announces every move between
+            // off / warming / ready / failed, and the editor's status bar draws it. See
+            // `localai::engine::attach`.
+            localai::engine::attach(app.handle().clone());
             appmenu::setup(&app.handle())?;
             // The branches that come locked without anyone having clicked a padlock. Seeded here,
             // before the first window can ask for anything, because the guards that read this list
@@ -889,6 +903,15 @@ pub fn run() {
             commands::debug_cmd::debug_properties,
             commands::debug_cmd::debug_evaluate,
             commands::debug_cmd::debug_is_running,
+            commands::localai_cmd::localai_state,
+            commands::localai_cmd::localai_set_enabled,
+            commands::localai_cmd::localai_set_model,
+            commands::localai_cmd::localai_download_model,
+            commands::localai_cmd::localai_cancel_download,
+            commands::localai_cmd::localai_delete_model,
+            commands::localai_cmd::localai_stop_engine,
+            commands::localai_cmd::localai_complete,
+            commands::localai_cmd::localai_cancel_completion,
             commands::lsp_cmd::lsp_start,
             commands::lsp_cmd::lsp_stop,
             commands::lsp_cmd::lsp_stop_project,
