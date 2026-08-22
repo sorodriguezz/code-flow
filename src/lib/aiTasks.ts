@@ -49,6 +49,11 @@ export const AI_TASKS: AiTaskDef[] = [
     agenticOnly: true,
   },
   { key: "wiki", labelKey: "task.wiki", hintKey: "task.wikiHint", agenticOnly: true },
+  // Reads the repository — that is the entire value of asking it here rather than pasting the
+  // log into a chat window — so it needs an engine with tools. Its own row rather than sharing
+  // `analyze`'s: that one is handed a diff and answers about the diff, this one is handed a log
+  // and has to go looking, which is a different length of run and routinely a different engine.
+  { key: "pipeline", labelKey: "task.pipeline", hintKey: "task.pipelineHint", agenticOnly: true },
 ];
 
 export const AI_TASK_KEYS = AI_TASKS.map((t) => t.key);

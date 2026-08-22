@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { Globe, Pencil, Search, Trash2, X } from "lucide-react";
+import { openPipelineAnalysis } from "../../state/ciStore";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { usePrStore } from "../../state/prStore";
@@ -127,6 +128,8 @@ export function ActivityModal({
     } else if (entry.job.kind === "analyze-changes") {
       selectPr(null);
       useAnalyzeUiStore.getState().showJob(entry.job.id);
+    } else if (entry.job.kind === "pipeline-analyze") {
+      void openPipelineAnalysis(entry.job);
     }
     onClose();
   };

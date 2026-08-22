@@ -39,7 +39,9 @@ export type LayoutKey =
   | "diagramsSidebarWidth"
   | "vaultSidebarWidth"
   | "dbmlEditorWidth"
-  | "dbmlInspectorWidth";
+  | "dbmlInspectorWidth"
+  | "pipelinesListWidth"
+  | "pipelinesGraphHeight";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -80,6 +82,8 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   vaultSidebarWidth: "layout_vault_sidebar_width",
   dbmlEditorWidth: "layout_dbml_editor_width",
   dbmlInspectorWidth: "layout_dbml_inspector_width",
+  pipelinesListWidth: "layout_pipelines_list_width",
+  pipelinesGraphHeight: "layout_pipelines_graph_height",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -152,6 +156,12 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // than this and the badges drift away from the names they mark; the seam is there for the schema
   // that has a `varchar` long enough to need it.
   dbmlInspectorWidth: 236,
+  // Wider than a plain list needs, because each row carries three things a CI list is read for:
+  // the workflow's name, the branch, and the strip showing how many jobs ran at once.
+  pipelinesListWidth: 292,
+  // The graph, above the log. Tall enough for four job cards stacked in one stage — which is the
+  // shape this pane exists to be able to draw — before it starts scrolling.
+  pipelinesGraphHeight: 268,
 };
 
 /**

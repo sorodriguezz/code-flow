@@ -23,7 +23,7 @@ use crate::secrets;
 /// providers' columns can never be routed at one host here and matched at another there.
 /// This is the single dispatch point the shared PR commands (list / review / comment) branch
 /// on, so the frontend, the `prStore`, and the whole Claude review pipeline stay provider-neutral.
-enum LinkedRepo {
+pub(crate) enum LinkedRepo {
     Azure { org: String, project: String, repo_id: String },
     /// `host` is "github.com" or a GitHub Enterprise hostname — picks both the token to use and
     /// the REST base URL.
@@ -33,7 +33,7 @@ enum LinkedRepo {
     GitLab { host: String, project: String },
 }
 
-fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
+pub(crate) fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
     if let (Some(owner), Some(repo)) = (project.github_owner.clone(), project.github_repo.clone()) {
         let host = project.github_host.clone().unwrap_or_else(|| github::GITHUB_COM.to_string());
         return Ok(LinkedRepo::GitHub { host, owner, repo });
@@ -80,12 +80,12 @@ pub(crate) fn project_repo_key(project: &Project) -> Option<String> {
     linked_repo(project).ok().map(|link| repo_key(&link))
 }
 
-fn github_token(host: &str) -> Result<String, String> {
+pub(crate) fn github_token(host: &str) -> Result<String, String> {
     secrets::get_secret(&secrets::github_token_key(host))?
         .ok_or_else(|| format!("No GitHub token saved for \"{host}\" — connect it in Settings first"))
 }
 
-fn gitlab_token(host: &str) -> Result<String, String> {
+pub(crate) fn gitlab_token(host: &str) -> Result<String, String> {
     secrets::get_secret(&secrets::gitlab_token_key(host))?
         .ok_or_else(|| format!("No GitLab token saved for \"{host}\" — connect it in Settings first"))
 }
@@ -113,7 +113,7 @@ struct AdoConnectionOrg {
 /// password" dialog. [`auto_link_project`] runs whenever a repository's pull request list is
 /// opened, so reading the Keychain from here meant one such prompt each time. The credential
 /// itself is still read — later, only when a request to the host is actually made.
-fn connected_hosts(db: &State<'_, Db>, setting: &str) -> Result<Vec<String>, String> {
+pub(crate) fn connected_hosts(db: &State<'_, Db>, setting: &str) -> Result<Vec<String>, String> {
     let raw = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::get_setting(&conn, setting).map_err(|e| e.to_string())?
@@ -132,7 +132,7 @@ fn gitlab_connected_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
     connected_hosts(db, "gitlab_connections")
 }
 
-fn ado_connected_orgs(db: &State<'_, Db>) -> Result<Vec<String>, String> {
+pub(crate) fn ado_connected_orgs(db: &State<'_, Db>) -> Result<Vec<String>, String> {
     let (raw, legacy) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         (
@@ -417,7 +417,7 @@ pub fn open_external_url(url: String) -> Result<(), String> {
     open::that(&url).map_err(|e| format!("couldn't open the browser: {e}"))
 }
 
-fn load_project(db: &State<'_, Db>, project_id: &str) -> Result<crate::db::models::Project, String> {
+pub(crate) fn load_project(db: &State<'_, Db>, project_id: &str) -> Result<crate::db::models::Project, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::get_project(&conn, project_id)
         .map_err(|e| e.to_string())?

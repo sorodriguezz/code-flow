@@ -1,0 +1,1035 @@
+//! Azure Pipelines, through the **Build** API.
+//!
+//! The names line up with the other two clients only after a translation that is worth stating
+//! once, because every awkward thing in this file falls out of it:
+//!
+//! * a *run* is a **build** (`/_apis/build/builds`), and its name is the *definition's* name —
+//!   a build has no name of its own, only a `buildNumber`;
+//! * a *job* is a **timeline record** of `type == "Job"`, out of a flat list of records that is
+//!   really a tree held together by `parentId`;
+//! * a *log* does not belong to the job. It belongs to a **record**, and the job record is not
+//!   guaranteed to have one — see [`job_log`] and [`resolve_log_ref`].
+//!
+//! Everything shared with the pull-request client (`API_VERSION`, the `Basic` header, the org
+//! normalisation, the path encoder, the `{count, value: […]}` envelope) is imported from
+//! [`crate::ado`] rather than re-derived here: both halves talk to the same server, and a second
+//! copy of `normalize_org` is a second thing to keep in step. The transport, on the other hand, is
+//! this module's own ([`super::http`]) — `ado::get_json` has no timeout and no plain-text path,
+//! and this screen both polls and downloads logs.
+
+use std::collections::HashMap;
+
+use serde::Deserialize;
+
+use super::http;
+use super::{status, JobLog, PipelineJob, PipelineRun, PipelineRunDetail, MAX_LOG_BYTES, PROVIDER_AZURE};
+use crate::ado::{
+    auth_header, encode_segment, normalize_org, ListResponse, API_VERSION, BAD_CREDENTIALS,
+};
+
+/// How deep a `parentId` chain is walked before giving up.
+///
+/// A real timeline is three or four levels (Stage → Phase → Job → Task). The bound is not about
+/// depth, it is about *cycles*: the records arrive as a flat array and nothing in the response
+/// promises the parent links form a tree. A malformed one must not hang the UI thread on an
+/// infinite walk.
+const MAX_TIMELINE_DEPTH: usize = 16;
+
+/// The ceiling on `$top` when the repository filter has to be applied on this side.
+///
+/// Asking for exactly `limit` builds and *then* discarding the ones belonging to other
+/// repositories of the same project would answer three runs for a project with several
+/// repositories. So the unfiltered path over-fetches and trims afterwards. The cap keeps that from
+/// turning into a multi-megabyte response on a busy project.
+const CLIENT_FILTER_TOP: usize = 200;
+
+// ---------------------------------------------------------------------------
+// Wire types
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawBuild {
+    #[serde(default)]
+    id: i64,
+    #[serde(rename = "buildNumber", default)]
+    build_number: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(rename = "queueTime", default)]
+    queue_time: Option<String>,
+    #[serde(rename = "startTime", default)]
+    start_time: Option<String>,
+    #[serde(rename = "finishTime", default)]
+    finish_time: Option<String>,
+    #[serde(rename = "sourceBranch", default)]
+    source_branch: String,
+    #[serde(rename = "sourceVersion", default)]
+    source_version: String,
+    /// What queued it: `manual`, `individualCI`, `pullRequest`, `schedule`… Shown, never matched.
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(rename = "_links", default)]
+    links: Option<RawLinks>,
+    #[serde(default)]
+    definition: Option<RawDefinition>,
+    #[serde(rename = "requestedFor", default)]
+    requested_for: Option<RawIdentity>,
+    #[serde(default)]
+    repository: Option<RawRepoRef>,
+}
+
+#[derive(Deserialize)]
+struct RawLinks {
+    #[serde(default)]
+    web: Option<RawHref>,
+}
+
+#[derive(Deserialize)]
+struct RawHref {
+    #[serde(default)]
+    href: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawDefinition {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct RawIdentity {
+    #[serde(rename = "displayName", default)]
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+struct RawRepoRef {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct RawTimeline {
+    #[serde(default)]
+    records: Vec<RawRecord>,
+}
+
+#[derive(Deserialize)]
+struct RawRecord {
+    #[serde(default)]
+    id: String,
+    #[serde(rename = "parentId", default)]
+    parent_id: Option<String>,
+    /// `Stage` | `Phase` | `Job` | `Task` | `Checkpoint` | … Compared case-insensitively: the
+    /// value is documented as PascalCase, and one lower-cased `job` from a future server version
+    /// would silently empty the graph.
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(rename = "startTime", default)]
+    start_time: Option<String>,
+    #[serde(rename = "finishTime", default)]
+    finish_time: Option<String>,
+    #[serde(default)]
+    order: i64,
+    #[serde(default)]
+    log: Option<RawLogRef>,
+    #[serde(default)]
+    issues: Vec<RawIssue>,
+}
+
+#[derive(Deserialize)]
+struct RawLogRef {
+    #[serde(default)]
+    id: i64,
+}
+
+#[derive(Deserialize)]
+struct RawIssue {
+    /// `error` | `warning`. The message is deliberately not deserialised: it is not shown on this
+    /// screen — the log is — and an unread field is a field that goes stale.
+    #[serde(rename = "type", default)]
+    kind: String,
+}
+
+// ---------------------------------------------------------------------------
+// Small pure helpers
+// ---------------------------------------------------------------------------
+
+/// Whether a string is shaped like an Azure DevOps repository GUID:
+/// `8-4-4-4-12` hex digits, e.g. `3f2504e0-4f89-11d3-9a0c-0305e82c3301`.
+///
+/// This is the single most expensive trap of this provider. The project's `ado_repo_id` column can
+/// hold **either** form:
+///
+/// * a GUID, when the user picked the repository from the settings dropdown (`ado::list_repos`
+///   answers ids), or
+/// * a plain **name**, when the link was auto-detected from the git remote — `ado_cmd.rs` writes
+///   `detected.repo`, and its comment there says why that is legal: Azure's *Git* REST API accepts
+///   a name wherever it accepts a GUID.
+///
+/// The **Build** API does not. `?repositoryId=MiRepo&repositoryType=TfsGit` is not an error and not
+/// a 404: it matches nothing and answers `{"count":0,"value":[]}`. The symptom is an empty
+/// Pipelines tab on a repository that plainly has builds, with no failure to show the user — which
+/// is why the filter is only sent when the value can actually work, and is otherwise applied here.
+fn looks_like_guid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(index, byte)| match index {
+        8 | 13 | 18 | 23 => *byte == b'-',
+        _ => byte.is_ascii_hexdigit(),
+    })
+}
+
+/// `refs/heads/main` → `main`.
+///
+/// Only that one prefix is removed. A pull-request validation build reports
+/// `refs/pull/123/merge`, which is not a branch and has no shorter honest form — showing it whole
+/// tells the user what actually ran; trimming it to `123/merge` would not.
+fn strip_branch_prefix(reference: &str) -> String {
+    reference.strip_prefix("refs/heads/").unwrap_or(reference).to_string()
+}
+
+/// The human-facing build number as an `i64`, when it is one.
+///
+/// Azure's default numbering format is `$(Date:yyyyMMdd)$(Rev:.r)` — `20260821.3` — which is not
+/// an integer and never will be. `None` is the correct answer there; the frontend already treats
+/// a missing number as "show the id instead", and parsing it as `20260821` would invent a
+/// counter that jumps by millions between days.
+fn parse_build_number(number: &str) -> Option<i64> {
+    number.trim().parse::<i64>().ok()
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// The provider's own word, for the tooltip — the `result` once there is one, the `state`
+/// otherwise. Keeping it is what makes [`bucket_status`] safe to be lossy: `partiallySucceeded`
+/// and a `succeeded` build carrying warnings both bucket to `warning`, and only this tells them
+/// apart on screen.
+fn raw_label(state: &str, result: Option<&str>) -> String {
+    match result.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(result) => result.to_string(),
+        None => state.to_string(),
+    }
+}
+
+/// Collapses Azure's state/result pair into the seven shared buckets.
+///
+/// | state | result | bucket |
+/// |---|---|---|
+/// | `notStarted`, `pending`, `postponed`, `none` | — | `QUEUED` |
+/// | `inProgress`, `cancelling` | — | `RUNNING` |
+/// | `completed` | `succeeded` | `SUCCESS`, or `WARNING` with warnings |
+/// | `completed` | `partiallySucceeded` | `WARNING` |
+/// | `completed` | `failed` | `FAILED` |
+/// | `completed` | `canceled` | `CANCELLED` |
+/// | `completed` | `skipped`, `abandoned` | `SKIPPED` |
+/// | `completed` | absent / unknown | `QUEUED` |
+///
+/// Two notes on the edges. `cancelling` is `RUNNING`, not `CANCELLED`: the agent is still tearing
+/// the job down, the log is still growing, and the polling cadence keyed off
+/// [`super::is_live`] has to keep going or the run freezes half-cancelled on screen. And
+/// `partiallySucceeded` is the reason [`status::WARNING`] exists at all — Azure is the only one of
+/// the three that publishes the state outright instead of making us derive it.
+///
+/// Both inputs are lower-cased before matching because the *same vocabulary arrives in two
+/// casings*: a build's `status` is `notStarted`/`inProgress`, a timeline record's `state` is
+/// `pending`/`inProgress` — and `canceled` is spelled with one `l` by the API but with two by
+/// roughly everyone typing a fixture.
+fn bucket_status(state: &str, result: Option<&str>, has_warnings: bool) -> String {
+    let state_key = state.trim().to_ascii_lowercase();
+    let result_key = result.map(|value| value.trim().to_ascii_lowercase());
+
+    if state_key != "completed" {
+        return match state_key.as_str() {
+            "inprogress" | "cancelling" | "canceling" => status::RUNNING.to_string(),
+            // Anything unrecognised is treated as "not moving yet" rather than as a finished
+            // state: an unknown *terminal* word rendered as SUCCESS would be a lie, while an
+            // unknown pending word merely keeps the row polling for one more cycle.
+            _ => status::QUEUED.to_string(),
+        };
+    }
+
+    match result_key.as_deref() {
+        Some("succeeded") => {
+            if has_warnings {
+                status::WARNING.to_string()
+            } else {
+                status::SUCCESS.to_string()
+            }
+        }
+        Some("partiallysucceeded") => status::WARNING.to_string(),
+        Some("failed") => status::FAILED.to_string(),
+        Some("canceled") | Some("cancelled") => status::CANCELLED.to_string(),
+        Some("skipped") | Some("abandoned") => status::SKIPPED.to_string(),
+        // `completed` with no result at all is a build the server has accepted but not yet
+        // adjudicated. QUEUED keeps it live so the next poll resolves it.
+        _ => status::QUEUED.to_string(),
+    }
+}
+
+/// Short-circuits an empty PAT with the message the server would eventually produce anyway.
+///
+/// Worth doing because of the 203 quirk documented in [`crate::ado::get_json`]: an unauthenticated
+/// request to `dev.azure.com` is not a 401, it is the sign-in *page* with a success-ish status. The
+/// round trip buys nothing and the error would be identical.
+fn require_pat(pat: &str) -> Result<(), String> {
+    if pat.trim().is_empty() {
+        return Err(BAD_CREDENTIALS.to_string());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Builds
+// ---------------------------------------------------------------------------
+
+/// The most recent builds of a repository, newest first.
+///
+/// `repo_id` may be a GUID or a repository name — see [`looks_like_guid`], which is where the
+/// interesting half of this function lives. `branch` is a plain branch name (`main`); it is
+/// re-prefixed to `refs/heads/…` because that is the only form the API matches on. An empty
+/// `repo_id` means the project is linked to the Azure *project* but not to one of its
+/// repositories, and every build of the project is returned rather than none.
+pub async fn list_builds(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    branch: Option<&str>,
+    limit: usize,
+    pat: &str,
+) -> Result<Vec<PipelineRun>, String> {
+    require_pat(pat)?;
+
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let limit = limit.max(1);
+
+    let repo_id = repo_id.trim();
+    let filter_on_server = looks_like_guid(repo_id);
+    let filter_here = !repo_id.is_empty() && !filter_on_server;
+
+    // When the server can filter, `$top` is exactly what the caller asked for. When it cannot, the
+    // response is every repository's builds interleaved, so ask for more and trim at the end.
+    let top = if filter_here { (limit * 5).min(CLIENT_FILTER_TOP).max(limit) } else { limit };
+
+    let mut url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds\
+         ?api-version={API_VERSION}&$top={top}&queryOrder=queueTimeDescending"
+    );
+    if filter_on_server {
+        url.push_str(&format!(
+            "&repositoryId={}&repositoryType=TfsGit",
+            encode_segment(repo_id)
+        ));
+    }
+    if let Some(branch) = branch.map(str::trim).filter(|value| !value.is_empty()) {
+        // Stripped and re-prefixed rather than concatenated blindly: callers upstream hold the
+        // branch in both forms (the checkout knows `main`, a PR link knows `refs/heads/main`),
+        // and `refs/heads/refs/heads/main` matches nothing and reports it as "no builds".
+        let full = format!("refs/heads/{}", strip_branch_prefix(branch));
+        url.push_str(&format!("&branchName={}", encode_segment(&full)));
+    }
+
+    let request = http::client().get(&url).header("Authorization", auth_header(pat));
+    let parsed: ListResponse<RawBuild> = http::get_json(request, http::Provider::Azure).await?;
+
+    let mut runs: Vec<PipelineRun> = parsed
+        .value
+        .into_iter()
+        .filter(|build| !filter_here || belongs_to_repo(build, repo_id))
+        .map(|build| map_build(&org_enc, &project_enc, build))
+        .collect();
+    runs.truncate(limit);
+    Ok(runs)
+}
+
+/// Whether a build came from the repository the project is linked to, matched by *either*
+/// identifier.
+///
+/// Both are compared because we do not know which one `repo_id` is: the auto-link stores a name,
+/// but a hand-edited link or an older row can hold a GUID that simply failed
+/// [`looks_like_guid`]'s shape check (a trimmed brace form, say). Comparing against both costs
+/// nothing and removes a whole class of "the tab is empty" reports.
+///
+/// A build with no `repository` block at all is dropped rather than kept: it cannot be attributed
+/// to this repository, and showing another repository's runs under this one's tab is worse than
+/// showing one run fewer.
+fn belongs_to_repo(build: &RawBuild, repo_id: &str) -> bool {
+    build.repository.as_ref().is_some_and(|repo| {
+        repo.id.eq_ignore_ascii_case(repo_id) || repo.name.eq_ignore_ascii_case(repo_id)
+    })
+}
+
+fn map_build(org_enc: &str, project_enc: &str, build: RawBuild) -> PipelineRun {
+    let id = build.id.to_string();
+    let web_url = build
+        .links
+        .as_ref()
+        .and_then(|links| links.web.as_ref())
+        .and_then(|web| web.href.as_deref())
+        .and_then(non_empty)
+        // `_links` is absent from some server responses (and from every cached fixture), and the
+        // results page is addressable without it. Built from the already-encoded segments so an
+        // org or project with a space in it stays a single path segment.
+        .unwrap_or_else(|| {
+            format!(
+                "https://dev.azure.com/{org_enc}/{project_enc}/_build/results?buildId={id}"
+            )
+        });
+
+    PipelineRun {
+        provider: PROVIDER_AZURE.to_string(),
+        id,
+        number: parse_build_number(&build.build_number),
+        // A build carries no name of its own; the definition's is what a human recognises.
+        name: build
+            .definition
+            .as_ref()
+            .and_then(|definition| non_empty(&definition.name))
+            .unwrap_or_else(|| "Pipeline".to_string()),
+        status: bucket_status(&build.status, build.result.as_deref(), false),
+        raw_status: raw_label(&build.status, build.result.as_deref()),
+        branch: strip_branch_prefix(&build.source_branch),
+        commit_sha: build.source_version,
+        // The Build API returns the commit *id* and nothing else about it. Fetching the message
+        // would be one Git API call per row of the list, for a subtitle — the frontend already
+        // renders a run without one.
+        commit_title: None,
+        actor: build
+            .requested_for
+            .as_ref()
+            .and_then(|identity| non_empty(&identity.display_name)),
+        event: build.reason.as_deref().and_then(non_empty),
+        // `queueTime` is the honest creation stamp: a build waiting for an agent has no
+        // `startTime` yet, and a list sorted by "created" that fell back to the start time would
+        // reorder itself as builds picked up runners.
+        created_at: build
+            .queue_time
+            .clone()
+            .or_else(|| build.start_time.clone())
+            .unwrap_or_default(),
+        started_at: build.start_time,
+        finished_at: build.finish_time,
+        web_url,
+        // Azure's own timeline gives the graph its stages, so nothing here needs the YAML file
+        // that `definition_path` exists to point the GitHub client at.
+        definition_path: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Detail
+// ---------------------------------------------------------------------------
+
+/// One build with its jobs, read from the build itself plus its timeline.
+///
+/// Two round trips, sequentially: the timeline is only meaningful for a build that exists, and
+/// firing both at once would mean explaining a timeline error for a build that turned out to be
+/// deleted.
+pub async fn build_detail(
+    org: &str,
+    project: &str,
+    build_id: &str,
+    pat: &str,
+) -> Result<PipelineRunDetail, String> {
+    require_pat(pat)?;
+
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let build_enc = encode_segment(build_id.trim());
+
+    let build_url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds/{build_enc}\
+         ?api-version={API_VERSION}"
+    );
+    let request = http::client().get(&build_url).header("Authorization", auth_header(pat));
+    let build: RawBuild = http::get_json(request, http::Provider::Azure).await?;
+    let run = map_build(&org_enc, &project_enc, build);
+
+    let timeline_url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds/{build_enc}/Timeline\
+         ?api-version={API_VERSION}"
+    );
+    let request = http::client().get(&timeline_url).header("Authorization", auth_header(pat));
+    let timeline: RawTimeline = http::get_json(request, http::Provider::Azure).await?;
+
+    let jobs = map_timeline(&run.id, &org_enc, &project_enc, &timeline.records);
+    Ok(PipelineRunDetail { run, jobs })
+}
+
+/// Turns the flat record array into the job list the graph draws.
+///
+/// Split out of [`build_detail`] so the part with all the reasoning in it — ancestry, ordering,
+/// log addressing — is testable without a network.
+fn map_timeline(
+    run_id: &str,
+    org_enc: &str,
+    project_enc: &str,
+    records: &[RawRecord],
+) -> Vec<PipelineJob> {
+    let by_id: HashMap<&str, usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| !record.id.is_empty())
+        .map(|(index, record)| (record.id.as_str(), index))
+        .collect();
+
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, record) in records.iter().enumerate() {
+        if let Some(parent) = record.parent_id.as_deref().filter(|id| !id.is_empty()) {
+            children.entry(parent).or_default().push(index);
+        }
+    }
+
+    let mut jobs: Vec<(i64, i64, PipelineJob)> = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        if !record.kind.eq_ignore_ascii_case("Job") {
+            continue;
+        }
+        let (stage, stage_order) = resolve_stage(records, &by_id, index);
+        let has_warnings = has_warning_issues(records, &children, index);
+
+        let job = PipelineJob {
+            provider: PROVIDER_AZURE.to_string(),
+            run_id: run_id.to_string(),
+            id: record.id.clone(),
+            name: non_empty(&record.name).unwrap_or_else(|| "Job".to_string()),
+            stage,
+            status: bucket_status(&record.state, record.result.as_deref(), has_warnings),
+            raw_status: raw_label(&record.state, record.result.as_deref()),
+            started_at: record.start_time.clone(),
+            finished_at: record.finish_time.clone(),
+            // `j=` is how the results page selects one timeline record in the logs view, so this
+            // opens the browser on *this* job rather than on the build's first one.
+            web_url: format!(
+                "https://dev.azure.com/{org_enc}/{project_enc}/_build/results\
+                 ?buildId={build}&view=logs&j={record}",
+                build = encode_segment(run_id),
+                record = encode_segment(&record.id)
+            ),
+            log_ref: resolve_log_ref(records, &children, index),
+        };
+        jobs.push((stage_order, record.order, job));
+    }
+
+    // Sorted by the *stage's* order first, then by the job's own, so the graph reads the way the
+    // YAML does. The array as it arrives is in no useful order: it is the server's record table,
+    // and a job of stage 3 routinely precedes a job of stage 1 in it.
+    jobs.sort_by_key(|(stage_order, record_order, _)| (*stage_order, *record_order));
+    jobs.into_iter().map(|(_, _, job)| job).collect()
+}
+
+/// The stage a job belongs to, found by walking up `parentId`.
+///
+/// A job's parent is normally a `Phase`, not a `Stage` — the phase is the *definition* of the job
+/// (a matrix of one) and the stage is above it — so a one-level lookup finds the wrong name, or
+/// none, on every classic multi-stage pipeline. Hence the walk.
+///
+/// If no `Stage` ancestor exists the phase's name is used instead. That is not a fallback for
+/// broken data: a classic (non-YAML) build definition has phases and no stages at all, and its
+/// phase names are exactly the column headings a user expects.
+///
+/// Returns the name and the order to sort that column by, which is the *ancestor's* order — the
+/// job's own is only meaningful within its phase.
+fn resolve_stage(
+    records: &[RawRecord],
+    by_id: &HashMap<&str, usize>,
+    start: usize,
+) -> (Option<String>, i64) {
+    let mut phase: Option<(String, i64)> = None;
+    let mut cursor = records[start].parent_id.as_deref();
+
+    for _ in 0..MAX_TIMELINE_DEPTH {
+        let Some(id) = cursor.filter(|id| !id.is_empty()) else { break };
+        let Some(&index) = by_id.get(id) else { break };
+        let parent = &records[index];
+
+        if parent.kind.eq_ignore_ascii_case("Stage") {
+            return (non_empty(&parent.name), parent.order);
+        }
+        if phase.is_none() && parent.kind.eq_ignore_ascii_case("Phase") {
+            phase = non_empty(&parent.name).map(|name| (name, parent.order));
+        }
+        cursor = parent.parent_id.as_deref();
+    }
+
+    match phase {
+        Some((name, order)) => (Some(name), order),
+        // No container at all — a job hanging off the root, which a hand-authored classic
+        // definition produces. Its sort key is its *own* order rather than zero: zero is a
+        // position, and it is the front one, so an orphan job would jump ahead of the first real
+        // stage every time. Its own order is the only claim about where it belongs that anything
+        // here actually knows.
+        None => (None, records[start].order),
+    }
+}
+
+/// How this job's log is addressed — the structural difference that costs this provider its own
+/// [`PipelineJob::log_ref`] field.
+///
+/// GitHub and GitLab both have one endpoint per job that answers that job's whole log. Azure does
+/// not: logs are numbered per *build* and hang off timeline **records**, and `log.id` is a
+/// different number from the record id, so the job's own identity cannot address it.
+///
+/// Worse, whether the job record has a log at all depends on how the pipeline ran. An agent job
+/// usually publishes an aggregated log for the job and every task writes its own as well; a
+/// server/container job, a job that failed during initialisation, and a job whose tasks were all
+/// skipped frequently publish only the per-task ones — the job record's `log` is simply absent.
+///
+/// So: the job's own `log.id` when there is one, otherwise the comma-joined ids of its `Task`
+/// children in execution order, which [`job_log`] fetches and concatenates back into the log the
+/// other two providers hand over in a single request. `None` means there is nothing to fetch —
+/// a queued job, or one that never started — and the UI shows "no log yet" instead of an error.
+fn resolve_log_ref(
+    records: &[RawRecord],
+    children: &HashMap<&str, Vec<usize>>,
+    job: usize,
+) -> Option<String> {
+    if let Some(id) = records[job].log.as_ref().map(|log| log.id).filter(|id| *id > 0) {
+        return Some(id.to_string());
+    }
+
+    let mut tasks: Vec<&RawRecord> = children
+        .get(records[job].id.as_str())
+        .map(|indexes| {
+            indexes
+                .iter()
+                .map(|&index| &records[index])
+                .filter(|record| record.kind.eq_ignore_ascii_case("Task"))
+                .collect()
+        })
+        .unwrap_or_default();
+    tasks.sort_by_key(|record| record.order);
+
+    let ids: Vec<String> = tasks
+        .iter()
+        .filter_map(|record| record.log.as_ref().map(|log| log.id))
+        .filter(|id| *id > 0)
+        .map(|id| id.to_string())
+        .collect();
+
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids.join(","))
+    }
+}
+
+/// Whether anything inside this job reported a `warning` issue.
+///
+/// The job record's own issues are checked *and* its tasks': a warning is raised by the task that
+/// logged it, and only sometimes rolled up to the job. Reading just the job record would let a
+/// `succeeded` job with three `##[warning]`s look indistinguishable from a clean one, which is the
+/// exact distinction [`status::WARNING`] exists to draw.
+fn has_warning_issues(
+    records: &[RawRecord],
+    children: &HashMap<&str, Vec<usize>>,
+    job: usize,
+) -> bool {
+    let is_warning = |record: &RawRecord| {
+        record.issues.iter().any(|issue| issue.kind.eq_ignore_ascii_case("warning"))
+    };
+    if is_warning(&records[job]) {
+        return true;
+    }
+    children
+        .get(records[job].id.as_str())
+        .is_some_and(|indexes| indexes.iter().any(|&index| is_warning(&records[index])))
+}
+
+// ---------------------------------------------------------------------------
+// Logs
+// ---------------------------------------------------------------------------
+
+/// One job's log.
+///
+/// `log_ref` is whatever [`resolve_log_ref`] produced: a single log id, or several separated by
+/// commas when the job's output only exists as its tasks'. The parts are fetched in order and
+/// joined with a blank line — a separator rather than a heading, because [`JobLog::text`] is
+/// contractually the host's own bytes and a `=== Task 3 ===` banner invented here would be read
+/// by users, and by the failure analysis, as something the pipeline printed.
+///
+/// The first truncated part ends the loop. Past that point the cap has already been reached, so
+/// the remaining requests would download megabytes to throw them away; `total_bytes` then counts
+/// what was actually read, which is what its documentation promises for a truncated log.
+pub async fn job_log(
+    org: &str,
+    project: &str,
+    build_id: &str,
+    log_ref: &str,
+    pat: &str,
+) -> Result<JobLog, String> {
+    require_pat(pat)?;
+
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let build_enc = encode_segment(build_id.trim());
+
+    // Validated rather than encoded. A log id is always a positive integer; anything else means
+    // the reference was mangled between the timeline and here, and a mangled value belongs in an
+    // error message, not interpolated into a URL.
+    let ids: Vec<&str> = log_ref
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if ids.is_empty() {
+        return Err("that job has no log in Azure DevOps yet".to_string());
+    }
+    if let Some(bad) = ids.iter().find(|id| !id.chars().all(|c| c.is_ascii_digit())) {
+        return Err(format!("that job's log reference isn't a valid Azure DevOps log id: {bad}"));
+    }
+
+    let mut text = String::new();
+    let mut truncated = false;
+    let mut total_bytes: u64 = 0;
+
+    for id in ids {
+        // A completed task's log never changes again, and this loop runs on every poll tick while
+        // the job is alive — a live job publishes no aggregated log of its own, so it always falls
+        // back to its children. Without the cache a build with twenty-five tasks cost twenty-five
+        // requests every five seconds; with it, only the parts that are new.
+        if let Some(cached) = cached_part(&org_enc, &project_enc, &build_enc, id) {
+            append_part(&mut text, &cached);
+            total_bytes += cached.len() as u64;
+            continue;
+        }
+
+        let url = format!(
+            "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds/{build_enc}\
+             /logs/{id}?api-version={API_VERSION}"
+        );
+        let request = http::client()
+            .get(&url)
+            .header("Authorization", auth_header(pat))
+            // Without it the endpoint is content-negotiated into a JSON envelope with the lines in
+            // an array, which is the same log at twice the size and none of the formatting.
+            .header("Accept", "text/plain");
+        let part = http::get_log(request, http::Provider::Azure).await?;
+        if !part.truncated {
+            remember_part(&org_enc, &project_enc, &build_enc, id, &part.text);
+        }
+
+        append_part(&mut text, &part.text);
+        total_bytes += part.total_bytes;
+
+        // The cap is per **job**, not per part. `http::get_log` applies MAX_LOG_BYTES to each
+        // response on its own, so a job with thirty tasks writing three megabytes each returned
+        // ninety megabytes across the IPC bridge with `truncated: false`. This is the only
+        // provider whose log arrives in pieces, and so the only one where the documented ceiling
+        // did not hold.
+        if part.truncated || text.len() as u64 >= MAX_LOG_BYTES {
+            if text.len() as u64 > MAX_LOG_BYTES {
+                let mut cut = MAX_LOG_BYTES as usize;
+                while cut > 0 && !text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                text.truncate(cut);
+            }
+            truncated = true;
+            break;
+        }
+    }
+
+    Ok(JobLog { text, truncated, total_bytes })
+}
+
+/// A blank line between concatenated parts, so two tasks' output never runs together on one line.
+fn append_part(text: &mut String, part: &str) {
+    if !text.is_empty() {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push('\n');
+    }
+    text.push_str(part);
+}
+
+/// Downloaded task logs, keyed by log id within one build.
+///
+/// Bounded by construction rather than by a size limit: the whole map is dropped the first time a
+/// *different* build asks for a part, so it holds at most the one build that is open. Nothing here
+/// survives a restart, which is right — it is a request optimisation, not storage.
+fn part_cache() -> &'static std::sync::Mutex<(String, std::collections::HashMap<String, String>)> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<(String, std::collections::HashMap<String, String>)>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new((String::new(), std::collections::HashMap::new())))
+}
+
+fn build_scope(org: &str, project: &str, build: &str) -> String {
+    format!("{org}/{project}/{build}")
+}
+
+fn cached_part(org: &str, project: &str, build: &str, log_id: &str) -> Option<String> {
+    let guard = part_cache().lock().ok()?;
+    if guard.0 != build_scope(org, project, build) {
+        return None;
+    }
+    guard.1.get(log_id).cloned()
+}
+
+fn remember_part(org: &str, project: &str, build: &str, log_id: &str, text: &str) {
+    let scope = build_scope(org, project, build);
+    let Ok(mut guard) = part_cache().lock() else { return };
+    if guard.0 != scope {
+        guard.0 = scope;
+        guard.1.clear();
+    }
+    guard.1.insert(log_id.to_string(), text.to_string());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timeline(json: &str) -> Vec<RawRecord> {
+        serde_json::from_str::<RawTimeline>(json).expect("fixture de timeline inválida").records
+    }
+
+    #[test]
+    fn every_azure_state_lands_in_one_of_the_seven_buckets() {
+        // Not finished yet.
+        assert_eq!(bucket_status("notStarted", None, false), status::QUEUED);
+        assert_eq!(bucket_status("pending", None, false), status::QUEUED);
+        assert_eq!(bucket_status("postponed", None, false), status::QUEUED);
+        assert_eq!(bucket_status("none", None, false), status::QUEUED);
+        assert_eq!(bucket_status("inProgress", None, false), status::RUNNING);
+        // Still tearing down: the log is still growing, so the row has to keep polling.
+        assert_eq!(bucket_status("cancelling", None, false), status::RUNNING);
+
+        // Finished, by result.
+        assert_eq!(bucket_status("completed", Some("succeeded"), false), status::SUCCESS);
+        assert_eq!(bucket_status("completed", Some("failed"), false), status::FAILED);
+        assert_eq!(bucket_status("completed", Some("canceled"), false), status::CANCELLED);
+        assert_eq!(bucket_status("completed", Some("skipped"), false), status::SKIPPED);
+        assert_eq!(bucket_status("completed", Some("abandoned"), false), status::SKIPPED);
+
+        // The two roads to WARNING: derived from issues, and stated outright — the only provider
+        // of the three that has a word for it.
+        assert_eq!(bucket_status("completed", Some("succeeded"), true), status::WARNING);
+        assert_eq!(bucket_status("completed", Some("partiallySucceeded"), false), status::WARNING);
+        // ...and warnings never downgrade a real failure.
+        assert_eq!(bucket_status("completed", Some("failed"), true), status::FAILED);
+
+        // Adjudication pending, and a word we have never seen: both keep the row live rather than
+        // claiming a terminal state that might be wrong.
+        assert_eq!(bucket_status("completed", None, false), status::QUEUED);
+        assert_eq!(bucket_status("completed", Some("marvelous"), false), status::QUEUED);
+        assert_eq!(bucket_status("teleporting", None, false), status::QUEUED);
+    }
+
+    /// The build API's `status` and the timeline's `state` are the same vocabulary in two casings.
+    #[test]
+    fn the_two_casings_azure_uses_agree() {
+        assert_eq!(bucket_status("inprogress", None, false), status::RUNNING);
+        assert_eq!(bucket_status("Completed", Some("Succeeded"), false), status::SUCCESS);
+        assert_eq!(bucket_status(" completed ", Some(" failed "), false), status::FAILED);
+    }
+
+    #[test]
+    fn a_guid_is_told_apart_from_a_repository_name() {
+        assert!(looks_like_guid("3f2504e0-4f89-11d3-9a0c-0305e82c3301"));
+        assert!(looks_like_guid("3F2504E0-4F89-11D3-9A0C-0305E82C3301"));
+        // What the auto-link from the remote writes into `ado_repo_id`.
+        assert!(!looks_like_guid("MiRepo"));
+        assert!(!looks_like_guid(""));
+        // 36 characters, hex, and not a GUID: the dashes have to be in their places, or the Build
+        // API's `repositoryId` filter silently matches nothing.
+        assert!(!looks_like_guid("3f2504e04f8911d39a0c0305e82c33011234"));
+        assert!(!looks_like_guid("3f2504e0-4f89-11d3-9a0c0305e82c3301-"));
+        // Right shape, wrong alphabet.
+        assert!(!looks_like_guid("zf2504e0-4f89-11d3-9a0c-0305e82c3301"));
+        // A braced GUID is 38 characters, and is correctly refused — `belongs_to_repo` still
+        // matches it on the client side.
+        assert!(!looks_like_guid("{3f2504e0-4f89-11d3-9a0c-0305e82c3301}"));
+    }
+
+    #[test]
+    fn only_the_branch_prefix_is_trimmed() {
+        assert_eq!(strip_branch_prefix("refs/heads/main"), "main");
+        assert_eq!(strip_branch_prefix("refs/heads/feature/ci-tab"), "feature/ci-tab");
+        assert_eq!(strip_branch_prefix("main"), "main");
+        // A PR validation build: not a branch, and shown whole.
+        assert_eq!(strip_branch_prefix("refs/pull/123/merge"), "refs/pull/123/merge");
+        assert_eq!(strip_branch_prefix("refs/tags/v1.2.0"), "refs/tags/v1.2.0");
+    }
+
+    #[test]
+    fn a_dated_build_number_is_not_forced_into_an_integer() {
+        assert_eq!(parse_build_number("42"), Some(42));
+        assert_eq!(parse_build_number(" 42 "), Some(42));
+        // Azure's default format. `20260821` would be a counter that jumps by millions per day.
+        assert_eq!(parse_build_number("20260821.3"), None);
+        assert_eq!(parse_build_number("release-7"), None);
+        assert_eq!(parse_build_number(""), None);
+    }
+
+    /// The three things the timeline mapping has to get right at once: a job's stage is its
+    /// *grandparent*, the order is the stage's and not the array's, and a job with no log of its
+    /// own borrows its tasks'.
+    #[test]
+    fn jobs_take_their_stage_from_the_ancestor_and_their_log_from_wherever_it_is() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"job-deploy","parentId":"phase-deploy","type":"Job","name":"Deploy",
+               "state":"completed","result":"succeeded","order":1},
+              {"id":"stage-build","parentId":null,"type":"Stage","name":"Build",
+               "state":"completed","result":"succeeded","order":1},
+              {"id":"phase-build","parentId":"stage-build","type":"Phase","name":"Build jobs",
+               "state":"completed","result":"succeeded","order":1},
+              {"id":"job-build","parentId":"phase-build","type":"Job","name":"Compile",
+               "state":"completed","result":"succeeded","order":1,"log":{"id":7}},
+              {"id":"task-a","parentId":"job-deploy","type":"Task","name":"Push",
+               "state":"completed","result":"succeeded","order":2,"log":{"id":13}},
+              {"id":"task-b","parentId":"job-deploy","type":"Task","name":"Checkout",
+               "state":"completed","result":"succeeded","order":1,"log":{"id":12}},
+              {"id":"stage-deploy","parentId":null,"type":"Stage","name":"Deploy",
+               "state":"completed","result":"succeeded","order":2},
+              {"id":"phase-deploy","parentId":"stage-deploy","type":"Phase","name":"Deploy jobs",
+               "state":"completed","result":"succeeded","order":1},
+              {"id":"checkpoint","parentId":"stage-deploy","type":"Checkpoint","name":"Approval",
+               "state":"completed","result":"succeeded","order":1}
+            ]}"#,
+        );
+
+        let jobs = map_timeline("55", "contoso", "Web%20App", &records);
+
+        // Only `Job` records become jobs: no stages, phases, checkpoints or tasks.
+        assert_eq!(jobs.len(), 2);
+        // Ordered by the stage's order, not by the order the server listed them in.
+        assert_eq!(jobs[0].name, "Compile");
+        assert_eq!(jobs[1].name, "Deploy");
+        // The stage is the grandparent; the intermediate Phase is walked through, not reported.
+        assert_eq!(jobs[0].stage.as_deref(), Some("Build"));
+        assert_eq!(jobs[1].stage.as_deref(), Some("Deploy"));
+
+        // The job that publishes its own aggregated log addresses it directly...
+        assert_eq!(jobs[0].log_ref.as_deref(), Some("7"));
+        // ...and the one that doesn't borrows its tasks', in execution order (task-b runs first).
+        assert_eq!(jobs[1].log_ref.as_deref(), Some("12,13"));
+
+        assert_eq!(jobs[0].run_id, "55");
+        assert_eq!(jobs[0].id, "job-build");
+        assert_eq!(jobs[0].provider, PROVIDER_AZURE);
+        assert!(jobs[0].web_url.contains("buildId=55"));
+        assert!(jobs[0].web_url.contains("j=job-build"));
+    }
+
+    /// A classic (non-YAML) definition has phases and no stages at all, and a job outside any
+    /// container still has to appear.
+    #[test]
+    fn a_pipeline_without_stages_falls_back_to_the_phase_then_to_nothing() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"phase-1","parentId":null,"type":"Phase","name":"Agent job","order":1},
+              {"id":"job-1","parentId":"phase-1","type":"Job","name":"Run tests",
+               "state":"inProgress","order":1},
+              {"id":"job-orphan","parentId":null,"type":"Job","name":"Orphan",
+               "state":"notStarted","order":9}
+            ]}"#,
+        );
+        let jobs = map_timeline("7", "contoso", "App", &records);
+
+        assert_eq!(jobs[0].stage.as_deref(), Some("Agent job"));
+        assert_eq!(jobs[0].status, status::RUNNING);
+        // Nothing above it: no column, and no crash walking a chain that ends immediately.
+        assert_eq!(jobs[1].stage, None);
+        assert_eq!(jobs[1].status, status::QUEUED);
+        // Nothing published a log yet, which is a state the UI shows rather than an error.
+        assert_eq!(jobs[1].log_ref, None);
+    }
+
+    /// A `succeeded` job whose *task* raised a warning is a warning: the issue is filed against
+    /// the task that logged it, and is only sometimes rolled up.
+    #[test]
+    fn a_task_level_warning_reaches_the_job_it_belongs_to() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"job-1","parentId":null,"type":"Job","name":"Build",
+               "state":"completed","result":"succeeded","order":1,"log":{"id":4}},
+              {"id":"task-1","parentId":"job-1","type":"Task","name":"npm ci",
+               "state":"completed","result":"succeeded","order":1,"log":{"id":5},
+               "issues":[{"type":"warning","message":"deprecated package"}]},
+              {"id":"job-2","parentId":null,"type":"Job","name":"Lint",
+               "state":"completed","result":"succeeded","order":2,"log":{"id":6}}
+            ]}"#,
+        );
+        let jobs = map_timeline("7", "contoso", "App", &records);
+
+        assert_eq!(jobs[0].status, status::WARNING);
+        // The provider's own word survives the bucketing, which is what makes it safe to be lossy.
+        assert_eq!(jobs[0].raw_status, "succeeded");
+        // A clean job next to it is untouched.
+        assert_eq!(jobs[1].status, status::SUCCESS);
+    }
+
+    /// The parent links arrive as a flat array with nothing promising they form a tree.
+    #[test]
+    fn a_cyclic_parent_chain_terminates_instead_of_hanging_the_screen() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"a","parentId":"b","type":"Phase","name":"A","order":1},
+              {"id":"b","parentId":"a","type":"Phase","name":"B","order":1},
+              {"id":"job","parentId":"a","type":"Job","name":"Looping","order":1}
+            ]}"#,
+        );
+        let jobs = map_timeline("7", "contoso", "App", &records);
+        assert_eq!(jobs.len(), 1);
+        // The first Phase found on the way up wins; the walk stops at the depth bound.
+        assert_eq!(jobs[0].stage.as_deref(), Some("A"));
+    }
+
+    #[test]
+    fn a_build_is_attributed_by_either_identifier_and_never_by_guesswork() {
+        let with_repo = |id: &str, name: &str| RawBuild {
+            id: 1,
+            build_number: String::new(),
+            status: String::new(),
+            result: None,
+            queue_time: None,
+            start_time: None,
+            finish_time: None,
+            source_branch: String::new(),
+            source_version: String::new(),
+            reason: None,
+            links: None,
+            definition: None,
+            requested_for: None,
+            repository: Some(RawRepoRef { id: id.to_string(), name: name.to_string() }),
+        };
+
+        let build = with_repo("3f2504e0-4f89-11d3-9a0c-0305e82c3301", "MiRepo");
+        // The name form, which is what the auto-link stores...
+        assert!(belongs_to_repo(&build, "MiRepo"));
+        assert!(belongs_to_repo(&build, "mirepo"));
+        // ...and the GUID form, which is what the settings dropdown stores.
+        assert!(belongs_to_repo(&build, "3F2504E0-4F89-11D3-9A0C-0305E82C3301"));
+        assert!(!belongs_to_repo(&build, "OtroRepo"));
+
+        // A build that doesn't say where it came from is dropped: showing another repository's
+        // runs under this tab is worse than showing one run fewer.
+        let mut anonymous = with_repo("", "");
+        anonymous.repository = None;
+        assert!(!belongs_to_repo(&anonymous, "MiRepo"));
+    }
+}

@@ -292,6 +292,51 @@ Reglas:
 - NO escribas la línea 📈 CALIDAD ni resumen: solo los bloques de hallazgo.
 - Si no encuentras nada que cruce archivos, responde exactamente: SIN HALLAZGOS"#;
 
+/// The failure analysis's ask.
+///
+/// Three constraints shaped it, and each one is a mistake it exists to avoid.
+///
+/// **It must go and look.** The value of doing this inside a git client rather than pasting the
+/// log into a chat window is that the repository is right there. So the prompt says so explicitly
+/// — and the invocation gives it `cwd` and tools to make it possible.
+///
+/// **It must not blame the commit by default.** The most common cause of a red build is not the
+/// change that was pushed: it is a flaky test, a missing runner dependency, an upstream registry.
+/// A prompt that opens with "find the bug in this diff" gets a confident answer about the diff
+/// every time.
+///
+/// **It must answer at length, in a fixed shape.** Partly because three headings are what makes an
+/// answer usable, and partly for a reason that is pure implementation: [`refusal_reply`] turns any
+/// reply under 400 characters that mentions "rate limit" or "quota" into a *quota exhausted*
+/// error. An analysis whose honest conclusion is "the job died on a registry rate limit" is
+/// exactly that shape, and a two-line version of it would be swallowed and shown as CodeFlow
+/// having run out of credit.
+pub const DEFAULT_PIPELINE_TEMPLATE: &str =
+    "Eres un ingeniero de plataforma senior. Se te entrega por stdin la información de una \
+     ejecución de CI/CD que ha fallado: los datos del pipeline, el job concreto que falló, la \
+     cola de su log, y el fichero de definición del pipeline si se ha podido leer.\n\n\
+     Tienes además acceso de LECTURA al repositorio en el directorio de trabajo. Úsalo: abre los \
+     ficheros que el log menciona, busca el símbolo que aparece en el error, compara lo que el \
+     log dice con lo que el código realmente hace. Ese contraste es lo que se te está pidiendo; \
+     una respuesta escrita solo a partir del log no sirve.\n\n\
+     No des por hecho que la culpa es del último commit. Un build rojo es, con la misma \
+     frecuencia, un test inestable, una dependencia que falta en el runner, una versión que ha \
+     cambiado río arriba, un secreto caducado o un límite de cuota del registro. Si la evidencia \
+     no señala al código, dilo claramente.\n\n\
+     Responde en español y en Markdown, con EXACTAMENTE estas tres secciones y en este orden:\n\n\
+     ## Causa raíz\n\
+     Qué falló y por qué, en dos o tres frases. Si no puedes determinarlo con la evidencia que \
+     tienes, dilo explícitamente y enumera qué haría falta para saberlo.\n\n\
+     ## Evidencia\n\
+     Cita las líneas concretas del log que lo demuestran y los ficheros del repositorio que has \
+     abierto para confirmarlo, con su ruta relativa y la línea. Si algo del log contradice lo que \
+     hay en el código, señálalo aquí.\n\n\
+     ## Arreglo propuesto\n\
+     Qué cambiar exactamente, con la ruta del fichero. Si hay más de una opción, ponlas en orden \
+     de menor a mayor riesgo. Si el arreglo no está en el repositorio sino en la configuración \
+     del runner o del proveedor, dilo así.\n\n\
+     No inventes rutas ni números de línea: si no lo has abierto, no lo cites.";
+
 pub const DEFAULT_ANALYZE_TEMPLATE: &str =
     "Eres un revisor de código senior. Se te entrega por stdin el contexto del proyecto y el \
      diff de cambios que TODAVÍA NO SE HAN COMMITEADO (working directory), justo antes de que \
@@ -486,6 +531,11 @@ pub mod task {
     /// they are routed separately, so counting them together would hide which engine is being paid
     /// for.
     pub const DIAGRAM_DRAW: &str = "diagram-draw";
+    /// Explaining a failed CI job. Its own label rather than [`ANALYZE`]'s: both are "read
+    /// something and tell me what is wrong with it", and counting them together would hide which
+    /// of the two is actually spending the budget — a pipeline analysis reads the repository with
+    /// tools, so it is by some distance the more expensive of the pair.
+    pub const PIPELINE_ANALYZE: &str = "pipeline-analyze";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -3965,6 +4015,80 @@ pub async fn analyze_changes(
     inv.task = task::ANALYZE;
     let run = run(engine, binary, inv).await?;
     Ok(stamp_footer(&run.text, "análisis pre-commit", engine.label(), run.model.as_deref().unwrap_or(model)))
+}
+
+/// How much of a failed job's log the analysis is given.
+///
+/// See [`crate::ci::MAX_AI_LOG_CHARS`] for the budget itself; what matters here is that the
+/// caller has already trimmed it **from the end**, not the start. Every other truncation in this
+/// file keeps the head, which is right for a diff and exactly wrong for a log.
+pub const MAX_PIPELINE_LOG_CHARS: usize = crate::ci::MAX_AI_LOG_CHARS;
+
+/// The CI definition that produced the run — a workflow file is a few kilobytes, and the part of
+/// it that matters is usually one step.
+pub const MAX_PIPELINE_DEFINITION_CHARS: usize = 12_000;
+
+/// Explains a failed CI job, with the log and the repository in front of it.
+///
+/// `log_text` must already be tail-trimmed by the caller (`ci::head_and_tail`) and stripped of CI
+/// scaffolding (`ci::clean_ci_markers`); this only enforces the ceiling a second time so a caller
+/// that forgets cannot hand a megabyte to an engine that bills by the token.
+///
+/// `cwd` and `allowed_tools` are what turn this from "summarise this log" into the thing that was
+/// actually asked for: the engine opens the repository itself and checks the log against it.
+#[allow(clippy::too_many_arguments)]
+pub async fn analyze_pipeline_failure(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    facts: &[(String, String)],
+    definition: Option<(&str, &str)>,
+    log_text: &str,
+    allowed_tools: &[String],
+    cwd: &str,
+    prompt_template: &str,
+) -> Result<String, String> {
+    if log_text.trim().is_empty() {
+        return Err("Ese job no publicó ningún log que analizar".to_string());
+    }
+
+    let mut stdin_payload = String::new();
+    stdin_payload.push_str("=== EJECUCIÓN ===\n");
+    for (label, value) in facts {
+        stdin_payload.push_str(&format!("{label}: {value}\n"));
+    }
+    if let Some((path, source)) = definition {
+        let source: String = source.chars().take(MAX_PIPELINE_DEFINITION_CHARS).collect();
+        stdin_payload.push_str(&format!("\n=== DEFINICIÓN DEL PIPELINE ({path}) ===\n"));
+        stdin_payload.push_str(&source);
+        stdin_payload.push('\n');
+    }
+    // The same tail-keeping trim as the caller's, not a `chars().take()`. A second ceiling that
+    // cut from the *head* would undo the first one's whole purpose whenever it bit — and because
+    // the caller's output lands exactly at the budget plus an elision marker, it bit on the last
+    // line of every trimmed log rather than only on long ones.
+    let (log, _) = crate::ci::head_and_tail(log_text, MAX_PIPELINE_LOG_CHARS);
+    stdin_payload.push_str("\n=== LOG DEL JOB (cola) ===\n");
+    stdin_payload.push_str(&log);
+
+    let prompt = if prompt_template.trim().is_empty() {
+        DEFAULT_PIPELINE_TEMPLATE
+    } else {
+        prompt_template
+    };
+
+    let mut inv = AiInvocation::new(prompt, &stdin_payload);
+    inv.model = model;
+    inv.allowed_tools = allowed_tools;
+    inv.cwd = Some(cwd);
+    inv.task = task::PIPELINE_ANALYZE;
+    let run = run(engine, binary, inv).await?;
+    Ok(stamp_footer(
+        &run.text,
+        "análisis de pipeline",
+        engine.label(),
+        run.model.as_deref().unwrap_or(model),
+    ))
 }
 
 /// Above this many characters a turn's message stops riding `-p` and is delivered as **data**,

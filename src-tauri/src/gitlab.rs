@@ -31,7 +31,7 @@ pub const GITLAB_COM: &str = "gitlab.com";
 
 /// gitlab.com and a self-managed instance serve the API from the same place: `/api/v4` on the
 /// host itself. There is no `api.` subdomain to special-case, unlike GitHub.
-fn api_root(host: &str) -> String {
+pub(crate) fn api_root(host: &str) -> String {
     format!("https://{host}/api/v4")
 }
 
@@ -49,7 +49,7 @@ fn client() -> reqwest::Client {
 /// or the router reads it as three segments and answers 404. Everything outside the unreserved set
 /// is encoded, which also covers the `.` and `-` that project paths are full of (harmlessly) and
 /// the spaces that a hand-typed path occasionally carries.
-fn encode_path(path: &str) -> String {
+pub(crate) fn encode_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len() + 8);
     for byte in path.trim_matches('/').bytes() {
         match byte {
@@ -114,13 +114,13 @@ pub fn detect_from_remote_url(remote_url: &str, known_hosts: &[String]) -> Optio
 /// `PRIVATE-TOKEN` rather than a bearer: it is the header GitLab documents for personal and
 /// project access tokens, and it is the one that works on every version back to the ones a
 /// self-managed instance is likely to be pinned to.
-fn authed(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+pub(crate) fn authed(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
     request.header("PRIVATE-TOKEN", token)
 }
 
 /// GitLab's errors are `{"message": …}` or `{"error": …}`, and the message is sometimes an object
 /// keyed by field. All three are more use than a bare status code.
-fn describe(status: reqwest::StatusCode, body: &str) -> String {
+pub(crate) fn describe(status: reqwest::StatusCode, body: &str) -> String {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
         for key in ["message", "error", "error_description"] {
             match value.get(key) {

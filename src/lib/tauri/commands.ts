@@ -34,6 +34,7 @@ import type {
   DiscardOutcome,
   FpSuppression,
   JobHistoryEntry,
+  JobLog,
   MergeOutcome,
   NewProject,
   PrActionOutcome,
@@ -43,6 +44,9 @@ import type {
   PrLinkActionOutcome,
   PrLinkResolution,
   Project,
+  PipelineAvailability,
+  PipelineRun,
+  PipelineRunDetail,
   PullRequestSummary,
   RemoteInfo,
   RepoStatusInfo,
@@ -1173,6 +1177,63 @@ export const openRepoInBrowser = (projectId: string) =>
 
 export const listPullRequests = (projectId: string) =>
   invoke<PullRequestSummary[]>("list_pull_requests", { projectId });
+
+// ---------------------------------------------------------------------------
+// CI/CD pipelines
+// ---------------------------------------------------------------------------
+//
+// All five dispatch on the same `linked_repo` the pull-request commands do, so nothing here
+// takes a provider: the project already knows which host it belongs to, and having the UI say it
+// a second time is how the two answers eventually disagree.
+
+/**
+ * Whether this repository should have a Pipelines tab at all, and against which host.
+ *
+ * The authoritative half of the gate. The tab itself is decided synchronously from
+ * `pipelinesAvailable()` so it never flickers, but that helper re-implements `linked_repo`'s
+ * provider precedence in TypeScript; this is the answer from the function that precedence
+ * actually lives in, and it is what the view reports when the two could differ.
+ */
+export const pipelineAvailability = (projectId: string) =>
+  invoke<PipelineAvailability>("pipeline_availability", { projectId });
+
+/** The most recent runs, newest first. `branch` narrows to one ref; `limit` caps the page. */
+export const listPipelineRuns = (projectId: string, branch: string | null, limit: number) =>
+  invoke<PipelineRun[]>("list_pipeline_runs", { projectId, branch, limit });
+
+/**
+ * One run plus its jobs.
+ *
+ * The run comes back too, not just the jobs, because for two of the three providers the run's own
+ * status can only be settled once the jobs are known — GitHub has no "passed with warnings" and
+ * GitLab doesn't put it in the list response. The row in the list is corrected from this.
+ */
+export const pipelineRunDetail = (projectId: string, runId: string) =>
+  invoke<PipelineRunDetail>("pipeline_run_detail", { projectId, runId });
+
+/** One job's log, as the host served it, capped at 5 MB. `logRef` is Azure's second identifier. */
+export const fetchPipelineJobLog = (
+  projectId: string,
+  runId: string,
+  jobId: string,
+  logRef: string | null,
+) => invoke<JobLog>("fetch_pipeline_job_log", { projectId, runId, jobId, logRef });
+
+/**
+ * Asks the AI why a job failed, with the log, the CI definition and the repository itself in
+ * front of it.
+ *
+ * `aiRunId` is minted by the caller (`newRunId("pipeline")`) before the invoke, like every other
+ * tracked run in this app: the backend cannot hand back an id the frontend needs in order to
+ * subscribe to the events the run is already emitting.
+ */
+export const analyzePipelineFailure = (
+  projectId: string,
+  runId: string,
+  jobId: string,
+  logRef: string | null,
+  aiRunId: string,
+) => invoke<string>("analyze_pipeline_failure", { projectId, runId, jobId, logRef, aiRunId });
 
 /** Resolves a pasted pull-request or merge-request URL — GitHub (including Enterprise), GitLab
  * (including self-managed) or Azure DevOps — into the PR plus the local repository it belongs to,

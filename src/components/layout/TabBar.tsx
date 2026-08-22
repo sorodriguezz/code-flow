@@ -1,7 +1,8 @@
 import { useMemo } from "react";
-import { Code2, FolderGit2, GitBranch, History, type LucideIcon } from "lucide-react";
+import { Code2, FolderGit2, GitBranch, History, Route, type LucideIcon } from "lucide-react";
 import { useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
+import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ActivePill } from "../common/ActivePill";
 import { useT } from "../../state/languageStore";
@@ -25,6 +26,21 @@ const TABS: Tab[] = [
   { id: "changes", labelKey: "tabbar.changes", icon: GitBranch },
   { id: "editor", labelKey: "tabbar.editor", icon: Code2 },
 ];
+
+/**
+ * The one tab that isn't always there.
+ *
+ * Every other tab in this app is unconditional, and this is the first exception — a pipeline
+ * screen for a repository with no CI host to ask is a screen with nothing on it, so it is absent
+ * rather than empty. The condition is both halves of the same question: the repository is linked
+ * to a host (its own columns say so) *and* that host has a saved connection.
+ *
+ * Kept out of `TABS` rather than filtered out of it, so nothing has to read a list whose contents
+ * depend on state. The cost of it appearing and disappearing is paid twice, and both are handled
+ * elsewhere: the view the user is standing in when it vanishes (the guard in `App.tsx`), and the
+ * project row going stale after a link (`workspaceStore.patchProject`).
+ */
+const PIPELINES_TAB: Tab = { id: "pipelines", labelKey: "tabbar.pipelines", icon: Route };
 
 /** Uncommitted files, counted once per path: a partially staged file appears in both `staged`
  * and `unstaged` but is still a single pending change. */
@@ -101,7 +117,12 @@ export function TabBar() {
   const activeView = useUiStore((s) => s.activeView);
   const uncommitted = useUncommittedCount();
   const project = useWorkspaceStore((s) => s.activeProject());
+  const connections = useVcsConnectionsStore();
   const t = useT();
+
+  // Recomputed on every render rather than memoized: it is one string comparison against a list of
+  // at most a handful of hosts, and a stale `useMemo` here is a tab that doesn't appear.
+  const tabs = pipelinesAvailable(project, connections) ? [...TABS, PIPELINES_TAB] : TABS;
 
   return (
     <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-3">
@@ -115,7 +136,7 @@ export function TabBar() {
         }
       />
       <div data-tour="repo-tabs" className="flex min-w-0 items-center gap-1">
-        {TABS.map((tab) => (
+        {tabs.map((tab) => (
           <TabButton
             key={tab.id}
             tab={tab}

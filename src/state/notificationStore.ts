@@ -29,7 +29,11 @@ export type NotificationSource =
   /** Something a paired phone or tablet did. Its own source rather than being filed under the
    *  feature it touched, because *where it came from* is the interesting part: a commit you made
    *  is not news, and the same commit arriving from a device in your pocket is. */
-  | "remote";
+  | "remote"
+  /** A pipeline that finished while the user was elsewhere. Its own source rather than `git`:
+   *  a build breaking is not something the repository did, it is something a host did to it,
+   *  and the menu the row sends you to is the Pipelines tab. */
+  | "ci";
 
 /**
  * The menu each source is called in the rest of the app.
@@ -50,6 +54,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   diagrams: "tabbar.diagrams",
   db: "tabbar.databases",
   remote: "remote.title",
+  ci: "tabbar.pipelines",
 };
 
 /**
@@ -94,7 +99,10 @@ export interface NotificationTarget {
       | "diagram"
       | "reviewSession"
       | "chatConversation"
-      | "job";
+      | "job"
+      /** `${projectId}:${provider}:${runId}` — a run number alone is ambiguous across
+       *  repositories exactly as a PR number is. See `runKey` in `ciStore`. */
+      | "pipelineRun";
     id: string;
   };
 }
@@ -345,6 +353,13 @@ async function showJobInAiPanel(jobId: string): Promise<void> {
     useAnalyzeUiStore.getState().showJob(job.id);
     return;
   }
+  if (job.kind === "pipeline-analyze") {
+    // Not the assistant rail: a pipeline analysis belongs under the log it is about, which is a
+    // view rather than a panel. Its coordinates travel in `meta` — see `analyze_pipeline_failure`.
+    const { openPipelineAnalysis } = await import("./ciStore");
+    await openPipelineAnalysis(job);
+    return;
+  }
   const prId = job.meta.prId;
   if (typeof prId !== "number") return;
   // Fetched rather than read off whatever the sidebar last loaded: the pull request this reviewed
@@ -467,6 +482,12 @@ export async function followTarget(
     await useChatStore.getState().switchTo(target.projectId, id);
   } else if (kind === "job") {
     await showJobInAiPanel(id);
+  } else if (kind === "pipelineRun") {
+    // The view is already opening (the target names it); this only has to put the right run
+    // under the cursor. The store re-reads it rather than trusting a snapshot: a run that was
+    // running when the notification was pushed has moved on by the time anyone follows it.
+    const { useCiStore } = await import("./ciStore");
+    await useCiStore.getState().openByKey(id);
   } else {
     // The exhaustiveness check this chain did not have.
     //

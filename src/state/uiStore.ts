@@ -17,6 +17,10 @@ export type MainView =
   | "graph"
   | "changes"
   | "editor"
+  /** The CI/CD screen. Repository-scoped like the three above it, and the only one of them
+   * that is **conditional**: it exists only while the repository is linked to a host that is
+   * connected. See `pipelinesAvailable` and the guard in `App.tsx`. */
+  | "pipelines"
   | "api"
   | "agents"
   | "stories"

@@ -77,6 +77,7 @@ import {
   jobPrUrl,
   type ActivityEntry,
 } from "../../lib/activityEntries";
+import { openPipelineAnalysis } from "../../state/ciStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -427,6 +428,8 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
       // The row's own bucket — an analyze job is filed under the repository it ran in, which is
       // the panel that has to show it.
       useAnalyzeUiStore.getState().showJob(entry.job.id, entry.job.projectId);
+    } else if (entry.job.kind === "pipeline-analyze") {
+      void openPipelineAnalysis(entry.job);
     }
   };
 

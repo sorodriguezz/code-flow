@@ -7,15 +7,15 @@ use crate::ado::{PrCommentThread, PrThreadComment, PullRequestSummary};
 
 /// GitHub pins REST behavior to a dated API version via this header; sending it keeps us on a
 /// known contract instead of whatever "latest" happens to be.
-const API_VERSION: &str = "2022-11-28";
+pub(crate) const API_VERSION: &str = "2022-11-28";
 /// GitHub rejects any request without a User-Agent (403), unlike Azure DevOps.
-const USER_AGENT: &str = "CodeFlow";
+pub(crate) const USER_AGENT: &str = "CodeFlow";
 /// The canonical public host — everything else is treated as a GitHub Enterprise Server.
 pub const GITHUB_COM: &str = "github.com";
 
 /// The REST API base for a host. GitHub.com serves its API from a dedicated `api.` subdomain;
 /// a GitHub Enterprise Server serves it from `https://<host>/api/v3` on the same host.
-fn api_root(host: &str) -> String {
+pub(crate) fn api_root(host: &str) -> String {
     if host.eq_ignore_ascii_case(GITHUB_COM) {
         "https://api.github.com".to_string()
     } else {
@@ -52,7 +52,7 @@ fn client() -> reqwest::Client {
 
 /// Both classic and fine-grained personal access tokens authenticate as a Bearer token on the
 /// modern REST API, so a single scheme covers whatever the user pasted.
-fn bearer(token: &str) -> String {
+pub(crate) fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
 

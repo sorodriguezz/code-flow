@@ -1,4 +1,5 @@
 import { getSetting, setSetting } from "./tauri/commands";
+import { useVcsConnectionsStore } from "../state/vcsConnectionsStore";
 import type { GithubConnection } from "../types/domain";
 
 // One list of GitHub connections (github.com and/or Enterprise hosts) persisted as a single
@@ -23,6 +24,10 @@ export async function loadGithubConnections(): Promise<GithubConnection[]> {
 
 export async function saveGithubConnections(connections: GithubConnection[]): Promise<void> {
   await setSetting(KEY, JSON.stringify(connections));
+  // The Pipelines tab is drawn from this list, so a save that nobody hears about is a tab that
+  // does not appear until the next launch. Notified here rather than at the six call sites
+  // (three settings forms, add and remove in each) because this is the one place they share.
+  await useVcsConnectionsStore.getState().refresh();
 }
 
 /** Reduces a pasted host/URL (`https://github.acme.com/…`) to a bare lowercase hostname. */

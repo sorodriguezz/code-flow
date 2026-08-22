@@ -26,6 +26,24 @@ interface WorkspaceState {
   addProject: (input: NewProject) => Promise<Project>;
   removeProject: (id: string, workspaceId: string) => Promise<void>;
   setProjectColor: (id: string, workspaceId: string, color: string) => Promise<void>;
+  /**
+   * Replaces one project row with a fresher copy the backend just handed back.
+   *
+   * The gap this closes: nothing else in this store ever updates a project's *link* columns
+   * (`github_owner`, `gitlab_project`, `ado_*`). They are written on the Rust side — by
+   * `auto_link_project`, which runs the first time a repository's pull requests are unfolded, and
+   * by the three connect modals — and until now the frontend never heard about it. So a repository
+   * that had just been linked went on looking unlinked here until the next `loadProjects`, which
+   * in practice meant until the app was restarted.
+   *
+   * That was invisible while nothing rendered off those columns. The Pipelines tab renders off
+   * them: it appears exactly when a project is linked to a connected host, so a stale row is a tab
+   * that does not show up after you connect. `auto_link_project` already returns the refreshed
+   * `Project` in its `Linked` result — it was simply being discarded.
+   *
+   * Local only; the row it takes has already been written.
+   */
+  patchProject: (project: Project) => void;
   moveProject: (id: string, fromWorkspaceId: string, toWorkspaceId: string) => Promise<void>;
   /** Moves one repository to a new position in its workspace's list. Optimistic: the row is where
    *  the user dropped it before the write goes out, because a list that snaps back for a moment
@@ -174,6 +192,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
         ),
       },
     }));
+  },
+
+  patchProject: (project) => {
+    set((s) => {
+      const current = s.projectsByWorkspace[project.workspace_id];
+      // A project whose workspace isn't loaded has no row to refresh, and inventing one here
+      // would put a repository in a list the user hasn't opened.
+      if (!current?.some((p) => p.id === project.id)) return {};
+      return {
+        projectsByWorkspace: {
+          ...s.projectsByWorkspace,
+          [project.workspace_id]: current.map((p) => (p.id === project.id ? project : p)),
+        },
+      };
+    });
   },
 
   moveProject: async (id, fromWorkspaceId, toWorkspaceId) => {

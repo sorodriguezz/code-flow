@@ -1733,3 +1733,89 @@ export interface RemoteDevice {
    */
   connected: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// CI/CD pipelines
+// ---------------------------------------------------------------------------
+
+/**
+ * The seven buckets every provider's status taxonomy is collapsed into, in `src-tauri/src/ci`.
+ *
+ * A closed union rather than a `string`, so the status map in `pipelineStatus.ts` is exhaustive by
+ * the compiler and a bucket added on the Rust side can't quietly render as a blank cell.
+ */
+export type PipelineStatus =
+  | "queued"
+  | "running"
+  | "success"
+  | "warning"
+  | "failed"
+  | "cancelled"
+  | "skipped";
+
+/** One execution: a GitHub workflow run, a GitLab pipeline, an Azure build. */
+export interface PipelineRun {
+  provider: VcsProvider;
+  /** The host's own id, as a string — the three providers don't share an id space. */
+  id: string;
+  /** The number a human sees, when the host publishes one. */
+  number: number | null;
+  name: string;
+  status: PipelineStatus;
+  /** What the provider actually called it, for the tooltip. */
+  raw_status: string;
+  branch: string;
+  commit_sha: string;
+  commit_title: string | null;
+  actor: string | null;
+  event: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  web_url: string;
+  /**
+   * Repo-relative path of the workflow file, GitHub only.
+   *
+   * The graph's columns come from here for GitHub and only for GitHub: its jobs endpoint returns
+   * no dependency information at all, so the `needs:` are read out of this file in the working
+   * copy. See `pipelineGraph.ts`.
+   */
+  definition_path: string | null;
+}
+
+/** One unit inside a run — and the unit that has a log. There is no step level; see `ci/mod.rs`. */
+export interface PipelineJob {
+  provider: VcsProvider;
+  run_id: string;
+  id: string;
+  name: string;
+  /** The graph column the provider itself puts this job in. `null` for GitHub. */
+  stage: string | null;
+  status: PipelineStatus;
+  raw_status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  web_url: string;
+  /** The extra identifier Azure needs to address a log; `null` everywhere else. */
+  log_ref: string | null;
+}
+
+export interface PipelineRunDetail {
+  run: PipelineRun;
+  jobs: PipelineJob[];
+}
+
+export interface JobLog {
+  /** As the host served it: ANSI intact, markers intact. The pane does the cleaning. */
+  text: string;
+  /** Whether the 5 MB read cap cut it short — announced in the UI, never left implicit. */
+  truncated: boolean;
+  total_bytes: number;
+}
+
+/** The authoritative answer to "should this repository have a Pipelines tab, and to what host?" */
+export interface PipelineAvailability {
+  provider: VcsProvider | null;
+  connected: boolean;
+  host: string | null;
+}

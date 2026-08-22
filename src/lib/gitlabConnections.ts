@@ -1,4 +1,5 @@
 import { getSetting, setSetting } from "./tauri/commands";
+import { useVcsConnectionsStore } from "../state/vcsConnectionsStore";
 import type { GitlabConnection } from "../types/domain";
 
 // One list of GitLab connections (gitlab.com and/or self-managed instances) persisted as a single
@@ -28,6 +29,10 @@ export async function loadGitlabConnections(): Promise<GitlabConnection[]> {
 
 export async function saveGitlabConnections(connections: GitlabConnection[]): Promise<void> {
   await setSetting(KEY, JSON.stringify(connections));
+  // The Pipelines tab is drawn from this list, so a save that nobody hears about is a tab that
+  // does not appear until the next launch. Notified here rather than at the six call sites
+  // (three settings forms, add and remove in each) because this is the one place they share.
+  await useVcsConnectionsStore.getState().refresh();
 }
 
 /**

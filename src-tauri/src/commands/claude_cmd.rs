@@ -104,6 +104,13 @@ pub(crate) enum AiTask {
     /// prose someone wants on a different engine than their code: a local model for a rough
     /// outline, a large one for something that has to read well.
     Notes,
+    /// Explaining why a CI pipeline broke. Reads the repository — that is the whole point of it,
+    /// since the question is what the log means *in this codebase* — so it needs an engine with
+    /// tools, like [`AiTask::StoryVerify`]. Its own route rather than [`AiTask::Analyze`]'s, which
+    /// is the closest relative: that one is handed a diff and answers about the diff, this one is
+    /// handed a log and has to go looking. A team that runs the cheap engine over its working copy
+    /// routinely wants the expensive one for a build that has been red for an hour.
+    Pipeline,
 }
 
 impl AiTask {
@@ -113,7 +120,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 15] = [
+    pub(crate) const ALL: [AiTask; 16] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -129,6 +136,7 @@ impl AiTask {
         AiTask::DbQuery,
         AiTask::Notes,
         AiTask::Diagram,
+        AiTask::Pipeline,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -151,6 +159,7 @@ impl AiTask {
             AiTask::DbQuery => "db_query",
             AiTask::Notes => "notes",
             AiTask::Diagram => "diagram",
+            AiTask::Pipeline => "pipeline",
         }
     }
 }

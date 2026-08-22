@@ -8,6 +8,7 @@ mod ai_runs;
 mod ai_usage;
 mod backup;
 mod chain_memory;
+mod ci;
 mod boards;
 mod claude;
 mod cline;
@@ -567,6 +568,11 @@ pub fn run() {
             commands::ado_cmd::unlink_project,
             commands::ado_cmd::open_repo_in_browser,
             commands::ado_cmd::list_pull_requests,
+            commands::ci_cmd::pipeline_availability,
+            commands::ci_cmd::list_pipeline_runs,
+            commands::ci_cmd::pipeline_run_detail,
+            commands::ci_cmd::fetch_pipeline_job_log,
+            commands::ci_cmd::analyze_pipeline_failure,
             commands::ado_cmd::resolve_pr_link,
             commands::ado_cmd::review_pr_from_link,
             commands::ado_cmd::post_pr_link_review_comment,

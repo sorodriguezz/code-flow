@@ -1,4 +1,5 @@
 import { getAdoPat, getSetting, setSetting } from "./tauri/commands";
+import { useVcsConnectionsStore } from "../state/vcsConnectionsStore";
 import type { AdoConnection } from "../types/domain";
 
 // The list of connected Azure DevOps organizations, persisted as a single app-setting JSON
@@ -40,8 +41,37 @@ export async function loadAdoConnections(): Promise<AdoConnection[]> {
   return legacyProbe;
 }
 
+/**
+ * The same list, without the keychain probe.
+ *
+ * `loadAdoConnections` reads the keychain on its legacy path, which is fine where it has always
+ * run — inside a section the user unfolded. It is not fine at startup: `vcsConnectionsStore`
+ * refreshes in the boot batch, and on macOS with an ad-hoc signature that turns into a password
+ * dialog every single launch for anyone who upgraded from the pre-multi-org version.
+ *
+ * Settings-only also makes the frontend agree with the backend, which is what actually decides:
+ * `ado_connected_orgs` reads the same two settings and never checks that the PAT is still there.
+ */
+export async function loadAdoConnectionsFromSettings(): Promise<AdoConnection[]> {
+  const raw = await getSetting(KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((c): c is AdoConnection => c && typeof c.org === "string");
+    } catch {
+      /* fall through to legacy */
+    }
+  }
+  const legacyOrg = await getSetting(LEGACY_ORG_KEY);
+  return legacyOrg ? [{ org: legacyOrg }] : [];
+}
+
 export async function saveAdoConnections(connections: AdoConnection[]): Promise<void> {
   await setSetting(KEY, JSON.stringify(connections));
+  // The Pipelines tab is drawn from this list, so a save that nobody hears about is a tab that
+  // does not appear until the next launch. Notified here rather than at the six call sites
+  // (three settings forms, add and remove in each) because this is the one place they share.
+  await useVcsConnectionsStore.getState().refresh();
 }
 
 // Accepts a bare org name or a pasted `https://dev.azure.com/<org>` /

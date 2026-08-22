@@ -37,6 +37,7 @@ import {
   useHoldReorder,
   type HoldReorder,
 } from "../../lib/holdReorder";
+import { useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
@@ -708,7 +709,15 @@ function PullRequestsSection({ project }: { project: Project }) {
     try {
       const result = await autoLinkProject(project.id);
       if (cancelledRef.current) return;
-      if (result.status === "Linked") setLinkState({ status: "linked" });
+      if (result.status === "Linked") {
+        setLinkState({ status: "linked" });
+        // The refreshed row, not just the flag. `auto_link_project` has written this project's
+        // link columns in the database and hands the updated `Project` straight back — and until
+        // now it was thrown away, so the copy in `workspaceStore` went on saying "not linked"
+        // until the next full `loadProjects`. That was invisible while nothing rendered off those
+        // columns; the Pipelines tab does, so a discarded row here is a tab that never appears.
+        useWorkspaceStore.getState().patchProject(result.project);
+      }
       else if (result.status === "NeedsToken")
         setLinkState({ status: "needsToken", provider: result.provider, identifier: result.identifier });
       else setLinkState({ status: "notDetected" });
@@ -768,6 +777,14 @@ function PullRequestsSection({ project }: { project: Project }) {
   const onConnected = () => {
     setLinkState({ status: "linked" });
     void loadPullRequests(project.id);
+    // A credential has just been saved, so the connection lists have changed — and the Pipelines
+    // tab is drawn from them. Without this it would not appear until the next launch.
+    void useVcsConnectionsStore.getState().refresh();
+    // And the link columns have changed too: the connect modals call `linkProject*` before this
+    // runs. Re-reading the workspace's projects is the cheapest way to pick that up here, since
+    // the modals don't hand back the updated row the way `auto_link_project` does.
+    const workspaceId = project.workspace_id;
+    void useWorkspaceStore.getState().loadProjects(workspaceId);
   };
 
   // The "planet" shortcut — open this repo's home page on its host (GitHub / Azure DevOps) in

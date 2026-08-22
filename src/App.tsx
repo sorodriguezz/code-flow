@@ -23,6 +23,7 @@ import { TourOverlay } from "./components/tour/TourOverlay";
 import { PaletteSkeleton, SettingsSkeleton, ViewSkeleton } from "./components/common/ViewSkeleton";
 import { useThemeStore } from "./state/themeStore";
 import { useUiStore, type MainView } from "./state/uiStore";
+import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectionsStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
@@ -87,6 +88,9 @@ import { DESKTOP_ORIGIN, onAppForeground, onRepoFsChanged, onStateInvalidate } f
  *     buy a skeleton flash on every launch.
  */
 const EditorView = lazy(() => import("./components/editor/EditorView").then((m) => ({ default: m.EditorView })));
+const PipelinesView = lazy(() =>
+  import("./components/pipelines/PipelinesView").then((m) => ({ default: m.PipelinesView })),
+);
 const ApiView = lazy(() => import("./components/api/ApiView").then((m) => ({ default: m.ApiView })));
 const AgentsView = lazy(() => import("./components/agents/AgentsView").then((m) => ({ default: m.AgentsView })));
 const StoriesView = lazy(() => import("./components/stories/StoriesView").then((m) => ({ default: m.StoriesView })));
@@ -234,6 +238,10 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "graph", render: () => <GraphView /> },
   { id: "changes", render: () => <ChangesPanel /> },
   { id: "editor", render: () => <EditorView /> },
+  // Repository-scoped like the three above it: a run belongs to a repo, and clicking a different
+  // repository reloads everything here. The tab that opens it is conditional — see `TabBar` — but
+  // membership of this list is not, because the guard below has to be able to leave it.
+  { id: "pipelines", render: () => <PipelinesView /> },
 ];
 
 /** Views that aren't about a repository, so the "no project open" empty state must not swallow
@@ -264,12 +272,30 @@ function MainContent() {
   const activeView = useUiStore((s) => s.activeView);
   const project = useWorkspaceStore((s) => s.activeProject());
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const connections = useVcsConnectionsStore();
   const [visited, setVisited] = useState<Set<MainView>>(new Set());
   const t = useT();
 
   useEffect(() => {
     setVisited((prev) => (prev.has(activeView) ? prev : new Set(prev).add(activeView)));
   }, [activeView]);
+
+  /**
+   * The way out of a tab that stopped existing.
+   *
+   * Pipelines is the app's first conditional view: click a repository that isn't linked to a
+   * connected host and its tab is gone, but `activeView` still says `"pipelines"` — which would
+   * leave the window showing a view with no tab lit and no way back except guessing.
+   *
+   * Written as an effect over *state* rather than as a guard inside `setActiveView`, and that
+   * distinction is the point: `lib/tour/stage.ts` sets `activeView` with `useUiStore.setState`
+   * directly, bypassing every action on the store. A guard in the action would not cover the tour;
+   * this does, because it only reads where we ended up.
+   */
+  const pipelinesOpen = pipelinesAvailable(project, connections);
+  useEffect(() => {
+    if (activeView === "pipelines" && !pipelinesOpen) useUiStore.getState().setActiveView("graph");
+  }, [activeView, pipelinesOpen]);
 
   const workspaceViewOpen =
     workspaceId !== null && WORKSPACE_VIEWS.some((v) => v.id === activeView);
@@ -381,6 +407,10 @@ export default function App() {
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
         startWindowBoundsTracking(),
+        // Which VCS hosts are connected. In this batch because the Pipelines tab appears and
+        // disappears based on the answer, and a tab that shows up a second after the window does
+        // reads as a glitch. Three `get_setting` reads against the local database.
+        useVcsConnectionsStore.getState().refresh(),
       ]);
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
       // Reads whether the guided tour has already been run, and — if it hasn't — arms the
