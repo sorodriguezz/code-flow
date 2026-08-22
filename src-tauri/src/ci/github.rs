@@ -146,26 +146,13 @@ struct RawJob {
     completed_at: Option<String>,
     #[serde(rename = "html_url", default)]
     html_url: Option<String>,
-    #[serde(default)]
-    steps: Vec<RawStep>,
 }
 
-/// A step, reduced to the two fields anything here reads.
-///
-/// The step's `name` and `number` are deliberately left on the wire. [`PipelineJob`] has no step
-/// level — `ci::mod` states why: GitLab has no steps at all and Azure hangs the log off a timeline
-/// record rather than off a job, so a step tier would be a GitHub-only shape the other two clients
-/// could not fill. Deserializing a field nothing reads would be a promise this module does not
-/// keep. What the steps *are* used for is [`has_soft_failures`], which needs only their outcome.
-#[derive(Deserialize)]
-struct RawStep {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    conclusion: Option<String>,
-}
+/// **There is deliberately no `steps` here any more.** [`PipelineJob`] has no step level —
+/// `ci::mod` states why: GitLab has no steps at all and Azure hangs the log off a timeline record
+/// rather than off a job — and the one thing that used to read them, an inference from skipped
+/// steps, is gone. See [`has_soft_failures`]. Deserializing a field nothing reads would be a
+/// promise this module does not keep, and the jobs endpoint sends a step array per job.
 
 // ---------------------------------------------------------------------------
 // Status
@@ -248,65 +235,31 @@ fn raw_status(status: &str, conclusion: Option<&str>) -> String {
 /// Whether the jobs say the run went less cleanly than the run itself admits.
 ///
 /// GitHub reports a workflow run as `success` when nothing in it *failed*, which is not the same
-/// as everything in it having run. Two shapes hide under a green run:
+/// as everything in it having gone to plan. The gap is a job that concluded `neutral` or
+/// `action_required` — the second in particular means a deployment is sitting there waiting for a
+/// human: the run is over, the work is not — and neither of those makes the run itself anything
+/// but green.
 ///
-/// 1. A job that concluded `neutral` or `action_required`. `action_required` in particular means a
-///    deployment is sitting there waiting for a human — the run is over, the work is not.
-/// 2. A job whose steps did not all execute.
+/// **The rule is exactly "some job is amber", and that is the point.** This used to also infer a
+/// warning from a job's *steps*: a step concluding `skipped` with a step that really ran after it
+/// was read as "something in the middle was bypassed and the job carried on regardless". The
+/// inference is unsound, because the API gives no reason for a skip and by far the most common
+/// reason is an ordinary `if:` — a matrix build whose signing step is `if: matrix.os ==
+/// 'macos-latest'` skips it on Windows, runs everything after it, and was reported as a run with
+/// warnings on every single green release.
 ///
-/// The second one needs a narrower rule than it first looks like it does. `if: failure()` and
-/// `if: cancelled()` cleanup steps are skipped on **every** healthy run, so "any skipped step"
-/// would paint essentially every successful build amber and the colour would stop meaning
-/// anything. So a skipped step only counts when a step that *did* run comes after it: something
-/// in the middle of the job was bypassed and the job carried on regardless. A trailing block of
-/// skipped conditionals — the ubiquitous pattern — is left alone.
+/// It also broke the property that makes an amber run *readable*: the run turned amber and not one
+/// job in it did, so the panel showed a warning triangle over six green cards and there was
+/// nowhere to click to find out why. A verdict you cannot trace to something on screen is a
+/// verdict the reader can only distrust. Both conclusions below map to `WARNING` for the job as
+/// well (see [`bucket_status`]), so an amber run now always contains an amber job.
 ///
-/// A job with a step still in flight is not judged at all; the run is not over from this
-/// function's point of view and the next poll will ask again.
+/// GitHub's own *annotations* — the deprecation notices it lists under a run — are a different
+/// thing entirely and are not read here: they live on the check-runs endpoint, one request per
+/// job, and a green run with three "Node.js 20 is deprecated" notices is still a green run.
 fn has_soft_failures(jobs: &[RawJob]) -> bool {
-    jobs.iter().any(|job| {
-        matches!(job.conclusion.as_deref(), Some("neutral") | Some("action_required"))
-            || skipped_mid_job(job)
-    })
-}
-
-/// Steps the runner adds itself, rather than steps the workflow declared.
-///
-/// They always come after the user's, and they always conclude `success`, so they cannot be
-/// evidence that the job carried on past a skip. `Set up job` opens every job, `Post <action>` and
-/// `Complete job` close it. A workflow that genuinely names a step "Post something" gets a false
-/// negative — green stays green — which is the safe direction to be wrong in.
-fn is_runner_step(name: &str) -> bool {
-    let name = name.trim();
-    name == "Set up job" || name == "Complete job" || name.starts_with("Post ")
-}
-
-/// A job that skipped a step and then kept going — see [`has_soft_failures`].
-fn skipped_mid_job(job: &RawJob) -> bool {
-    if job.status != "completed" {
-        return false;
-    }
-    let mut seen_skip = false;
-    for step in &job.steps {
-        match step.conclusion.as_deref() {
-            // Still moving: refuse to draw a conclusion from a half-finished job.
-            None | Some("") => {
-                if step.status != "completed" {
-                    return false;
-                }
-            }
-            Some("skipped") => seen_skip = true,
-            // A step that reached a real verdict after a skip is the signal — unless the runner
-            // wrote it. This is the difference between the rule as designed and the rule as it
-            // behaved: Actions appends `Post <action>` and `Complete job` to the end of *every*
-            // job, always `success`, so the trailing block of skipped `if: failure()` cleanup that
-            // this function is documented as leaving alone was in fact followed by a real verdict
-            // every single time. Nearly every green run came back amber.
-            Some(_) if seen_skip && !is_runner_step(&step.name) => return true,
-            Some(_) => {}
-        }
-    }
-    false
+    jobs.iter()
+        .any(|job| matches!(job.conclusion.as_deref(), Some("neutral") | Some("action_required")))
 }
 
 /// Upgrades a `SUCCESS` run to `WARNING` when its jobs say it should be — see
@@ -587,19 +540,7 @@ pub fn web_run_url(host: &str, owner: &str, repo: &str, run_id: &str) -> String 
 mod tests {
     use super::*;
 
-    fn step(status: &str, conclusion: Option<&str>) -> RawStep {
-        named_step("", status, conclusion)
-    }
-
-    fn named_step(name: &str, status: &str, conclusion: Option<&str>) -> RawStep {
-        RawStep {
-            name: name.to_string(),
-            status: status.to_string(),
-            conclusion: conclusion.map(str::to_string),
-        }
-    }
-
-    fn job(conclusion: Option<&str>, steps: Vec<RawStep>) -> RawJob {
+    fn job(conclusion: Option<&str>) -> RawJob {
         RawJob {
             id: 1,
             name: "build".to_string(),
@@ -608,7 +549,6 @@ mod tests {
             started_at: None,
             completed_at: None,
             html_url: None,
-            steps,
         }
     }
 
@@ -798,10 +738,10 @@ mod tests {
             definition_path: None,
         };
 
-        refine_run_status(&mut run, &[job(Some("success"), vec![])]);
+        refine_run_status(&mut run, &[job(Some("success"))]);
         assert_eq!(run.status, status::SUCCESS, "nothing to correct");
 
-        refine_run_status(&mut run, &[job(Some("success"), vec![]), job(Some("neutral"), vec![])]);
+        refine_run_status(&mut run, &[job(Some("success")), job(Some("neutral"))]);
         assert_eq!(run.status, status::WARNING);
         // The provider's own word is untouched — the tooltip must still match GitHub's UI.
         assert_eq!(run.raw_status, "success");
@@ -809,61 +749,28 @@ mod tests {
 
     #[test]
     fn a_deployment_waiting_on_a_human_is_a_warning_too() {
-        assert!(has_soft_failures(&[job(Some("action_required"), vec![])]));
-        assert!(!has_soft_failures(&[job(Some("success"), vec![])]));
+        assert!(has_soft_failures(&[job(Some("action_required"))]));
+        assert!(!has_soft_failures(&[job(Some("success"))]));
         // A failed job already made the run FAILED; `refine_run_status` never sees it, and this
         // function has no business second-guessing it either.
-        assert!(!has_soft_failures(&[job(Some("failure"), vec![])]));
+        assert!(!has_soft_failures(&[job(Some("failure"))]));
     }
 
-    /// The narrowing that keeps `WARNING` meaning something: `if: failure()` cleanup steps are
-    /// skipped on every healthy run, so a trailing skip is not a signal.
+    /// The property the whole rule now rests on, asserted rather than assumed: a run can only be
+    /// upgraded to amber by a job that is *itself* amber, so the reader always has something to
+    /// click. See [`has_soft_failures`] for the inference this replaced.
     #[test]
-    fn trailing_conditional_steps_do_not_make_a_run_amber() {
-        let healthy = job(
-            Some("success"),
-            vec![
-                step("completed", Some("success")),
-                step("completed", Some("success")),
-                step("completed", Some("skipped")), // if: failure()
-                step("completed", Some("skipped")), // if: cancelled()
-            ],
-        );
-        assert!(!has_soft_failures(&[healthy]));
-    }
-
-    #[test]
-    fn a_step_skipped_mid_job_is_a_signal() {
-        let bypassed = job(
-            Some("success"),
-            vec![
-                step("completed", Some("success")),
-                step("completed", Some("skipped")), // something was bypassed...
-                step("completed", Some("success")), // ...and the job carried on anyway
-            ],
-        );
-        assert!(has_soft_failures(&[bypassed]));
-    }
-
-    #[test]
-    fn a_job_still_running_is_not_judged() {
-        let mut moving = job(
-            Some("success"),
-            vec![step("completed", Some("skipped")), step("in_progress", None)],
-        );
-        moving.status = "in_progress".to_string();
-        assert!(!has_soft_failures(&[moving]));
-
-        // Marked completed but carrying a step that never reached a verdict: still no judgement.
-        let ragged = job(
-            Some("success"),
-            vec![
-                step("completed", Some("skipped")),
-                step("in_progress", None),
-                step("completed", Some("success")),
-            ],
-        );
-        assert!(!has_soft_failures(&[ragged]));
+    fn an_amber_run_always_contains_an_amber_job() {
+        for conclusion in ["neutral", "action_required", "success", "skipped", "cancelled"] {
+            let jobs = [job(Some("success")), job(Some(conclusion))];
+            if has_soft_failures(&jobs) {
+                assert!(
+                    jobs.iter().any(|j| bucket_status(&j.status, j.conclusion.as_deref())
+                        == status::WARNING),
+                    "a run upgraded to WARNING by `{conclusion}` shows no amber job"
+                );
+            }
+        }
     }
 
     #[test]
@@ -881,7 +788,6 @@ mod tests {
                 started_at: Some("2026-08-21T17:00:11Z".to_string()),
                 completed_at: Some("2026-08-21T17:02:00Z".to_string()),
                 html_url: None,
-                steps: vec![],
             },
         );
         assert_eq!(mapped.stage, None);
@@ -890,6 +796,15 @@ mod tests {
         assert_eq!(mapped.raw_status, "timed_out");
         assert_eq!(mapped.run_id, "7");
         assert_eq!(mapped.web_url, "https://github.com/acme/app/actions/runs/7/job/99");
+    }
+
+    /// Unencoded, `?branch=release/2.0` reaches GitHub as a branch named `release` and comes back
+    /// as an empty list — which reads like "no runs" rather than like a bug.
+    #[test]
+    fn a_branch_with_a_slash_survives_the_query_string() {
+        assert_eq!(encode("release/2.0"), "release%2F2%2E0");
+        assert_eq!(encode("feature/joe's branch"), "feature%2Fjoe%27s%20branch");
+        assert_eq!(encode("main"), "main");
     }
 
     #[test]
@@ -907,50 +822,6 @@ mod tests {
             web_run_url("  ", "acme", "app", "7"),
             "https://github.com/acme/app/actions/runs/7"
         );
-    }
-
-    /// Unencoded, `?branch=release/2.0` reaches GitHub as a branch named `release` and comes back
-    /// as an empty list — which reads like "no runs" rather than like a bug.
-    #[test]
-    fn a_branch_with_a_slash_survives_the_query_string() {
-        assert_eq!(encode("release/2.0"), "release%2F2%2E0");
-        assert_eq!(encode("feature/joe's branch"), "feature%2Fjoe%27s%20branch");
-        assert_eq!(encode("main"), "main");
-    }
-    /// The regression this rule was quietly producing on nearly every green build.
-    ///
-    /// Actions appends its own steps to the end of every job — `Post <action>` for each action that
-    /// registered cleanup, then `Complete job` — and they always conclude `success`. So the
-    /// trailing block of skipped `if: failure()` steps that `has_soft_failures` is documented as
-    /// leaving alone was, in fact, always followed by a step with a real verdict.
-    #[test]
-    fn the_runners_own_trailing_steps_do_not_turn_a_green_run_amber() {
-        let green = job(
-            Some("success"),
-            vec![
-                named_step("Set up job", "completed", Some("success")),
-                named_step("Run actions/checkout@v4", "completed", Some("success")),
-                named_step("pnpm build", "completed", Some("success")),
-                // The ubiquitous `if: failure()` cleanup, skipped because nothing failed.
-                named_step("Upload logs", "completed", Some("skipped")),
-                // …and what the runner writes after it, every time.
-                named_step("Post Run actions/checkout@v4", "completed", Some("success")),
-                named_step("Complete job", "completed", Some("success")),
-            ],
-        );
-        assert!(!skipped_mid_job(&green), "un build verde no puede leerse como 'con avisos'");
-        assert!(!has_soft_failures(std::slice::from_ref(&green)));
-
-        // And the rule it exists for still fires: a skip with real work after it.
-        let amber = job(
-            Some("success"),
-            vec![
-                named_step("run tests", "completed", Some("skipped")),
-                named_step("publish", "completed", Some("success")),
-                named_step("Complete job", "completed", Some("success")),
-            ],
-        );
-        assert!(skipped_mid_job(&amber));
     }
 
 }

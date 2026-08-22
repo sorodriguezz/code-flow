@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { ExternalLink, GitBranch, RefreshCw } from "lucide-react";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { riseDelay } from "../../lib/rise";
 import { useCiStore } from "../../state/ciStore";
 import { useT } from "../../state/languageStore";
+import { Select, type SelectOption } from "../common/Select";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Tooltip } from "../common/Tooltip";
 import { PIPELINE_STATUS, STATUS_ORDER, STATUS_TOKEN, elapsed, formatDuration, statusOf } from "./pipelineStatus";
@@ -128,6 +129,7 @@ export function RunList({ projectId, currentBranch }: { projectId: string; curre
   const selection = useCiStore((s) => s.selection);
   const detailByRun = useCiStore((s) => s.detailByRun);
   const branchFilter = useCiStore((s) => s.branchFilterByProject[projectId] ?? null);
+  const branchesSeen = useCiStore((s) => s.branchesSeenByProject[projectId]);
   const statusFilter = useCiStore((s) => s.statusFilter);
   const setBranchFilter = useCiStore((s) => s.setBranchFilter);
   const setStatusFilter = useCiStore((s) => s.setStatusFilter);
@@ -147,6 +149,37 @@ export function RunList({ projectId, currentBranch }: { projectId: string; curre
     const list = runs ?? [];
     return statusFilter ? list.filter((run) => run.status === statusFilter) : list;
   }, [runs, statusFilter]);
+
+  /**
+   * Every branch that has run something here, with the one you are standing on lifted to the top.
+   *
+   * This used to be two chips: "all branches", and the checked-out branch. Which is the whole
+   * story in a repository where CI only ever runs on `main`, and useless in one where it doesn't —
+   * a release branch's runs were *in* the list, mixed in with everything else and identifiable
+   * only by reading the second line of each row, and there was no way to ask for just them. The
+   * options come from `branchesSeenByProject`, so this lists branches that have actually built
+   * rather than every ref in the repository, most of which never will.
+   *
+   * The checked-out branch keeps its glyph and its place at the top even when a dozen others exist:
+   * it is the one branch whose runs are about the code in the editor behind this panel.
+   */
+  const branchOptions = useMemo<SelectOption[]>(() => {
+    const options: SelectOption[] = [{ value: "", label: t("pipelines.allBranches") }];
+    const taken = new Set([""]);
+    for (const branch of [currentBranch, branchFilter]) {
+      if (branch && !taken.has(branch)) {
+        taken.add(branch);
+        options.push({ value: branch, label: branch, icon: branch === currentBranch ? GitBranch : undefined });
+      }
+    }
+    for (const branch of branchesSeen ?? []) {
+      if (!taken.has(branch)) {
+        taken.add(branch);
+        options.push({ value: branch, label: branch });
+      }
+    }
+    return options;
+  }, [branchesSeen, currentBranch, branchFilter, t]);
 
   return (
     <>
@@ -176,18 +209,16 @@ export function RunList({ projectId, currentBranch }: { projectId: string; curre
         )}
       </div>
 
-      <div className="flex shrink-0 flex-wrap gap-1 border-b border-[var(--cf-border)] px-2 py-1.5">
-        <FilterChip active={branchFilter === null} onClick={() => setBranchFilter(projectId, null)}>
-          {t("pipelines.allBranches")}
-        </FilterChip>
-        {currentBranch && (
-          <FilterChip
-            active={branchFilter === currentBranch}
-            onClick={() => setBranchFilter(projectId, branchFilter === currentBranch ? null : currentBranch)}
-          >
-            {currentBranch}
-          </FilterChip>
-        )}
+      <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1.5">
+        <div className="min-w-[124px] flex-1">
+          <Select
+            size="compact"
+            value={branchFilter ?? ""}
+            onChange={(value) => setBranchFilter(projectId, value === "" ? null : value)}
+            options={branchOptions}
+            ariaLabel={t("pipelines.branchFilter")}
+          />
+        </div>
         <FilterChip
           active={statusFilter === "failed"}
           onClick={() => setStatusFilter(statusFilter === "failed" ? null : "failed")}
@@ -244,7 +275,10 @@ function FilterChip({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`max-w-[130px] truncate rounded-full border px-2 py-px text-[11px] transition-colors ${
+      // `py-1` and not `py-px`: this chip now shares its row with the branch `Select`, whose
+      // `compact` size is the same 11px text over the same vertical padding. A one-pixel pill next
+      // to a 26px trigger read as two controls that had wandered in from different screens.
+      className={`max-w-[130px] shrink-0 truncate rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
         active
           ? "border-[color-mix(in_oklab,var(--cf-accent)_30%,transparent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
           : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"

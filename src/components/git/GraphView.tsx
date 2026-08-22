@@ -6,10 +6,11 @@ import { confirmAction } from "../../state/confirmStore";
 import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
-import { Cloud, GitBranch, History, RotateCcw, Tag, X, type LucideIcon } from "lucide-react";
+import { ChevronDown, ChevronRight, Cloud, GitBranch, History, RotateCcw, Tag, X, type LucideIcon } from "lucide-react";
 import { useT } from "../../state/languageStore";
-import { SkeletonRows } from "../common/Skeleton";
-import type { CommitRef, RefKind } from "../../types/domain";
+import { Skeleton, SkeletonRows } from "../common/Skeleton";
+import { fileStatusColor, fileStatusLabelKey, fileStatusLetter } from "../../lib/fileStatus";
+import type { CommitRef, FileDiffInfo, RefKind } from "../../types/domain";
 import { useFrameThrottle } from "../../lib/frameThrottle";
 
 const ROW_HEIGHT = 30;
@@ -20,6 +21,20 @@ const DIFF_MAX = 900;
 const COL_MIN = 50;
 const COL_MAX = 600;
 const COLUMN_GAP = 8; // matches Tailwind gap-2
+
+/** The disclosure triangle's column, left of the hash. Fixed, and part of `fixedColumnsWidth`, so
+ *  the lane graph's offset stays a subtraction rather than a measurement. */
+const CHEVRON_WIDTH = 14;
+/** One file inside an expanded commit — shorter than a commit row, because it carries one line of
+ *  monospace and no chips. */
+const FILE_ROW_HEIGHT = 22;
+/** Breathing room above and below an expanded commit's file list, so the first path doesn't sit
+ *  flush against the row that owns it. */
+const FILE_LIST_PAD = 4;
+/** Where a file row's status letter starts: one step further in than the hash above it (`px-3` +
+ *  the chevron + its gap), which is what makes the list read as *belonging to* that commit rather
+ *  than as more rows in the same table. */
+const FILE_INDENT = 12 + CHEVRON_WIDTH + COLUMN_GAP + 14;
 
 /** Rows kept rendered above and below the viewport, so a fast scroll never lands on empty space.
  *  Same idea, same number as the result grid's — see `db/ResultGrid`. */
@@ -121,6 +136,78 @@ function RefChip({ commitRef, lane, isCurrent }: { commitRef: CommitRef; lane: s
   );
 }
 
+/**
+ * One changed path inside an expanded commit, as `git status --short` writes it: a letter, then the
+ * file.
+ *
+ * The letter carries the status on its own — colour *and* glyph, `fileStatusColor` and
+ * `fileStatusLetter` — rather than the pill of translated text the diff panel puts above each file.
+ * That pill is right where one file is the subject and has a header to itself; here the path is the
+ * subject and there can be four hundred of them, and four hundred "Modificado" pills would push
+ * every filename they annotate past the right edge. The word is still there, in the `title`.
+ *
+ * A rename shows both halves with an arrow between them, because "R" beside the new path alone is
+ * the one status you cannot act on: it tells you a file moved and hides where it moved *from*.
+ */
+function CommitFileRow({
+  file,
+  top,
+  width,
+  selected,
+  onSelect,
+  t,
+}: {
+  file: FileDiffInfo;
+  top: number;
+  /**
+   * Where the path stops truncating — the same place the message column above it stops.
+   *
+   * Without it the row ran the full width of the table and a deep path went straight on under the
+   * lane graph, which is a strip this list has no business drawing into: the lanes are painted over
+   * the rows (`z-[1]`, so selection can't erase them), so the two would simply overlap.
+   */
+  width: string;
+  selected: boolean;
+  /** Opens this file in the diff panel. Passed the path the backend can find it by — see the note
+   *  on `path` below. */
+  onSelect: (path: string) => void;
+  t: ReturnType<typeof useT>;
+}) {
+  // `new_path` first, `old_path` for a deletion. Either is enough: `get_commit_file_diff` matches
+  // a delta on whichever side names the path, which is what makes a deleted file openable at all.
+  const path = file.new_path ?? file.old_path ?? "";
+  const label =
+    file.status === "renamed" && file.old_path && file.new_path && file.old_path !== file.new_path
+      ? `${file.old_path} → ${file.new_path}`
+      : path;
+  const color = fileStatusColor(file.status);
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(path)}
+      aria-current={selected ? "page" : undefined}
+      title={`${t(fileStatusLabelKey(file.status))} — ${label}`}
+      style={{ position: "absolute", left: 0, top, width, height: FILE_ROW_HEIGHT, paddingLeft: FILE_INDENT }}
+      className={`flex items-center gap-2 rounded-[5px] text-left text-[12px] transition-colors ${
+        selected
+          ? "bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)]"
+          : "hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+      }`}
+    >
+      <span style={{ color }} className="w-3 shrink-0 text-center font-mono text-[11px] font-bold">
+        {fileStatusLetter(file.status)}
+      </span>
+      <span
+        className={`truncate font-mono ${
+          selected ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
+        }`}
+      >
+        {label}
+      </span>
+    </button>
+  );
+}
+
 /** Everything left of the diff panel: sticky column headers + the commit rows/graph SVG.
  * Memoized (and reading its own store slices rather than taking props) so dragging the diff
  * panel's resize handle — which only touches `graphDiffWidth` — doesn't force this
@@ -130,6 +217,13 @@ const CommitTable = memo(function CommitTable() {
   const commitsLoading = useRepoStore((s) => s.commitsLoading);
   const status = useRepoStore((s) => s.status);
   const selectedCommitId = useRepoStore((s) => s.selectedCommitId);
+  // The expanded row's file list, and the reason it costs nothing extra: selecting a commit already
+  // fetches its diff for the panel on the right, so the inline list is the *paths* out of a payload
+  // that is on its way regardless. No second command, no second round trip.
+  const commitDiff = useRepoStore((s) => s.commitDiff);
+  const commitDiffLoading = useRepoStore((s) => s.commitDiffLoading);
+  const selectedCommitPath = useRepoStore((s) => s.selectedCommitPath);
+  const selectCommitFile = useRepoStore((s) => s.selectCommitFile);
   const selectCommit = useRepoStore((s) => s.selectCommit);
   const undoCommit = useRepoStore((s) => s.undoCommit);
   const colHash = useLayoutStore((s) => s.sizes.graphColHash);
@@ -142,6 +236,39 @@ const CommitTable = memo(function CommitTable() {
   const t = useT();
 
   const layout = useMemo(() => computeGraphLayout(commits), [commits]);
+
+  /**
+   * Which row is open, and how much room its files take under it.
+   *
+   * **Expansion is selection.** There is deliberately no second piece of state for "which rows are
+   * open": the row you have selected is the row whose files are on screen, which is also the row
+   * whose diff is in the panel to the right, and clicking it again closes all three at once. One
+   * open row is also what keeps the geometry below a subtraction — see `rowTop`.
+   *
+   * `Math.max(1, …)` because the block always has *something* to say. Zero files is two different
+   * answers — the fetch is still out, or the commit really is empty (`--allow-empty`) — and both of
+   * them are a line of text, so reserving a row for it means the list doesn't jump by one row's
+   * height the moment the diff lands.
+   */
+  const expandedRow = useMemo(() => {
+    if (!selectedCommitId) return null;
+    const index = layout.rows.findIndex((r) => r.commit.id === selectedCommitId);
+    return index === -1 ? null : index;
+  }, [layout.rows, selectedCommitId]);
+  const fileCount = expandedRow === null ? 0 : Math.max(1, commitDiff.length);
+  const expandedHeight = expandedRow === null ? 0 : fileCount * FILE_ROW_HEIGHT + FILE_LIST_PAD * 2;
+  /** Top of the file block: immediately under the commit row that owns it. */
+  const blockTop = expandedRow === null ? 0 : (expandedRow + 1) * ROW_HEIGHT;
+  /**
+   * Where a row sits, once one of them has grown a list underneath it.
+   *
+   * Everything above the open row is exactly where it was; everything below is pushed down by the
+   * whole block. That is the entire cost of variable-height rows here, and it is why only one row
+   * may be open at a time: with two, this stops being an if and becomes a prefix sum, and the row
+   * lookup below stops being a division and becomes a binary search.
+   */
+  const rowTop = (row: number) =>
+    row * ROW_HEIGHT + (expandedRow !== null && row > expandedRow ? expandedHeight : 0);
   // From HEAD itself, not from whichever branch claims to be head: on a detached HEAD no branch
   // does, and deriving it from the branch list dropped the marker off the graph entirely just
   // when knowing where you are matters most.
@@ -151,10 +278,13 @@ const CommitTable = memo(function CommitTable() {
   const currentBranch = status?.is_detached ? null : (status?.current_branch ?? null);
 
   const svgWidth = layout.laneCount * LANE_WIDTH + 12;
-  const svgHeight = layout.rows.length * ROW_HEIGHT;
-  // Four fixed text columns (message is the fifth and takes the slack), and five `gap-2` seams:
-  // one between each pair of the six children, the last of them before the lane graph.
-  const fixedColumnsWidth = colHash + colDate + colAuthor + colRefs + COLUMN_GAP * 5;
+  /** Every row plus whatever the open one added — the scroll height, and the height the lane graph
+   *  has to span so an edge crossing the open row stretches over its files instead of stopping at
+   *  them. */
+  const contentHeight = layout.rows.length * ROW_HEIGHT + expandedHeight;
+  // The chevron, four fixed text columns (message is the fifth and takes the slack), and six
+  // `gap-2` seams: one between each pair of the seven children, the last of them before the graph.
+  const fixedColumnsWidth = CHEVRON_WIDTH + colHash + colDate + colAuthor + colRefs + COLUMN_GAP * 6;
 
   /**
    * Message takes whatever the other five columns and the lane graph don't.
@@ -224,12 +354,26 @@ const CommitTable = memo(function CommitTable() {
   // (switching to a repository with forty commits while parked at row 400) before the scroll event
   // that would correct the state. Without this the slice comes out empty and the graph reads as
   // broken for a frame.
-  const maxScrollTop = Math.max(0, layout.rows.length * ROW_HEIGHT - viewportHeight);
+  const maxScrollTop = Math.max(0, contentHeight - viewportHeight);
   const clampedScrollTop = Math.min(scrollTop, maxScrollTop);
-  const firstRow = Math.max(0, Math.floor(clampedScrollTop / ROW_HEIGHT) - OVERSCAN);
+  /**
+   * The inverse of `rowTop`: which row is under a given offset.
+   *
+   * Three cases rather than one division, and the middle one is the interesting one — every offset
+   * *inside* the open row's file block answers with the open row itself. That is what keeps the
+   * commit whose files you are reading mounted while you scroll through them: a block taller than
+   * the viewport would otherwise put its own header outside the window and unmount the row the
+   * files hang from.
+   */
+  const rowAtOffset = (y: number) => {
+    if (expandedRow === null || y < blockTop) return Math.floor(y / ROW_HEIGHT);
+    if (y < blockTop + expandedHeight) return expandedRow;
+    return Math.floor((y - expandedHeight) / ROW_HEIGHT);
+  };
+  const firstRow = Math.max(0, rowAtOffset(clampedScrollTop) - OVERSCAN);
   const lastRow = Math.min(
     layout.rows.length,
-    Math.ceil((clampedScrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN,
+    rowAtOffset(clampedScrollTop + viewportHeight) + 1 + OVERSCAN,
   );
   const visibleRows = useMemo(
     () => layout.rows.slice(firstRow, lastRow),
@@ -275,8 +419,26 @@ const CommitTable = memo(function CommitTable() {
   ];
 
   // Coordinates local to the graph SVG itself, which is offset past the text columns via `left`.
+  // `rowY` goes through `rowTop`, so an open row's files push the lanes below it down with the rows
+  // they belong to and the line into the parent simply grows longer across the gap — rather than
+  // the dots drifting off their rows the moment anything expands.
   const laneX = (lane: number) => lane * LANE_WIDTH + LANE_WIDTH / 2;
-  const rowY = (row: number) => row * ROW_HEIGHT + ROW_HEIGHT / 2;
+  const rowY = (row: number) => rowTop(row) + ROW_HEIGHT / 2;
+
+  /**
+   * The file block's own window, on the same principle as the rows'.
+   *
+   * A commit that touches four hundred files is a block nine thousand pixels tall, and expanding
+   * one used to be a fair description of "build four hundred rows nobody asked to see". The block
+   * keeps its full reserved height either way — only what is near the viewport is built. When the
+   * block is nowhere near, `lastFile` lands at or below `firstFile` and the slice is empty.
+   */
+  const fileListTop = blockTop + FILE_LIST_PAD;
+  const firstFile = Math.max(0, Math.floor((clampedScrollTop - fileListTop) / FILE_ROW_HEIGHT) - OVERSCAN);
+  const lastFile = Math.min(
+    commitDiff.length,
+    Math.ceil((clampedScrollTop + viewportHeight - fileListTop) / FILE_ROW_HEIGHT) + OVERSCAN,
+  );
 
   /** The fallback keeps the first paint honest, before the observer has run once. */
   const messageWidth = `var(--cf-graph-msg, ${colMessage}px)`;
@@ -296,6 +458,10 @@ const CommitTable = memo(function CommitTable() {
         className="sticky top-0 z-10 flex h-6 min-w-full items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[10px]"
         style={{ width: totalWidth, willChange: "transform", contain: "paint" }}
       >
+        {/* The chevron's column has no label — a header over a column of disclosure triangles names
+            nothing — but it has to exist here, or every heading sits fourteen pixels left of the
+            column it heads. */}
+        <div style={{ width: CHEVRON_WIDTH }} className="shrink-0" />
         {columns.map((col) => (
           <div
             key={col.key}
@@ -335,7 +501,7 @@ const CommitTable = memo(function CommitTable() {
           own commit dot on the way in. */}
       <div
         className="cf-rise relative min-w-full"
-        style={{ width: totalWidth, minHeight: svgHeight }}
+        style={{ width: totalWidth, minHeight: contentHeight }}
       >
         {/* Above the rows, which is not where it was.
             Both layers are absolutely positioned at `z-index: auto`, so they painted in DOM order —
@@ -351,7 +517,7 @@ const CommitTable = memo(function CommitTable() {
             the part of it this covers. */}
         <svg
           width={svgWidth}
-          height={svgHeight}
+          height={contentHeight}
           style={{ left: textColumnsWidth, top: 0 }}
           className="pointer-events-none absolute z-[1]"
         >
@@ -391,13 +557,38 @@ const CommitTable = memo(function CommitTable() {
             return (
               <div
                 key={r.commit.id}
-                // Absolutely placed at its own index rather than stacked in flow, because the rows
-                // either side of the window are not built at all — the parent already reserves the
-                // full `svgHeight`, so the scrollbar is the same length it has always been and the
-                // row lands under its own dot in the SVG layer above.
-                style={{ position: "absolute", left: 0, right: 0, top: r.row * ROW_HEIGHT, height: ROW_HEIGHT }}
+                // Absolutely placed at its own row offset rather than stacked in flow, because the
+                // rows either side of the window are not built at all — the parent already reserves
+                // the full `contentHeight`, so the scrollbar is the same length it has always been
+                // and the row lands under its own dot in the SVG layer above.
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  top: rowTop(r.row),
+                  height: ROW_HEIGHT,
+                  // The selected row is *outlined*, not just washed. The wash alone had to carry
+                  // both "this is the open commit" and "this is the row under the pointer", and on
+                  // the dark theme those two are a few percent of lightness apart; the ring says it
+                  // in a channel hover has no claim on. An inset shadow rather than a border,
+                  // because a border would be a pixel of layout and shift every column in the row
+                  // by it the moment you clicked.
+                  //
+                  // The fill is mixed from `--cf-accent` rather than taken from `--cf-accent-soft`
+                  // so that it agrees with the ring around it. On the light theme that changes
+                  // nothing worth seeing — `--cf-accent-soft` is the same 14% mix, against the
+                  // surface instead of against transparent. On the dark theme it is a hardcoded
+                  // navy: it happens to land on the *default* indigo and does not follow
+                  // `accentStore`, so a user on teal would have got a teal ring around a blue fill.
+                  ...(isSelected
+                    ? {
+                        background: "color-mix(in oklab, var(--cf-accent) 14%, transparent)",
+                        boxShadow: "inset 0 0 0 1px var(--cf-accent)",
+                      }
+                    : null),
+                }}
                 className={`group flex w-full items-center gap-2 px-3 text-[13px] ${
-                  isSelected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  isSelected ? "rounded-md" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                 }`}
               >
                 {/* The hit area is the row, not the text. It used to be exactly `textColumnsWidth`
@@ -410,8 +601,21 @@ const CommitTable = memo(function CommitTable() {
                 <button
                   onClick={() => selectCommit(isSelected ? null : r.commit.id)}
                   style={{ minWidth: textColumnsWidth }}
+                  // The row *is* the disclosure control, so it is the thing that has to announce
+                  // itself as one: the triangle beside the hash is a glyph inside this button, not a
+                  // second button with its own tab stop and its own 14px hit area next to a target
+                  // that already does the same job across the full width of the row.
+                  aria-expanded={isSelected}
                   className="flex h-full flex-1 items-center gap-2 text-left"
                 >
+                  <span
+                    style={{ width: CHEVRON_WIDTH }}
+                    className={`flex shrink-0 items-center justify-center ${
+                      isSelected ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+                    }`}
+                  >
+                    {isSelected ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  </span>
                   <span style={{ width: colHash }} className="shrink-0 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
                     {r.commit.short_id}
                   </span>
@@ -471,22 +675,79 @@ const CommitTable = memo(function CommitTable() {
             );
           })}
         </div>
+
+        {/* The open commit's files, in the gap `rowTop` opened for them.
+            A sibling of the rows rather than a child of the one it belongs to, because that row is
+            a fixed 30px box positioned by the same arithmetic as every other row, and nesting a
+            variable-height list inside it would make its height a measurement instead. */}
+        {expandedRow !== null && (
+          <div style={{ position: "absolute", left: 0, right: 0, top: blockTop, height: expandedHeight }}>
+            {commitDiffLoading ? (
+              <div
+                style={{ height: FILE_ROW_HEIGHT, marginTop: FILE_LIST_PAD, paddingLeft: FILE_INDENT }}
+                className="flex items-center"
+              >
+                <Skeleton className="h-3 w-48 rounded" />
+              </div>
+            ) : commitDiff.length === 0 ? (
+              // Reachable, and not a fallback for a slow fetch — `commitDiffLoading` above owns that
+              // case. This is `git commit --allow-empty`, and a merge that resolved to no change.
+              <div
+                style={{ height: FILE_ROW_HEIGHT, marginTop: FILE_LIST_PAD, paddingLeft: FILE_INDENT }}
+                className="flex items-center text-[12px] text-[var(--cf-text-muted)]"
+              >
+                {t("graph.noFilesChanged")}
+              </div>
+            ) : (
+              commitDiff.slice(firstFile, lastFile).map((file, i) => (
+                <CommitFileRow
+                  // Keyed by the path, not by the index in the slice: the slice's indices shift
+                  // under the window as you scroll, on the same reasoning as the edges' keys above.
+                  key={`${file.old_path ?? ""}>${file.new_path ?? ""}`}
+                  file={file}
+                  top={FILE_LIST_PAD + (firstFile + i) * FILE_ROW_HEIGHT}
+                  width={`calc(12px + ${textColumnsWidth})`}
+                  selected={(file.new_path ?? file.old_path) === selectedCommitPath}
+                  // Clicking the open file again closes the panel, the same toggle the commit row
+                  // itself has — otherwise the only way out of a diff is the panel's × button,
+                  // which is nowhere near the thing you clicked to get there.
+                  onSelect={(path) =>
+                    void selectCommitFile(path === selectedCommitPath ? null : path)
+                  }
+                  t={t}
+                />
+              ))
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
 });
 
+/**
+ * The whole screen: the commit table, and the diff of **one** file beside it.
+ *
+ * The panel used to open on the commit and show every file it touched, stacked. That is the view
+ * for "read this commit end to end" and the wrong one for every other question — a release commit
+ * put four hundred sticky headers in a 440px column and the file you wanted was somewhere in it.
+ * Now the commit expands into its file list in the table, and the panel opens on the file you
+ * click. One file, full context, nothing to scroll past.
+ */
 export function GraphView() {
   const commits = useRepoStore((s) => s.commits);
   const selectedCommitId = useRepoStore((s) => s.selectedCommitId);
-  const commitDiff = useRepoStore((s) => s.commitDiff);
-  const selectCommit = useRepoStore((s) => s.selectCommit);
+  const selectedCommitPath = useRepoStore((s) => s.selectedCommitPath);
+  const commitFileDiff = useRepoStore((s) => s.commitFileDiff);
+  const commitFileDiffLoading = useRepoStore((s) => s.commitFileDiffLoading);
+  const selectCommitFile = useRepoStore((s) => s.selectCommitFile);
   const diffWidth = useLayoutStore((s) => s.sizes.graphDiffWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const t = useT();
 
   const selectedCommit = commits.find((c) => c.id === selectedCommitId) ?? null;
+  const open = selectedCommit !== null && selectedCommitPath !== null;
 
   return (
     <div className="flex h-full min-h-0">
@@ -494,7 +755,7 @@ export function GraphView() {
         <CommitTable />
       </div>
 
-      {selectedCommit && (
+      {open && (
         <>
           <ResizeHandle
             axis="x"
@@ -509,12 +770,24 @@ export function GraphView() {
             style={{ width: diffWidth }}
             className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
           >
-            <div className="flex items-center justify-between border-b border-[var(--cf-border)] px-3 py-1.5">
-              <span className="truncate text-[12px] font-medium text-[var(--cf-text-muted)]">
-                {selectedCommit.short_id} — {selectedCommit.summary}
+            <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
+              {/* The path leads and the commit follows it, because the path is what changed when
+                  you clicked and the commit is the context you already have on screen. `dir="rtl"`
+                  on a truncating path so it loses the *front* — a column of
+                  `src/components/git/Gra…` names nothing, `…/git/GraphView.tsx` names the file. */}
+              <span className="min-w-0 flex-1" title={selectedCommitPath}>
+                <span
+                  dir="rtl"
+                  className="block truncate text-left font-mono text-[12px] text-[var(--cf-text)]"
+                >
+                  {selectedCommitPath}
+                </span>
+                <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">
+                  <span className="font-mono">{selectedCommit.short_id}</span> — {selectedCommit.summary}
+                </span>
               </span>
               <button
-                onClick={() => selectCommit(null)}
+                onClick={() => void selectCommitFile(null)}
                 title={t("graph.close")}
                 className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
               >
@@ -522,7 +795,14 @@ export function GraphView() {
               </button>
             </div>
             <div className="min-h-0 flex-1">
-              <DiffView files={commitDiff} />
+              {commitFileDiffLoading ? (
+                <SkeletonRows count={10} className="cf-fade-in" />
+              ) : (
+                // `[]` and not "the file is missing": `DiffView`'s own empty state ("no changes")
+                // is the honest reading of a delta with nothing in it, which is what a mode-only
+                // change or a file the pathspec no longer matches comes back as.
+                <DiffView files={commitFileDiff ? [commitFileDiff] : []} />
+              )}
             </div>
           </div>
         </>

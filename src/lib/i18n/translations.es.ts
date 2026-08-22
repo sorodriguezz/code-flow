@@ -2472,6 +2472,7 @@ export const es = {
   "graph.colMessage": "Mensaje",
   "graph.colRefs": "Refs",
   "graph.colGraph": "Grafo",
+  "graph.noFilesChanged": "Sin archivos modificados",
 
   "diff.noChanges": "Sin cambios",
   "diff.noChangesHint": "No hay nada que mostrar para esta selección.",
@@ -5981,6 +5982,7 @@ export const es = {
   "pipelines.refresh": "Actualizar",
   "pipelines.openOnHost": "Abrir en el proveedor",
   "pipelines.allBranches": "Todas las ramas",
+  "pipelines.branchFilter": "Filtrar por rama",
   "pipelines.jobCount": "{n} jobs",
   "pipelines.noneWithStatus": "No hay ejecuciones con el estado «{status}» en esta página.",
   "pipelines.statusQueued": "En cola",
@@ -5992,10 +5994,18 @@ export const es = {
   "pipelines.statusSkipped": "Omitido",
   "pipelines.structure": "Estructura",
   "pipelines.structureOf": "Estructura de {name}",
-  "pipelines.sourceStage": "estructura: las etapas del proveedor",
-  "pipelines.sourceNeeds": "estructura: needs: del workflow",
-  "pipelines.sourceTime": "estructura: deducida del solape de tiempos",
+  "pipelines.sourceStage": "etapas declaradas por el proveedor",
+  "pipelines.sourceStageHint":
+    "Las columnas son las etapas que el propio proveedor declara para este pipeline. Aquí no se deduce nada.",
+  "pipelines.sourceNeeds": "needs: del workflow",
+  "pipelines.sourceNeedsHint":
+    "La API de GitHub no publica ninguna relación entre jobs, así que las columnas se leen del needs: del archivo del workflow que tienes en la copia de trabajo. Cada columna es un nivel de dependencias: los jobs que hay en ella no dependen unos de otros, y por eso pueden correr a la vez.",
+  "pipelines.sourceTime": "deducida de los tiempos",
+  "pipelines.sourceTimeHint":
+    "No se ha podido leer el archivo del workflow, así que las columnas agrupan los jobs cuyas ejecuciones se solaparon en el tiempo. Es una aproximación: dos jobs independientes que corrieron uno detrás de otro porque solo había un runner parecen una dependencia.",
   "pipelines.sourceMeasured": "medido: marcas de tiempo",
+  "pipelines.sourceMeasuredHint":
+    "La cascada no deduce nada. Cada barra es cuándo empezó el job y cuánto duró, y las barras que se solapan corrieron a la vez.",
   "pipelines.modeGraph": "Grafo",
   "pipelines.modeWaterfall": "Cascada",
   "pipelines.inParallel": "×{n} en paralelo",

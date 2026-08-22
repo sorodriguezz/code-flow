@@ -24,7 +24,17 @@ function LogRow({ line, highlighted }: { line: LogLine; highlighted: boolean }) 
   const bad = looksLikeError(line);
   return (
     <div
-      className={`flex gap-3 whitespace-pre pr-3 font-mono text-[11.5px] ${
+      // `select-text` against the app-wide `body { user-select: none }`, which otherwise makes a
+      // log behave like a picture of a log: the copy button takes the *whole* thing, and the thing
+      // you usually want is one stack frame. The gutter keeps `select-none` below, so a drag down
+      // the log copies the lines without the line numbers welded to the front of each one — the
+      // same split `DiffView` makes.
+      //
+      // The list is windowed, so a selection can only cover what is mounted: the viewport plus the
+      // overscan either side. Dragging past that scrolls, and the rows that leave take their part
+      // of the selection with them. That is the trade for not building a thousand-line log up
+      // front, and the copy button is still there for the whole thing.
+      className={`flex select-text gap-3 whitespace-pre pr-3 font-mono text-[11.5px] ${
         bad ? "bg-[color-mix(in_oklab,var(--cf-danger)_9%,transparent)]" : ""
       } ${highlighted ? "bg-[var(--cf-accent-soft)]" : ""}`}
       style={{ height: LINE_H, lineHeight: `${LINE_H}px` }}

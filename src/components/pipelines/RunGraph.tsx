@@ -1,26 +1,52 @@
 import { useEffect, useMemo } from "react";
+import { Info } from "lucide-react";
 import { readFileText } from "../../lib/tauri/commands";
-import { buildGraph, parseWorkflowNeeds, type GraphSource } from "../../lib/pipelineGraph";
+import { buildGraph, parseWorkflowNeeds, type GraphEdge, type GraphSource } from "../../lib/pipelineGraph";
 import { useCiStore, runKey } from "../../state/ciStore";
 import { useT } from "../../state/languageStore";
+import { Tooltip } from "../common/Tooltip";
 import { StatusGlyph } from "./RunList";
 import { STATUS_TOKEN, at, elapsed, formatDuration, statusOf } from "./pipelineStatus";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { PipelineJob, PipelineRunDetail } from "../../types/domain";
 
-/** Card and gutter geometry, fixed here so the connector lines can be positioned arithmetically
- *  rather than measured. A measured layout would need a resize observer per column to draw one
- *  vertical line, and the line would lag a frame behind every drag of the pane's seam. */
+/** Card and gutter geometry, fixed here so the connectors can be positioned arithmetically rather
+ *  than measured. A measured layout would need a resize observer per card to place one arrowhead,
+ *  and every arrow would lag a frame behind each drag of the pane's seam. */
+const CARD_W = 178;
 const CARD_H = 34;
 const CARD_GAP = 7;
+const GUTTER = 40;
 const HEADER_H = 25;
 const STEP = CARD_H + CARD_GAP;
+/** Vertical room under the card block before the first bypass lane, and between lanes. */
+const LANE_GAP = 13;
+const LANE_STEP = 11;
+/** Corner rounding on a bypass route's two right angles. */
+const CORNER = 6;
+/** Length of an arrowhead, so the stroke can stop short of its own point. */
+const HEAD = 6;
+
+const columnX = (column: number) => column * (CARD_W + GUTTER);
+const cardMidY = (row: number) => HEADER_H + row * STEP + CARD_H / 2;
+const cardBottom = (row: number) => HEADER_H + row * STEP + CARD_H;
 
 const SOURCE_LABEL: Record<GraphSource, TranslationKey> = {
   stage: "pipelines.sourceStage",
   needs: "pipelines.sourceNeeds",
   time: "pipelines.sourceTime",
   flat: "pipelines.sourceTime",
+};
+
+/** The long version of each badge, for the tooltip — what the source *means*, and what it is worth.
+ *  The badge itself has room for four words; "needs: from the workflow" is not self-explanatory to
+ *  anyone who has not read `pipelineGraph.ts`, and this is the screen where it matters most that
+ *  the reader knows how much to trust the drawing. */
+const SOURCE_HINT: Record<GraphSource, TranslationKey> = {
+  stage: "pipelines.sourceStageHint",
+  needs: "pipelines.sourceNeedsHint",
+  time: "pipelines.sourceTimeHint",
+  flat: "pipelines.sourceTimeHint",
 };
 
 /**
@@ -84,8 +110,8 @@ function JobCard({
       type="button"
       onClick={onSelect}
       aria-current={selected ? "page" : undefined}
-      style={{ height: CARD_H }}
-      className={`relative flex w-[178px] shrink-0 items-center gap-2 rounded-[7px] border px-2 text-left transition-colors ${
+      style={{ height: CARD_H, width: CARD_W }}
+      className={`relative flex shrink-0 items-center gap-2 rounded-[7px] border px-2 text-left transition-colors ${
         selected
           ? "border-[color-mix(in_oklab,var(--cf-accent)_55%,transparent)] bg-[var(--cf-accent-soft)] shadow-[0_0_0_1px_color-mix(in_oklab,var(--cf-accent)_32%,transparent)]"
           : "border-[var(--cf-border)] bg-[var(--cf-surface)] hover:border-[color-mix(in_oklab,var(--cf-accent)_40%,var(--cf-border))]"
@@ -100,13 +126,158 @@ function JobCard({
   );
 }
 
+interface DrawnEdge {
+  key: string;
+  /** The stroked route. */
+  d: string;
+  /** The filled triangle at its end. */
+  head: string;
+  lit: boolean;
+}
+
+/**
+ * Every arrow's path, and how many bypass lanes the drawing needs under the cards.
+ *
+ * Two routes, because there are two kinds of arrow and drawing them the same way is what made the
+ * old picture lie.
+ *
+ * **Between neighbouring columns** — the overwhelming majority, and all of them once
+ * `transitiveReduction` has run — a bezier straight across the gutter. It leaves and arrives
+ * horizontal, so a fixed right-pointing triangle is exact: no `<marker>`, no `orient="auto"`, and
+ * none of the `context-stroke` inconsistencies markers still have across engines.
+ *
+ * **Skipping a column** — a dependency the layout genuinely doesn't already imply — down out of the
+ * source's bottom edge, along a lane below the whole block, and back up into the target's bottom
+ * edge with the head pointing *up*. Drawn straight, it would run behind the cards in between and
+ * surface only as an arrowhead in the last gutter, where the reader attaches it to whichever short
+ * arrow it happens to be lying on: an arrow you cannot trace back to its own tail is worse than no
+ * arrow. Down here it has empty space to itself and a shape that says "this one goes around".
+ *
+ * Lanes are packed greedily on the horizontal span, so two bypasses that don't overlap share one
+ * and the block only grows by what it has to.
+ */
+function layoutEdges(
+  edges: GraphEdge[],
+  position: Map<string, { column: number; row: number }>,
+  blockBottom: number,
+  selectedId: string | null | undefined,
+): { drawn: DrawnEdge[]; laneCount: number } {
+  const placed = edges.flatMap((edge) => {
+    const from = position.get(edge.fromId);
+    const to = position.get(edge.toId);
+    if (!from || !to || from.column >= to.column) return [];
+    return [{ edge, from, to }];
+  });
+
+  // Longest span first, so the arrow that has to travel furthest gets the lane nearest the cards
+  // and the shorter ones nest under it instead of crossing it.
+  const bypasses = placed
+    .filter(({ from, to }) => to.column > from.column + 1)
+    .sort((a, b) => b.to.column - b.from.column - (a.to.column - a.from.column));
+  const laneOf = new Map<string, number>();
+  const laneEnd: number[] = [];
+  for (const { edge, from, to } of bypasses) {
+    const left = columnX(from.column) + CARD_W - 22;
+    const right = columnX(to.column) + 22;
+    let lane = laneEnd.findIndex((end) => end < left - 10);
+    if (lane === -1) {
+      laneEnd.push(right);
+      lane = laneEnd.length - 1;
+    } else {
+      laneEnd[lane] = right;
+    }
+    laneOf.set(`${edge.fromId}>${edge.toId}`, lane);
+  }
+
+  const drawn = placed.map(({ edge, from, to }) => {
+    const key = `${edge.fromId}>${edge.toId}`;
+    const lit = Boolean(selectedId) && (edge.fromId === selectedId || edge.toId === selectedId);
+    const lane = laneOf.get(key);
+
+    if (lane === undefined) {
+      const x1 = columnX(from.column) + CARD_W;
+      const y1 = cardMidY(from.row);
+      const x2 = columnX(to.column) - HEAD;
+      const y2 = cardMidY(to.row);
+      // Enough horizontal pull that the curve leaves and arrives flat even when the two cards are
+      // rows apart.
+      const pull = Math.max(16, (x2 - x1) * 0.42);
+      return {
+        key,
+        lit,
+        d: `M ${x1} ${y1} C ${x1 + pull} ${y1}, ${x2 - pull} ${y2}, ${x2} ${y2}`,
+        head: `M ${x2 + HEAD} ${y2} L ${x2 - 1} ${y2 - 3.6} L ${x2 - 1} ${y2 + 3.6} Z`,
+      };
+    }
+
+    const sx = columnX(from.column) + CARD_W - 22;
+    const sy = cardBottom(from.row);
+    const tx = columnX(to.column) + 22;
+    const ty = cardBottom(to.row);
+    const ly = blockBottom + LANE_GAP + lane * LANE_STEP;
+    return {
+      key,
+      lit,
+      d:
+        `M ${sx} ${sy} V ${ly - CORNER} Q ${sx} ${ly} ${sx + CORNER} ${ly} ` +
+        `H ${tx - CORNER} Q ${tx} ${ly} ${tx} ${ly - CORNER} V ${ty + HEAD}`,
+      head: `M ${tx} ${ty} L ${tx - 3.6} ${ty + HEAD} L ${tx + 3.6} ${ty + HEAD} Z`,
+    };
+  });
+
+  return { drawn, laneCount: laneEnd.length };
+}
+
+/**
+ * The arrows, as one SVG behind the whole grid.
+ *
+ * What this replaces was a vertical bus in each gutter with a 17px stub off either side of every
+ * card — a shape that says "these are connected" and refuses to say which way, and which falls
+ * apart precisely where it matters most. Two parallel jobs produced one bus crossed by four stubs
+ * and a T-junction in the middle of it, and nothing in that drawing distinguished the fan-*out*
+ * into the pair from the fan-*in* out of it. Directed arrows do: four leaving one card read as
+ * four, not as one line with notches.
+ *
+ * Under the cards, which only matters for the bezier route — the bypass lanes are in empty space
+ * below the block and nothing can cover them.
+ */
+function Connectors({
+  drawn,
+  width,
+  height,
+}: {
+  drawn: DrawnEdge[];
+  width: number;
+  height: number;
+}) {
+  return (
+    <svg
+      aria-hidden
+      width={width}
+      height={height}
+      className="pointer-events-none absolute left-0 top-0"
+    >
+      {/* Lit edges last, so the arrows touching the job you have open are drawn over the ones that
+          don't — the selection has to survive a crossing. */}
+      {[...drawn.filter((edge) => !edge.lit), ...drawn.filter((edge) => edge.lit)].map((edge) => {
+        const color = edge.lit ? "var(--cf-accent)" : "var(--cf-border)";
+        return (
+          <g key={edge.key}>
+            <path d={edge.d} fill="none" stroke={color} strokeWidth={edge.lit ? 1.6 : 1.2} />
+            <path d={edge.head} fill={color} />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 /**
  * The run as columns: one per stage, everything inside a column ran at the same time.
  *
- * The connectors are two 17px stubs per card plus one vertical bus in each gutter — the classic
- * fan-out/fan-in, which is what says "these four all follow that one" without a legend. They are
- * positioned from the constants at the top of this file rather than measured, so nothing here
- * needs a layout effect.
+ * Every card is placed by arithmetic — `columnX` and `cardMidY` — rather than by flow, because the
+ * arrows behind them are drawn from the same two functions and a layout the SVG has to *measure*
+ * is a layout the SVG gets wrong for one frame after every resize.
  */
 function StageColumns({
   detail,
@@ -122,63 +293,71 @@ function StageColumns({
   const t = useT();
   const graph = useMemo(() => buildGraph(detail.jobs, { needs }), [detail.jobs, needs]);
 
+  const { drawn, width, height } = useMemo(() => {
+    const position = new Map<string, { column: number; row: number }>();
+    graph.columns.forEach((column, c) =>
+      column.jobs.forEach((job, r) => position.set(job.id, { column: c, row: r })),
+    );
+    // Real dependencies when the workflow declared them; otherwise every card in a column to every
+    // card in the next, which is all "these ran, then those ran" entitles anyone to draw.
+    const edges =
+      graph.edges.length > 0
+        ? graph.edges
+        : graph.columns.flatMap((column, c) =>
+            c === 0
+              ? []
+              : graph.columns[c - 1].jobs.flatMap((from) =>
+                  column.jobs.map((to) => ({ fromId: from.id, toId: to.id })),
+                ),
+          );
+    const blockBottom = HEADER_H + Math.max(1, graph.maxParallel) * STEP - CARD_GAP;
+    const { drawn, laneCount } = layoutEdges(edges, position, blockBottom, selection?.jobId);
+    return {
+      drawn,
+      width: Math.max(1, graph.columns.length * (CARD_W + GUTTER) - GUTTER),
+      // The lanes are part of the drawing, so they are part of its height: without this the block
+      // would be exactly as tall as its cards and every bypass would be clipped by the scroller.
+      height: blockBottom + (laneCount > 0 ? LANE_GAP + laneCount * LANE_STEP : 0),
+    };
+  }, [graph, selection?.jobId]);
+
   return (
-    <div className="flex min-w-min items-start">
-      {graph.columns.map((column, index) => {
-        const previous = graph.columns[index - 1];
-        // The bus spans the taller of the two columns it joins, so a fan-out from one card to four
-        // reaches all four and a fan-in from four to one starts at all four.
-        const span = previous ? Math.max(previous.jobs.length, column.jobs.length) : 0;
-        return (
-          <div key={column.key} className="flex items-start">
-            {previous && (
-              <div className="relative w-[34px] self-stretch" aria-hidden>
-                <span
-                  className="absolute left-1/2 w-px bg-[var(--cf-border)]"
-                  style={{ top: HEADER_H + CARD_H / 2, height: Math.max(1, (span - 1) * STEP) }}
-                />
-              </div>
+    <div className="relative" style={{ width, height }}>
+      <Connectors drawn={drawn} width={width} height={height} />
+      {graph.columns.map((column, index) => (
+        <div
+          key={column.key}
+          className="absolute top-0"
+          style={{ left: columnX(index), width: CARD_W }}
+        >
+          <div className="flex items-center gap-1.5 px-0.5" style={{ height: HEADER_H }}>
+            {/* Empty for a column of unrelated jobs — see `declaredLabel`. The badge then carries
+                the header on its own, which is the one fact that column has to offer. */}
+            {column.label && (
+              <span className="truncate text-[10px] font-bold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                {column.label}
+              </span>
             )}
-            <div className="flex flex-col" style={{ gap: CARD_GAP }}>
-              <div className="flex items-center gap-1.5 px-0.5" style={{ height: HEADER_H }}>
-                <span className="truncate text-[10px] font-bold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                  {column.label}
-                </span>
-                {/* Said in words as well as drawn, because the drawing only works for people who
-                    already know how to read it — and this is the one fact the screen exists for. */}
-                {column.jobs.length > 1 && (
-                  <span className="shrink-0 rounded-[3px] bg-[var(--cf-accent-soft)] px-1 text-[9px] font-bold uppercase tracking-wide text-[var(--cf-accent)]">
-                    {t("pipelines.inParallel", { n: column.jobs.length })}
-                  </span>
-                )}
-              </div>
-              {column.jobs.map((job) => (
-                <div key={job.id} className="relative">
-                  {/* The stubs that reach the bus on either side. */}
-                  {index > 0 && (
-                    <span
-                      aria-hidden
-                      className="absolute -left-[17px] top-1/2 h-px w-[17px] bg-[var(--cf-border)]"
-                    />
-                  )}
-                  {index < graph.columns.length - 1 && (
-                    <span
-                      aria-hidden
-                      className="absolute -right-[17px] top-1/2 h-px w-[17px] bg-[var(--cf-border)]"
-                    />
-                  )}
-                  <JobCard
-                    job={job}
-                    now={now}
-                    selected={selection?.jobId === job.id}
-                    onSelect={() => void selectJob(job.id)}
-                  />
-                </div>
-              ))}
-            </div>
+            {/* Said in words as well as drawn, because the drawing only works for people who
+                already know how to read it — and this is the one fact the screen exists for. */}
+            {column.jobs.length > 1 && (
+              <span className="shrink-0 rounded-[3px] bg-[var(--cf-accent-soft)] px-1 text-[9px] font-bold uppercase tracking-wide text-[var(--cf-accent)]">
+                {t("pipelines.inParallel", { n: column.jobs.length })}
+              </span>
+            )}
           </div>
-        );
-      })}
+          {column.jobs.map((job, row) => (
+            <div key={job.id} className="absolute" style={{ top: HEADER_H + row * STEP }}>
+              <JobCard
+                job={job}
+                now={now}
+                selected={selection?.jobId === job.id}
+                onSelect={() => void selectJob(job.id)}
+              />
+            </div>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
@@ -259,15 +438,32 @@ function Waterfall({ detail, now }: { detail: PipelineRunDetail; now: number }) 
                       background: STATUS_TOKEN[statusOf(job.status)],
                     }}
                   />
-                  <span
-                    className="absolute top-[5px] text-[9.5px] tabular-nums text-[var(--cf-text-muted)]"
-                    style={{ left: `calc(${left + width}% + 6px)` }}
-                  >
-                    {formatDuration(took)}
-                    {took === longest && longest > 0 ? ` · ${t("pipelines.longest")}` : ""}
-                  </span>
                 </>
               )}
+            </span>
+            {/* The duration in a column of its own, right-aligned.
+                It used to be absolutely positioned just past the end of its own bar, which works
+                until the bar is the longest one in the run — and the longest one is the whole point
+                of this view. At 19m of a 19m pipeline the bar ends at ~100%, so the label started
+                six pixels off the right edge, wrapped onto a second line and then a third, and
+                spilled out of a 24px row into the two rows underneath it. A fixed column cannot
+                collide with anything, and it has a second, better effect: the times line up, so
+                they can be compared by reading straight down instead of by chasing them across.
+
+                "The longest" is no longer spelled out beside the number — that is the phrase that
+                made the label long enough to overflow in the one row where it appears. It is said
+                in weight and colour instead, which survives any bar length, with the words kept in
+                the `title`. Nothing is lost: the longest bar is also, by construction, the longest
+                bar. */}
+            <span
+              title={took === longest && longest > 0 ? t("pipelines.longest") : undefined}
+              className={`w-[72px] shrink-0 whitespace-nowrap pr-1.5 text-right text-[9.5px] tabular-nums ${
+                took === longest && longest > 0
+                  ? "font-semibold text-[var(--cf-text)]"
+                  : "text-[var(--cf-text-muted)]"
+              }`}
+            >
+              {jobStart === null ? "" : formatDuration(took)}
             </span>
           </button>
         );
@@ -313,22 +509,35 @@ export function RunGraph({
               source, and "measured from timestamps" is a materially weaker claim than "declared by
               the pipeline" — a reader who can't tell them apart will believe the wrong one. */}
           {detail && (
-            <span className="shrink-0 rounded border border-[var(--cf-border)] px-1 text-[9.5px] text-[var(--cf-text-muted)]">
-              {t(mode === "waterfall" ? "pipelines.sourceMeasured" : SOURCE_LABEL[source])}
-            </span>
+            <Tooltip
+              label={t(mode === "waterfall" ? "pipelines.sourceMeasured" : SOURCE_LABEL[source])}
+              description={t(mode === "waterfall" ? "pipelines.sourceMeasuredHint" : SOURCE_HINT[source])}
+            >
+              <span className="flex shrink-0 items-center gap-1 rounded border border-[var(--cf-border)] px-1 text-[9.5px] text-[var(--cf-text-muted)]">
+                <Info size={9} className="shrink-0 opacity-70" />
+                {t(mode === "waterfall" ? "pipelines.sourceMeasured" : SOURCE_LABEL[source])}
+              </span>
+            </Tooltip>
           )}
         </span>
-        <div className="flex shrink-0 gap-px rounded-[5px] bg-[var(--cf-border)] p-px">
+        {/* A segmented control, with room to be one.
+            It used to be two buttons separated by a one-pixel seam of `--cf-border` inside a
+            one-pixel frame of the same colour, which at 10.5px made "Grafo Cascada" read as a
+            single smudged word: the gap between the two labels was smaller than the gap between
+            the letters in either of them. What separates them now is space — a track two pixels
+            wider than its thumbs, and 10px of padding inside each — plus a raised thumb on the
+            selected one, so the pair reads as one control with one of its halves pressed. */}
+        <div className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-[2px]">
           {(["graph", "waterfall"] as const).map((option) => (
             <button
               key={option}
               type="button"
               onClick={() => setGraphMode(option)}
               aria-pressed={mode === option}
-              className={`rounded-[4px] px-2 py-px text-[10.5px] font-semibold transition-colors ${
+              className={`flex h-[19px] items-center rounded-[5px] px-2.5 text-[10.5px] font-semibold transition-colors ${
                 mode === option
-                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : "bg-[var(--cf-surface)] text-[var(--cf-text-muted)]"
+                  ? "bg-[var(--cf-surface)] text-[var(--cf-accent)] shadow-[0_1px_2px_rgba(0,0,0,0.16)]"
+                  : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
               }`}
             >
               {t(option === "graph" ? "pipelines.modeGraph" : "pipelines.modeWaterfall")}

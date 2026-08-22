@@ -38,6 +38,36 @@ interface RepoState {
   /** The staged side of the same thing, under the same rule — see `workingDiff` above. */
   stagedDiff: FileDiffInfo[];
   commitDiff: FileDiffInfo[];
+  /**
+   * Whether `commitDiff` is still on its way, as distinct from being empty.
+   *
+   * `commitDiff: []` cannot tell those two apart, and once the graph started drawing the file list
+   * *inline* under the selected commit that difference became visible: without this, expanding a
+   * row showed "no files changed" for as long as the fetch took and then replaced it with the
+   * files, which reads as the wrong answer followed by the right one. An empty commit
+   * (`--allow-empty`) is a real thing, so the empty state has to stay reachable — it just has to
+   * mean it.
+   */
+  commitDiffLoading: boolean;
+  /**
+   * Which of the selected commit's files is open in the diff panel, or `null` for none.
+   *
+   * Selecting a *commit* no longer opens a diff. It expands the row into its file list and stops
+   * there, because "what did this commit touch" and "what did it do to this file" are two
+   * questions, and answering the second one for four hundred files at once — which is what the
+   * panel used to do — is how you get a scroll bar instead of an answer.
+   */
+  selectedCommitPath: string | null;
+  /**
+   * That one file's change, at full context.
+   *
+   * `getCommitFileDiff`, not a `find` over `commitDiff`: the list is fetched at
+   * `LIST_DIFF_CONTEXT_LINES` and the split view rebuilds both file texts from the hunks it is
+   * given, so a diff out of the list cannot be shown side by side. Same rule `workingDiff` is
+   * under — see the note there.
+   */
+  commitFileDiff: FileDiffInfo | null;
+  commitFileDiffLoading: boolean;
   busy: boolean;
   error: string | null;
   checkingOutBranch: string | null;
@@ -63,6 +93,8 @@ interface RepoState {
   refreshRemotes: () => Promise<void>;
   refreshMergeState: () => Promise<void>;
   selectCommit: (id: string | null) => Promise<void>;
+  /** Opens one of the selected commit's files in the diff panel; `null` closes it. */
+  selectCommitFile: (path: string | null) => Promise<void>;
 
   mergeBranch: (branchName: string) => Promise<import("../types/domain").MergeOutcome | null>;
   resolveConflict: (relPath: string, side: "ours" | "theirs") => Promise<void>;
@@ -420,6 +452,10 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   workingDiff: [],
   stagedDiff: [],
   commitDiff: [],
+  commitDiffLoading: false,
+  selectedCommitPath: null,
+  commitFileDiff: null,
+  commitFileDiffLoading: false,
   busy: false,
   error: null,
   checkingOutBranch: null,
@@ -443,6 +479,10 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       workingDiff: [],
       stagedDiff: [],
       commitDiff: [],
+      commitDiffLoading: false,
+      selectedCommitPath: null,
+      commitFileDiff: null,
+      commitFileDiffLoading: false,
       merging: false,
       conflicts: [],
     });
@@ -624,10 +664,52 @@ export const useRepoStore = create<RepoState>((set, get) => ({
 
   selectCommit: async (id) => {
     const { repoPath } = get();
-    set({ selectedCommitId: id, commitDiff: [] });
-    if (repoPath && id) {
+    // The open file goes with the commit it belonged to. Keeping it would leave the panel showing
+    // `src/main.rs` as of the commit you just navigated away from, under a header naming the new
+    // one — and the path may not even exist in this commit.
+    set({
+      selectedCommitId: id,
+      commitDiff: [],
+      commitDiffLoading: Boolean(repoPath && id),
+      selectedCommitPath: null,
+      commitFileDiff: null,
+      commitFileDiffLoading: false,
+    });
+    if (!repoPath || !id) return;
+    try {
       const commitDiff = await api.getCommitDiff(repoPath, id);
+      // The selection is re-read *after* the await and compared against the id this call was made
+      // for, because a click on another commit does not cancel this fetch — it only starts a second
+      // one, and two fetches of very different sizes finish in whatever order they finish in. Land
+      // this one unconditionally and clicking a 400-file merge and then a one-line fix leaves the
+      // merge's diff sitting under the fix's header. Whoever selected last owns the panel.
+      if (get().selectedCommitId !== id) return;
       set({ commitDiff });
+    } finally {
+      // In `finally` so a failed fetch clears the flag too: the expanded row would otherwise
+      // shimmer for the rest of the session. Guarded the same way, so a superseded call can't
+      // switch off a spinner that now belongs to a newer one.
+      if (get().selectedCommitId === id) set({ commitDiffLoading: false });
+    }
+  },
+
+  selectCommitFile: async (path) => {
+    const { repoPath, selectedCommitId } = get();
+    set({ selectedCommitPath: path, commitFileDiff: null, commitFileDiffLoading: path !== null });
+    if (!repoPath || !selectedCommitId || !path) return;
+    try {
+      const commitFileDiff = await api.getCommitFileDiff(repoPath, selectedCommitId, path);
+      // Both halves of the identity are re-checked after the await, for the reason `selectCommit`
+      // writes down: clicking down a file list faster than the fetches return would otherwise
+      // leave whichever one happened to be slowest on screen under someone else's header.
+      const now = get();
+      if (now.selectedCommitId !== selectedCommitId || now.selectedCommitPath !== path) return;
+      set({ commitFileDiff });
+    } finally {
+      const now = get();
+      if (now.selectedCommitId === selectedCommitId && now.selectedCommitPath === path) {
+        set({ commitFileDiffLoading: false });
+      }
     }
   },
 

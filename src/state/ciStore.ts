@@ -73,6 +73,16 @@ interface CiState {
    *  filter carried across would fetch `release/1.18` from a repo that has never had it —
    *  while the chips, which read the *active* project, showed "all branches". */
   branchFilterByProject: Record<string, string | null>;
+  /**
+   * Every branch this project has been *seen* running something on, accumulated across loads.
+   *
+   * Accumulated rather than derived from `runsByProject` on the spot, and the difference only
+   * shows once you use it: the branch filter is applied by the host, so narrowing to `release/1.4`
+   * refetches and the list then contains nothing but `release/1.4` runs. Derived, the picker would
+   * lose every other branch the moment you picked one — the classic dropdown that eats its own
+   * options. This set only grows, so the way back is always on the menu.
+   */
+  branchesSeenByProject: Record<string, string[]>;
   statusFilter: PipelineRun["status"] | null;
   graphMode: GraphMode;
 
@@ -181,6 +191,23 @@ function announceTransitions(projectId: string, runs: PipelineRun[], workspaceId
   }
 }
 
+/**
+ * The known branches, plus whatever this page of runs added — sorted, deduplicated, blanks dropped.
+ *
+ * Returns the array it was given, unchanged, when the page brought nothing new. That identity is
+ * the point: `load` runs on a poll every few seconds, and a fresh array each time would re-render
+ * the branch picker of a repository where nothing has happened since the last tick.
+ */
+function mergeBranches(known: string[] | undefined, runs: PipelineRun[]): string[] {
+  const set = new Set(known ?? []);
+  const before = set.size;
+  for (const run of runs) {
+    const branch = run.branch.trim();
+    if (branch) set.add(branch);
+  }
+  return set.size === before && known ? known : [...set].sort((a, b) => a.localeCompare(b));
+}
+
 export const useCiStore = create<CiState>((set, get) => ({
   runsByProject: {},
   loadingProjectId: null,
@@ -195,6 +222,7 @@ export const useCiStore = create<CiState>((set, get) => ({
   needsByRun: {},
   selection: null,
   branchFilterByProject: {},
+  branchesSeenByProject: {},
   statusFilter: null,
   graphMode: "graph",
   analysisByJob: {},
@@ -237,6 +265,10 @@ export const useCiStore = create<CiState>((set, get) => ({
               ? refined
               : run;
           }),
+        },
+        branchesSeenByProject: {
+          ...s.branchesSeenByProject,
+          [projectId]: mergeBranches(s.branchesSeenByProject[projectId], runs),
         },
         errorByProject: { ...s.errorByProject, [projectId]: "" },
         fetchedProjects: { ...s.fetchedProjects, [projectId]: true },

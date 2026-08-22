@@ -2515,6 +2515,7 @@ const en = {
   "graph.colMessage": "Message",
   "graph.colRefs": "Refs",
   "graph.colGraph": "Graph",
+  "graph.noFilesChanged": "No files changed",
 
   "diff.noChanges": "No changes",
   "diff.noChangesHint": "Nothing to show for this selection.",
@@ -6057,6 +6058,7 @@ const en = {
   "pipelines.refresh": "Refresh",
   "pipelines.openOnHost": "Open on the provider",
   "pipelines.allBranches": "All branches",
+  "pipelines.branchFilter": "Filter by branch",
   "pipelines.jobCount": "{n} jobs",
   "pipelines.noneWithStatus": "No runs with the status “{status}” on this page.",
   "pipelines.statusQueued": "Queued",
@@ -6068,10 +6070,18 @@ const en = {
   "pipelines.statusSkipped": "Skipped",
   "pipelines.structure": "Structure",
   "pipelines.structureOf": "Structure of {name}",
-  "pipelines.sourceStage": "structure: the provider's own stages",
-  "pipelines.sourceNeeds": "structure: needs: from the workflow",
-  "pipelines.sourceTime": "structure: inferred from overlapping times",
+  "pipelines.sourceStage": "stages declared by the provider",
+  "pipelines.sourceStageHint":
+    "The columns are the stages the provider itself declares for this pipeline. Nothing here is inferred.",
+  "pipelines.sourceNeeds": "needs: from the workflow",
+  "pipelines.sourceNeedsHint":
+    "GitHub's API publishes no relation between jobs, so the columns are read out of the needs: in the workflow file in your working copy. Each column is one level of dependencies: the jobs in it depend on nothing else in it, which is why they can run at once.",
+  "pipelines.sourceTime": "inferred from timings",
+  "pipelines.sourceTimeHint":
+    "The workflow file could not be read, so the columns group the jobs whose runs overlapped in time. It is an approximation: two independent jobs that ran back to back because there was only one runner look like a dependency.",
   "pipelines.sourceMeasured": "measured: timestamps",
+  "pipelines.sourceMeasuredHint":
+    "The waterfall infers nothing. Each bar is when a job started and how long it took, and bars that overlap ran at the same time.",
   "pipelines.modeGraph": "Graph",
   "pipelines.modeWaterfall": "Waterfall",
   "pipelines.inParallel": "×{n} in parallel",

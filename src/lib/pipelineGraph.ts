@@ -34,11 +34,27 @@ export interface GraphColumn {
   jobs: PipelineJob[];
 }
 
+/** One declared dependency, job id to job id, pointing the way the run flowed. */
+export interface GraphEdge {
+  fromId: string;
+  toId: string;
+}
+
 export interface PipelineGraph {
   columns: GraphColumn[];
   source: GraphSource;
   /** The widest column — how many jobs ran at once at the busiest moment of the run. */
   maxParallel: number;
+  /**
+   * The real arrows, when the run declared any — one per `needs:` that resolved to a job in this
+   * run, and they can skip columns, because a job may depend on something two levels back.
+   *
+   * Empty for `stage` and `time`, and that emptiness is meaningful rather than missing: a stage
+   * name says which jobs ran together and *nothing* about which of them fed which. The renderer
+   * falls back to joining consecutive columns in full, which is the only honest drawing of "all of
+   * these, then all of those".
+   */
+  edges: GraphEdge[];
 }
 
 /** Epoch milliseconds, or `null` for a job that never started. */
@@ -146,7 +162,10 @@ function matches(apiName: string, declared: string): boolean {
  * renamed can — so anything still unplaced after the levels stop growing is swept into the last
  * one rather than dropped. A job you can see in the log has to appear in the graph.
  */
-function levelsFromNeeds(jobs: PipelineJob[], needs: Map<string, string[]>): GraphColumn[] | null {
+function levelsFromNeeds(
+  jobs: PipelineJob[],
+  needs: Map<string, string[]>,
+): { columns: GraphColumn[]; edges: GraphEdge[] } | null {
   const dependsOn = (job: PipelineJob): string[] => {
     for (const [declared, list] of needs) {
       if (matches(job.name, declared)) return list;
@@ -183,22 +202,114 @@ function levelsFromNeeds(jobs: PipelineJob[], needs: Map<string, string[]>): Gra
   }
 
   if (levels.length === 0) return null;
-  return levels.map((jobsAtLevel, index) => ({
-    key: `needs:${index}`,
-    label: labelForLevel(jobsAtLevel, index),
-    jobs: jobsAtLevel,
-  }));
+
+  // One arrow per `needs:` that actually resolved. Built from the declarations rather than from the
+  // columns, so a job that depends on something two levels back gets the arrow it earned instead of
+  // one implied by whatever happens to sit immediately to its left.
+  const declared: GraphEdge[] = [];
+  const seen = new Set<string>();
+  for (const job of jobs) {
+    for (const need of dependsOn(job)) {
+      for (const source of jobs) {
+        const key = `${source.id}>${job.id}`;
+        if (source.id !== job.id && matches(source.name, need) && !seen.has(key)) {
+          seen.add(key);
+          declared.push({ fromId: source.id, toId: job.id });
+        }
+      }
+    }
+  }
+
+  return {
+    columns: levels.map((jobsAtLevel, index) => ({
+      key: `needs:${index}`,
+      label: declaredLabel(jobsAtLevel, needs),
+      jobs: jobsAtLevel,
+    })),
+    edges: transitiveReduction(declared),
+  };
 }
 
 /**
- * A name for a column that has none.
+ * Drops every arrow the rest of the graph already implies.
  *
- * A level with one job borrows that job's name — "setup" reads better as a column header than
- * "Nivel 1" does. A level with several has no honest name, so it gets none and the header shows
- * only the count and the "×N in parallel" badge, which is the information that matters there.
+ * An edge `u → v` goes if there is any *other* path from `u` to `v`: the dependency is still there,
+ * still enforced, still reachable in the drawing — it is just no longer stated twice. This is the
+ * transitive reduction of the DAG, and it has exactly the same reachability as what went in.
+ *
+ * **It is not a tidy-up, it is a correctness fix.** Real workflows declare far more than the graph's
+ * shape needs, because `needs:` is also how a job gets another job's *outputs*: this repository's
+ * own `release.yml` names `check-version` in all five of its jobs, to read the version it computed.
+ * Drawn literally that is five arrows leaving `check-version`, four of which run the length of the
+ * graph hidden behind the cards in between and surface only as an arrowhead in the last gutter. The
+ * reader does not see four long arrows; the reader sees the short chain lit up, and concludes that
+ * `create-release → release` is the highlighted edge when what is actually highlighted is
+ * `check-version → prune-caches` passing behind it. An arrow nobody can trace to its own tail is
+ * worse than no arrow — it attaches itself to whatever it happens to be lying on top of.
+ *
+ * The edges that survive are the ones that say something the layout doesn't already: they are what
+ * the columns are *for*. Anything still spanning more than one column after this is genuine
+ * information, and `RunGraph` routes those around the block rather than behind it.
+ *
+ * O(E·(V+E)) with a visited set per edge, which for a CI run — tens of jobs — is nothing, and the
+ * visited set is also what keeps a malformed graph from walking a cycle forever.
  */
-function labelForLevel(jobs: PipelineJob[], index: number): string {
-  return jobs.length === 1 ? jobs[0].name : String(index + 1);
+export function transitiveReduction(edges: GraphEdge[]): GraphEdge[] {
+  const out = new Map<string, string[]>();
+  for (const edge of edges) {
+    const list = out.get(edge.fromId);
+    if (list) list.push(edge.toId);
+    else out.set(edge.fromId, [edge.toId]);
+  }
+
+  /** Can `target` be reached from `from` *without* taking the one edge under test? */
+  const reachesAround = (edge: GraphEdge): boolean => {
+    const visited = new Set<string>([edge.fromId]);
+    // Seeded with the first hop rather than with `fromId`, so the edge being tested is the only one
+    // excluded — every *other* edge out of `fromId`, including a parallel duplicate, still counts.
+    const stack = (out.get(edge.fromId) ?? []).filter((next) => next !== edge.toId);
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if (node === edge.toId) return true;
+      if (visited.has(node)) continue;
+      visited.add(node);
+      for (const next of out.get(node) ?? []) stack.push(next);
+    }
+    return false;
+  };
+
+  return edges.filter((edge) => !reachesAround(edge));
+}
+
+/**
+ * The name a column of jobs can honestly be given.
+ *
+ * One job lends its own name. Several jobs that are all expansions of the *same* declaration —
+ * a matrix — lend that declaration's name: `release (macos-latest)` and `release (windows-latest)`
+ * are one `release:` in the workflow, and "RELEASE" is what the person who wrote it calls that
+ * column. Several unrelated jobs have no shared name and get none.
+ *
+ * What this replaces was the level's 1-based index, printed bare: a column headed **3** sitting
+ * between one headed CREATE-RELEASE and one headed UPDATER-JSON, with nothing to say that the 3
+ * was an ordinal and not a count of anything. Two vocabularies in one row of headers, and the
+ * number was the one that looked like data.
+ */
+function declaredLabel(jobs: PipelineJob[], needs: Map<string, string[]>): string {
+  if (jobs.length === 1) return jobs[0].name;
+  for (const declared of needs.keys()) {
+    if (jobs.every((job) => matches(job.name, declared))) return declared;
+  }
+  return "";
+}
+
+/**
+ * A name for a wave of jobs that overlapped in time.
+ *
+ * One job lends its name; several have nothing in common but a clock, so the header shows only the
+ * "×N in parallel" badge. Deliberately *not* the wave's index: see [`declaredLabel`].
+ */
+function labelForWave(jobs: PipelineJob[]): string {
+  return jobs.length === 1 ? jobs[0].name : "";
 }
 
 /**
@@ -236,7 +347,7 @@ function byTime(jobs: PipelineJob[]): GraphColumn[] {
 
   const columns = waves.map((wave, index) => ({
     key: `time:${index}`,
-    label: labelForLevel(wave, index),
+    label: labelForWave(wave),
     jobs: wave,
   }));
   if (pending.length > 0) {
@@ -257,10 +368,11 @@ export interface BuildGraphOptions {
  * *parsed*, and both beat what we *measured*.
  */
 export function buildGraph(jobs: PipelineJob[], options: BuildGraphOptions = {}): PipelineGraph {
-  const finish = (columns: GraphColumn[], source: GraphSource): PipelineGraph => ({
+  const finish = (columns: GraphColumn[], source: GraphSource, edges: GraphEdge[] = []): PipelineGraph => ({
     columns,
     source,
     maxParallel: columns.reduce((most, column) => Math.max(most, column.jobs.length), 0),
+    edges,
   });
 
   if (jobs.length === 0) return finish([], "flat");
@@ -273,10 +385,10 @@ export function buildGraph(jobs: PipelineJob[], options: BuildGraphOptions = {})
   }
 
   if (options.needs && options.needs.size > 0) {
-    const columns = levelsFromNeeds(jobs, options.needs);
+    const built = levelsFromNeeds(jobs, options.needs);
     // One column out of `needs:` is a real answer, not a failed one: a workflow whose jobs declare
     // no dependencies genuinely runs all of them at once.
-    if (columns) return finish(columns, "needs");
+    if (built) return finish(built.columns, "needs", built.edges);
   }
 
   return finish(byTime(jobs), "time");
