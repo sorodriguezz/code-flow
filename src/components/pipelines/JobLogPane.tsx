@@ -5,6 +5,7 @@ import { parseClaudeError } from "../../lib/claudeError";
 import { firstErrorIndex, looksLikeError, parseLog, type LogLine } from "../../lib/ansiLog";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { useCiStore, selectedJobKey } from "../../state/ciStore";
+import { statusOf } from "./pipelineStatus";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -12,7 +13,7 @@ import { AiRunLog } from "../ai/AiRunLog";
 import { Markdown } from "../common/Markdown";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Tooltip } from "../common/Tooltip";
-import { StatusGlyph } from "./RunList";
+import { RunningGlyph, StatusGlyph } from "./RunList";
 import type { PipelineJob } from "../../types/domain";
 
 /** One rendered line's height, in px. Fixed because the window below is computed from it. */
@@ -77,7 +78,15 @@ function LogRow({ line, highlighted }: { line: LogLine; highlighted: boolean }) 
  * explicit decision (`DataGrid.tsx` says why), and a CI log runs to thousands of lines, which is
  * exactly the size where rendering all of them costs a visible pause on every selection.
  */
-export function JobLogPane({ job }: { job: PipelineJob | undefined }) {
+export function JobLogPane({
+  job,
+  loading,
+}: {
+  job: PipelineJob | undefined;
+  /** The run this job would come from is still being fetched. Without it the pane says "pick a
+   *  job" at someone who picked a run two seconds ago and is waiting on the host. */
+  loading: boolean;
+}) {
   const logByJob = useCiStore((s) => s.logByJob);
   const logBusy = useCiStore((s) => s.logBusy);
   const logError = useCiStore((s) => s.logError);
@@ -182,6 +191,24 @@ export function JobLogPane({ job }: { job: PipelineJob | undefined }) {
     }
   };
 
+  /**
+   * Whether this job is still going — which is the difference between "there is no log" and "there
+   * is no log **yet**", and the whole reason the block below exists.
+   *
+   * A host has no log to hand over for a job that has not produced output, and GitHub answers that
+   * with a 404. `ci/http.rs` maps a 404 to "that pipeline doesn't exist any more — it may have been
+   * deleted or the repository re-linked", which is the right reading for a *run* that has gone and
+   * an alarming piece of nonsense for a job that started nine seconds ago: the pipeline is on
+   * screen, running, in the panel directly above. So while the job is live the error is suppressed
+   * and replaced with what is actually happening. Nothing is swallowed — the poll re-requests the
+   * log every few seconds (see `ciStore.watch`), so this state resolves itself the moment the host
+   * has something, and if the job finishes and the log still won't load the error comes back.
+   */
+  const live = job !== undefined && (statusOf(job.status) === "running" || statusOf(job.status) === "queued");
+  const showError = error !== "" && !live;
+  /** Live, not loading, and nothing to show: waiting on the host rather than empty. */
+  const pending = live && !busy && visible.length === 0 && query.trim() === "";
+
   const askable = job && (job.status === "failed" || job.status === "warning");
   const running = analysis !== undefined && analysis.text === undefined && analysis.error === undefined;
 
@@ -193,6 +220,11 @@ export function JobLogPane({ job }: { job: PipelineJob | undefined }) {
             <>
               <StatusGlyph status={job.status} size={13} />
               <span className="truncate">{job.name}</span>
+            </>
+          ) : loading ? (
+            <>
+              <RunningGlyph size={13} />
+              <span className="text-[var(--cf-text-muted)]">{t("pipelines.loadingRun")}</span>
             </>
           ) : (
             <span className="text-[var(--cf-text-muted)]">{t("pipelines.pickJob")}</span>
@@ -241,12 +273,19 @@ export function JobLogPane({ job }: { job: PipelineJob | undefined }) {
         className="min-h-0 flex-1 overflow-auto bg-[var(--cf-bg)] py-2"
       >
         {busy && lines.length === 0 && (
-          <p className="px-3 text-[11.5px] text-[var(--cf-text-muted)]">{t("pipelines.loadingLog")}</p>
+          <p className="flex items-center gap-2 px-3 text-[11.5px] text-[var(--cf-text-muted)]">
+            <RunningGlyph size={12} />
+            {t("pipelines.loadingLog")}
+          </p>
         )}
-        {error && (
-          <p className="px-3 text-[11.5px] text-[var(--cf-danger)]">{error}</p>
+        {showError && <p className="px-3 text-[11.5px] text-[var(--cf-danger)]">{error}</p>}
+        {pending && (
+          <p className="flex items-center gap-2 px-3 text-[11.5px] text-[var(--cf-text-muted)]">
+            <RunningGlyph size={12} />
+            {t(job.status === "queued" ? "pipelines.logQueued" : "pipelines.logPending")}
+          </p>
         )}
-        {!busy && !error && log && visible.length === 0 && (
+        {!busy && !showError && !pending && log && visible.length === 0 && (
           <p className="px-3 text-[11.5px] text-[var(--cf-text-muted)]">
             {query ? t("pipelines.noMatches") : t("pipelines.emptyLog")}
           </p>

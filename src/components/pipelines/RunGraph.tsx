@@ -4,6 +4,7 @@ import { readFileText } from "../../lib/tauri/commands";
 import { buildGraph, parseWorkflowNeeds, type GraphEdge, type GraphSource } from "../../lib/pipelineGraph";
 import { useCiStore, runKey } from "../../state/ciStore";
 import { useT } from "../../state/languageStore";
+import { Skeleton } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
 import { StatusGlyph } from "./RunList";
 import { STATUS_TOKEN, at, elapsed, formatDuration, statusOf } from "./pipelineStatus";
@@ -479,11 +480,18 @@ export function RunGraph({
   projectId,
   localPath,
   detail,
+  loading,
+  error,
   now,
 }: {
   projectId: string;
   localPath: string | null;
   detail: PipelineRunDetail | undefined;
+  /** The run's detail is in flight. Distinct from `detail === undefined`, which on its own cannot
+   *  tell a pane that nothing has been picked apart from one whose pick has not arrived. */
+  loading: boolean;
+  /** Why it isn't coming. `""` for no error, the convention this store uses throughout. */
+  error: string;
   now: number;
 }) {
   const mode = useCiStore((s) => s.graphMode);
@@ -547,7 +555,23 @@ export function RunGraph({
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto p-3.5">
-        {!detail ? (
+        {!detail && loading ? (
+          /* Cards, not a spinner: the shape of what is coming is itself information, and a pane
+             that keeps its geometry while it fills doesn't jump when it does. */
+          <div className="flex items-start gap-10">
+            {[0, 1, 2].map((column) => (
+              <div key={column} className="flex flex-col" style={{ gap: CARD_GAP }}>
+                <Skeleton className="h-2 w-20 rounded" style={{ marginBottom: HEADER_H - 8 }} />
+                <Skeleton style={{ height: CARD_H, width: CARD_W }} className="rounded-[7px]" />
+                {column === 1 && (
+                  <Skeleton style={{ height: CARD_H, width: CARD_W }} className="rounded-[7px]" />
+                )}
+              </div>
+            ))}
+          </div>
+        ) : !detail && error ? (
+          <p className="text-[11.5px] text-[var(--cf-danger)]">{error}</p>
+        ) : !detail ? (
           <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("pipelines.pickRun")}</p>
         ) : detail.jobs.length === 0 ? (
           <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("pipelines.noJobs")}</p>

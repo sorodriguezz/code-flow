@@ -703,15 +703,36 @@ pub async fn job_log(
     let mut truncated = false;
     let mut total_bytes: u64 = 0;
 
-    for id in ids {
-        // A completed task's log never changes again, and this loop runs on every poll tick while
-        // the job is alive — a live job publishes no aggregated log of its own, so it always falls
-        // back to its children. Without the cache a build with twenty-five tasks cost twenty-five
-        // requests every five seconds; with it, only the parts that are new.
-        if let Some(cached) = cached_part(&org_enc, &project_enc, &build_enc, id) {
-            append_part(&mut text, &cached);
-            total_bytes += cached.len() as u64;
-            continue;
+    // The task still writing is the last one in the list, and it is the one that must never be
+    // cached — see the note below.
+    let writing = ids.len() - 1;
+
+    for (index, id) in ids.iter().copied().enumerate() {
+        /*
+         * A *completed* task's log never changes again, and this loop runs on every poll tick
+         * while the job is alive — a live job publishes no aggregated log of its own, so it always
+         * falls back to its children. Without the cache a build with twenty-five tasks cost
+         * twenty-five requests every five seconds; with it, only the parts that are new.
+         *
+         * "Completed" was the precondition and nothing checked it. Every part was cached, the
+         * currently-writing one included, so the task actually producing output was read once and
+         * then served from memory for the rest of the build: the log stopped growing on screen and
+         * stayed stopped, and the finished job kept the truncated copy. A cache whose key cannot
+         * change and whose value still can is not a cache.
+         *
+         * `resolve_log_ref` returns the task children in execution order and a task has no log id
+         * before it starts, so the last id in the list is the one being written and everything
+         * before it has finished. Only those are cached. The cost is one extra fetch per task over
+         * the life of a job — the poll after it settles reads it once more, in full, and *that* is
+         * what gets remembered.
+         */
+        let settled = index < writing;
+        if settled {
+            if let Some(cached) = cached_part(&org_enc, &project_enc, &build_enc, id) {
+                append_part(&mut text, &cached);
+                total_bytes += cached.len() as u64;
+                continue;
+            }
         }
 
         let url = format!(
@@ -725,7 +746,7 @@ pub async fn job_log(
             // an array, which is the same log at twice the size and none of the formatting.
             .header("Accept", "text/plain");
         let part = http::get_log(request, http::Provider::Azure).await?;
-        if !part.truncated {
+        if settled && !part.truncated {
             remember_part(&org_enc, &project_enc, &build_enc, id, &part.text);
         }
 

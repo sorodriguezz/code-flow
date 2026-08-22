@@ -523,6 +523,25 @@ export function selectedDetail(state: CiState): PipelineRunDetail | undefined {
   return s ? state.detailByRun[`${s.projectId}:${s.provider}:${s.runId}`] : undefined;
 }
 
+/**
+ * Whether the selected run's detail is on its way, and what went wrong if it isn't coming.
+ *
+ * Separate selectors rather than fields on `selectedDetail`, because the thing they answer is what
+ * `undefined` cannot: a pane handed `detail === undefined` has no way to tell "nobody has picked a
+ * run" from "the run you just clicked is still loading", and it used to guess the first — so the
+ * whole right-hand side sat there saying *pick a run* about the run whose row was already
+ * highlighted two inches to the left.
+ */
+export function selectedDetailBusy(state: CiState): boolean {
+  const s = state.selection;
+  return s ? state.detailBusy[`${s.projectId}:${s.provider}:${s.runId}`] === true : false;
+}
+
+export function selectedDetailError(state: CiState): string {
+  const s = state.selection;
+  return s ? (state.detailError[`${s.projectId}:${s.provider}:${s.runId}`] ?? "") : "";
+}
+
 /** The key the selected job's log and analysis are filed under. */
 export function selectedJobKey(state: CiState): string | null {
   const s = state.selection;

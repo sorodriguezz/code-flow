@@ -87,7 +87,7 @@ pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(
         .map_err(|e| format!("unexpected response from {}: {e}", provider.label()))?;
 
     if !status.is_success() {
-        return Err(describe(provider, status, &body, quota));
+        return Err(describe(provider, Asked::Pipeline, status, &body, quota));
     }
     // Azure's trap, repeated here because this helper cannot reuse `ado::get_json`: a wrong or
     // expired PAT is not a 401. dev.azure.com treats the request as anonymous and serves the
@@ -113,7 +113,7 @@ pub(crate) async fn get_log(
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(describe(provider, status, &body, quota));
+        return Err(describe(provider, Asked::Log, status, &body, quota));
     }
     if provider == Provider::Azure && (status.as_u16() == 203 || html) {
         return Err(crate::ado::BAD_CREDENTIALS.to_string());
@@ -202,6 +202,17 @@ fn quota_note(headers: &reqwest::header::HeaderMap) -> Option<String> {
     }
 }
 
+/// What the request was after.
+///
+/// The only thing that separates two 404s that mean entirely different things — see [`describe`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Asked {
+    /// A run, or the jobs of a run.
+    Pipeline,
+    /// One job's log.
+    Log,
+}
+
 /// A failure the user can act on.
 ///
 /// The three cases worth separating are the three that need different actions: the token is not
@@ -210,6 +221,7 @@ fn quota_note(headers: &reqwest::header::HeaderMap) -> Option<String> {
 /// with a large error page behind it produces an unreadable toast.
 fn describe(
     provider: Provider,
+    asked: Asked,
     status: reqwest::StatusCode,
     body: &str,
     quota: Option<String>,
@@ -233,11 +245,25 @@ fn describe(
         return missing_scope(provider);
     }
     if status == reqwest::StatusCode::NOT_FOUND {
-        return format!(
-            "{} doesn't have that pipeline any more — it may have been deleted or the \
-             repository re-linked",
-            provider.label()
-        );
+        // A missing *log* is routine and a missing *run* is not, so they cannot share a sentence.
+        // A host has nothing to hand over for a job that has not written anything yet — GitHub
+        // answers a queued or freshly started job with a 404 — and it has nothing for a job whose
+        // log has aged out of retention either. Told that "the pipeline doesn't exist any more"
+        // while the pipeline is on screen and visibly running, the reader concludes the app is
+        // broken, and they are not being unreasonable. (The panel goes further and doesn't show
+        // this at all while the job is live: see `JobLogPane`.)
+        return match asked {
+            Asked::Log => format!(
+                "{} has no log for that job — it may not have started writing one yet, or the log \
+                 may have aged out of the host's retention window",
+                provider.label()
+            ),
+            Asked::Pipeline => format!(
+                "{} doesn't have that pipeline any more — it may have been deleted or the \
+                 repository re-linked",
+                provider.label()
+            ),
+        };
     }
     // GitLab phrases its own errors well enough to be worth reusing.
     if provider == Provider::GitLab {
@@ -270,5 +296,44 @@ fn missing_scope(provider: Provider) -> String {
         Provider::Azure => "Your Azure DevOps token can't read builds. It needs the \
              `Build (Read)` scope. Reconnect it in Settings → Integrations."
             .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two 404s. Same status, same provider, two different facts about the world — and the one
+    /// that used to be sent for both is the alarming one.
+    #[test]
+    fn a_missing_log_and_a_missing_run_do_not_share_a_sentence() {
+        let not_found = reqwest::StatusCode::NOT_FOUND;
+        let log = describe(Provider::GitHub, Asked::Log, not_found, "", None);
+        let run = describe(Provider::GitHub, Asked::Pipeline, not_found, "", None);
+
+        assert!(log.contains("no log for that job"), "{log}");
+        assert!(!log.contains("deleted"), "a job still starting up has not been deleted: {log}");
+        assert!(run.contains("deleted or the repository re-linked"), "{run}");
+    }
+
+    /// Everything that isn't a 404 answers the same way whichever it was asked for: the fix for a
+    /// missing scope or an exhausted quota doesn't depend on what you happened to be fetching.
+    #[test]
+    fn the_other_failures_read_the_same_either_way() {
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert_eq!(
+                describe(Provider::GitHub, Asked::Log, status, "boom", None),
+                describe(Provider::GitHub, Asked::Pipeline, status, "boom", None),
+                "{status}"
+            );
+        }
+        assert_eq!(
+            describe(Provider::GitHub, Asked::Log, reqwest::StatusCode::FORBIDDEN, "", Some("rate limited".into())),
+            "GitHub: rate limited"
+        );
     }
 }

@@ -1,20 +1,43 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, GitBranch, RefreshCw } from "lucide-react";
+import { ExternalLink, GitBranch, LoaderCircle, RefreshCw } from "lucide-react";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { riseDelay } from "../../lib/rise";
 import { useCiStore } from "../../state/ciStore";
 import { useT } from "../../state/languageStore";
 import { Select, type SelectOption } from "../common/Select";
-import { ThinkingOrb } from "../common/ThinkingOrb";
+import { Skeleton } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
 import { PIPELINE_STATUS, STATUS_ORDER, STATUS_TOKEN, elapsed, formatDuration, statusOf } from "./pipelineStatus";
 import type { PipelineRun } from "../../types/domain";
 
-/** The status glyph, or the orb — the one status this app never draws with a glyph. */
+/**
+ * A job or a run that is currently moving.
+ *
+ * **Deliberately not `ThinkingOrb`.** That mark means *an engine is thinking* — an agent turn, a
+ * story generation, a review stage — and this app has spent it consistently enough that a reader
+ * has learned it. A CI job is a build on somebody else's runner; there is no model in it, nothing
+ * is being reasoned about, and nothing here is spending tokens. Wearing the orb, a `pnpm build`
+ * claimed to be an AI run, which is the one thing a status glyph must never get wrong.
+ *
+ * A plain spinning arc instead — the same vocabulary as the refresh button two rows up, and the
+ * one shape that means "in progress" in every tool the reader already uses.
+ */
+export function RunningGlyph({ size = 14 }: { size?: number }) {
+  const t = useT();
+  return (
+    <LoaderCircle
+      size={size}
+      className="shrink-0 animate-spin text-[var(--cf-accent)]"
+      aria-label={t("pipelines.statusRunning")}
+    />
+  );
+}
+
+/** The status glyph, or the spinner — the one status this app never draws with a static icon. */
 export function StatusGlyph({ status, size = 14 }: { status: string; size?: number }) {
   const t = useT();
   const bucket = statusOf(status);
-  if (bucket === "running") return <ThinkingOrb size="sm" />;
+  if (bucket === "running") return <RunningGlyph size={size} />;
   const Icon = PIPELINE_STATUS[bucket].icon;
   return (
     <Icon
@@ -233,6 +256,23 @@ export function RunList({ projectId, currentBranch }: { projectId: string; curre
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto p-1">
+        {/* The first load used to leave this column completely blank — no rows, no message, no
+            spinner — for as long as the host took to answer, which on a cold GitHub call is a
+            couple of seconds of a screen that looks broken. Placeholders in the shape of the rows
+            that are coming: two lines and a strip, the same 46px, so nothing shifts when they
+            arrive. Only while there is nothing to show; a *refresh* keeps the rows it already has,
+            because replacing a readable list with grey bars every poll would be worse. */}
+        {loading && visible.length === 0 &&
+          Array.from({ length: 8 }).map((_, index) => (
+            <div key={index} className="flex items-start gap-2 px-2 py-1.5">
+              <Skeleton className="mt-[2px] h-3.5 w-3.5 shrink-0 rounded-full" />
+              <div className="min-w-0 flex-1">
+                <Skeleton className="h-3 rounded" style={{ width: `${52 + ((index * 17) % 34)}%` }} />
+                <Skeleton className="mt-1.5 h-2 w-1/3 rounded" />
+                <Skeleton className="mt-1.5 h-[3px] rounded" />
+              </div>
+            </div>
+          ))}
         {visible.map((run, index) => {
           const key = `${projectId}:${run.provider}:${run.id}`;
           return (

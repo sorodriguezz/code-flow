@@ -29,7 +29,8 @@ export const PIPELINE_STATUS: Record<
 > = {
   queued: { icon: Clock, color: "text-[var(--cf-text-muted)]", labelKey: "pipelines.statusQueued" },
   // The icon is here for the label and the screen reader; on screen a running job is drawn with
-  // `<ThinkingOrb size="sm" />` instead, exactly as a running agent task is.
+  // `<RunningGlyph />` — a plain spinning arc, and pointedly *not* the app's `ThinkingOrb`, which
+  // means an engine is reasoning. See the note on that component.
   running: { icon: CircleDot, color: "text-[var(--cf-accent)]", labelKey: "pipelines.statusRunning" },
   success: { icon: CircleCheck, color: "text-[var(--cf-success)]", labelKey: "pipelines.statusSuccess" },
   warning: { icon: TriangleAlert, color: "text-[var(--cf-warning)]", labelKey: "pipelines.statusWarning" },
