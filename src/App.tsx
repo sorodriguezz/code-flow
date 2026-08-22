@@ -13,6 +13,8 @@ import { ChangesPanel } from "./components/git/ChangesPanel";
 import { AiPanel } from "./components/ai/AiPanel";
 import { UpdateNotesModal } from "./components/layout/UpdateNotesModal";
 import { RequirementsModal } from "./components/layout/RequirementsModal";
+import { DataDirsNotice } from "./components/layout/DataDirsNotice";
+import { useDataDirsStore } from "./state/dataDirsStore";
 import { UpdateAlert } from "./components/layout/UpdateAlert";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
@@ -386,8 +388,24 @@ export default function App() {
       let clearToTour = true;
       await Promise.all([
         initRequirements().then((ok) => {
-          clearToTour = ok;
+          clearToTour = ok && clearToTour;
         }),
+        // The v1.19 layout verdict, in the batch for the same reason and gating the same thing.
+        //
+        // It has to be here rather than left to `DataDirsNotice`'s own effect. A blocking verdict
+        // means the migration copied nothing, which means the app booted on a scratch database,
+        // which means there is no `requirements_checked` row and no `tour_seen` row — so
+        // `initRequirements` re-runs, finds all three directories perfectly writable (they are; the
+        // migration failed for some other reason), and returns `true`. Eleven hundred milliseconds
+        // later the 32-step tour would open at `z-[100000]` directly over the unclosable screen the
+        // user was supposed to read, and walk them through an empty app.
+        useDataDirsStore
+          .getState()
+          .load()
+          .then(() => {
+            const status = useDataDirsStore.getState().status;
+            if (status && !status.ok) clearToTour = false;
+          }),
         initTheme(),
         initLayout(),
         initPreferences(),
@@ -898,6 +916,9 @@ export default function App() {
       {/* Only ever drawn on the first launch of an installation, and only if that launch found
           something broken. Silent on a clean machine and on every launch after. */}
       <RequirementsModal />
+      {/* After it, and drawn above it: a data directory that cannot be written is a smaller
+          problem than a database that is not the user's. See `DataDirsNotice`. */}
+      <DataDirsNotice />
       <ToastContainer />
       {/* Watches the notification store rather than being pushed to, so every `notify` gets a card
           — including the ones a paired phone raises, which no call site here knows about. */}

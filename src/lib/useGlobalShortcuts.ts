@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useShortcutsStore, activeChords } from "../state/shortcutsStore";
 import { useTourStore } from "../state/tourStore";
+import { useDataDirsStore } from "../state/dataDirsStore";
 import { SHORTCUT_BY_ID } from "./shortcuts";
 import { eventToChord, isFunctionKey, isTypingTarget, usesMod } from "./keys";
 
@@ -15,6 +16,7 @@ export function useGlobalShortcuts(): void {
   const overrides = useShortcutsStore((s) => s.overrides);
   const recording = useShortcutsStore((s) => s.recordingId !== null);
   const tourActive = useTourStore((s) => s.active);
+  const dataDirsBlocked = useDataDirsStore((s) => s.status !== null && !s.status.ok);
 
   useEffect(() => {
     // While a row in settings is capturing keys, the app must not also *act* on them — otherwise
@@ -25,6 +27,13 @@ export function useGlobalShortcuts(): void {
     // step would silently close again. The tour's own keys are bound in the capture phase, ahead
     // of this handler, so Escape and the arrows keep working.
     if (tourActive) return;
+    // And while the app is refusing to hold data. `DataDirsNotice` draws an unclosable screen for
+    // that, but a `fixed inset-0` div only stops the mouse: every chord here still reached
+    // `command.run()` behind it, and the command palette — which renders at `z-50`, *below* that
+    // screen — would mount invisible under the scrim with its input autofocused, take typing, and
+    // run whatever was selected on Enter. Each of those writes rows into a database that is not the
+    // user's, which is the single thing the screen exists to prevent.
+    if (dataDirsBlocked) return;
     const chords = activeChords(overrides);
 
     const handler = (e: KeyboardEvent) => {
@@ -53,5 +62,5 @@ export function useGlobalShortcuts(): void {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [overrides, recording, tourActive]);
+  }, [overrides, recording, tourActive, dataDirsBlocked]);
 }

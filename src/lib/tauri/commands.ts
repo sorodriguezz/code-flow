@@ -104,9 +104,47 @@ export const quitApp = () => invoke<void>("quit_app");
 
 export const resetAppData = () => invoke<void>("reset_app_data");
 
-/** What the app cannot do without: `git` on `PATH`, and a writable data directory. Called once per
- *  installation — see `requirementsStore` for the flag that keeps it that way. */
+/** What the app cannot do without: `git` on `PATH`, and three writable data directories. Called
+ *  once per installation — see `requirementsStore` for the flag that keeps it that way. */
 export const checkRequirements = () => invoke<Requirement[]>("check_requirements");
+
+/** Where this install keeps its files, and whether the v1.19 layout change went cleanly. */
+export type LayoutStatus = {
+  /** `false` only when the app cannot be trusted to hold data. `LayoutNotice` blocks on it. */
+  ok: boolean;
+  /** `fresh` | `already` | `migrated` | `notPersistent` | `unknownOccupant` | `previouslyFailed`
+   *  | `failed` | `sharedAccount`. Doubles as the translation-key fragment. */
+  kind: string;
+  /** The machine's own words, untranslated. Rendered verbatim, like `Requirement.detail`. */
+  detail: string;
+  stateDir: string;
+  cacheDir: string;
+  userDir: string;
+  legacyDir: string;
+  /** Pre-migration copies of the database still on disk, and their total size. */
+  legacyCopies: string[];
+  legacyCopyBytes: number;
+};
+
+/** The single source of truth for the app's directories.
+ *
+ *  Before this existed, the settings screen answered the same question by reproducing `paths.rs`'s
+ *  platform branch in TSX — `platform === "windows" ? "C:\\CodeFlow" : "~/CodeFlow"` — a guess
+ *  that happened to be right and would have gone on being displayed confidently after the v1.19
+ *  layout change made it wrong. Ask the backend; it is the only thing that knows. */
+export const appPaths = () => invoke<LayoutStatus>("app_paths");
+
+/** Deletes the pre-migration copy of the database left in the old directory. Answers with the bytes
+ *  freed. Never automatic: while that file exists, an unwanted migration is undone with a rename. */
+export const deleteLegacyData = () => invoke<number>("delete_legacy_data");
+
+/** Clears a recorded migration failure so the next launch tries again. Does not restart. */
+export const retryLayoutMigration = () => invoke<void>("retry_layout_migration");
+
+/** Records that this user was the only person using CodeFlow on this machine, releasing the
+ *  shared-root check. A person has to answer this: nothing in the data can tell "two Windows
+ *  accounts shared this folder" from "this PC has a second account that never opened CodeFlow". */
+export const acknowledgeSharedRoot = () => invoke<void>("acknowledge_shared_root");
 
 // ---------- workspaces / projects ----------
 
@@ -172,7 +210,13 @@ export interface RepoCandidate {
 export const findDuplicateProjects = (workspaceId: string, candidates: RepoCandidate[]) =>
   invoke<(DuplicateProject | null)[]>("find_duplicate_projects", { workspaceId, candidates });
 
-export const defaultCloneDir = () => invoke<string>("default_clone_dir");
+/** The default clone destination and the separator to append a name with.
+ *
+ *  The separator is sent rather than inferred: this used to build the path as `${baseDir}/${name}`,
+ *  a forward slash onto a root that on Windows is `C:\\CodeFlow\\repos`, producing a mixed path
+ *  that then lived in `projects.local_path` forever. */
+export const defaultCloneDir = () =>
+  invoke<{ root: string; separator: string }>("default_clone_dir");
 
 export const createWorkspace = (name: string, icon: string, color: string) =>
   invoke<Workspace>("create_workspace", { name, icon, color });

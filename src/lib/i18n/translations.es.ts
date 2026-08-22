@@ -1855,10 +1855,25 @@ export const es = {
   "settings.quitConfirm": "¿Salir completamente de CodeFlow? Esto detiene todas las terminales y procesos de IA en curso.",
   "settings.resetData": "Restablecer datos de la app",
   "settings.resetDataHint":
-    "Elimina todo lo que CodeFlow guarda localmente en {path} — la base de datos, credenciales guardadas, archivos MD y skills de workspace, contextos de revisión, toda la configuración. Esto cierra la app de inmediato; vuelve a abrirla para empezar de cero.",
+    "Elimina lo que CodeFlow guarda en {path} — la base de datos, el llavero, tus espacios de trabajo y skills, contextos de revisión, toda la configuración — y vacía su caché. Tus repositorios clonados y tus copias de seguridad en {userPath} NO se eliminan, ni tampoco las contraseñas guardadas en el llavero del sistema. Esto cierra la app de inmediato; vuelve a abrirla para empezar de cero.",
   "settings.resetDataButton": "Eliminar todos los datos de CodeFlow…",
   "settings.resetDataConfirm":
-    "¿Eliminar permanentemente {path} y todo su contenido? Esto no se puede deshacer. CodeFlow se cerrará de inmediato.",
+    "¿Eliminar permanentemente la base de datos, el llavero y la configuración de CodeFlow en {path}? Esto no se puede deshacer. Tus repositorios y copias de seguridad quedan intactos. CodeFlow se cerrará de inmediato.",
+
+  "settings.dataLocations": "Dónde están tus archivos",
+  "settings.dataLocationsHint":
+    "CodeFlow usa tres directorios separados: lo que le pertenece, lo que puede reconstruir y lo que es tuyo. El botón de restablecer de abajo solo borra los dos primeros.",
+  "settings.dataStateDir": "Datos de la app",
+  "settings.dataCacheDir": "Caché",
+  "settings.dataUserDir": "Tus archivos",
+  "settings.dataReveal": "Mostrar en el explorador de archivos",
+  "settings.legacyCopy": "Copia previa a la actualización",
+  "settings.legacyCopyHint":
+    "Cuando CodeFlow movió sus datos a las carpetas de arriba, dejó la base de datos anterior en {path} por si algo salía mal. Nada la lee. Eliminarla libera {size}.",
+  "settings.legacyCopyButton": "Eliminar la copia antigua",
+  "settings.legacyCopyConfirm":
+    "¿Eliminar la copia de la base de datos previa a la actualización? Contiene una instantánea anterior de todo, incluido tu llavero. Esto no se puede deshacer, y es la única vía de vuelta si el traslado resultó estar mal.",
+  "settings.legacyCopyDone": "Se liberaron {size}.",
 
   "settings.projectsTitle": "Workspaces y proyectos",
   "settings.projectsHint": "Repositorios locales que CodeFlow sigue. Agrega nuevos desde el botón + de la barra lateral.",
@@ -2498,9 +2513,36 @@ export const es = {
   "requirements.git": "Git no está disponible",
   "requirements.gitHint":
     "CodeFlow lee el historial por su cuenta, pero cada clone, fetch, pull y push usa el Git del sistema — así es como reutiliza tus llaves SSH, tu gestor de credenciales y tu .gitconfig. Sin él, esas operaciones fallarán. Instala Git desde git-scm.com y vuelve a abrir CodeFlow.",
-  "requirements.dataDir": "CodeFlow no puede escribir su carpeta de datos",
+  "requirements.dataDir": "CodeFlow no puede escribir una de sus carpetas",
   "requirements.dataDirHint":
-    "Ahí viven la base de datos, tus espacios de trabajo y tu configuración. Si no se puede escribir, no se guarda nada y puede que la app ni siquiera arranque. Revisa los permisos de la carpeta, o pide acceso de escritura a quien administre este equipo.",
+    "CodeFlow usa tres directorios: uno para la base de datos y tu configuración, otro para su caché, y otro para tus repositorios y copias de seguridad. La ruta de abajo es la que se negó. Si no se puede escribir, no se guarda nada y puede que la app ni siquiera arranque. Revisa los permisos de esa carpeta, o pide acceso de escritura a quien administre este equipo.",
+
+  "dataDirs.dismiss": "Entendido",
+  "dataDirs.openOldFolder": "Abrir la carpeta antigua",
+  "dataDirs.retry": "Reintentar en el próximo arranque",
+  "dataDirs.soleUser": "Yo era la única persona que usaba CodeFlow aquí",
+  "dataDirs.retryArmed": "Reinicia CodeFlow para reintentar",
+  "dataDirs.stateDir": "Datos de la app",
+  "dataDirs.userDir": "Tus archivos",
+  "dataDirs.legacyDir": "Carpeta antigua",
+  "dataDirs.migrated": "CodeFlow movió sus datos",
+  "dataDirs.migratedHint":
+    "La base de datos, tus espacios de trabajo y la memoria de las cadenas ahora viven en la carpeta de datos que tu sistema operativo reserva para CodeFlow. Tus repositorios clonados y tus copias de seguridad no se movieron — siguen en la carpeta antigua, y CodeFlow los sigue leyendo y escribiendo ahí. La copia previa de la base de datos se conservó; puedes eliminarla desde Ajustes cuando estés conforme.",
+  "dataDirs.notPersistent": "Este equipo está descartando la carpeta de datos de CodeFlow",
+  "dataDirs.notPersistentHint":
+    "CodeFlow ya movió sus datos aquí antes, y la carpeta volvió a desaparecer — o sea que este perfil no la conserva entre sesiones. Es normal en un escritorio virtual no persistente o en un perfil gestionado que excluye los datos locales de aplicación. CodeFlow no volverá a mover nada por su cuenta. Para arreglarlo, apunta la variable de entorno CODEFLOW_HOME a una carpeta que sobreviva al cierre de sesión y reinicia.",
+  "dataDirs.unknownOccupant": "La carpeta de datos de CodeFlow contiene algo que no reconoce",
+  "dataDirs.unknownOccupantHint":
+    "Hay un archivo de layout en la carpeta de datos que esta versión de CodeFlow no sabe leer. Se detuvo en vez de escribir encima, porque hacerlo podría destruir lo que sea que lo dejó ahí. Tus datos en la carpeta antigua no se han tocado. Si hace poco usaste una versión más nueva de CodeFlow, usa esa.",
+  "dataDirs.previouslyFailed": "Un traslado anterior de los datos de CodeFlow falló",
+  "dataDirs.previouslyFailedHint":
+    "CodeFlow intentó mover sus datos antes y no pudo terminar, así que no lo ha vuelto a intentar por su cuenta. Todo sigue en la carpeta antigua, sin cambios. Corrige lo que describe el mensaje de abajo — normalmente espacio en disco o permisos de carpeta — y luego elige reintentar y reinicia.",
+  "dataDirs.failed": "CodeFlow no pudo mover sus datos",
+  "dataDirs.failedHint":
+    "La copia no se completó, así que CodeFlow no va a abrir una base de datos aquí — lo que escribieras iría a parar a un sitio donde no está tu trabajo. Nada de la carpeta antigua se modificó y todo sigue ahí. Corrige lo que describe el mensaje de abajo, reintenta y reinicia.",
+  "dataDirs.sharedAccount": "Esta carpeta se comparte con otra cuenta de Windows",
+  "dataDirs.sharedAccountHint":
+    "La carpeta antigua de CodeFlow está fuera de tu perfil de usuario y su base de datos menciona un proyecto de otra cuenta de este equipo — es decir, la ha usado más de una persona. Copiarla a tu perfil dejaría sus notas, sus conexiones guardadas y su llavero de contraseñas en tu cuenta de forma permanente, y no los quitaría de la suya. CodeFlow no ha copiado nada. Si eras la única persona que usaba este equipo, o tienes el acuerdo de la otra cuenta, pide ayuda antes de continuar.",
 
   "bench.title": "Terminales",
   "bench.section": "Terminales",

@@ -1,12 +1,16 @@
-import { GraduationCap, LogOut, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { FolderOpen, GraduationCap, LogOut, Trash2 } from "lucide-react";
 import { ActivePill } from "../common/ActivePill";
 import { APP_TOURS, type TourId } from "../../lib/tour/steps";
 import { tourLength, useTourStore } from "../../state/tourStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import type { Language } from "../../lib/i18n/translations";
-import { quitApp, resetAppData } from "../../lib/tauri/commands";
+import { deleteLegacyData, quitApp, resetAppData, revealInFileManager } from "../../lib/tauri/commands";
 import { confirmAction } from "../../state/confirmStore";
-import { usePlatform } from "../../lib/platform";
+import { useDataDirsStore } from "../../state/dataDirsStore";
+import { useToastStore } from "../../state/toastStore";
+// Shared with the backup panel, which formats the same kind of number for the same reason.
+import { formatBytes } from "../../lib/tauri/backupCommands";
 import { UpdateSection } from "./UpdateSection";
 import { SettingsHeader } from "../api/settingsChrome";
 
@@ -21,9 +25,21 @@ export function GeneralSettings() {
   const t = useT();
   const language = useLanguageStore((s) => s.language);
   const setLanguage = useLanguageStore((s) => s.setLanguage);
-  const platform = usePlatform();
-  const dataPath = platform === "windows" ? "C:\\CodeFlow" : "~/CodeFlow";
   const startTour = useTourStore((s) => s.start);
+  // Asked, not guessed. This line used to be
+  // `platform === "windows" ? "C:\\CodeFlow" : "~/CodeFlow"` — a second, independent copy of
+  // `paths.rs`'s platform branch, which was right until the v1.19 layout change made it wrong and
+  // would have gone on being displayed with total confidence.
+  const layout = useDataDirsStore((s) => s.status);
+  const loadLayout = useDataDirsStore((s) => s.load);
+  const refreshLayout = useDataDirsStore((s) => s.refresh);
+  const [deleting, setDeleting] = useState(false);
+  const pushToast = useToastStore((s) => s.pushToast);
+  const dataPath = layout?.stateDir ?? "…";
+
+  useEffect(() => {
+    void loadLayout();
+  }, [loadLayout]);
 
   /**
    * Starting the tour is the whole of it. It closes this dialog itself.
@@ -123,10 +139,81 @@ export function GeneralSettings() {
         </div>
       </div>
 
+      {/* Where the files are.
+          Three rows rather than one, because since v1.19 there are three directories and they are
+          not siblings — and because the row that matters most to a person is the third one, which
+          says that the reset button below cannot reach their repositories. */}
+      <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
+        <h3 className="mb-1 text-sm font-semibold">{t("settings.dataLocations")}</h3>
+        <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.dataLocationsHint")}</p>
+        <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
+          {(
+            [
+              ["settings.dataStateDir", layout?.stateDir],
+              ["settings.dataCacheDir", layout?.cacheDir],
+              ["settings.dataUserDir", layout?.userDir],
+            ] as const
+          ).map(([key, path]) => (
+            <div
+              key={key}
+              className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2 last:border-b-0"
+            >
+              <span className="w-[150px] shrink-0 text-[12.5px] text-[var(--cf-text-muted)]">{t(key)}</span>
+              <span className="min-w-0 flex-1 select-text truncate font-mono text-[11.5px]" title={path ?? ""}>
+                {path ?? "…"}
+              </span>
+              <button
+                disabled={!path}
+                onClick={() => path && void revealInFileManager(path)}
+                aria-label={t("settings.dataReveal")}
+                title={t("settings.dataReveal")}
+                className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] disabled:opacity-40 dark:hover:bg-white/[0.06]"
+              >
+                <FolderOpen size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* Only after a migration actually left one behind. A row that says "0 bytes to reclaim"
+            on every clean install would be a permanent question with no answer. */}
+        {layout && layout.legacyCopies.length > 0 && (
+          <div className="mt-3 rounded-lg border border-[var(--cf-border)] p-3">
+            <p className="text-[12.5px] font-medium">{t("settings.legacyCopy")}</p>
+            <p className="mt-1 text-[12px] leading-snug text-[var(--cf-text-muted)]">
+              {t("settings.legacyCopyHint", {
+                path: layout.legacyDir,
+                size: formatBytes(layout.legacyCopyBytes),
+              })}
+            </p>
+            <button
+              disabled={deleting}
+              onClick={async () => {
+                if (!(await confirmAction(t("settings.legacyCopyConfirm")))) return;
+                setDeleting(true);
+                try {
+                  const freed = await deleteLegacyData();
+                  await refreshLayout();
+                  pushToast(t("settings.legacyCopyDone", { size: formatBytes(freed) }), "success");
+                } catch (e) {
+                  pushToast(String(e));
+                } finally {
+                  setDeleting(false);
+                }
+              }}
+              className="mt-2 flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12.5px] font-medium text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)]/40 hover:text-[var(--cf-danger)] disabled:opacity-50"
+            >
+              <Trash2 size={13} />
+              {t("settings.legacyCopyButton")}
+            </button>
+          </div>
+        )}
+      </div>
+
       <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
         <h3 className="mb-1 text-sm font-semibold">{t("settings.resetData")}</h3>
         <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">
-          {t("settings.resetDataHint", { path: dataPath })}
+          {t("settings.resetDataHint", { path: dataPath, userPath: layout?.userDir ?? "…" })}
         </p>
         <button
           onClick={async () => {

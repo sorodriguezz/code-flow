@@ -6,11 +6,17 @@ import type { Requirement } from "../types/domain";
  * Where "this installation has already been checked" is recorded.
  *
  * The same mechanism as the tour's own flag, and for the same reason: it is a row in `codeflow.db`,
- * which lives in `~/CodeFlow` (or `C:\CodeFlow`) — **beside** the application rather than inside it.
- * An update replaces the bundle and never touches that folder, so an upgrade is not a fresh install
- * and does not bring the screen back. The only three things that do are all deliberate: a new
- * machine or user account, the installer's "wipe my data" option, and Settings → General → Reset
- * data.
+ * which lives in the app-data directory the OS sets aside for CodeFlow (see `paths::state_dir`) —
+ * **beside** the application rather than inside it. An update replaces the bundle and never touches
+ * that directory, so an upgrade is not a fresh install and does not bring the screen back. The only
+ * things that do are all deliberate: a new machine or user account, the installer's "wipe my data"
+ * option, and Settings → General → Reset data.
+ *
+ * One exception, and it is on purpose: the v1.19 layout migration deletes this row. The check it
+ * gates is the only warning anyone gets that a data directory cannot be written, and the launch
+ * right after the directories move is precisely the launch where that can newly be true — so
+ * carrying the row across would have disarmed the alarm on the one night it was needed. See
+ * `migrate::rewrite_rows`.
  */
 const SEEN_KEY = "requirements_checked";
 

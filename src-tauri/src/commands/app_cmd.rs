@@ -31,6 +31,48 @@ pub fn reset_app_data(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Where this install keeps its files, and whether the layout is in a state worth saying something
+/// about.
+///
+/// The verdict was decided at startup and lives in managed state; only the pre-migration copies are
+/// re-read, because Settings has a button that deletes them. See [`crate::migrate::refresh`].
+#[tauri::command]
+pub fn app_paths(layout: State<crate::migrate::LayoutStatus>) -> crate::migrate::LayoutStatus {
+    crate::migrate::refresh(layout.inner())
+}
+
+/// Deletes the pre-migration copy of the database left in the old directory, and answers with how
+/// many bytes went.
+///
+/// Not part of "Reset app data" and not automatic: while these files exist, a migration that turned
+/// out to be wrong is undone with a rename, so the decision to give that up is the user's.
+#[tauri::command]
+pub fn delete_legacy_data() -> Result<u64, String> {
+    crate::migrate::delete_legacy_copies()
+}
+
+/// Clears a recorded migration failure so the next launch tries again.
+///
+/// Answers without restarting, deliberately: a migration is only safe in the window before the
+/// database is opened, and this is called from a process that has already opened one. The frontend
+/// asks the user to restart.
+#[tauri::command]
+pub fn retry_layout_migration() -> Result<(), String> {
+    crate::migrate::arm_retry()
+}
+
+/// Records that this user was the only person using CodeFlow on this machine, releasing the
+/// shared-root check so the migration can run on the next launch.
+///
+/// A person answers this, not the code, and deliberately: nothing in the database can distinguish
+/// "two Windows accounts shared this folder" from "this PC has a second account that never opened
+/// CodeFlow", and the guard errs toward asking because the cost of guessing wrong is another
+/// person's password vault copied permanently into this user's profile.
+#[tauri::command]
+pub fn acknowledge_shared_root() -> Result<(), String> {
+    crate::migrate::acknowledge_shared_root()
+}
+
 /// The statistics screen's whole payload for one window, in hours.
 ///
 /// The only reader of what this app recorded, now that the status bar draws provider quota alone —

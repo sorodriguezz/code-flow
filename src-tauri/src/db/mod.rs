@@ -19,7 +19,28 @@ pub struct Db(pub Mutex<Connection>);
 
 pub fn init() -> rusqlite::Result<Db> {
     paths::ensure_dirs().expect("failed to create CodeFlow config directory");
-    let conn = Connection::open(paths::db_path())?;
+    open(Connection::open(paths::db_path())?)
+}
+
+/// A throwaway database in memory, for a launch where the state root must not be written to.
+///
+/// Used when [`crate::migrate`] reports a layout it cannot vouch for — a copy that failed, an
+/// unrecognised occupant, a shared Windows root. The frontend blocks the whole window in that case
+/// (`DataDirsNotice`), so nothing *should* reach this connection; this is the second lock, and it
+/// is the one that holds if the first is ever wrong. The alternative is what this used to do:
+/// `Connection::open` on the state root, which on a failed migration means either creating a fresh
+/// empty database beside the user's real one — a plausible, working, empty app — or opening the
+/// truncated remains of a half-finished copy, which returns `SQLITE_CORRUPT` from the schema parse
+/// and takes the `.expect()` in `run()` down with it. That panic happens before any window exists,
+/// on every subsequent launch, so the recovery screen with the Retry button could never be reached.
+///
+/// The whole schema is created here, exactly as on disk, because every command in the app assumes
+/// its tables exist and a blocked window still mounts its React tree.
+pub fn init_scratch() -> rusqlite::Result<Db> {
+    open(Connection::open_in_memory()?)
+}
+
+fn open(conn: Connection) -> rusqlite::Result<Db> {
     // Must come before `migrations::run` — the journal mode is a property of the database file,
     // and switching it is cheapest when nothing is mid-transaction.
     //
@@ -38,6 +59,14 @@ pub fn init() -> rusqlite::Result<Db> {
     // Why a single writer is guaranteed: `tauri-plugin-single-instance` means there is never a
     // second CodeFlow process on this file, and inside the process every access goes through the
     // `Mutex<Connection>` below.
+    //
+    // That claim was false on Windows until v1.19, and worth recording as the reason the data
+    // directory moved. The old `C:\CodeFlow` had no per-user component, so every local account
+    // shared one database file — and the plugin's mutex is per Terminal Services session, so two
+    // signed-in accounts under fast user switching defeated it outright. Two processes, one file,
+    // each running `recover_after_restart` and demoting the other's live rows to `interrupted`.
+    // The state root is per user now (`paths::state_dir`), which is what makes the sentence above
+    // true rather than aspirational.
     //
     // `busy_timeout` is the precondition for ever moving read commands off the UI thread: the
     // moment a second connection can exist, a reader that lands during a checkpoint must wait

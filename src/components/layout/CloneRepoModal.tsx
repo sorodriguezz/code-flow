@@ -32,7 +32,11 @@ export function CloneRepoModal({
 }) {
   const addProject = useWorkspaceStore((s) => s.addProject);
   const t = useT();
-  const [baseDir, setBaseDir] = useState("");
+  /** The clone root and the separator to append a name with, both from Rust. The separator is not
+   *  cosmetic: this used to build the destination as `${baseDir}/${name}`, a forward slash onto a
+   *  root that on Windows is `C:\\CodeFlow\\repos`, and the mixed path it produced went on to live
+   *  in `projects.local_path` for the life of the project. */
+  const [base, setBase] = useState({ root: "", separator: "/" });
   const [url, setUrl] = useState(initialUrl ?? "");
   const [name, setName] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
@@ -44,7 +48,7 @@ export function CloneRepoModal({
   const [duplicate, setDuplicate] = useState<DuplicateProject | null>(null);
 
   useEffect(() => {
-    void defaultCloneDir().then(setBaseDir);
+    void defaultCloneDir().then(setBase);
   }, []);
 
   useEffect(() => {
@@ -58,7 +62,7 @@ export function CloneRepoModal({
   // Falls back to the repo's own name whenever the field is left blank — whether the
   // user never touched it, or cleared it out on purpose — rather than blocking Clone.
   const effectiveName = name.trim() || deriveName(url);
-  const dest = baseDir && effectiveName ? `${baseDir}/${effectiveName}` : "";
+  const dest = base.root && effectiveName ? `${base.root}${base.separator}${effectiveName}` : "";
 
   const clone = async () => {
     if (!url.trim() || !dest) return;

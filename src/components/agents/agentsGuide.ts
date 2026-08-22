@@ -75,9 +75,9 @@ Lo que evita que esto se vaya de las manos son dos números, no la forma del pla
 
 ### La memoria de la cadena
 
-Cada cadena tiene una carpeta de notas en **\`~/CodeFlow/chain-memory/<id>/\`** (\`C:\\CodeFlow\\…\` en Windows), espejada dentro de **cada** repositorio que la cadena toca en \`.codeflow/memory/<id>/\`. **La escribe la app, no el modelo**: cuando un paso responde, su respuesta queda ahí como \`01-analista.md\`, \`02-implementador.md\`, etc.
+Cada cadena tiene una carpeta de notas en la carpeta de datos de CodeFlow, en **\`chain-memory/<id>/\`** — la ruta exacta está en Ajustes → General → Dónde están tus archivos — espejada dentro de **cada** repositorio que la cadena toca en \`.codeflow/memory/<id>/\`. **La escribe la app, no el modelo**: cuando un paso responde, su respuesta queda ahí como \`01-analista.md\`, \`02-implementador.md\`, etc.
 
-Las dos mitades hacen falta. La de \`~/CodeFlow\` es la que dura: puedes borrar, mover o volver a clonar un repositorio y el registro de lo que hizo la cadena no se va con él. Los espejos son los que leen los agentes, porque salir del directorio de trabajo no es portable entre motores y una carpeta dentro de él no necesita permiso de nadie.
+Las dos mitades hacen falta. La de la carpeta de datos es la que dura: puedes borrar, mover o volver a clonar un repositorio y el registro de lo que hizo la cadena no se va con él. Los espejos son los que leen los agentes, porque salir del directorio de trabajo no es portable entre motores y una carpeta dentro de él no necesita permiso de nadie.
 
 Eso resuelve lo que antes se perdía: el paso 4 solo veía la respuesta del 3. Ahora el mensaje de cada paso trae el índice de todas las notas anteriores, y el agente abre las que necesite con sus propias herramientas — sin flags ni permisos, porque la carpeta está dentro del directorio de trabajo en el que ya corre. Funciona igual con Claude, Codex, agy u opencode.
 
@@ -204,9 +204,9 @@ What keeps this from running away is two numbers rather than the shape of the pl
 
 ### The chain's memory
 
-Every chain has a folder of notes at **\`~/CodeFlow/chain-memory/<id>/\`** (\`C:\\CodeFlow\\…\` on Windows), mirrored into **every** repository the chain touches at \`.codeflow/memory/<id>/\`. **The app writes them, not the model**: when a step answers, its answer is filed as \`01-analyst.md\`, \`02-implementer.md\`, and so on.
+Every chain has a folder of notes inside CodeFlow's data folder, at **\`chain-memory/<id>/\`** — the exact path is in Settings → General → Where your files are — mirrored into **every** repository the chain touches at \`.codeflow/memory/<id>/\`. **The app writes them, not the model**: when a step answers, its answer is filed as \`01-analyst.md\`, \`02-implementer.md\`, and so on.
 
-Both halves earn their keep. The \`~/CodeFlow\` copy is the one that lasts: you can delete, move or re-clone a repository and the chain's record of what it did does not go with it. The mirrors are what the agents read, because reaching outside the working directory is not portable between engines and a folder inside it needs nobody's permission.
+Both halves earn their keep. The copy in the data folder is the one that lasts: you can delete, move or re-clone a repository and the chain's record of what it did does not go with it. The mirrors are what the agents read, because reaching outside the working directory is not portable between engines and a folder inside it needs nobody's permission.
 
 That fixes what used to be lost: step 4 only ever saw step 3's answer. Now every step's message carries an index of all the earlier notes, and the agent opens the ones it needs with its own tools — no flags, no permissions, because the folder is inside the working directory it already runs in. It works the same on Claude, Codex, agy or opencode.
 

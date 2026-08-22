@@ -1885,10 +1885,25 @@ const en = {
   "settings.quitConfirm": "Quit CodeFlow completely? This stops every running terminal and background AI job.",
   "settings.resetData": "Reset app data",
   "settings.resetDataHint":
-    "Deletes everything CodeFlow stores locally at {path} — the database, saved credentials, workspace MD files and skills, review contexts, all settings. This quits the app immediately; reopen it to start fresh.",
+    "Deletes what CodeFlow stores at {path} — the database, the password vault, your workspaces and skills, review contexts, all settings — and empties its cache. Your cloned repositories and your backups in {userPath} are NOT deleted, and neither are passwords saved in your system keychain. This quits the app immediately; reopen it to start fresh.",
   "settings.resetDataButton": "Delete all CodeFlow data…",
   "settings.resetDataConfirm":
-    "Permanently delete {path} and everything in it? This cannot be undone. CodeFlow will quit immediately.",
+    "Permanently delete CodeFlow's database, vault and settings in {path}? This cannot be undone. Your repositories and backups are left alone. CodeFlow will quit immediately.",
+
+  "settings.dataLocations": "Where your files are",
+  "settings.dataLocationsHint":
+    "CodeFlow keeps three separate directories: what it owns, what it can rebuild, and what is yours. Only the first two are ever deleted by the reset below.",
+  "settings.dataStateDir": "App data",
+  "settings.dataCacheDir": "Cache",
+  "settings.dataUserDir": "Your files",
+  "settings.dataReveal": "Show in file manager",
+  "settings.legacyCopy": "Pre-upgrade copy of the database",
+  "settings.legacyCopyHint":
+    "When CodeFlow moved its data into the folders above, it kept the old database in {path} in case anything went wrong. Nothing reads it. Deleting it frees {size}.",
+  "settings.legacyCopyButton": "Delete the old copy",
+  "settings.legacyCopyConfirm":
+    "Delete the pre-upgrade copy of the database? It holds an older snapshot of everything, including your password vault. This cannot be undone, and it is the only way back if the move turns out to have gone wrong.",
+  "settings.legacyCopyDone": "Freed {size}.",
 
   "settings.projectsTitle": "Workspaces & projects",
   "settings.projectsHint": "Local repositories tracked by CodeFlow. Add new ones from the + button in the sidebar.",
@@ -2541,9 +2556,36 @@ const en = {
   "requirements.git": "Git isn't available",
   "requirements.gitHint":
     "CodeFlow reads history on its own, but every clone, fetch, pull and push runs your system Git — that's how it reuses your SSH keys, your credential manager and your .gitconfig. Without it those will fail. Install Git from git-scm.com and reopen CodeFlow.",
-  "requirements.dataDir": "CodeFlow can't write its data folder",
+  "requirements.dataDir": "CodeFlow can't write one of its folders",
   "requirements.dataDirHint":
-    "This is where the database, your workspaces and your settings live. If it can't be written, nothing can be saved and the app may not start at all. Check the folder's permissions, or ask whoever administers this machine for write access to it.",
+    "CodeFlow uses three directories: one for the database and your settings, one for its cache, and one for your repositories and backups. The path below is the one that refused. If it can't be written, nothing can be saved and the app may not start at all. Check that folder's permissions, or ask whoever administers this machine for write access to it.",
+
+  "dataDirs.dismiss": "Got it",
+  "dataDirs.openOldFolder": "Open the old folder",
+  "dataDirs.retry": "Try again on next launch",
+  "dataDirs.soleUser": "I was the only one using CodeFlow here",
+  "dataDirs.retryArmed": "Restart CodeFlow to retry",
+  "dataDirs.stateDir": "App data",
+  "dataDirs.userDir": "Your files",
+  "dataDirs.legacyDir": "Old folder",
+  "dataDirs.migrated": "CodeFlow moved its data",
+  "dataDirs.migratedHint":
+    "The database, your workspaces and your chain memory now live in the app-data folder your operating system sets aside for CodeFlow. Your cloned repositories and your backups have not moved — they are still in the old folder, and CodeFlow still reads and writes them there. The pre-move copy of the database was kept; you can delete it from Settings once you're happy.",
+  "dataDirs.notPersistent": "This machine is discarding CodeFlow's data folder",
+  "dataDirs.notPersistentHint":
+    "CodeFlow moved its data here before, and the folder is gone again — which means this profile does not keep it between sessions. That is normal on a non-persistent virtual desktop or a managed profile that excludes local app data. CodeFlow will not move anything again on its own. To fix it, set the CODEFLOW_HOME environment variable to a folder that survives signing out, and restart.",
+  "dataDirs.unknownOccupant": "CodeFlow's data folder holds something it doesn't recognise",
+  "dataDirs.unknownOccupantHint":
+    "There is a layout file in the app-data folder that this version of CodeFlow cannot read. It has stopped rather than write over it, because writing over it could destroy whatever put it there. Your data in the old folder has not been touched. If you recently ran a newer version of CodeFlow, use that one instead.",
+  "dataDirs.previouslyFailed": "A previous move of CodeFlow's data failed",
+  "dataDirs.previouslyFailedHint":
+    "CodeFlow tried to move its data before and could not finish, so it has not tried again on its own. Everything is still in the old folder, unchanged. Fix what the message below describes — usually free disk space or folder permissions — then choose to try again and restart.",
+  "dataDirs.failed": "CodeFlow could not move its data",
+  "dataDirs.failedHint":
+    "The copy did not complete, so CodeFlow will not open a database here — anything you typed would be written somewhere your work is not. Nothing in the old folder was changed and all of it is still there. Fix what the message below describes, then try again and restart.",
+  "dataDirs.sharedAccount": "This folder is shared with another Windows account",
+  "dataDirs.sharedAccountHint":
+    "The old CodeFlow folder is outside your user profile and its database mentions a project belonging to a different account on this machine — which means more than one person has been using it. Copying it into your profile would put their notes, their saved connections and their password vault permanently in your account, and would not remove them from theirs. CodeFlow has not copied anything. If you were the only person using this machine, or you have the other account's agreement, ask for help before continuing.",
 
   "bench.title": "Terminals",
   "bench.section": "Terminals",

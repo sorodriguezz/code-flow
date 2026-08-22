@@ -1,5 +1,6 @@
 mod ado;
 mod ai;
+mod applog;
 mod api;
 mod appmenu;
 mod ai_locks;
@@ -27,6 +28,7 @@ mod github;
 mod gitlab;
 mod npm;
 mod lsp;
+mod migrate;
 mod oauth;
 mod onedrive;
 mod opencode;
@@ -40,6 +42,7 @@ mod remotectl;
 mod remotes;
 mod repo_identity;
 mod requirements;
+mod reset;
 mod review;
 mod review_memory;
 mod search;
@@ -178,16 +181,32 @@ pub(crate) fn set_webview_memory_target(webview_window: &tauri::WebviewWindow, l
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Must happen before `db::init()` opens the SQLite connection below — see
-    // `paths::reset_marker_path`'s doc comment for why the delete can't happen live.
+    // First, before anything that can fail. Everything from here to the window appearing runs with
+    // no way to report itself — no console on Windows, no window anywhere — and two of the steps
+    // below now move the user's database between directories. See `applog`, which until v1.19 did
+    // not exist: `logs/` was created on every launch and had no writer at all.
+    applog::init();
+
+    // Then the reset, if one was requested on the previous launch. Must happen before `db::init()`
+    // opens the SQLite connection below — see `paths::reset_marker_path`'s doc comment for why the
+    // delete can't happen live.
     //
-    // Ahead of `import_login_path` rather than behind it, which it used to be: that call now keeps a
-    // cache file inside this same directory and rewrites it from a background thread, so a wipe
-    // running afterwards would be racing it — the delete would land first and the late write would
-    // recreate the directory holding a value the user just asked to be rid of. Wiping first leaves
-    // the import to find no cache, which is exactly what a reset should look like to it.
-    if paths::reset_marker_path().exists() {
-        let _ = std::fs::remove_dir_all(paths::base_dir());
+    // Ahead of `import_login_path` rather than behind it, which it used to be: that call keeps a
+    // cache file under the cache root and rewrites it from a background thread, so a wipe running
+    // afterwards would be racing it — the delete would land first and the late write would recreate
+    // the directory holding a value the user just asked to be rid of. Wiping first leaves the
+    // import to find no cache, which is exactly what a reset should look like to it.
+    let wiped = reset::run_if_requested();
+
+    // And then the layout migration, which has to be after the reset and not before: a user who
+    // asked for everything to be deleted, and whose old data is still sitting in the pre-v1.19
+    // directory, must not have it copied back in. Running the wipe first leaves nothing for this to
+    // find, so the ordering carries the whole argument — there is no "was a reset just performed"
+    // flag to thread through, and deliberately so.
+    let layout = migrate::run_at_startup();
+    let layout_status = migrate::status(&layout);
+    if wiped {
+        applog::info("layout: a reset ran on this launch, so there was nothing to migrate");
     }
 
     // Before anything can spawn a thread, and it has to be: this writes a process-wide environment
@@ -223,7 +242,26 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(db::init().expect("failed to initialize CodeFlow database"))
+        // The startup layout verdict, decided above and read by `app_paths`. Managed rather
+        // than recomputed, because "did this launch migrate" is a fact about *this* launch and
+        // asking again later would answer about a different one.
+        .manage(layout_status.clone())
+        // The state root, unless the migration said it cannot vouch for it.
+        //
+        // `db::init()` used to run here unconditionally, and that made the whole recovery design
+        // unreachable: a copy that failed part-way leaves a truncated `codeflow.db`, opening it
+        // returns `SQLITE_CORRUPT` from the schema parse, and the `.expect()` panics *before*
+        // `.setup()` — so no window, no notice, no Retry button, on that launch and every one
+        // after it. A copy that failed before writing anything is worse in a quieter way: an empty
+        // database appears in the new root and the app comes up looking fresh and working.
+        //
+        // Both are answered by not putting a connection on that file at all until the layout is
+        // one this build is willing to write to. See `db::init_scratch`.
+        .manage(if layout_status.ok {
+            db::init().expect("failed to initialize CodeFlow database")
+        } else {
+            db::init_scratch().expect("failed to initialize a scratch database")
+        })
         .manage(TerminalRegistry::default())
         .manage(ApiRegistry::default())
         .manage(DbRegistry::default())
@@ -342,6 +380,10 @@ pub fn run() {
             commands::app_cmd::quit_app,
             commands::app_cmd::check_requirements,
             commands::app_cmd::reset_app_data,
+            commands::app_cmd::app_paths,
+            commands::app_cmd::delete_legacy_data,
+            commands::app_cmd::retry_layout_migration,
+            commands::app_cmd::acknowledge_shared_root,
             commands::backup_cmd::backup_state,
             commands::backup_cmd::backup_save_settings,
             commands::backup_cmd::backup_reset_auto,

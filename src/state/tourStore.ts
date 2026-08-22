@@ -14,9 +14,11 @@ import { applyStage, captureAppState, restoreAppState, type AppSnapshot } from "
  * The per-app tours are never opened automatically at all, and never write this flag: they are
  * offered by a button inside the app they describe, and taken by whoever wants one.
  *
- * That holds because this is a row in `codeflow.db`, which lives in `~/CodeFlow` (or
- * `C:\CodeFlow`) — **beside** the app rather than inside it. An update replaces the application
- * bundle and never touches that folder, so the flag survives every release. The only three things
+ * That holds because this is a row in `codeflow.db`, which lives in the app-data directory the OS
+ * sets aside for CodeFlow (see `paths::state_dir`) — **beside** the app rather than inside it. An
+ * update replaces the application bundle and never touches that directory, so the flag survives
+ * every release. The v1.19 layout change moved that directory and copied the row across with it,
+ * which is why upgrading through it did not bring the tour back either. The only three things
  * that bring the tour back are all things the user did on purpose: installing on a fresh machine or
  * user account, choosing the installer's "wipe my data" option, and Settings → General → Reset
  * data.
