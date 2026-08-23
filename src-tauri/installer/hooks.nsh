@@ -68,8 +68,16 @@
       ; Understating what a delete takes is precisely the bug the rest of this file exists to fix —
       ; see problem 2 above — so a new multi-gigabyte thing under this root gets its own clause
       ; rather than being quietly covered by the old wording.
+      ;
+      ; `/SD IDNO` goes *after* the text, never before it. That is not a style preference and it is
+      ; what broke the first Windows bundle built from this file: the grammar is
+      ; `MessageBox mode messagebox_text [/SD return] [return_check label [return_check2 label2]]`,
+      ; and makensis reads the text from token 2 unconditionally. With `/SD` sitting there the
+      ; message became the literal string "/SD", the real message became a jump label, and the two
+      ; ID/label pairs became one pair too many — so it printed its usage and aborted the whole NSIS
+      ; bundle, on a line number inside the *generated* installer that names nothing in this file.
       ${If} ${FileExists} "$LOCALAPPDATA\CodeFlow\*.*"
-        MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 /SD IDNO \
+        MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 \
           "Delete CodeFlow's database, settings and password vault?$\n$\n\
            Location: $LOCALAPPDATA\CodeFlow$\n$\n\
            This also deletes any AI autocomplete models you downloaded, which can be several \
@@ -78,7 +86,7 @@
            $PROFILE\CodeFlow and will be left alone.$\n$\n\
            Passwords saved in Windows Credential Manager are also left alone; remove them there if \
            you want them gone." \
-          IDYES codeflow_delete_data IDNO codeflow_data_done
+          /SD IDNO IDYES codeflow_delete_data IDNO codeflow_data_done
         codeflow_delete_data:
           RMDir /r "$LOCALAPPDATA\CodeFlow"
       ${EndIf}
@@ -97,12 +105,12 @@
       ; recently written pages verbatim — including the vault columns this schema stores in the
       ; clear. Leaving it in a machine-wide folder is the exposure this release exists to end.
       ${If} ${FileExists} "C:\CodeFlow\codeflow.db*.migrated-*"
-        MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 /SD IDNO \
+        MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 \
           "Also delete the pre-upgrade copy of the database left in C:\CodeFlow?$\n$\n\
            It contains an older snapshot of everything, including your password vault.$\n$\n\
            Everything else in that folder — including any repositories and backups, and anything \
            belonging to other Windows accounts — is left alone." \
-          IDYES codeflow_delete_legacy IDNO codeflow_legacy_done
+          /SD IDNO IDYES codeflow_delete_legacy IDNO codeflow_legacy_done
         codeflow_delete_legacy:
           Delete "C:\CodeFlow\codeflow.db*.migrated-*"
           Delete "C:\CodeFlow\MIGRATED.txt"
