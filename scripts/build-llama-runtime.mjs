@@ -2,7 +2,8 @@
 //
 //   llama-server[.exe]   the FIM server CodeFlow talks to over a loopback port
 //   lib*/… .dll          only the libraries that binary actually resolves
-//   LICENSE              llama.cpp's, because we are redistributing its binaries
+//   LICENSE              llama.cpp's, because we are redistributing its binaries — from the
+//                        archive when it carries one, from `scripts/assets/` when it does not
 //
 // Same bargain as `build-iris-runtime.mjs`, which does this for the JRE the IRIS driver needs, and
 // deliberately the same shape: a pinned upstream release, checksum-verified, trimmed to what is
@@ -78,6 +79,10 @@ const ASSETS = {
  * the CPU it finds itself on and takes the best. They cost 16.5 MB and they are the difference
  * between AVX-512 and a baseline build on the machines that have it — on Windows, where this
  * engine has no GPU backend at all, that is the whole of the feature's speed. All fourteen stay.
+ *
+ * `LICENSE` is deliberately not here even though it ships: the macOS tarball carries one and the
+ * Windows zip does not, so it is not a property of the archive to assert. `installLicense` handles
+ * it, and see the note on `VENDORED_LICENSE`.
  */
 const KEEP = {
   "darwin-arm64": {
@@ -96,7 +101,6 @@ const KEEP = {
       "libggml-metal.0.dylib",
       "libggml-rpc.0.dylib",
       "libggml-base.0.dylib",
-      "LICENSE",
     ],
     prefixes: [],
     executable: ["llama-server"],
@@ -111,12 +115,29 @@ const KEEP = {
       "ggml.dll",
       "ggml-base.dll",
       "libomp.dll",
-      "LICENSE",
     ],
     prefixes: ["ggml-cpu-"],
     executable: [],
   },
 };
+
+/**
+ * llama.cpp's MIT license, for the archive that does not carry one.
+ *
+ * This is what broke the first Windows release. `LICENSE` sat in `KEEP["win32-x64"].exact` by
+ * symmetry with the macOS list — every exact name is required, the checksum had already proven the
+ * asset was the pinned one, and the build died reporting a layout change over the one file that had
+ * never been in `llama-<build>-bin-win-cpu-x64.zip` to begin with. The macOS tarball does ship it.
+ *
+ * Dropping it instead would be the wrong repair: these are llama.cpp's binaries inside an installer,
+ * and the MIT license travels with them. So the archive's copy wins when there is one, this stands
+ * in when there is not, and `installLicense` fails the build if neither produced a file — the same
+ * bargain as the `missing` check above, for the same reason.
+ *
+ * The text is upstream's, verbatim from the macOS tarball of the pinned BUILD. Re-copy it from
+ * there when bumping BUILD if upstream ever edits it.
+ */
+const VENDORED_LICENSE = join(ROOT, "scripts", "assets", "llama.cpp-LICENSE");
 
 const force = process.argv.includes("--force");
 const optional = process.argv.includes("--optional");
@@ -136,6 +157,7 @@ main().catch((error) => {
 async function main() {
   const platform = `${process.platform}-${process.arch}`;
   const asset = ASSETS[platform];
+  const rules = KEEP[platform];
   if (!asset) {
     // Not an error even without `--optional`: a Linux developer can build and run everything else,
     // and `engine::locate()` in Rust already reports the engine as unavailable rather than
@@ -145,8 +167,16 @@ async function main() {
     return;
   }
 
-  const stamp = join(OUT, ".build");
-  if (!force && (await currentStamp(stamp)) === stampFor(platform)) {
+  // The stamp lives in the work directory rather than in `OUT`, for the reason `build-iris-runtime`
+  // keeps its own outside `resources/iris`: that directory is copied verbatim into the bundle, and a
+  // build stamp has no business reaching a user's disk.
+  //
+  // The existence check beside it is what a stamp kept elsewhere costs. `WORK` can outlive an `OUT`
+  // that was deleted by hand or restored from a partial cache, and a stamp on its own would then
+  // report an engine that is not there — which `tauri build` would package without noticing.
+  const stamp = join(WORK, ".build");
+  const installed = join(OUT, rules.exact[0]);
+  if (!force && (await currentStamp(stamp)) === stampFor(platform) && existsSync(installed)) {
     console.log(`llama-runtime: ${BUILD} already in place for ${platform}.`);
     return;
   }
@@ -176,10 +206,8 @@ async function main() {
   await extract(archive, unpacked);
 
   const source = await findPayload(unpacked);
-  await rm(OUT, { recursive: true, force: true });
-  await mkdir(OUT, { recursive: true });
+  await clearOutput();
 
-  const rules = KEEP[platform];
   const names = await readdir(source);
   const wanted = names.filter(
     (name) => rules.exact.includes(name) || rules.prefixes.some((p) => name.startsWith(p)),
@@ -201,6 +229,7 @@ async function main() {
   for (const name of wanted) {
     total += await copyResolved(join(source, name), join(OUT, name));
   }
+  total += await installLicense(source);
   for (const name of rules.executable) {
     // The tar/zip round trip does not reliably carry the executable bit on every extractor, and a
     // `llama-server` that cannot be exec'd fails with a permission error that reads like a
@@ -210,11 +239,11 @@ async function main() {
 
   await writeFile(stamp, stampFor(platform), "utf8");
   console.log(
-    `llama-runtime: ${wanted.length} files, ${(total / 1024 / 1024).toFixed(1)} MB → ${OUT}`,
+    `llama-runtime: ${wanted.length + 1} files, ${(total / 1024 / 1024).toFixed(1)} MB → ${OUT}`,
   );
 }
 
-/** What `.build` holds, so a stale platform or build is detected rather than reused. */
+/** What the stamp holds, so a stale platform or build is detected rather than reused. */
 function stampFor(platform) {
   return `${BUILD} ${platform}\n`;
 }
@@ -293,6 +322,39 @@ async function copyResolved(from, to) {
   const real = await realpath(from);
   await copyFile(real, to);
   return (await stat(to)).size;
+}
+
+/**
+ * Writes `LICENSE` into the output — from the archive when it has one, from the vendored copy when
+ * it does not, and never not at all. See the note on `VENDORED_LICENSE`.
+ */
+async function installLicense(source) {
+  const to = join(OUT, "LICENSE");
+  const inArchive = join(source, "LICENSE");
+  if (existsSync(inArchive)) return copyResolved(inArchive, to);
+  if (!existsSync(VENDORED_LICENSE)) {
+    throw new Error(
+      `${BUILD} ships no LICENSE and ${VENDORED_LICENSE} is gone.\n` +
+        `llama.cpp's binaries cannot be redistributed without it.`,
+    );
+  }
+  console.log("llama-runtime: the archive carries no LICENSE — using the vendored copy.");
+  return copyResolved(VENDORED_LICENSE, to);
+}
+
+/**
+ * Empties `OUT` of everything this script put there, and of nothing else.
+ *
+ * `rm -rf` on the directory would be simpler and was wrong: `README.md` is checked in — the
+ * `.gitignore` entry ignores the directory's *contents* and then exempts that one file — so every
+ * rebuild deleted a tracked file, leaving a dirty tree here and a phantom deletion in CI.
+ */
+async function clearOutput() {
+  await mkdir(OUT, { recursive: true });
+  for (const name of await readdir(OUT)) {
+    if (name === "README.md") continue;
+    await rm(join(OUT, name), { recursive: true, force: true });
+  }
 }
 
 async function chmodExecutable(path) {

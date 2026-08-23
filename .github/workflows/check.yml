@@ -1,4 +1,13 @@
-# The cheap half of a test gate, and deliberately only the cheap half.
+# The cheap half of a test gate, for pull requests — and, since v1.18.6, only for pull requests.
+#
+# It used to trigger on pushes to `main` too, and that is where the noise came from: a version bump
+# is a push to `main`, so every release produced two runs of the same commit — this two-minute
+# typecheck and the twenty-minute release beside it, neither aware of the other. The two checks now
+# also live in `release.yml` as its `verify` job, where they gate the builds that actually cost
+# something. So: a pull request gets this, a release gets the same two checks inside its own run,
+# and a push to `main` that releases nothing runs nothing at all.
+#
+# What follows is the other half of the reasoning, unchanged — why this is the cheap half only.
 #
 # What is here runs on Ubuntu in about two minutes with no Rust toolchain: a TypeScript typecheck
 # and a translation-key parity check. Between them they catch the two regressions this repository
@@ -27,8 +36,6 @@ name: check
 
 on:
   pull_request:
-  push:
-    branches: [main]
 
 jobs:
   frontend:

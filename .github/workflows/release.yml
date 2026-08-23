@@ -59,6 +59,46 @@ jobs:
             echo "CF_RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
+  # The cheap gate, moved here out of a workflow of its own.
+  #
+  # It used to be `check.yml` triggering on every push to `main`, which meant one commit produced
+  # two unrelated runs: a two-minute typecheck and the release beside it, neither aware of the
+  # other. `check.yml` now answers pull requests only and a release carries its own gate — one run
+  # per push, and nothing expensive starts until the cheap half has passed.
+  #
+  # `tsc` also runs inside `beforeBuildCommand` (`pnpm build` is `tsc && vite build`), and doing it
+  # here first is not the duplication it looks like: there it fails on a Windows runner twenty
+  # minutes in, behind the toolchain, the caches and half a Rust build. Here it fails on Ubuntu in
+  # two, on its own line, before a draft release has been opened.
+  #
+  # No `needs`, deliberately: this job reads nothing `check-version` produces, so making it wait
+  # would put that job's checkout on the critical path of every release for no information. The
+  # cost of the trade is one wasted minute of Ubuntu on a dispatch whose version was already
+  # released — `create-release` is where `should-release` is still honoured.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # `--ignore-scripts`: nothing in this job builds or runs the Tauri app, and the postinstall
+      # steps of a desktop toolchain are the slowest part of an install that otherwise takes
+      # seconds.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Before `tsc`, because it is the faster of the two and its failure is the more common one —
+      # and because reading "you forgot the Spanish string" is more useful than reading the type
+      # error that same omission produces.
+      - run: node scripts/check-translations.mjs
+
+      - run: pnpm exec tsc --noEmit
+
   # The single writer of the release object, so that the two builds below can run at the same time.
   #
   # This job exists because the matrix used to be `max-parallel: 1`, and the reason it was is worth
@@ -82,7 +122,7 @@ jobs:
   # Idempotent by tag: a re-run finds the existing draft and reuses its id instead of opening a
   # second release.
   create-release:
-    needs: check-version
+    needs: [check-version, verify]
     if: needs.check-version.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -142,6 +182,9 @@ jobs:
           - platform: macos-latest
             args: ""
     runs-on: ${{ matrix.platform }}
+    # Warm is 11 minutes and cold is 26, per the note on `rust-toolchain` above. The default is six
+    # hours, which is what a bundler waiting on a prompt that will never come costs.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -192,6 +235,23 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # 61 MB of draw.io, unpacked from a `draw.war` fetched from jgraph's releases — per runner,
+      # per release, and until now not cached at all. It is pinned by version *and* SHA-256 inside
+      # the script, so hashing the script is an exact identity for the output, and the stamp the
+      # script reads (`public/drawio/.drawio-version`) lives inside the cached directory, so a hit
+      # turns the step below into a no-op instead of a re-download.
+      #
+      # It is also the largest single input to `vite build`: `public/` is copied wholesale into
+      # `dist/`, so this is 61 MB the frontend build cannot start without.
+      - uses: actions/cache@v4
+        with:
+          path: public/drawio
+          key: drawio-webapp-${{ runner.os }}-${{ hashFiles('scripts/build-drawio-webapp.mjs') }}
+
+      # Same reason as the two runtime steps below: on its own line, where a failed download reads
+      # as a failed download.
+      - run: pnpm drawio:webapp
+
       # `jlink` and `javac` cost between 20 seconds and 2.5 minutes on a cold runner, to produce
       # something whose inputs change about once a year.
       #
@@ -219,6 +279,26 @@ jobs:
       # no-op. Doing it here first is for the log: when the Java toolchain is the thing that broke,
       # this step fails on its own line instead of somewhere inside a ten-minute Rust build.
       - run: pnpm iris:runtime
+
+      # The same bargain as the iris cache above, and both paths for the same reason it uses both:
+      # the stamp that says "already current" is deliberately kept out of `resources/llama`, which
+      # is copied verbatim into the bundle. Restore the engine without `target/llama-build` and the
+      # script rebuilds it anyway — and re-downloads the 38 MB it was trimmed from.
+      #
+      # The key covers the vendored license too, because that file is one of the things the script
+      # writes into the directory being cached.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/resources/llama
+            src-tauri/target/llama-build
+          key: llama-runtime-${{ runner.os }}-${{ hashFiles('scripts/build-llama-runtime.mjs', 'scripts/assets/llama.cpp-LICENSE') }}
+
+      # Again for the log, and this one has already earned it: v1.18.6 died here, inside
+      # `beforeBuildCommand`, on the Windows leg, after vite had built twice and jlink had run —
+      # with the failure printed under a `pnpm drawio:webapp && pnpm build && …` line that says
+      # nothing about which of the five commands broke.
+      - run: pnpm llama:runtime
 
       # tauri downloads the WiX and NSIS toolchains into the user cache directory the first time it
       # packages, and a hosted runner is new every time — so without this, every Windows release
@@ -388,6 +468,12 @@ jobs:
 
   # Keeps the repository under GitHub's 10 GB Actions cache quota.
   #
+  # Not only the Rust ones any more. The three runtime caches (`iris-runtime-*`, `llama-runtime-*`,
+  # `drawio-webapp-*`) add ~120 MB per platform per generation, and their keys are content hashes of
+  # the scripts that produce them — so the moment one of those scripts changes, the entry it
+  # supersedes becomes unreachable rather than merely old. Unreachable entries still count against
+  # the quota, and the thing the quota evicts is a 2 GB Rust cache.
+  #
   # `rust-cache` writes a new entry whenever its key changes and never removes the old one, so the
   # generations pile up: at v1.13.4 there were twelve entries totalling 11.23 GB — three macOS
   # generations at ~1.96 GB and three Windows ones at ~1.23 GB, all for compilers and lockfiles no
@@ -411,7 +497,7 @@ jobs:
     permissions:
       actions: write
     steps:
-      - name: Drop superseded Rust caches
+      - name: Drop superseded caches
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -419,22 +505,39 @@ jobs:
           # is what `rust-cache`'s restore-keys fall back to when `Cargo.lock` moves — which turns a
           # dependency bump from a cold build into a warm one. Two is the whole reason to keep more
           # than one; a third has never been restored by anything.
-          KEEP: "2"
+          KEEP_RUST: "2"
+          # The runtime caches have no restore-keys at all — that is deliberate where they are
+          # declared, because a near-miss would hand a build a runtime assembled from different
+          # inputs. It also means a superseded generation can never be restored by anything ever
+          # again, so keeping one is keeping the only one that can be read.
+          KEEP_EXACT: "1"
         shell: bash
         run: |
           set -euo pipefail
-          # Only the Rust caches. The `node-cache-*` entries are ~60 MB each and belong to
-          # `setup-node`, which manages its own; deleting those would be meddling for no space.
           gh api --paginate "/repos/${REPO}/actions/caches?per_page=100" \
-            --jq '.actions_caches[] | select(.key | startswith("v0-rust-")) | [.created_at, .id, .key] | @tsv' \
+            --jq '.actions_caches[] | [.created_at, .id, .key] | @tsv' \
             | sort -r \
-            | awk -v keep="$KEEP" -F'\t' '
+            | awk -v rust="$KEEP_RUST" -v exact="$KEEP_EXACT" -F'\t' '
                 {
-                  # The key is `…-<env hash>-<lockfile hash>`; dropping both leaves the platform,
-                  # which is the thing there should be one live generation of.
-                  group = $3
-                  sub(/-[^-]*-[^-]*$/, "", group)
-                  if (++seen[group] > keep) print $2 "\t" $3
+                  key = $3
+                  # `v0-rust-…` ends in `-<env hash>-<lockfile hash>`; dropping both leaves the
+                  # platform, which is the thing there should be live generations of.
+                  #
+                  # The runtime keys end in a single `-<script hash>`, so dropping one segment
+                  # leaves `<name>-<os>` — one live generation each.
+                  #
+                  # Everything else is left alone: the `node-cache-*` entries are ~60 MB each and
+                  # belong to `setup-node`, which manages its own.
+                  if (key ~ /^v0-rust-/) {
+                    keep = rust
+                    sub(/-[^-]*-[^-]*$/, "", key)
+                  } else if (key ~ /^(iris-runtime|llama-runtime|drawio-webapp)-/) {
+                    keep = exact
+                    sub(/-[^-]*$/, "", key)
+                  } else {
+                    next
+                  }
+                  if (++seen[key] > keep) print $2 "\t" $3
                 }
               ' \
             | while IFS=$'\t' read -r id key; do
