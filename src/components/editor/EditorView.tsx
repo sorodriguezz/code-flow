@@ -408,6 +408,19 @@ export function EditorView() {
     [project],
   );
 
+  /**
+   * "Reveal in Explorer" on a tab: show the tree, then hand it the file.
+   *
+   * Two steps because the tree may not even be the panel on screen — the same pair the explorer's
+   * keybindings make a few hundred lines down, for the same reason. It deliberately does *not*
+   * make the file the active tab: the question the action answers is "where does this live",
+   * which is one you can ask about a file you are not currently editing.
+   */
+  const revealInTree = useCallback((path: string) => {
+    setSidePanel("files");
+    setExplorerCommand({ command: "revealFile", path, nonce: dropNonce.current++ });
+  }, []);
+
   const closeGroup = useCallback(async (groupId: string) => {
     const outcome = closeGroupInGroups(groupsRef.current, groupId);
     if (!outcome) return;
@@ -563,6 +576,23 @@ export function EditorView() {
     syncOpenTabs();
     setFsNonce((n) => n + 1);
   }, [syncOpenTabs]);
+
+  /**
+   * The same sweep, asked for rather than observed.
+   *
+   * Three things go stale together here and three different mechanisms refresh them: the open
+   * buffers by `syncOpenTabs`, the explorer's listings by the nonce, and every change decoration —
+   * the tree's badges, the gutter markers, the diff tab — by `repoStore.status`/`workingDiff`,
+   * which only `refreshStatus` rebuilds. The explorer's Refresh button used to drive the middle
+   * one alone, so pressing it on a screen that looked stale left two thirds of it exactly as stale
+   * as before, which is most of what "refresh does nothing" meant.
+   *
+   * Not silent: this one was asked for, unlike the watcher's.
+   */
+  const forceReload = useCallback(() => {
+    noteFsChange();
+    void useRepoStore.getState().refreshStatus();
+  }, [noteFsChange]);
 
   useEffect(() => {
     if (!project) return;
@@ -1006,6 +1036,7 @@ export function EditorView() {
         togglePinned: (path) => togglePinned(group.id, path),
         closeAll: () => void closeAllTabs(group.id),
         copyPath,
+        revealInTree,
         splitRight: (path) => splitGroup(group.id, path),
       }}
     />
@@ -1139,6 +1170,7 @@ export function EditorView() {
               changedPaths={changedPaths}
               changedDirs={changedDirs}
               fsNonce={fsNonce}
+              onRefresh={forceReload}
             />
           )}
         </div>

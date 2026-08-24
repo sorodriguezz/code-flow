@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ClipboardCopy, Pin, PinOff, SplitSquareHorizontal, X } from "lucide-react";
+import { ClipboardCopy, ListTree, Pin, PinOff, SplitSquareHorizontal, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { FileGlyph } from "../common/FileGlyph";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
@@ -27,6 +27,9 @@ export interface TabMenuActions {
   closeAll: () => void;
   copyPath: (path: string) => void;
   splitRight: (path: string) => void;
+  /** Show this file's row in the explorer beside the editor: open every folder above it and scroll
+   *  it into view. Distinct from the tree's own "Reveal in file manager", which opens Finder. */
+  revealInTree: (path: string) => void;
 }
 
 function baseName(path: string): string {
@@ -227,6 +230,9 @@ export function EditorTabs({
       onClick: () => menu.togglePinned(tab.path),
     },
     { label: t("editor.copyPath"), icon: ClipboardCopy, onClick: () => menu.copyPath(tab.path) },
+    // Next to Copy Path rather than at the bottom: both answer "where is this file", which is the
+    // question a strip of basenames leaves you with once a few of them are called `index.ts`.
+    { label: t("editor.revealInTree"), icon: ListTree, onClick: () => menu.revealInTree(tab.path) },
     { label: t("editor.splitRight"), icon: SplitSquareHorizontal, onClick: () => menu.splitRight(tab.path) },
     { label: t("editor.closeAllTabs"), icon: X, separated: true, onClick: menu.closeAll },
   ];

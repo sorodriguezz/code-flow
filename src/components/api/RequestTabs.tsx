@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Boxes, ChevronDown, Folder, Plus, ShieldAlert, X } from "lucide-react";
+import { Boxes, ChevronDown, Copy, Folder, Plus, ShieldAlert, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
+import { ContextMenu, type MenuItem } from "./CollectionTree";
 import { useApiStore, type ApiEntityTab, type ApiTab } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore } from "../../state/collabStore";
@@ -58,6 +59,10 @@ export function RequestTabs() {
   const stripRef = useRef<HTMLDivElement>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
   const [protocolMenu, setProtocolMenu] = useState<{ left: number; top: number } | null>(null);
+  /** The right-clicked tab, by id rather than by value: the tab it names is re-derived on every
+   *  render, so holding the object would leave the menu acting on a stale draft if a sync landed
+   *  while it was open. */
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const tabRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   // Opening a request from the tree can append a tab past the right edge of the strip.
@@ -94,6 +99,40 @@ export function RequestTabs() {
     const entity = entityTabs.find((tab) => tab.id === id);
     return entity ? [{ kind: "entity", tab: entity }] : [];
   });
+
+  /**
+   * The right-click menu on a tab.
+   *
+   * Only two entries, and both already exist elsewhere in the strip — the point of the menu is
+   * that Clone has nowhere else to live, since a duplicate is a gesture on the tab rather than on
+   * the row behind it (a scratch tab has no row at all). Close is here because a menu with a
+   * single item reads as an accident.
+   *
+   * Clone is offered for request tabs only: a collection's or folder's settings tab edits a row,
+   * so "duplicate" there would mean duplicating the row — which is what the tree's own Duplicate
+   * already does, and does properly.
+   */
+  const menuItems = (id: string): MenuItem[] => {
+    const entry = strip.find((candidate) => candidate.tab.id === id);
+    if (!entry) return [];
+    const items: MenuItem[] = [];
+    if (entry.kind === "request") {
+      items.push({
+        label: t("api.cloneTab"),
+        icon: Copy,
+        // No toast: the copy opens focused, with its unsaved dot showing, which says more about
+        // what just happened than a line of text at the corner of the screen would.
+        onClick: () => useApiStore.getState().cloneTab(id),
+      });
+    }
+    items.push({
+      label: t("common.close"),
+      icon: X,
+      separated: entry.kind === "request",
+      onClick: () => void requestClose(entry.tab),
+    });
+    return items;
+  };
 
   return (
     <div className="flex shrink-0 items-stretch border-b border-[var(--cf-border)] bg-[var(--cf-bg)]">
@@ -132,7 +171,14 @@ export function RequestTabs() {
               onPointerEnter={() => useRowHoverStore.getState().enter(hoverKey)}
               onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
               // Kills press-and-sweep text selection without costing the `click` that follows.
-              onMouseDown={(e) => e.preventDefault()}
+              // Left button only: the right one has a `contextmenu` to raise — preventing its
+              // default here suppresses that on some platforms — and nothing to select by
+              // sweeping anyway.
+              onMouseDown={(e) => e.button === 0 && e.preventDefault()}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setTabMenu({ x: e.clientX, y: e.clientY, id: tab.id });
+              }}
               onClick={() => setActiveTab(tab.id)}
               onAuxClick={(e) => {
                 if (e.button !== 1) return;
@@ -233,6 +279,15 @@ export function RequestTabs() {
           <ChevronDown size={12} />
         </button>
       </div>
+
+      {tabMenu && (
+        <ContextMenu
+          x={tabMenu.x}
+          y={tabMenu.y}
+          items={menuItems(tabMenu.id)}
+          onClose={() => setTabMenu(null)}
+        />
+      )}
 
       {protocolMenu &&
         createPortal(

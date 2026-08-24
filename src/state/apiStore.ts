@@ -246,6 +246,20 @@ interface ApiState {
   openRequest: (requestId: string) => void;
   openScratchTab: (protocol?: ApiProtocol, target?: { collectionId: string; folderId: string | null }) => string;
   /**
+   * A throwaway copy of an open request tab — Postman's "Duplicate Tab".
+   *
+   * The copy is a *scratch* request: it belongs to no collection until the user saves it, which is
+   * the whole point. Forking a saved request to try three different headers against it should cost
+   * nothing on disk and leave the original exactly as it was, so the clone deliberately drops the
+   * source's `requestId` **and** its `collectionId` — carrying the latter would file the copy on
+   * the very next ⌘S without ever asking where it should go.
+   *
+   * Returns the new tab's id, or `null` when `tabId` is not a request tab (a collection's or
+   * folder's settings tab has no spec to copy, and duplicating a row's settings would mean
+   * duplicating the row).
+   */
+  cloneTab: (tabId: string) => string | null;
+  /**
    * Opens a collection or folder's settings, or focuses the tab already showing them.
    *
    * Returns the tab id, or `null` when the row is gone — the tree can race a delete from a
@@ -868,6 +882,43 @@ export const useApiStore = create<ApiState>((set, get) => ({
     return tab.id;
   },
 
+  cloneTab: (tabId) => {
+    const source = get().openTabs.find((tab) => tab.id === tabId);
+    if (!source) return null;
+    const clone: ApiTab = {
+      id: newId(),
+      // The three fields that make it temporary — see the interface for why `collectionId` goes
+      // too, and not just `requestId`.
+      requestId: null,
+      collectionId: null,
+      folderId: null,
+      // A deep copy, not a spread. `ApiRequestSpec` is nested several levels down — headers,
+      // params, body, auth, the four per-protocol blocks, examples — and a shallow copy would
+      // leave the clone editing the *same* arrays as the tab it came from, so typing a header
+      // into one would appear in both. The JSON round trip rather than `structuredClone` because
+      // a spec is exactly what `saveTab` stringifies into the row: anything a round trip would
+      // lose was never going to be persisted either.
+      draft: JSON.parse(JSON.stringify(source.draft)) as ApiRequestSpec,
+      name: copyName(source.name),
+      // Dirty from birth: nothing about this tab is on disk, so the unsaved dot is simply true.
+      dirty: true,
+      // `rowUpdatedAt` and `staleAgainst` are left off on purpose. Both answer "has the row moved
+      // underneath me", and a scratch tab has no row to have moved — copying the source's stamps
+      // would have the clone claim to be in step with a request it is not a view of.
+    };
+    set((s) => {
+      const at = s.tabOrder.indexOf(tabId);
+      const tabOrder = [...s.tabOrder];
+      // Right next to what it came from, the way every editor opens a duplicate. Appending would
+      // put it at the far end of a strip that scrolls — out of sight of the gesture that made it,
+      // even though `RequestTabs` would then scroll it back into view.
+      tabOrder.splice(at < 0 ? tabOrder.length : at + 1, 0, clone.id);
+      return { openTabs: [...s.openTabs, clone], tabOrder, activeTabId: clone.id };
+    });
+    persistTabs(get);
+    return clone.id;
+  },
+
   openEntityTab: (kind, entityId) => {
     const existing = get().entityTabs.find((tab) => tab.kind === kind && tab.entityId === entityId);
     if (existing) {
@@ -1206,6 +1257,21 @@ async function renameShareIfShared(collectionId: string, name: string) {
  */
 const PERSIST_DEBOUNCE_MS = 600;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * What a duplicate is called.
+ *
+ * The suffix is **not** translated, and that is deliberate: `db::api_queries::duplicate_request`
+ * builds the same `"{name} copy"` in Rust for the tree's own Duplicate, and translating it here
+ * would make the two ways of copying a request disagree about what the copy is named — in Spanish
+ * only, which is the kind of difference nobody would think to look for.
+ *
+ * An unnamed tab stays unnamed rather than becoming "copy": the strip renders an empty name as
+ * "Untitled request", and a tab called "copy" of nothing says less than that does.
+ */
+function copyName(name: string): string {
+  return name ? `${name} copy` : "";
+}
 
 function persistTabs(get: () => ApiState) {
   if (persistTimer !== null) {

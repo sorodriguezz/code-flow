@@ -49,6 +49,7 @@ import { useBlameStore } from "./state/blameStore";
 import { useChainStore } from "./state/chainStore";
 import { useAgentsStore } from "./state/agentsStore";
 import { notify } from "./state/notificationStore";
+import { pushErrorToast } from "./state/toastStore";
 import { useJobsStore } from "./state/jobsStore";
 import { useAiRunStore } from "./state/aiRunStore";
 import { useChatHistoryStore } from "./state/activityStore";
@@ -556,7 +557,13 @@ export default function App() {
   useEffect(() => {
     const path = project?.local_path;
     if (!path) return;
-    void startWatching(path);
+    // A watcher that never armed is indistinguishable from a repository where nothing happens:
+    // `start_watching` really can fail — a poisoned registry lock, `recommended_watcher` itself,
+    // or the recursive `.watch()` on a network share or a container bind mount — and discarding
+    // the rejection meant Changes and the Editor simply stopped keeping up, for the rest of the
+    // session, with nothing on screen to say why. The toast at least names the state that the
+    // manual refresh buttons exist for.
+    void startWatching(path).catch((e) => pushErrorToast(String(e)));
     return () => {
       void stopWatching(path);
       // The blame cache holds eight files at most, so a project left behind would otherwise sit in
@@ -577,9 +584,23 @@ export default function App() {
     // happened — the commit list, branches, stashes, remotes, and the unpushed count that hangs
     // off the commit list. Splitting them is what stops a branch switch, which touches a few
     // thousand files, from firing seven git invocations per burst tick for as long as it runs.
+    //
+    // Silent, both of them. This is exactly what `RefreshOptions` was written for and nothing had
+    // ever passed it: these run on every save, every `git` command in a terminal, every branch
+    // switch, several times a second while a build writes — and showing them with an *action's*
+    // indicators greys out the commit button and re-renders the commit table because a file
+    // changed on disk, which reads as the app doing something nobody asked it to.
+    //
+    // It silences the `state:invalidate` path below too, and that is right there as well: a stage
+    // performed from a paired phone is somebody else's action, and this window reflecting it
+    // should look like the list updating, not like this window being busy.
+    //
+    // Errors are *not* suppressed — see `RefreshOptions`. A background refresh that fails still
+    // sets `error` and still raises a toast, which is the one case where nothing else on screen
+    // would say so.
     const refreshNear = trailingDebounce(
       () => {
-        void useRepoStore.getState().refreshStatus();
+        void useRepoStore.getState().refreshStatus({ silent: true });
         void useRepoStore.getState().refreshMergeState();
       },
       FS_NEAR_WAIT_MS,
@@ -588,7 +609,7 @@ export default function App() {
     const refreshFar = trailingDebounce(
       () => {
         const repo = useRepoStore.getState();
-        void repo.refreshCommits();
+        void repo.refreshCommits({ silent: true });
         void repo.refreshUnpushedCommits();
         void repo.refreshBranches();
         void repo.refreshStashes();
@@ -808,11 +829,22 @@ export default function App() {
   // never lost focus, so there is no `focus` to wait for. Either way the repository has been out
   // of sight for a while, which is exactly when it is most likely to have moved.
   useEffect(() => {
-    const onFocus = () => backgroundFetch();
-    window.addEventListener("focus", onFocus);
-    const unlisten = onAppForeground(() => backgroundFetch());
+    // One `git status` on the way back in, on top of the remote fetch.
+    //
+    // The watcher stops emitting entirely while the window is hidden or minimised and no phone is
+    // attached (see `watched()` in `watcher.rs`), so a repository edited from another editor while
+    // this one sat in the tray comes back describing itself as it was when the window went away.
+    // `backgroundFetch` alone never covered it: it reaches `fetchSilently`, which touches remotes
+    // and branches and never the working copy. Silent, because arriving somewhere is not an
+    // action — and cheap enough to pay for on every front.
+    const onReturn = () => {
+      backgroundFetch();
+      void useRepoStore.getState().refreshStatus({ silent: true });
+    };
+    window.addEventListener("focus", onReturn);
+    const unlisten = onAppForeground(onReturn);
     return () => {
-      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("focus", onReturn);
       void unlisten.then((f) => f());
     };
   }, []);
