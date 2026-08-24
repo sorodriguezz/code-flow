@@ -550,6 +550,19 @@ export function EditorView() {
   /** Set when the watcher fired for this repo while the Editor was off screen, so the sweep can be
    * deferred to the moment it comes back rather than run behind another view. */
   const missedFsChangeRef = useRef(false);
+  /**
+   * Bumped on every sweep, and handed to the tree so it re-lists too.
+   *
+   * The watcher only ever moved the *open tabs*. The explorer beside them was refreshed by one
+   * thing — its own toolbar button — so a branch switch, a `git pull`, a generated file or an agent
+   * writing into the working tree left the tree showing the directory as it used to be, and the
+   * only way out was to keep pressing refresh. Same event, same deferral, one more consumer.
+   */
+  const [fsNonce, setFsNonce] = useState(0);
+  const noteFsChange = useCallback(() => {
+    syncOpenTabs();
+    setFsNonce((n) => n + 1);
+  }, [syncOpenTabs]);
 
   useEffect(() => {
     if (!project) return;
@@ -562,12 +575,12 @@ export function EditorView() {
         missedFsChangeRef.current = true;
         return;
       }
-      syncOpenTabs();
+      noteFsChange();
     });
     return () => {
       void unlisten.then((f) => f());
     };
-  }, [project, syncOpenTabs]);
+  }, [project, noteFsChange]);
 
   // The catch-up, and the reason the skip above is safe: coming back to the Editor runs the sweep
   // that was deferred while it was hidden. Without this, a file changed on disk from another tab
@@ -576,8 +589,8 @@ export function EditorView() {
   useEffect(() => {
     if (activeView !== "editor" || !missedFsChangeRef.current) return;
     missedFsChangeRef.current = false;
-    syncOpenTabs();
-  }, [activeView, syncOpenTabs]);
+    noteFsChange();
+  }, [activeView, noteFsChange]);
 
   /** The tree's two open gestures, as stable identities. Inline arrows here would re-identify on
    * every render of this view and defeat the `memo` on every row of `FileTree`. */
@@ -1125,6 +1138,7 @@ export function EditorView() {
               command={explorerCommand}
               changedPaths={changedPaths}
               changedDirs={changedDirs}
+              fsNonce={fsNonce}
             />
           )}
         </div>

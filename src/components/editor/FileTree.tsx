@@ -524,6 +524,7 @@ export function FileTree({
   command,
   changedPaths,
   changedDirs,
+  fsNonce = 0,
 }: {
   repoPath: string;
   /** The project the terminal dock indexes its shells by. Passed in rather than read from the
@@ -549,6 +550,20 @@ export function FileTree({
    * `EditorView`, in the same walk, so a directory row can answer "does anything inside me differ?"
    * with one lookup instead of a scan of every changed path. */
   changedDirs: Set<string>;
+  /**
+   * Bumped by `EditorView` whenever the file watcher says this repository moved on disk.
+   *
+   * The tree had no connection to the watcher at all: `refresh()` was reachable only from the
+   * toolbar button, so a file created by a script, a `git checkout`, a branch switch or an agent
+   * writing into the working tree left the explorer showing the directory as it was — and the only
+   * way to see the truth was to press refresh, which is exactly what a file explorer is supposed to
+   * spare you. Open *tabs* were already synced from the same event (`syncOpenTabs`); the tree was
+   * the half that never got wired.
+   *
+   * A nonce rather than a callback, for the same reason `command` above is one: the tree owns its
+   * expansion set and its listing cache, and nobody outside it can re-list without them.
+   */
+  fsNonce?: number;
 }) {
   const t = useT();
   // Expansion and the listing cache both live here rather than in each node, so "collapse
@@ -734,6 +749,23 @@ export function FileTree({
     },
     [draft, repoPath, loadDir, onOpenFile],
   );
+
+  /**
+   * The watcher's answer, coalesced.
+   *
+   * `refresh()` re-lists every expanded directory, so one call per event would turn a `pnpm build`
+   * into a burst of `listDir`s over a tree nobody is looking at that closely. The wait is short
+   * enough to feel immediate for the single-file case — a save from another editor, a generated
+   * file — and long enough that a checkout's thousands of events cost one sweep.
+   *
+   * Skipped on the first render: `fsNonce` starts at 0 and the initial listing has just been done
+   * by the mount effect above.
+   */
+  useEffect(() => {
+    if (fsNonce === 0) return;
+    const id = window.setTimeout(() => void refresh(), 250);
+    return () => window.clearTimeout(id);
+  }, [fsNonce, refresh]);
 
   const cancelDraft = useCallback(() => setDraft(null), []);
 

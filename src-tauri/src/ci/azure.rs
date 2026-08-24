@@ -501,11 +501,19 @@ fn map_timeline(
     }
 
     let mut jobs: Vec<(i64, i64, PipelineJob)> = Vec::new();
+    // Which stages ended up with a job under them, so the ones that did not can be drawn as
+    // stages. Owned names rather than borrows: the `stage` they come from is moved into the job a
+    // few lines below, which is the whole point of building it.
+    let mut stages_with_jobs: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for (index, record) in records.iter().enumerate() {
         if !record.kind.eq_ignore_ascii_case("Job") {
             continue;
         }
         let (stage, stage_order) = resolve_stage(records, &by_id, index);
+        if let Some(name) = stage.as_deref() {
+            stages_with_jobs.insert(name.to_string());
+        }
         let has_warnings = has_warning_issues(records, &children, index);
 
         let job = PipelineJob {
@@ -529,6 +537,62 @@ fn map_timeline(
             log_ref: resolve_log_ref(records, &children, index),
         };
         jobs.push((stage_order, record.order, job));
+    }
+
+    // A stage the timeline knows about and has no jobs under — yet, or ever.
+    //
+    // # Why this loop exists
+    //
+    // Azure fills a build's timeline as the build runs. A stage that has **not started** is in it
+    // from the beginning as a `pending` record, but its phases and jobs are not: job expansion can
+    // depend on runtime expressions, so the server defers it until the stage begins. A stage that
+    // was **skipped by a condition** is the same shape from this side — a record with
+    // `result: "skipped"` and, frequently, nothing underneath it at all.
+    //
+    // Mapping only `Job` records therefore made those stages *disappear*. A build sitting on its
+    // second of four stages drew two columns and no hint that two more were coming, next to a
+    // browser tab showing all four — which is the whole complaint: the app said the pipeline was
+    // two stages long and the pipeline was not.
+    //
+    // So a stage with no jobs becomes one card carrying the stage's own state. It is deliberately
+    // **not** an invented job list: the timeline does not say what those jobs will be called, and a
+    // guessed name on a CI screen is worse than an honest "this stage, not started". When the stage
+    // does start, its real jobs arrive on the next poll and replace the placeholder, because it is
+    // only emitted while `stages_with_jobs` has nothing for that stage.
+    for record in records.iter() {
+        if !record.kind.eq_ignore_ascii_case("Stage") {
+            continue;
+        }
+        let Some(name) = non_empty(&record.name) else { continue };
+        if stages_with_jobs.contains(&name) {
+            continue;
+        }
+        jobs.push((
+            record.order,
+            // Behind every real job of the same stage order, which there are none of by
+            // construction — this is only for sorting against *other* stages' placeholders.
+            i64::MIN,
+            PipelineJob {
+                provider: PROVIDER_AZURE.to_string(),
+                run_id: run_id.to_string(),
+                id: record.id.clone(),
+                name: name.clone(),
+                stage: Some(name),
+                status: bucket_status(&record.state, record.result.as_deref(), false),
+                raw_status: raw_label(&record.state, record.result.as_deref()),
+                started_at: record.start_time.clone(),
+                finished_at: record.finish_time.clone(),
+                web_url: format!(
+                    "https://dev.azure.com/{org_enc}/{project_enc}/_build/results\
+                     ?buildId={build}&view=results",
+                    build = encode_segment(run_id)
+                ),
+                // A stage record has no log of its own, and its children are the phases whose logs
+                // belong to jobs that do not exist yet. Nothing to fetch is `None`, not an empty
+                // string — see `job_log`.
+                log_ref: None,
+            },
+        ));
     }
 
     // Sorted by the *stage's* order first, then by the job's own, so the graph reads the way the
@@ -903,6 +967,69 @@ mod tests {
         assert_eq!(parse_build_number("20260821.3"), None);
         assert_eq!(parse_build_number("release-7"), None);
         assert_eq!(parse_build_number(""), None);
+    }
+
+    /// A build half way through: two stages done, one skipped by a condition, one not started.
+    ///
+    /// The two that have not produced jobs are exactly what used to vanish — the graph drew the
+    /// stages that had run and nothing else, so a four-stage pipeline looked like a two-stage one
+    /// next to a browser tab showing all four.
+    #[test]
+    fn a_stage_with_no_jobs_yet_is_still_a_column() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"stage-env","parentId":null,"type":"Stage","name":"Environment","order":1,
+               "state":"completed","result":"succeeded"},
+              {"id":"phase-env","parentId":"stage-env","type":"Phase","name":"Environment","order":1},
+              {"id":"job-env","parentId":"phase-env","type":"Job","name":"Checkout","order":1,
+               "state":"completed","result":"succeeded"},
+              {"id":"stage-val","parentId":null,"type":"Stage","name":"Validations","order":2,
+               "state":"completed","result":"skipped"},
+              {"id":"stage-test","parentId":null,"type":"Stage","name":"Testing","order":3,
+               "state":"inProgress"},
+              {"id":"phase-test","parentId":"stage-test","type":"Phase","name":"Testing","order":1},
+              {"id":"job-test","parentId":"phase-test","type":"Job","name":"Unit tests","order":1,
+               "state":"inProgress"},
+              {"id":"stage-quality","parentId":null,"type":"Stage","name":"Quality Code","order":4,
+               "state":"pending"}
+            ]}"#,
+        );
+
+        let jobs = map_timeline("42", "contoso", "App", &records);
+        let named: Vec<(&str, &str, &str)> = jobs
+            .iter()
+            .map(|job| (job.name.as_str(), job.stage.as_deref().unwrap_or(""), job.status.as_str()))
+            .collect();
+
+        assert_eq!(
+            named,
+            vec![
+                ("Checkout", "Environment", status::SUCCESS),
+                // The skipped stage, as itself: the timeline never named its jobs.
+                ("Validations", "Validations", status::SKIPPED),
+                ("Unit tests", "Testing", status::RUNNING),
+                // And the one that has not started, in the stage's own order rather than last.
+                ("Quality Code", "Quality Code", status::QUEUED),
+            ]
+        );
+    }
+
+    /// A stage whose jobs *are* in the timeline must not also get a card of its own — that would
+    /// double every column of every finished build.
+    #[test]
+    fn a_stage_that_has_jobs_is_not_drawn_twice() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"stage-1","parentId":null,"type":"Stage","name":"Build","order":1,
+               "state":"completed","result":"succeeded"},
+              {"id":"phase-1","parentId":"stage-1","type":"Phase","name":"Build","order":1},
+              {"id":"job-1","parentId":"phase-1","type":"Job","name":"Compile","order":1,
+               "state":"completed","result":"succeeded"}
+            ]}"#,
+        );
+        let jobs = map_timeline("42", "contoso", "App", &records);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "Compile");
     }
 
     /// The three things the timeline mapping has to get right at once: a job's stage is its

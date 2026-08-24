@@ -40,6 +40,30 @@ export function trackViewport(): void {
     // already has: the fallback in `var(--cf-vh, 100%)`. Writing a measured pixel height from
     // `innerHeight` would be the same wrong number with more confidence behind it.
     if (!vv) return;
+    /**
+     * A zoomed page is not a keyboard, and this is the one place that cannot tell them apart.
+     *
+     * Pinch-zoom is deliberately allowed on this client — the diff draws code at 11px, and blocking
+     * zoom over code is telling anybody who cannot read it that the screen is not for them. But
+     * `visualViewport.height` is reported in the *layout* viewport's pixels, so it halves at 2×, and
+     * `offsetTop` becomes whatever the user has panned to. Fed into `--cf-vh` and `--cf-vt` those
+     * numbers shrink the whole shell to half the screen and slide it under the finger: zooming in on
+     * a hunk collapsed the app around it.
+     *
+     * So a zoomed viewport is simply not measured. The variables keep the last unzoomed values,
+     * which is exactly what the layout should stay at while the browser scales it, and the next
+     * `resize` at scale 1 picks the measurement back up.
+     */
+    if (vv.scale > 1.01) return;
+    /**
+     * A backgrounded page has no layout, and some browsers say so by reporting a viewport of zero.
+     *
+     * Writing that through collapses `#root` — and with it the whole app — to nothing, which is then
+     * what the user comes back to until something else happens to fire a `resize`. Zero is never a
+     * real answer to "how tall is the screen", so it is not treated as one; the previous measurement
+     * stands until a real one arrives.
+     */
+    if (vv.height === 0) return;
     root.style.setProperty("--cf-vh", `${vv.height}px`);
     root.style.setProperty("--cf-vt", `${vv.offsetTop}px`);
   };

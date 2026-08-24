@@ -252,6 +252,15 @@ export interface RevealRequest {
  * against the one thing that names a buffer uniquely — two projects both have a `src/main.ts`, and
  * only the URI tells them apart.
  */
+/**
+ * What became of an inline rewrite when its reply arrived.
+ *
+ * Three answers rather than a boolean, because "it landed" and "it landed somewhere you are not
+ * looking" need to be reported differently: the first is visible on its own, the second has to be
+ * announced or the user never finds out the work happened at all.
+ */
+export type InlineEditOutcome = "applied" | "applied-offscreen" | "refused";
+
 interface InlineEditTarget {
   /**
    * Which press of Ctrl+I this is, the way [`RevealRequest`] counts its own.
@@ -648,6 +657,11 @@ export function EditorPane({
   /** Mints [`InlineEditTarget.nonce`]. A ref rather than state: nothing renders from it, and it has
    *  to be readable and bumped inside `openInlineEdit` without scheduling a pass of its own. */
   const inlineEditNonceRef = useRef(0);
+  /** The file this pane was showing the last time the guard below looked, so a change of file can
+   *  be told apart from the pane simply going away. */
+  const inlineEditPathRef = useRef(activePath);
+  /** Whether the widget has a rewrite in flight — see the unmount effect. */
+  const inlineEditRunningRef = useRef(false);
 
   /**
    * Takes the widget down and, with it, the decoration that was following its selection around.
@@ -2020,32 +2034,48 @@ export function EditorPane({
    * while the first is still running passes both of those and would take the first reply onto the
    * second selection.
    */
-  const applyInlineEdit = useCallback((replacement: string, nonce: number): boolean => {
+  const applyInlineEdit = useCallback((replacement: string, nonce: number): InlineEditOutcome => {
     const target = inlineEditRef.current;
     const ed = editorRef.current;
     const mon = monacoRef.current;
-    if (!target || !ed || !mon) return false;
-    if (target.nonce !== nonce || target.path !== activePathRef.current) return false;
+    if (!target || !mon) return "refused";
+    if (target.nonce !== nonce || target.path !== activePathRef.current) return "refused";
     // `getModel` answers with the one buffer that URI names, so a hit here is the buffer the
-    // selection came out of rather than merely a file with the same name somewhere else. The
-    // identity check against the live editor is what keeps the edit *visible*: a model that is no
-    // longer the one on screen would take the change in silence.
+    // selection came out of rather than merely a file with the same name somewhere else.
     const model = mon.editor.getModel(mon.Uri.parse(target.modelUri));
-    if (!model || model.isDisposed() || model !== ed.getModel()) return false;
+    if (!model || model.isDisposed()) return "refused";
+    /**
+     * Whether the buffer being rewritten is also the one currently on screen.
+     *
+     * It used to be a *precondition*, and that is what threw the work away. Leaving the editor for
+     * another view — Pipelines, Cambios, the graph — unmounts the pane and with it the Monaco
+     * instance, while the model itself survives in Monaco's registry. So a rewrite that was still
+     * running came back to `ed` being gone, was refused, and the user returned to the file to find
+     * their edit had never happened and a line in the notification centre saying it was discarded.
+     *
+     * The check the identity test was really making is "is this the right *file*", and the two
+     * lines above make it: same request, same path, same model URI. Being on screen is not part of
+     * that — it only decides whether the user is *watching* it land, which is what the caller uses
+     * this answer for.
+     */
+    const onScreen = ed !== null && model === ed.getModel();
     // Where the selection is *now*. A missing answer is a refusal rather than a fall back on the
     // range Ctrl+I was pressed on: the only thing that drops a decoration is the model being reset
     // wholesale under us (a `setValue`, a reload from disk), which is precisely the case where the
     // original line numbers point at somebody else's code. Falling back would fire only when it is
     // wrong.
     const range = model.getDecorationRange(target.decorationId);
-    if (!range) return false;
+    if (!range) return "refused";
     // Bracketed by stack elements so Ctrl+Z takes the whole rewrite back in one press, and so the
     // user's own typing before and after it stays separately undoable.
     model.pushStackElement();
     model.pushEditOperations([], [{ range, text: replacement, forceMoveMarkers: true }], () => null);
     model.pushStackElement();
-    ed.focus();
-    return true;
+    // Only when there is something to focus, and only when it is this buffer: stealing focus back
+    // into an editor the user has navigated away from would yank them out of whatever they moved on
+    // to in order to show them a change they can find whenever they like.
+    if (onScreen) ed?.focus();
+    return onScreen ? "applied" : "applied-offscreen";
   }, []);
 
   /**
@@ -2070,9 +2100,32 @@ export function EditorPane({
    * is still open in the other split.
    */
   useEffect(() => {
+    if (inlineEditPathRef.current === activePath) return;
+    inlineEditPathRef.current = activePath;
     closeInlineEdit();
-    return closeInlineEdit;
   }, [activePath, closeInlineEdit]);
+
+  /**
+   * The pane going away, which is **not** the same thing as the file changing.
+   *
+   * Leaving the editor for another view — Pipelines, Cambios, the graph — unmounts this pane and
+   * disposes its Monaco instance, while the models themselves stay in Monaco's registry. The
+   * cleanup used to be `closeInlineEdit` for both cases, so a rewrite the user had started and then
+   * navigated away from was refused when it came back: the work was thrown away, and the only trace
+   * was a line in the notification centre calling it discarded. `applyInlineEdit` now takes an
+   * off-screen buffer, so all this has to do is *not* destroy the request on the way out.
+   *
+   * Only while something is actually running, though. A widget the user opened and abandoned
+   * without submitting is a text box with a tracked range attached, and leaving that behind is the
+   * decoration leak `closeInlineEdit` was written to prevent — one hidden range per Ctrl+I, for as
+   * long as the file stays open.
+   */
+  useEffect(
+    () => () => {
+      if (!inlineEditRunningRef.current) closeInlineEdit();
+    },
+    [closeInlineEdit],
+  );
 
   // Jumping to a search hit can't reveal the line until the file has finished loading *and*
   // Monaco has (re)mounted on it, which is several renders after the click — so the request is
@@ -2446,6 +2499,9 @@ export function EditorPane({
                 selection={inlineEdit.selection}
                 workspaceId={project.workspace_id}
                 onApply={applyInlineEdit}
+                onRunningChange={(running) => {
+                  inlineEditRunningRef.current = running;
+                }}
                 // Bound to *this* press. An unmounted widget keeps the props of its last render,
                 // so the reply a superseded request is still owed closes itself by a nonce that no
                 // longer matches — and `closeInlineEdit` ignores it instead of closing its

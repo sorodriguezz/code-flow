@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNav } from "../nav";
 
 /**
@@ -27,6 +27,15 @@ export function Sheet({
 }) {
   const back = useNav((s) => s.back);
   const panel = useRef<HTMLDivElement>(null);
+  /**
+   * Whether the entry animation is finished and can come off the element.
+   *
+   * Without this the drag below did nothing at all. `cf-sheet-in` is `animation: … both`, so it goes
+   * on applying its final keyframe — `translate3d(0,0,0)` — forever, and a CSS animation's values
+   * outrank the `style` attribute. Every inline transform the drag wrote was discarded, silently,
+   * and the panel sat still under the finger. Same cascade trap as the navigation layers; same fix.
+   */
+  const [entered, setEntered] = useState(false);
 
   // Escape, for the tablet-with-a-keyboard case. Cheap, and its absence is the sort of thing that
   // makes an app feel like a website in a frame.
@@ -46,13 +55,20 @@ export function Sheet({
     let pointer = -1;
 
     const onDown = (event: PointerEvent) => {
+      if (dragging || !event.isPrimary) return;
       // Only from the handle area. A drag that starts on a row would fight the list's own scroll.
       const target = event.target as HTMLElement;
       if (!target.closest("[data-sheet-handle]")) return;
       pointer = event.pointerId;
       startY = event.clientY;
       dragging = true;
-      node.setPointerCapture(event.pointerId);
+      // Takes the entry animation off for good — see `entered`.
+      setEntered(true);
+      try {
+        node.setPointerCapture(event.pointerId);
+      } catch {
+        /* the pointer is already gone; the listeners on the element still fire */
+      }
       node.style.transition = "none";
     };
     const onMove = (event: PointerEvent) => {
@@ -62,6 +78,7 @@ export function Sheet({
     const onUp = (event: PointerEvent) => {
       if (!dragging || event.pointerId !== pointer) return;
       dragging = false;
+      pointer = -1;
       const dy = Math.max(0, event.clientY - startY);
       node.style.transition = "transform 220ms var(--ease-nav)";
       if (dy > node.clientHeight / 3) {
@@ -95,7 +112,12 @@ export function Sheet({
       />
       <div
         ref={panel}
-        className="cf-sheet-in relative max-h-[82%] overflow-hidden rounded-t-2xl border-t border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-raised"
+        onAnimationEnd={(event) => {
+          if (event.animationName === "cf-sheet-up") setEntered(true);
+        }}
+        className={`relative max-h-[82%] overflow-hidden rounded-t-2xl border-t border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-raised ${
+          entered ? "" : "cf-sheet-in"
+        }`}
       >
         {/* The grab handle. It is also the drag target — see the effect above — which is why it has
             a generous invisible area around a small visible bar. */}
@@ -105,8 +127,11 @@ export function Sheet({
         <h2 className="px-4 pb-2 text-md font-semibold">{title}</h2>
         <div className="cf-scroll max-h-[60vh] px-3 pb-3">{children}</div>
         {footer && (
-          <div className="cf-safe-bottom border-t border-[var(--cf-border)] bg-[var(--cf-surface)] p-3">
-            {footer}
+          // The padding is on an inner element on purpose: `.cf-safe-bottom` lives in
+          // `@layer components` and a `p-*` utility on the same element replaces its padding
+          // outright, taking the home-indicator inset with it. See the note in `mobile.css`.
+          <div className="cf-safe-bottom border-t border-[var(--cf-border)] bg-[var(--cf-surface)]">
+            <div className="p-3">{footer}</div>
           </div>
         )}
       </div>

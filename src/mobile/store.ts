@@ -421,6 +421,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     const nextProject = data.projects.some((p) => p.id === projectId)
       ? projectId
       : (data.projectId ?? data.projects[0]?.id ?? null);
+    const moved = nextProject !== projectId;
     set({
       workspaces: data.workspaces,
       workspaceId: data.workspaceId,
@@ -429,10 +430,15 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       terminalAllowed: data.allowTerminal ?? false,
       projectId: nextProject,
       error: null,
+      // The same clearing `setProject` does, and for the same reason: `repoPath` resolves from the
+      // *new* project the moment this lands, while `status` still holds the old one's rows — so for
+      // the round trip until `refreshRepo` answers, the file list on screen belonged to repository A
+      // and its checkboxes wrote to repository B.
+      ...(moved ? { status: null, commits: [], unpushed: [], repoState: "loading" as const } : {}),
     });
     // The project moved under the user while they were away, so anything open that named the old
     // one is about something that is no longer on screen.
-    if (nextProject !== projectId) resetDepth();
+    if (moved) resetDepth();
     rememberScope(data.workspaceId, nextProject);
     // Re-claimed, because the socket that closed is what released it: the desktop drops a device's
     // watchers when its last connection goes (see `DeviceConnection`), which is exactly the gap
@@ -473,6 +479,19 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     // Anything open is about the workspace being left. Popped before the read, so the screen the
     // user lands on is the new workspace's list rather than the old one's chain.
     resetDepth();
+    // What to put back if the read fails. Clearing the scope before asking is what makes the switch
+    // feel immediate; leaving it cleared afterwards is what made one dropped request unrecoverable —
+    // `projectId` stayed null, so every screen drew "Elige un proyecto arriba" and the error had
+    // nowhere to appear, on a picker whose only other entry was the workspace that had just failed.
+    const previous = {
+      workspaceId: get().workspaceId,
+      projects: get().projects,
+      projectId: get().projectId,
+      status: get().status,
+      commits: get().commits,
+      unpushed: get().unpushed,
+      chains: get().chains,
+    };
     set({
       workspaceId: id,
       projects: [],
@@ -493,10 +512,14 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     // flight, and writing the old workspace's rows over the new ones is the bug it prevents.
     if (get().workspaceId !== id) return;
     if (!info.ok) {
-      if (info.unpaired) set({ unpaired: true });
-      // An empty project list drawn from a failed read is a workspace that looks deleted. Say what
-      // happened and leave the picker alone.
-      else set({ repoState: "error", error: info.error });
+      if (info.unpaired) {
+        set({ unpaired: true });
+        return;
+      }
+      // Back to the workspace that was working, with the reason said out loud. An empty project list
+      // drawn from a failed read is a workspace that looks deleted.
+      set({ ...previous, repoState: "ready", error: null });
+      toastError(t("error.actionFailed"), info.error);
       return;
     }
     const data = info.value;

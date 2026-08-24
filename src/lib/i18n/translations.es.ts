@@ -3710,6 +3710,7 @@ export const es = {
   "npm.searching": "Buscando…",
   "npm.searchHint": "Escribe para buscar en el registro",
   "npm.noResults": "Sin resultados",
+  "npm.openRegistry": "Ver {name} en npmjs.com",
   "npm.install": "Instalar",
   "npm.installNamed": "Instalar {name}",
   "npm.installTitle": "instalar",

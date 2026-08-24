@@ -11,7 +11,7 @@ import { RootBar } from "../ui/RootBar";
 import { Screen } from "../ui/Screen";
 import { BottomBar } from "../ui/BottomBar";
 import { Button, IconButton } from "../ui/Button";
-import { EmptyState } from "../ui/Feedback";
+import { EmptyState, ErrorState } from "../ui/Feedback";
 import type { ActivityLogEntry } from "../../types/domain";
 
 /** A brand-new conversation id, in the shape the desktop mints (`chatStore.send`) — the same
@@ -59,6 +59,9 @@ export function ChatScreen() {
   const projectId = useMobileStore((s) => s.projectId);
   const run = useMobileStore((s) => s.run);
   const busy = useBusy("chat");
+  /** The same flag under its own name, because this screen reads it for two different reasons: to
+   *  disable the send button, and to notice a turn of its own finishing while it was away. */
+  const chatBusy = busy;
   const [entries, setEntries] = useState<ActivityLogEntry[]>([]);
   /** The app's id for the conversation on screen — see the note above. Never null: a project with
    *  no history gets a fresh one so the first turn has something to file under. */
@@ -69,7 +72,30 @@ export function ChatScreen() {
   const [engineSessionId, setEngineSessionId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  /**
+   * Whether the conversation this screen is showing is a real one yet.
+   *
+   * `conversationId` is seeded with a throwaway `conv-<uuid>` so the very first message has something
+   * to file under, and it is only replaced once `list_chat_conversations` answers. That read used to
+   * end in `.catch(() => setEntries([]))`, which drew "Todavía no hay conversación en este proyecto"
+   * over a project that had one — and left the throwaway id in place, so the next message started a
+   * *second* conversation and orphaned the one on the desk. A failed read is now a failure, and
+   * nothing can be sent until the identity is known.
+   */
+  const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
+  const [listFailure, setListFailure] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
+  /**
+   * Which conversation the in-flight reads belong to.
+   *
+   * Bumped whenever the screen's identity moves — a new project, a new conversation. A response that
+   * arrives for an older generation is dropped, which is what stops "Conversación nueva" being
+   * repopulated by a reload that was already in the air: the fresh conversation would come back
+   * holding the old one's turns *and* its engine resume token, which is the exact identity mix-up
+   * this screen's header spends forty lines explaining.
+   */
+  const generation = useRef(0);
   /**
    * A re-read this screen owes but cannot safely take yet.
    *
@@ -78,20 +104,26 @@ export function ChatScreen() {
    * fired into nothing, and re-subscribing afterwards performed no catch-up.
    */
   const owed = useRef(false);
+  /** The same, for a turn that was in flight when this screen was last unmounted — see the note by
+   *  the effect that reads it. */
+  const owedRemote = useRef(false);
 
   // The most recent conversation for this project, so opening the tab lands you where you were
   // rather than on a blank page. A project with no history starts a new one, which is correct.
   useEffect(() => {
     if (!projectId) return;
-    let alive = true;
+    const mine = ++generation.current;
+    setListState("loading");
+    setListFailure(null);
     void rpc<{ session_id: string }[]>("list_chat_conversations", { projectId })
       .then(async (conversations) => {
-        if (!alive) return;
+        if (generation.current !== mine) return;
         const latest = conversations[0]?.session_id ?? null;
         if (!latest) {
           setConversationId(newConversationId());
           setEngineSessionId(null);
           setEntries([]);
+          setListState("ready");
           return;
         }
         setConversationId(latest);
@@ -104,7 +136,7 @@ export function ChatScreen() {
           // between opening instantly and waiting on wifi.
           withTrace: false,
         }).catch(() => [] as ActivityLogEntry[]);
-        if (!alive) return;
+        if (generation.current !== mine) return;
         setEntries(turns);
         // The *last* recorded token, and `null` when there is none: turns written before the two
         // ids were separated carry no engine session at all, which simply means the next message
@@ -112,12 +144,16 @@ export function ChatScreen() {
         setEngineSessionId(
           turns.reduce<string | null>((last, e) => e.engine_session_id ?? last, null),
         );
+        setListState("ready");
       })
-      .catch(() => alive && setEntries([]));
-    return () => {
-      alive = false;
-    };
-  }, [projectId]);
+      .catch((e: unknown) => {
+        if (generation.current !== mine) return;
+        setListFailure(e instanceof Error ? e.message : String(e));
+        setListState("error");
+      });
+    // `attempt` is the retry button; bumping it re-runs the read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectId, attempt]);
 
   // The draft follows the conversation it belongs to, so starting a new one does not inherit a
   // half-written question from the old.
@@ -135,12 +171,16 @@ export function ChatScreen() {
         return;
       }
       owed.current = false;
+      const mine = generation.current;
       void rpc<ActivityLogEntry[]>("get_chat_conversation", {
         projectId,
         sessionId: conversationId,
         withTrace: false,
       })
         .then((turns) => {
+          // The conversation may have been replaced while this was in flight — "Conversación nueva"
+          // is one tap and this read is a round trip.
+          if (generation.current !== mine) return;
           setEntries(turns);
           // The engine session moved with whatever turn was just added elsewhere. Left at the old
           // token, the next message from this phone would ask the CLI to continue from before that
@@ -157,11 +197,24 @@ export function ChatScreen() {
     // The turn that was in flight has landed, and something arrived while it was.
     if (owed.current && !sending) reload();
 
+    // A turn this device sent that finished while this screen was not mounted.
+    //
+    // The screen is remounted on every tab change (`key={tab}` in `App.tsx`), and an engine turn
+    // takes tens of seconds — so "send, tap Repo to check something, tap Chat again" is ordinary.
+    // The mount read then misses the row, because the backend has not written it yet, and nothing
+    // else ever tells this screen: `send_chat_message`'s own invalidation is dropped by the frame
+    // router as this device's own echo. The one signal that survives is the busy flag falling.
+    if (!sending && !chatBusy && owedRemote.current) {
+      owedRemote.current = false;
+      reload();
+    }
+    if (chatBusy) owedRemote.current = true;
+
     return onInvalidate("chat", projectId, (detail) => {
       if (detail.conversation !== conversationId) return;
       reload();
     });
-  }, [projectId, conversationId, sending]);
+  }, [projectId, conversationId, sending, chatBusy]);
 
   useEffect(() => {
     // The transcript's own scroller, not `scrollIntoView` — which drags every scrollable ancestor
@@ -171,7 +224,8 @@ export function ChatScreen() {
 
   const send = () => {
     const message = draft.trim();
-    if (!message) return;
+    // Nothing goes out under a conversation id that may be about to be replaced by the real one.
+    if (!message || listState !== "ready") return;
     setSending(true);
     void run(async () => {
       try {
@@ -254,7 +308,14 @@ export function ChatScreen() {
       />
 
       <div ref={scroller} className="cf-scroll min-h-0 flex-1 px-3 pb-3">
-        {entries.length === 0 && !sending && (
+        {listState === "error" && (
+          <ErrorState
+            title={t("chat.loadFailed")}
+            detail={listFailure}
+            onRetry={() => setAttempt((n) => n + 1)}
+          />
+        )}
+        {listState === "ready" && entries.length === 0 && !sending && (
           <EmptyState
             icon={<MessagesSquare size={26} aria-hidden />}
             title={t("chat.empty")}
@@ -319,7 +380,7 @@ export function ChatScreen() {
             variant="primary"
             onClick={send}
             loading={sending}
-            disabled={busy || draft.trim().length === 0}
+            disabled={busy || listState !== "ready" || draft.trim().length === 0}
             ariaLabel={t("chat.send")}
             icon={sending ? undefined : <SendHorizontal size={17} />}
           />

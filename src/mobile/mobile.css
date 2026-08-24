@@ -375,7 +375,14 @@
 
   /* The home-indicator strip on a modern iPhone. `env()` resolves to 0 everywhere else, so this is
      safe unconditionally — and without it the tab bar's last row of pixels sits under the gesture
-     area, where taps go to the OS instead. */
+     area, where taps go to the OS instead.
+
+     **Never put a `p-*` utility on an element that carries one of these three classes.** They are in
+     `@layer components` and Tailwind's utilities are in a later layer, so a utility wins outright
+     regardless of specificity — and these three classes exist to add padding, which means a `p-2`
+     beside them does not merge with the inset, it deletes it. Every call site puts its padding on an
+     inner element instead. This is the one place in the file where the header's "nothing here needs
+     to beat a utility" is a rule about the call sites rather than about the declaration. */
   .cf-safe-bottom {
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }

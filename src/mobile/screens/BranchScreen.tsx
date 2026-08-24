@@ -134,6 +134,11 @@ export function BranchScreen({ repoPath }: { repoPath: string }) {
    * names files, and it belongs in the detail line under a sentence rather than as the sentence.
    */
   const attemptAction = (action: () => Promise<unknown>, success: string) => {
+    // Which screen this action belongs to, captured before anything is awaited. A checkout plus a
+    // status read is comfortably a second on a large repository over home wifi, and nothing stops
+    // the user going back and opening a diff in the meantime — at which point the `back()` below
+    // would close *that* instead. Same capture-before-await guard the store's loads use.
+    const opened = useNav.getState().top();
     void run(async () => {
       try {
         await action();
@@ -142,7 +147,7 @@ export function BranchScreen({ repoPath }: { repoPath: string }) {
         // the status back is what makes the chip show the branch you just chose.
         await refreshRepo();
         toastSuccess(success);
-        back();
+        if (useNav.getState().top() === opened) back();
       } catch (e) {
         toastError(t("error.actionFailed"), plainError(e instanceof Error ? e.message : String(e)));
       }

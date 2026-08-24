@@ -3775,6 +3775,7 @@ const en = {
   "npm.searching": "Searching…",
   "npm.searchHint": "Type to search the registry",
   "npm.noResults": "Nothing matched",
+  "npm.openRegistry": "View {name} on npmjs.com",
   "npm.install": "Install",
   "npm.installNamed": "Install {name}",
   "npm.installTitle": "install",

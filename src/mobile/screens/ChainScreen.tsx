@@ -165,7 +165,21 @@ export function ChainScreen({ chainId, title }: { chainId: string; title: string
   // A gate answered at the desk, a step that finished, the chain aborted from another device.
   useEffect(() => onInvalidate("chains", null, () => void load()), [load]);
 
-  const act = (cmd: string, success: string, extra: Record<string, unknown> = {}) =>
+  /**
+   * Runs one chain command.
+   *
+   * `consumesAnswer` is not a detail: this is the single entry point for five commands and only two
+   * of them read the gate box. It used to clear the draft for all five, so somebody halfway through
+   * a long answer whose chain flipped to `failed` under them — which happens on any `ai:done` — lost
+   * every word they had typed by tapping "Reintentar", and the retry parked on the same gate again
+   * with an empty box.
+   */
+  const act = (
+    cmd: string,
+    success: string,
+    extra: Record<string, unknown> = {},
+    consumesAnswer = false,
+  ) =>
     void run(
       async () => {
         try {
@@ -177,8 +191,10 @@ export function ChainScreen({ chainId, title }: { chainId: string; title: string
           if (e instanceof Error && e.message === GATE_MOVED) throw new Error(t("chain.gateMoved"));
           throw e;
         }
-        setAnswer("");
-        clearDraft("gate", chainId);
+        if (consumesAnswer) {
+          setAnswer("");
+          clearDraft("gate", chainId);
+        }
         setConfirmAbort(false);
         // Both, and both explicitly.
         //
@@ -302,10 +318,12 @@ export function ChainScreen({ chainId, title }: { chainId: string; title: string
             // steps and parked on a *different* gate, and without this the tap would clear that one
             // — approving something nobody read and pulling a chain mid-run back to `queued`.
             onClick={() =>
-              act("approve_chain_gate", t("toast.gateApproved"), {
-                input: answer,
-                stepId: waiting?.id ?? null,
-              })
+              act(
+                "approve_chain_gate",
+                t("toast.gateApproved"),
+                { input: answer, stepId: waiting?.id ?? null },
+                true,
+              )
             }
           >
             {t("chains.approve")}
@@ -315,7 +333,7 @@ export function ChainScreen({ chainId, title }: { chainId: string; title: string
             size="sm"
             className="mt-1.5"
             disabled={busy}
-            onClick={() => act("skip_chain_step", t("toast.stepSkipped"))}
+            onClick={() => act("skip_chain_step", t("toast.stepSkipped"), {}, true)}
           >
             {t("chains.skip")}
           </Button>

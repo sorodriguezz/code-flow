@@ -125,17 +125,27 @@ function RunRow({
   const ran = stamp === null ? null : new Date(stamp);
 
   return (
-    <button
-      type="button"
-      style={riseDelay(at)}
-      onClick={() => void selectRun(projectId, run)}
-      aria-current={selected ? "page" : undefined}
-      className={`cf-rise flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
-        selected
-          ? "bg-[var(--cf-accent-soft)]"
-          : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-      }`}
-    >
+    /**
+     * A wrapper, so the row and the "open on the host" control can both be real buttons.
+     *
+     * They cannot nest — a `<button>` inside a `<button>` is invalid, and browsers resolve it by
+     * dropping one of them — so the link sits over the row instead, in a strip of padding the row
+     * reserves for it. The space is reserved whether or not the icon is visible, because a control
+     * that appears on hover and *pushes the text* is one that moves the thing you were about to
+     * read.
+     */
+    <div className="group/run relative">
+      <button
+        type="button"
+        style={riseDelay(at)}
+        onClick={() => void selectRun(projectId, run)}
+        aria-current={selected ? "page" : undefined}
+        className={`cf-rise flex w-full items-start gap-2 rounded-md py-1.5 pl-2 pr-7 text-left transition-colors ${
+          selected
+            ? "bg-[var(--cf-accent-soft)]"
+            : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        }`}
+      >
       <span className="mt-[1px] shrink-0">
         <StatusGlyph status={run.status} />
       </span>
@@ -176,7 +186,24 @@ function RunRow({
         </span>
         <ParallelStrip statuses={jobStatuses} />
       </span>
-    </button>
+      </button>
+
+      {/* This run, on the host — *this* one, which is the whole point of it being here.
+          It used to live in the panel's toolbar and open `visible[0].web_url`: the first row of the
+          list, whatever row you were actually looking at. From the toolbar there is no run to be
+          right about, so it could only ever be right by accident. */}
+      <Tooltip label={t("pipelines.openOnHost")}>
+        <button
+          type="button"
+          onClick={() => void openExternalUrl(run.web_url)}
+          className={`absolute right-1 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[var(--cf-text-muted)] transition-opacity hover:bg-black/[0.06] hover:text-[var(--cf-text)] focus-visible:opacity-100 dark:hover:bg-white/[0.10] ${
+            selected ? "opacity-100" : "opacity-0 group-hover/run:opacity-100"
+          }`}
+        >
+          <ExternalLink size={12} />
+        </button>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -262,17 +289,6 @@ export function RunList({ projectId, currentBranch }: { projectId: string; curre
             <RefreshCw size={13} className={loading ? "animate-spin" : undefined} />
           </button>
         </Tooltip>
-        {visible.length > 0 && (
-          <Tooltip label={t("pipelines.openOnHost")}>
-            <button
-              type="button"
-              onClick={() => void openExternalUrl(visible[0].web_url)}
-              className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-            >
-              <ExternalLink size={13} />
-            </button>
-          </Tooltip>
-        )}
       </div>
 
       <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1.5">

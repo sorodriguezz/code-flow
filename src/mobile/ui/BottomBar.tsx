@@ -38,11 +38,14 @@ export function BottomBar({ children, className = "" }: { children: ReactNode; c
   }, []);
 
   return (
+    // Two elements, and the split is load-bearing: `.cf-safe-x` is a `@layer components` rule and a
+    // `p-*` utility on the same element replaces its padding outright — which would silently delete
+    // the landscape safe-area inset that is this class's only job. The caller's padding goes inside.
     <div
       ref={node}
-      className={`cf-safe-x shrink-0 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-bar ${className}`}
+      className="cf-safe-x shrink-0 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-bar"
     >
-      {children}
+      <div className={className}>{children}</div>
     </div>
   );
 }

@@ -69,6 +69,9 @@ export function useSwipeBack(
     let startY = 0;
     let startedAt = 0;
     let dragging = false;
+    /** The pending tail of the last `settle`. A drag that starts inside that window has to cancel it,
+     *  or a timer belonging to the *previous* gesture wipes the transform of the current one. */
+    let settling: number | undefined;
     /** Set once the direction is known, so the decision is taken once rather than re-litigated on
      *  every move as the angle wanders. */
     let decided: "horizontal" | "vertical" | null = null;
@@ -92,7 +95,8 @@ export function useSwipeBack(
     const settle = (toClosed: boolean) => {
       node.style.transition = "transform 220ms var(--ease-nav)";
       node.style.transform = toClosed ? "translate3d(100%, 0, 0)" : "translate3d(0, 0, 0)";
-      window.setTimeout(() => {
+      window.clearTimeout(settling);
+      settling = window.setTimeout(() => {
         node.style.transition = "";
         if (!toClosed) {
           node.style.transform = "";
@@ -117,6 +121,9 @@ export function useSwipeBack(
       if (dragging || !event.isPrimary) return;
       if (event.pointerType === "mouse" && event.button !== 0) return;
       if (event.clientX > EDGE) return;
+      // Whatever the last release was still finishing, this gesture now owns the element.
+      window.clearTimeout(settling);
+      node.style.transition = "";
       pointer = event.pointerId;
       startX = event.clientX;
       startY = event.clientY;
@@ -196,6 +203,7 @@ export function useSwipeBack(
     node.addEventListener("pointerup", onUp);
     node.addEventListener("pointercancel", onCancel);
     return () => {
+      window.clearTimeout(settling);
       node.removeEventListener("pointerdown", onDown);
       node.removeEventListener("pointermove", onMove);
       node.removeEventListener("pointerup", onUp);
@@ -301,15 +309,38 @@ export function usePullToRefresh(
       });
     };
 
+    /**
+     * The back-swipe gesture has taken this pointer.
+     *
+     * It listens on the navigation layer, which is an *ancestor* of this scroller, and
+     * `setPointerCapture` retargets the pointer to it — so from that moment on nothing here fires
+     * again, including the `pointerup` that would have put the indicator away. A diagonal drag from
+     * the left edge of a pushed screen left a refresh spinner drawn over the content with no gesture
+     * behind it and nothing that could ever clear it. The claim is announced rather than guessed at.
+     */
+    const onClaimed = () => {
+      if (!pulling) return;
+      pulling = false;
+      if (armed) {
+        armed = false;
+        reset();
+      }
+    };
+
     node.addEventListener("pointerdown", onDown, { passive: true });
     node.addEventListener("pointermove", onMove, { passive: true });
     node.addEventListener("pointerup", onUp, { passive: true });
     node.addEventListener("pointercancel", onUp, { passive: true });
+    window.addEventListener("codeflow:gesture-claimed", onClaimed);
     return () => {
       node.removeEventListener("pointerdown", onDown);
       node.removeEventListener("pointermove", onMove);
       node.removeEventListener("pointerup", onUp);
       node.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("codeflow:gesture-claimed", onClaimed);
+      // A screen unmounted mid-pull would otherwise leave the indicator's inline transform on a node
+      // React is about to reuse.
+      reset();
     };
   }, [scroller, indicator, enabled]);
 }

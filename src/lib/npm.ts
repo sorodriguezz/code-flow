@@ -33,6 +33,22 @@ export interface SearchHit {
   publisher: string;
 }
 
+/**
+ * The package's page on npmjs.com.
+ *
+ * Built here rather than taken from the search response's `links.npm`, which the backend does not
+ * forward: the URL is a pure function of the name, so carrying it over IPC for every hit of every
+ * keystroke would be bytes spent on something derivable.
+ *
+ * Encoded per segment so a scoped name keeps its `/` — `@nestjs-modules/ioredis` is one path with a
+ * slash in it on npmjs.com, and `encodeURIComponent` on the whole name would turn it into `%2F` and
+ * land on a 404.
+ */
+export function npmPackageUrl(name: string): string {
+  const path = name.split("/").map(encodeURIComponent).join("/");
+  return `https://www.npmjs.com/package/${path}`;
+}
+
 export const npmLatestVersions = (names: string[]) =>
   invoke<LatestVersion[]>("npm_latest_versions", { names });
 

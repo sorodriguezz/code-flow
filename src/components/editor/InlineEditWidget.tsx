@@ -3,9 +3,10 @@ import { Loader2, Sparkles, X } from "lucide-react";
 import { inlineEditWithAi } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { RunEngineChip } from "../ai/AiRunLog";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { notify } from "../../state/notificationStore";
 import { useT } from "../../state/languageStore";
+import type { InlineEditOutcome } from "./EditorPane";
 
 /** Ctrl+I: describe the change in words, and the selected code is rewritten in place.
  *
@@ -21,6 +22,7 @@ export function InlineEditWidget({
   selection,
   workspaceId,
   onApply,
+  onRunningChange,
   onClose,
 }: {
   /**
@@ -44,10 +46,24 @@ export function InlineEditWidget({
    * and that run is precisely the one whose home nobody can reconstruct afterwards.
    */
   workspaceId: string;
-  /** Applies the rewrite, and answers whether it actually landed: the editor refuses a reply whose
-   *  file — or whose request — has moved on since Ctrl+I, and a refusal must not be reported as a
-   *  success. */
-  onApply: (replacement: string, editNonce: number) => boolean;
+  /**
+   * Applies the rewrite, and answers what became of it.
+   *
+   * The editor refuses a reply whose file — or whose request — has moved on since Ctrl+I, and a
+   * refusal must not be reported as a success. `applied-offscreen` is the third answer and the
+   * reason this is not a boolean: the rewrite landed in the buffer, but the user has since left the
+   * editor, so nothing on their screen changed and they have to be told in words.
+   */
+  onApply: (replacement: string, editNonce: number) => InlineEditOutcome;
+  /**
+   * Whether a rewrite is in flight, told to the pane as it changes.
+   *
+   * The pane needs it for exactly one decision: whether leaving the editor for another view should
+   * abandon this request or let it finish. A widget with nothing running is just a text box and can
+   * be dropped with its tracked range; one that is waiting on a model is work the user asked for,
+   * and throwing it away because they went to look at something else is the bug this reports.
+   */
+  onRunningChange?: (running: boolean) => void;
   onClose: () => void;
 }) {
   const t = useT();
@@ -79,6 +95,7 @@ export function InlineEditWidget({
     // carry however long the answer takes.
     useAiRunStore.getState().start(runId, { kindKey: "agents.liveKindInline", detail: filePath, workspaceId });
     setRunning(true);
+    onRunningChange?.(true);
     try {
       const replacement = await inlineEditWithAi(filePath, fileContent, selection, text, runId);
       // The editor refuses a rewrite whose file is no longer the one on screen, or whose request
@@ -86,7 +103,7 @@ export function InlineEditWidget({
       // this request to it, read out of the closure this call started in rather than off a later
       // render. Reporting a refusal as finished would put a success in the panel for an edit that
       // no buffer ever received, and send the user looking for a change that is not there.
-      const applied = onApply(replacement, editNonce);
+      const outcome = onApply(replacement, editNonce);
       onClose();
       // The shortest-lived run of the lot, and the one most likely to land while the user is still
       // watching — but an edit over a large selection can take a while, and closing the widget on
@@ -94,10 +111,18 @@ export function InlineEditWidget({
       notify({
         source: "editor",
         workspaceId,
-        titleKey: applied ? "notifications.inlineEditDone" : "notifications.inlineEditDiscarded",
-        status: applied ? "success" : "info",
+        titleKey:
+          outcome === "refused" ? "notifications.inlineEditDiscarded" : "notifications.inlineEditDone",
+        status: outcome === "refused" ? "info" : "success",
         detail: filePath,
       });
+      // Landed in a buffer nobody is looking at — the user pressed Ctrl+I and then went to another
+      // view while the model worked. The notification centre has it either way; a toast is what
+      // makes it *arrive*, and without one the only evidence the rewrite ever happened is a change
+      // the user has to go back and find.
+      if (outcome === "applied-offscreen") {
+        pushSuccessToast(t("notifications.inlineEditDone"));
+      }
     } catch (e) {
       if (!isCancellation(e)) {
         pushErrorToast(String(e));
@@ -112,6 +137,7 @@ export function InlineEditWidget({
     } finally {
       useAiRunStore.getState().finish(runId);
       setRunning(false);
+      onRunningChange?.(false);
       runIdRef.current = null;
     }
   };

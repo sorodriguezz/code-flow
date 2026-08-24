@@ -423,15 +423,17 @@ export function TerminalScreen() {
           browser's own wording, its own language, and a look that has nothing to do with the rest of
           the app. Every other destructive action here confirms in place; this one now does too. */}
       {confirmClose && (
-        <div className="cf-safe-x shrink-0 border-b border-[var(--cf-danger)]/40 bg-[var(--cf-danger-soft)] px-3 py-2">
-          <p className="text-base text-[var(--cf-danger-text)]">{t("terminal.closeConfirm")}</p>
-          <div className="mt-2 flex gap-2">
-            <Button full size="sm" onClick={() => setConfirmClose(false)}>
-              {t("common.cancel")}
-            </Button>
-            <Button full size="sm" variant="danger" onClick={close}>
-              {t("terminal.close")}
-            </Button>
+        <div className="cf-safe-x shrink-0 border-b border-[var(--cf-danger)]/40 bg-[var(--cf-danger-soft)]">
+          <div className="px-3 py-2">
+            <p className="text-base text-[var(--cf-danger-text)]">{t("terminal.closeConfirm")}</p>
+            <div className="mt-2 flex gap-2">
+              <Button full size="sm" onClick={() => setConfirmClose(false)}>
+                {t("common.cancel")}
+              </Button>
+              <Button full size="sm" variant="danger" onClick={close}>
+                {t("terminal.close")}
+              </Button>
+            </div>
           </div>
         </div>
       )}

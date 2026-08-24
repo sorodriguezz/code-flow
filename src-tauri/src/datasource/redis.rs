@@ -888,17 +888,44 @@ impl RedisSession {
     }
 }
 
-/// The full Redis key a node names: its parent prefix and its own last segment, rejoined.
+/// The full Redis key a node names.
 ///
 /// `DbNodeRef` carries only `{kind, database, schema, name}` and the frontend sends back whatever
-/// the driver put there, so the key is split across `schema` (the prefix) and `name` (the last
-/// segment) on the way out and rebuilt here on the way in. That is what lets a key of any depth
-/// travel through a four-field struct with no frontend change at all.
+/// the driver put there, so a key of any depth travels through a four-field struct with no frontend
+/// change at all. What it does *not* carry is which of two shapes `name` is in, and that is the
+/// whole of this function:
+///
+/// * a **namespace or key node** — the rows `namespace` builds — carries only its own last segment
+///   in `name`, with the parent prefix in `schema` (`table: None`). `av:v3:dec5_valid` arrives as
+///   `schema = "av:v3"`, `name = "dec5_valid"`, and the two are rejoined here.
+/// * everything **under** a key — the `Fields` and `Details` folders and the columns inside them —
+///   is built with `table: Some(<the whole key>)`, and `refOf` on the frontend deliberately sends
+///   `table` as the ref's `name` so a child can name the relation it belongs to. `name` is then
+///   already the entire key.
+///
+/// Rejoining in the second case is what produced *"The key av:v3:av:v3:dec5_valid no longer
+/// exists."* the moment anybody expanded **Fields** on a nested key: the prefix was concatenated
+/// onto a value that already contained it, and every command underneath — `TYPE`, `TTL`, `OBJECT
+/// ENCODING`, `MEMORY USAGE` — then answered honestly about a key nobody has. Hence `none`,
+/// `expired` and `0 bytes` in the Details rows beside it: not a stale tree, a fabricated key.
+///
+/// Keyed on the node's kind rather than on "does `name` already start with `schema`", because that
+/// test is a guess: `av:v3:av:v3:x` is a perfectly legal Redis key, and a heuristic that strips it
+/// would break the one user who has one. The kind is a fact.
 fn full_key(node: &DbNodeRef, separator: &str) -> String {
     let name = node.name.clone().unwrap_or_default();
-    match node.schema() {
-        Some(prefix) if !prefix.is_empty() => format!("{prefix}{separator}{name}"),
-        _ => name,
+    match node.kind {
+        // Already whole — see above.
+        DbNodeKind::ColumnFolder
+        | DbNodeKind::IndexFolder
+        | DbNodeKind::KeyFolder
+        | DbNodeKind::Column
+        | DbNodeKind::Index
+        | DbNodeKind::Key => name,
+        _ => match node.schema() {
+            Some(prefix) if !prefix.is_empty() => format!("{prefix}{separator}{name}"),
+            _ => name,
+        },
     }
 }
 
@@ -2278,6 +2305,37 @@ mod tests {
         assert!(parse_argv(r#"SET "a"b c"#).is_err());
         assert!(parse_argv(r#"SET "unclosed"#).is_err());
         assert!(parse_argv("SET 'unclosed").is_err());
+    }
+
+    fn node(kind: DbNodeKind, schema: &str, name: &str) -> DbNodeRef {
+        DbNodeRef {
+            kind,
+            database: Some("0".to_string()),
+            schema: Some(schema.to_string()),
+            name: Some(name.to_string()),
+        }
+    }
+
+    /// The two shapes a ref's `name` arrives in, and the bug that came of treating them alike.
+    ///
+    /// A key node carries its last segment and needs the prefix rejoined; everything under it
+    /// carries the whole key already, because `refOf` on the frontend sends the relation's name so
+    /// a child can say what it belongs to. Rejoining there produced `av:v3:av:v3:dec5_valid`, and
+    /// every command on that key then reported it missing.
+    #[test]
+    fn a_key_is_rejoined_but_its_children_are_not() {
+        assert_eq!(full_key(&node(DbNodeKind::Table, "av:v3", "dec5_valid"), ":"), "av:v3:dec5_valid");
+        assert_eq!(full_key(&node(DbNodeKind::Collection, "av", "v3"), ":"), "av:v3");
+
+        for kind in [DbNodeKind::ColumnFolder, DbNodeKind::IndexFolder, DbNodeKind::Column] {
+            assert_eq!(full_key(&node(kind, "av:v3", "av:v3:dec5_valid"), ":"), "av:v3:dec5_valid");
+        }
+    }
+
+    /// A top-level key has no prefix to rejoin, and must not gain a leading separator.
+    #[test]
+    fn a_key_with_no_namespace_is_left_alone() {
+        assert_eq!(full_key(&node(DbNodeKind::Table, "", "session"), ":"), "session");
     }
 
     /// The reason this module does not use `super::split_statements`: `;` is a legal byte in a

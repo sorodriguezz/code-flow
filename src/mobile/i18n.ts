@@ -116,6 +116,7 @@ const es = {
   "chat.new": "Conversación nueva",
   "chat.thinking": "Pensando…",
   "chat.failed": "No se pudo enviar. Tu mensaje sigue escrito abajo.",
+  "chat.loadFailed": "No se pudo leer la conversación de este proyecto.",
 
   // ── Terminal ────────────────────────────────────────────────────────────────
   "terminal.refused":
@@ -416,6 +417,7 @@ const en: Record<MobileKey, string> = {
   "chat.new": "New conversation",
   "chat.thinking": "Thinking…",
   "chat.failed": "Could not send. Your message is still in the box below.",
+  "chat.loadFailed": "This project's conversation could not be read.",
 
   "terminal.refused":
     "Terminals are switched off for remote devices. Turn them on at the desktop, under Settings → Remote control.",

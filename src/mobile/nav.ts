@@ -99,10 +99,27 @@ export function isSheet(route: Route): boolean {
   return route.k === "scope";
 }
 
+/**
+ * A route once it is on the stack, with the identity React needs to tell two of them apart.
+ *
+ * # Why the key is minted here and not derived
+ *
+ * The layer list used to be keyed by `${index}-${route.k}` — position and kind — and a popped layer
+ * is deliberately kept mounted for the length of its exit animation. Open the diff of a *staged*
+ * file, go back, and tap an *unstaged* file within that quarter-second: both are `0-diff`, so React
+ * matched the new layer to the one still sliding out and *updated* it instead of mounting it. The
+ * new screen inherited the old one's state — including which side of the index it thought it was
+ * showing, which is the one thing that screen's buttons act on.
+ *
+ * Minted in `push` rather than computed from the route's fields, so that even re-opening the very
+ * same file is a different screen. It travels in `history.state`, so it survives a popstate.
+ */
+export type StackEntry = Route & { navKey: string };
+
 export interface NavState {
   tab: Tab;
   /** The pushed routes, oldest first. Empty means the tab's own screen is showing. */
-  stack: Route[];
+  stack: StackEntry[];
 }
 
 /** What actually goes into `history.state`, stamped with the page load that wrote it. */
@@ -196,6 +213,9 @@ interface NavStore extends NavState {
   /** Closes the top route. A no-op at a tab root, so the phone's back button keeps its own
    *  meaning there — leaving the app — rather than being swallowed. */
   back: () => void;
+  /** The route on top, or `null` at a tab root. For a caller that has to check, after awaiting
+   *  something slow, that the screen it belongs to is still the one on screen. */
+  top: () => StackEntry | null;
   /** Closes everything that is open. */
   popToRoot: () => void;
   /** How deep the stack is — and, by the invariant, how many history entries above the tab root
@@ -242,7 +262,10 @@ export const useNav = create<NavStore>((set, get) => ({
   push: (route) => {
     if (navigating) return;
     const state = get();
-    const next: NavState = { tab: state.tab, stack: [...state.stack, route] };
+    const next: NavState = {
+      tab: state.tab,
+      stack: [...state.stack, { ...route, navKey: newId() }],
+    };
     write(next, "push");
     set(next);
   },
@@ -253,6 +276,15 @@ export const useNav = create<NavStore>((set, get) => ({
   // screen the user had already closed.
   back: () => {
     if (navigating || get().depth() === 0) return;
+    // Armed, like the other two.
+    //
+    // It was not, and that is reachable without any timing luck: a sheet has two Escape listeners on
+    // it — its own and the layer stack's — so one key press ran `back()` twice in the same task,
+    // both saw `navigating === false` and a depth the store had not been told about yet, and two
+    // synchronous `history.back()` calls traverse two entries. From a one-deep stack that walks the
+    // user out of the app. (The duplicate listener is gone too; this is the guard that makes the
+    // whole class of double-intent harmless.)
+    arm();
     history.back();
   },
 
@@ -264,6 +296,11 @@ export const useNav = create<NavStore>((set, get) => ({
     // `popstate` and animate a screen out, so a three-deep stack would play three transitions.
     arm();
     history.go(-depth);
+  },
+
+  top: () => {
+    const stack = get().stack;
+    return stack.length > 0 ? stack[stack.length - 1] : null;
   },
 
   depth: () => get().stack.length,

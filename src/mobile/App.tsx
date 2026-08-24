@@ -13,7 +13,7 @@ import { useMobileStore, useRepoPath } from "./store";
 import { announceInvalidation, type Invalidation } from "./invalidate";
 import { toastInfo } from "./toast";
 import { tapped } from "./haptics";
-import { isSheet, useNav, type Route, type Tab } from "./nav";
+import { isSheet, useNav, type Route, type StackEntry, type Tab } from "./nav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { Button } from "./ui/Button";
 import { Spinner } from "./ui/Feedback";
@@ -96,12 +96,17 @@ export function App() {
   // The grant being withdrawn while the Shell tab is open. The tab itself disappears from the bar
   // below, so leaving `tab` pointing at it would show an empty pane with no way back — and moving
   // somebody to another tab without a word reads as the app losing its place, so it says why.
+  // `ready` is half the condition, and its absence was a bug on every cold start whose remembered
+  // tab was the shell: `terminalAllowed` starts `false` and is only filled in by `bootstrap`, a
+  // round trip later, so this effect ran first and read "not asked yet" as "refused" — throwing the
+  // user onto Agents, telling them the desktop had switched terminals off when it had not, and
+  // *remembering* Agents as their tab in the process.
   useEffect(() => {
-    if (!terminalAllowed && tab === "terminal") {
+    if (ready && !terminalAllowed && tab === "terminal") {
       select("agents");
       toastInfo(t("terminal.revoked"));
     }
-  }, [terminalAllowed, tab, select]);
+  }, [ready, terminalAllowed, tab, select]);
 
   useEffect(() => {
     if (paired) void useMobileStore.getState().bootstrap();
@@ -551,17 +556,19 @@ function NavLayers() {
   const projectId = useMobileStore((s) => s.projectId);
   const workspaceId = useMobileStore((s) => s.workspaceId);
 
-  // Escape, for the iPad-with-a-keyboard case. The sheet has had one since it was written; a pushed
-  // screen is the same kind of thing and its absence is the sort of gap that makes an app feel like
-  // a website in a frame.
+  // Escape, for the iPad-with-a-keyboard case.
+  //
+  // Not while a sheet is on top: `Sheet` binds its own, and two handlers for one key press are two
+  // navigation intents — which, before `back()` was armed, traversed two history entries and left
+  // the app. The guard makes that harmless now; binding once makes it not happen.
   useEffect(() => {
-    if (stack.length === 0) return;
+    if (stack.length === 0 || isSheet(stack[stack.length - 1])) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") back();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [stack.length, back]);
+  }, [stack, back]);
 
   /**
    * A screen whose scope moved out from under it.
@@ -589,7 +596,6 @@ function NavLayers() {
 
   useEffect(() => {
     const desired = layersOf(stack);
-    let popped = false;
     setLayers((current) => {
       const live = current.filter((layer) => !layer.exiting);
       if (desired.length >= live.length) return desired;
@@ -597,12 +603,19 @@ function NavLayers() {
         suppress.current = false;
         return desired;
       }
-      popped = true;
-      return [...desired, ...live.slice(desired.length).map((layer) => ({ ...layer, exiting: true }))];
+      return [
+        ...desired,
+        ...live.slice(desired.length).map((layer) => ({ ...layer, exiting: true })),
+      ];
     });
-    if (!popped) return;
+    // Scheduled unconditionally, where it used to be gated on a flag assigned *inside* the updater
+    // above. React only runs an updater eagerly as an optimisation and skips it whenever the fiber
+    // already has work queued — which a store write landing in the same batch is enough to cause —
+    // so the flag was read before it was set, no sweep was scheduled, and the popped layer stayed
+    // in the tree: invisible, but mounted, and still re-issuing its own reads on every
+    // invalidation. Sweeping when there is nothing to sweep is a no-op.
     const id = window.setTimeout(
-      () => setLayers((current) => current.filter((layer) => !layer.exiting)),
+      () => setLayers((current) => (current.some((l) => l.exiting) ? current.filter((l) => !l.exiting) : current)),
       260,
     );
     return () => window.clearTimeout(id);
@@ -616,7 +629,7 @@ function NavLayers() {
     <>
       {layers.map((layer, index) => (
         <NavLayer
-          key={layer.key}
+          key={layer.route.navKey}
           layer={layer}
           index={index}
           // Only the layer on top is draggable, and only when no sheet is over it.
@@ -638,16 +651,13 @@ function NavLayers() {
 }
 
 interface Layer {
-  route: Route;
-  key: string;
+  route: StackEntry;
   /** On its way out. Kept in the tree for the length of the animation and then dropped. */
   exiting?: boolean;
 }
 
-function layersOf(stack: Route[]): Layer[] {
-  return stack
-    .filter((route) => !isSheet(route))
-    .map((route, index) => ({ route, key: `${index}-${route.k}` }));
+function layersOf(stack: StackEntry[]): Layer[] {
+  return stack.filter((route) => !isSheet(route)).map((route) => ({ route }));
 }
 
 /**
@@ -675,14 +685,29 @@ function NavLayer({
   onSwipeBack: () => void;
 }) {
   const node = useRef<HTMLDivElement>(null);
-  useSwipeBack(node, onSwipeBack, draggable);
+  /**
+   * Whether the entry animation is done with, and can come off the element.
+   *
+   * It has to come off. A CSS animation with `fill-mode: both` keeps applying its final keyframe
+   * forever, and animation values sit *above* the `style` attribute in the cascade — so a layer that
+   * still carries `cf-push-in` silently discards every inline transform the drag gesture writes. The
+   * gesture masks that with `animation: none !important` while a finger is down, but the mask has to
+   * be lifted eventually, and lifting it restarts the animation from zero: the layer snapped back to
+   * the middle and slid in again on every release. Removing the class for good is the only version
+   * of this that has no moment where both things are true.
+   */
+  const [entered, setEntered] = useState(false);
+  useSwipeBack(node, onSwipeBack, draggable, () => setEntered(true));
 
   return (
     <div
       ref={node}
       aria-hidden={layer.exiting || undefined}
+      onAnimationEnd={(event) => {
+        if (event.animationName === "cf-push-in") setEntered(true);
+      }}
       className={`absolute inset-0 flex flex-col bg-[var(--cf-bg)] shadow-[-10px_0_30px_rgba(0,0,0,0.12)] ${
-        layer.exiting ? "cf-push-out" : "cf-push-in"
+        layer.exiting ? "cf-push-out" : entered ? "" : "cf-push-in"
       }`}
       style={{ zIndex: 30 + index }}
     >

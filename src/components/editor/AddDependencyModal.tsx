@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Package, Search } from "lucide-react";
+import { ExternalLink, Loader2, Package, Search } from "lucide-react";
 import { ApiModal, Field, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { useNpmInstallStore } from "../../state/npmInstallStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import { npmSearch, type SearchHit } from "../../lib/npm";
+import { Tooltip } from "../common/Tooltip";
+import { openExternalUrl } from "../../lib/tauri/commands";
+import { npmPackageUrl, npmSearch, type SearchHit } from "../../lib/npm";
 import { addCommandLine } from "../../lib/packageScripts";
 
 /**
@@ -152,34 +154,55 @@ export function AddDependencyModal() {
             </p>
           ) : (
             hits.map((hit) => (
-              <button
-                key={hit.name}
-                type="button"
-                onClick={() => setPicked(hit.name)}
-                onDoubleClick={() => {
-                  setPicked(hit.name);
-                  install();
-                }}
-                className={`flex w-full flex-col items-start gap-0.5 border-b border-[var(--cf-border)] px-3 py-2 text-left last:border-b-0 ${
-                  picked === hit.name
-                    ? "bg-[color-mix(in_oklab,var(--cf-accent)_14%,transparent)]"
-                    : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                }`}
-              >
-                <span className="flex w-full items-baseline gap-2">
-                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-[var(--cf-text)]">
-                    {hit.name}
+              /* A wrapper so the row and the link to the registry can both be real buttons: one
+                 cannot be nested inside the other, so the link sits over the row in a strip of
+                 padding the row reserves for it. */
+              <div key={hit.name} className="group/hit relative border-b border-[var(--cf-border)] last:border-b-0">
+                <button
+                  type="button"
+                  onClick={() => setPicked(hit.name)}
+                  onDoubleClick={() => {
+                    setPicked(hit.name);
+                    install();
+                  }}
+                  className={`flex w-full flex-col items-start gap-0.5 py-2 pl-3 pr-9 text-left ${
+                    picked === hit.name
+                      ? "bg-[color-mix(in_oklab,var(--cf-accent)_14%,transparent)]"
+                      : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  }`}
+                >
+                  <span className="flex w-full items-baseline gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-[var(--cf-text)]">
+                      {hit.name}
+                    </span>
+                    <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+                      {hit.version}
+                    </span>
                   </span>
-                  <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-text-muted)]">
-                    {hit.version}
-                  </span>
-                </span>
-                {hit.description && (
-                  <span className="line-clamp-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                    {hit.description}
-                  </span>
-                )}
-              </button>
+                  {hit.description && (
+                    <span className="line-clamp-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                      {hit.description}
+                    </span>
+                  )}
+                </button>
+
+                {/* The registry's own page, for the decision this dialog cannot help with.
+                    A one-line description and a version number are enough to recognise a package
+                    you already know and not nearly enough to choose between four you do not — that
+                    needs the README, the weekly downloads and when it was last published, and all
+                    three are one click away rather than something to reproduce here. */}
+                <Tooltip label={t("npm.openRegistry", { name: hit.name })}>
+                  <button
+                    type="button"
+                    onClick={() => void openExternalUrl(npmPackageUrl(hit.name))}
+                    className={`absolute right-1.5 top-2 flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] transition-opacity hover:bg-black/[0.06] hover:text-[var(--cf-text)] focus-visible:opacity-100 dark:hover:bg-white/[0.10] ${
+                      picked === hit.name ? "opacity-100" : "opacity-0 group-hover/hit:opacity-100"
+                    }`}
+                  >
+                    <ExternalLink size={13} />
+                  </button>
+                </Tooltip>
+              </div>
             ))
           )}
         </div>

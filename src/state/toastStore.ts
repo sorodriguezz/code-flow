@@ -24,3 +24,13 @@ export const useToastStore = create<ToastState>((set) => ({
 }));
 
 export const pushErrorToast = (message: string) => useToastStore.getState().pushToast(message, "error");
+
+/**
+ * A good outcome, said where the user is rather than where it happened.
+ *
+ * For work that finishes somewhere the user is no longer looking — an inline AI rewrite that lands
+ * in a buffer after they switched to the Pipelines tab. The notification centre records it either
+ * way; a toast is what makes it *arrive*.
+ */
+export const pushSuccessToast = (message: string) =>
+  useToastStore.getState().pushToast(message, "success");

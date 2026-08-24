@@ -91,12 +91,16 @@ export function PrScreen() {
   const [runs, setRuns] = useState<ReviewRunSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [failure, setFailure] = useState<string | null>(null);
+  /** The saved-runs half's own failure. Its own slot, because the two halves fail independently and
+   *  a repository can legitimately have pull requests and no reviews, or the other way round. */
+  const [runsFailure, setRunsFailure] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState<number | null>(null);
 
   const reload = useCallback(async () => {
     if (!projectId) return;
     setLoading(true);
     setFailure(null);
+    setRunsFailure(null);
     const [prList, runList] = await Promise.all([
       // A project with no linked host answers an error rather than an empty list, and that is not
       // a failure worth a red screen here — it just means this repository has no pull requests. The
@@ -106,9 +110,13 @@ export function PrScreen() {
         return [] as PullRequestSummary[];
       }),
       workspaceId
-        ? rpc<ReviewRunSummary[]>("list_review_runs", { workspaceId }).catch(
-            () => [] as ReviewRunSummary[],
-          )
+        ? rpc<ReviewRunSummary[]>("list_review_runs", { workspaceId }).catch((e: unknown) => {
+            // Kept, where it used to be swallowed into `[]` — which rendered "Todavía no hay
+            // revisiones guardadas" next to a PR list that had loaded fine, so nothing on the screen
+            // suggested anything had failed.
+            setRunsFailure(e instanceof Error ? e.message : String(e));
+            return [] as ReviewRunSummary[];
+          })
         : Promise.resolve([] as ReviewRunSummary[]),
     ]);
     // The scope may have moved while this was in flight — the guard every async load in this client
@@ -240,11 +248,15 @@ export function PrScreen() {
         {loading ? (
           <SkeletonList rows={2} />
         ) : runs.length === 0 ? (
-          <EmptyState
-            icon={<ScanText size={26} aria-hidden />}
-            title={t("pr.noRuns")}
-            hint={t("pr.noRunsHint")}
-          />
+          runsFailure ? (
+            <ErrorState title={t("pr.failed")} detail={runsFailure} onRetry={() => void reload()} />
+          ) : (
+            <EmptyState
+              icon={<ScanText size={26} aria-hidden />}
+              title={t("pr.noRuns")}
+              hint={t("pr.noRunsHint")}
+            />
+          )
         ) : (
           <Card>
             {runs.map((entry, index) => (

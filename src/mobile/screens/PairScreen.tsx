@@ -78,8 +78,11 @@ export function PairScreen({ onPaired }: { onPaired: () => void }) {
   };
 
   return (
-    <div className="cf-brand-wash cf-scroll cf-safe-top cf-safe-bottom cf-safe-x flex h-full flex-col justify-center px-6 py-10">
-      <div className="mx-auto w-full max-w-sm">
+    // The padding is on the inner element: `.cf-safe-*` are `@layer components` rules and a `px-6`
+    // on the same element would replace their insets rather than add to them, putting the code box
+    // under the notch in landscape.
+    <div className="cf-brand-wash cf-scroll cf-safe-top cf-safe-bottom cf-safe-x flex h-full flex-col justify-center">
+      <div className="mx-auto w-full max-w-sm px-6 py-10">
         <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-card">
           <Smartphone size={24} className="text-[var(--cf-accent-text)]" aria-hidden />
         </div>
