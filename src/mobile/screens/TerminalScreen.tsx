@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Power, RotateCcw, X } from "lucide-react";
+import { Keyboard, Power, RotateCcw, X } from "lucide-react";
 import { t } from "../i18n";
 import { NotAllowed, rpc } from "../transport";
 import { useMobileStore } from "../store";
+import { toastError, toastSuccess } from "../toast";
+import { tapped } from "../haptics";
+import { RootBar } from "../ui/RootBar";
+import { Button, IconButton } from "../ui/Button";
+import { Spinner } from "../ui/Feedback";
+import { BottomBar } from "../ui/BottomBar";
 // xterm's own stylesheet, and it is not optional decoration — it is the structural CSS that makes
 // the widget a terminal. Without it the helper textarea xterm keeps for input renders in-flow at
 // the browser's default size (complete with a resize handle), pushing the rows down and clipping
@@ -38,20 +44,25 @@ import "@xterm/xterm/css/xterm.css";
  * A phone keyboard has no Ctrl, no Tab, no Esc and no arrows, and a terminal is unusable without
  * them — Ctrl-C alone is most of what you need a terminal on a phone *for*. The row above the
  * keyboard sends the control bytes directly, which is what every mobile SSH client settles on. It
- * only sits above the keyboard at all because the shell is sized from `window.visualViewport`; see
- * `viewport.ts`.
+ * scrolls horizontally rather than squeezing: at eight keys on a 360-point screen every one of them
+ * was under the 44px minimum, and the arrows — the ones you press repeatedly — were the ones that
+ * fell off the end.
  */
 
 /** The control sequences the accessory row writes, as raw bytes on the wire. */
 const KEYS: { label: string; data: string; wide?: boolean }[] = [
   { label: "^C", data: "\x03" },
   { label: "^D", data: "\x04" },
-  { label: "Tab", data: "\t" },
-  { label: "Esc", data: "\x1b" },
+  { label: "^Z", data: "\x1a" },
+  { label: "^L", data: "\x0c" },
+  { label: "Tab", data: "\t", wide: true },
+  { label: "Esc", data: "\x1b", wide: true },
   { label: "↑", data: "\x1b[A" },
   { label: "↓", data: "\x1b[B" },
   { label: "←", data: "\x1b[D" },
   { label: "→", data: "\x1b[C" },
+  { label: "Home", data: "\x1b[H", wide: true },
+  { label: "End", data: "\x1b[F", wide: true },
 ];
 
 /**
@@ -75,7 +86,10 @@ interface TerminalInfo {
 }
 
 export function TerminalScreen() {
-  const { projects, projectId, terminals, rememberTerminal } = useMobileStore();
+  const projects = useMobileStore((s) => s.projects);
+  const projectId = useMobileStore((s) => s.projectId);
+  const terminals = useMobileStore((s) => s.terminals);
+  const rememberTerminal = useMobileStore((s) => s.rememberTerminal);
   const holder = useRef<HTMLDivElement>(null);
   const term = useRef<import("@xterm/xterm").Terminal | null>(null);
   /** Whether xterm itself has loaded and attached. The session effect waits on it, because the
@@ -89,6 +103,7 @@ export function TerminalScreen() {
    *  boolean because reopening twice has to run the effect twice. */
   const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [confirmClose, setConfirmClose] = useState(false);
   const cwd = projects.find((p) => p.id === projectId)?.local_path;
   const remembered = projectId ? (terminals[projectId] ?? null) : null;
 
@@ -211,12 +226,11 @@ export function TerminalScreen() {
       observer = new ResizeObserver(refit);
       observer.observe(holder.current);
 
-      // **And from the visual viewport, which the observer never hears about.** The comment this
-      // replaces claimed the `ResizeObserver` covered "the keyboard sliding up"; it does not. On
-      // iOS the keyboard is drawn over the page without resizing anything the observer watches, so
-      // the shell kept its full-screen geometry while half of it was behind the keyboard — long
-      // commands wrapped against a row count that no longer existed. `visualViewport` is the only
-      // thing that reports the keyboard at all; see `viewport.ts`.
+      // **And from the visual viewport, which the observer never hears about.** On iOS the keyboard
+      // is drawn over the page without resizing anything the observer watches, so the shell kept its
+      // full-screen geometry while half of it was behind the keyboard — long commands wrapped
+      // against a row count that no longer existed. `visualViewport` is the only thing that reports
+      // the keyboard at all; see `viewport.ts`.
       onViewport = () => refit();
       window.visualViewport?.addEventListener("resize", onViewport);
 
@@ -378,77 +392,125 @@ export function TerminalScreen() {
   const close = () => {
     const id = liveId.current;
     if (!id) return;
-    if (!window.confirm(t("terminal.closeConfirm"))) return;
+    setConfirmClose(false);
     // Forgotten before the round trip, so a failed close cannot leave this client adopting an id the
     // desktop has already killed. The `terminal:exit` frame does the rest of the tidying.
     if (projectId) rememberTerminal(projectId, null);
-    void rpc<void>("close_terminal", { id }).catch((e) => setError(String(e)));
+    void rpc<void>("close_terminal", { id })
+      .then(() => toastSuccess(t("toast.terminalClosed")))
+      .catch((e: unknown) =>
+        toastError(t("error.actionFailed"), e instanceof Error ? e.message : String(e)),
+      );
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col bg-[var(--cf-bg)]">
+      <RootBar
+        title={t("nav.terminal")}
+        actions={
+          sessionId ? (
+            <IconButton
+              icon={<X size={18} />}
+              label={t("terminal.close")}
+              tone="danger"
+              onClick={() => setConfirmClose(true)}
+            />
+          ) : undefined
+        }
+      />
+
+      {/* An inline confirmation, where this used to call `window.confirm` — a native dialog with the
+          browser's own wording, its own language, and a look that has nothing to do with the rest of
+          the app. Every other destructive action here confirms in place; this one now does too. */}
+      {confirmClose && (
+        <div className="cf-safe-x shrink-0 border-b border-[var(--cf-danger)]/40 bg-[var(--cf-danger-soft)] px-3 py-2">
+          <p className="text-base text-[var(--cf-danger-text)]">{t("terminal.closeConfirm")}</p>
+          <div className="mt-2 flex gap-2">
+            <Button full size="sm" onClick={() => setConfirmClose(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button full size="sm" variant="danger" onClick={close}>
+              {t("terminal.close")}
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* The holder is rendered unconditionally, in every state — xterm attaches to this node once
           and keeps it for the life of the screen, so a message that replaced it would tear the
           terminal down to say something about it. Anything to say goes on top instead. */}
       <div className="relative min-h-0 flex-1">
-        <div ref={holder} className="absolute inset-0 overflow-hidden bg-[var(--cf-field)] p-1" />
+        <div ref={holder} className="absolute inset-0 overflow-hidden bg-[var(--cf-sunken)] p-1" />
         {!cwd ? (
           <Message>{t("repo.noProject")}</Message>
         ) : error ? (
-          <Message icon={<Power size={24} className="text-[var(--cf-text-muted)]" />}>{error}</Message>
+          <Message icon={<Power size={24} className="text-[var(--cf-text-muted)]" aria-hidden />}>
+            <span className="cf-selectable">{error}</span>
+            <Button className="mt-3" onClick={() => setAttempt((n) => n + 1)}>
+              {t("terminal.retry")}
+            </Button>
+          </Message>
         ) : !sessionId && !dead ? (
-          <div className="pointer-events-none absolute inset-x-0 top-2 flex justify-center">
-            <Loader2 size={16} className="animate-spin text-[var(--cf-text-muted)]" />
+          <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center">
+            <Spinner />
           </div>
         ) : null}
       </div>
 
-      <div className="cf-scroll shrink-0 border-t border-[var(--cf-border)] bg-[var(--cf-surface)]">
-        <div className="flex gap-1 px-1 py-1">
+      <BottomBar>
+        {/* Horizontally scrollable rather than squeezed. Twelve keys at the 44px minimum need more
+            width than a phone has, and the ones that fell off the end when they were squeezed were
+            the arrows — which are the keys you press over and over. */}
+        <div className="cf-scroll-x flex gap-1 px-1.5 py-1.5">
           {KEYS.map((key) => (
             <button
               key={key.label}
               type="button"
               disabled={!sessionId}
+              aria-label={key.label}
               // `onPointerDown` with the default prevented, not `onClick`: a click steals focus
               // from the hidden input xterm keeps, which closes the phone keyboard on every
               // Ctrl-C. This sends the byte and leaves focus exactly where it was.
               onPointerDown={(e) => {
                 e.preventDefault();
+                tapped();
                 write(key.data);
               }}
-              className="cf-tap min-w-11 flex-1 rounded-md border border-[var(--cf-border)] font-mono text-[12px] disabled:opacity-40"
+              className={`cf-tap cf-press shrink-0 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] font-mono text-sm disabled:opacity-40 ${
+                key.wide ? "min-w-[3.25rem]" : "min-w-11"
+              }`}
             >
               {key.label}
             </button>
           ))}
         </div>
-        {/* Ending a session is an explicit act with its own control, which is the whole point: it
-            used to be a side effect of navigating away. Reopening is offered in the same slot,
-            because after an exit that is the only thing left to do here. */}
-        <div className="flex px-1 pb-1">
+        <div className="flex gap-2 px-1.5 pb-1.5">
           {dead ? (
-            <button
-              type="button"
+            <Button
+              full
+              size="sm"
+              variant="primary"
+              icon={<RotateCcw size={14} />}
               onClick={() => setAttempt((n) => n + 1)}
-              className="cf-tap flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] text-[12px] text-[var(--cf-accent)]"
             >
-              <RotateCcw size={13} />
               {t("terminal.reopen")}
-            </button>
+            </Button>
           ) : (
-            <button
-              type="button"
-              onClick={close}
+            // Brings the phone keyboard back after the key bar or a scroll has dismissed it — there
+            // is no other way to focus a canvas-backed terminal on touch, and losing the keyboard
+            // used to mean switching tabs and back.
+            <Button
+              full
+              size="sm"
               disabled={!sessionId}
-              className="cf-tap flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] text-[12px] text-[var(--cf-text-muted)] disabled:opacity-40"
+              icon={<Keyboard size={14} />}
+              onClick={() => term.current?.focus()}
             >
-              <X size={13} />
-              {t("terminal.close")}
-            </button>
+              {t("terminal.keyboard")}
+            </Button>
           )}
         </div>
-      </div>
+      </BottomBar>
     </div>
   );
 }
@@ -456,9 +518,9 @@ export function TerminalScreen() {
 /** Something to say, drawn over the terminal rather than instead of it. */
 function Message({ icon, children }: { icon?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[var(--cf-field)] px-8 text-center">
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[var(--cf-sunken)] px-8 text-center">
       {icon}
-      <p className="text-[13px] text-[var(--cf-text-muted)]">{children}</p>
+      <div className="text-base text-[var(--cf-text-muted)]">{children}</div>
     </div>
   );
 }

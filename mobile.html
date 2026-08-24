@@ -1,13 +1,24 @@
 <!doctype html>
+<!-- `lang` is corrected at runtime by `main.tsx` to whatever `i18n.ts` actually resolved from the
+     phone's own locale. It is `es` here because that is what this file is written in and an
+     attribute-less document is worse, but a phone set to English gets the English table and was
+     being announced by VoiceOver in a Spanish voice reading English words. -->
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
     <title>CodeFlow</title>
 
     <!-- `viewport-fit=cover` is what puts the page under the notch and the home indicator, which
-         is the only way `env(safe-area-inset-*)` in mobile.css resolves to anything. `user-scalable=no`
-         is deliberate on a control panel: pinch-zoom here only ever happens by accident mid-tap,
-         and every control is already at the 44px minimum.
+         is the only way `env(safe-area-inset-*)` in mobile.css resolves to anything.
+
+         **Zoom is allowed**, where it used to be blocked with `user-scalable=no`. The old reasoning
+         was that pinch-zoom on a control panel only ever happens by accident mid-tap — which was
+         true when every control was 44px, and false the moment this client started drawing diffs
+         and terminal output at 11px monospace. Blocking zoom over code is not a tidiness decision,
+         it is telling anybody who cannot read 11px that this screen is not for them. The accidental
+         double-tap zoom that `user-scalable=no` was really guarding against is handled properly
+         instead, by `touch-action: manipulation` on every tappable thing (see `.cf-tap`), which
+         suppresses it per element without taking pinch away from the page.
 
          `interactive-widget=resizes-content` asks the browser to shrink the *layout* viewport when
          the virtual keyboard opens, instead of drawing the keyboard over a page that was told
@@ -16,7 +27,7 @@
          same job from JavaScript. Both are needed, and neither can be feature-detected. -->
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, interactive-widget=resizes-content"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5, interactive-widget=resizes-content"
     />
 
     <!-- "Add to Home Screen", twice, because the two platforms read different things.
@@ -33,7 +44,12 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="CodeFlow" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="theme-color" content="#6366f1" />
+    <!-- One per scheme, and neither of them the accent. `theme-color` paints Android's status bar
+         and the PWA splash background, so a single indigo meant a dark-mode phone opened this to a
+         bright violet band above a near-black app. These are `--cf-surface` from `mobile.css` in
+         each theme, so the bar reads as part of the app bar under it. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1e1e27" />
 
     <!-- Nothing here should ever be indexed; it is somebody's desk on their home network. -->
     <meta name="robots" content="noindex, nofollow" />

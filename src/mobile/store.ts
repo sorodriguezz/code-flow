@@ -3,16 +3,25 @@
  *
  * One store, not the sixty-odd the desktop has, and the difference is not laziness — it is that
  * this client holds far less. The desktop's stores each own a view with its own selection, its own
- * drafts and its own undo; here there are three screens and one selection between them.
+ * drafts and its own undo; here there are five screens and one selection between them.
  *
  * Everything is loaded from the desktop and nothing is authoritative here. When in doubt the client
  * refetches rather than reconciling: the round trip is a few milliseconds over a home network, and
  * a phone showing a stale gate is worse than a phone showing a spinner.
+ *
+ * # What is deliberately *not* here
+ *
+ * Where the user is. That used to be split between this file (`openChain`) and five booleans in
+ * five screens, which is how the Agents tab ended up with no way back to its own list: `openChain`
+ * survived every tab switch, so re-entering the tab re-entered the chain, forever. Navigation lives
+ * in `nav.ts` now, and this file holds only data.
  */
 
 import { create } from "zustand";
 import { NotAllowed, rpc, Unpaired } from "./transport";
 import { t } from "./i18n";
+import { toastError, toastSuccess } from "./toast";
+import { resetDepth } from "./nav";
 
 /**
  * The outcome of one read, with the two failures that must not be treated alike kept apart.
@@ -67,6 +76,7 @@ function watchProject(projectId: string | null) {
   if (!projectId) return;
   void rpc("watch_project", { projectId }).catch(() => undefined);
 }
+
 /**
  * The pty sessions this device has open, by project.
  *
@@ -83,6 +93,22 @@ function watchProject(projectId: string | null) {
  * the id is a claim about another process's state, and the process may well have exited.
  */
 const TERMINALS_KEY = "codeflow.remote.terminals";
+
+/**
+ * The workspace and project this phone was last looking at.
+ *
+ * # Why the phone remembers a scope the desktop already has an opinion about
+ *
+ * `resync` goes out of its way to keep the user where they were — its own comment says that
+ * "snapping back to the first project on every reconnect would move the screen under somebody every
+ * time their phone woke up" — and `bootstrap` then did exactly that, because it takes the desktop's
+ * current workspace and project unconditionally. `bootstrap` is what runs after every reload,
+ * *including* the forced one in `reloadIfStale`, which fires precisely when a phone wakes up. So
+ * the case `resync` was written to prevent happened anyway, by the other route.
+ *
+ * The desktop's answer is still the fallback, and still the right one for a genuinely new device.
+ */
+const SCOPE_KEY = "codeflow.remote.scope";
 
 function storedTerminals(): Record<string, string> {
   try {
@@ -102,9 +128,30 @@ function storedTerminals(): Record<string, string> {
   }
 }
 
+function storedScope(): { workspaceId: string | null; projectId: string | null } {
+  try {
+    const raw = localStorage.getItem(SCOPE_KEY);
+    if (!raw) return { workspaceId: null, projectId: null };
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      workspaceId: typeof parsed.workspaceId === "string" ? parsed.workspaceId : null,
+      projectId: typeof parsed.projectId === "string" ? parsed.projectId : null,
+    };
+  } catch {
+    return { workspaceId: null, projectId: null };
+  }
+}
+
+function rememberScope(workspaceId: string | null, projectId: string | null) {
+  try {
+    localStorage.setItem(SCOPE_KEY, JSON.stringify({ workspaceId, projectId }));
+  } catch {
+    /* private browsing; the scope is simply not remembered across reloads */
+  }
+}
+
 import type {
   AgentChain,
-  ChainDetail,
   CommitInfo,
   Project,
   RepoStatusInfo,
@@ -120,8 +167,8 @@ import type {
  *
  * The grouping is "actions that contend for the same thing", not "actions on the same screen":
  * a checkout and a commit both write the working tree and genuinely should wait for each other, so
- * the branch sheet shares `repo`. `review` and `chat` are apart from everything because they are the
- * two calls that hold the connection open for as long as an engine takes to answer.
+ * the branch screen shares `repo`. `review` and `chat` are apart from everything because they are
+ * the two calls that hold the connection open for as long as an engine takes to answer.
  */
 export type BusyKey = "repo" | "analyze" | "chains" | "review" | "chat";
 
@@ -132,6 +179,10 @@ export interface RunLog {
   /** Set when `ai:done` lands. The card stays — its output is still worth reading — but stops
    *  claiming to be live and stops offering to cancel something that already ended. */
   finished?: boolean;
+  /** When this client first heard of the run, so the card can say how long ago that was. Not the
+   *  run's real start: a phone that joined mid-run knows only when it joined, and pretending
+   *  otherwise would put a wrong number next to a right one. */
+  firstSeen: number;
 }
 
 /**
@@ -198,12 +249,10 @@ interface MobileState {
    * three rows you can point at rather than a number you have to take on faith.
    */
   unpushed: CommitInfo[];
-  /** The last 30 commits. Fetched on every `repo:fs-changed` since this client existed, and until
-   *  now rendered nowhere — a round trip per filesystem event that bought nothing. */
+  /** The last 30 commits. */
   commits: CommitInfo[];
 
   chains: AgentChain[];
-  openChain: ChainDetail | null;
 
   logs: Record<string, RunLog>;
 
@@ -223,6 +272,13 @@ interface MobileState {
    * showing no reason why. One long action must not be able to freeze the rest of the client.
    */
   busy: Record<BusyKey, boolean>;
+  /**
+   * The last *read* failure, for the screens that draw it inline beside a retry.
+   *
+   * Action failures do not come here any more — they go to a toast, which appears next to the thumb
+   * that caused them and dismisses itself. This field is only for "the screen could not be filled
+   * in", which is a state of the screen rather than an event.
+   */
   error: string | null;
 
   bootstrap: () => Promise<void>;
@@ -231,13 +287,22 @@ interface MobileState {
   setProject: (id: string) => Promise<void>;
   refreshRepo: () => Promise<void>;
   refreshChains: () => Promise<void>;
-  openChainDetail: (chainId: string | null) => Promise<void>;
-  run: <T>(action: () => Promise<T>, key: BusyKey) => Promise<T | null>;
+  /** Everything the current scope can show, for pull-to-refresh. */
+  refreshAll: () => Promise<void>;
+  /**
+   * Runs one mutating command under `key`'s busy flag.
+   *
+   * `success` is the sentence to show when it lands. Optional only because a handful of callers
+   * report their own outcome in a richer way; anything that writes and says nothing is a bug.
+   */
+  run: <T>(action: () => Promise<T>, key: BusyKey, success?: string) => Promise<T | null>;
   appendLog: (runId: string, lines: string[]) => void;
   setEngine: (runId: string, engine: string) => void;
   markRunFinished: (runId: string) => void;
-  /** Puts a message in the header banner, for the one caller that cannot go through [`run`] — see
-   *  the stop button in `RunsScreen`. */
+  /** Drops one run's card. The run itself is untouched — this is the *card*. */
+  dismissRun: (runId: string) => void;
+  /** Drops every card whose run has ended. */
+  clearFinishedRuns: () => void;
   setError: (error: string | null) => void;
   setConnected: (connected: boolean) => void;
   /** Records — or, with `null`, forgets — the shell open for one project. */
@@ -261,7 +326,6 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   commits: [],
 
   chains: [],
-  openChain: null,
 
   logs: {},
   terminals: storedTerminals(),
@@ -273,26 +337,38 @@ export const useMobileStore = create<MobileState>((set, get) => ({
    *  in the dispatch table for why that matters on a phone. */
   bootstrap: async () => {
     try {
-      const data = await rpc<Bootstrap>("remote_bootstrap", {});
+      const remembered = storedScope();
+      // The remembered workspace is sent *with the request*, so the desktop answers with that
+      // workspace's projects rather than with its own and having to be corrected afterwards.
+      const data = await rpc<Bootstrap>("remote_bootstrap", {
+        workspaceId: remembered.workspaceId,
+      });
+      // The phone's own last choice wins when it still exists, and the desktop's answer is the
+      // fallback. `??` and not `||` on the desktop's project: an older desktop sends no field at
+      // all, and that is the case the fallback is for.
+      const workspaceId = data.workspaces.some((w) => w.id === remembered.workspaceId)
+        ? remembered.workspaceId
+        : data.workspaceId;
+      const projectId = data.projects.some((p) => p.id === remembered.projectId)
+        ? remembered.projectId
+        : (data.projectId ?? data.projects[0]?.id ?? null);
       set({
         ready: true,
         unpaired: false,
         error: null,
         workspaces: data.workspaces,
-        workspaceId: data.workspaceId,
+        workspaceId,
         projects: data.projects,
         chains: data.chains,
-        // The desktop's own project when it named one, and only then the first — a machine with
-        // several repositories used to open this client on whichever sorted first. `??` and not
-        // `||`: an older desktop sends no field at all, and that is the case the fallback is for.
-        projectId: data.projectId ?? data.projects[0]?.id ?? null,
+        projectId,
         // One field of one answer, where there used to be a second round trip that could unpair the
         // device. `?? false` because a desktop older than this client will not send it, and no
         // answer must mean no shell.
         terminalAllowed: data.allowTerminal ?? false,
       });
-      if (get().projectId) {
-        watchProject(get().projectId);
+      rememberScope(workspaceId, projectId);
+      if (projectId) {
+        watchProject(projectId);
         void get().refreshRepo();
       }
     } catch (e) {
@@ -326,9 +402,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
    */
   resync: async () => {
     const workspaceId = get().workspaceId;
-    const info = await read(() =>
-      rpc<Bootstrap>("remote_bootstrap", { workspaceId }),
-    );
+    const info = await read(() => rpc<Bootstrap>("remote_bootstrap", { workspaceId }));
     if (!info.ok) {
       if (info.unpaired) set({ unpaired: true });
       else set({ error: info.error });
@@ -341,24 +415,29 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     if (get().workspaceId !== workspaceId) return;
     const data = info.value;
     const projectId = get().projectId;
+    // The project the user was looking at, kept unless it is genuinely gone from the desktop.
+    // Snapping back to the first project on every reconnect would move the screen under somebody
+    // every time their phone woke up.
+    const nextProject = data.projects.some((p) => p.id === projectId)
+      ? projectId
+      : (data.projectId ?? data.projects[0]?.id ?? null);
     set({
       workspaces: data.workspaces,
       workspaceId: data.workspaceId,
       projects: data.projects,
       chains: data.chains,
       terminalAllowed: data.allowTerminal ?? false,
-      // The project the user was looking at, kept unless it is genuinely gone from the desktop.
-      // Snapping back to the first project on every reconnect would move the screen under somebody
-      // every time their phone woke up.
-      projectId: data.projects.some((p) => p.id === projectId)
-        ? projectId
-        : (data.projectId ?? data.projects[0]?.id ?? null),
+      projectId: nextProject,
       error: null,
     });
+    // The project moved under the user while they were away, so anything open that named the old
+    // one is about something that is no longer on screen.
+    if (nextProject !== projectId) resetDepth();
+    rememberScope(data.workspaceId, nextProject);
     // Re-claimed, because the socket that closed is what released it: the desktop drops a device's
     // watchers when its last connection goes (see `DeviceConnection`), which is exactly the gap
     // this resync exists to close.
-    watchProject(get().projectId);
+    watchProject(nextProject);
     void get().refreshRepo();
 
     const active = await read(() => rpc<string[]>("list_active_runs"));
@@ -378,7 +457,22 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     });
   },
 
+  /**
+   * Moves to another workspace.
+   *
+   * # Why this is one call and not two
+   *
+   * It used to be `list_projects` and `list_agent_chains` in parallel, and then `projects[0]?.id` —
+   * two round trips over home wifi to land on *whichever repository sorted first*, which is exactly
+   * the coin toss `remote_bootstrap` was added to end for the cold start. That command already
+   * answers the projects, the chains, the desktop's own project for the workspace and the terminal
+   * grant, in one request. Using it here makes the switch cost what the cold start costs and land
+   * where the desktop is.
+   */
   setWorkspace: async (id) => {
+    // Anything open is about the workspace being left. Popped before the read, so the screen the
+    // user lands on is the new workspace's list rather than the old one's chain.
+    resetDepth();
     set({
       workspaceId: id,
       projects: [],
@@ -394,38 +488,39 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       repoState: "loading",
       error: null,
     });
-    const [projects, chains] = await Promise.all([
-      read(() => rpc<Project[]>("list_projects", { workspaceId: id })),
-      read(() => rpc<AgentChain[]>("list_agent_chains", { workspaceId: id })),
-    ]);
+    const info = await read(() => rpc<Bootstrap>("remote_bootstrap", { workspaceId: id }));
     // The guard every async load here needs: the user may have switched again while this was in
     // flight, and writing the old workspace's rows over the new ones is the bug it prevents.
     if (get().workspaceId !== id) return;
-    if (anyUnpaired(projects, chains)) {
-      set({ unpaired: true });
-      return;
-    }
-    if (!projects.ok) {
+    if (!info.ok) {
+      if (info.unpaired) set({ unpaired: true });
       // An empty project list drawn from a failed read is a workspace that looks deleted. Say what
       // happened and leave the picker alone.
-      set({ repoState: "error", error: projects.error });
+      else set({ repoState: "error", error: info.error });
       return;
     }
+    const data = info.value;
+    const projectId = data.projectId ?? data.projects[0]?.id ?? null;
     set({
-      projects: projects.value,
-      chains: chains.ok ? chains.value : get().chains,
-      error: chains.ok ? null : chains.error,
-      projectId: projects.value[0]?.id ?? null,
-      repoState: projects.value[0] ? "loading" : "ready",
+      workspaces: data.workspaces,
+      projects: data.projects,
+      chains: data.chains,
+      terminalAllowed: data.allowTerminal ?? false,
+      projectId,
+      repoState: projectId ? "loading" : "ready",
+      error: null,
     });
-    if (projects.value[0]) {
-      watchProject(projects.value[0].id);
+    rememberScope(id, projectId);
+    if (projectId) {
+      watchProject(projectId);
       void get().refreshRepo();
     }
   },
 
   setProject: async (id) => {
+    resetDepth();
     set({ projectId: id, status: null, commits: [], unpushed: [], repoState: "loading" });
+    rememberScope(get().workspaceId, id);
     // Before the read, not after: the watcher is what keeps this project live from here on, and the
     // desktop releases whatever this device was holding as part of taking the new claim.
     watchProject(id);
@@ -479,28 +574,14 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       return;
     }
     set({ chains: chains.value, error: null });
-    // The open chain as well as the list: a gate answered elsewhere is most likely the one on
-    // screen, and the list row carries the chain without its steps.
-    const open = get().openChain;
-    if (open) void get().openChainDetail(open.chain.id);
   },
 
-  openChainDetail: async (chainId) => {
-    if (!chainId) {
-      set({ openChain: null });
-      return;
-    }
-    const detail = await read(() => rpc<ChainDetail | null>("get_chain_detail", { chainId }));
-    if (!detail.ok) {
-      if (detail.unpaired) set({ unpaired: true });
-      else set({ error: detail.error });
-      return;
-    }
-    set({ openChain: detail.value, error: null });
+  refreshAll: async () => {
+    await Promise.all([get().refreshRepo(), get().refreshChains()]);
   },
 
   /**
-   * Runs one mutating command under `key`'s busy flag, into the shared error slot.
+   * Runs one mutating command under `key`'s busy flag.
    *
    * Nothing here refetches on success, and that is on purpose: every mutating command makes the
    * desktop emit — `state:invalidate` for a chain, `repo:fs-changed` for a commit — and that event
@@ -512,21 +593,27 @@ export const useMobileStore = create<MobileState>((set, get) => ({
    * review is still holding. Anything that must work *during* a long command belongs outside this
    * helper entirely — see the stop button in `RunsScreen`.
    */
-  run: async (action, key) => {
+  run: async (action, key, success) => {
     if (get().busy[key]) return null;
-    set((s) => ({ busy: { ...s.busy, [key]: true }, error: null }));
+    set((s) => ({ busy: { ...s.busy, [key]: true } }));
     try {
-      return await action();
+      const value = await action();
+      if (success) toastSuccess(success);
+      return value;
     } catch (e) {
-      // `e.message`, not `String(e)`: the transport throws `new Error(body.error)`, and the string
-      // form prefixes it with `Error: ` — a piece of JavaScript vocabulary in front of a sentence
-      // the backend wrote for the user to read.
-      if (e instanceof Unpaired) set({ unpaired: true });
-      // `NotAllowed`'s message is the wire token `not_allowed` — a value, not a sentence. It
-      // reaches a user only when this client is newer than the desktop and names a command the
-      // allowlist has not grown yet, which is a real thing to say and worth saying in words.
-      else if (e instanceof NotAllowed) set({ error: t("error.notAllowed") });
-      else set({ error: e instanceof Error ? e.message : String(e) });
+      if (e instanceof Unpaired) {
+        set({ unpaired: true });
+      } else if (e instanceof NotAllowed) {
+        // `NotAllowed`'s message is the wire token `not_allowed` — a value, not a sentence. It
+        // reaches a user only when this client is newer than the desktop and names a command the
+        // allowlist has not grown yet, which is a real thing to say and worth saying in words.
+        toastError(t("error.notAllowed"));
+      } else {
+        // `e.message`, not `String(e)`: the transport throws `new Error(body.error)`, and the string
+        // form prefixes it with `Error: ` — a piece of JavaScript vocabulary in front of a sentence
+        // the backend wrote for the user to read.
+        toastError(t("error.actionFailed"), e instanceof Error ? e.message : String(e));
+      }
       return null;
     } finally {
       set((s) => ({ busy: { ...s.busy, [key]: false } }));
@@ -535,13 +622,17 @@ export const useMobileStore = create<MobileState>((set, get) => ({
 
   appendLog: (runId, lines) =>
     set((s) => {
-      const previous = s.logs[runId]?.lines ?? [];
-      const merged = [...previous, ...lines];
+      const existing = s.logs[runId];
+      const merged = [...(existing?.lines ?? []), ...lines];
       return {
         logs: {
           ...s.logs,
           [runId]: {
-            ...s.logs[runId],
+            ...existing,
+            // The first frame this client saw for the run, kept for the life of the card. A run this
+            // phone joined halfway through cannot know when it really started, and `?? Date.now()`
+            // is the honest version of that: "since you have been watching".
+            firstSeen: existing?.firstSeen ?? Date.now(),
             lines: merged.length > MAX_LINES ? merged.slice(merged.length - MAX_LINES) : merged,
           },
         },
@@ -549,9 +640,20 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     }),
 
   setEngine: (runId, engine) =>
-    set((s) => ({
-      logs: { ...s.logs, [runId]: { ...s.logs[runId], lines: s.logs[runId]?.lines ?? [], engine } },
-    })),
+    set((s) => {
+      const existing = s.logs[runId];
+      return {
+        logs: {
+          ...s.logs,
+          [runId]: {
+            ...existing,
+            firstSeen: existing?.firstSeen ?? Date.now(),
+            lines: existing?.lines ?? [],
+            engine,
+          },
+        },
+      };
+    }),
 
   markRunFinished: (runId) =>
     set((s) =>
@@ -562,6 +664,18 @@ export const useMobileStore = create<MobileState>((set, get) => ({
           // be showing the user a run they cannot learn anything about.
           s,
     ),
+
+  dismissRun: (runId) =>
+    set((s) => {
+      const logs = { ...s.logs };
+      delete logs[runId];
+      return { logs };
+    }),
+
+  clearFinishedRuns: () =>
+    set((s) => ({
+      logs: Object.fromEntries(Object.entries(s.logs).filter(([, log]) => !log.finished)),
+    })),
 
   setError: (error) => set({ error }),
 
@@ -590,3 +704,12 @@ export const useMobileStore = create<MobileState>((set, get) => ({
  * would re-render the commit button every time a review started or ended.
  */
 export const useBusy = (key: BusyKey): boolean => useMobileStore((s) => s.busy[key]);
+
+/**
+ * The path of the repository currently in scope, or `null`.
+ *
+ * Every repository screen needs it and every one of them used to compute it inline from `projects`
+ * and `projectId` — which meant subscribing to the whole project list to read one string.
+ */
+export const useRepoPath = (): string | null =>
+  useMobileStore((s) => s.projects.find((p) => p.id === s.projectId)?.local_path ?? null);

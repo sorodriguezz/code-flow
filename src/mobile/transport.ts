@@ -395,11 +395,27 @@ export function connectEvents(
 
   open();
 
-  /** Tears down whatever is there and starts again, from any of the two liveness checks. */
+  /**
+   * Tears down whatever is there and starts again, from either of the two liveness checks.
+   *
+   * `reopened = true` is the line this was missing, and its absence cost the feature its whole
+   * recovery path. `reopened` was set only in `sock.onclose` — and `discard()` above nulls
+   * `onclose` *before* closing, precisely so a socket it is abandoning cannot schedule a second
+   * reconnect. So every socket replaced from here came back with `reopened` still `false`, and the
+   * `open()` below therefore called neither `onReopen()` (which is `resync`, the only thing that
+   * re-reads a client that has been out of the loop) nor `reloadIfStale`.
+   *
+   * That is not the rare path. iOS freezes a backgrounded tab's timers and does not always fire
+   * `close` for the socket it kills, so a phone coming out of a pocket is handled *here*, by the
+   * watchdog or the visibility check — which means the common case was the one that skipped the
+   * resync, and a phone that had been asleep through an hour of work quietly showed the hour-old
+   * picture with a connected header over it.
+   */
   const restart = () => {
     const dead = socket;
     socket = null;
     discard(dead);
+    reopened = true;
     onStatus(false);
     window.clearTimeout(timer);
     delay = 500;
@@ -425,6 +441,9 @@ export function connectEvents(
     if (!socket) {
       window.clearTimeout(timer);
       delay = 500;
+      // Same reason as `restart`: this is a reconnection, and it owes a resync and a staleness
+      // check. Coming back with `reopened` false was a socket that reconnected into silence.
+      reopened = true;
       open();
     } else if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
       restart();

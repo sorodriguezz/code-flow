@@ -3,11 +3,22 @@ import { ExternalLink, GitBranch, LoaderCircle, RefreshCw } from "lucide-react";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { riseDelay } from "../../lib/rise";
 import { useCiStore } from "../../state/ciStore";
-import { useT } from "../../state/languageStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
 import { Select, type SelectOption } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
-import { PIPELINE_STATUS, STATUS_ORDER, STATUS_TOKEN, elapsed, formatDuration, statusOf } from "./pipelineStatus";
+import {
+  PIPELINE_STATUS,
+  STATUS_ORDER,
+  STATUS_TOKEN,
+  // Aliased: `RunRow` takes a prop called `at` — the rise-delay index — which shadows this
+  // import inside the one component that needs it, and does so as a `number`, so the mistake
+  // surfaces as "Type 'Number' has no call signatures" rather than as anything about names.
+  at as epochOf,
+  elapsed,
+  formatDuration,
+  statusOf,
+} from "./pipelineStatus";
 import type { PipelineRun } from "../../types/domain";
 
 /**
@@ -91,7 +102,27 @@ function RunRow({
 }) {
   const selectRun = useCiStore((s) => s.selectRun);
   const t = useT();
+  const locale = useLanguageStore((s) => (s.language === "es" ? "es-ES" : "en-US"));
   const took = elapsed(run.started_at ?? run.created_at, run.finished_at, now);
+
+  /**
+   * When it ran, absolute.
+   *
+   * The row answered "how long" and never "when", and that is the question a list of runs is
+   * actually read for: whether the red one at the top is from this morning's push or from last
+   * Thursday. A duration cannot say it and neither can the order — the list is newest-first, which
+   * tells you the sequence and nothing about the gaps.
+   *
+   * `started_at`, because that is when it *ran*; a queued run has not started, so it falls back to
+   * when it was created — the same fallback `took` uses one line up, so the two can never describe
+   * different moments.
+   *
+   * Date *and* time, both always, for the reason `NotificationBell` writes down: a list that mixes
+   * today and yesterday needs the date to be readable, and "14:32" alone is a lie once the app has
+   * been open overnight. The full stamp, seconds and timezone included, is in the title.
+   */
+  const stamp = epochOf(run.started_at ?? run.created_at);
+  const ran = stamp === null ? null : new Date(stamp);
 
   return (
     <button
@@ -129,6 +160,18 @@ function RunRow({
               <span className="opacity-45">·</span>
               <span className="shrink-0">{t("pipelines.jobCount", { n: jobStatuses.length })}</span>
             </>
+          )}
+          {/* `ml-auto` and `shrink-0`, mirroring the duration one line up: the timestamp is a fixed
+              width and the branch is not, so when the column is narrow the branch is what gives way
+              — losing the tail of a branch name costs less than losing the date entirely. */}
+          {ran !== null && (
+            <span
+              className="ml-auto shrink-0 pl-1.5 tabular-nums"
+              title={ran.toLocaleString(locale)}
+            >
+              {ran.toLocaleDateString(locale, { day: "2-digit", month: "short" })}{" "}
+              {ran.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
+            </span>
           )}
         </span>
         <ParallelStrip statuses={jobStatuses} />

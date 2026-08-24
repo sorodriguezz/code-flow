@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, MessageSquarePlus, SendHorizontal } from "lucide-react";
+import { Loader2, MessageSquarePlus, MessagesSquare, SendHorizontal } from "lucide-react";
 import { t } from "../i18n";
 import { rpc } from "../transport";
 import { newId } from "../ids";
 import { useBusy, useMobileStore } from "../store";
 import { onInvalidate } from "../invalidate";
+import { clearDraft, readDraft, writeDraft } from "../drafts";
+import { sinceIso } from "../time";
+import { RootBar } from "../ui/RootBar";
+import { Screen } from "../ui/Screen";
+import { BottomBar } from "../ui/BottomBar";
+import { Button, IconButton } from "../ui/Button";
+import { EmptyState } from "../ui/Feedback";
 import type { ActivityLogEntry } from "../../types/domain";
 
 /** A brand-new conversation id, in the shape the desktop mints (`chatStore.send`) — the same
@@ -40,9 +47,17 @@ const newConversationId = () => `conv-${newId()}`;
  * turn became its own throwaway conversation whose junk id was then loaded back into the resume slot
  * on the next open — a failure that could not recover on its own. They are kept apart here, and the
  * backend's `send_chat_message` takes both.
+ *
+ * # The draft is not cleared until the turn lands
+ *
+ * It used to be cleared on *send*, before the request. A turn that failed — a model that refused, a
+ * dropped connection, a CLI that was not installed — therefore destroyed the question along with
+ * itself, and on a phone keyboard that is a real loss. The draft is written through to storage on
+ * every keystroke and removed only by a reply.
  */
 export function ChatScreen() {
-  const { projectId, run } = useMobileStore();
+  const projectId = useMobileStore((s) => s.projectId);
+  const run = useMobileStore((s) => s.run);
   const busy = useBusy("chat");
   const [entries, setEntries] = useState<ActivityLogEntry[]>([]);
   /** The app's id for the conversation on screen — see the note above. Never null: a project with
@@ -54,17 +69,13 @@ export function ChatScreen() {
   const [engineSessionId, setEngineSessionId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const bottom = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
   /**
    * A re-read this screen owes but cannot safely take yet.
    *
    * The invalidation listener used to early-return on `sending`, which meant no listener was
    * mounted at all while a turn was in flight — so a turn added at the desk during those seconds
-   * fired into nothing, and re-subscribing afterwards performed no catch-up. The transcript stayed
-   * missing that turn until the tab was reopened.
-   *
-   * A ref and not a local in the effect: the whole point is to survive the effect re-running, which
-   * is exactly what `sending` flipping back does.
+   * fired into nothing, and re-subscribing afterwards performed no catch-up.
    */
   const owed = useRef(false);
 
@@ -98,7 +109,9 @@ export function ChatScreen() {
         // The *last* recorded token, and `null` when there is none: turns written before the two
         // ids were separated carry no engine session at all, which simply means the next message
         // starts a fresh engine session while still filing under this same conversation.
-        setEngineSessionId(turns.reduce<string | null>((last, e) => e.engine_session_id ?? last, null));
+        setEngineSessionId(
+          turns.reduce<string | null>((last, e) => e.engine_session_id ?? last, null),
+        );
       })
       .catch(() => alive && setEntries([]));
     return () => {
@@ -106,13 +119,13 @@ export function ChatScreen() {
     };
   }, [projectId]);
 
+  // The draft follows the conversation it belongs to, so starting a new one does not inherit a
+  // half-written question from the old.
+  useEffect(() => {
+    setDraft(readDraft("chat", conversationId));
+  }, [conversationId]);
+
   // A turn added to *this* conversation somewhere else — at the desk, or on another device.
-  //
-  // Only this conversation, and only while nothing is in flight here. Reloading a transcript over
-  // an optimistic bubble would make the question the user just asked vanish and come back; and
-  // switching to whatever conversation moved would move the screen out from under somebody reading
-  // an older one, which is the bug the desktop's own chat store is shaped around. A change to any
-  // other conversation is picked up the next time this tab is opened.
   useEffect(() => {
     if (!projectId) return;
 
@@ -141,8 +154,7 @@ export function ChatScreen() {
         .catch(() => undefined);
     };
 
-    // The turn that was in flight has landed, and something arrived while it was. Taken now, on the
-    // same pass that re-runs this effect when `sending` clears.
+    // The turn that was in flight has landed, and something arrived while it was.
     if (owed.current && !sending) reload();
 
     return onInvalidate("chat", projectId, (detail) => {
@@ -152,17 +164,14 @@ export function ChatScreen() {
   }, [projectId, conversationId, sending]);
 
   useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" });
+    // The transcript's own scroller, not `scrollIntoView` — which drags every scrollable ancestor
+    // and, on this screen, fights the keyboard for the viewport.
+    if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
   }, [entries.length, sending]);
-
-  if (!projectId) {
-    return <p className="p-6 text-center text-[13px] text-[var(--cf-text-muted)]">{t("repo.noProject")}</p>;
-  }
 
   const send = () => {
     const message = draft.trim();
     if (!message) return;
-    setDraft("");
     setSending(true);
     void run(async () => {
       try {
@@ -173,6 +182,10 @@ export function ChatScreen() {
           // one-turn activities instead of the conversation you are having.
           { projectId, message, conversationId, sessionId: engineSessionId },
         );
+        // Only now. A turn that never landed leaves the question in the box, where it can be sent
+        // again with one tap instead of retyped.
+        setDraft("");
+        clearDraft("chat", conversationId);
         // The engine's token for the *next* turn. A reply with none leaves the previous one
         // standing rather than clearing it: "the CLI did not say" is not "start over".
         if (reply.session_id) setEngineSessionId(reply.session_id);
@@ -204,90 +217,114 @@ export function ChatScreen() {
     }, "chat");
   };
 
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {/* Starting over.
-          Only offered when there is something to start over *from* — on an empty conversation the
-          button would do nothing visible, and a control that appears to do nothing is worse than
-          one that is absent. A fresh conversation id and no engine session: the next turn files
-          itself under a new activity and starts the CLI from nothing, which is exactly what the
-          desktop's own new-chat does. Nothing is deleted; the old conversation is still in the
-          history on both clients. */}
-      {entries.length > 0 && (
-        <div className="shrink-0 px-3 pt-2">
-          <button
-            type="button"
-            disabled={sending}
-            onClick={() => {
-              setConversationId(newConversationId());
-              setEngineSessionId(null);
-              setEntries([]);
-              setDraft("");
-            }}
-            className="cf-tap flex w-full items-center justify-center gap-1.5 rounded-lg border border-[var(--cf-border)] text-[12px] disabled:opacity-40"
-          >
-            <MessageSquarePlus size={13} /> {t("chat.new")}
-          </button>
-        </div>
-      )}
+  if (!projectId) {
+    return (
+      <Screen bar={<RootBar title={t("nav.chat")} />}>
+        <EmptyState
+          icon={<MessagesSquare size={26} aria-hidden />}
+          title={t("repo.noProject")}
+          hint={t("repo.noProjectHint")}
+        />
+      </Screen>
+    );
+  }
 
-      <div className="cf-scroll flex-1 px-3 pb-3">
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-[var(--cf-bg)]">
+      <RootBar
+        title={t("nav.chat")}
+        actions={
+          // Starting over. Only offered when there is something to start over *from* — on an empty
+          // conversation the button would do nothing visible, and a control that appears to do
+          // nothing is worse than one that is absent. Nothing is deleted; the old conversation is
+          // still in the history on both clients.
+          entries.length > 0 ? (
+            <IconButton
+              icon={<MessageSquarePlus size={18} />}
+              label={t("chat.new")}
+              disabled={sending}
+              onClick={() => {
+                setConversationId(newConversationId());
+                setEngineSessionId(null);
+                setEntries([]);
+              }}
+            />
+          ) : undefined
+        }
+      />
+
+      <div ref={scroller} className="cf-scroll min-h-0 flex-1 px-3 pb-3">
         {entries.length === 0 && !sending && (
-          <p className="mt-8 text-center text-[13px] text-[var(--cf-text-muted)]">{t("chat.empty")}</p>
+          <EmptyState
+            icon={<MessagesSquare size={26} aria-hidden />}
+            title={t("chat.empty")}
+            hint={t("chat.emptyHint")}
+          />
         )}
         {entries.map((entry) => (
-          <div key={entry.id} className="mt-3">
+          <div key={entry.id} className="cf-rise mt-3">
             {/* The question, right-aligned and accent-filled; the answer, left and plain. The
                 asymmetry is what lets a thumb-scrolled transcript be parsed at a glance without
                 reading a single word. */}
             <div className="flex justify-end">
-              <p className="max-w-[85%] rounded-2xl rounded-br-sm bg-[var(--cf-accent)] px-3 py-2 text-[13px] text-white">
+              <p className="cf-selectable max-w-[85%] rounded-2xl rounded-br-sm bg-[var(--cf-accent-strong)] px-3 py-2 text-base text-[var(--cf-accent-contrast)]">
                 {entry.question}
               </p>
             </div>
             <div className="mt-1.5 flex justify-start">
+              {/* `cf-prose`, not `cf-log`. An answer is paragraphs, and rendering paragraphs at
+                  11px monospace — which is what this did — makes the one screen whose whole content
+                  is prose the least readable in the client. */}
               <p
-                className={`cf-log max-w-[92%] rounded-2xl rounded-bl-sm border px-3 py-2 ${
+                className={`cf-prose max-w-[92%] rounded-2xl rounded-bl-sm border px-3 py-2 ${
                   entry.is_error
-                    ? "border-[var(--cf-danger)]/40 text-[var(--cf-danger)]"
+                    ? "border-[var(--cf-danger)]/40 bg-[var(--cf-danger-soft)] text-[var(--cf-danger-text)]"
                     : "border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text)]"
                 }`}
               >
                 {entry.answer}
               </p>
             </div>
+            <p className="mt-1 text-2xs text-[var(--cf-text-faint)]">
+              {[entry.provider, entry.model, sinceIso(entry.created_at)].filter(Boolean).join(" · ")}
+            </p>
           </div>
         ))}
         {sending && (
           <div className="mt-3 flex justify-start">
-            <Loader2 size={16} className="animate-spin text-[var(--cf-text-muted)]" />
+            <p className="flex items-center gap-2 rounded-2xl rounded-bl-sm border border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 py-2 text-base text-[var(--cf-text-muted)]">
+              <Loader2 size={14} className="animate-spin" aria-hidden />
+              {t("chat.thinking")}
+            </p>
           </div>
         )}
-        <div ref={bottom} />
       </div>
 
-      <div className="shrink-0 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] p-2">
+      <BottomBar className="p-2">
         <div className="flex items-end gap-2">
           <textarea
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              writeDraft("chat", conversationId, e.target.value);
+            }}
             placeholder={t("chat.placeholder")}
+            aria-label={t("chat.placeholder")}
             rows={1}
             // No Enter-to-send: on a phone the return key is how you write a second line, and
             // hijacking it turns every paragraph break into an accidental turn that costs money.
-            className="max-h-32 min-h-[44px] flex-1 resize-none rounded-lg border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-3 py-2 outline-none focus:border-[var(--cf-accent)]"
+            className="max-h-32 min-h-[2.75rem] flex-1 resize-none rounded-lg border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-3 py-2.5 outline-none focus:border-[var(--cf-accent)]"
           />
-          <button
-            type="button"
+          <Button
+            variant="primary"
             onClick={send}
-            disabled={busy || sending || draft.trim().length === 0}
-            aria-label={t("chat.send")}
-            className="cf-tap flex items-center justify-center rounded-lg bg-[var(--cf-accent)] px-3 text-white disabled:opacity-40"
-          >
-            <SendHorizontal size={17} />
-          </button>
+            loading={sending}
+            disabled={busy || draft.trim().length === 0}
+            ariaLabel={t("chat.send")}
+            icon={sending ? undefined : <SendHorizontal size={17} />}
+          />
         </div>
-      </div>
+      </BottomBar>
     </div>
   );
 }

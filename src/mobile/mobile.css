@@ -26,136 +26,615 @@
  * The theme follows the phone rather than the desktop's setting: the desktop's choice is not in the
  * command allowlist, and whoever is holding the phone at midnight wants dark regardless of how the
  * machine on their desk is configured.
+ *
+ * # The scales below are the whole point
+ *
+ * Every screen in this client used to size its own text with arbitrary values — `text-[12.5px]`
+ * beside `text-[13px]` beside `text-[11px]` — which is how a five-screen app ends up with twelve
+ * type sizes and no two rows that line up. The `@theme` block redefines Tailwind's own `text-*`,
+ * `rounded-*` and `shadow-*` scales to this client's values, so a screen writes `text-sm` and gets
+ * the one 13px there is. An arbitrary value in a screen file is now a bug, not a shortcut.
  */
 
-/* The system font on whichever phone is holding this. `-apple-system` covers iOS, `Roboto` covers
-   Android, and the rest are there so a desktop browser opening the same URL to check something
-   does not fall all the way to Times. No web font is loaded on purpose: this page is fetched over
-   somebody's wifi on demand, and a font file is the largest thing it could possibly wait for. */
 @theme {
+  /* The system font on whichever phone is holding this. `-apple-system` covers iOS, `Roboto`
+     covers Android, and the rest are there so a desktop browser opening the same URL to check
+     something does not fall all the way to Times. No web font is loaded on purpose: this page is
+     fetched over somebody's wifi on demand, and a font file is the largest thing it could possibly
+     wait for. */
   --font-sans:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+
+  /* Seven sizes, and the line height each one is meant to be read at. Two below `text-sm` because
+     a phone genuinely needs metadata smaller than body text; nothing above `text-2xl`, because a
+     control panel has no headlines. */
+  --text-2xs: 0.625rem;      /* 10px — badge counters, gutter numbers */
+  --text-2xs--line-height: 1.3;
+  --text-xs: 0.6875rem;      /* 11px — captions, section labels, timestamps */
+  --text-xs--line-height: 1.4;
+  --text-sm: 0.75rem;        /* 12px — secondary rows */
+  --text-sm--line-height: 1.45;
+  --text-base: 0.8125rem;    /* 13px — body, the size most of this UI is set in */
+  --text-base--line-height: 1.5;
+  --text-md: 0.875rem;       /* 14px — row titles, app-bar titles */
+  --text-md--line-height: 1.45;
+  --text-lg: 1rem;           /* 16px — primary buttons, inputs (see the iOS zoom note) */
+  --text-lg--line-height: 1.4;
+  --text-xl: 1.375rem;       /* 22px — the pairing screen, and nothing else */
+  --text-xl--line-height: 1.25;
+  --text-2xl: 1.75rem;       /* 28px — the pairing code */
+  --text-2xl--line-height: 1.2;
+
+  /* Rounder than the desktop's, deliberately: a phone UI is nearly all stacked cards, and at this
+     width a 6px radius reads as a rectangle with damaged corners. */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.125rem;
+  --radius-2xl: 1.5rem;
+  --radius-3xl: 1.75rem;
+
+  --shadow-card: 0 1px 2px rgba(20, 20, 40, 0.04);
+  --shadow-raised: 0 2px 6px rgba(20, 20, 40, 0.06), 0 12px 32px rgba(20, 20, 40, 0.08);
+  --shadow-bar: 0 -1px 0 rgba(20, 20, 40, 0.05);
+
+  /* Motion. One easing for everything that enters or leaves, one for the navigation push — the
+     second is slightly slower and more decelerated because it moves a whole screen and the eye
+     needs to follow where it went. */
+  --ease-out-soft: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-nav: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 :root {
   --cf-bg: #f7f7fb;
   --cf-surface: #ffffff;
+  --cf-surface-raised: #ffffff;
+  /* One step further in than a card: the well a diff, a log or a code block sits in. On the light
+     theme it is a shade *down* from the surface and on the dark one a shade further down again,
+     which is the direction both themes read as "recessed". */
+  --cf-sunken: #f1f1f7;
   --cf-border: #e7e7ef;
+  /* The line between two rows of one list, as opposed to the edge of the list. Lighter on purpose:
+     at `--cf-border` a ten-row list is a ladder, and the rungs are louder than the words. */
+  --cf-divider: #eeeef4;
   --cf-text: #1c1c26;
   --cf-text-muted: #6b6b7d;
+  /* Quieter still — the third rank, for a timestamp beside a name that is itself secondary. */
+  --cf-text-faint: #9494a6;
   --cf-accent: #6366f1;
+  /**
+   * The accent as a *fill under white text*, which is not the same colour as the accent.
+   *
+   * White on `#6366f1` measures 4.47:1 — under AA, on every primary button in the client, in the
+   * theme most phones are in during the day. `#4f46e5` is the same hue two steps down and reads
+   * 6.4:1. `--cf-accent` keeps its job: strokes, icons, selection, the tab bar's active rule.
+   */
+  --cf-accent-strong: #4f46e5;
+  --cf-accent-contrast: #ffffff;
+  /* The soft tints, as **opaque colours rather than alpha**.
+   *
+   * Tailwind v4 compiles `bg-[var(--x)]/15` to a `color-mix()`, with the un-mixed colour as the
+   * fallback for browsers that lack it — Safari before 16.2, which is a real iPhone somebody is
+   * still carrying. The fallback is the *solid* accent behind accent-coloured text: the gate panel,
+   * the badges and the highlighted chain row all become one flat block with invisible writing on
+   * them. Naming the mixed result means the tint is a colour, not a computation. */
+  --cf-accent-soft: #ececfd;
+  --cf-success-soft: #e6f4ea;
+  --cf-danger-soft: #fdecec;
+  --cf-warning-soft: #fdf3e3;
   --cf-field: #ffffff;
-  --cf-field-border: #cfcfdd;
+  /* Darker than the desktop's `#cfcfdd`, and the one place this palette deliberately diverges.
+   *
+   * At `#cfcfdd` on white a field's edge measures 1.54:1, and this token also draws the staging
+   * checkbox — the control that says a row *can* be staged, invisible until it is ticked. WCAG
+   * wants 3:1 for a control boundary, and a phone is read at arm's length, one-handed, outdoors,
+   * which is the case the desktop's value was never tuned for. */
+  --cf-field-border: #8b8ba0;
   --cf-success: #16a34a;
   --cf-danger: #dc2626;
   --cf-warning: #d97706;
-  /* The blue a foreign key is badged in on the schema canvas, beside the amber of a primary key and
-     the violet of a unique column. Three fixed hues rather than three accent-derived ones, and that
-     is deliberate even though the rest of that canvas follows the accent: the badges sit *next to
-     each other on one row*, so what they have to be is distinct from each other. Tied to the accent,
-     FK and unique were the same colour on the default indigo, and FK and PK were the same colour the
-     moment somebody picked Amber. The accent still draws the headers, the lines, the glow and the
-     selection — the badges are a legend, and a legend has fixed colours. */
-  --cf-violet: #9333ea;
-  --cf-blue: #2563eb;
+  /* `--cf-violet` and `--cf-blue` used to be copied here from the desktop palette. They describe
+     the primary-key / foreign-key / unique badges on the schema canvas, which this client does not
+     have and cannot have — no schema command is in the remote allowlist — and nothing in
+     `src/mobile` ever referenced them. Copied tokens that name a feature the copy does not include
+     are how a palette drifts out of meaning. */
+  /* Text drawn *on a 12–15% tint of its own hue* — a status badge, a diff line, a warning box.
+   *
+   * These are not the same values as the fills above and they cannot be. `--cf-success` is tuned to
+   * carry white on a solid button; put it on its own pale tint and it is 2.7:1, which is what the
+   * added lines of every diff in this client were, and what the chain status badges were at 10px.
+   * The dark theme has the opposite problem and does not need the split — its fills are already
+   * light colours on dark tints — so there the two are equal. */
+  --cf-accent-text: #4338ca;
+  --cf-success-text: #15803d;
+  --cf-danger-text: #b91c1c;
+  --cf-warning-text: #b45309;
+  /* What darkens the app behind a sheet. A colour rather than `black/40` in a class, because the
+     dark theme needs a *deeper* scrim, not the same one — a 40% black over a near-black surface is
+     barely a change and the sheet stops reading as being in front of anything. */
+  --cf-scrim: rgba(24, 24, 34, 0.42);
+  /* The product's own three hues, at the strength the desktop's title bar uses them. This is the
+     only decorative colour in the client and it appears in exactly two places — the pairing screen
+     and the empty states — which is what keeps it identity rather than noise. */
+  --cf-brand-1: #6fd0c8;
+  --cf-brand-2: #b79ae8;
+  --cf-brand-3: #f0a8c4;
+  /* The size code is drawn at, as a variable so the diff screen can offer a control for it. */
+  --cf-code-size: 0.6875rem;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --cf-bg: #16161d;
     --cf-surface: #1e1e27;
+    --cf-surface-raised: #262632;
+    --cf-sunken: #131320;
     --cf-border: #313140;
+    --cf-divider: #292935;
     --cf-text: #eceef5;
     --cf-text-muted: #9797ab;
+    --cf-text-faint: #71718a;
     --cf-accent: #818cf8;
+    /* On a dark theme the accent is already the light colour, so the fill and the stroke are the
+       same value and the *text* on it is what changes — see `--cf-accent-contrast`. */
+    --cf-accent-strong: #818cf8;
+    --cf-accent-contrast: #12121c;
+    --cf-accent-soft: #23233a;
+    --cf-success-soft: #14291d;
+    --cf-danger-soft: #2b1a1c;
+    --cf-warning-soft: #2b2313;
     --cf-field: #131320;
-    --cf-field-border: #3d3d50;
+    --cf-field-border: #5a5a70;
     --cf-success: #4ade80;
     --cf-danger: #f87171;
     --cf-warning: #fbbf24;
-    --cf-violet: #c084fc;
-    --cf-blue: #60a5fa;
-  --cf-blue: #60a5fa;
+    /* Equal to the fills — see the note in the light block. */
+    --cf-accent-text: #a5b0ff;
+    --cf-success-text: #4ade80;
+    --cf-danger-text: #f87171;
+    --cf-warning-text: #fbbf24;
+    --cf-scrim: rgba(0, 0, 0, 0.62);
+    --cf-brand-1: #2dd4c4;
+    --cf-brand-2: #8b6fd9;
+    --cf-brand-3: #d9527d;
   }
 }
 
-html,
-body {
-  height: 100%;
-}
-
-/* The app's box is the *visual* viewport, not the layout one.
+/* # Why the rest of this file is inside `@layer`
  *
- * `--cf-vh` and `--cf-vt` are written by `viewport.ts` from `window.visualViewport`, which is the
- * only thing that shrinks when the phone's keyboard slides up. With `height: 100%` here the shell
- * kept describing the full screen and everything anchored to its bottom — the terminal's key row,
- * the chat send button, the tab bar — sat underneath the keyboard, unreachable. `100dvh` is not the
- * fix: dvh follows the browser's own chrome, not the keyboard.
+ * Tailwind v4 puts its utilities in `@layer utilities`, and CSS layer order beats specificity:
+ * **any unlayered rule wins against every utility**, however specific the utility is. The old
+ * version of this file was entirely unlayered, and two rules in it were quietly breaking screens.
  *
- * `fixed` rather than static because the offset has to be able to push the whole shell back down on
- * the browsers that scroll the layout viewport under the keyboard instead of resizing it. The
- * fallbacks are what an old browser with no `visualViewport` gets, and they are exactly the old
- * behaviour. */
-#root {
-  position: fixed;
-  top: var(--cf-vt, 0px);
-  left: 0;
-  right: 0;
-  height: var(--cf-vh, 100%);
+ * `input, textarea, select { font-size: 16px }` — there for the iOS zoom reason below — defeated
+ * every `text-*` on a field, so the pairing screen's 28px code box rendered at 16px and nobody
+ * could work out why. `.cf-log { font-size: 11px }` did the same to the diff, which is why the
+ * font-size control on that screen could not have worked before this change.
+ *
+ * Base rules go in `base` so a utility can override them; the `.cf-*` classes go in `components`
+ * for the same reason. Nothing in this file needs to beat a utility.
+ */
+
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
+
+  /* The app's box is the *visual* viewport, not the layout one.
+   *
+   * `--cf-vh` and `--cf-vt` are written by `viewport.ts` from `window.visualViewport`, which is the
+   * only thing that shrinks when the phone's keyboard slides up. With `height: 100%` here the shell
+   * kept describing the full screen and everything anchored to its bottom — the terminal's key row,
+   * the chat send button, the tab bar — sat underneath the keyboard, unreachable. `100dvh` is not
+   * the fix: dvh follows the browser's own chrome, not the keyboard.
+   *
+   * `fixed` rather than static because the offset has to be able to push the whole shell back down
+   * on the browsers that scroll the layout viewport under the keyboard instead of resizing it. The
+   * fallbacks are what an old browser with no `visualViewport` gets, and they are exactly the old
+   * behaviour.
+   *
+   * `isolation: isolate` gives this client its own stacking context, so the navigation layers and
+   * the sheets can order themselves with small z-indexes that mean something locally. It is also
+   * what makes `position: absolute` inside the shell resolve against *this* box — which is the fix
+   * for the three sheets that used `fixed inset-0` and so opted out of the keyboard correction
+   * entirely, putting their back button off the top of the screen whenever the keyboard was up. */
+  #root {
+    position: fixed;
+    top: var(--cf-vt, 0px);
+    left: 0;
+    right: 0;
+    height: var(--cf-vh, 100%);
+    isolation: isolate;
+  }
+
+  body {
+    margin: 0;
+    background: var(--cf-bg);
+    color: var(--cf-text);
+    font-family: var(--font-sans);
+    font-size: 0.8125rem;
+    /* iOS inflates text in landscape unless told not to, which reflows a layout built around a
+       fixed column width. */
+    -webkit-text-size-adjust: 100%;
+    /* The page itself never scrolls — the screen bodies do (see `.cf-scroll`). Without this, iOS
+       rubber-bands the whole document behind a fixed tab bar and the bar appears to float away. */
+    overscroll-behavior-y: none;
+    /* The blue-grey flash Android paints over any element being tapped, on every element. It fires
+       on the container as well as the button inside it, so a tap on a list row lit up the whole
+       card. Every tappable thing here draws its own pressed state instead — see `.cf-press`. */
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Code, log output and diffs are meant to be copied; chrome is not, and a long-press that selects
+     the tab bar's label instead of opening a context menu is the phone version of a misclick. */
+  body,
+  button,
+  select {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* iOS zooms the whole page when a focused input's text is under 16px, and never zooms back out.
+     Every input here is therefore at least 16px — but as a *floor*, not a fixed size, so the
+     pairing screen can still set its code box to 28px. Before this was layered it could not: an
+     unlayered declaration beats every Tailwind utility regardless of specificity, so `text-2xl` on
+     that input did nothing at all. */
+  input,
+  textarea,
+  select {
+    font-size: max(1rem, 1em);
+    color: var(--cf-text);
+    background: transparent;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--cf-text-faint);
+  }
+
+  /* Keyboard focus, for the tablet-with-a-keyboard case and for anybody driving this with switch
+     control. `:focus-visible` and not `:focus`, so a thumb never draws a ring. */
+  :where(button, a, input, textarea, select, [tabindex]):focus-visible {
+    outline: 2px solid var(--cf-accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+  }
 }
 
-body {
-  margin: 0;
-  background: var(--cf-bg);
-  color: var(--cf-text);
-  font-family: var(--font-sans);
-  /* iOS inflates text in landscape unless told not to, which reflows a layout built around a
-     fixed column width. */
-  -webkit-text-size-adjust: 100%;
-  /* The page itself never scrolls — the screen bodies do (see `.cf-scroll`). Without this, iOS
-     rubber-bands the whole document behind a fixed tab bar and the bar appears to float away. */
-  overscroll-behavior-y: none;
+@layer components {
+  .cf-selectable {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* Every tappable thing is at least this big. 44px is Apple's own minimum and the number below
+     which a control on a phone starts being missed — this app is used one-handed, walking, which is
+     exactly the case that minimum was measured for.
+
+     `touch-action: manipulation` is the other half: without it a browser waits ~300 ms after every
+     tap to see whether a second one is coming (a double-tap zoom), and the whole UI feels like it
+     is thinking. Pinch-zoom is untouched — see the viewport meta in `mobile.html`, which allows it
+     deliberately because this client draws code at 11px. */
+  .cf-tap {
+    min-height: 44px;
+    min-width: 44px;
+    touch-action: manipulation;
+  }
+
+  /* What a control does under a thumb. There is no hover on a phone, so this is the *only* feedback
+     a tap gets before its effect lands — and on a slow wifi link that gap is long enough to make
+     somebody tap again. Scale rather than a colour change: it reads at any size, over any
+     background, and costs one compositor property. */
+  .cf-press {
+    transition:
+      transform 120ms var(--ease-out-soft),
+      opacity 120ms var(--ease-out-soft),
+      background-color 120ms var(--ease-out-soft);
+  }
+
+  .cf-press:active:not(:disabled) {
+    transform: scale(0.97);
+    opacity: 0.9;
+  }
+
+  /* A row is too wide for a scale to look like anything but a wobble, so it dims instead. */
+  .cf-press-row {
+    transition: background-color 120ms var(--ease-out-soft);
+  }
+
+  .cf-press-row:active:not(:disabled) {
+    background-color: color-mix(in oklab, var(--cf-text) 6%, transparent);
+  }
+
+  /* A row that scrolls sideways — the terminal's key bar. Its scrollbar is hidden because on a
+     phone the bar is an overlay that is never drawn, and on the desktop browser somebody opens this
+     in it is a grey track cutting the row in half. The keys themselves are the affordance: the last
+     one is deliberately half-visible at the right edge. */
+  .cf-scroll-x {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .cf-scroll-x::-webkit-scrollbar {
+    display: none;
+  }
+
+  .cf-scroll {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    /* A scroll that reaches its end must not hand the gesture to the page behind it — which, on a
+       stack of navigation layers, is a *different screen* rubber-banding into view under the one
+       being read. */
+    overscroll-behavior: contain;
+  }
+
+  /* The home-indicator strip on a modern iPhone. `env()` resolves to 0 everywhere else, so this is
+     safe unconditionally — and without it the tab bar's last row of pixels sits under the gesture
+     area, where taps go to the OS instead. */
+  .cf-safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .cf-safe-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  /* The sensor housing, in landscape. `viewport-fit=cover` puts the page under it on both sides,
+     and only the top and bottom insets were ever applied — so turning the phone sideways slid the
+     back button and the first tab under the notch, where they cannot be tapped. */
+  .cf-safe-x {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+
+  /* A run's output, a diff, a code block. Monospace and pre-wrap: agent CLIs align things in
+     columns, and reflowing that as prose makes a table unreadable — but a phone is too narrow to
+     scroll horizontally for it, so wrapping wins over alignment where they conflict.
+
+     The size is a variable so a screen can offer a control for it. `DiffScreen` does: 11px is right
+     for skimming a change and far too small to read an unfamiliar function, and the page cannot be
+     zoomed out of the problem without zooming the whole UI. */
+  .cf-log {
+    font-family: var(--font-mono);
+    font-size: var(--cf-code-size, 0.6875rem);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* Prose that happens to be in a monospace container — a chat answer, an AI report, the handoff
+     text at a gate. It is *not* code, and rendering paragraphs at 11px monospace is the reason
+     those three screens were unreadable. */
+  .cf-prose {
+    font-size: 0.8125rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    -webkit-user-select: text;
+    user-select: text;
+  }
 }
 
-/* Every tappable thing is at least this big. 44px is Apple's own minimum and the number below
-   which a control on a phone starts being missed — this app is used one-handed, walking, which is
-   exactly the case that minimum was measured for. */
-.cf-tap {
-  min-height: 44px;
-  min-width: 44px;
-}
+@layer components {
+  /* ---------------------------------------------------------------------------
+   * Navigation
+   * ------------------------------------------------------------------------ */
 
-/* iOS zooms the whole page when a focused input's text is under 16px, and never zooms back out.
-   Every input here is therefore at least 16px, regardless of how small the surrounding UI is. */
-input,
-textarea,
-select {
-  font-size: 16px;
-}
+  /* A pushed screen, sliding in from the right over the one that opened it.
+   *
+   * The animation is on `transform` and nothing else, so it runs on the compositor and does not
+   * relayout the screen underneath — which matters here because the screen underneath is often a
+   * list of several hundred diff lines. */
+  @keyframes cf-push-in {
+    from {
+      transform: translate3d(100%, 0, 0);
+    }
+    to {
+      transform: translate3d(0, 0, 0);
+    }
+  }
 
-.cf-scroll {
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-}
+  @keyframes cf-push-out {
+    from {
+      transform: translate3d(0, 0, 0);
+    }
+    to {
+      transform: translate3d(100%, 0, 0);
+    }
+  }
 
-/* The home-indicator strip on a modern iPhone. `env()` resolves to 0 everywhere else, so this is
-   safe unconditionally — and without it the tab bar's last row of pixels sits under the gesture
-   area, where taps go to the OS instead. */
-.cf-safe-bottom {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
-}
+  .cf-push-in {
+    animation: cf-push-in 280ms var(--ease-nav) both;
+  }
 
-.cf-safe-top {
-  padding-top: env(safe-area-inset-top, 0px);
-}
+  .cf-push-out {
+    animation: cf-push-out 240ms var(--ease-nav) both;
+    /* On its way out it must not intercept the tap that is already landing on what is behind it. */
+    pointer-events: none;
+  }
 
-/* A run's output. Monospace and pre-wrap: agent CLIs align things in columns, and reflowing that
-   as prose makes a table unreadable — but a phone is too narrow to scroll horizontally for it, so
-   wrapping wins over alignment where they conflict. */
-.cf-log {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-  font-size: 11px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  word-break: break-word;
+  /* The layer being dragged by the back gesture. The animation is off — the transform is written
+     frame by frame from JavaScript — and `will-change` keeps it on its own compositor layer for the
+     whole drag rather than promoting it on the first move. */
+  .cf-dragging {
+    animation: none !important;
+    will-change: transform;
+    transition: none;
+  }
+
+  /* Where the drag lets go and the layer finishes the journey by itself. */
+  .cf-settle {
+    transition: transform 220ms var(--ease-nav);
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Sheets, scrims and toasts
+   * ------------------------------------------------------------------------ */
+
+  @keyframes cf-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes cf-sheet-up {
+    from {
+      transform: translate3d(0, 100%, 0);
+    }
+    to {
+      transform: translate3d(0, 0, 0);
+    }
+  }
+
+  @keyframes cf-sheet-down {
+    from {
+      transform: translate3d(0, 0, 0);
+    }
+    to {
+      transform: translate3d(0, 100%, 0);
+    }
+  }
+
+  .cf-fade-in {
+    animation: cf-fade-in 200ms var(--ease-out-soft) both;
+  }
+
+  .cf-fade-out {
+    animation: cf-fade-in 180ms var(--ease-out-soft) reverse both;
+  }
+
+  .cf-sheet-in {
+    animation: cf-sheet-up 300ms var(--ease-nav) both;
+  }
+
+  .cf-sheet-out {
+    animation: cf-sheet-down 220ms var(--ease-nav) both;
+    pointer-events: none;
+  }
+
+  @keyframes cf-toast-in {
+    from {
+      opacity: 0;
+      transform: translate3d(0, 12px, 0) scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+  }
+
+  .cf-toast-in {
+    animation: cf-toast-in 240ms var(--ease-nav) both;
+  }
+
+  .cf-toast-out {
+    animation: cf-toast-in 180ms var(--ease-out-soft) reverse both;
+    pointer-events: none;
+  }
+
+  /* A newly arrived row, so a list that grew under the user says which part is new. Deliberately
+     short: anything longer than this reads as the UI being slow rather than as an arrival. */
+  @keyframes cf-rise {
+    from {
+      opacity: 0;
+      transform: translate3d(0, 6px, 0);
+    }
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0);
+    }
+  }
+
+  .cf-rise {
+    animation: cf-rise 220ms var(--ease-out-soft) both;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Loading
+   * ------------------------------------------------------------------------ */
+
+  /* The shape of what is coming, rather than a spinner in the middle of an empty screen. A phone on
+     a home wifi link waits 100–400 ms for most of these reads; a skeleton makes that read as the
+     list arriving, and a spinner makes it read as the app hanging. */
+  @keyframes cf-shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+
+  .cf-skeleton {
+    border-radius: var(--radius-sm);
+    /* The flat fill first: the gradient below is built out of `color-mix`, and a browser that does
+       not understand it drops the whole `background-image` declaration — leaving an invisible box
+       where the shape of the incoming list should be. */
+    background-color: var(--cf-sunken);
+    background-image: linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--cf-text) 6%, transparent) 25%,
+      color-mix(in oklab, var(--cf-text) 11%, transparent) 37%,
+      color-mix(in oklab, var(--cf-text) 6%, transparent) 63%
+    );
+    background-size: 200% 100%;
+    animation: cf-shimmer 1.4s linear infinite;
+  }
+
+  /* The dot that says a chain is asking for something, or a run is live. Pulsing rather than static
+     because it has to be findable in a list read at arm's length. */
+  @keyframes cf-pulse-ring {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 45%, transparent);
+    }
+    70% {
+      box-shadow: 0 0 0 6px color-mix(in oklab, currentColor 0%, transparent);
+    }
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 0%, transparent);
+    }
+  }
+
+  .cf-pulse {
+    animation: cf-pulse-ring 2s var(--ease-out-soft) infinite;
+  }
+
+  /* ---------------------------------------------------------------------------
+   * Decoration
+   * ------------------------------------------------------------------------ */
+
+  /* The product's own three hues, as the faint wash the desktop puts behind its main views. Used on
+     the pairing screen and behind empty states, and nowhere else — it is identity, and identity
+     stops being identity when it is on every screen. */
+  .cf-brand-wash {
+    background-image:
+      radial-gradient(60% 50% at 15% 0%, color-mix(in oklab, var(--cf-brand-1) 22%, transparent), transparent 70%),
+      radial-gradient(55% 45% at 85% 8%, color-mix(in oklab, var(--cf-brand-2) 22%, transparent), transparent 70%),
+      radial-gradient(70% 50% at 50% 100%, color-mix(in oklab, var(--cf-brand-3) 16%, transparent), transparent 70%);
+  }
+
+  /* Somebody who has asked their phone to stop animating things has asked this client too. Kept as
+     `0.01ms` rather than `none` so animations still *complete* and any `animationend` listener the
+     navigation stack depends on still fires — a screen that never finishes leaving is worse than one
+     that never animates. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }

@@ -1,11 +1,12 @@
 import { useMemo, useState } from "react";
 import { t } from "../i18n";
+import { Button } from "../ui/Button";
 import type { DiffLine, FileDiffInfo } from "../../types/domain";
 
 /**
  * Diff rendering, on a phone. Presentational only — nothing here fetches.
  *
- * It lives apart from `DiffSheet` because three screens now draw a diff and they get theirs from
+ * It lives apart from `DiffScreen` because three screens now draw a diff and they get theirs from
  * three different places: one file from `get_file_diff`, a whole changeset from `get_commit_diff`,
  * and the pull request's raw unified text off a saved review run. One renderer for all three is
  * what keeps a `+` line the same colour in each of them.
@@ -16,6 +17,14 @@ import type { DiffLine, FileDiffInfo } from "../../types/domain";
  * 390-point-wide viewport is roughly nineteen characters each — narrow enough that every real line
  * wraps, which destroys the alignment that was the entire reason to put them side by side. A
  * unified diff with a colour and a sign per line reads correctly at any width.
+ *
+ * # The colours are not the palette's greens and reds
+ *
+ * `--cf-success` and `--cf-danger` are tuned to carry white text on a solid button. Drawn as text
+ * on a 12% tint of themselves — which is what a diff line is — they measure 2.7:1 against the
+ * background in the light theme, well under the 4.5:1 a body of text needs, and this is a *body of
+ * text*: it is the screen somebody opened because they wanted to read the change. `--cf-*-text`
+ * are the darker pair kept for exactly this (see `mobile.css`).
  */
 
 /**
@@ -33,8 +42,8 @@ const CHUNK = 400;
 export function lineTone(origin: string): string {
   // libgit2's origin characters. `+`/`-` are the content changes; `>`/`<` are "no newline at end of
   // file" markers, which are noise here and are drawn as ordinary context.
-  if (origin === "+") return "bg-[var(--cf-success)]/12 text-[var(--cf-success)]";
-  if (origin === "-") return "bg-[var(--cf-danger)]/12 text-[var(--cf-danger)]";
+  if (origin === "+") return "bg-[var(--cf-success-soft)] text-[var(--cf-success-text)]";
+  if (origin === "-") return "bg-[var(--cf-danger-soft)] text-[var(--cf-danger-text)]";
   return "text-[var(--cf-text-muted)]";
 }
 
@@ -43,8 +52,10 @@ export function Line({ line }: { line: DiffLine }) {
   return (
     <div className={`cf-log flex gap-2 px-2 ${lineTone(line.origin)}`}>
       {/* One gutter, not two. The desktop shows old and new line numbers; at this width that is
-          eight characters of chrome before any code, so only the line's own side is shown. */}
-      <span className="w-9 shrink-0 select-none text-right opacity-50">
+          eight characters of chrome before any code, so only the line's own side is shown.
+          `opacity-70` and not `opacity-50`: at half strength on `--cf-text-faint` the numbers were
+          2:1 against the page, which is a decoration rather than a line number. */}
+      <span className="w-9 shrink-0 select-none text-right text-[var(--cf-text-muted)] opacity-70">
         {line.new_lineno ?? line.old_lineno ?? ""}
       </span>
       <span className="w-2 shrink-0 select-none">{sign}</span>
@@ -57,13 +68,11 @@ export function Line({ line }: { line: DiffLine }) {
  *  whether one more tap finishes the file or whether there are nine thousand lines left. */
 function MoreRow({ hidden, onMore }: { hidden: number; onMore: () => void }) {
   return (
-    <button
-      type="button"
-      onClick={onMore}
-      className="cf-tap mt-1 w-full rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[12px] text-[var(--cf-text-muted)]"
-    >
-      {t("diff.more", { n: hidden })}
-    </button>
+    <div className="px-3 pt-2">
+      <Button full size="sm" onClick={onMore}>
+        {t("diff.more", { n: hidden })}
+      </Button>
+    </div>
   );
 }
 
@@ -92,7 +101,7 @@ export function FileDiff({ diff }: { diff: FileDiffInfo }) {
 
   if (diff.hunks.length === 0) {
     return (
-      <p className="mt-6 text-center text-[13px] text-[var(--cf-text-muted)]">
+      <p className="px-6 pt-8 text-center text-base text-[var(--cf-text-muted)]">
         {diff.binary ? t("diff.binary") : t("diff.noText")}
       </p>
     );
@@ -103,9 +112,12 @@ export function FileDiff({ diff }: { diff: FileDiffInfo }) {
     <div>
       {shown.map((row, index) =>
         row.kind === "header" ? (
+          // Sticky, so the hunk you are reading keeps saying which lines it is. On a phone a hunk
+          // is often taller than the screen, and without this the `@@ -120,7 +120,9 @@` that placed
+          // it scrolls away in the first flick.
           <p
             key={index}
-            className="cf-log mt-2 bg-[var(--cf-surface)] px-2 py-1 text-[var(--cf-text-muted)]"
+            className="cf-log sticky top-0 z-10 mt-2 border-y border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 py-1 text-[var(--cf-text-muted)]"
           >
             {row.text}
           </p>
@@ -124,12 +136,17 @@ export function FileDiff({ diff }: { diff: FileDiffInfo }) {
 function textTone(line: string): string {
   // `+++`/`---` are the file headers, not added and removed lines, so they are checked first —
   // colouring them green and red would paint every file boundary as a change to itself.
-  if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ")) {
+  if (
+    line.startsWith("+++") ||
+    line.startsWith("---") ||
+    line.startsWith("diff ") ||
+    line.startsWith("index ")
+  ) {
     return "text-[var(--cf-text-muted)] opacity-70";
   }
-  if (line.startsWith("@@")) return "bg-[var(--cf-surface)] text-[var(--cf-text-muted)]";
-  if (line.startsWith("+")) return "bg-[var(--cf-success)]/12 text-[var(--cf-success)]";
-  if (line.startsWith("-")) return "bg-[var(--cf-danger)]/12 text-[var(--cf-danger)]";
+  if (line.startsWith("@@")) return "bg-[var(--cf-sunken)] text-[var(--cf-text-muted)]";
+  if (line.startsWith("+")) return "bg-[var(--cf-success-soft)] text-[var(--cf-success-text)]";
+  if (line.startsWith("-")) return "bg-[var(--cf-danger-soft)] text-[var(--cf-danger-text)]";
   return "text-[var(--cf-text-muted)]";
 }
 
@@ -148,7 +165,7 @@ export function UnifiedDiffText({ text }: { text: string }) {
     <div>
       {lines.slice(0, visible).map((line, index) => (
         <div key={index} className={`cf-log whitespace-pre-wrap break-words px-2 ${textTone(line)}`}>
-          {line || " "}
+          {line || " "}
         </div>
       ))}
       {lines.length > visible && (

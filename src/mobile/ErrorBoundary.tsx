@@ -50,16 +50,16 @@ export class ErrorBoundary extends Component<Props, State> {
           this.props.compact ? "flex-1 py-10" : "min-h-full"
         }`}
       >
-        <p className="text-[14px] text-[var(--cf-text)]">{t("error.crashed")}</p>
+        <p className="text-md text-[var(--cf-text)]">{t("error.crashed")}</p>
         {/* The message verbatim, small and muted. It is usually a module URL, which is the one
             detail that tells the reader this is a stale page rather than a broken feature. */}
-        <p className="max-w-[22rem] break-words font-mono text-[11px] leading-snug text-[var(--cf-text-muted)]">
+        <p className="cf-selectable max-w-[22rem] break-words font-mono text-xs leading-snug text-[var(--cf-text-muted)]">
           {this.state.message}
         </p>
         <button
           type="button"
           onClick={() => location.reload()}
-          className="cf-tap rounded-lg bg-[var(--cf-accent)] px-5 text-[14px] font-medium text-white"
+          className="cf-tap cf-press rounded-lg bg-[var(--cf-accent-strong)] px-5 text-md font-medium text-[var(--cf-accent-contrast)]"
         >
           {t("error.reload")}
         </button>
