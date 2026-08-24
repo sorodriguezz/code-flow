@@ -28,6 +28,7 @@ import { CARD, EngineBadge, nodeIcon } from "./dbChrome";
 import { ensureDbStoreLoaded, pendingCount, useDbStore, type DbTab } from "../../state/dbStore";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useUiStore } from "../../state/uiStore";
+import { preventMiddleClickAutoscroll } from "../../lib/pointerDrag";
 import { confirmAction } from "../../state/confirmStore";
 import { translate, useT } from "../../state/languageStore";
 import { referenceLabel } from "./ResultGrid";
@@ -217,6 +218,9 @@ function DbTabStrip() {
             // check "which server am I about to run this on" without moving the mouse to the
             // toolbar.
             title={connection ? `${connection.name} · ${tab.name}` : tab.name}
+            // Cancels the middle button's *default* (Windows/Linux autoscroll) so the `auxclick`
+            // below is all that press does — see `preventMiddleClickAutoscroll`.
+            onMouseDown={preventMiddleClickAutoscroll}
             onAuxClick={(e) => {
               // Middle click closes, like every other tab strip in the app.
               if (e.button === 1) void closeTabSafely(tab);

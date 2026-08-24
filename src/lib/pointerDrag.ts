@@ -26,3 +26,25 @@ export function setDragCursor(active: boolean) {
   document.body.classList.toggle("cf-dragging", active);
   if (active) window.getSelection()?.removeAllRanges();
 }
+
+/**
+ * The `mousedown` a tab strip needs so middle-click can mean "close this tab".
+ *
+ * Every strip in the app closes a tab on `auxclick` with `button === 1`, and on macOS that is the
+ * whole story. On Windows and Linux it is not: pressing the middle button over a scrollable
+ * element is the *autoscroll* gesture, and every one of these strips is `overflow-x-auto` — so the
+ * press put the four-way pan cursor on screen and left the page in scroll mode, on top of (or
+ * instead of) closing anything. Chromium only offers one way out, and it is this one: cancel the
+ * default on `mousedown`, before autoscroll arms itself. `auxclick` still fires afterwards —
+ * `preventDefault` here suppresses the browser's *action*, not the events that follow.
+ *
+ * Button 2 is deliberately left alone: its default is the `contextmenu` event, which several of
+ * these strips raise a menu from, and cancelling the press cancels the menu with it.
+ *
+ * Button 0 is the caller's business. The two strips with a drag gesture already cancel it to stop
+ * press-and-sweep text selection; the two without leave it, because cancelling a left press also
+ * cancels the focus it would have moved.
+ */
+export function preventMiddleClickAutoscroll(e: { button: number; preventDefault: () => void }) {
+  if (e.button === 1) e.preventDefault();
+}

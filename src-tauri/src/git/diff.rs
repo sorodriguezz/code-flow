@@ -481,10 +481,12 @@ pub fn discard_all_changes(path: &str) -> Result<(), String> {
 
     let mut tracked: Vec<String> = vec![];
     let mut untracked: Vec<String> = vec![];
+    let mut conflicted = false;
     for entry in statuses.iter() {
         let Some(file_path) = entry.path() else { continue };
         let status = entry.status();
         if status.is_conflicted() {
+            conflicted = true;
             continue;
         }
         if status.is_wt_new() {
@@ -500,21 +502,75 @@ pub fn discard_all_changes(path: &str) -> Result<(), String> {
 
     if !tracked.is_empty() {
         let mut index = repo.index().map_err(|e| e.message().to_string())?;
-        let mut cb = git2::build::CheckoutBuilder::new();
-        cb.force();
-        for file_path in &tracked {
-            cb.path(file_path);
+
+        // No pathspec, and that is the whole point: a *many-path* checkout is what breaks on
+        // Windows.
+        //
+        // `checkout_action_wd_only` (libgit2 checkout.c:373-381) answers a working-directory
+        // directory that matches no pathspec by calling `git_iterator_advance_into` on it, with no
+        // ignore check in front — it cannot prove that nothing underneath will match, so it
+        // descends into every non-matching directory, `node_modules` included. Each frame it
+        // pushes then length-validates the *absolute* path of every dirent it reads
+        // (iterator.c:1410) before any filtering, and on Windows that is a flat 260-character
+        // count (fs_path.c:1657-1666). One pnpm path is over it and the whole discard dies with
+        // "path too long".
+        //
+        // With no pathspec the match is vacuously true (pathspec.c:213-214), so the same walk goes
+        // through `git_iterator_advance_over` instead (checkout.c:430) — and that one consults
+        // `git_ignore__lookup` first and steps *over* an ignored directory without entering it.
+        // Ignored trees are never opened, so the long path is never built; it is also dramatically
+        // faster on a repo with a real `node_modules`.
+        //
+        // Nothing about what gets written changes: restoring "every tracked path whose working
+        // tree differs from the index" is by definition the set `tracked` already holds, which is
+        // still what decides whether there is anything to do at all. And FORCE on its own never
+        // touches untracked or ignored files — removing those needs `REMOVE_UNTRACKED` /
+        // `REMOVE_IGNORED` (checkout.c:437-442), which is exactly why the loop below deletes the
+        // untracked ones by hand and stays confined to what the panel listed.
+        if conflicted {
+            // A merge is in progress, and a pathspec-free FORCE checkout would find each
+            // conflicted path in the index at stages 1/2/3, delete the working file
+            // (checkout.c:390-396) and rewrite it from those stages with fresh conflict markers —
+            // throwing away whatever the user had already resolved by hand. That is the one
+            // promise in this function's doc comment that an empty pathspec would break.
+            //
+            // So keep the paths here, but issue them *one at a time*. A single-path checkout makes
+            // that path the pathspec's common prefix (`git_pathspec_prefix`, pathspec.c:21-45),
+            // which libgit2 installs as the workdir iterator's start *and* end bound
+            // (checkout.c:2584-2585); `node_modules` then sorts outside the range and is rejected
+            // at the root frame (iterator.c:1201-1224) rather than descended. Batching the paths
+            // is what collapses that prefix to nothing and removes the bound — which is the bug.
+            //
+            // Not `skip_unmerged(true)`: that disables only the *recreate* half (checkout.c:1228)
+            // while the queued removal still fires, so it would delete the conflicted file outright.
+            for file_path in &tracked {
+                let mut cb = git2::build::CheckoutBuilder::new();
+                cb.force().path(file_path);
+                repo.checkout_index(Some(&mut index), Some(&mut cb))
+                    .map_err(|e| format!("{file_path}: {}", e.message()))?;
+            }
+        } else {
+            let mut cb = git2::build::CheckoutBuilder::new();
+            cb.force();
+            repo.checkout_index(Some(&mut index), Some(&mut cb))
+                .map_err(|e| e.message().to_string())?;
         }
-        repo.checkout_index(Some(&mut index), Some(&mut cb))
-            .map_err(|e| e.message().to_string())?;
     }
 
+    // Collected rather than returned on the first failure: a "discard everything" that stops at the
+    // first file Windows has locked leaves the panel in a state nobody can reason about — some rows
+    // gone, some not, and one error naming only the file it gave up on.
+    let mut failures: Vec<String> = vec![];
     for file_path in &untracked {
         let full = workdir.join(file_path);
         match std::fs::remove_file(&full) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("{file_path}: {e}")),
+            Err(e) => {
+                failures.push(format!("{file_path}: {e}"));
+                // The file is still there, so the empty-parent walk below has nothing to do.
+                continue;
+            }
         }
         // The directory a deleted untracked file lived in is often untracked itself (git records no
         // empty directories), so leaving it behind would show up as a stray empty folder in the
@@ -527,6 +583,10 @@ pub fn discard_all_changes(path: &str) -> Result<(), String> {
             }
             parent = dir.parent().map(|p| p.to_path_buf());
         }
+    }
+
+    if !failures.is_empty() {
+        return Err(failures.join("; "));
     }
 
     Ok(())
@@ -749,6 +809,65 @@ mod tests {
         let status = repo.status_file(Path::new("tracked.txt")).unwrap();
         assert!(status.is_index_modified(), "the staged change must survive");
         assert!(!status.is_wt_modified(), "nothing unstaged should be left");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The reason `discard_all_changes` still issues a path per file while a merge is unresolved.
+    ///
+    /// The bulk path dropped its pathspec to stop libgit2 descending into ignored trees on Windows
+    /// (see the comment there). A pathspec-free FORCE checkout would find a conflicted path at
+    /// index stages 1/2/3, delete the working file and rewrite it from those stages with fresh
+    /// conflict markers — silently destroying a resolution the user had already typed. This pins
+    /// that the conflicted file is left exactly as it was found while the rest of the discard still
+    /// happens.
+    ///
+    /// Platform-independent: the long-path failure itself is Windows-only and cannot be reproduced
+    /// here, so what this test guards is the *contract* the fix had to preserve, not the crash.
+    #[test]
+    fn discard_all_leaves_a_conflicted_path_alone() {
+        let (dir, repo) = fixture();
+        let path = dir.to_str().unwrap();
+
+        // A conflict, built by hand: the same path at all three merge stages.
+        let base = repo.blob(b"base\n").unwrap();
+        let ours = repo.blob(b"ours\n").unwrap();
+        let theirs = repo.blob(b"theirs\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.remove_path(Path::new("tracked.txt")).unwrap();
+            for (stage, oid) in [(1u16, base), (2, ours), (3, theirs)] {
+                let entry = git2::IndexEntry {
+                    ctime: git2::IndexTime::new(0, 0),
+                    mtime: git2::IndexTime::new(0, 0),
+                    dev: 0,
+                    ino: 0,
+                    mode: 0o100644,
+                    uid: 0,
+                    gid: 0,
+                    file_size: 0,
+                    id: oid,
+                    // Stage lives in bits 12-13 of `flags`; anything else there is not a stage.
+                    flags: stage << 12,
+                    flags_extended: 0,
+                    path: b"tracked.txt".to_vec(),
+                };
+                index.add(&entry).unwrap();
+            }
+            index.write().unwrap();
+        }
+        // What the user has typed while resolving. Nothing here may overwrite it.
+        fs::write(dir.join("tracked.txt"), "my careful resolution\n").unwrap();
+        fs::write(dir.join("other.txt"), "untracked\n").unwrap();
+
+        discard_all_changes(path).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("tracked.txt")).unwrap(),
+            "my careful resolution\n",
+            "a conflicted path is the conflict banner's business, not this button's",
+        );
+        assert!(!dir.join("other.txt").exists(), "the rest of the discard still has to happen");
 
         fs::remove_dir_all(&dir).ok();
     }

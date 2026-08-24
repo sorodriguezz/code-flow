@@ -48,6 +48,7 @@ import { canDropInto, useTreeDragStore, type TreeDrag } from "../../state/treeDr
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
+import { useMinimumSpin } from "../../lib/useMinimumSpin";
 
 /** Repo-relative path of the directory holding `path` ("" for a top-level entry). */
 export function parentDir(path: string): string {
@@ -641,7 +642,14 @@ export function FileTree({
   /** The repo-relative path whose row is currently an input, if any. */
   const [renaming, setRenaming] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; entry: FileEntry | null } | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  /**
+   * The toolbar Refresh's spinner, floored so it is actually visible.
+   *
+   * Re-listing a few directories over local IPC finishes inside one frame, so a plain boolean was
+   * set and cleared in the same React batch and the icon never moved — the button worked and read
+   * as dead. The Changes panel's Refresh uses the same hook, which is what makes the two agree.
+   */
+  const [refreshing, runRefreshing] = useMinimumSpin();
   /**
    * The file a `revealFile` still owes a scroll to, or null.
    *
@@ -731,35 +739,33 @@ export function FileTree({
     [loadDir],
   );
 
+  // Owns no spinner of its own: the watcher calls this several times a minute and a flag flipped
+  // from there would put a spinner in the toolbar for changes nobody asked about. Only the button
+  // spins, and it does that by wrapping the call — see `useMinimumSpin`.
   const refresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const dirs = ["", ...expandedRef.current];
-      const results = await Promise.all(
-        dirs.map((dir) =>
-          listDir(repoPath, dir || undefined).then(
-            (entries) => [dir, entries] as [string, FileEntry[]],
-            // A directory that disappeared since it was expanded simply drops out of both
-            // the cache and the expanded set instead of failing the whole refresh.
-            () => null,
-          ),
+    const dirs = ["", ...expandedRef.current];
+    const results = await Promise.all(
+      dirs.map((dir) =>
+        listDir(repoPath, dir || undefined).then(
+          (entries) => [dir, entries] as [string, FileEntry[]],
+          // A directory that disappeared since it was expanded simply drops out of both
+          // the cache and the expanded set instead of failing the whole refresh.
+          () => null,
         ),
-      );
-      if (activeRepoRef.current !== repoPath) return;
-      const loaded = results.filter((r): r is [string, FileEntry[]] => r !== null);
-      setChildrenByDir(new Map(loaded));
-      // Only when a directory actually dropped out. The overwhelmingly common sweep re-lists the
-      // same folders that were already open, and handing back a fresh `Set` for that re-renders
-      // every row of the tree for no change — the same trade `syncOpenTabs` makes when a file
-      // comes back byte for byte identical. It is also half of the fix above: a new `Set` on
-      // every sweep is what re-identified this callback in the first place.
-      setExpanded((prev) => {
-        const next = loaded.map(([dir]) => dir).filter((dir) => dir !== "");
-        return next.length === prev.size && next.every((dir) => prev.has(dir)) ? prev : new Set(next);
-      });
-    } finally {
-      setRefreshing(false);
-    }
+      ),
+    );
+    if (activeRepoRef.current !== repoPath) return;
+    const loaded = results.filter((r): r is [string, FileEntry[]] => r !== null);
+    setChildrenByDir(new Map(loaded));
+    // Only when a directory actually dropped out. The overwhelmingly common sweep re-lists the
+    // same folders that were already open, and handing back a fresh `Set` for that re-renders
+    // every row of the tree for no change — the same trade `syncOpenTabs` makes when a file
+    // comes back byte for byte identical. It is also half of the fix above: a new `Set` on
+    // every sweep is what re-identified this callback in the first place.
+    setExpanded((prev) => {
+      const next = loaded.map(([dir]) => dir).filter((dir) => dir !== "");
+      return next.length === prev.size && next.every((dir) => prev.has(dir)) ? prev : new Set(next);
+    });
   }, [repoPath]);
 
   const collapseAll = useCallback(() => {
@@ -1405,8 +1411,10 @@ export function FileTree({
           // through the watcher effect. Two sweeps, not one — harmless, and the honest cost of one
           // button standing for the whole screen.
           onClick={() => {
-            onRefresh?.();
-            void refresh();
+            void runRefreshing(async () => {
+              onRefresh?.();
+              await refresh();
+            });
           }}
           title={`${t("editor.refreshExplorer")} — ${t("editor.refreshHint")}`}
           ariaLabel={t("editor.refreshExplorer")}

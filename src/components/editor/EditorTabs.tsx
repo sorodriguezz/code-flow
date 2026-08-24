@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { ClipboardCopy, ListTree, Pin, PinOff, SplitSquareHorizontal, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { FileGlyph } from "../common/FileGlyph";
-import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
+import { DRAG_THRESHOLD, preventMiddleClickAutoscroll, setDragCursor } from "../../lib/pointerDrag";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { useTabDragStore, type TabDrag, type TabDropTarget } from "../../state/tabDragStore";
 import { useT } from "../../state/languageStore";
@@ -266,9 +266,13 @@ export function EditorTabs({
                 onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
                 // Kills the browser's own press-and-sweep text selection without costing the
                 // `click`/`dblclick` that follow — preventing it on `pointerdown` instead would
-                // suppress those compatibility events too. Left button only: the right one has a
-                // `contextmenu` to raise, and nothing to select by sweeping.
-                onMouseDown={(e) => e.button === 0 && e.preventDefault()}
+                // suppress those compatibility events too. The middle button is cancelled for a
+                // different reason entirely (see `preventMiddleClickAutoscroll`); the right one is
+                // left alone, because it has a `contextmenu` to raise.
+                onMouseDown={(e) => {
+                  if (e.button === 0) e.preventDefault();
+                  else preventMiddleClickAutoscroll(e);
+                }}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setTabMenu({ x: e.clientX, y: e.clientY, tab });

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Boxes, ChevronDown, Copy, Folder, Plus, ShieldAlert, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
+import { preventMiddleClickAutoscroll } from "../../lib/pointerDrag";
 import { ContextMenu, type MenuItem } from "./CollectionTree";
 import { useApiStore, type ApiEntityTab, type ApiTab } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
@@ -171,10 +172,13 @@ export function RequestTabs() {
               onPointerEnter={() => useRowHoverStore.getState().enter(hoverKey)}
               onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
               // Kills press-and-sweep text selection without costing the `click` that follows.
-              // Left button only: the right one has a `contextmenu` to raise — preventing its
-              // default here suppresses that on some platforms — and nothing to select by
-              // sweeping anyway.
-              onMouseDown={(e) => e.button === 0 && e.preventDefault()}
+              // The middle button is cancelled for a different reason entirely (see
+              // `preventMiddleClickAutoscroll`); the right one is left alone, because it has a
+              // `contextmenu` to raise and cancelling the press cancels the menu with it.
+              onMouseDown={(e) => {
+                if (e.button === 0) e.preventDefault();
+                else preventMiddleClickAutoscroll(e);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setTabMenu({ x: e.clientX, y: e.clientY, id: tab.id });

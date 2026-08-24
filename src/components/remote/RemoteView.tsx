@@ -30,6 +30,7 @@ import {
   type RemoteTab,
 } from "../../state/remoteStore";
 import { useUiStore } from "../../state/uiStore";
+import { preventMiddleClickAutoscroll } from "../../lib/pointerDrag";
 import { parseHostSpec, type RemoteAuth } from "../../types/remote";
 import { onTerminalExit } from "../../lib/tauri/events";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -259,6 +260,9 @@ function RemoteTabStrip() {
                 setActiveTab(tab.id);
               }
             }}
+            // Cancels the middle button's *default* (Windows/Linux autoscroll) so the `auxclick`
+            // below is all that press does — see `preventMiddleClickAutoscroll`.
+            onMouseDown={preventMiddleClickAutoscroll}
             // Middle click closes, the way every tab strip in this app does.
             onAuxClick={(e) => {
               if (e.button === 1) {
