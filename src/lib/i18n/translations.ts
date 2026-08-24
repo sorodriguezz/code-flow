@@ -6174,6 +6174,13 @@ const en = {
   "pipelines.modeGraph": "Graph",
   "pipelines.modeWaterfall": "Waterfall",
   "pipelines.inParallel": "×{n} in parallel",
+  // The stage board. `stageDoneOne` exists because `render` has no plural rules and
+  // "1 jobs completed" is the one count a stage card shows most often.
+  "pipelines.stageDone": "{n} jobs completed",
+  "pipelines.stageDoneOne": "1 job completed",
+  "pipelines.stageProgress": "{done}/{total} completed",
+  "pipelines.stageNotExpanded": "no jobs reported yet",
+  "pipelines.overlapHint": "Measured: {n} of these jobs were running at the same moment.",
   "pipelines.notStarted": "not started",
   "pipelines.longest": "longest",
   "pipelines.pickRun": "Pick a run to see how it was put together.",

@@ -1789,8 +1789,18 @@ export interface PipelineJob {
   run_id: string;
   id: string;
   name: string;
-  /** The graph column the provider itself puts this job in. `null` for GitHub. */
+  /** The graph column's *label*, as the provider spells it. `null` for GitHub. */
   stage: string | null;
+  /**
+   * The host's own id for that stage — what the graph groups by. `null` for GitLab and GitHub.
+   *
+   * `stage` is a display name and display names are not unique: Azure requires the `stage:` key to
+   * be unique and says nothing about `displayName`, and it is the display name the timeline
+   * reports. Two stages from one template with a constant `displayName: Deploy` arrive as two
+   * columns' worth of jobs under one string; grouped by that string they collapse into one card
+   * that takes one stage's verdict and the other's jobs.
+   */
+  stage_id: string | null;
   status: PipelineStatus;
   raw_status: string;
   started_at: string | null;
@@ -1800,9 +1810,39 @@ export interface PipelineJob {
   log_ref: string | null;
 }
 
+/**
+ * One stage of a run, as the provider itself reports it — never rolled up from the jobs.
+ *
+ * A stage outlives its jobs at both ends: it is `running` while an approval is pending and no job
+ * has started, its clock opens before the first job's and closes after the last one's, and it can
+ * be cancelled above jobs that finished cleanly. Summarising the job list would get all three
+ * wrong, and would get them wrong precisely on the builds someone opened this screen to read.
+ *
+ * Only Azure fills it — its timeline carries `Stage` records. GitLab knows a job's stage name and
+ * nothing else about the stage; GitHub has no stages at all. Both send `[]`, and the graph then
+ * summarises the jobs and says so.
+ */
+export interface PipelineStage {
+  provider: VcsProvider;
+  run_id: string;
+  /**
+   * The host's own id. Shared with the placeholder job the backend emits for a stage that has no
+   * jobs yet, which is how the graph tells that "job" apart from a real one.
+   */
+  id: string;
+  /** What every job inside it carries in `stage`. The join key. */
+  name: string;
+  status: PipelineStatus;
+  raw_status: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface PipelineRunDetail {
   run: PipelineRun;
   jobs: PipelineJob[];
+  /** Empty for GitHub and GitLab — see {@link PipelineStage}. */
+  stages: PipelineStage[];
 }
 
 export interface JobLog {

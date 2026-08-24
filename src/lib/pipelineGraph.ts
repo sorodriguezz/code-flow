@@ -65,24 +65,35 @@ function at(stamp: string | null): number | null {
 }
 
 /**
- * Columns straight from the `stage` the provider gave, in first-appearance order.
+ * Columns straight from the stage the provider gave, in first-appearance order.
  *
  * First-appearance rather than alphabetical or by start time: the backend already returns jobs in
  * the order the host lists them, which for both GitLab and Azure is declaration order — the order
  * the person who wrote the pipeline put them in, and the one they will be looking for.
+ *
+ * Grouped by [`PipelineJob.stage_id`] and only *labelled* with `stage`, because a display name is
+ * not an identity. Azure requires a stage's `stage:` key to be unique and says nothing about its
+ * `displayName`, so one template instantiated per environment with a constant `displayName: Deploy`
+ * produces two genuinely different stages under one string — and merged into one column they became
+ * one card wearing one stage's verdict over the other's jobs. GitLab has no stage object and so no
+ * id, but there the name *is* the identity: a pipeline cannot declare the same stage twice.
  */
 function byStage(jobs: PipelineJob[]): GraphColumn[] {
   const order: string[] = [];
   const map = new Map<string, PipelineJob[]>();
   for (const job of jobs) {
-    const stage = job.stage ?? "";
-    if (!map.has(stage)) {
-      map.set(stage, []);
-      order.push(stage);
+    const key = job.stage_id ?? job.stage ?? "";
+    if (!map.has(key)) {
+      map.set(key, []);
+      order.push(key);
     }
-    map.get(stage)!.push(job);
+    map.get(key)!.push(job);
   }
-  return order.map((stage) => ({ key: `stage:${stage}`, label: stage, jobs: map.get(stage)! }));
+  return order.map((key) => ({
+    key: `stage:${key}`,
+    label: map.get(key)![0].stage ?? "",
+    jobs: map.get(key)!,
+  }));
 }
 
 /**

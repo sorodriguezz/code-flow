@@ -9,7 +9,12 @@ import { Tooltip } from "../common/Tooltip";
 import { StatusGlyph } from "./RunList";
 import { STATUS_TOKEN, at, elapsed, formatDuration, statusOf } from "./pipelineStatus";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import type { PipelineJob, PipelineRunDetail } from "../../types/domain";
+import type {
+  PipelineJob,
+  PipelineRunDetail,
+  PipelineStage,
+  PipelineStatus,
+} from "../../types/domain";
 
 /** Card and gutter geometry, fixed here so the connectors can be positioned arithmetically rather
  *  than measured. A measured layout would need a resize observer per card to place one arrowhead,
@@ -274,13 +279,18 @@ function Connectors({
 }
 
 /**
- * The run as columns: one per stage, everything inside a column ran at the same time.
+ * The run as columns of **jobs**, for the two sources that have no stages to draw.
+ *
+ * This is the GitHub picture: levels read out of `needs:`, or waves measured off the clock. Neither
+ * has a container to put a card around — a `needs:` level is not a thing the pipeline declares, it
+ * is a thing we computed — so the drawing stays at the job level and the arrows carry the meaning.
+ * A run whose provider *did* declare stages gets [`StageBoard`] instead.
  *
  * Every card is placed by arithmetic — `columnX` and `cardMidY` — rather than by flow, because the
  * arrows behind them are drawn from the same two functions and a layout the SVG has to *measure*
  * is a layout the SVG gets wrong for one frame after every resize.
  */
-function StageColumns({
+function JobColumns({
   detail,
   now,
   needs,
@@ -358,6 +368,461 @@ function StageColumns({
             </div>
           ))}
         </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * The stage board
+ *
+ * What a run looks like when its provider named its own stages — Azure Pipelines and GitLab. The
+ * host's run page draws a **card per stage** with the jobs listed inside it, and so does this,
+ * because a reader arrives here having just looked at that page and the two have to be the same
+ * picture. What was here before drew the stage as a nine-pixel caption over a column of loose
+ * pills: the stage's own status, its own clock and its own progress were nowhere on screen, and
+ * five stages read as five jobs.
+ * ------------------------------------------------------------------------- */
+
+/** Stage card geometry. Fixed for the same reason the job cards' is: the connectors between the
+ *  cards are drawn from these numbers, and a layout the SVG has to measure is one it draws wrong
+ *  for a frame after every drag of the pane's seam. */
+const STAGE_W = 224;
+const STAGE_GUTTER = 46;
+/** The header block: the stage's name over its summary line. */
+const STAGE_HEAD_H = 45;
+const STAGE_PAD = 5;
+const STAGE_ROW_H = 25;
+const STAGE_ROW_GAP = 3;
+
+const stageX = (column: number) => column * (STAGE_W + STAGE_GUTTER);
+
+/** A card's height from its row count. One row minimum: a stage the provider has not expanded yet
+ *  still has a line to draw, and a card that collapsed to its header would read as a stage with
+ *  nothing in it rather than one with nothing *yet*.
+ *
+ *  `+ 2` is the card's own border. Tailwind's preflight sets `box-sizing: border-box`, so a height
+ *  written without it is two pixels short of what the contents need, and the body — the one child
+ *  with no explicit height — is what gives them up: the rows then sat 5px below the header and 3px
+ *  above the card's floor on every stage on the board. */
+const stageHeight = (rows: number) => {
+  const drawn = Math.max(1, rows);
+  return 2 + STAGE_HEAD_H + STAGE_PAD * 2 + drawn * STAGE_ROW_H + (drawn - 1) * STAGE_ROW_GAP;
+};
+
+/** The five buckets that mean "this is over". Everything else is still moving. */
+const SETTLED: ReadonlySet<PipelineStatus> = new Set<PipelineStatus>([
+  "success",
+  "warning",
+  "failed",
+  "cancelled",
+  "skipped",
+]);
+
+/** Border tint per stage status: only the three worth finding without reading — what is running,
+ *  what is broken, what is nearly broken. A card per stage is a big enough object that colouring
+ *  all seven would turn the board into a paint chart and none of them would stand out. */
+const STAGE_BORDER: Record<PipelineStatus, string> = {
+  queued: "border-[var(--cf-border)]",
+  running: "border-[color-mix(in_oklab,var(--cf-accent)_50%,var(--cf-border))]",
+  success: "border-[var(--cf-border)]",
+  warning: "border-[color-mix(in_oklab,var(--cf-warning)_45%,var(--cf-border))]",
+  failed: "border-[color-mix(in_oklab,var(--cf-danger)_50%,var(--cf-border))]",
+  cancelled: "border-[var(--cf-border)]",
+  skipped: "border-[var(--cf-border)]",
+};
+
+/**
+ * A stage's status when the provider didn't send one — GitLab, and Azure's classic phases.
+ *
+ * Order is the argument. `running` comes first because a stage with one job burning and one job
+ * already broken is a stage that is *still going*: calling it failed while it runs would be a
+ * verdict the pipeline has not reached. A stage that has jobs waiting *and* jobs already finished
+ * is the same fact from the other side, and one whose jobs are all still waiting is queued.
+ *
+ * "Already finished" pointedly excludes `skipped`, and that exclusion is the whole subtlety: a
+ * GitLab job with `when: manual` is reported as skipped the moment its stage is processed, before
+ * anything in the stage has run. Counting it as progress drew a spinner and an accent border over
+ * a stage no job had entered, next to an empty duration, because nothing had started to measure.
+ */
+function deriveStageStatus(jobs: PipelineJob[]): PipelineStatus {
+  const seen = new Set(jobs.map((job) => statusOf(job.status)));
+  if (seen.size === 0) return "queued";
+  if (seen.has("running")) return "running";
+  if (seen.has("queued")) {
+    const moved = jobs.some((job) => {
+      const bucket = statusOf(job.status);
+      return bucket !== "queued" && bucket !== "skipped";
+    });
+    return moved ? "running" : "queued";
+  }
+  if (seen.has("failed")) return "failed";
+  if (seen.has("warning")) return "warning";
+  if (seen.has("cancelled")) return "cancelled";
+  if (seen.has("success")) return "success";
+  return "skipped";
+}
+
+/**
+ * The most jobs that were running at the same *instant*.
+ *
+ * The badge this feeds used to say "×N in parallel" about every job in a column, which for a stage
+ * is not true and was never checked: a stage's jobs may declare `dependsOn` between themselves, and
+ * two of them printed one under the other is not evidence they overlapped. This is evidence — a
+ * sweep over the intervals, and the badge only appears when the answer is at least two.
+ *
+ * Ties are resolved end-before-start so that a job finishing at the exact moment the next one
+ * starts — the ordinary shape of a sequential stage — counts as one, not two. Zero-length spans are
+ * dropped rather than swept: they cannot overlap anything, and they would make the running count
+ * dip below what is actually open.
+ */
+function peakOverlap(jobs: PipelineJob[], now: number): number {
+  const events: { at: number; delta: number }[] = [];
+  for (const job of jobs) {
+    const start = at(job.started_at);
+    if (start === null) continue;
+    const end = at(job.finished_at) ?? now;
+    if (end <= start) continue;
+    events.push({ at: start, delta: 1 }, { at: end, delta: -1 });
+  }
+  events.sort((a, b) => a.at - b.at || a.delta - b.delta);
+
+  let open = 0;
+  let peak = 0;
+  for (const event of events) {
+    open += event.delta;
+    peak = Math.max(peak, open);
+  }
+  return peak;
+}
+
+/** Everything a card shows that isn't the job rows themselves. */
+interface StageSummary {
+  status: PipelineStatus;
+  /** The provider's own word for it, for the header's `title`. Empty when nothing was quoted. */
+  rawStatus: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** The jobs to draw. Empty for a stage whose jobs the host has not expanded yet. */
+  jobs: PipelineJob[];
+  /**
+   * The stage's stand-in job when `jobs` is empty — the thing the log pane can actually be pointed
+   * at. Kept rather than discarded because `ciStore.pickInterestingJob` selects out of the raw job
+   * list and will happily land on it: an Azure stage that failed at its approval gate is a `failed`
+   * job with no card of its own, so the log pane opened on "Deploy" while the board above it
+   * highlighted nothing.
+   */
+  placeholder: PipelineJob | null;
+  settled: number;
+  overlap: number;
+}
+
+/**
+ * One column of the graph, read as a stage.
+ *
+ * Three sources, in descending order of authority, and the order is the point:
+ *
+ *  1. the provider's own `Stage` record, when it sent one — see `PipelineStage`, which exists
+ *     precisely because a stage's state and clock are not recoverable from its jobs;
+ *  2. the **placeholder** job the Azure client emits for a stage it has not expanded yet, which is
+ *     that stage's record wearing a job's shape and is identified by sharing its id;
+ *  3. a roll-up of the jobs, which is all GitLab leaves us and is honest as far as it goes.
+ *
+ * Once (1) answers it answers completely — status *and* both timestamps. Mixing a record's status
+ * with a rolled-up duration would produce a card whose number contradicts its icon on exactly the
+ * builds where the difference matters: a stage held at an approval reads as `running` for minutes
+ * during which no job is running at all.
+ *
+ * The record is looked up by **stage id**, never by the name on the card: see
+ * `PipelineJob.stage_id` for the two stages called `Deploy` that made the difference matter.
+ */
+function summarise(
+  stageId: string | null,
+  columnJobs: PipelineJob[],
+  stagesById: Map<string, PipelineStage>,
+  now: number,
+): StageSummary {
+  const record = (stageId !== null ? stagesById.get(stageId) : undefined) ?? null;
+  // The placeholder is a column of exactly one "job" that is really the stage record — it shares
+  // its id. Drawing it as a job row would print the stage's name twice, once as the card and once
+  // inside it.
+  const placeholder =
+    columnJobs.length === 1 && stagesById.has(columnJobs[0].id) ? columnJobs[0] : null;
+  const jobs = placeholder ? [] : columnJobs;
+  const settled = jobs.filter((job) => SETTLED.has(statusOf(job.status))).length;
+  const overlap = peakOverlap(jobs, now);
+
+  const declared = record ?? placeholder;
+  if (declared) {
+    return {
+      status: statusOf(declared.status),
+      rawStatus: declared.raw_status,
+      startedAt: declared.started_at,
+      finishedAt: declared.finished_at,
+      jobs,
+      placeholder,
+      settled,
+      overlap,
+    };
+  }
+
+  const starts = jobs.map((job) => at(job.started_at)).filter((ms): ms is number => ms !== null);
+  const ends = jobs.map((job) => at(job.finished_at)).filter((ms): ms is number => ms !== null);
+  return {
+    status: deriveStageStatus(jobs),
+    rawStatus: "",
+    startedAt: starts.length > 0 ? new Date(Math.min(...starts)).toISOString() : null,
+    // Only once every job has landed. While one is still going the stage has no end, and
+    // `elapsed` measures it to now — which is what a stage in flight is actually doing.
+    finishedAt:
+      jobs.length > 0 && settled === jobs.length && ends.length > 0
+        ? new Date(Math.max(...ends)).toISOString()
+        : null,
+    jobs,
+    placeholder,
+    settled,
+    overlap,
+  };
+}
+
+/** One job, as a row inside its stage's card. */
+function StageJobRow({
+  job,
+  selected,
+  now,
+  onSelect,
+}: {
+  job: PipelineJob;
+  selected: boolean;
+  now: number;
+  onSelect: () => void;
+}) {
+  const pending = job.started_at === null;
+  const took = elapsed(job.started_at, job.finished_at, now);
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-current={selected ? "page" : undefined}
+      style={{ height: STAGE_ROW_H }}
+      className={`flex w-full shrink-0 items-center gap-1.5 rounded-[5px] px-1.5 text-left transition-colors ${
+        selected
+          ? "bg-[var(--cf-accent-soft)] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-accent)_40%,transparent)]"
+          : "hover:bg-black/[0.035] dark:hover:bg-white/[0.05]"
+      } ${pending ? "opacity-55" : ""}`}
+    >
+      <StatusGlyph status={job.status} size={12} />
+      <span className="min-w-0 flex-1 truncate text-[11px]">{job.name}</span>
+      <span className="shrink-0 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+        {pending ? "" : formatDuration(took)}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * One stage: a header carrying the stage's own verdict, clock and progress, over its jobs.
+ *
+ * The header is the whole change. A stage is a thing with a state — it succeeds, it fails, it sits
+ * on an approval — and the host's run page says so on every card. Reading it off the caption of a
+ * column of pills was not possible, which is why the two screens didn't look like the same run.
+ */
+function StageCard({
+  name,
+  summary,
+  left,
+  selectedId,
+  now,
+  onSelect,
+}: {
+  name: string;
+  summary: StageSummary;
+  left: number;
+  selectedId: string | null | undefined;
+  now: number;
+  onSelect: (jobId: string) => void;
+}) {
+  const t = useT();
+  const took = elapsed(summary.startedAt, summary.finishedAt, now);
+  const total = summary.jobs.length;
+  const progress =
+    total === 0
+      ? ""
+      : summary.settled === total
+        ? total === 1
+          ? t("pipelines.stageDoneOne")
+          : t("pipelines.stageDone", { n: total })
+        : t("pipelines.stageProgress", { done: summary.settled, total });
+
+  return (
+    <div
+      style={{ left, width: STAGE_W, height: stageHeight(total) }}
+      className={`absolute top-0 flex flex-col overflow-hidden rounded-[10px] border bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${
+        STAGE_BORDER[summary.status]
+      } ${summary.status === "skipped" ? "opacity-[0.72]" : ""}`}
+    >
+      <div
+        style={{ height: STAGE_HEAD_H }}
+        title={summary.rawStatus || undefined}
+        /* A tint of the text colour into the surface rather than `--cf-surface-raised`: that token
+           is `#ffffff` in the light theme, identical to `--cf-surface`, so the header separated from
+           the body in dark mode and vanished into it in light. Mixing against `--cf-text` moves the
+           right way in both. */
+        className="flex shrink-0 flex-col justify-center gap-[3px] border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-text)_4%,var(--cf-surface))] px-2"
+      >
+        <span className="flex items-center gap-1.5">
+          <StatusGlyph status={summary.status} size={13} />
+          {/* Its own `title`, because the wrapper's is the provider's raw status word: without
+              this, hovering a stage name cut off at 13 characters answered "succeeded". */}
+          <span title={name} className="min-w-0 flex-1 truncate text-[12px] font-semibold">
+            {name}
+          </span>
+          {/* Measured, not assumed. Two jobs listed under one stage are not two jobs that ran
+              together — a stage's jobs can depend on each other — so this only appears when their
+              intervals genuinely overlapped, and the tooltip says that is what it means.
+
+              On the name's row rather than under it: stage names are short and progress lines are
+              not, and sharing the lower row left "2 jobs completed" truncated to "2 jobs com…" on
+              every stage that had any parallelism at all — which is the stage the badge is for. */}
+          {summary.overlap > 1 && (
+            <span
+              title={t("pipelines.overlapHint", { n: summary.overlap })}
+              className="shrink-0 rounded-[3px] border border-[var(--cf-border)] px-1 text-[9px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
+            >
+              {t("pipelines.inParallel", { n: summary.overlap })}
+            </span>
+          )}
+        </span>
+        <span className="flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
+          <span className="min-w-0 truncate">{progress}</span>
+          <span className="ml-auto shrink-0 tabular-nums">{formatDuration(took)}</span>
+        </span>
+      </div>
+
+      <div className="flex min-h-0 flex-col" style={{ padding: STAGE_PAD, gap: STAGE_ROW_GAP }}>
+        {summary.jobs.length === 0 ? (
+          // Not an invented job list: the timeline does not say what this stage's jobs will be
+          // called, and a guessed name on a CI screen is worse than an honest blank.
+          //
+          // Still a button, though, and bound to the placeholder job. That "job" is reachable
+          // without it — `pickInterestingJob` picks the most alarming job in the run, and a stage
+          // that failed at its approval gate *is* the most alarming — so a plain span left the log
+          // pane opened on a job the board could neither highlight nor let you return to.
+          <button
+            type="button"
+            disabled={summary.placeholder === null}
+            onClick={() => summary.placeholder && onSelect(summary.placeholder.id)}
+            aria-current={
+              summary.placeholder && selectedId === summary.placeholder.id ? "page" : undefined
+            }
+            style={{ height: STAGE_ROW_H }}
+            className={`flex w-full shrink-0 items-center rounded-[5px] px-1.5 text-left text-[10.5px] italic text-[var(--cf-text-muted)] transition-colors ${
+              summary.placeholder && selectedId === summary.placeholder.id
+                ? "bg-[var(--cf-accent-soft)] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-accent)_40%,transparent)]"
+                : "enabled:hover:bg-black/[0.035] dark:enabled:hover:bg-white/[0.05]"
+            }`}
+          >
+            {t("pipelines.stageNotExpanded")}
+          </button>
+        ) : (
+          summary.jobs.map((job) => (
+            <StageJobRow
+              key={job.id}
+              job={job}
+              now={now}
+              selected={selectedId === job.id}
+              onSelect={() => onSelect(job.id)}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The elbow between two stage cards: out of the right edge, across the gutter, into the left edge.
+ *
+ * Orthogonal rather than the bezier the job graph uses, and deliberately: cards of different job
+ * counts have their mid-points at different heights, and a curve between two of them reads as a
+ * flourish. A right angle with a rounded corner reads as a route — which is also what the host's
+ * own run page draws, so the two pictures agree down to the joinery.
+ */
+function elbow(x1: number, y1: number, x2: number, y2: number): string {
+  if (Math.abs(y2 - y1) < 1) return `M ${x1} ${y1} H ${x2}`;
+  const midX = (x1 + x2) / 2;
+  const dir = y2 > y1 ? 1 : -1;
+  // Never round more than half of either leg, or the two arcs meet and cross.
+  const r = Math.max(1, Math.min(CORNER, Math.abs(y2 - y1) / 2, (x2 - x1) / 2));
+  return (
+    `M ${x1} ${y1} H ${midX - r} Q ${midX} ${y1} ${midX} ${y1 + dir * r} ` +
+    `V ${y2 - dir * r} Q ${midX} ${y2} ${midX + r} ${y2} H ${x2}`
+  );
+}
+
+/**
+ * The run as a board of stage cards.
+ *
+ * One card per stage, in the order the provider declared them, joined left to right. The joins are
+ * between *cards* and not between jobs on purpose: a stage name says which jobs ran under it and
+ * nothing whatever about which of them fed which, and an arrow drawn from one job to another would
+ * be claiming a dependency nobody reported. Card to card claims only "this stage, then that one",
+ * which is exactly what the stage order entitles the drawing to say.
+ */
+function StageBoard({ detail, now }: { detail: PipelineRunDetail; now: number }) {
+  const selection = useCiStore((s) => s.selection);
+  const selectJob = useCiStore((s) => s.selectJob);
+  const graph = useMemo(() => buildGraph(detail.jobs), [detail.jobs]);
+
+  const cards = useMemo(() => {
+    // By id, not by name: `byStage` already groups the jobs by `stage_id`, and two stages sharing a
+    // `displayName` have to find their own record rather than the last one to claim the string.
+    const stagesById = new Map(detail.stages.map((stage) => [stage.id, stage]));
+    return graph.columns.map((column) => ({
+      key: column.key,
+      name: column.label,
+      summary: summarise(column.jobs[0]?.stage_id ?? null, column.jobs, stagesById, now),
+    }));
+  }, [graph.columns, detail.stages, now]);
+
+  const { links, width, height } = useMemo(() => {
+    const heights = cards.map((card) => stageHeight(card.summary.jobs.length));
+    const holdsSelection = (index: number) =>
+      Boolean(selection?.jobId) && cards[index].summary.jobs.some((job) => job.id === selection?.jobId);
+
+    const links: DrawnEdge[] = cards.slice(1).map((card, index) => {
+      const y1 = heights[index] / 2;
+      const y2 = heights[index + 1] / 2;
+      const x1 = stageX(index) + STAGE_W;
+      const x2 = stageX(index + 1) - HEAD;
+      return {
+        key: `${cards[index].key}>${card.key}`,
+        d: elbow(x1, y1, x2, y2),
+        head: `M ${x2 + HEAD} ${y2} L ${x2 - 1} ${y2 - 3.6} L ${x2 - 1} ${y2 + 3.6} Z`,
+        lit: holdsSelection(index) || holdsSelection(index + 1),
+      };
+    });
+
+    return {
+      links,
+      width: Math.max(1, cards.length * (STAGE_W + STAGE_GUTTER) - STAGE_GUTTER),
+      height: Math.max(1, ...heights),
+    };
+  }, [cards, selection?.jobId]);
+
+  return (
+    <div className="relative" style={{ width, height }}>
+      <Connectors drawn={links} width={width} height={height} />
+      {cards.map((card, index) => (
+        <StageCard
+          key={card.key}
+          name={card.name}
+          summary={card.summary}
+          left={stageX(index)}
+          selectedId={selection?.jobId}
+          now={now}
+          onSelect={(jobId) => void selectJob(jobId)}
+        />
       ))}
     </div>
   );
@@ -575,10 +1040,14 @@ export function RunGraph({
           <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("pipelines.pickRun")}</p>
         ) : detail.jobs.length === 0 ? (
           <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("pipelines.noJobs")}</p>
-        ) : mode === "graph" ? (
-          <StageColumns detail={detail} now={now} needs={needs} />
-        ) : (
+        ) : mode !== "graph" ? (
           <Waterfall detail={detail} now={now} />
+        ) : source === "stage" ? (
+          /* The provider named its stages, so the drawing is made of stages — the same shape the
+             host's own run page uses, because that is the shape the reader arrived with. */
+          <StageBoard detail={detail} now={now} />
+        ) : (
+          <JobColumns detail={detail} now={now} needs={needs} />
         )}
       </div>
     </>

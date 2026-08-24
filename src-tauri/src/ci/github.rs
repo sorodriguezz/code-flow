@@ -387,6 +387,7 @@ fn map_job(host: &str, owner: &str, repo: &str, run_id: &str, raw: RawJob) -> Pi
         // answer is nothing, and `PipelineRun::definition_path` is how the frontend gets the real
         // graph — from the workflow file, which is where GitHub actually keeps it.
         stage: None,
+        stage_id: None,
         status: bucket_status(&raw.status, raw.conclusion.as_deref()),
         raw_status: raw_status(&raw.status, raw.conclusion.as_deref()),
         started_at: non_empty(raw.started_at),
@@ -484,7 +485,9 @@ pub async fn run_detail(
         .map(|job| map_job(host, owner, repo, &run.id, job))
         .collect();
 
-    Ok(PipelineRunDetail { run, jobs })
+    // GitHub has no stage concept at all: the graph's columns are read out of the workflow's
+    // `needs:` on the frontend, and there is nothing here to describe them with.
+    Ok(PipelineRunDetail { run, jobs, stages: Vec::new() })
 }
 
 /// One job's log.

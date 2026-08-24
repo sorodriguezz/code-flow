@@ -22,7 +22,10 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 use super::http;
-use super::{status, JobLog, PipelineJob, PipelineRun, PipelineRunDetail, MAX_LOG_BYTES, PROVIDER_AZURE};
+use super::{
+    status, JobLog, PipelineJob, PipelineRun, PipelineRunDetail, PipelineStage, MAX_LOG_BYTES,
+    PROVIDER_AZURE,
+};
 use crate::ado::{
     auth_header, encode_segment, normalize_org, ListResponse, API_VERSION, BAD_CREDENTIALS,
 };
@@ -473,7 +476,11 @@ pub async fn build_detail(
     let timeline: RawTimeline = http::get_json(request, http::Provider::Azure).await?;
 
     let jobs = map_timeline(&run.id, &org_enc, &project_enc, &timeline.records);
-    Ok(PipelineRunDetail { run, jobs })
+    // Read from the same records, in a second pass rather than as a by-product of the first: the
+    // stage list has to include the stages that *do* have jobs, and `map_timeline` only ever looks
+    // at a `Stage` record when it turns out to have none.
+    let stages = map_stages(&run.id, &timeline.records);
+    Ok(PipelineRunDetail { run, jobs, stages })
 }
 
 /// Turns the flat record array into the job list the graph draws.
@@ -502,17 +509,18 @@ fn map_timeline(
 
     let mut jobs: Vec<(i64, i64, PipelineJob)> = Vec::new();
     // Which stages ended up with a job under them, so the ones that did not can be drawn as
-    // stages. Owned names rather than borrows: the `stage` they come from is moved into the job a
-    // few lines below, which is the whole point of building it.
+    // stages. Keyed by the record **id** and not by the name: two stages sharing a `displayName`
+    // are two stages, and keying by name let a jobless one be suppressed by its namesake's jobs —
+    // which is exactly the disappearance the placeholder loop below exists to prevent.
     let mut stages_with_jobs: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (index, record) in records.iter().enumerate() {
         if !record.kind.eq_ignore_ascii_case("Job") {
             continue;
         }
-        let (stage, stage_order) = resolve_stage(records, &by_id, index);
-        if let Some(name) = stage.as_deref() {
-            stages_with_jobs.insert(name.to_string());
+        let (stage, stage_id, stage_order) = resolve_stage(records, &by_id, index);
+        if let Some(id) = stage_id.as_deref() {
+            stages_with_jobs.insert(id.to_string());
         }
         let has_warnings = has_warning_issues(records, &children, index);
 
@@ -522,6 +530,7 @@ fn map_timeline(
             id: record.id.clone(),
             name: non_empty(&record.name).unwrap_or_else(|| "Job".to_string()),
             stage,
+            stage_id,
             status: bucket_status(&record.state, record.result.as_deref(), has_warnings),
             raw_status: raw_label(&record.state, record.result.as_deref()),
             started_at: record.start_time.clone(),
@@ -564,7 +573,7 @@ fn map_timeline(
             continue;
         }
         let Some(name) = non_empty(&record.name) else { continue };
-        if stages_with_jobs.contains(&name) {
+        if stages_with_jobs.contains(&record.id) {
             continue;
         }
         jobs.push((
@@ -578,6 +587,7 @@ fn map_timeline(
                 id: record.id.clone(),
                 name: name.clone(),
                 stage: Some(name),
+                stage_id: non_empty(&record.id),
                 status: bucket_status(&record.state, record.result.as_deref(), false),
                 raw_status: raw_label(&record.state, record.result.as_deref()),
                 started_at: record.start_time.clone(),
@@ -602,6 +612,54 @@ fn map_timeline(
     jobs.into_iter().map(|(_, _, job)| job).collect()
 }
 
+/// The `Stage` records, as themselves.
+///
+/// [`map_timeline`] flattens the timeline into jobs and keeps only the *name* of the stage each one
+/// sits under, which is all a column heading needs. A stage card needs the rest: its own state, and
+/// its own clock.
+///
+/// Those two are not recoverable from the jobs, which is the whole argument for this function:
+///
+/// * a stage sitting on an **approval** is `inProgress` with no jobs started under it at all, and
+///   rolled up from its (empty, or already-succeeded) job list it would read as queued or done;
+/// * a stage's `startTime` precedes its first job's — the agent allocation, the checkpoint, the
+///   `dependsOn` wait all land in the stage's span and in no job's — so `max(finish) - min(start)`
+///   over the jobs is systematically shorter than the number Azure prints;
+/// * `canceled` above jobs that finished cleanly is an ordinary shape, not a corrupted one.
+///
+/// Stages with no usable name are dropped rather than emitted anonymously: the frontend joins these
+/// to their jobs *by name*, so a nameless one could only ever match a column that isn't there.
+fn map_stages(run_id: &str, records: &[RawRecord]) -> Vec<PipelineStage> {
+    let mut stages: Vec<(i64, PipelineStage)> = records
+        .iter()
+        .filter(|record| record.kind.eq_ignore_ascii_case("Stage"))
+        .filter_map(|record| {
+            let name = non_empty(&record.name)?;
+            Some((
+                record.order,
+                PipelineStage {
+                    provider: PROVIDER_AZURE.to_string(),
+                    run_id: run_id.to_string(),
+                    id: record.id.clone(),
+                    name,
+                    // `false` for warnings, deliberately: a stage's own record carries no issues,
+                    // and hunting the tree for a descendant's would make the card disagree with the
+                    // word Azure itself puts on the stage. The jobs inside it show their own.
+                    status: bucket_status(&record.state, record.result.as_deref(), false),
+                    raw_status: raw_label(&record.state, record.result.as_deref()),
+                    started_at: record.start_time.clone(),
+                    finished_at: record.finish_time.clone(),
+                },
+            ))
+        })
+        .collect();
+
+    // Declaration order, matching what `map_timeline` sorts the jobs by, so the two arrive in the
+    // same sequence and a reader stepping through them is stepping through the YAML.
+    stages.sort_by_key(|(order, _)| *order);
+    stages.into_iter().map(|(_, stage)| stage).collect()
+}
+
 /// The stage a job belongs to, found by walking up `parentId`.
 ///
 /// A job's parent is normally a `Phase`, not a `Stage` — the phase is the *definition* of the job
@@ -612,14 +670,19 @@ fn map_timeline(
 /// broken data: a classic (non-YAML) build definition has phases and no stages at all, and its
 /// phase names are exactly the column headings a user expects.
 ///
-/// Returns the name and the order to sort that column by, which is the *ancestor's* order — the
-/// job's own is only meaningful within its phase.
+/// Returns the ancestor's display name, **its record id**, and the order to sort that column by —
+/// the ancestor's order, since the job's own is only meaningful within its phase.
+///
+/// The id is what the graph actually groups by. A display name is not an identity here: Azure
+/// requires the `stage:` key to be unique and says nothing about `displayName`, and it is the
+/// display name the timeline reports, so one template instantiated twice with a constant
+/// `displayName` produces two genuinely different stages under one string.
 fn resolve_stage(
     records: &[RawRecord],
     by_id: &HashMap<&str, usize>,
     start: usize,
-) -> (Option<String>, i64) {
-    let mut phase: Option<(String, i64)> = None;
+) -> (Option<String>, Option<String>, i64) {
+    let mut phase: Option<(String, String, i64)> = None;
     let mut cursor = records[start].parent_id.as_deref();
 
     for _ in 0..MAX_TIMELINE_DEPTH {
@@ -628,22 +691,28 @@ fn resolve_stage(
         let parent = &records[index];
 
         if parent.kind.eq_ignore_ascii_case("Stage") {
-            return (non_empty(&parent.name), parent.order);
+            // A nameless stage gives no column at all, so it gives no id either: the two travel
+            // together, and a job with an id and no name would be grouped by something the header
+            // could not print.
+            return match non_empty(&parent.name) {
+                Some(name) => (Some(name), non_empty(&parent.id), parent.order),
+                None => (None, None, parent.order),
+            };
         }
         if phase.is_none() && parent.kind.eq_ignore_ascii_case("Phase") {
-            phase = non_empty(&parent.name).map(|name| (name, parent.order));
+            phase = non_empty(&parent.name).map(|name| (name, parent.id.clone(), parent.order));
         }
         cursor = parent.parent_id.as_deref();
     }
 
     match phase {
-        Some((name, order)) => (Some(name), order),
+        Some((name, id, order)) => (Some(name), non_empty(&id), order),
         // No container at all — a job hanging off the root, which a hand-authored classic
         // definition produces. Its sort key is its *own* order rather than zero: zero is a
         // position, and it is the front one, so an orphan job would jump ahead of the first real
         // stage every time. Its own order is the only claim about where it belongs that anything
         // here actually knows.
-        None => (None, records[start].order),
+        None => (None, None, records[start].order),
     }
 }
 
@@ -1014,6 +1083,53 @@ mod tests {
         );
     }
 
+    /// The stage cards read the stage's *own* record, not a roll-up of the jobs under it.
+    ///
+    /// The approval case is the one that made this necessary: `Deploy` is `inProgress` while its
+    /// only job has already succeeded, and its clock started 40 seconds before that job did.
+    #[test]
+    fn stages_carry_their_own_state_and_their_own_clock() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"stage-build","parentId":null,"type":"Stage","name":"Build","order":1,
+               "state":"completed","result":"succeeded",
+               "startTime":"2026-08-24T10:00:00Z","finishTime":"2026-08-24T10:02:00Z"},
+              {"id":"phase-build","parentId":"stage-build","type":"Phase","name":"Build","order":1},
+              {"id":"job-build","parentId":"phase-build","type":"Job","name":"Compile","order":1,
+               "state":"completed","result":"succeeded",
+               "startTime":"2026-08-24T10:00:10Z","finishTime":"2026-08-24T10:01:50Z"},
+              {"id":"stage-deploy","parentId":null,"type":"Stage","name":"Deploy","order":2,
+               "state":"inProgress","startTime":"2026-08-24T10:02:00Z"},
+              {"id":"phase-deploy","parentId":"stage-deploy","type":"Phase","name":"Deploy","order":1},
+              {"id":"job-deploy","parentId":"phase-deploy","type":"Job","name":"Push image","order":1,
+               "state":"completed","result":"succeeded",
+               "startTime":"2026-08-24T10:02:40Z","finishTime":"2026-08-24T10:03:30Z"},
+              {"id":"stage-nameless","parentId":null,"type":"Stage","name":"","order":3,
+               "state":"pending"}
+            ]}"#,
+        );
+
+        let stages = map_stages("42", &records);
+
+        // Declaration order, and the nameless one dropped: it could never join to a column.
+        let named: Vec<(&str, &str)> =
+            stages.iter().map(|s| (s.name.as_str(), s.status.as_str())).collect();
+        assert_eq!(named, vec![("Build", status::SUCCESS), ("Deploy", status::RUNNING)]);
+
+        // A stage that is still going above a job that has finished — the fact a roll-up loses.
+        let jobs = map_timeline("42", "contoso", "App", &records);
+        assert_eq!(jobs[1].status, status::SUCCESS);
+        assert_eq!(stages[1].status, status::RUNNING);
+
+        // And its clock is the stage's, which opened 40s before the job's did.
+        assert_eq!(stages[1].started_at.as_deref(), Some("2026-08-24T10:02:00Z"));
+        assert_eq!(stages[1].finished_at, None);
+        assert_eq!(stages[1].run_id, "42");
+        assert_eq!(stages[1].provider, PROVIDER_AZURE);
+        // The id the frontend matches the placeholder job against.
+        assert_eq!(stages[0].id, "stage-build");
+    }
+
     /// A stage whose jobs *are* in the timeline must not also get a card of its own — that would
     /// double every column of every finished build.
     #[test]
@@ -1030,6 +1146,65 @@ mod tests {
         let jobs = map_timeline("42", "contoso", "App", &records);
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].name, "Compile");
+    }
+
+    /// Two stages instantiated from one template with a constant `displayName` are two stages.
+    ///
+    /// Azure requires the `stage:` key to be unique and says nothing about `displayName`, and the
+    /// timeline reports the display name — so the name is not an identity. Keyed by it, the jobless
+    /// one was suppressed by its namesake's jobs and vanished from the board, which is the exact
+    /// disappearance the placeholder loop exists to prevent.
+    #[test]
+    fn two_stages_sharing_a_display_name_stay_two_stages() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"stage-dev","parentId":null,"type":"Stage","name":"Deploy","order":1,
+               "state":"completed","result":"succeeded"},
+              {"id":"phase-dev","parentId":"stage-dev","type":"Phase","name":"Deploy","order":1},
+              {"id":"job-dev","parentId":"phase-dev","type":"Job","name":"Run","order":1,
+               "state":"completed","result":"succeeded"},
+              {"id":"stage-prod","parentId":null,"type":"Stage","name":"Deploy","order":2,
+               "state":"pending"}
+            ]}"#,
+        );
+
+        let jobs = map_timeline("42", "contoso", "App", &records);
+
+        // The second one still gets its placeholder: it is a different stage, however it is spelled.
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].name, "Run");
+        assert_eq!(jobs[0].stage_id.as_deref(), Some("stage-dev"));
+        assert_eq!(jobs[1].name, "Deploy");
+        assert_eq!(jobs[1].status, status::QUEUED);
+        // And the two carry different group keys under the one display name, which is what keeps
+        // the frontend from merging them into a single card.
+        assert_eq!(jobs[1].stage_id.as_deref(), Some("stage-prod"));
+        assert_eq!(jobs[0].stage.as_deref(), jobs[1].stage.as_deref());
+
+        // Both records reach the frontend, each addressable by the id its jobs carry.
+        let stages = map_stages("42", &records);
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0].id, "stage-dev");
+        assert_eq!(stages[1].id, "stage-prod");
+    }
+
+    /// A classic definition has phases and no stages, and its jobs group by the phase they hang
+    /// off — so the phase's id is what they carry.
+    #[test]
+    fn a_phase_lends_its_id_as_well_as_its_name() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"phase-1","parentId":null,"type":"Phase","name":"Agent job","order":1},
+              {"id":"job-1","parentId":"phase-1","type":"Job","name":"Run tests","order":1,
+               "state":"inProgress"},
+              {"id":"job-orphan","parentId":null,"type":"Job","name":"Orphan","order":9,
+               "state":"notStarted"}
+            ]}"#,
+        );
+        let jobs = map_timeline("7", "contoso", "App", &records);
+        assert_eq!(jobs[0].stage_id.as_deref(), Some("phase-1"));
+        // Nothing above it: no column, and so no key for one either.
+        assert_eq!(jobs[1].stage_id, None);
     }
 
     /// The three things the timeline mapping has to get right at once: a job's stage is its

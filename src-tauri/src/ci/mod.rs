@@ -116,7 +116,20 @@ pub struct PipelineJob {
     pub name: String,
     /// The column this job belongs to in the graph, when the provider says. `None` for GitHub,
     /// where nothing in the API knows — see [`PipelineRun::definition_path`].
+    ///
+    /// A *display* name, and therefore not an identity: see [`PipelineJob::stage_id`].
     pub stage: Option<String>,
+    /// The host's own id for that stage, when it has one. `None` for GitLab and GitHub.
+    ///
+    /// This is what the graph groups by, and [`stage`] is only what it *writes on the column*.
+    /// Azure requires a stage's `stage:` key to be unique and its `displayName` not to be, and the
+    /// timeline reports the display name — so two stages instantiated from one template with a
+    /// constant `displayName: Deploy` arrive as two records both called "Deploy". Grouped by name
+    /// they collapse into a single card that takes one stage's verdict and the other's jobs; the
+    /// failed one then has no representation on the board at all.
+    ///
+    /// [`stage`]: PipelineJob::stage
+    pub stage_id: Option<String>,
     pub status: String,
     pub raw_status: String,
     pub started_at: Option<String>,
@@ -127,11 +140,43 @@ pub struct PipelineJob {
     pub log_ref: Option<String>,
 }
 
+/// One stage of a run, as the **provider itself** reports it.
+///
+/// Not derived from the jobs, and that is the entire reason it exists. A stage is a container with
+/// a life of its own: it can be `inProgress` while every job under it has already succeeded (an
+/// approval, a post-job check, a gate still evaluating), it can be `canceled` above jobs that
+/// finished cleanly, and its wall clock starts before its first job and ends after its last. A
+/// card that rolled those facts up out of the job list would be confidently wrong exactly on the
+/// builds a person opens this screen to understand.
+///
+/// Only Azure fills it: its timeline carries `Stage` records next to the `Job` ones. GitLab knows
+/// which stage a job is in and *nothing else about the stage*, and GitHub has no stages at all —
+/// both send an empty vector, and the UI falls back to summarising the jobs, saying so.
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineStage {
+    pub provider: String,
+    pub run_id: String,
+    /// The host's own id for the stage. Shared with the placeholder job emitted for a stage that
+    /// has no jobs yet, which is how the UI tells that "job" apart from a real one — see
+    /// `azure::map_timeline`.
+    pub id: String,
+    /// What the job's `stage` field holds for every job inside it. The join key.
+    pub name: String,
+    /// One of [`status`], bucketed exactly like a job's.
+    pub status: String,
+    pub raw_status: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
 /// A run plus its jobs, fetched together because the UI never wants one without the other.
 #[derive(Debug, Clone, Serialize)]
 pub struct PipelineRunDetail {
     pub run: PipelineRun,
     pub jobs: Vec<PipelineJob>,
+    /// The stages the provider declared, when it says anything about them beyond their names.
+    /// Empty for GitHub and GitLab — see [`PipelineStage`].
+    pub stages: Vec<PipelineStage>,
 }
 
 /// A job's log, already capped.

@@ -360,6 +360,10 @@ fn map_job(host: &str, project: &str, run_id: &str, raw: RawJob) -> PipelineJob 
         run_id: run_id.to_string(),
         name: raw.name,
         stage: raw.stage,
+        // GitLab's stage is a bare string on the job and nothing else — there is no stage
+        // object to have an id. The graph groups by the name, which for GitLab *is* the
+        // identity: a pipeline cannot declare two stages with the same name.
+        stage_id: None,
         status: bucket_status(&raw.status, raw.allow_failure, None),
         raw_status: raw.status,
         started_at: raw.started_at,
@@ -465,7 +469,10 @@ pub async fn pipeline_detail(
 
     let run = map_pipeline_detail(host, project, raw_run);
     let jobs = raw_jobs.into_iter().map(|job| map_job(host, project, &run.id, job)).collect();
-    Ok(PipelineRunDetail { run, jobs })
+    // GitLab names a job's stage and says nothing else about the stage itself — no state, no
+    // start, no finish, and no endpoint that has them. The UI summarises the jobs instead, and
+    // an empty vector is what tells it to.
+    Ok(PipelineRunDetail { run, jobs, stages: Vec::new() })
 }
 
 /// A job's log — GitLab calls it the trace.
