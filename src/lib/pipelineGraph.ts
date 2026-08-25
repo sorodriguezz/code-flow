@@ -46,13 +46,16 @@ export interface PipelineGraph {
   /** The widest column — how many jobs ran at once at the busiest moment of the run. */
   maxParallel: number;
   /**
-   * The real arrows, when the run declared any — one per `needs:` that resolved to a job in this
-   * run, and they can skip columns, because a job may depend on something two levels back.
+   * The arrows, and where they came from depends on the source:
    *
-   * Empty for `stage` and `time`, and that emptiness is meaningful rather than missing: a stage
-   * name says which jobs ran together and *nothing* about which of them fed which. The renderer
-   * falls back to joining consecutive columns in full, which is the only honest drawing of "all of
-   * these, then all of those".
+   *  - `needs` — one per declaration that resolved to a job in this run. They can skip columns,
+   *    because a job may depend on something two levels back.
+   *  - `time` — the covering pairs of "could have gated", measured off the timestamps by
+   *    [`layerSpans`]. Weaker than a declaration and drawn all the same, because the alternative is
+   *    joining consecutive columns in full, which claims *more*: every job to every job.
+   *  - `stage` — empty, and meaningfully so. A stage name says which jobs ran under it and nothing
+   *    about which of them fed which; the stage board draws the relations between the **stages**,
+   *    which it works out from the stage clocks rather than from these.
    */
   edges: GraphEdge[];
 }
@@ -314,57 +317,216 @@ function declaredLabel(jobs: PipelineJob[], needs: Map<string, string[]>): strin
 }
 
 /**
- * A name for a wave of jobs that overlapped in time.
+ * A name for a column of jobs that ran at the same depth.
  *
  * One job lends its name; several have nothing in common but a clock, so the header shows only the
- * "×N in parallel" badge. Deliberately *not* the wave's index: see [`declaredLabel`].
+ * "×N in parallel" badge. Deliberately *not* the column's index: see [`declaredLabel`].
  */
 function labelForWave(jobs: PipelineJob[]): string {
   return jobs.length === 1 ? jobs[0].name : "";
 }
 
 /**
- * Waves of jobs whose runs overlapped in time.
+ * How far a span may appear to outlive the one after it and still count as its gate.
  *
- * Interval merging: sort by start, and a job joins the open wave when it started before that wave
- * ended. This is the only grouping that needs nothing but the data every provider returns, and it
- * is the only one that is *measured* rather than declared — which cuts both ways. It cannot claim
- * a dependency that wasn't there, and it can invent one that was only ever a queue.
+ * A sequential pipeline is the common case and it has to keep looking sequential. The hosts stamp a
+ * container's `finishTime` when it finished tearing down and its successor's `startTime` when the
+ * successor was dispatched, and those two are recorded by different machines: a few hundred
+ * milliseconds of overlap between two stages that plainly ran one after the other is ordinary, and
+ * read literally it would put them side by side and claim they ran at once.
  *
- * Jobs that never started (queued, skipped) have no interval to merge and are collected into a
- * trailing column: they are real, they belong on screen, and putting them anywhere else would
- * imply a position in the run they haven't earned yet.
+ * Two seconds is deliberately far below the overlap of anything genuinely concurrent — parallel
+ * stages share minutes, not milliseconds — so the slack cannot merge a real branch back into a
+ * chain. It buys the reverse: a chain stays a chain.
  */
-function byTime(jobs: PipelineJob[]): GraphColumn[] {
-  const started = jobs.filter((job) => at(job.started_at) !== null);
-  const pending = jobs.filter((job) => at(job.started_at) === null);
+const GATE_SLACK_MS = 2000;
 
-  const sorted = [...started].sort((a, b) => (at(a.started_at) ?? 0) - (at(b.started_at) ?? 0));
-  const waves: PipelineJob[][] = [];
-  let waveEnd = -Infinity;
+/** The five status buckets that mean "this is over". Everything else is still moving.
+ *
+ *  Lives here rather than beside the icons in `pipelineStatus.ts` because `layerSpans` needs it and
+ *  nothing under `lib/` should be reaching into a component directory for a set of strings. */
+export function isSettled(status: string): boolean {
+  return (
+    status === "success" ||
+    status === "warning" ||
+    status === "failed" ||
+    status === "cancelled" ||
+    status === "skipped"
+  );
+}
 
-  for (const job of sorted) {
-    const start = at(job.started_at)!;
-    // A job still running has no end; treat it as reaching the present, which it does.
-    const end = at(job.finished_at) ?? Date.now();
-    if (waves.length === 0 || start >= waveEnd) {
-      waves.push([job]);
-      waveEnd = end;
-    } else {
-      waves[waves.length - 1].push(job);
-      waveEnd = Math.max(waveEnd, end);
+/** One thing that occupied a span of time and has to be placed in the drawing: a job, or a whole
+ *  stage. Only the two timestamps matter, which is why this is not `PipelineJob`. */
+export interface Span {
+  key: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /**
+   * Whether it has reached a terminal state. Only consulted for the awkward span that has settled
+   * without publishing a finish time — see the `end` computation in [`layerSpans`]. A span with a
+   * finish stamp does not need it, and neither does one that never started.
+   */
+  settled?: boolean;
+}
+
+export interface SpanLayers {
+  /** `layers[d]` is every key at depth `d`, in the order the provider declared them. */
+  layers: string[][];
+  /** The covering pairs — the *latest* things that could have gated each span, and no more. */
+  edges: GraphEdge[];
+  /** True once any layer holds more than one span: the drawing now says something beyond "then". */
+  branched: boolean;
+}
+
+/**
+ * Depth for each span, from what could possibly have gated what.
+ *
+ * This replaces the interval merging that used to group jobs into "waves", and it is the reason a
+ * run stops being drawn as a queue of one thing after another. Merging asks "did these overlap",
+ * which is not transitive and collapses a whole chain the moment one long span touches all of it:
+ * a 4-minute `Testing` running alongside `Build`→`Deploy` merged all three into one column, and the
+ * fact that Deploy could not start until Build finished disappeared.
+ *
+ * What is asked instead is **"could j have gated i"**, and three rules answer it:
+ *
+ *  1. `j` started first and had **finished** by the time `i` started, give or take
+ *     [`GATE_SLACK_MS`]. Finished is meant literally: something still running has not gated
+ *     anything, however long ago it started.
+ *  2. `i` never started, so no clock can place it. It sits behind everything declared ahead of it.
+ *  3. `j` never started, so nothing declared after it can be shown running *beside* it — a stage
+ *     that was skipped by a condition did not run alongside the one after it, it was passed over on
+ *     the way there. Without this rule a `DeployStaging` skipped on this branch was drawn stacked
+ *     against `DeployProd` as though the two had gone out together.
+ *
+ * Depth is the *longest* chain of gates reaching a span, so anything with no gate between it and
+ * another span shares that span's column. On a real Azure build — `Environment` → (`Testing`,
+ * `Build`) → (`Quality Code`, `Deploy`) — this reproduces the host's own drawing exactly, arrows
+ * included, out of nothing but five pairs of timestamps.
+ *
+ * **Declaration order is the tie-break**, deliberately: `j` can only gate `i` when it comes first in
+ * the array. That guarantees the relation is acyclic whatever the timestamps say (two zero-length
+ * spans stamped identically would otherwise gate each other), and it is not merely a safety net —
+ * declaration order is itself something the provider told us. On the build above, `Quality Code` is
+ * declared before `Deploy` and finished after it, so by the clock alone Deploy appears to gate it
+ * and the two stop being siblings; the YAML's order is what keeps them in one column.
+ *
+ * The three rules together are **not** transitively closed — rule 3 can hand `j → k` and `k → i`
+ * where `j` and `i` overlap outright — so the closure is computed rather than assumed. That is what
+ * `reaches` is: without it the depths would be short by however many unplaceable spans lay along
+ * the chain, and the covers below would not be a transitive reduction at all but merely a filter
+ * that happens to be right most of the time.
+ *
+ * Note what is *not* a parameter: the clock. Nothing here consults the present, so a run's shape is
+ * a function of the run alone and two polls of the same unchanged data cannot draw it differently.
+ * That was not true while a running span was measured to `now`.
+ */
+export function layerSpans(spans: Span[]): SpanLayers {
+  const n = spans.length;
+  const start = spans.map((span) => at(span.startedAt));
+  // When it stopped, or `null` for something that has not stopped.
+  //
+  // Deliberately *not* `now`. `now` is what the durations on screen are measured against, and it was
+  // used here too until a run with two stages both in flight was drawn as a chain: `end - SLACK <=
+  // start` reads a running span as one that finished two seconds ago, so every sibling dispatched
+  // within the last couple of seconds of the poll looked gated by it. Two things running at the same
+  // instant are the one case where concurrency is not an inference at all, and it was the case this
+  // got wrong.
+  //
+  // A span that has settled without a finish stamp — an abandoned Azure stage — is taken as
+  // instantaneous at its start rather than as never-ending: it is over, and what is left of it must
+  // not hold the next column open.
+  const end = spans.map((span, i) => {
+    if (start[i] === null) return null;
+    const stopped = at(span.finishedAt);
+    if (stopped !== null) return stopped;
+    return span.settled ? start[i] : null;
+  });
+
+  const gate: boolean[][] = Array.from({ length: n }, () => new Array<boolean>(n).fill(false));
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < i; j++) {
+      // Rules 2 and 3: one of the pair has no clock, so the file's order is the whole answer.
+      if (start[i] === null || start[j] === null) {
+        gate[j][i] = true;
+        continue;
+      }
+      if (end[j] === null) continue;
+      gate[j][i] =
+        // Started later, or they are siblings: two stages dispatched in the same instant are the
+        // shape this whole function exists to draw, and the shorter of them must not be read as the
+        // longer one's gate just because it finished first.
+        (start[j] as number) < (start[i] as number) &&
+        (end[j] as number) - GATE_SLACK_MS <= (start[i] as number);
     }
   }
 
-  const columns = waves.map((wave, index) => ({
-    key: `time:${index}`,
-    label: labelForWave(wave),
-    jobs: wave,
-  }));
-  if (pending.length > 0) {
-    columns.push({ key: "time:pending", label: "", jobs: pending });
+  // `reaches[i][j]` — j is an ancestor of i. Built in one ascending pass because `gate[j][i]` only
+  // ever holds for `j < i`, so every ancestor of j is already known by the time i is reached.
+  const reaches: boolean[][] = Array.from({ length: n }, () => new Array<boolean>(n).fill(false));
+  const depth = new Array<number>(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < i; j++) {
+      if (!gate[j][i]) continue;
+      reaches[i][j] = true;
+      for (let k = 0; k < j; k++) if (reaches[j][k]) reaches[i][k] = true;
+    }
+    // The longest chain ending here. Every chain to i passes through one of its ancestors, and each
+    // ancestor's own longest chain is already settled, so the maximum over them is exact.
+    for (let j = 0; j < i; j++) {
+      if (reaches[i][j]) depth[i] = Math.max(depth[i], depth[j] + 1);
+    }
   }
-  return columns;
+
+  const edges: GraphEdge[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < i; j++) {
+      if (!reaches[i][j]) continue;
+      // A cover: nothing sits between them. `j → k → i` already says everything `j → i` would.
+      let covered = false;
+      for (let k = j + 1; k < i && !covered; k++) covered = reaches[k][j] && reaches[i][k];
+      if (!covered) edges.push({ fromId: spans[j].key, toId: spans[i].key });
+    }
+  }
+
+  const layers: string[][] = [];
+  for (let i = 0; i < n; i++) {
+    while (layers.length <= depth[i]) layers.push([]);
+    layers[depth[i]].push(spans[i].key);
+  }
+
+  return { layers, edges, branched: layers.some((layer) => layer.length > 1) };
+}
+
+/**
+ * Columns of jobs, placed by [`layerSpans`] — the fallback for a run whose structure nothing
+ * declared.
+ *
+ * This is the only grouping that needs nothing but the data every provider returns, and it is the
+ * only one that is *measured* rather than declared, which cuts both ways: it cannot claim a
+ * dependency that wasn't there, and it can invent one that was only ever a queue for a runner.
+ *
+ * Jobs that never started are placed by declaration order rather than swept into a trailing column,
+ * which is what `layerSpans`' second rule buys: a queued job now sits behind what was declared
+ * before it instead of behind everything, and two of them declared in sequence read as a sequence.
+ */
+function byTime(jobs: PipelineJob[]): { columns: GraphColumn[]; edges: GraphEdge[] } {
+  const byId = new Map(jobs.map((job) => [job.id, job]));
+  const { layers, edges } = layerSpans(
+    jobs.map((job) => ({
+      key: job.id,
+      startedAt: job.started_at,
+      finishedAt: job.finished_at,
+      settled: isSettled(job.status),
+    })),
+  );
+
+  return {
+    columns: layers.map((layer, index) => {
+      const inLayer = layer.map((key) => byId.get(key)!);
+      return { key: `time:${index}`, label: labelForWave(inLayer), jobs: inLayer };
+    }),
+    edges,
+  };
 }
 
 export interface BuildGraphOptions {
@@ -402,5 +564,6 @@ export function buildGraph(jobs: PipelineJob[], options: BuildGraphOptions = {})
     if (built) return finish(built.columns, "needs", built.edges);
   }
 
-  return finish(byTime(jobs), "time");
+  const measured = byTime(jobs);
+  return finish(measured.columns, "time", measured.edges);
 }

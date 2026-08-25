@@ -6162,6 +6162,9 @@ const en = {
   "pipelines.sourceStage": "stages declared by the provider",
   "pipelines.sourceStageHint":
     "The columns are the stages the provider itself declares for this pipeline. Nothing here is inferred.",
+  "pipelines.sourceStageOrder": "declared stages · measured order",
+  "pipelines.sourceStageOrderHint":
+    "The cards are the stages the provider declares. Which of them ran beside which is not something any of the three hosts publishes, so it is worked out here from the stage clocks: a stage sits behind another only when that one had finished before it started. Two stages that ran back to back only because there was one agent free will look like a dependency.",
   "pipelines.sourceNeeds": "needs: from the workflow",
   "pipelines.sourceNeedsHint":
     "GitHub's API publishes no relation between jobs, so the columns are read out of the needs: in the workflow file in your working copy. Each column is one level of dependencies: the jobs in it depend on nothing else in it, which is why they can run at once.",

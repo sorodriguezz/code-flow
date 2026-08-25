@@ -6083,6 +6083,9 @@ export const es = {
   "pipelines.sourceStage": "etapas declaradas por el proveedor",
   "pipelines.sourceStageHint":
     "Las columnas son las etapas que el propio proveedor declara para este pipeline. Aquí no se deduce nada.",
+  "pipelines.sourceStageOrder": "etapas declaradas · orden medido",
+  "pipelines.sourceStageOrderHint":
+    "Las tarjetas son las etapas que declara el proveedor. Cuál corrió al lado de cuál no lo publica ninguno de los tres hosts, así que se deduce aquí de los relojes de cada etapa: una etapa se coloca detrás de otra solo si esa ya había terminado cuando la primera arrancó. Dos etapas que corrieron una tras otra solo porque había un agente libre parecerán una dependencia.",
   "pipelines.sourceNeeds": "needs: del workflow",
   "pipelines.sourceNeedsHint":
     "La API de GitHub no publica ninguna relación entre jobs, así que las columnas se leen del needs: del archivo del workflow que tienes en la copia de trabajo. Cada columna es un nivel de dependencias: los jobs que hay en ella no dependen unos de otros, y por eso pueden correr a la vez.",

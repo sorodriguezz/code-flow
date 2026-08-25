@@ -1,7 +1,15 @@
 import { useEffect, useMemo } from "react";
 import { Info } from "lucide-react";
 import { readFileText } from "../../lib/tauri/commands";
-import { buildGraph, parseWorkflowNeeds, type GraphEdge, type GraphSource } from "../../lib/pipelineGraph";
+import {
+  buildGraph,
+  isSettled,
+  layerSpans,
+  parseWorkflowNeeds,
+  type GraphEdge,
+  type GraphSource,
+  type PipelineGraph,
+} from "../../lib/pipelineGraph";
 import { useCiStore, runKey } from "../../state/ciStore";
 import { useT } from "../../state/languageStore";
 import { Skeleton } from "../common/Skeleton";
@@ -35,7 +43,6 @@ const HEAD = 6;
 
 const columnX = (column: number) => column * (CARD_W + GUTTER);
 const cardMidY = (row: number) => HEADER_H + row * STEP + CARD_H / 2;
-const cardBottom = (row: number) => HEADER_H + row * STEP + CARD_H;
 
 const SOURCE_LABEL: Record<GraphSource, TranslationKey> = {
   stage: "pipelines.sourceStage",
@@ -132,6 +139,48 @@ function JobCard({
   );
 }
 
+/** Where something sits, for the two routers below. */
+interface Box {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * The route for an arrow that skips a column: out of the source's right edge, down the gutter,
+ * along a lane beneath everything, up the gutter before the target and into its left edge.
+ *
+ * It used to drop straight out of the source card's **underside** and climb into the target's, and
+ * that was fine while a column held one card per row with clear space below the block. It stopped
+ * being fine the moment a column could hold a *stack*: the drop leg then ran behind whatever card
+ * sat underneath the source, so the arrow appeared to leave the card below the one it actually
+ * belongs to — an arrow attributed to the wrong stage is worse than no arrow, which is the same
+ * argument that put these routes down here in the first place.
+ *
+ * The gutters are the fix because they are empty by construction: no card is ever drawn in one. So
+ * both vertical legs run in open space, and the arrowhead arrives horizontally at the target's left
+ * edge exactly like every other arrow on the drawing.
+ */
+function bypassRoute(from: Box, to: Box, gutter: number, laneY: number): { d: string; head: string } {
+  const y1 = from.top + from.height / 2;
+  const y2 = to.top + to.height / 2;
+  const x1 = from.left + from.width;
+  const x2 = to.left - HEAD;
+  // The middle of the gutter on either side. Half a gutter is 20px at its narrowest, comfortably
+  // more than the corner radius, so the arcs never overrun the straight they turn out of.
+  const down = x1 + gutter / 2;
+  const up = to.left - gutter / 2;
+  return {
+    d:
+      `M ${x1} ${y1} H ${down - CORNER} Q ${down} ${y1} ${down} ${y1 + CORNER} ` +
+      `V ${laneY - CORNER} Q ${down} ${laneY} ${down + CORNER} ${laneY} ` +
+      `H ${up - CORNER} Q ${up} ${laneY} ${up} ${laneY - CORNER} ` +
+      `V ${y2 + CORNER} Q ${up} ${y2} ${up + CORNER} ${y2} H ${x2}`,
+    head: `M ${x2 + HEAD} ${y2} L ${x2 - 1} ${y2 - 3.6} L ${x2 - 1} ${y2 + 3.6} Z`,
+  };
+}
+
 interface DrawnEdge {
   key: string;
   /** The stroked route. */
@@ -183,8 +232,8 @@ function layoutEdges(
   const laneOf = new Map<string, number>();
   const laneEnd: number[] = [];
   for (const { edge, from, to } of bypasses) {
-    const left = columnX(from.column) + CARD_W - 22;
-    const right = columnX(to.column) + 22;
+    const left = columnX(from.column) + CARD_W + GUTTER / 2;
+    const right = columnX(to.column) - GUTTER / 2;
     let lane = laneEnd.findIndex((end) => end < left - 10);
     if (lane === -1) {
       laneEnd.push(right);
@@ -216,18 +265,15 @@ function layoutEdges(
       };
     }
 
-    const sx = columnX(from.column) + CARD_W - 22;
-    const sy = cardBottom(from.row);
-    const tx = columnX(to.column) + 22;
-    const ty = cardBottom(to.row);
-    const ly = blockBottom + LANE_GAP + lane * LANE_STEP;
     return {
       key,
       lit,
-      d:
-        `M ${sx} ${sy} V ${ly - CORNER} Q ${sx} ${ly} ${sx + CORNER} ${ly} ` +
-        `H ${tx - CORNER} Q ${tx} ${ly} ${tx} ${ly - CORNER} V ${ty + HEAD}`,
-      head: `M ${tx} ${ty} L ${tx - 3.6} ${ty + HEAD} L ${tx + 3.6} ${ty + HEAD} Z`,
+      ...bypassRoute(
+        { left: columnX(from.column), top: HEADER_H + from.row * STEP, width: CARD_W, height: CARD_H },
+        { left: columnX(to.column), top: HEADER_H + to.row * STEP, width: CARD_W, height: CARD_H },
+        GUTTER,
+        blockBottom + LANE_GAP + lane * LANE_STEP,
+      ),
     };
   });
 
@@ -290,19 +336,10 @@ function Connectors({
  * arrows behind them are drawn from the same two functions and a layout the SVG has to *measure*
  * is a layout the SVG gets wrong for one frame after every resize.
  */
-function JobColumns({
-  detail,
-  now,
-  needs,
-}: {
-  detail: PipelineRunDetail;
-  now: number;
-  needs: Map<string, string[]> | null;
-}) {
+function JobColumns({ graph, now }: { graph: PipelineGraph; now: number }) {
   const selection = useCiStore((s) => s.selection);
   const selectJob = useCiStore((s) => s.selectJob);
   const t = useT();
-  const graph = useMemo(() => buildGraph(detail.jobs, { needs }), [detail.jobs, needs]);
 
   const { drawn, width, height } = useMemo(() => {
     const position = new Map<string, { column: number; row: number }>();
@@ -409,15 +446,6 @@ const stageHeight = (rows: number) => {
   const drawn = Math.max(1, rows);
   return 2 + STAGE_HEAD_H + STAGE_PAD * 2 + drawn * STAGE_ROW_H + (drawn - 1) * STAGE_ROW_GAP;
 };
-
-/** The five buckets that mean "this is over". Everything else is still moving. */
-const SETTLED: ReadonlySet<PipelineStatus> = new Set<PipelineStatus>([
-  "success",
-  "warning",
-  "failed",
-  "cancelled",
-  "skipped",
-]);
 
 /** Border tint per stage status: only the three worth finding without reading — what is running,
  *  what is broken, what is nearly broken. A card per stage is a big enough object that colouring
@@ -549,7 +577,7 @@ function summarise(
   const placeholder =
     columnJobs.length === 1 && stagesById.has(columnJobs[0].id) ? columnJobs[0] : null;
   const jobs = placeholder ? [] : columnJobs;
-  const settled = jobs.filter((job) => SETTLED.has(statusOf(job.status))).length;
+  const settled = jobs.filter((job) => isSettled(job.status)).length;
   const overlap = peakOverlap(jobs, now);
 
   const declared = record ?? placeholder;
@@ -631,6 +659,7 @@ function StageCard({
   name,
   summary,
   left,
+  top,
   selectedId,
   now,
   onSelect,
@@ -638,6 +667,7 @@ function StageCard({
   name: string;
   summary: StageSummary;
   left: number;
+  top: number;
   selectedId: string | null | undefined;
   now: number;
   onSelect: (jobId: string) => void;
@@ -656,8 +686,8 @@ function StageCard({
 
   return (
     <div
-      style={{ left, width: STAGE_W, height: stageHeight(total) }}
-      className={`absolute top-0 flex flex-col overflow-hidden rounded-[10px] border bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${
+      style={{ left, top, width: STAGE_W, height: stageHeight(total) }}
+      className={`absolute flex flex-col overflow-hidden rounded-[10px] border bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${
         STAGE_BORDER[summary.status]
       } ${summary.status === "skipped" ? "opacity-[0.72]" : ""}`}
     >
@@ -760,65 +790,200 @@ function elbow(x1: number, y1: number, x2: number, y2: number): string {
   );
 }
 
+/** Vertical room between two stage cards sharing a column. Wider than the gap between job rows
+ *  inside a card, so a column of two stages never reads as one tall stage. */
+const STAGE_LANE_GAP = 16;
+
+/** One stage, placed. */
+interface PlacedStage {
+  key: string;
+  name: string;
+  summary: StageSummary;
+  /** Which column it sits in — its depth in the gating order, not its position in the file. */
+  lane: number;
+  left: number;
+  top: number;
+  height: number;
+}
+
+export interface StageBoardModel {
+  placed: PlacedStage[];
+  edges: GraphEdge[];
+  width: number;
+  height: number;
+  /** Whether anything actually runs beside anything else. Drives the header badge: until this is
+   *  true the board is a chain, and a chain is what the declared order alone already said. */
+  branched: boolean;
+}
+
 /**
- * The run as a board of stage cards.
+ * The board: which stage sits where, and what points at what.
  *
- * One card per stage, in the order the provider declared them, joined left to right. The joins are
- * between *cards* and not between jobs on purpose: a stage name says which jobs ran under it and
- * nothing whatever about which of them fed which, and an arrow drawn from one job to another would
- * be claiming a dependency nobody reported. Card to card claims only "this stage, then that one",
- * which is exactly what the stage order entitles the drawing to say.
+ * The columns are **not** the stages in file order, and that is the whole point of this function.
+ * Stages do not queue up one behind another — the build in the screenshot that started this ran
+ * `Testing` and `Build` at the same time and then `Quality Code` beside `Deploy` — and drawn as a
+ * row of five the picture said the opposite of what the host's own page showed.
+ *
+ * Nothing here is guessed at from scratch: [`layerSpans`] places each stage at the end of the
+ * longest chain of stages that could have gated it, out of the stage clocks the provider already
+ * gave us, and hands back the covering pairs as the arrows. What it cannot know is a `dependsOn`
+ * that the clock does not betray — two stages that genuinely ran back to back for want of an agent
+ * look like a dependency — which is what the header badge is for.
  */
-function StageBoard({ detail, now }: { detail: PipelineRunDetail; now: number }) {
-  const selection = useCiStore((s) => s.selection);
-  const selectJob = useCiStore((s) => s.selectJob);
-  const graph = useMemo(() => buildGraph(detail.jobs), [detail.jobs]);
+function buildStageBoard(
+  graph: PipelineGraph,
+  stages: PipelineStage[],
+  now: number,
+): StageBoardModel {
+  // By id, not by name: `byStage` already groups the jobs by `stage_id`, and two stages sharing a
+  // `displayName` have to find their own record rather than the last one to claim the string.
+  const stagesById = new Map(stages.map((stage) => [stage.id, stage]));
+  const cards = graph.columns.map((column) => ({
+    key: column.key,
+    name: column.label,
+    summary: summarise(column.jobs[0]?.stage_id ?? null, column.jobs, stagesById, now),
+  }));
 
-  const cards = useMemo(() => {
-    // By id, not by name: `byStage` already groups the jobs by `stage_id`, and two stages sharing a
-    // `displayName` have to find their own record rather than the last one to claim the string.
-    const stagesById = new Map(detail.stages.map((stage) => [stage.id, stage]));
-    return graph.columns.map((column) => ({
-      key: column.key,
-      name: column.label,
-      summary: summarise(column.jobs[0]?.stage_id ?? null, column.jobs, stagesById, now),
-    }));
-  }, [graph.columns, detail.stages, now]);
+  const { layers, edges, branched } = layerSpans(
+    cards.map((card) => ({
+      key: card.key,
+      startedAt: card.summary.startedAt,
+      finishedAt: card.summary.finishedAt,
+      settled: isSettled(card.summary.status),
+    })),
+  );
 
-  const { links, width, height } = useMemo(() => {
-    const heights = cards.map((card) => stageHeight(card.summary.jobs.length));
-    const holdsSelection = (index: number) =>
-      Boolean(selection?.jobId) && cards[index].summary.jobs.some((job) => job.id === selection?.jobId);
+  const byKey = new Map(cards.map((card) => [card.key, card]));
+  const placed: PlacedStage[] = [];
+  let height = 0;
+  layers.forEach((layer, lane) => {
+    let top = 0;
+    for (const key of layer) {
+      const card = byKey.get(key)!;
+      const cardHeight = stageHeight(card.summary.jobs.length);
+      placed.push({ ...card, lane, left: stageX(lane), top, height: cardHeight });
+      top += cardHeight + STAGE_LANE_GAP;
+    }
+    height = Math.max(height, top - STAGE_LANE_GAP);
+  });
 
-    const links: DrawnEdge[] = cards.slice(1).map((card, index) => {
-      const y1 = heights[index] / 2;
-      const y2 = heights[index + 1] / 2;
-      const x1 = stageX(index) + STAGE_W;
-      const x2 = stageX(index + 1) - HEAD;
+  return {
+    placed,
+    edges,
+    width: Math.max(1, layers.length * (STAGE_W + STAGE_GUTTER) - STAGE_GUTTER),
+    height: Math.max(1, height),
+    branched,
+  };
+}
+
+/**
+ * Every arrow on the board, and how much room the routes underneath it need.
+ *
+ * Two shapes, for the same reason the job graph has two. An arrow between **neighbouring columns**
+ * is an elbow across the gutter, which is empty space by construction. An arrow that **skips a
+ * column** — which the layering does produce, when the thing it points at was pushed deeper by a
+ * longer chain elsewhere — cannot go straight: it would pass behind the cards in between and
+ * surface only as an arrowhead, attached in the reader's eye to whichever short arrow it happens to
+ * be lying on. Those drop below the whole board, run along a lane of their own and come back up
+ * into the target's underside, which is a shape that says "this one goes around".
+ */
+function boardEdges(
+  board: StageBoardModel,
+  selectedId: string | null | undefined,
+): { drawn: DrawnEdge[]; laneCount: number } {
+  const rect = new Map(board.placed.map((stage) => [stage.key, stage]));
+  const holdsSelection = (stage: PlacedStage) =>
+    Boolean(selectedId) && stage.summary.jobs.some((job) => job.id === selectedId);
+
+  const routed = board.edges.flatMap((edge) => {
+    const from = rect.get(edge.fromId);
+    const to = rect.get(edge.toId);
+    if (!from || !to || from.lane >= to.lane) return [];
+    return [{ edge, from, to }];
+  });
+
+  // Longest span first, so the arrow that has to travel furthest takes the lane nearest the board
+  // and the shorter ones nest under it instead of crossing it. Same packing as `layoutEdges`.
+  const laneOf = new Map<string, number>();
+  const laneEnd: number[] = [];
+  for (const { edge, from, to } of routed
+    .filter(({ from, to }) => to.lane > from.lane + 1)
+    .sort((a, b) => b.to.lane - b.from.lane - (a.to.lane - a.from.lane))) {
+    const left = from.left + STAGE_W + STAGE_GUTTER / 2;
+    const right = to.left - STAGE_GUTTER / 2;
+    let lane = laneEnd.findIndex((occupied) => occupied < left - 10);
+    if (lane === -1) {
+      laneEnd.push(right);
+      lane = laneEnd.length - 1;
+    } else {
+      laneEnd[lane] = right;
+    }
+    laneOf.set(`${edge.fromId}>${edge.toId}`, lane);
+  }
+
+  const drawn = routed.map(({ edge, from, to }) => {
+    const key = `${edge.fromId}>${edge.toId}`;
+    const lit = holdsSelection(from) || holdsSelection(to);
+    const lane = laneOf.get(key);
+
+    if (lane === undefined) {
+      const x1 = from.left + STAGE_W;
+      const y1 = from.top + from.height / 2;
+      const x2 = to.left - HEAD;
+      const y2 = to.top + to.height / 2;
       return {
-        key: `${cards[index].key}>${card.key}`,
+        key,
+        lit,
         d: elbow(x1, y1, x2, y2),
         head: `M ${x2 + HEAD} ${y2} L ${x2 - 1} ${y2 - 3.6} L ${x2 - 1} ${y2 + 3.6} Z`,
-        lit: holdsSelection(index) || holdsSelection(index + 1),
       };
-    });
+    }
 
     return {
-      links,
-      width: Math.max(1, cards.length * (STAGE_W + STAGE_GUTTER) - STAGE_GUTTER),
-      height: Math.max(1, ...heights),
+      key,
+      lit,
+      ...bypassRoute(
+        { left: from.left, top: from.top, width: STAGE_W, height: from.height },
+        { left: to.left, top: to.top, width: STAGE_W, height: to.height },
+        STAGE_GUTTER,
+        board.height + LANE_GAP + lane * LANE_STEP,
+      ),
     };
-  }, [cards, selection?.jobId]);
+  });
+
+  return { drawn, laneCount: laneEnd.length };
+}
+
+/**
+ * The run as a board of stage cards, laid out by what ran beside what.
+ *
+ * The joins are between *cards* and not between jobs on purpose: a stage name says which jobs ran
+ * under it and nothing whatever about which of them fed which, and an arrow from one job to another
+ * would be claiming a dependency nobody reported. Between stages there is something to claim —
+ * see [`buildStageBoard`].
+ */
+function StageBoard({ board, now }: { board: StageBoardModel; now: number }) {
+  const selection = useCiStore((s) => s.selection);
+  const selectJob = useCiStore((s) => s.selectJob);
+
+  const { drawn, laneCount } = useMemo(
+    () => boardEdges(board, selection?.jobId),
+    [board, selection?.jobId],
+  );
+  // The bypass lanes are part of the drawing, so they are part of its height: without this the
+  // block would be exactly as tall as its cards and every route under them would be clipped.
+  const height = board.height + (laneCount > 0 ? LANE_GAP + laneCount * LANE_STEP : 0);
 
   return (
-    <div className="relative" style={{ width, height }}>
-      <Connectors drawn={links} width={width} height={height} />
-      {cards.map((card, index) => (
+    <div className="relative" style={{ width: board.width, height }}>
+      <Connectors drawn={drawn} width={board.width} height={height} />
+      {board.placed.map((stage) => (
         <StageCard
-          key={card.key}
-          name={card.name}
-          summary={card.summary}
-          left={stageX(index)}
+          key={stage.key}
+          name={stage.name}
+          summary={stage.summary}
+          left={stage.left}
+          top={stage.top}
           selectedId={selection?.jobId}
           now={now}
           onSelect={(jobId) => void selectJob(jobId)}
@@ -964,10 +1129,30 @@ export function RunGraph({
   const t = useT();
   const needs = useWorkflowNeeds(projectId, localPath, detail);
 
-  const source: GraphSource = useMemo(() => {
-    if (!detail) return "flat";
-    return buildGraph(detail.jobs, { needs }).source;
-  }, [detail, needs]);
+  // Built once and handed down rather than rebuilt inside each drawing, which is what the two used
+  // to do.
+  const graph = useMemo(() => (detail ? buildGraph(detail.jobs, { needs }) : null), [detail, needs]);
+  const board = useMemo(
+    () =>
+      detail && graph?.source === "stage" ? buildStageBoard(graph, detail.stages, now) : null,
+    [graph, detail, now],
+  );
+  const source: GraphSource = graph?.source ?? "flat";
+  // A board whose stages all sit one behind another says nothing the declared order didn't already,
+  // so it keeps the plain badge. The moment two stages share a column the arrangement is something
+  // this app worked out from the clocks, and the badge has to stop claiming the provider said it.
+  const label: TranslationKey =
+    mode === "waterfall"
+      ? "pipelines.sourceMeasured"
+      : board?.branched
+        ? "pipelines.sourceStageOrder"
+        : SOURCE_LABEL[source];
+  const hint: TranslationKey =
+    mode === "waterfall"
+      ? "pipelines.sourceMeasuredHint"
+      : board?.branched
+        ? "pipelines.sourceStageOrderHint"
+        : SOURCE_HINT[source];
 
   return (
     <>
@@ -982,13 +1167,10 @@ export function RunGraph({
               source, and "measured from timestamps" is a materially weaker claim than "declared by
               the pipeline" — a reader who can't tell them apart will believe the wrong one. */}
           {detail && (
-            <Tooltip
-              label={t(mode === "waterfall" ? "pipelines.sourceMeasured" : SOURCE_LABEL[source])}
-              description={t(mode === "waterfall" ? "pipelines.sourceMeasuredHint" : SOURCE_HINT[source])}
-            >
+            <Tooltip label={t(label)} description={t(hint)}>
               <span className="flex shrink-0 items-center gap-1 rounded border border-[var(--cf-border)] px-1 text-[9.5px] text-[var(--cf-text-muted)]">
                 <Info size={9} className="shrink-0 opacity-70" />
-                {t(mode === "waterfall" ? "pipelines.sourceMeasured" : SOURCE_LABEL[source])}
+                {t(label)}
               </span>
             </Tooltip>
           )}
@@ -1042,13 +1224,13 @@ export function RunGraph({
           <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("pipelines.noJobs")}</p>
         ) : mode !== "graph" ? (
           <Waterfall detail={detail} now={now} />
-        ) : source === "stage" ? (
+        ) : board ? (
           /* The provider named its stages, so the drawing is made of stages — the same shape the
              host's own run page uses, because that is the shape the reader arrived with. */
-          <StageBoard detail={detail} now={now} />
-        ) : (
-          <JobColumns detail={detail} now={now} needs={needs} />
-        )}
+          <StageBoard board={board} now={now} />
+        ) : graph ? (
+          <JobColumns graph={graph} now={now} />
+        ) : null}
       </div>
     </>
   );
