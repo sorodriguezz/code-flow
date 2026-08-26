@@ -379,6 +379,348 @@ export interface SpanLayers {
 }
 
 /**
+ * Where the *stage board's* arrangement came from.
+ *
+ * A strictly different question from [`GraphSource`], which is about the **job** columns — hence a
+ * union of its own rather than another member on that one. `dependsOn` is a declaration read out of
+ * the pipeline file; `clocks` is [`layerSpans`] measuring, which can be wrong and should say so.
+ */
+export type StageLayout = "dependsOn" | "clocks";
+
+/** What one walk of an Azure pipeline file yields. Both maps are keyed by **lower-cased ref name**,
+ * because Azure resolves a `dependsOn` case-insensitively. */
+export interface DeclaredStages {
+  /** ref name → the ref names it declares a dependency on. */
+  deps: Map<string, string[]>;
+  /** ref name → the job names the file declares under it, in file order. */
+  jobs: Map<string, string[]>;
+}
+
+/** Appends to a `Map` of lists, creating the list on first use. */
+function push<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const existing = map.get(key);
+  if (existing) existing.push(value);
+  else map.set(key, [value]);
+}
+
+/** A `${{ … }}` template expression or a `$[ … ]` runtime one — neither resolvable from the file. */
+function isExpression(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.startsWith("${{") || trimmed.startsWith("$[");
+}
+
+/** The job names one `stages:` entry declares, in file order, preferring what Azure will display. */
+function declaredJobNames(entry: Record<string, unknown>): string[] {
+  const jobs = entry.jobs;
+  if (!Array.isArray(jobs)) return [];
+  const out: string[] = [];
+  for (const job of jobs) {
+    if (!job || typeof job !== "object") continue;
+    const record = job as Record<string, unknown>;
+    // `displayName` is what the timeline would have reported had the stage run, so it is what the
+    // ghost row should say. `job`/`deployment` is the ref name, and the fallback.
+    const name = [record.displayName, record.job, record.deployment].find(
+      (candidate) => typeof candidate === "string" && candidate.trim() !== "",
+    );
+    if (typeof name === "string" && !isExpression(name)) out.push(name.trim());
+  }
+  return out;
+}
+
+/**
+ * Reads the `dependsOn:` — and the declared job names — out of an Azure pipeline file.
+ *
+ * The defaults are the whole difficulty, and they are the **opposite** of GitHub's. A GitHub job
+ * with no `needs:` runs immediately; an Azure stage with no `dependsOn:` runs after the one written
+ * above it, and `dependsOn: []` is how you say "actually, immediately". Getting that backwards
+ * turns a four-stage fan into a four-stage chain — which is the drawing this function exists to
+ * stop. Hence a separate function from [`parseWorkflowNeeds`] rather than a flag on it: two
+ * opposite defaults sharing one body is how the wrong one ends up applied to the wrong provider.
+ *
+ * A stage whose dependencies cannot be *known* is **omitted from the map** rather than guessed at:
+ * a `- template: stages.yml` entry, an `- ${{ if … }}` block, a `dependsOn: ${{ parameters.x }}`,
+ * and — the subtle one — any stage that would have inherited its implicit dependency from an entry
+ * we could not name. [`layerDeclared`] requires the map to cover every stage on the board before it
+ * draws from it, so a partial answer degrades to the clocks rather than to a half-right DAG, which
+ * would be worse than the chain it replaced.
+ *
+ * Keyed lower-case throughout, because Azure resolves stage references case-insensitively.
+ *
+ * Returns `null` — never a half-parsed map — for anything that is not a stage-shaped pipeline.
+ */
+export function parseAzureStages(yamlText: string): DeclaredStages | null {
+  let doc: unknown;
+  try {
+    doc = parseYaml(yamlText);
+  } catch {
+    return null;
+  }
+  if (!doc || typeof doc !== "object") return null;
+  const list = (doc as Record<string, unknown>).stages;
+  // A jobs-only pipeline has no stages to draw a board from. Not an error — just nothing to say.
+  if (!Array.isArray(list)) return null;
+
+  const deps = new Map<string, string[]>();
+  const jobs = new Map<string, string[]>();
+  /** The previous *nameable* entry, or `null` when the last one could not be named. */
+  let previous: string | null = null;
+  let first = true;
+
+  for (const item of list) {
+    if (!item || typeof item !== "object") {
+      previous = null;
+      first = false;
+      continue;
+    }
+    const entry = item as Record<string, unknown>;
+    const rawName = typeof entry.stage === "string" ? entry.stage.trim() : "";
+    if (rawName === "" || isExpression(rawName)) {
+      // A template include or a conditional block. It has no name here, so nothing can depend on
+      // it by name — and the entry *after* it can no longer inherit an implicit dependency either.
+      previous = null;
+      first = false;
+      continue;
+    }
+    const name = rawName.toLowerCase();
+    const raw = entry.dependsOn;
+
+    if (raw === undefined) {
+      // Omitted: the previous entry, and only the previous entry.
+      if (first) deps.set(name, []);
+      else if (previous !== null) deps.set(name, [previous]);
+      // else: the entry above could not be named, so this one's dependency is unknowable — omit it
+      // and let the coverage gate fall back to the clocks.
+    } else if (raw === null) {
+      // `dependsOn:` with nothing after it. YAML gives null; Azure reads it as the empty list.
+      deps.set(name, []);
+    } else if (typeof raw === "string") {
+      if (!isExpression(raw) && raw.trim() !== "") deps.set(name, [raw.trim().toLowerCase()]);
+    } else if (Array.isArray(raw)) {
+      const items = raw.filter((value): value is string => typeof value === "string");
+      // A partly-unreadable list is not a shorter list: dropping one entry would claim a stage
+      // starts earlier than it does.
+      if (items.length === raw.length && !items.some(isExpression)) {
+        deps.set(
+          name,
+          items.map((value) => value.trim().toLowerCase()).filter((value) => value !== ""),
+        );
+      }
+    }
+
+    const names = declaredJobNames(entry);
+    if (names.length > 0) jobs.set(name, names);
+    previous = name;
+    first = false;
+  }
+
+  return deps.size > 0 ? { deps, jobs } : null;
+}
+
+/**
+ * Columns from what the pipeline *declared*, rather than from what the clocks suggest.
+ *
+ * Same return shape as [`layerSpans`] so the board can swap one for the other, and deliberately
+ * **not** a modification of it: that function is also the job-column fallback for GitHub and
+ * GitLab, and a rule bent to suit a skipped Azure stage would be bent under every run in the app.
+ *
+ * Longest path, not shortest: a stage sits one column past the *deepest* thing it waits on, which
+ * is what makes a dependency reaching two columns back draw as a line that reaches two columns back
+ * instead of dragging its target forward.
+ *
+ * Returns `null` — never a partial layering — when the declarations do not cover every key, when
+ * two cards share a ref name, or when the edges contain a cycle. Azure rejects a cyclic
+ * `dependsOn`, so a cycle here means the file we read is not the file that ran, and the honest
+ * answer to that is the clocks plus a badge that says they are the clocks.
+ */
+export function layerDeclared(
+  keys: string[],
+  refOf: (key: string) => string | null,
+  deps: Map<string, string[]>,
+): SpanLayers | null {
+  if (keys.length === 0) return null;
+
+  const refs = new Map<string, string>();
+  const present = new Map<string, string>();
+  for (const key of keys) {
+    const ref = refOf(key);
+    // No ref name means nothing to join on — GitLab, or an Azure record without `identifier`.
+    if (!ref) return null;
+    const lower = ref.toLowerCase();
+    // Two cards under one ref name: the file is not describing this run.
+    if (present.has(lower)) return null;
+    refs.set(key, lower);
+    present.set(lower, key);
+  }
+
+  const preds = new Map<string, string[]>(keys.map((key) => [key, []]));
+  const succs = new Map<string, string[]>(keys.map((key) => [key, []]));
+  for (const key of keys) {
+    const declared = deps.get(refs.get(key)!);
+    // The coverage gate: one stage the file does not describe and the whole board goes back to the
+    // clocks. A half-declared DAG would be worse than the chain it replaced, because it would look
+    // authoritative.
+    if (!declared) return null;
+    for (const dep of declared) {
+      const from = present.get(dep);
+      // A dependency pruned from this run is simply not drawn: the stage is not there to point at,
+      // and this one becomes a root.
+      if (!from || from === key) continue;
+      preds.get(key)!.push(from);
+      succs.get(from)!.push(key);
+    }
+  }
+
+  // Kahn, so a cycle is detected rather than hung on.
+  const indegree = new Map(keys.map((key) => [key, preds.get(key)!.length]));
+  const queue = keys.filter((key) => indegree.get(key) === 0);
+  const order: string[] = [];
+  for (let head = 0; head < queue.length; head += 1) {
+    const key = queue[head];
+    order.push(key);
+    for (const next of succs.get(key)!) {
+      const left = indegree.get(next)! - 1;
+      indegree.set(next, left);
+      if (left === 0) queue.push(next);
+    }
+  }
+  if (order.length !== keys.length) return null;
+
+  // Longest path. Every predecessor is settled before its successors in topological order, so one
+  // pass is exact.
+  const depth = new Map<string, number>(keys.map((key) => [key, 0]));
+  for (const key of order) {
+    for (const pred of preds.get(key)!) {
+      depth.set(key, Math.max(depth.get(key)!, depth.get(pred)! + 1));
+    }
+  }
+
+  const layers: string[][] = [];
+  // Declaration order within a layer, not topological order: it is something the provider told us,
+  // and `orderLayers` refines it only where that removes a crossing.
+  for (const key of keys) {
+    const d = depth.get(key)!;
+    while (layers.length <= d) layers.push([]);
+    layers[d].push(key);
+  }
+
+  const declaredEdges: GraphEdge[] = [];
+  for (const key of keys) {
+    for (const pred of preds.get(key)!) declaredEdges.push({ fromId: pred, toId: key });
+  }
+
+  return {
+    layers,
+    // The same reduction the `needs` path uses: `a → b → c` already says everything `a → c` would.
+    edges: transitiveReduction(declaredEdges),
+    branched: layers.some((layer) => layer.length > 1),
+  };
+}
+
+/**
+ * The order of the cards *within* each column, chosen to cross as few arrows as possible.
+ *
+ * Declaration order is the starting point and the tie-break — it is something the provider told us,
+ * and a board that reshuffles its cards between two polls of identical data is a board nobody can
+ * read. This only reorders when doing so removes a crossing.
+ *
+ * Barycentre sweeps, the standard Sugiyama middle layer: a card wants to sit at the average height
+ * of the things pointing at it, and then at the average height of the things it points at. The
+ * arrangement with the fewest crossings is kept, not the last one — a sweep can make it worse and
+ * there is no reason to accept that.
+ *
+ * Only arrows between *neighbouring* columns are counted. The long ones do not cross anything on
+ * screen: they are routed under the whole board.
+ */
+export function orderLayers(layers: string[][], edges: GraphEdge[], sweeps = 4): string[][] {
+  if (layers.length < 2) return layers.map((layer) => [...layer]);
+
+  const lane = new Map<string, number>();
+  const declared = new Map<string, number>();
+  let index = 0;
+  layers.forEach((layer, d) => {
+    for (const key of layer) {
+      lane.set(key, d);
+      declared.set(key, index);
+      index += 1;
+    }
+  });
+
+  const preds = new Map<string, string[]>();
+  const succs = new Map<string, string[]>();
+  for (const edge of edges) {
+    const from = lane.get(edge.fromId);
+    const to = lane.get(edge.toId);
+    // Adjacent lanes only: a long edge is drawn under the board and crosses nothing on screen.
+    if (from === undefined || to === undefined || to !== from + 1) continue;
+    push(preds, edge.toId, edge.fromId);
+    push(succs, edge.fromId, edge.toId);
+  }
+
+  let current = layers.map((layer) => [...layer]);
+  const positions = () => {
+    const pos = new Map<string, number>();
+    for (const layer of current) layer.forEach((key, at) => pos.set(key, at));
+    return pos;
+  };
+
+  const crossings = (): number => {
+    const pos = positions();
+    let total = 0;
+    for (let d = 0; d < current.length - 1; d += 1) {
+      const pairs: [number, number][] = [];
+      for (const key of current[d]) {
+        for (const next of succs.get(key) ?? []) {
+          if (lane.get(next) !== d + 1) continue;
+          pairs.push([pos.get(key)!, pos.get(next)!]);
+        }
+      }
+      pairs.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      // Inversions among the endpoints: every pair out of order is one crossing. The counts here
+      // are a handful, so the quadratic count is cheaper than anything cleverer.
+      for (let i = 0; i < pairs.length; i += 1) {
+        for (let j = i + 1; j < pairs.length; j += 1) {
+          if (pairs[i][1] > pairs[j][1]) total += 1;
+        }
+      }
+    }
+    return total;
+  };
+
+  let best = current.map((layer) => [...layer]);
+  let bestCost = crossings();
+
+  for (let sweep = 0; sweep < sweeps && bestCost > 0; sweep += 1) {
+    const forward = sweep % 2 === 0;
+    const lanes = forward
+      ? Array.from({ length: current.length - 1 }, (_, i) => i + 1)
+      : Array.from({ length: current.length - 1 }, (_, i) => current.length - 2 - i);
+    for (const d of lanes) {
+      const pos = positions();
+      const bary = new Map<string, number>();
+      for (const key of current[d]) {
+        const neighbours = (forward ? preds.get(key) : succs.get(key)) ?? [];
+        bary.set(
+          key,
+          neighbours.length === 0
+            ? pos.get(key)!
+            : neighbours.reduce((sum, n) => sum + pos.get(n)!, 0) / neighbours.length,
+        );
+      }
+      current[d] = [...current[d]].sort(
+        (a, b) => bary.get(a)! - bary.get(b)! || declared.get(a)! - declared.get(b)!,
+      );
+    }
+    const cost = crossings();
+    if (cost < bestCost) {
+      bestCost = cost;
+      best = current.map((layer) => [...layer]);
+    }
+  }
+
+  return best;
+}
+
+/**
  * Depth for each span, from what could possibly have gated what.
  *
  * This replaces the interval merging that used to group jobs into "waves", and it is the reason a

@@ -12,7 +12,7 @@ native app. And when you're done, test the endpoint you just changed, query the 
 it and SSH into the box it runs on without leaving the window. **You decide which model does
 what.**
 
-![version](https://img.shields.io/badge/version-1.18.13-6C5CE7)
+![version](https://img.shields.io/badge/version-1.18.14-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)

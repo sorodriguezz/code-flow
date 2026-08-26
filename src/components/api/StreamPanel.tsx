@@ -27,7 +27,7 @@ import { Checkbox } from "../common/Checkbox";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { Select } from "../common/Select";
 import { useApiStore } from "../../state/apiStore";
-import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
+import { DEFAULT_TAB_VIEW, useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -324,8 +324,21 @@ function Transcript({ tabId }: { tabId: string }) {
     (s) => s.openTabs.find((tab) => tab.id === tabId)?.draft.protocol === "socketio",
   );
 
-  const [filter, setFilter] = useState("");
-  const [autoScroll, setAutoScroll] = useState(true);
+  /**
+   * The transcript's filter and whether it is pinned to the newest frame — per request tab.
+   *
+   * `messages` beside them has always been keyed by tab; these two were not, so one `StreamPanel`
+   * instance shared them across every open socket. Filtering one transcript filtered the others,
+   * and scrolling back through one tab's history unpinned every other tab from its live tail.
+   */
+  const filter = useApiRuntimeStore(
+    (s) => s.tabView[tabId]?.streamFilter ?? DEFAULT_TAB_VIEW.streamFilter,
+  );
+  const autoScroll = useApiRuntimeStore(
+    (s) => s.tabView[tabId]?.streamAutoScroll ?? DEFAULT_TAB_VIEW.streamAutoScroll,
+  );
+  const setTabView = useApiRuntimeStore((s) => s.setTabView);
+  const setAutoScroll = (next: boolean) => setTabView(tabId, { streamAutoScroll: next });
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const filtered = useMemo(() => {
@@ -365,7 +378,10 @@ function Transcript({ tabId }: { tabId: string }) {
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < STICK_TO_BOTTOM_PX);
+    const next = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_TO_BOTTOM_PX;
+    // Guarded, and not optionally: this fires once per scroll frame, and every store write
+    // allocates a fresh record that re-renders each subscriber. Only a real change is worth one.
+    if (next !== autoScroll) setAutoScroll(next);
   };
 
   const jumpToLatest = () => {
@@ -382,7 +398,7 @@ function Transcript({ tabId }: { tabId: string }) {
         </span>
         <input
           value={filter}
-          onChange={(e) => setFilter(e.target.value)}
+          onChange={(e) => setTabView(tabId, { streamFilter: e.target.value })}
           placeholder={t("api.ws.filterPlaceholder")}
           className="w-48 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-0.5 text-[11px] outline-none focus:border-[var(--cf-accent)]"
         />
@@ -413,7 +429,12 @@ function Transcript({ tabId }: { tabId: string }) {
               {messages.length === 0 ? t("api.ws.noMessages") : t("api.ws.noMatches")}
             </p>
           ) : (
-            visible.map((entry) => <MessageRow key={entry.index} message={entry.message} t={t} />)
+            // Scoped by tab, because `entry.index` is a position within *this* tab's transcript:
+            // tab A's frame #3 and tab B's frame #3 collided on the bare index, so the row's
+            // expanded/hex state landed on an unrelated payload after a tab switch.
+            visible.map((entry) => (
+              <MessageRow key={`${tabId}:${entry.index}`} message={entry.message} t={t} />
+            ))
           )}
         </div>
 

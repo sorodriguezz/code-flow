@@ -171,6 +171,20 @@ export interface ResultGridProps {
    * cell follows it too, for when it *is* the thing being done constantly.
    */
   onFollowForeignKey?: (key: DbForeignKey, value: string | null) => void;
+  /**
+   * Column widths, controlled by the caller so they can be remembered per tab.
+   *
+   * Optional, with a local fallback: this grid is also used from modals that have no tab to hang a
+   * width on, and those keep the old self-managed behaviour by simply not passing these.
+   */
+  widths?: Record<string, number>;
+  onWidths?: (next: Record<string, number>) => void;
+  /** The record view's two gutters, controlled the same way and for the same reason. `null` means
+   * "use the default" — the shape the tab record stores before anything has been dragged. */
+  fieldWidth?: number | null;
+  onFieldWidth?: (next: number) => void;
+  recordWidth?: number | null;
+  onRecordWidth?: (next: number) => void;
 }
 
 export function ResultGrid({
@@ -196,6 +210,8 @@ export function ResultGrid({
   foreignKeys,
   rowActions,
   onFollowForeignKey,
+  widths: widthsProp,
+  onWidths,
 }: ResultGridProps) {
   const t = useT();
   const model = recordModel(engine);
@@ -204,7 +220,13 @@ export function ResultGrid({
   const [scrollLeft, setScrollLeft] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
   const [viewportWidth, setViewportWidth] = useState(1200);
-  const [widths, setWidths] = useState<Record<string, number>>({});
+  // Controlled when the caller supplies them, self-managed otherwise — see `widths` on the props.
+  const [localWidths, setLocalWidths] = useState<Record<string, number>>({});
+  const widths = widthsProp ?? localWidths;
+  const applyWidth = (column: string, width: number) => {
+    if (onWidths) onWidths({ ...widths, [column]: width });
+    else setLocalWidths((current) => ({ ...current, [column]: width }));
+  };
   const [editing, setEditing] = useState<{ row: number; column: string; inserted: boolean } | null>(
     null,
   );
@@ -486,9 +508,7 @@ export function ResultGrid({
                 )}
                 <ColumnResizer
                   width={widthOf(column.name)}
-                  onChange={(width) =>
-                    setWidths((current) => ({ ...current, [column.name]: width }))
-                  }
+                  onChange={(width) => applyWidth(column.name, width)}
                 />
               </div>
               );

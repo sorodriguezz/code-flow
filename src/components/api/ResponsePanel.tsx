@@ -19,7 +19,7 @@ import {
   XCircle,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
+import { DEFAULT_TAB_VIEW, useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useApiStore } from "../../state/apiStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
@@ -30,7 +30,13 @@ import { EmptyState } from "../common/EmptyState";
 import { SkeletonRows } from "../common/Skeleton";
 import { statusColor } from "./methodStyle";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import type { ApiResponse, KeyValue, ResponseTimings, SavedExample } from "../../types/api";
+import type {
+  ApiResponse,
+  ApiResponseTab as ResponseTab,
+  KeyValue,
+  ResponseTimings,
+  SavedExample,
+} from "../../types/api";
 
 /** Above this, `JSON.parse` + `JSON.stringify` on the UI thread is a visible freeze. */
 const PRETTY_LIMIT = 2 * 1024 * 1024;
@@ -49,7 +55,6 @@ type BodyView = "pretty" | "raw" | "preview" | "visualize";
  * the end of a narrow panel. They collapse into one `body` tab with its own picker, leaving the
  * strip to say what it actually offers: the payload, or something about the response.
  */
-type ResponseTab = "body" | "headers" | "cookies" | "tests" | "console" | "timeline";
 
 const BODY_VIEWS: { id: BodyView; label: TranslationKey }[] = [
   { id: "pretty", label: "api.response.pretty" },
@@ -86,7 +91,13 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
 
   // Two axes now, and they're independent on purpose: tabbing to Headers and back leaves the body
   // on whichever rendering you were reading it in.
-  const [tab, setTab] = useState<ResponseTab>("body");
+  //
+  // The sub-tab is per *request tab*, in the runtime store: one `ResponsePanel` instance serves
+  // every open request (`RequestBuilder` is mounted once, without a key), so a local `useState`
+  // here meant reading one response's headers switched every other tab to Headers too.
+  const tab = useApiRuntimeStore((s) => s.tabView[tabId]?.responseTab ?? DEFAULT_TAB_VIEW.responseTab);
+  const setTabView = useApiRuntimeStore((s) => s.setTabView);
+  const setTab = (next: ResponseTab) => setTabView(tabId, { responseTab: next });
   // `null` means "whatever suits this payload". Only an explicit click on the picker pins a
   // rendering, and only until the next response — see the reset below.
   const [pickedBodyView, setPickedBodyView] = useState<BodyView | null>(null);

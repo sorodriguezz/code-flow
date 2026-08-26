@@ -3,12 +3,12 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
-import { Check, ClipboardPaste, Copy, X } from "lucide-react";
+import { Check, ClipboardPaste, Copy, TriangleAlert, X } from "lucide-react";
 import { resizeTerminal, writeTerminal } from "../../lib/tauri/commands";
 import { registerTerminalSink } from "../../state/terminalStore";
 import { useThemeStore } from "../../state/themeStore";
 import { TypedLineBuffer } from "../../lib/remote/typedLines";
-import { isMac } from "../../lib/platform";
+import { currentPlatform, isMac } from "../../lib/platform";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ContextMenu } from "../api/CollectionTree";
@@ -50,6 +50,22 @@ const DARK_THEME = {
  * purpose — the memory lever worth pulling is the *number* of retained terminals, not how much
  * of each one's history the user is allowed to scroll back to.
  */
+/** Shorter than one row and there is nothing meaningful to fit to — see `fitAndReport`. */
+const MIN_FIT_PX = 8;
+
+/**
+ * How many times a pane will try to get a WebGL context back before settling for the DOM renderer.
+ *
+ * A lost context is usually transient — a GPU process restart, a driver reset, waking from sleep —
+ * and the DOM renderer is many times slower, so giving up on the first loss is expensive. But a
+ * webview that will never grant one (software rendering, a driver blocklist) must not be asked
+ * forever, hence a budget rather than a loop.
+ */
+const WEBGL_RETRIES = 3;
+/** Multiplied by the attempt number: a context lost mid-restart cannot be reacquired in the same
+ * frame, so asking immediately only burns the budget. */
+const WEBGL_RETRY_MS = 400;
+
 const SCROLLBACK_LINES = 1000;
 
 /** How long the "Copied" badge sits in the corner of the pane. Long enough to be read out of the
@@ -155,6 +171,8 @@ export function TerminalPane({
   const replayRef = useRef(replay);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  /** The size the pty was last told about, so an unchanged fit costs nothing. See `fitAndReport`. */
+  const reportedRef = useRef<{ cols: number; rows: number }>({ cols: 0, rows: 0 });
   // Read by the terminal-construction effect, which deliberately does not depend on `visible` —
   // a visibility change must not tear down a live shell.
   const visibleRef = useRef(visible);
@@ -168,6 +186,16 @@ export function TerminalPane({
   /** The open right-click menu and where it goes. `hasSelection` is sampled when the menu opens
    *  rather than read during render, because it lives in xterm, not in React. */
   const [menu, setMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
+  /**
+   * Which renderer this pane ended up on. `null` until the attach below has run.
+   *
+   * Surfaced because the fallback used to be completely silent: a webview that refuses a WebGL
+   * context drops the pane onto xterm's DOM renderer, which rebuilds a `<div>` per row and a
+   * `<span>` per style run on every frame, and the only symptom is that the terminal feels slow.
+   * Nothing said why, and nothing could be reported back. It is drawn only when it is `"dom"` —
+   * the fast path is the expected one and does not deserve a badge.
+   */
+  const [renderer, setRenderer] = useState<"webgl" | "dom" | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /**
@@ -236,8 +264,28 @@ export function TerminalPane({
 
     const term = new Terminal({
       fontSize: 13,
-      fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+      // Cascadia first among the Windows faces: it ships with Windows Terminal and modern Windows,
+      // it carries the powerline and box-drawing glyphs a shell prompt actually uses, and Consolas
+      // does not. Without it a Windows user fell straight through to `monospace`, which resolves to
+      // Courier New — a face with no box-drawing coverage at all, so every table and progress bar
+      // rendered as a row of substitution boxes. Menlo stays for macOS, where it is what `ui-mono`
+      // already resolves to anyway.
+      fontFamily:
+        "ui-monospace, Menlo, 'Cascadia Mono', 'Cascadia Code', Consolas, 'DejaVu Sans Mono', monospace",
       theme: resolved === "dark" ? DARK_THEME : LIGHT_THEME,
+      /**
+       * Tells xterm it is talking to a ConPTY, on Windows only.
+       *
+       * ConPTY does not behave like a unix pty: it re-emits whole regions of the screen buffer, and
+       * it wraps lines by *writing* the wrap rather than letting the terminal decide. Without this
+       * flag xterm treats those re-emissions as new output, which shows up as duplicated prompts
+       * and lines that reflow wrongly the moment the pane is resized. `windowsPty` switches on the
+       * heuristics xterm ships for exactly this, and is inert on every other platform — which is
+       * why it is set from the platform rather than always.
+       */
+      ...(currentPlatform() === "windows"
+        ? ({ windowsPty: { backend: "conpty" } } as const)
+        : {}),
       // Only the pane on screen blinks — see the effect below for why that matters when a dozen
       // hidden terminals are still mounted.
       cursorBlink: visibleRef.current,
@@ -410,8 +458,19 @@ export function TerminalPane({
    */
   const fitAndReport = (term: Terminal, fitAddon: FitAddon) => {
     const box = containerRef.current;
-    if (!box || box.clientHeight < 1 || box.clientWidth < 1) return;
+    // One cell, not one pixel. `clientHeight` is the padding box, so while the padding sat on this
+    // node the guard could never fire — a dock at `height: 0` still measured 16px, `fit()` floored
+    // to a single row, and the shell got a SIGWINCH telling it the terminal was one row tall on
+    // *every* dock open. The padding has moved to the wrapper, which fixes that by itself; the
+    // floor stays because a box shorter than one row cannot be fitted to a meaningful size anyway,
+    // and this is exactly the state a dock opening from zero passes through.
+    if (!box || box.clientHeight < MIN_FIT_PX || box.clientWidth < MIN_FIT_PX) return;
     fitAddon.fit();
+    // Nothing to tell the shell if nothing changed. A resize drag fires this on every animation
+    // frame, and each call is an IPC round trip plus a pty reflow — which on Windows is a ConPTY
+    // re-render of the whole screen buffer.
+    if (term.cols === reportedRef.current.cols && term.rows === reportedRef.current.rows) return;
+    reportedRef.current = { cols: term.cols, rows: term.rows };
     void resizeTerminal(sessionId, term.cols, term.rows);
   };
 
@@ -452,11 +511,15 @@ export function TerminalPane({
     const fitAddon = fitRef.current;
     const box = containerRef.current;
     if (!term || !fitAddon || !box || box.clientHeight < 1 || box.clientWidth < 1) return;
-    const { fontSize } = term.options;
-    if (fontSize) {
-      term.options.fontSize = fontSize + 1;
-      term.options.fontSize = fontSize;
-    }
+    // No font-size nudge here any more.
+    //
+    // It used to set `fontSize` to `n + 1` and straight back to `n` to force a refresh — and by the
+    // comment above, a refresh is the whole of what it bought. But assigning `fontSize` is not a
+    // refresh: xterm's setter tears the renderer down and rebuilds it, glyph atlas included, so
+    // this was two full renderer rebuilds on *every* hide→show — every tab switch, every dock
+    // reopen, for every mounted pane. `repaint()` on the next line is the refresh, and it is a
+    // `term.refresh(0, rows - 1)` that marks the rows dirty and lets the existing renderer redraw
+    // them on the next frame.
     fitAndReport(term, fitAddon);
     repaint();
   };
@@ -514,27 +577,63 @@ export function TerminalPane({
     const term = termRef.current;
     if (!term || !visible) return;
     let webgl: WebglAddon | null = null;
-    try {
-      const addon = new WebglAddon();
-      // A lost context hands this pane back to the DOM renderer — exactly what it used to be —
-      // and that renderer starts empty. The repaint is part of the handover, not an extra.
-      addon.onContextLoss(() => {
-        addon.dispose();
+    let retry: number | undefined;
+    let disposed = false;
+
+    /**
+     * Builds the GPU renderer, and says out loud when it could not.
+     *
+     * The retry is the part that was missing. `onContextLoss` used to dispose the addon and stop
+     * there, which strands the pane on the DOM renderer *for the rest of the session* — and a lost
+     * context is not a permanent condition: WebView2 hands one back after a GPU process restart, a
+     * driver reset or the machine waking up, all of which are ordinary. Losing the fast renderer to
+     * a transient event and never asking again is most of what "the terminals are very slow on
+     * Windows" feels like from the outside, because nothing about the pane says anything changed.
+     *
+     * Bounded, so a webview that will never grant a context is asked a handful of times rather than
+     * forever: past `WEBGL_RETRIES` this pane stays on the DOM renderer and reports it.
+     */
+    const attach = (attempt: number) => {
+      if (disposed) return;
+      try {
+        const addon = new WebglAddon();
+        addon.onContextLoss(() => {
+          addon.dispose();
+          if (webgl === addon) webgl = null;
+          // The DOM renderer it just fell back to starts empty; the repaint is part of the
+          // handover, not an extra.
+          repaint();
+          if (attempt < WEBGL_RETRIES) {
+            // Backed off, because a context lost during a GPU process restart cannot be reacquired
+            // in the same frame — asking immediately just burns the retry budget.
+            retry = window.setTimeout(() => attach(attempt + 1), WEBGL_RETRY_MS * (attempt + 1));
+          } else {
+            setRenderer("dom");
+          }
+        });
+        term.loadAddon(addon);
+        webgl = addon;
+        setRenderer("webgl");
         repaint();
-      });
-      term.loadAddon(addon);
-      webgl = addon;
-    } catch {
-      // No WebGL in this webview, or `loadAddon` refused it. Nothing to dispose: `webgl` is assigned
-      // on the try's *last* line, so anything that throws leaves it null — the addon that took a
-      // context, if one did, is unreachable from here and this used to pretend otherwise. What is
-      // left is the DOM renderer, which is what not having the addon *is*, and it needs telling that
-      // what it shows is not what the buffer holds.
-      repaint();
-      return;
-    }
-    repaint();
-    return () => webgl?.dispose();
+        return;
+      } catch {
+        // No WebGL in this webview, or `loadAddon` refused it. Nothing to dispose: `webgl` is
+        // assigned on the try's *last* line, so anything that throws leaves it null.
+        if (attempt < WEBGL_RETRIES) {
+          retry = window.setTimeout(() => attach(attempt + 1), WEBGL_RETRY_MS * (attempt + 1));
+        } else {
+          setRenderer("dom");
+        }
+        repaint();
+      }
+    };
+
+    attach(0);
+    return () => {
+      disposed = true;
+      if (retry !== undefined) window.clearTimeout(retry);
+      webgl?.dispose();
+    };
   }, [visible, sessionId]);
 
   return (
@@ -554,7 +653,37 @@ export function TerminalPane({
         });
       }}
     >
-      <div ref={containerRef} className="h-full w-full overflow-hidden p-2" />
+      {/* The padding is on this wrapper, never on `containerRef`, and that is load-bearing.
+
+          `FitAddon` measures `terminal.element.parentElement` — the node `term.open()` was called
+          with — by reading its *computed* height, which under `box-sizing: border-box` is the
+          border box and therefore includes its padding. It then subtracts the padding of `.xterm`
+          itself, which has none. Padding on that node was thus counted as usable terminal height
+          twice over: it fitted ~16px too many rows, laid `.xterm` out 8px down from the top, and
+          sent its last row past the bottom of the clip box — where `overflow-hidden` cut it in
+          half, at the very bottom edge of the dock, directly above the status bar. Measured at a
+          341px dock: FitAddon saw 307px, fitted 20 rows, and `.xterm` overhung by exactly 8px.
+          Which heights it bites at depends on `dockHeight mod cellHeight`, and the cell height
+          differs per platform and per display scaling — so the same build can look right on one
+          machine and clipped on another, which is how this survived so long.
+
+          Moving the padding out here keeps the visual inset identical and leaves `containerRef` a
+          pure content box, so what FitAddon measures is what xterm actually gets. */}
+      <div className="h-full w-full p-2">
+        <div ref={containerRef} className="h-full w-full overflow-hidden" />
+      </div>
+
+      {/* Only when the GPU renderer could not be had. Top-right rather than bottom-right, which the
+          copy badge owns, and it stays put: this is a condition, not an event. */}
+      {renderer === "dom" && (
+        <div
+          title={t("terminal.softwareRendererHint")}
+          className="pointer-events-none absolute right-3 top-3 z-10 flex items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-1.5 py-0.5 text-[10px] text-[var(--cf-text-muted)] opacity-70"
+        >
+          <TriangleAlert size={10} className="text-[var(--cf-warning)]" />
+          {t("terminal.softwareRenderer")}
+        </div>
+      )}
 
       {/* Bottom-right, where terminal output isn't: a shell's cursor sits at the *start* of the
           last line, so the corner opposite it is the one square of the pane a badge can occupy

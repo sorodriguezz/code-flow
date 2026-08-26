@@ -45,6 +45,7 @@ import {
   type EditorGroup,
 } from "../../lib/editorGroups";
 import { copyIntoRepo, readFileText, writeFileText } from "../../lib/tauri/commands";
+import { readDrafts, writeDrafts } from "../../lib/editorDrafts";
 import { onRepoFsChanged } from "../../lib/tauri/events";
 import { findTheme } from "../../lib/codeThemes";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -65,6 +66,15 @@ import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import type { FileDiffInfo } from "../../types/domain";
+
+/**
+ * How long after the last keystroke the unsaved buffers are journalled.
+ *
+ * Generous on purpose. This is crash recovery, not autosave: nobody is waiting on the write,
+ * and the cost of losing the last two seconds of typing to a force-quit is nothing next to the
+ * cost of a SQLite round trip per keystroke.
+ */
+const DRAFT_DEBOUNCE_MS = 2000;
 
 const TREE_MIN = 200;
 const TREE_MAX = 480;
@@ -240,6 +250,27 @@ export function EditorView() {
   const activeTab = useMemo(() => tabs.find((tab) => tab.path === activePath) ?? null, [tabs, activePath]);
   const activeContent = activeTab?.content ?? "";
 
+  /**
+   * Every open file whose buffer has drifted from disk, as `{ path, content }`.
+   *
+   * The project search greps disk and this editor has no autosave, so between typing a word and
+   * pressing save there is a window where the file the user is looking at is the one file the
+   * search describes wrongly — at line numbers that have already moved. `SearchPanel` closes that
+   * window by matching these itself and letting them override the backend's hits for the same path.
+   *
+   * This re-identifies on every keystroke, which is exactly why it is handed down as *data* and
+   * never as a refresh trigger: the panel folds it into a `useMemo`, never into the effect that
+   * calls `searchRepo`. Clean tabs are left out on purpose — for those, disk *is* the buffer, and
+   * matching them here would re-scan every open file to arrive at the answer the backend just gave.
+   */
+  const dirtyBuffers = useMemo(
+    () =>
+      tabs
+        .filter((tab) => !tab.loading && tab.content !== tab.originalContent)
+        .map((tab) => ({ path: tab.path, content: tab.content })),
+    [tabs],
+  );
+
   // `useT()` hands back a fresh function every render; callbacks that only need it to
   // build a message read it through this ref instead of taking it as a dependency and
   // re-identifying (and re-subscribing their listeners) on every keystroke.
@@ -247,6 +278,30 @@ export function EditorView() {
   useEffect(() => {
     tRef.current = t;
   });
+
+  /**
+   * The crash-recovery journal for unsaved buffers.
+   *
+   * Debounced, and deliberately generously: this exists so a force-quit after a hang costs nothing,
+   * not so every keystroke reaches SQLite. `DRAFT_DEBOUNCE_MS` after the last edit the whole dirty
+   * set is written as one row — a write nobody is waiting on, which is why it is fire-and-forget.
+   *
+   * Note what is written: every dirty buffer, every time. A file that has just been saved is no
+   * longer dirty, so it leaves the list on the next write and stops being offered back — which is
+   * the only correct way to express "this one is done" in a whole-list row.
+   */
+  useEffect(() => {
+    if (!project) return;
+    const repoPath = project.local_path;
+    const id = window.setTimeout(() => {
+      void writeDrafts(
+        repoPath,
+        dirtyBuffers.map((buffer) => ({ path: buffer.path, content: buffer.content, at: Date.now() })),
+      );
+    }, DRAFT_DEBOUNCE_MS);
+    return () => window.clearTimeout(id);
+  }, [project, dirtyBuffers]);
+
 
   const activeAbsolutePath = useMemo(
     () => (project && activePath ? normalizePath(`${project.local_path}/${activePath}`) : null),
@@ -416,6 +471,50 @@ export function EditorView() {
    * make the file the active tab: the question the action answers is "where does this live",
    * which is one you can ask about a file you are not currently editing.
    */
+  /**
+   * What the last session was in the middle of, offered back on the way in.
+   *
+   * Restored *as dirty tabs*, never written to the files themselves: the buffer comes back exactly
+   * as it was typed, the tab shows its unsaved dot, and saving it is still the user's decision. A
+   * draft whose content now matches what is on disk is dropped silently — the work landed, and
+   * re-opening a tab to show no change would be noise.
+   *
+   * Once per project, guarded by a ref rather than by a dependency list: `openFile` re-identifies
+   * whenever the project does, and re-running this would re-open tabs the user had closed.
+   */
+  const restoredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!project) return;
+    const repoPath = project.local_path;
+    if (restoredRef.current === repoPath) return;
+    restoredRef.current = repoPath;
+    let cancelled = false;
+    void (async () => {
+      const drafts = await readDrafts(repoPath, Date.now());
+      if (cancelled || drafts.length === 0) return;
+      const restored: string[] = [];
+      for (const draft of drafts) {
+        // What the file holds now — which may have moved on, or may already be this exact text.
+        const onDisk = await readFileText(repoPath, draft.path).catch(() => null);
+        if (cancelled) return;
+        if (onDisk === null || onDisk === draft.content) continue;
+        await openFile(draft.path, { pin: true });
+        if (cancelled) return;
+        // `originalContent` stays whatever the file holds, so the tab is dirty against disk and the
+        // diff gutter tells the truth about what would be written.
+        patchTab(draft.path, { content: draft.content, preview: false });
+        restored.push(draft.path);
+      }
+      if (cancelled || restored.length === 0) return;
+      useToastStore
+        .getState()
+        .pushToast(tRef.current("editor.draftsRestored", { n: restored.length }), "info");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [project, openFile, patchTab]);
+
   const revealInTree = useCallback((path: string) => {
     setSidePanel("files");
     setExplorerCommand({ command: "revealFile", path, nonce: dropNonce.current++ });
@@ -1137,7 +1236,13 @@ export function EditorView() {
           {/* Explorer, find-in-project, anchors or the debugger — same column VS Code uses for
               all of them, since each wants the width more than a file tree does. */}
           {sidePanel === "search" ? (
-            <SearchPanel repoPath={project.local_path} onOpenHit={openHit} onClose={() => setSidePanel("files")} />
+            <SearchPanel
+              repoPath={project.local_path}
+              fsNonce={fsNonce}
+              dirtyBuffers={dirtyBuffers}
+              onOpenHit={openHit}
+              onClose={() => setSidePanel("files")}
+            />
           ) : sidePanel === "anchors" ? (
             <AnchorsPanel
               repoPath={project.local_path}

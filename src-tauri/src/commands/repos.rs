@@ -314,14 +314,129 @@ pub fn create_project(db: State<Db>, input: NewProject) -> Result<Project, Strin
             duplicate.name, duplicate.local_path
         ));
     }
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::create_project(&conn, input).map_err(|e| e.to_string())
+    let project = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let workspace_id = input.workspace_id.clone();
+        let created = queries::create_project(&conn, input).map_err(|e| e.to_string())?;
+        let identity = queries::get_workspace_identity(&conn, &workspace_id)
+            .map_err(|e| e.to_string())?;
+        (created, workspace_id, identity)
+    };
+    // A repository added to a workspace that overrides the identity has to be brought into line
+    // now, not the next time somebody opens the settings screen — the first commit could be a
+    // minute away. Best-effort on purpose: a repository this fails on is still a repository the
+    // user asked to add, and failing the whole add over a config write would be the wrong trade.
+    apply_workspace_identity(&project.0.local_path, &project.1, project.2.as_ref());
+    Ok(project.0)
+}
+
+/// Projects a workspace's identity onto one repository, swallowing the failure.
+///
+/// Shared by the add and move paths, both of which want the same "do it, but never at the cost of
+/// the operation the user actually asked for" semantics. The settings screen's own writer reports
+/// its failures, because there the config write *is* the operation.
+fn apply_workspace_identity(
+    local_path: &str,
+    workspace_id: &str,
+    identity: Option<&(String, String)>,
+) {
+    let identity = identity.map(|(name, email)| crate::git::identity::GitIdentity {
+        name: Some(name.clone()),
+        email: Some(email.clone()),
+    });
+    let _ = crate::git::identity::apply_to_repo(local_path, workspace_id, identity.as_ref());
 }
 
 #[tauri::command]
 pub fn list_projects(db: State<Db>, workspace_id: String) -> Result<Vec<Project>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::list_projects(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// A workspace's git identity, or `None` when it inherits the global one.
+#[tauri::command]
+pub fn get_workspace_identity(
+    db: State<Db>,
+    workspace_id: String,
+) -> Result<Option<crate::git::identity::GitIdentity>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let stored = queries::get_workspace_identity(&conn, &workspace_id).map_err(|e| e.to_string())?;
+    Ok(stored.map(|(name, email)| crate::git::identity::GitIdentity {
+        name: Some(name),
+        email: Some(email),
+    }))
+}
+
+/// Every workspace that overrides the global identity, keyed by workspace id.
+#[tauri::command]
+pub fn list_workspace_identities(
+    db: State<Db>,
+) -> Result<Vec<(String, String, String)>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_workspace_identities(&conn).map_err(|e| e.to_string())
+}
+
+/// Sets or clears a workspace's identity, and **projects it into every repository the workspace
+/// holds** — which is the half that makes the setting mean anything.
+///
+/// The row is the declared intent; `.git/config` is what git actually reads. Writing only the row
+/// would leave a setting that changes nothing until some later code happened to consult it, and
+/// nothing would: `repo.signature()` reads config, and so do the terminal and every agent that
+/// shells out to `git`.
+///
+/// Per-repository failures are collected rather than returned on the first one. A workspace with a
+/// repository on a disconnected network drive should still apply to the other nine, and an error
+/// naming only the one it gave up on would leave the rest in an unknown state.
+#[tauri::command]
+pub fn set_workspace_identity(
+    db: State<Db>,
+    workspace_id: String,
+    name: Option<String>,
+    email: Option<String>,
+) -> Result<Vec<String>, String> {
+    let identity = match (name, email) {
+        (Some(name), Some(email)) if !name.trim().is_empty() && !email.trim().is_empty() => {
+            Some(crate::git::identity::GitIdentity {
+                name: Some(name.trim().to_string()),
+                email: Some(email.trim().to_string()),
+            })
+        }
+        // Anything else means "inherit": a half-filled pair is not an identity.
+        _ => None,
+    };
+
+    let projects = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::set_workspace_identity(
+            &conn,
+            &workspace_id,
+            identity
+                .as_ref()
+                .and_then(|i| Some((i.name.as_deref()?, i.email.as_deref()?))),
+        )
+        .map_err(|e| e.to_string())?;
+        queries::list_projects(&conn, &workspace_id).map_err(|e| e.to_string())?
+    };
+
+    let mut failures = vec![];
+    for project in projects {
+        if let Err(e) = crate::git::identity::apply_to_repo(
+            &project.local_path,
+            &workspace_id,
+            identity.as_ref(),
+        ) {
+            failures.push(format!("{}: {e}", project.name));
+        }
+    }
+    Ok(failures)
+}
+
+/// What one repository will actually commit as, and which level of config said so.
+#[tauri::command]
+pub fn get_effective_identity(
+    repo_path: String,
+) -> Result<crate::git::identity::EffectiveIdentity, String> {
+    crate::git::identity::effective_for_repo(&repo_path)
 }
 
 /// Writes the order the repositories are shown in, for one workspace. `ids` is the whole list.
@@ -345,8 +460,25 @@ pub fn delete_project(db: State<Db>, id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn move_project_to_workspace(db: State<Db>, id: String, workspace_id: String) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::move_project_to_workspace(&conn, &id, &workspace_id).map_err(|e| e.to_string())
+    let moved = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::move_project_to_workspace(&conn, &id, &workspace_id).map_err(|e| e.to_string())?;
+        let identity =
+            queries::get_workspace_identity(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let path = queries::list_projects(&conn, &workspace_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|project| project.id == id)
+            .map(|project| project.local_path);
+        (path, identity)
+    };
+    // The repository has changed workspaces, so it has changed identities — including *back* to the
+    // global one, if the workspace it landed in does not override. `apply_to_repo` clearing a
+    // stamped identity is what makes that direction work.
+    if let Some(path) = moved.0 {
+        apply_workspace_identity(&path, &workspace_id, moved.1.as_ref());
+    }
+    Ok(())
 }
 
 #[tauri::command]

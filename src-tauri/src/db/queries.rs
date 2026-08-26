@@ -417,6 +417,60 @@ pub fn set_workspace_prompt(conn: &Connection, workspace_id: &str, kind: &str, c
     Ok(())
 }
 
+/// The identity a workspace overrides with, or `None` when it inherits the global one.
+///
+/// Absence *is* the answer here — there is no "empty" identity, and a row that existed but held
+/// two blank strings would be a third state nothing knows how to render.
+pub fn get_workspace_identity(
+    conn: &Connection,
+    workspace_id: &str,
+) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT name, email FROM workspace_git_identity WHERE workspace_id = ?1",
+        params![workspace_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )
+    .optional()
+}
+
+/// Every workspace that overrides, in one read — so the settings screen can list them all without
+/// a query per workspace.
+pub fn list_workspace_identities(conn: &Connection) -> rusqlite::Result<Vec<(String, String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT workspace_id, name, email FROM workspace_git_identity")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?;
+    rows.collect()
+}
+
+/// Sets or clears a workspace's override. `None` deletes the row, which is how "inherit the global
+/// identity" is expressed — see the table comment.
+pub fn set_workspace_identity(
+    conn: &Connection,
+    workspace_id: &str,
+    identity: Option<(&str, &str)>,
+) -> rusqlite::Result<()> {
+    match identity {
+        Some((name, email)) => {
+            conn.execute(
+                "INSERT INTO workspace_git_identity (workspace_id, name, email, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(workspace_id) DO UPDATE SET
+                     name = excluded.name, email = excluded.email, updated_at = excluded.updated_at",
+                params![workspace_id, name, email, now()],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "DELETE FROM workspace_git_identity WHERE workspace_id = ?1",
+                params![workspace_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn list_workspaces(conn: &Connection) -> rusqlite::Result<Vec<Workspace>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, icon, color, sort_order, created_at FROM workspaces ORDER BY sort_order, created_at",

@@ -143,8 +143,23 @@ pub fn attach(app: &AppHandle) {
         let app_for_handler = app.clone();
         let name = *name;
         app.listen_any(name, move |event| {
+            let state = app_for_handler.state::<RemoteCtl>();
+            // Nobody is connected, so there is nothing to authorise and nowhere to send.
+            //
+            // This guard is first because everything after it is expensive on a path that is *not*:
+            // this handler runs once per terminal frame — up to 60 a second, per terminal — and the
+            // permission check below takes the database mutex and runs a SELECT. A desk with no
+            // phone paired was paying for a SQLite read on every frame of every build log, and
+            // contending the same mutex every other command needs. A `broadcast::Sender` with no
+            // receivers is nearly free (see `RemoteCtl::events`), so asking it first costs an
+            // atomic load and answers the common case.
+            if state.events.receiver_count() == 0 {
+                return;
+            }
             // The check that keeps terminal output off an unauthorised phone. Deliberately inside
-            // the handler and not around the registration — see `TERMINAL_EVENTS`.
+            // the handler and not around the registration — see `TERMINAL_EVENTS`. Read live rather
+            // than cached: revoking a phone's terminal access has to take effect on the next frame,
+            // not on the next cache expiry.
             if !crate::remotectl::terminal_allowed(&app_for_handler.state::<Db>()) {
                 return;
             }
@@ -154,7 +169,6 @@ pub fn attach(app: &AppHandle) {
             let Some(owner) = terminal_owner_of(event.payload()) else {
                 return;
             };
-            let state = app_for_handler.state::<RemoteCtl>();
             let _ = state
                 .events
                 .send(addressed(frame(name, event.payload()), owner));

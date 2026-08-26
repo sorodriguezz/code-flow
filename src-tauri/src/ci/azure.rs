@@ -97,8 +97,29 @@ struct RawHref {
 
 #[derive(Deserialize)]
 struct RawDefinition {
+    /// The definition's own id, which is what the definition-detail endpoint is addressed by. A
+    /// build carries only this reference — never the pipeline file it was compiled from.
+    #[serde(default)]
+    id: i64,
     #[serde(default)]
     name: String,
+}
+
+/// A build definition, fetched only for the one field a build reference does not carry.
+#[derive(Deserialize)]
+struct RawDefinitionDetail {
+    #[serde(default)]
+    process: Option<RawProcess>,
+}
+
+#[derive(Deserialize)]
+struct RawProcess {
+    /// `1` = designer (classic), `2` = YAML. Only a YAML pipeline has a file to point at; a
+    /// classic one is stored as a graph of tasks in the server's own database.
+    #[serde(rename = "type", default)]
+    kind: i64,
+    #[serde(rename = "yamlFilename", default)]
+    yaml_filename: String,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +165,10 @@ struct RawRecord {
     finish_time: Option<String>,
     #[serde(default)]
     order: i64,
+    /// The record's own ref name — for a `Stage`, the `stage:` key in the pipeline file. The only
+    /// token a `dependsOn:` can be matched against; see `PipelineStage::ref_name`.
+    #[serde(default)]
+    identifier: Option<String>,
     #[serde(default)]
     log: Option<RawLogRef>,
     #[serde(default)]
@@ -433,8 +458,15 @@ fn map_build(org_enc: &str, project_enc: &str, build: RawBuild) -> PipelineRun {
         started_at: build.start_time,
         finished_at: build.finish_time,
         web_url,
-        // Azure's own timeline gives the graph its stages, so nothing here needs the YAML file
-        // that `definition_path` exists to point the GitHub client at.
+        // Filled in by `build_detail`, which is the only caller that has a definition id and a
+        // spare round trip to spend on it — a build resource carries a `DefinitionReference` whose
+        // `path` is the folder in the *pipeline definitions* tree, not a repo path, so the YAML
+        // filename takes a second lookup.
+        //
+        // This used to be a hard `None` on the premise that Azure's timeline already gives the
+        // graph its stages. It gives the *stages*; it says nothing whatsoever about which one waits
+        // for which, so the board was left inferring the shape from the stage clocks — which reads
+        // two stages that ran in parallel as a chain whenever one of them was skipped.
         definition_path: None,
     }
 }
@@ -466,7 +498,18 @@ pub async fn build_detail(
     );
     let request = http::client().get(&build_url).header("Authorization", auth_header(pat));
     let build: RawBuild = http::get_json(request, http::Provider::Azure).await?;
-    let run = map_build(&org_enc, &project_enc, build);
+    let definition_id = build.definition.as_ref().map(|definition| definition.id).unwrap_or(0);
+    let mut run = map_build(&org_enc, &project_enc, build);
+
+    // Where the pipeline is written down, when it is written down at all.
+    //
+    // Deliberately best-effort, and deliberately not `?`: this exists to give the stage board its
+    // `dependsOn`, and a build whose definition cannot be read is a build that draws the board it
+    // drew before — from the stage clocks, with the badge saying so. Failing the whole detail over
+    // it would trade a slightly weaker drawing for no drawing at all.
+    if definition_id > 0 {
+        run.definition_path = definition_yaml_path(&org_enc, &project_enc, definition_id, pat).await;
+    }
 
     let timeline_url = format!(
         "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds/{build_enc}/Timeline\
@@ -481,6 +524,40 @@ pub async fn build_detail(
     // at a `Stage` record when it turns out to have none.
     let stages = map_stages(&run.id, &timeline.records);
     Ok(PipelineRunDetail { run, jobs, stages })
+}
+
+/// The repo-relative pipeline file a definition points at, or `None` if there isn't one.
+///
+/// Never returns an error: every failure here — a PAT without definition read, a deleted
+/// definition, a classic pipeline that has no file at all — means the same thing to the caller,
+/// which is "draw the board from the clocks".
+async fn definition_yaml_path(
+    org_enc: &str,
+    project_enc: &str,
+    definition_id: i64,
+    pat: &str,
+) -> Option<String> {
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/definitions/{definition_id}\
+         ?api-version={API_VERSION}"
+    );
+    let request = http::client().get(&url).header("Authorization", auth_header(pat));
+    let detail: RawDefinitionDetail = http::get_json(request, http::Provider::Azure).await.ok()?;
+    yaml_path(&detail)
+}
+
+/// The mapping half of [`definition_yaml_path`], as a pure function so it is testable without a
+/// network.
+fn yaml_path(detail: &RawDefinitionDetail) -> Option<String> {
+    let process = detail.process.as_ref()?;
+    // A classic definition has no file to read; pointing the parser at one would be a read that
+    // could only ever fail.
+    if process.kind != 2 {
+        return None;
+    }
+    // Azure reports it with a leading slash; `readFileText` joins it onto the working copy's root
+    // and an absolute-looking segment there would escape it.
+    non_empty(&process.yaml_filename).map(|path| path.trim_start_matches('/').to_string())
 }
 
 /// Turns the flat record array into the job list the graph draws.
@@ -642,6 +719,7 @@ fn map_stages(run_id: &str, records: &[RawRecord]) -> Vec<PipelineStage> {
                     run_id: run_id.to_string(),
                     id: record.id.clone(),
                     name,
+                    ref_name: record.identifier.as_deref().and_then(non_empty),
                     // `false` for warnings, deliberately: a stage's own record carries no issues,
                     // and hunting the tree for a descendant's would make the card disagree with the
                     // word Azure itself puts on the stage. The jobs inside it show their own.
@@ -1128,6 +1206,67 @@ mod tests {
         assert_eq!(stages[1].provider, PROVIDER_AZURE);
         // The id the frontend matches the placeholder job against.
         assert_eq!(stages[0].id, "stage-build");
+    }
+
+    /// The ref name is carried through, because it is the only thing a `dependsOn:` can be
+    /// matched against.
+    ///
+    /// The display name deliberately differs from the ref name here: matching a `dependsOn` against
+    /// display names is the mistake this field exists to make impossible.
+    #[test]
+    fn stages_carry_the_ref_name_the_pipeline_file_refers_to() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"stage-env","parentId":null,"type":"Stage","name":"Environment Variables",
+               "identifier":"Environment","order":1,"state":"completed","result":"succeeded"},
+              {"id":"stage-val","parentId":null,"type":"Stage","name":"Validations","order":2,
+               "identifier":"","state":"completed","result":"skipped"},
+              {"id":"stage-test","parentId":null,"type":"Stage","name":"Testing","order":3,
+               "state":"inProgress"}
+            ]}"#,
+        );
+
+        let stages = map_stages("42", &records);
+        let refs: Vec<(&str, Option<&str>)> =
+            stages.iter().map(|s| (s.name.as_str(), s.ref_name.as_deref())).collect();
+
+        assert_eq!(
+            refs,
+            vec![
+                // Ref name and display name are two different strings, and both survive.
+                ("Environment Variables", Some("Environment")),
+                // Present but blank, and absent entirely, both mean "nothing to join on" — never
+                // an empty string, which would match a `dependsOn: ""` nobody wrote.
+                ("Validations", None),
+                ("Testing", None),
+            ]
+        );
+    }
+
+    /// Only a YAML definition has a file to point the parser at.
+    #[test]
+    fn yaml_path_is_only_read_from_a_yaml_definition() {
+        let parse = |json: &str| -> Option<String> {
+            yaml_path(&serde_json::from_str::<RawDefinitionDetail>(json).expect("definition"))
+        };
+
+        // A YAML pipeline: the filename, with Azure's leading slash stripped so it can be joined
+        // onto the working copy without escaping it.
+        assert_eq!(
+            parse(r#"{"process":{"type":2,"yamlFilename":"/pipelines/build.yml"}}"#),
+            Some("pipelines/build.yml".to_string())
+        );
+        assert_eq!(
+            parse(r#"{"process":{"type":2,"yamlFilename":"azure-pipelines.yml"}}"#),
+            Some("azure-pipelines.yml".to_string())
+        );
+
+        // A classic (designer) definition is stored as a task graph on the server. There is no file.
+        assert_eq!(parse(r#"{"process":{"type":1,"yamlFilename":""}}"#), None);
+        // A YAML definition that somehow names no file is the same "nothing to read" answer.
+        assert_eq!(parse(r#"{"process":{"type":2,"yamlFilename":"   "}}"#), None);
+        // And a definition with no process block at all must not panic.
+        assert_eq!(parse(r#"{}"#), None);
     }
 
     /// A stage whose jobs *are* in the timeline must not also get a card of its own — that would

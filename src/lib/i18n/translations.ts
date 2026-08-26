@@ -138,6 +138,20 @@ const en = {
   "createPr.generating": "Generating…",
   "createPr.create": "Create PR",
   "createPr.creating": "Creating…",
+  "createPr.workItems":
+    "Work items",
+  "createPr.workItemsPlaceholder":
+    "Search by id or title…",
+  "createPr.workItemRemove":
+    "Unlink this work item",
+  "createPr.workItemSuggested":
+    "Link #{id}, found in the branch name",
+  "createPr.workItemsNone":
+    "No work items match",
+  "createPr.workItemsEmpty":
+    "Nothing assigned to you and open. Type an id or a title to search.",
+  "createPr.workItemsUnavailable":
+    "Work items could not be read. Your access token may not have work-item read permission — you can still open the pull request and link them in Azure DevOps.",
   "createPr.created": "Pull request created",
   "createPr.sameBranch": "Choose two different branches.",
   "createPr.needTwoBranches": "You need at least two local branches to create a pull request.",
@@ -1948,6 +1962,50 @@ const en = {
   "settings.blameLabel": "Show who last changed the line the caret is on",
   "settings.blameHint":
     "A dim note at the end of the current line, and the same in the status bar. Clicking it opens that commit's change to the file side by side. Off by default: it runs a blame over the whole open file.",
+  "settings.identityPerWorkspace":
+    "Identidad por workspace",
+  "settings.identityPerWorkspaceHint":
+    "Un workspace puede hacer commits como otra persona: trabajo en uno, personal en otro. Lo que definas aqu\u00ed se escribe en la configuraci\u00f3n de git de cada repositorio del workspace, as\u00ed que la terminal, tus agentes de IA y el git de l\u00ednea de comandos coinciden con la app. Un workspace sin nada definido hereda la identidad global de arriba.",
+  "settings.identityEffective":
+    "Los commits se firmar\u00e1n como",
+  "settings.identityUnset":
+    "Sin identidad definida",
+  "settings.identityUnsetHint":
+    "git se negar\u00e1 a hacer commit hasta que definas una",
+  "settings.identityFromWorkspace":
+    "de este workspace",
+  "settings.identityFromWorkspaceHint":
+    "La configuraci\u00f3n de git de este repositorio lleva la identidad que CodeFlow escribi\u00f3 para su workspace.",
+  "settings.identityFromRepo":
+    "definida en este repositorio",
+  "settings.identityFromRepoHint":
+    "Alguien defini\u00f3 user.name a mano en la configuraci\u00f3n de este repositorio. CodeFlow no lo sobrescribe.",
+  "settings.identityFromGlobal":
+    "global",
+  "settings.identityFromGlobalHint":
+    "Sin override de repositorio ni de workspace, as\u00ed que git recurre a tu ~/.gitconfig global.",
+  "settings.identityRepoOverrideNote":
+    "Este repositorio tiene su propio user.name, puesto a mano. Una identidad de workspace no lo va a reemplazar: CodeFlow solo sobrescribe identidades que escribi\u00f3 \u00e9l mismo. Qu\u00edtalo con `git config --unset user.name` si quieres que aplique la del workspace.",
+  "settings.identityInherits":
+    "hereda la identidad global",
+  "settings.identityInheritsHint":
+    "Nada definido para este workspace, as\u00ed que sus repositorios usan tu identidad global de git.",
+  "settings.identitySet":
+    "Definir una identidad para este workspace",
+  "settings.identityEdit":
+    "Editar la identidad de este workspace",
+  "settings.identityReset":
+    "Quitarla y heredar la identidad global",
+  "settings.identitySaved":
+    "{name} ahora har\u00e1 commits con su propia identidad",
+  "settings.identityCleared":
+    "{name} vuelve a la identidad global",
+  "settings.identityPartial":
+    "Guardado, pero no se pudieron actualizar estos repositorios: {repos}. Seguir\u00e1n haciendo commits como antes.",
+  "settings.identityBadEmail":
+    "Eso no parece una direcci\u00f3n de correo",
+  "settings.identityNoWorkspaces":
+    "Todav\u00eda no hay workspaces.",
   "settings.gitIdentityHint": "Identity used for commits made through CodeFlow (writes to your global git config).",
   "settings.name": "Name",
   "settings.email": "Email",
@@ -2980,6 +3038,23 @@ const en = {
   "editor.noMatches": "No matches",
   "editor.matchCount": "{hits} results in {files} files",
   "editor.searchTruncated": "showing the first ones",
+  "terminal.softwareRenderer": "software rendering",
+  "terminal.softwareRendererHint":
+    "This webview would not give the terminal a GPU context, so it is drawing every row as HTML instead. It still works, but heavy output will feel slow. Usually a graphics driver the webview has blocklisted, or a machine running without hardware acceleration.",
+  "error.boundaryTitle": "This screen stopped working",
+  "error.boundaryTitleNamed": "{name} stopped working",
+  "error.boundaryViewHint":
+    "The rest of the app is still running — switch to another view and come back, or retry this one. Nothing on disk was touched.",
+  "error.boundaryFatalHint":
+    "Reloading rebuilds the window without restarting the app, so your repositories, terminals and background work stay as they are.",
+  "error.boundaryRetry": "Try again",
+  "error.boundaryReload": "Reload the window",
+  "editor.draftsRestored":
+    "Restored {n} unsaved file(s) from your last session. Nothing was written to disk — save them, or close the tabs to discard.",
+  "editor.searchUpdating": "updating…",
+  "editor.searchUnsaved": "Matches in this file come from the unsaved buffer, not from disk.",
+  "editor.replaceNeedsSave": "Save this file before replacing in it — replace writes to disk, and the unsaved buffer would overwrite it.",
+  "editor.replaceUnsavedNote": " {d} of them have unsaved changes that would overwrite the replacement on save.",
   "editor.inlineEditPlaceholder": "Describe the change to {n} selected line(s)… (Ctrl+I)",
   "editor.inlineEditApply": "Rewrite",
   "editor.closeTab": "Close (Ctrl+W)",
@@ -6161,7 +6236,13 @@ const en = {
   "pipelines.structureOf": "Structure of {name}",
   "pipelines.sourceStage": "stages declared by the provider",
   "pipelines.sourceStageHint":
-    "The columns are the stages the provider itself declares for this pipeline. Nothing here is inferred.",
+    "The columns are the stages the provider itself declares for this pipeline. Where each one sits is a separate question — see the badge on the stage board.",
+  "pipelines.sourceStageDeps": "declared stages · declared dependsOn",
+  "pipelines.sourceStageDepsHint":
+    "The cards are the stages the provider declares, and which one waits for which is read out of the dependsOn: in the pipeline file in your working copy — nothing here is measured. A stage with no dependsOn: waits for the one written above it; an empty dependsOn: waits for nothing. If your checkout sits on a different commit than the run, what was read is a pipeline but not necessarily this run's.",
+  "pipelines.stageJobDeclared": "declared, never ran",
+  "pipelines.stageJobDeclaredHint":
+    "This job is named in the pipeline file. The stage never ran, so the host reported nothing for it — no status, no log, no duration.",
   "pipelines.sourceStageOrder": "declared stages · measured order",
   "pipelines.sourceStageOrderHint":
     "The cards are the stages the provider declares. Which of them ran beside which is not something any of the three hosts publishes, so it is worked out here from the stage clocks: a stage sits behind another only when that one had finished before it started. Two stages that ran back to back only because there was one agent free will look like a dependency.",

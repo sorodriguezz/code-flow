@@ -16,7 +16,11 @@ import {
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { useApiStore } from "../../state/apiStore";
-import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
+import {
+  DEFAULT_GRAPHQL_INTROSPECTION,
+  DEFAULT_TAB_VIEW,
+  useApiRuntimeStore,
+} from "../../state/apiRuntimeStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -199,10 +203,32 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
   const setGraphqlSchema = useApiRuntimeStore((s) => s.setGraphqlSchema);
 
   const queryEditorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
-  const [explorerOpen, setExplorerOpen] = useState(true);
+  /**
+   * Whether the schema explorer is docked, what is typed in its filter, and how the last
+   * introspection went — all per request tab.
+   *
+   * One `GraphqlPanel` instance serves every tab, so held locally these meant closing the explorer
+   * on one GraphQL request closed it on all of them, and a failed introspection left its error
+   * banner hanging over a different endpoint entirely.
+   */
+  const explorerOpen = useApiRuntimeStore(
+    (s) => s.tabView[tabId]?.graphqlExplorerOpen ?? DEFAULT_TAB_VIEW.graphqlExplorerOpen,
+  );
+  const search = useApiRuntimeStore(
+    (s) => s.tabView[tabId]?.graphqlSearch ?? DEFAULT_TAB_VIEW.graphqlSearch,
+  );
+  const setTabView = useApiRuntimeStore((s) => s.setTabView);
+  const fetching = useApiRuntimeStore(
+    (s) => s.graphqlIntrospection[tabId]?.fetching ?? DEFAULT_GRAPHQL_INTROSPECTION.fetching,
+  );
+  const error = useApiRuntimeStore(
+    (s) => s.graphqlIntrospection[tabId]?.error ?? DEFAULT_GRAPHQL_INTROSPECTION.error,
+  );
+  const setIntrospection = useApiRuntimeStore((s) => s.setGraphqlIntrospection);
+
+  // Stays local: this is a splitter position, not a view choice, and the honest place for it is a
+  // `layoutStore` key alongside the app's other pane sizes.
   const [variablesHeight, setVariablesHeight] = useState(140);
-  const [fetching, setFetching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   // Claimed for the whole life of the panel rather than on editor mount, so the provider can find
   // the schema even while Monaco is still loading its model.
@@ -241,8 +267,7 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
     const tab = store.openTabs.find((candidate) => candidate.id === tabId);
     if (!tab) return;
 
-    setFetching(true);
-    setError(null);
+    setIntrospection(tabId, { fetching: true, error: null });
     try {
       const spec: ApiRequestSpec = {
         ...tab.draft,
@@ -264,10 +289,10 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
       setGraphqlSchema(tabId, parseIntrospection(response.body_text));
     } catch (e) {
       const detail = messageOf(e);
-      setError(detail);
+      setIntrospection(tabId, { error: detail });
       pushErrorToast(t("api.graphql.schemaFailed", { error: detail }));
     } finally {
-      setFetching(false);
+      setIntrospection(tabId, { fetching: false });
     }
   };
 
@@ -338,7 +363,7 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
             {status}
           </span>
           <button
-            onClick={() => setExplorerOpen((open) => !open)}
+            onClick={() => setTabView(tabId, { graphqlExplorerOpen: !explorerOpen })}
             title={t("api.graphql.explorer")}
             aria-label={t("api.graphql.explorer")}
             className={`flex h-5 w-5 shrink-0 items-center justify-center rounded ${
@@ -407,7 +432,12 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
           style={{ width: EXPLORER_WIDTH }}
         >
           {schema ? (
-            <SchemaExplorer schema={schema} onInsert={insertSkeleton} />
+            <SchemaExplorer
+              schema={schema}
+              search={search}
+              onSearch={(next) => setTabView(tabId, { graphqlSearch: next })}
+              onInsert={insertSkeleton}
+            />
           ) : (
             <EmptyState
               icon={Boxes}
@@ -427,13 +457,17 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
 
 function SchemaExplorer({
   schema,
+  search,
+  onSearch,
   onInsert,
 }: {
   schema: GraphqlSchema;
+  /** Lifted to the parent, which keeps it per tab — this child has no tab identity of its own. */
+  search: string;
+  onSearch: (next: string) => void;
   onInsert: (operation: GqlOperation, field: GqlField) => void;
 }) {
   const t = useT();
-  const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const needle = search.trim().toLowerCase();
 
@@ -473,7 +507,7 @@ function SchemaExplorer({
         <Search size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
         <input
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => onSearch(e.target.value)}
           placeholder={t("api.graphql.searchPlaceholder")}
           className="min-w-0 flex-1 bg-transparent text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
         />

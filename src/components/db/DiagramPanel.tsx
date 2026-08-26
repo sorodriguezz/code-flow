@@ -28,8 +28,6 @@ import {
   diagramStats,
   layoutDiagram,
   toMermaid,
-  type DiagramColumnMode,
-  type DiagramDensity,
   type DiagramLayout,
   type DiagramNode,
 } from "../../lib/db/erLayout";
@@ -70,13 +68,21 @@ type Highlight = "none" | "noPrimaryKey" | "isolated";
 export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
   const t = useT();
   const store = useDbStore.getState();
-  const [mode, setMode] = useState<DiagramColumnMode>("keys");
-  const [density, setDensity] = useState<DiagramDensity>("roomy");
-  const [pinned, setPinned] = useState<Record<string, { x: number; y: number }>>({});
+  /**
+   * Everything about how this canvas is being *read* — the column mode, the density, the boxes
+   * dragged by hand, the selection, the search and the highlight — on the tab record.
+   *
+   * `DatabaseView` renders one `DiagramPanel` for every diagram tab, so held locally these were one
+   * set of controls shared by all of them. The worst of it was `pinned`: tables dragged into place
+   * on one schema were applied by id to whatever schema was opened next, and reading a second
+   * diagram silently rearranged the first one's layout.
+   *
+   * The pan/zoom below deliberately stays local — it is re-fitted on every relayout and is driven
+   * imperatively through `viewRef`, not by React state.
+   */
+  const { mode, density, pinned, selected, query, highlight } = tab.ui;
+  const setUi = useDbStore((s) => s.setDiagramUi);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
-  const [selected, setSelected] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [highlight, setHighlight] = useState<Highlight>("none");
   /** Where the export menu was opened from, or `null` when it is closed. */
   const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
   const frameRef = useRef<HTMLDivElement>(null);
@@ -236,7 +242,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
           viewX: viewRef.current.x,
           viewY: viewRef.current.y,
         };
-    if (node) setSelected(node.id);
+    if (node) setUi(tab.id, { selected: node.id });
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -248,10 +254,23 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
       applyView({ ...viewRef.current, x: drag.viewX + dx, y: drag.viewY + dy });
     } else {
       // Divided by the zoom, so a box follows the cursor at every scale instead of racing it.
-      setPinned((current) => ({
-        ...current,
-        [drag.id]: { x: drag.nodeX + dx / viewRef.current.k, y: drag.nodeY + dy / viewRef.current.k },
-      }));
+      //
+      // The other pinned boxes are read from the store rather than from the closed-over `pinned`:
+      // pointer moves arrive faster than this component re-renders, so the value in scope can be a
+      // frame or two behind, and spreading a stale copy would resurrect positions the user has
+      // already moved. `setDiagramUi` takes a patch rather than an updater, so this is where the
+      // freshness has to come from. (The dragged box itself is safe either way — its position is
+      // recomputed absolutely from `drag.nodeX + dx`, never accumulated.)
+      const current = useDbStore
+        .getState()
+        .tabs.find((entry) => entry.id === tab.id);
+      const base = current?.kind === "diagram" ? current.ui.pinned : pinned;
+      setUi(tab.id, {
+        pinned: {
+          ...base,
+          [drag.id]: { x: drag.nodeX + dx / viewRef.current.k, y: drag.nodeY + dy / viewRef.current.k },
+        },
+      });
     }
   };
 
@@ -405,7 +424,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
                 })}
                 title={t("db.diagram.noPkHint")}
                 onClick={() =>
-                  setHighlight((current) => (current === "noPrimaryKey" ? "none" : "noPrimaryKey"))
+                  setUi(tab.id, { highlight: highlight === "noPrimaryKey" ? "none" : "noPrimaryKey" })
                 }
               />
             )}
@@ -416,7 +435,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
                 label={t("db.diagram.isolatedN", { n: formatCount(stats.isolated.length) })}
                 title={t("db.diagram.isolatedHint")}
                 onClick={() =>
-                  setHighlight((current) => (current === "isolated" ? "none" : "isolated"))
+                  setUi(tab.id, { highlight: highlight === "isolated" ? "none" : "isolated" })
                 }
               />
             )}
@@ -430,13 +449,13 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
           />
           <input
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => setUi(tab.id, { query: e.target.value })}
             placeholder={t("db.diagram.findPlaceholder")}
             className="w-[150px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-[3px] pl-5 pr-5 text-[11.5px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
           />
           {query && (
             <button
-              onClick={() => setQuery("")}
+              onClick={() => setUi(tab.id, { query: "" })}
               aria-label={t("db.clearSearch")}
               className="absolute right-1 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
             >
@@ -454,7 +473,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
               the button said the opposite of what the canvas did. The title still describes the
               click, not the state, which is the other half of getting a toggle right. */}
           <ToolbarButton
-            onClick={() => setMode((current) => (current === "keys" ? "all" : "keys"))}
+            onClick={() => setUi(tab.id, { mode: mode === "keys" ? "all" : "keys" })}
             active={mode === "keys"}
             title={mode === "keys" ? t("db.diagram.showAllColumns") : t("db.diagram.showKeysOnly")}
           >
@@ -464,7 +483,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
               points at out of the flow and wraps the layers that have grown into strips, which is
               what turns a canvas of mostly whitespace back into a diagram. */}
           <ToolbarButton
-            onClick={() => setDensity((current) => (current === "compact" ? "roomy" : "compact"))}
+            onClick={() => setUi(tab.id, { density: density === "compact" ? "roomy" : "compact" })}
             active={density === "compact"}
             title={density === "compact" ? t("db.diagram.spreadOut") : t("db.diagram.packTogether")}
           >
@@ -478,7 +497,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
           </ToolbarButton>
           <ToolbarButton
             onClick={() => {
-              setPinned({});
+              setUi(tab.id, { pinned: {} });
               fit();
             }}
             title={t("db.diagram.fit")}
@@ -519,7 +538,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
         ref={frameRef}
         onWheel={onWheel}
         onPointerDown={(e) => {
-          setSelected(null);
+          setUi(tab.id, { selected: null });
           onPointerDown(e);
         }}
         onPointerMove={onPointerMove}

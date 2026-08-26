@@ -59,6 +59,26 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         -- and backfilled for pre-existing workspaces (see backfill_workspace_prompts). Empty
         -- content means "use the built-in default", so resetting is just a blank save. These are
         -- deliberately NOT per-provider — the same text applies to whatever engine a task routes to.
+        -- A workspace that commits as somebody else.
+        --
+        -- One row per workspace, and only when there is an override: **no row means inherit**, the
+        -- same convention `workspace_prompts` uses for an empty `content`. There is deliberately no
+        -- 'global' row and no `scope` column, because the global row already exists and it is
+        -- ~/.gitconfig — a second one stored here would be a second answer to the same question,
+        -- free to disagree with the first.
+        --
+        -- This table is the *declared intent*, not the thing git reads. What git reads is each
+        -- repository's own .git/config, which `apply_workspace_identity` keeps in step: the intent
+        -- lives here so a repository added to the workspace tomorrow can be brought into line
+        -- without asking, and so the settings screen can show every workspace's identity without
+        -- opening N repositories to find out.
+        CREATE TABLE IF NOT EXISTS workspace_git_identity (
+            workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            email        TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS workspace_prompts (
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             kind         TEXT NOT NULL,

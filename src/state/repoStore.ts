@@ -181,6 +181,22 @@ interface RefreshOptions {
  * "Push finished" on a failed push would be a lie.
  *
  * `silent` skips the `busy` pair only — see `RefreshOptions`. The failure path is untouched. */
+/**
+ * Which status refresh is the newest — the interlock that stops a stale one repainting the panel.
+ *
+ * `refreshStatus` fires from two places that do not coordinate: the file watcher, on its own clock,
+ * and every mutating action, right after it finishes. Both read three things concurrently and then
+ * write all three, so a watcher tick that started *before* a discard could easily land *after* the
+ * refresh that discard triggered — putting the row the user just cleared straight back on screen,
+ * with the file already gone from disk. From the outside that is indistinguishable from "discard
+ * didn't work", which is exactly how it was reported.
+ *
+ * A module-level counter rather than a field on the store: it is an implementation detail of one
+ * action, nothing renders from it, and putting it in state would re-render every subscriber twice
+ * per refresh for a number none of them read.
+ */
+let statusRun = 0;
+
 async function guarded(
   set: (partial: Partial<RepoState>) => void,
   fn: () => Promise<void>,
@@ -526,6 +542,9 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   refreshStatus: async (options) => {
     const { repoPath } = get();
     if (!repoPath) return;
+    // Claimed before the awaits below, so a slower run started earlier cannot write over a faster
+    // one started later — see `statusRun`.
+    const token = ++statusRun;
     await guarded(
       set,
       async () => {
@@ -537,6 +556,9 @@ export const useRepoStore = create<RepoState>((set, get) => ({
           api.getWorkingDiff(repoPath, LIST_DIFF_CONTEXT_LINES),
           api.getStagedDiff(repoPath, LIST_DIFF_CONTEXT_LINES),
         ]);
+        // Stale by the time it landed: something newer has already asked, and this answer describes
+        // a repository that has since changed. Dropping it is the whole point of the token.
+        if (token !== statusRun || get().repoPath !== repoPath) return;
         set({ status, workingDiff, stagedDiff });
       },
       options,

@@ -20,7 +20,7 @@ import { looksLikeCurl, parseCurl } from "../../lib/api/importers";
 import { PROTOCOL_NAMES, switchProtocol } from "../../lib/api/protocol";
 import { apiCancelHttp, apiSaveFile } from "../../lib/tauri/apiCommands";
 import { useApiStore } from "../../state/apiStore";
-import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
+import { DEFAULT_TAB_VIEW, useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -28,6 +28,7 @@ import { API_PROTOCOLS, emptyKeyValue, HTTP_METHODS, STREAMING_PROTOCOLS } from 
 import type {
   ApiCollection,
   ApiFolder,
+  ApiPanelId as PanelId,
   ApiProtocol,
   ApiResponse,
   ApiRequestSpec,
@@ -50,7 +51,6 @@ import type { TranslationKey } from "../../lib/i18n/translations";
  * later, which is exactly how two-way binding usually goes wrong.
  */
 
-type PanelId = "params" | "auth" | "headers" | "body" | "pre" | "tests" | "settings" | "docs";
 
 const MIN_RESPONSE_HEIGHT = 140;
 const MAX_RESPONSE_HEIGHT = 900;
@@ -302,15 +302,48 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
   const commitSize = useLayoutStore((s) => s.commitSize);
   const pushToast = useToastStore((s) => s.pushToast);
 
-  const [panel, setPanel] = useState<PanelId>("params");
+  /**
+   * Which sub-panel this *tab* is on, and whether its hidden-header list is unfolded.
+   *
+   * In the runtime store rather than in a `useState` here, because this component is mounted once
+   * for every tab (`ApiView.tsx` renders it with no key, deliberately — a key would remount Monaco
+   * and throw away the undo stacks). A local `useState` was therefore one panel selector shared by
+   * every open request: leaving one tab on Body put every other tab on Body too, and coming back
+   * to a tab had forgotten where it was. Read as scalars so a click in one tab doesn't re-render
+   * every subscriber of the record.
+   */
+  const panel = useApiRuntimeStore((s) => s.tabView[tabId]?.panel ?? DEFAULT_TAB_VIEW.panel);
+  const showImplicit = useApiRuntimeStore(
+    (s) => s.tabView[tabId]?.showImplicit ?? DEFAULT_TAB_VIEW.showImplicit,
+  );
+  const setTabView = useApiRuntimeStore((s) => s.setTabView);
+  const setPanel = (next: PanelId) => setTabView(tabId, { panel: next });
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [savePicker, setSavePicker] = useState<{ collectionId: string; folderId: string } | null>(null);
   const [protocolMenu, setProtocolMenu] = useState(false);
   const [implicitHeaders, setImplicitHeaders] = useState<KeyValue[]>([]);
-  const [showImplicit, setShowImplicit] = useState(false);
-  const trackRef = useRef<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const actionsRef = useRef<TabActions>({ save: () => {}, send: () => {} });
+
+  /**
+   * The three popovers, closed on the way *out* of a tab rather than remembered.
+   *
+   * They are the other half of the one-instance-for-every-tab problem, and they want the opposite
+   * treatment from `panel`: a popover belongs to the tab it was opened over. Without this, the save
+   * picker opened on tab A stays on screen over tab B — and `saveToTarget` calls `saveTab(tabId)`
+   * with whatever tab is current, so it files B into the collection chosen for A.
+   *
+   * Adjusted during render, not in an effect: an effect runs after paint, which leaves exactly one
+   * frame in which the wrong-tab popover is on screen and clickable.
+   */
+  const [popoverTab, setPopoverTab] = useState(tabId);
+  if (popoverTab !== tabId) {
+    setPopoverTab(tabId);
+    setSavePicker(null);
+    setMenuOpen(false);
+    setProtocolMenu(false);
+  }
 
   const collectionId = tab?.collectionId ?? null;
   const spec = tab?.draft ?? null;
@@ -487,7 +520,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
     if (!current || runtime.sending[tabId]) return;
 
     const trackId = newId("send");
-    trackRef.current = trackId;
+    runtime.setSendTrack(tabId, trackId);
     runtime.setSending(tabId, true);
     runtime.setResponse(tabId, null);
 
@@ -560,13 +593,20 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
       useApiRuntimeStore.getState().setResponse(tabId, response);
       await recordHistory(response, request);
     } finally {
-      useApiRuntimeStore.getState().setSending(tabId, false);
-      if (trackRef.current === trackId) trackRef.current = null;
+      const runtimeNow = useApiRuntimeStore.getState();
+      runtimeNow.setSending(tabId, false);
+      // Only disarm the slot if it is still *this* send's. Without the guard, a send that finishes
+      // after the user has already started another one on the same tab would leave Cancel with
+      // nothing to fire at.
+      if (runtimeNow.sendTracks[tabId] === trackId) runtimeNow.setSendTrack(tabId, null);
     }
   };
 
+  // Read from the store rather than from a ref: the ref was a single slot shared by every tab, so
+  // sending in A and then in B left Cancel on A aborting B's request — or doing nothing at all,
+  // if B had already finished and cleared the slot.
   const cancelSend = () => {
-    const trackId = trackRef.current;
+    const trackId = useApiRuntimeStore.getState().sendTracks[tabId];
     if (trackId) void apiCancelHttp(trackId).catch(() => {});
   };
 
@@ -1039,7 +1079,13 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                     <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
                       {t("api.queryParams")}
                     </h3>
+                    {/* Scoped by tab: `KeyValueTable` keeps the bulk-edit textarea, its snapshot of
+                        the rows it was opened over, and a half-typed new row in local state. This
+                        is the one place a React key is the right tool — that snapshot is only
+                        meaningful for the rows it was taken from, so it can never travel to
+                        another tab, and remounting is exactly the re-snapshot it would need. */}
                     <KeyValueTable
+                      key={`${tabId}:params`}
                       rows={spec.params}
                       onChange={onParamsChange}
                       variableContext={variableContext}
@@ -1052,6 +1098,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                         {t("api.pathVariables")}
                       </h3>
                       <KeyValueTable
+                        key={`${tabId}:pathVars`}
                         rows={spec.pathVars}
                         onChange={(pathVars) => update({ pathVars })}
                         variableContext={variableContext}
@@ -1061,11 +1108,15 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                 </div>
               )}
 
-              {panel === "auth" && <AuthPanel tabId={tabId} />}
+              {/* Keyed, unlike the builder itself. `AuthPanel` holds nothing worth remembering — the auth
+                  config lives in `spec.auth` — but its children hold reveal toggles, and a secret shown
+                  in clear text on one tab must not arrive already revealed on the next. */}
+              {panel === "auth" && <AuthPanel key={tabId} tabId={tabId} />}
 
               {panel === "headers" && (
                 <div className="flex h-full flex-col gap-3 overflow-auto p-3">
                   <KeyValueTable
+                    key={`${tabId}:headers`}
                     rows={spec.headers}
                     onChange={(headers) => update({ headers })}
                     variableContext={variableContext}
@@ -1074,7 +1125,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                   {implicitHeaders.length > 0 && (
                     <div className="flex flex-col gap-1.5">
                       <button
-                        onClick={() => setShowImplicit((open) => !open)}
+                        onClick={() => setTabView(tabId, { showImplicit: !showImplicit })}
                         title={showImplicit ? t("api.hideHiddenHeaders") : t("api.showHiddenHeaders")}
                         className="flex items-center gap-1 self-start text-[11px] text-[var(--cf-accent)]"
                       >
@@ -1088,7 +1139,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                           backend offers no way to suppress them — an editable row here would be a
                           control that quietly does nothing. */}
                       {showImplicit && (
-                        <KeyValueTable rows={implicitHeaders} onChange={() => {}} readOnlyKeys />
+                        <KeyValueTable key={`${tabId}:implicit`} rows={implicitHeaders} onChange={() => {}} readOnlyKeys />
                       )}
                     </div>
                   )}

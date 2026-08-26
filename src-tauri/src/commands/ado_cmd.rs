@@ -1344,13 +1344,26 @@ pub async fn create_pull_request(
     source_branch: String,
     target_branch: String,
     draft: bool,
+    // Azure DevOps only. Ignored by the other two providers, which have no equivalent: a work item
+    // is an Azure concept, and a branch policy requiring one is why linking at creation time
+    // matters rather than being a convenience.
+    work_item_ids: Option<Vec<i64>>,
 ) -> Result<ado::PullRequestSummary, String> {
     let project = load_project(&db, &project_id)?;
     match linked_repo(&project)? {
         LinkedRepo::Azure { org, project: ado_project, repo_id } => {
             let pat = pat_for_org(&org)?;
             ado::create_pull_request(
-                &org, &ado_project, &repo_id, &title, &description, &source_branch, &target_branch, draft, &pat,
+                &org,
+                &ado_project,
+                &repo_id,
+                &title,
+                &description,
+                &source_branch,
+                &target_branch,
+                draft,
+                &work_item_ids.unwrap_or_default(),
+                &pat,
             )
             .await
         }
@@ -1368,6 +1381,28 @@ pub async fn create_pull_request(
             )
             .await
         }
+    }
+}
+
+/// Work items a pull request could be linked to. Azure DevOps only.
+///
+/// An empty `query` is not an empty answer: it asks for the caller's own open items, which is the
+/// list worth showing before anything has been typed.
+#[tauri::command]
+pub async fn search_work_items(
+    db: State<'_, Db>,
+    project_id: String,
+    query: String,
+) -> Result<Vec<ado::WorkItem>, String> {
+    let project = load_project(&db, &project_id)?;
+    match linked_repo(&project)? {
+        LinkedRepo::Azure { org, project: ado_project, .. } => {
+            let pat = pat_for_org(&org)?;
+            ado::search_work_items(&org, &ado_project, &query, &pat).await
+        }
+        // Not an error: the picker asks whenever a PR form is open, and the answer for a GitHub or
+        // GitLab repository is simply that there is nothing of this kind to offer.
+        _ => Ok(vec![]),
     }
 }
 

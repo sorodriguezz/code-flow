@@ -131,6 +131,20 @@ export const es = {
   "createPr.generating": "Generando…",
   "createPr.create": "Crear PR",
   "createPr.creating": "Creando…",
+  "createPr.workItems":
+    "Work items",
+  "createPr.workItemsPlaceholder":
+    "Buscar por id o título…",
+  "createPr.workItemRemove":
+    "Quitar este work item",
+  "createPr.workItemSuggested":
+    "Enlazar #{id}, encontrado en el nombre de la rama",
+  "createPr.workItemsNone":
+    "Ningún work item coincide",
+  "createPr.workItemsEmpty":
+    "No tienes nada asignado y abierto. Escribe un id o un título para buscar.",
+  "createPr.workItemsUnavailable":
+    "No se pudieron leer los work items. Puede que tu token de acceso no tenga permiso de lectura de work items: igual puedes abrir el pull request y enlazarlos en Azure DevOps.",
   "createPr.created": "Pull request creado",
   "createPr.sameBranch": "Elige dos ramas distintas.",
   "createPr.needTwoBranches": "Necesitas al menos dos ramas locales para crear un pull request.",
@@ -1913,6 +1927,50 @@ export const es = {
   "settings.blameLabel": "Mostrar quién cambió por última vez la línea donde está el cursor",
   "settings.blameHint":
     "Una nota atenuada al final de la línea actual, y la misma en la barra de estado. Al hacer clic se abre en paralelo el cambio de ese commit en el archivo. Desactivado por defecto: ejecuta un blame sobre todo el archivo abierto.",
+  "settings.identityPerWorkspace":
+    "Identidad por workspace",
+  "settings.identityPerWorkspaceHint":
+    "Un workspace puede hacer commits como otra persona: trabajo en uno, personal en otro. Lo que definas aquí se escribe en la configuración de git de cada repositorio del workspace, así que la terminal, tus agentes de IA y el git de línea de comandos coinciden con la app. Un workspace sin nada definido hereda la identidad global de arriba.",
+  "settings.identityEffective":
+    "Los commits se firmarán como",
+  "settings.identityUnset":
+    "Sin identidad definida",
+  "settings.identityUnsetHint":
+    "git se negará a hacer commit hasta que definas una",
+  "settings.identityFromWorkspace":
+    "de este workspace",
+  "settings.identityFromWorkspaceHint":
+    "La configuración de git de este repositorio lleva la identidad que CodeFlow escribió para su workspace.",
+  "settings.identityFromRepo":
+    "definida en este repositorio",
+  "settings.identityFromRepoHint":
+    "Alguien definió user.name a mano en la configuración de este repositorio. CodeFlow no lo sobrescribe.",
+  "settings.identityFromGlobal":
+    "global",
+  "settings.identityFromGlobalHint":
+    "Sin override de repositorio ni de workspace, así que git recurre a tu ~/.gitconfig global.",
+  "settings.identityRepoOverrideNote":
+    "Este repositorio tiene su propio user.name, puesto a mano. Una identidad de workspace no lo va a reemplazar: CodeFlow solo sobrescribe identidades que escribió él mismo. Quítalo con `git config --unset user.name` si quieres que aplique la del workspace.",
+  "settings.identityInherits":
+    "hereda la identidad global",
+  "settings.identityInheritsHint":
+    "Nada definido para este workspace, así que sus repositorios usan tu identidad global de git.",
+  "settings.identitySet":
+    "Definir una identidad para este workspace",
+  "settings.identityEdit":
+    "Editar la identidad de este workspace",
+  "settings.identityReset":
+    "Quitarla y heredar la identidad global",
+  "settings.identitySaved":
+    "{name} ahora hará commits con su propia identidad",
+  "settings.identityCleared":
+    "{name} vuelve a la identidad global",
+  "settings.identityPartial":
+    "Guardado, pero no se pudieron actualizar estos repositorios: {repos}. Seguirán haciendo commits como antes.",
+  "settings.identityBadEmail":
+    "Eso no parece una dirección de correo",
+  "settings.identityNoWorkspaces":
+    "Todavía no hay workspaces.",
   "settings.gitIdentityHint": "Identidad usada para los commits hechos desde CodeFlow (escribe en tu git config global).",
   "settings.name": "Nombre",
   "settings.email": "Correo",
@@ -2928,6 +2986,23 @@ export const es = {
   "editor.noMatches": "Sin coincidencias",
   "editor.matchCount": "{hits} resultados en {files} archivos",
   "editor.searchTruncated": "mostrando los primeros",
+  "terminal.softwareRenderer": "renderizado por software",
+  "terminal.softwareRendererHint":
+    "Este webview no le dio a la terminal un contexto de GPU, así que está dibujando cada fila como HTML. Funciona igual, pero con mucha salida se sentirá lenta. Suele ser un driver gráfico que el webview tiene en su lista de bloqueo, o una máquina sin aceleración por hardware.",
+  "error.boundaryTitle": "Esta pantalla dejó de funcionar",
+  "error.boundaryTitleNamed": "{name} dejó de funcionar",
+  "error.boundaryViewHint":
+    "El resto de la app sigue funcionando: cambia a otra vista y vuelve, o reintenta esta. No se tocó nada en disco.",
+  "error.boundaryFatalHint":
+    "Recargar reconstruye la ventana sin reiniciar la app, así que tus repositorios, terminales y trabajo en segundo plano se mantienen.",
+  "error.boundaryRetry": "Reintentar",
+  "error.boundaryReload": "Recargar la ventana",
+  "editor.draftsRestored":
+    "Se recuperaron {n} archivo(s) sin guardar de tu última sesión. No se escribió nada en disco: guárdalos, o cierra las pestañas para descartarlos.",
+  "editor.searchUpdating": "actualizando…",
+  "editor.searchUnsaved": "Las coincidencias de este archivo vienen del búfer sin guardar, no del disco.",
+  "editor.replaceNeedsSave": "Guarda este archivo antes de reemplazar en él: el reemplazo escribe en disco y el búfer sin guardar lo sobrescribiría.",
+  "editor.replaceUnsavedNote": " {d} de ellos tienen cambios sin guardar que sobrescribirían el reemplazo al guardar.",
   "editor.inlineEditPlaceholder": "Describe el cambio a {n} línea(s) seleccionada(s)… (Ctrl+I)",
   "editor.inlineEditApply": "Reescribir",
   "editor.closeTab": "Cerrar (Ctrl+W)",
@@ -6082,7 +6157,13 @@ export const es = {
   "pipelines.structureOf": "Estructura de {name}",
   "pipelines.sourceStage": "etapas declaradas por el proveedor",
   "pipelines.sourceStageHint":
-    "Las columnas son las etapas que el propio proveedor declara para este pipeline. Aquí no se deduce nada.",
+    "Las columnas son las etapas que el propio proveedor declara para este pipeline. Dónde se coloca cada una es otra pregunta: mírala en la insignia del tablero de etapas.",
+  "pipelines.sourceStageDeps": "etapas y dependsOn declarados",
+  "pipelines.sourceStageDepsHint":
+    "Las tarjetas son las etapas que declara el proveedor, y cuál espera a cuál se lee del dependsOn: del archivo del pipeline que tienes en la copia de trabajo: aquí no se mide nada. Una etapa sin dependsOn: espera a la que está escrita justo encima; un dependsOn: vacío no espera a ninguna. Si tu copia de trabajo está en un commit distinto al de la ejecución, lo que se leyó es un pipeline pero no necesariamente el de esta ejecución.",
+  "pipelines.stageJobDeclared": "declarado, no llegó a ejecutarse",
+  "pipelines.stageJobDeclaredHint":
+    "Este job está nombrado en el archivo del pipeline. La etapa no llegó a ejecutarse, así que el host no reportó nada de él: ni estado, ni log, ni duración.",
   "pipelines.sourceStageOrder": "etapas declaradas · orden medido",
   "pipelines.sourceStageOrderHint":
     "Las tarjetas son las etapas que declara el proveedor. Cuál corrió al lado de cuál no lo publica ninguno de los tres hosts, así que se deduce aquí de los relojes de cada etapa: una etapa se coloca detrás de otra solo si esa ya había terminado cuando la primera arrancó. Dos etapas que corrieron una tras otra solo porque había un agente libre parecerán una dependencia.",

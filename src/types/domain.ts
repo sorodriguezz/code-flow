@@ -156,6 +156,30 @@ export interface RemoteInfo {
   url: string;
 }
 
+/**
+ * What a repository will actually commit as, and which level of git config supplied it.
+ *
+ * The `source` is the whole reason this exists rather than a bare name/email pair: "commits here
+ * will be authored as X" is only useful next to *why*, because the fix differs completely between
+ * the three. A `"repository"` source means a human set `user.email` in that repo by hand, and
+ * CodeFlow deliberately will not overwrite it.
+ */
+export interface EffectiveIdentity {
+  name: string | null;
+  email: string | null;
+  source: "workspace" | "repository" | "global";
+}
+
+/** One Azure DevOps work item, as the PR form's picker shows it. */
+export interface WorkItem {
+  id: number;
+  title: string;
+  /** `Bug`, `User Story`, `Task`, … — whatever the project's process template calls it. */
+  work_item_type: string;
+  state: string;
+  assigned_to: string | null;
+}
+
 export interface GitIdentity {
   name: string | null;
   email: string | null;
@@ -1774,11 +1798,15 @@ export interface PipelineRun {
   finished_at: string | null;
   web_url: string;
   /**
-   * Repo-relative path of the workflow file, GitHub only.
+   * Repo-relative path of the pipeline file — GitHub's workflow, or Azure's `azure-pipelines.yml`.
    *
-   * The graph's columns come from here for GitHub and only for GitHub: its jobs endpoint returns
-   * no dependency information at all, so the `needs:` are read out of this file in the working
-   * copy. See `pipelineGraph.ts`.
+   * Neither host will say which units ran in parallel: GitHub's jobs endpoint returns no `needs:`,
+   * and Azure's timeline carries `Stage` records with no `dependsOn` on them at all. So both read
+   * the declaration out of this file in the working copy instead.
+   *
+   * The two parsers have **opposite defaults** and are deliberately separate: a GitHub job with no
+   * `needs:` runs immediately, an Azure stage with no `dependsOn:` waits for the stage above it.
+   * See `parseWorkflowNeeds` and `parseAzureStages` in `pipelineGraph.ts`.
    */
   definition_path: string | null;
 }
@@ -1832,6 +1860,15 @@ export interface PipelineStage {
   id: string;
   /** What every job inside it carries in `stage`. The join key. */
   name: string;
+  /**
+   * The stage's **ref name** — the `stage:` key in the pipeline file, which is what a `dependsOn:`
+   * refers to.
+   *
+   * {@link name} is the *display* name and cannot be joined on: one template instantiated twice
+   * under a single `displayName` produces two genuinely different stages wearing one string.
+   * `null` for GitLab, which has no stage object, and for any Azure record that omits `identifier`.
+   */
+  ref_name: string | null;
   status: PipelineStatus;
   raw_status: string;
   started_at: string | null;

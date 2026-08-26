@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { nodeIcon } from "./dbChrome";
-import { useDbStore, type DbSchemaTab } from "../../state/dbStore";
+import { useDbStore, type DbSchemaSortKey as SortKey, type DbSchemaTab } from "../../state/dbStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { DbNodeKind, DbObjectInfo } from "../../types/database";
@@ -39,8 +39,6 @@ const CATEGORIES: { kind: DbNodeKind; labelKey: TranslationKey }[] = [
   { kind: "routine", labelKey: "db.catRoutines" },
   { kind: "sequence", labelKey: "db.catSequences" },
 ];
-
-type SortKey = "name" | "object_type" | "created_at" | "modified_at" | "total_bytes" | "used_bytes" | "rows";
 
 /** Bytes as something readable. Deliberately the same 1024 steps the explorer's own size text uses,
  * so a number does not change meaning between the tree and this grid. */
@@ -100,9 +98,16 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
   const loadSchema = useDbStore((s) => s.loadSchema);
   const openData = useDbStore((s) => s.openData);
   const openDdl = useDbStore((s) => s.openDdl);
-  const [category, setCategory] = useState<DbNodeKind | null>(null);
-  const [query, setQuery] = useState("");
-  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: "name", desc: false });
+  /**
+   * The rail selection, the filter box and the sort — on the tab record rather than in a
+   * `useState` here.
+   *
+   * `DatabaseView` renders one `SchemaPanel` for every schema tab, so held locally these were one
+   * set of controls shared by all of them: sorting one schema by size sorted the next one too, and
+   * a search typed in one listing was still in the box when a different schema opened.
+   */
+  const { category, query, sort } = tab.ui;
+  const setUi = useDbStore((s) => s.setSchemaUi);
 
   const objects = tab.objects ?? [];
 
@@ -162,7 +167,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
   }, [objects, selected, query, sort]);
 
   const toggleSort = (key: SortKey) =>
-    setSort((current) => (current.key === key ? { key, desc: !current.desc } : { key, desc: false }));
+    setUi(tab.id, { sort: sort.key === key ? { key, desc: !sort.desc } : { key, desc: false } });
 
   /** A row's own actions — the same two the tree offers, so this view is a place to work from
    * rather than only a place to look. */
@@ -184,13 +189,13 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
           <Search size={11} className="pointer-events-none absolute left-2 text-[var(--cf-text-muted)]" />
           <input
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => setUi(tab.id, { query: e.target.value })}
             placeholder={t("db.schemaFilter")}
             className="w-40 rounded-md border border-[var(--cf-border)] bg-transparent py-1 pl-6 pr-6 text-[12px] outline-none focus:border-[var(--cf-accent)]"
           />
           {query && (
             <button
-              onClick={() => setQuery("")}
+              onClick={() => setUi(tab.id, { query: "" })}
               className="absolute right-1.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
             >
               <X size={11} />
@@ -241,7 +246,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
               return (
                 <button
                   key={entry.kind}
-                  onClick={() => setCategory(entry.kind)}
+                  onClick={() => setUi(tab.id, { category: entry.kind })}
                   className={`flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[12px] ${
                     active
                       ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"

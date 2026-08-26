@@ -49,6 +49,7 @@ pub const TABLES: &[&str] = &[
     // Workspace-scoped configuration.
     "review_contexts",
     "workspace_prompts",
+    "workspace_git_identity",
     "review_engine_config",
     "workspace_skills",
     "workspace_agents",
@@ -179,6 +180,7 @@ pub const CORE_TABLES: &[&str] = &[
     "projects",
     "review_contexts",
     "workspace_prompts",
+    "workspace_git_identity",
     "review_engine_config",
     "workspace_skills",
     "workspace_agents",

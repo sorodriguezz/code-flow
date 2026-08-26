@@ -29,7 +29,9 @@ import type {
   FileEntry,
   GatedChain,
   HarvestOutcome,
+  EffectiveIdentity,
   GitIdentity,
+  WorkItem,
   HunkRef,
   DiscardOutcome,
   FpSuppression,
@@ -544,6 +546,29 @@ export const getSettings = (keys: string[]) =>
   invoke<Record<string, string>>("get_settings", { keys });
 
 export const setSetting = (key: string, value: string) => invoke<void>("set_setting", { key, value });
+
+/** A workspace's git identity override, or `null` when it inherits the global one. */
+export const getWorkspaceIdentity = (workspaceId: string) =>
+  invoke<GitIdentity | null>("get_workspace_identity", { workspaceId });
+
+/** Every workspace that overrides, as `[workspaceId, name, email]` — one read for the whole list. */
+export const listWorkspaceIdentities = () =>
+  invoke<[string, string, string][]>("list_workspace_identities");
+
+/**
+ * Sets or clears a workspace's identity and writes it into every repository it holds.
+ *
+ * Passing `null` for either field means "inherit the global identity", which also *removes* the
+ * override from those repositories — but only where this app was the one that wrote it.
+ *
+ * Resolves with the repositories it could not write to, by name. An empty array is a clean apply.
+ */
+export const setWorkspaceIdentity = (workspaceId: string, name: string | null, email: string | null) =>
+  invoke<string[]>("set_workspace_identity", { workspaceId, name, email });
+
+/** What a repository will actually commit as, and which level of config supplied it. */
+export const getEffectiveIdentity = (repoPath: string) =>
+  invoke<EffectiveIdentity>("get_effective_identity", { repoPath });
 
 /** The app-wide patterns whose branches come locked with no padlock clicked on them. Not a
  * `getSetting` call: the backend answers with the shipped defaults when nothing has been saved
@@ -1433,6 +1458,16 @@ export const generatePrDescription = (
   runId?: string,
 ) => invoke<PrDescriptionDraft>("generate_pr_description", { projectId, sourceBranch, targetBranch, runId });
 
+/**
+ * Work items a pull request could be linked to. Azure DevOps only — resolves to `[]` for a GitHub
+ * or GitLab project rather than failing, so the picker can ask unconditionally.
+ *
+ * An empty `query` asks for the caller's own open items, which is the useful list before anything
+ * has been typed.
+ */
+export const searchWorkItems = (projectId: string, query: string) =>
+  invoke<WorkItem[]>("search_work_items", { projectId, query });
+
 /** Opens a PR on the project's linked host. Returns the created PR. */
 export const createPullRequest = (
   projectId: string,
@@ -1441,7 +1476,19 @@ export const createPullRequest = (
   sourceBranch: string,
   targetBranch: string,
   draft: boolean,
-) => invoke<PullRequestSummary>("create_pull_request", { projectId, title, description, sourceBranch, targetBranch, draft });
+  /** Azure DevOps only; ignored elsewhere. Linking happens after the PR exists — a failed link is
+   *  logged rather than failing the call, because by then the pull request is real. */
+  workItemIds?: number[],
+) =>
+  invoke<PullRequestSummary>("create_pull_request", {
+    projectId,
+    title,
+    description,
+    sourceBranch,
+    targetBranch,
+    draft,
+    workItemIds: workItemIds ?? null,
+  });
 
 // ---------- filesystem (embedded editor) ----------
 

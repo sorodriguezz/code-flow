@@ -5,6 +5,7 @@ import { getGitIdentity, setGitIdentity } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
 import { LockedBranchRules } from "./LockedBranchRules";
+import { WorkspaceIdentities } from "./WorkspaceIdentities";
 import { SettingsHeader } from "../api/settingsChrome";
 
 export function GitSettings() {
@@ -73,7 +74,9 @@ export function GitSettings() {
         </button>
       </div>
 
-      <p className="mb-4 mt-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.autoFetchDescription")}</p>
+      <WorkspaceIdentities />
+
+      <p className="mb-4 mt-6 text-[13px] text-[var(--cf-text-muted)]">{t("settings.autoFetchDescription")}</p>
 
       <label className="mb-2 flex items-center gap-2 text-[13px]">
         <Checkbox checked={enabled} onChange={(checked) => setAutoFetchSeconds(checked ? draft : 0)} />

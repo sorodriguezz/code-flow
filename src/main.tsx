@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { ErrorBoundary } from "./components/common/ErrorBoundary";
 // `./lib/monacoSetup` is deliberately NOT imported here, and that absence is the point.
 //
 // It used to be, "before any editor mounts" — which is true of every module that renders one, and
@@ -41,6 +42,14 @@ startOverlayDragRegion();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    {/* The outermost net. The per-view boundaries in `App` catch a broken screen and leave the
+        shell usable; this one catches a throw in the shell itself — the title bar, the sidebar, the
+        status bar — where there is no view left to walk to. Its only offer is a reload, which
+        rebuilds the webview without restarting the process, so terminals, clones and background
+        work all survive it. Without either, React tears down the whole tree on any uncaught throw
+        and leaves a blank window that can only be quit. */}
+    <ErrorBoundary fatal>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

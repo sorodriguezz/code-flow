@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { WorkItemPicker } from "./WorkItemPicker";
+import type { WorkItem } from "../../types/domain";
 import { GitPullRequest, Loader2, Sparkles, X } from "lucide-react";
 import { listBranches, generatePrDescription } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
@@ -32,6 +34,12 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [draft, setDraft] = useState(false);
+  /**
+   * Azure DevOps work items to link. Empty everywhere else — the picker is not drawn at all for a
+   * GitHub or GitLab project, because a work item is not a thing those hosts have.
+   */
+  const [workItems, setWorkItems] = useState<WorkItem[]>([]);
+  const isAzure = Boolean(project.ado_org);
   const [generating, setGenerating] = useState(false);
   const [creating, setCreating] = useState(false);
 
@@ -113,6 +121,7 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
         sourceBranch: source,
         targetBranch: target,
         draft,
+        workItemIds: workItems.map((item) => item.id),
       });
       onCreated();
       onClose();
@@ -205,6 +214,21 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
               disabled={busy}
               className="mb-3 w-full resize-none rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
             />
+
+            {/* Azure only, and above the draft toggle rather than below it: "Work items must be
+                linked" is a branch policy, so this is part of whether the PR will pass its checks
+                — not an afterthought next to the submit button. The branch and title are mined for
+                an id worth suggesting. */}
+            {isAzure && (
+              <div className="mb-3">
+                <WorkItemPicker
+                  projectId={project.id}
+                  selected={workItems}
+                  onChange={setWorkItems}
+                  suggestFrom={`${source} ${title}`}
+                />
+              </div>
+            )}
 
             <label className="mb-4 flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
               <input type="checkbox" checked={draft} onChange={(e) => setDraft(e.target.checked)} disabled={busy} />

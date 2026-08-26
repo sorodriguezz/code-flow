@@ -453,14 +453,95 @@ pub fn unstage_all(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Discards unstaged working-directory changes for a file, restoring it to match the index.
+/// Removes an untracked file and any directories it leaves empty behind it.
+///
+/// Shared by the one-file and the whole-panel discard so the two cannot drift on what "discard an
+/// untracked file" means. Git records no empty directories, so the folder an untracked file lived
+/// in is usually untracked itself and would otherwise linger in the tree as a stray empty node.
+/// `remove_dir` only ever succeeds on an already-empty directory, so walking up until it fails
+/// cannot take anything with it.
+fn remove_untracked(workdir: &Path, file_path: &str) -> Result<(), String> {
+    let full = workdir.join(file_path);
+    match std::fs::remove_file(&full) {
+        Ok(()) => {}
+        // Already gone is the outcome we wanted.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{file_path}: {e}")),
+    }
+    let mut parent = full.parent().map(|p| p.to_path_buf());
+    while let Some(dir) = parent {
+        if dir == workdir || std::fs::remove_dir(&dir).is_err() {
+            break;
+        }
+        parent = dir.parent().map(|p| p.to_path_buf());
+    }
+    Ok(())
+}
+
+/// Discards one row of the "Changes" section: a tracked file goes back to what the index holds, an
+/// untracked file is deleted from disk.
+///
+/// **The path is classified before anything is done to it**, exactly as [`discard_all_changes`]
+/// does, and that is the whole point of the function's shape. It used to be a single
+/// `checkout_index` with the path as a pathspec, which is right for a tracked file and a **silent
+/// no-op for an untracked one**: `checkout_index` writes what the index contains, an untracked file
+/// is by definition not in the index, so there was nothing to write — and the call returned `Ok`.
+/// The row stayed on screen, no error was raised, and "discard sometimes does nothing" is exactly
+/// what that looks like from the outside.
+///
+/// A conflicted path is refused rather than silently skipped. `discard_all_changes` can skip one
+/// quietly because it is clearing a whole list and the conflict banner is still on screen saying
+/// what is left; here the user aimed at one specific row, so nothing happening needs a reason.
 pub fn discard_file_changes(path: &str, file_path: &str) -> Result<(), String> {
     let repo = open(path)?;
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| "bare repository".to_string())?
+        .to_path_buf();
+
+    // The conflict check comes first, and out of the *index* rather than out of the status.
+    //
+    // `status_file` cannot answer for a conflicted path at all — it fails with "ambiguous path",
+    // because the path is in the index three times, at stages 1, 2 and 3. Letting that error escape
+    // would put a libgit2 internal in front of the user for a situation the app understands
+    // perfectly well. `has_conflicts` is a flag on the index that is already loaded, so the common
+    // case costs nothing.
     let mut index = repo.index().map_err(|e| e.message().to_string())?;
+    if index.has_conflicts() {
+        let conflicts = index.conflicts().map_err(|e| e.message().to_string())?;
+        for conflict in conflicts.flatten() {
+            let named = [&conflict.our, &conflict.their, &conflict.ancestor]
+                .iter()
+                .filter_map(|entry| entry.as_ref())
+                .any(|entry| entry.path == file_path.as_bytes());
+            if named {
+                return Err(format!("{file_path}: resolve the conflict first"));
+            }
+        }
+    }
+
+    // `status_file` rather than a filtered `statuses()`: it answers for one path without walking
+    // the tree, which on a repo with a real `node_modules` is the difference between instant and
+    // several seconds — and this runs on every click of a discard button.
+    let status = repo
+        .status_file(Path::new(file_path))
+        .map_err(|e| format!("{file_path}: {}", e.message()))?;
+
+    if status.is_wt_new() {
+        return remove_untracked(&workdir, file_path);
+    }
+
+    // Everything else the panel can list under Changes — modified, deleted, typechanged, or the
+    // working-tree half of a rename — is in the index and comes back from it.
+    //
+    // One path, and deliberately one: a *single* pathspec becomes the workdir iterator's start and
+    // end bound (`git_pathspec_prefix`), so an ignored `node_modules` sorts outside the range and is
+    // rejected at the root frame instead of being descended into. See the long note in
+    // [`discard_all_changes`] for why batching paths is what breaks that on Windows.
     let mut cb = git2::build::CheckoutBuilder::new();
     cb.force().path(file_path);
     repo.checkout_index(Some(&mut index), Some(&mut cb))
-        .map_err(|e| e.message().to_string())?;
+        .map_err(|e| format!("{file_path}: {}", e.message()))?;
     Ok(())
 }
 
@@ -641,6 +722,168 @@ mod tests {
             repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
         (dir, repo)
+    }
+
+    /// The bug this function was rewritten for: an untracked file is not in the index, so the
+    /// `checkout_index` this used to be had nothing to write and returned `Ok` having done nothing.
+    #[test]
+    fn discarding_an_untracked_file_deletes_it() {
+        let (dir, _repo) = fixture();
+        fs::write(dir.join("scratch.txt"), "never committed\n").unwrap();
+
+        discard_file_changes(dir.to_str().unwrap(), "scratch.txt").unwrap();
+
+        assert!(!dir.join("scratch.txt").exists(), "the untracked file should be gone");
+    }
+
+    /// And the directory it lived in goes with it, since git records no empty directories and a
+    /// stray empty folder in the tree is its own kind of "discard didn't work".
+    #[test]
+    fn discarding_an_untracked_file_takes_its_empty_parents() {
+        let (dir, _repo) = fixture();
+        fs::create_dir_all(dir.join("a/b")).unwrap();
+        fs::write(dir.join("a/b/scratch.txt"), "x\n").unwrap();
+
+        discard_file_changes(dir.to_str().unwrap(), "a/b/scratch.txt").unwrap();
+
+        assert!(!dir.join("a/b").exists(), "the empty parent should be gone");
+        assert!(!dir.join("a").exists(), "and its empty parent too");
+        // But never the working directory itself.
+        assert!(dir.exists());
+    }
+
+    /// A directory that still holds something is left exactly where it is.
+    #[test]
+    fn discarding_an_untracked_file_keeps_a_parent_that_still_has_something_in_it() {
+        let (dir, _repo) = fixture();
+        fs::create_dir_all(dir.join("a")).unwrap();
+        fs::write(dir.join("a/one.txt"), "x\n").unwrap();
+        fs::write(dir.join("a/two.txt"), "keep me\n").unwrap();
+
+        discard_file_changes(dir.to_str().unwrap(), "a/one.txt").unwrap();
+
+        assert!(!dir.join("a/one.txt").exists());
+        assert_eq!(fs::read_to_string(dir.join("a/two.txt")).unwrap(), "keep me\n");
+    }
+
+    /// The ordinary case, unchanged by the rewrite.
+    #[test]
+    fn discarding_a_modified_file_restores_it_from_the_index() {
+        let (dir, _repo) = fixture();
+        fs::write(dir.join("tracked.txt"), "EDITED\n").unwrap();
+
+        discard_file_changes(dir.to_str().unwrap(), "tracked.txt").unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap(), "original\n");
+    }
+
+    /// A deleted tracked file comes back.
+    #[test]
+    fn discarding_a_deleted_file_brings_it_back() {
+        let (dir, _repo) = fixture();
+        fs::remove_file(dir.join("tracked.txt")).unwrap();
+
+        discard_file_changes(dir.to_str().unwrap(), "tracked.txt").unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap(), "original\n");
+    }
+
+    /// Staged content is the floor, not HEAD — the same promise `discard_all_changes` makes. A file
+    /// staged and then edited again keeps the staged version, because that is what the Changes row
+    /// is showing a diff *against*.
+    #[test]
+    fn discarding_keeps_what_was_already_staged() {
+        let (dir, repo) = fixture();
+        fs::write(dir.join("tracked.txt"), "STAGED\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("tracked.txt")).unwrap();
+            index.write().unwrap();
+        }
+        fs::write(dir.join("tracked.txt"), "EDITED AGAIN\n").unwrap();
+
+        discard_file_changes(dir.to_str().unwrap(), "tracked.txt").unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap(), "STAGED\n");
+    }
+
+    /// One row means one file. The pathspec is a pattern, so a sibling whose name this one is a
+    /// prefix of is the case worth pinning: losing an unrelated file to a discard would be the
+    /// worst outcome this function has.
+    #[test]
+    fn discarding_one_file_leaves_a_prefix_named_sibling_alone() {
+        let (dir, repo) = fixture();
+        fs::write(dir.join("app.ts"), "a\n").unwrap();
+        fs::write(dir.join("app.test.ts"), "b\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("app.ts")).unwrap();
+            index.add_path(Path::new("app.test.ts")).unwrap();
+            index.write().unwrap();
+        }
+        fs::write(dir.join("app.ts"), "EDITED\n").unwrap();
+        fs::write(dir.join("app.test.ts"), "PRECIOUS\n").unwrap();
+
+        discard_file_changes(dir.to_str().unwrap(), "app.ts").unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("app.ts")).unwrap(), "a\n");
+        assert_eq!(
+            fs::read_to_string(dir.join("app.test.ts")).unwrap(),
+            "PRECIOUS\n",
+            "the sibling must not be touched"
+        );
+    }
+
+    /// A filename that reads as a pathspec pattern still discards itself and nothing else.
+    #[test]
+    fn discarding_a_file_whose_name_looks_like_a_glob_still_works() {
+        let (dir, repo) = fixture();
+        let name = "report[2026].txt";
+        fs::write(dir.join(name), "a\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new(name)).unwrap();
+            index.write().unwrap();
+        }
+        fs::write(dir.join(name), "EDITED\n").unwrap();
+
+        discard_file_changes(dir.to_str().unwrap(), name).unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join(name)).unwrap(), "a\n");
+    }
+
+    /// A conflicted path is refused out loud. `discard_all_changes` skips one quietly because the
+    /// banner is still on screen explaining what is left; a click aimed at one row needs a reason.
+    #[test]
+    fn discarding_a_conflicted_file_says_why_it_will_not() {
+        let (dir, repo) = fixture();
+        // Stages 1/2/3 for one path is what a conflict is, written directly so the test does not
+        // have to drive a whole merge to get there.
+        let blob = repo.blob(b"theirs\n").unwrap();
+        let mut index = repo.index().unwrap();
+        for stage in 1..=3u16 {
+            let entry = git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: blob,
+                flags: stage << 12,
+                flags_extended: 0,
+                path: b"tracked.txt".to_vec(),
+            };
+            index.add(&entry).unwrap();
+        }
+        index.write().unwrap();
+        drop(index);
+
+        let err = discard_file_changes(dir.to_str().unwrap(), "tracked.txt").unwrap_err();
+
+        assert!(err.contains("conflict"), "got: {err}");
     }
 
     /// The invariant `src/lib/diffText.ts` leans on. `reconstructSides` rebuilds both complete file

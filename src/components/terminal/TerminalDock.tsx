@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion } from "framer-motion";
 import { ChevronDown, ChevronUp, Pencil, Plus, Settings2, SplitSquareHorizontal, TerminalSquare, X } from "lucide-react";
@@ -141,6 +141,33 @@ function ProfileMenu({ onPick, disabled }: { onPick: (profileId: string) => void
 }
 
 /** Rendered by App.tsx inside an `AnimatePresence` so mount/unmount slides the dock in/out. */
+/**
+ * One mounted terminal, memoized so the dock's own re-renders do not reach it.
+ *
+ * The dock re-renders for a great many reasons that have nothing to do with any single pane — a tab
+ * being renamed, the height being dragged, another project's tab list changing — and every mounted
+ * `TerminalPane` used to re-render with it. That is every pane of every project, not just the one
+ * on screen.
+ *
+ * `memo` alone would not have helped: the `onClose` arrow was rebuilt on every dock render, so the
+ * props were never referentially equal. Hence this wrapper — it takes only ids and a boolean, and
+ * builds the callback from a store action that is stable for the life of the app.
+ */
+const DockPane = memo(function DockPane({
+  projectId,
+  tabId,
+  visible,
+}: {
+  projectId: string;
+  tabId: string;
+  visible: boolean;
+}) {
+  const close = useCallback(() => {
+    void useTerminalStore.getState().close(projectId, tabId);
+  }, [projectId, tabId]);
+  return <TerminalPane sessionId={tabId} visible={visible} onClose={close} />;
+});
+
 export function TerminalDock() {
   const t = useT();
   const shortcutHint = useShortcutHint();
@@ -370,11 +397,7 @@ export function TerminalDock() {
             {/* The pane's own project, not the selected one: every project's terminals are mounted
                 here at once, and closing one from its right-click menu has to go to the store under
                 the id it actually belongs to. */}
-            <TerminalPane
-              sessionId={tab.id}
-              visible={visible}
-              onClose={() => void closeTab(projectId, tab.id)}
-            />
+            <DockPane projectId={projectId} tabId={tab.id} visible={visible} />
           </div>
         ))}
       </div>

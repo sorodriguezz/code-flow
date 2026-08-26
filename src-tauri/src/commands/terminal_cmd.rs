@@ -83,17 +83,24 @@ pub struct TerminalOpened {
     pub profile_name: String,
 }
 
-#[tauri::command]
+// All three `(async)`, which runs the sync body on a worker rather than on the main thread.
+//
+// Every one of them takes the global terminal registry mutex and then does something that can
+// block while holding it: a pty write blocks when the child has stopped reading and the pipe is
+// full, a resize is a ConPTY screen-buffer reflow on Windows, and a close waits on the child. On
+// the main thread that is the window not repainting — a shell that stops draining its input would
+// freeze the whole app on the next keystroke, which is one of the ways "se pega" happens.
+#[tauri::command(async)]
 pub fn write_terminal(registry: State<TerminalRegistry>, id: String, data: String) -> Result<(), String> {
     terminal::write_terminal(&registry, &id, &data)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resize_terminal(registry: State<TerminalRegistry>, id: String, cols: u16, rows: u16) -> Result<(), String> {
     terminal::resize_terminal(&registry, &id, cols, rows)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn close_terminal(registry: State<TerminalRegistry>, id: String) -> Result<(), String> {
     terminal::close_terminal(&registry, &id)
 }

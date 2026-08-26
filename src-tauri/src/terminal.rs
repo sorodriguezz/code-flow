@@ -19,6 +19,16 @@ use crate::shell_profiles::ShellProfile;
 /// without thinking about it.
 const TRANSCRIPT_LIMIT: usize = 256 * 1024;
 
+/// What a trim cuts back *to*, rather than merely under the limit.
+///
+/// The hysteresis is the whole point. Trimming to exactly the limit means that once a long-lived
+/// session has filled its buffer, **every subsequent read** overshoots by a few bytes and drains
+/// again — and `String::drain(..n)` from the front is a memmove of everything after it, so a
+/// `cargo build` in a recorded terminal was moving a quarter of a megabyte per read, hundreds of
+/// times a second, for the rest of the session. Cutting back to three quarters means the next trim
+/// is 64 KB of output away instead of one line away, which turns a per-read cost into a rare one.
+const TRANSCRIPT_TARGET: usize = TRANSCRIPT_LIMIT * 3 / 4;
+
 /// The most often a session may emit — one frame.
 ///
 /// A `cargo build` in a pty produces hundreds of reads a second, and each one used to be its own
@@ -99,7 +109,7 @@ impl Transcript {
         // screen with it. Falling back to the whole buffer is the degenerate case of one line
         // longer than the limit, which is a `curl` progress bar or a minified file — nothing worth
         // keeping a fragment of.
-        let overflow = self.buf.len() - TRANSCRIPT_LIMIT;
+        let overflow = self.buf.len() - TRANSCRIPT_TARGET;
         let cut = self.buf[overflow..].find('\n').map(|at| overflow + at + 1).unwrap_or(self.buf.len());
         self.buf.drain(..cut);
     }
@@ -237,6 +247,55 @@ pub fn open_terminal(
 ///
 /// `cwd` is where the *local* process starts. It means something for a shell and nothing for
 /// `ssh`, hence the `Option`.
+
+/// Decodes as much of `carry` as forms whole characters, leaving an incomplete trailing sequence
+/// behind for the next read to complete.
+///
+/// This exists because a pty read boundary lands wherever the kernel's buffer happened to fill, not
+/// on a character boundary. The obvious `String::from_utf8_lossy` per read therefore replaced the
+/// two halves of any multi-byte character that straddled one with `U+FFFD` — permanently, in the
+/// transcript as well as on screen. It is not a rare case either: box-drawing characters are what
+/// every progress bar, table and spinner in a modern CLI is made of, so a `cargo build` or an
+/// `npm install` was reliably producing garbage at 64 KB intervals.
+///
+/// Genuinely invalid bytes — a latin-1 file catted into the terminal — still become one `U+FFFD`
+/// each and are stepped over, so a stream that is not UTF-8 at all cannot wedge this in a loop or
+/// grow `carry` without bound.
+fn take_utf8(carry: &mut Vec<u8>) -> String {
+    let mut out = String::new();
+    loop {
+        match std::str::from_utf8(carry) {
+            Ok(text) => {
+                out.push_str(text);
+                carry.clear();
+                return out;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                if valid > 0 {
+                    // Validated one line above, so this cannot fail.
+                    match std::str::from_utf8(&carry[..valid]) {
+                        Ok(text) => out.push_str(text),
+                        Err(_) => return out,
+                    }
+                }
+                match e.error_len() {
+                    // A truncated-but-plausible tail. Keep it; the next read finishes it.
+                    None => {
+                        carry.drain(..valid);
+                        return out;
+                    }
+                    // Not UTF-8 at all. One replacement character, then step over it.
+                    Some(bad) => {
+                        out.push('\u{FFFD}');
+                        carry.drain(..valid + bad);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn open_pty(
     app: AppHandle,
     registry: &TerminalRegistry,
@@ -314,12 +373,21 @@ pub fn open_pty(
         // keystroke still comes back as one byte and echoes instantly, while a build that has
         // filled the pty's buffer comes back in one call instead of sixteen.
         let mut buf = [0u8; 64 * 1024];
+        // Bytes read but not yet decodable: the tail of a character split across two reads. Never
+        // more than three, since that is the most an incomplete UTF-8 sequence can be short by.
+        let mut carry: Vec<u8> = Vec::new();
         let (lock, ready) = &*reader_outbox;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                    carry.extend_from_slice(&buf[..n]);
+                    let data = take_utf8(&mut carry);
+                    // Nothing complete yet — a character split across this read boundary and the
+                    // next. Waiting is the whole point; emitting now is what used to corrupt it.
+                    if data.is_empty() {
+                        continue;
+                    }
                     // Recorded before it is queued, and holding the lock for no longer than the
                     // append: a `poisoned` lock (a panic in the flush) must not take the terminal
                     // down with it, so the record is skipped and the output still reaches the pane.
@@ -456,8 +524,18 @@ pub fn resize_terminal(registry: &TerminalRegistry, id: &str, cols: u16, rows: u
 }
 
 pub fn close_terminal(registry: &TerminalRegistry, id: &str) -> Result<(), String> {
-    let mut sessions = registry.0.lock().map_err(|e| e.to_string())?;
-    if let Some(mut session) = sessions.remove(id) {
+    // Taken out of the registry under the lock, killed *outside* it.
+    //
+    // `child.kill()` is not instant: on Windows it is a `TerminateProcess` plus the handle work
+    // behind `ClosePseudoConsole`, which waits for ConPTY's own pump to drain. Doing that while
+    // holding the global registry mutex stalls every other terminal on the machine — including the
+    // emitter threads trying to push output — for as long as it takes. The session is already
+    // unreachable the moment `remove` returns, so nothing can race the kill.
+    let session = {
+        let mut sessions = registry.0.lock().map_err(|e| e.to_string())?;
+        sessions.remove(id)
+    };
+    if let Some(mut session) = session {
         let _ = session.child.kill();
     }
     Ok(())
@@ -647,6 +725,65 @@ mod tests {
 
     fn transcript() -> Transcript {
         Transcript { key: Some("row".into()), buf: String::new(), dirty: false }
+    }
+
+    /// A character split across two pty reads must survive, because that is what a box-drawing
+    /// character in a progress bar is doing every time a build fills the buffer.
+    #[test]
+    fn a_character_split_across_two_reads_is_not_corrupted() {
+        // U+2500 BOX DRAWINGS LIGHT HORIZONTAL: three bytes, e2 94 80.
+        let full = "a─b".as_bytes().to_vec();
+        let split_at = 2; // mid-character: 'a' plus the first byte of the box character.
+
+        let mut carry: Vec<u8> = Vec::new();
+        carry.extend_from_slice(&full[..split_at]);
+        let first = take_utf8(&mut carry);
+        carry.extend_from_slice(&full[split_at..]);
+        let second = take_utf8(&mut carry);
+
+        assert_eq!(first, "a", "the incomplete tail must be held back, not emitted");
+        assert_eq!(second, "─b");
+        assert_eq!(format!("{first}{second}"), "a─b");
+        assert!(carry.is_empty());
+    }
+
+    /// Every boundary, not just the interesting one — the reassembled stream must equal the input
+    /// wherever the read happened to land.
+    #[test]
+    fn every_split_point_reassembles_exactly() {
+        let text = "héllo ─ 世界 🎉 done";
+        let bytes = text.as_bytes();
+        for at in 0..=bytes.len() {
+            let mut carry: Vec<u8> = Vec::new();
+            carry.extend_from_slice(&bytes[..at]);
+            let mut out = take_utf8(&mut carry);
+            carry.extend_from_slice(&bytes[at..]);
+            out.push_str(&take_utf8(&mut carry));
+            assert_eq!(out, text, "split at byte {at}");
+            assert!(carry.is_empty(), "split at byte {at} left {carry:?}");
+        }
+    }
+
+    /// Bytes that are not UTF-8 at all become one replacement character each and are stepped over,
+    /// so a latin-1 file catted into the terminal cannot wedge the decoder or grow the carry.
+    #[test]
+    fn invalid_bytes_are_replaced_once_and_stepped_over() {
+        let mut carry: Vec<u8> = vec![b'a', 0xff, b'b', 0xfe, b'c'];
+        let out = take_utf8(&mut carry);
+        assert_eq!(out, "a\u{FFFD}b\u{FFFD}c");
+        assert!(carry.is_empty());
+    }
+
+    /// The carry never grows: an incomplete sequence is at most three bytes short.
+    #[test]
+    fn the_carry_stays_bounded() {
+        let mut carry: Vec<u8> = Vec::new();
+        for _ in 0..1000 {
+            // The leading byte of a four-byte character, over and over: always incomplete.
+            carry.push(0xf0);
+            take_utf8(&mut carry);
+            assert!(carry.len() <= 3, "carry grew to {}", carry.len());
+        }
     }
 
     /// The ordinary case: output accumulates, and appending marks the row for the next flush.

@@ -69,12 +69,14 @@ import {
   type DbQueryHistoryEntry,
   type DbQueryOptions,
   type DbRowEdit,
+  type DbNodeKind,
   type DbObjectInfo,
   type DbSchemaDiagram,
   type DbServerInfo,
   type DbSortKey,
   type DbStatementResult,
 } from "../types/database";
+import type { DiagramColumnMode, DiagramDensity } from "../lib/db/erLayout";
 
 /**
  * The database workspace's state.
@@ -115,6 +117,93 @@ const HISTORY_LIMIT = 300;
 // Tabs
 // ---------------------------------------------------------------------------
 
+/**
+ * How a tab is being *looked at*, as opposed to what it holds.
+ *
+ * `DatabaseView` renders one panel per tab *kind* in a single slot with no React key, so every
+ * data tab shared one component instance and therefore one `useState` for each of these. Toggling
+ * the record layout on one table transposed the next one too, and routing through a console tab
+ * threw the choice away entirely instead of leaving it where it was put.
+ *
+ * A key on the panel would have been the wrong fix: it discards the choice on every switch rather
+ * than remembering it. So the state moves to the tab record instead, where it is naturally per tab
+ * and dies with the tab.
+ *
+ * Deliberately absent from [`PersistedTab`], which is an explicit whitelist and drops these by
+ * construction: a tab that reopened sideways, with column widths measured against columns the
+ * schema may no longer have, would be a surprise rather than a convenience.
+ */
+export interface DbDataUi {
+  /** `"record"` is the transposed read — one record down the page instead of rows across it. */
+  layout: "grid" | "record";
+  docView: "documents" | "json" | "grid";
+  optionsOpen: boolean;
+  /** Column pixel widths by column name; a missing entry means the grid's own default. */
+  widths: Record<string, number>;
+  /** Record-view gutters; `null` means the grid's own default. */
+  fieldWidth: number | null;
+  recordWidth: number | null;
+}
+
+export const DEFAULT_DATA_UI: DbDataUi = {
+  layout: "grid",
+  docView: "documents",
+  optionsOpen: false,
+  widths: {},
+  fieldWidth: null,
+  recordWidth: null,
+};
+
+/** The console's own view state — see [`DbDataUi`] for why it lives on the tab. */
+export interface DbConsoleUi {
+  docView: "documents" | "json" | "grid";
+  widths: Record<string, number>;
+}
+
+export const DEFAULT_CONSOLE_UI: DbConsoleUi = { docView: "documents", widths: {} };
+
+export type DbSchemaSortKey =
+  | "name"
+  | "object_type"
+  | "created_at"
+  | "modified_at"
+  | "total_bytes"
+  | "used_bytes"
+  | "rows";
+
+/** The schema listing's rail selection, filter and sort — see [`DbDataUi`]. */
+export interface DbSchemaUi {
+  category: DbNodeKind | null;
+  query: string;
+  sort: { key: DbSchemaSortKey; desc: boolean };
+}
+
+export const DEFAULT_SCHEMA_UI: DbSchemaUi = {
+  category: null,
+  query: "",
+  sort: { key: "name", desc: false },
+};
+
+/** The ER canvas's view choices and hand-dragged positions — see [`DbDataUi`]. */
+export interface DbDiagramUi {
+  mode: DiagramColumnMode;
+  density: DiagramDensity;
+  /** Hand-dragged table positions by node id; everything else is laid out automatically. */
+  pinned: Record<string, { x: number; y: number }>;
+  selected: string | null;
+  query: string;
+  highlight: "none" | "noPrimaryKey" | "isolated";
+}
+
+export const DEFAULT_DIAGRAM_UI: DbDiagramUi = {
+  mode: "keys",
+  density: "roomy",
+  pinned: {},
+  selected: null,
+  query: "",
+  highlight: "none",
+};
+
 /** A statement to run, and what came back. */
 export interface DbConsoleTab {
   id: string;
@@ -140,6 +229,8 @@ export interface DbConsoleTab {
   /** The AI assistant's ask bar and its last answer. `null` until it is first opened, so a console
    * that never uses it costs nothing — and it is never persisted, like every other result here. */
   ai: DbConsoleAi | null;
+  /** How this console is being looked at — see [`DbConsoleUi`]. */
+  ui: DbConsoleUi;
 }
 
 /**
@@ -235,6 +326,8 @@ export interface DbDataTab {
    *  by hand produces. Alongside `inserted`, which is the grid's own column-shaped version. */
   insertedDocs: string[];
   error: string | null;
+  /** How these rows are being looked at — see [`DbDataUi`]. */
+  ui: DbDataUi;
 }
 
 /** An object's definition, as introspection can reconstruct it. */
@@ -251,9 +344,10 @@ export interface DbDdlTab {
 /**
  * A whole schema drawn: its tables, their keys, and what points at what.
  *
- * The tab holds only what the server said. Every position, zoom level and highlight lives in the
- * panel — they are a way of looking at this data, not part of it, and persisting them would mean a
- * reopened tab could disagree with a schema that has changed underneath it.
+ * `diagram` is only what the server said. How it is being *looked at* — the column mode, the
+ * density, the hand-dragged positions, the highlight — sits beside it in `ui`, per tab and never
+ * persisted: a reopened tab could otherwise disagree with a schema that has changed underneath it.
+ * (Pan and zoom stay in the panel, because they are re-fitted on every relayout.)
  */
 export interface DbDiagramTab {
   id: string;
@@ -266,6 +360,8 @@ export interface DbDiagramTab {
   runId: string | null;
   diagram: DbSchemaDiagram | null;
   error: string | null;
+  /** How this canvas is being looked at — see [`DbDiagramUi`]. */
+  ui: DbDiagramUi;
 }
 
 /**
@@ -277,8 +373,9 @@ export interface DbDiagramTab {
  * with their type, their dates, their size and their comment — which is the view you want the
  * moment you are comparing them rather than opening one.
  *
- * Like the diagram, it holds only what the server said: which category is selected and how the grid
- * is sorted live in the panel, because they are ways of looking at this data rather than part of it.
+ * Like the diagram, `objects` is only what the server said; which category is selected, what is
+ * typed in the filter and how the grid is sorted sit beside it in `ui`, per tab and never
+ * persisted — they are ways of looking at this data rather than part of it.
  */
 export interface DbSchemaTab {
   id: string;
@@ -291,6 +388,8 @@ export interface DbSchemaTab {
   runId: string | null;
   objects: DbObjectInfo[] | null;
   error: string | null;
+  /** How this listing is being looked at — see [`DbSchemaUi`]. */
+  ui: DbSchemaUi;
 }
 
 export type DbTab = DbConsoleTab | DbDataTab | DbDdlTab | DbDiagramTab | DbSchemaTab;
@@ -467,6 +566,17 @@ interface DbState {
     enabled: boolean,
   ) => Promise<void>;
   updateData: (tabId: string, patch: Partial<DbDataTab>) => void;
+
+  /**
+   * The per-tab view state — which layout, which document view, the dragged column widths.
+   *
+   * Separate from `updateConsole`/`updateData` on purpose: none of these persists, and none marks
+   * a tab dirty. See [`DbDataUi`] for why the state sits on the tab at all.
+   */
+  setDataUi: (tabId: string, patch: Partial<DbDataUi>) => void;
+  setConsoleUi: (tabId: string, patch: Partial<DbConsoleUi>) => void;
+  setSchemaUi: (tabId: string, patch: Partial<DbSchemaUi>) => void;
+  setDiagramUi: (tabId: string, patch: Partial<DbDiagramUi>) => void;
   loadData: (tabId: string) => Promise<void>;
   setCell: (tabId: string, row: number, column: string, value: string | null) => void;
   toggleDeleteRow: (tabId: string, row: number) => void;
@@ -1214,6 +1324,7 @@ export const useDbStore = create<DbState>((set, get) => ({
           activeResult: 0,
           plan: null,
           ai: null,
+          ui: DEFAULT_CONSOLE_UI,
         });
         return;
       }
@@ -1241,6 +1352,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       activeResult: 0,
       plan: null,
       ai: null,
+      ui: DEFAULT_CONSOLE_UI,
     });
   },
 
@@ -1398,6 +1510,15 @@ export const useDbStore = create<DbState>((set, get) => ({
           0,
           result.results.findIndex((entry) => entry.columns.length > 0),
         ),
+        // Back to the document list on every new result: a `find()` is read as documents, and a
+        // view chosen for the last statement should not silently apply to the next one, which may
+        // not even be the same shape.
+        //
+        // Reset here rather than in an effect on `[tab.result]` in the panel, which is where it
+        // used to live: one `SqlConsolePanel` serves every console tab, so that effect fired on
+        // every *tab switch* too — each tab carries its own `result` object — and would wipe the
+        // remembered view the instant the tab was opened.
+        ui: { ...current.ui, docView: "documents" },
       }));
       for (const entry of result.results) {
         get().logSql({
@@ -1442,6 +1563,8 @@ export const useDbStore = create<DbState>((set, get) => ({
           duration_ms: Date.now() - started,
         },
         activeResult: 0,
+        // A failed statement is still a new result — same reason as the success path above.
+        ui: { ...current.ui, docView: "documents" },
       }));
     } finally {
       patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({
@@ -1681,6 +1804,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       replaced: {},
       insertedDocs: [],
       error: null,
+      ui: DEFAULT_DATA_UI,
     });
     void get().loadData(id);
     // Alongside the rows rather than before them: the grid is useful without this, and a catalog
@@ -1779,6 +1903,11 @@ export const useDbStore = create<DbState>((set, get) => ({
   updateData: (tabId, patch) => {
     patchTab<DbDataTab>(set, tabId, "data", (tab) => ({ ...tab, ...patch }));
   },
+
+  setDataUi: (tabId, patch) => patchUi<DbDataTab>(set, tabId, "data", patch),
+  setConsoleUi: (tabId, patch) => patchUi<DbConsoleTab>(set, tabId, "console", patch),
+  setSchemaUi: (tabId, patch) => patchUi<DbSchemaTab>(set, tabId, "schema", patch),
+  setDiagramUi: (tabId, patch) => patchUi<DbDiagramTab>(set, tabId, "diagram", patch),
 
   loadData: async (tabId) => {
     const tab = findTab<DbDataTab>(get, tabId, "data");
@@ -2080,6 +2209,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       runId: null,
       objects: null,
       error: null,
+      ui: DEFAULT_SCHEMA_UI,
     });
     void get().loadSchema(id);
   },
@@ -2145,6 +2275,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       runId: null,
       diagram: null,
       error: null,
+      ui: DEFAULT_DIAGRAM_UI,
     });
     void get().loadDiagram(id);
   },
@@ -2561,6 +2692,22 @@ function patchTab<T extends DbTab>(
   }));
 }
 
+/**
+ * Patches a tab's `ui` — the how-it-is-being-looked-at half of the record.
+ *
+ * Deliberately routed through `patchTab` rather than through `updateConsole`/`updateData`: those
+ * two schedule a persist and, for the console, can mark the tab dirty. Clicking "record layout"
+ * is not an edit to anything, so it must cost neither a settings write nor an unsaved dot.
+ */
+function patchUi<T extends DbTab & { ui: object }>(
+  set: (partial: (state: DbState) => Partial<DbState>) => void,
+  tabId: string,
+  kind: T["kind"],
+  patch: Partial<T["ui"]>,
+) {
+  patchTab<T>(set, tabId, kind, (tab) => ({ ...tab, ui: { ...tab.ui, ...patch } }) as T);
+}
+
 function sameNode(a: DbNodeRef, b: DbNodeRef): boolean {
   return (
     a.kind === b.kind &&
@@ -2643,6 +2790,7 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
       activeResult: 0,
       plan: null,
       ai: null,
+      ui: DEFAULT_CONSOLE_UI,
     };
   }
   const node = persisted.node ?? { kind: "table", database: null, schema: null, name: null };
@@ -2659,6 +2807,7 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
       // catalog sweep per tab at a database that may be behind a VPN. The panel asks when looked at.
       diagram: null,
       error: null,
+      ui: DEFAULT_DIAGRAM_UI,
     };
   }
   if (persisted.kind === "schema") {
@@ -2674,6 +2823,7 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
       // catalog sweep per tab at a database that may be behind a VPN. The panel asks when looked at.
       objects: null,
       error: null,
+      ui: DEFAULT_SCHEMA_UI,
     };
   }
   if (persisted.kind === "ddl") {
@@ -2715,6 +2865,7 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
     replaced: {},
     insertedDocs: [],
     error: null,
+    ui: DEFAULT_DATA_UI,
   };
 }
 

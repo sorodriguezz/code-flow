@@ -281,6 +281,7 @@ function Body({
         {body.mode === "formdata" && (
           <div className="h-full overflow-auto">
             <KeyValueTable
+              key={`${tabId}:formdata`}
               rows={body.formdata}
               onChange={(rows) => patchBody({ formdata: rows })}
               fileRows
@@ -293,6 +294,7 @@ function Body({
         {body.mode === "urlencoded" && (
           <div className="h-full overflow-auto">
             <KeyValueTable
+              key={`${tabId}:urlencoded`}
               rows={body.urlencoded}
               onChange={(rows) => patchBody({ urlencoded: rows })}
               allowBulkEdit

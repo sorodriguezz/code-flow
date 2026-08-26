@@ -97,12 +97,20 @@ pub struct PipelineRun {
     pub web_url: String,
     /// Repo-relative path of the file that defines this run, when the host names one.
     ///
-    /// Only GitHub populates it, and it exists for exactly one reason: `/runs/{id}/jobs` does not
-    /// return `needs`, so GitHub is the one provider whose API cannot tell us which jobs ran in
-    /// parallel. The frontend reads this file out of the working copy and parses the `needs:` to
-    /// build the graph's columns — no extra request, no new dependency. When it can't (renamed
-    /// workflow, working copy on another commit), the graph falls back to grouping jobs by
-    /// overlapping time, and says so.
+    /// GitHub and Azure populate it, for the same reason and with two different files.
+    ///
+    /// Neither host will say which units ran in parallel. GitHub's `/runs/{id}/jobs` does not
+    /// return `needs:`, and Azure's timeline carries `Stage` records with no `dependsOn` on them
+    /// at all. So in both cases the frontend reads this file out of the working copy and parses
+    /// the declaration itself — no extra request, no new dependency.
+    ///
+    /// The two parsers have **opposite defaults** and are deliberately separate functions: a
+    /// GitHub job with no `needs:` runs immediately, while an Azure stage with no `dependsOn:`
+    /// waits for the stage written above it. See `parseWorkflowNeeds` and `parseAzureStages`.
+    ///
+    /// When the file can't be read — renamed, working copy on another commit, or a pipeline that
+    /// builds a repository other than the one holding it — the graph falls back to grouping by
+    /// overlapping time, and says so on the badge rather than pretending it was declared.
     pub definition_path: Option<String>,
 }
 
@@ -162,6 +170,18 @@ pub struct PipelineStage {
     pub id: String,
     /// What the job's `stage` field holds for every job inside it. The join key.
     pub name: String,
+    /// The stage's **ref name** — the `stage: Validations` key in the pipeline file, which Azure
+    /// publishes as the timeline record's `identifier`.
+    ///
+    /// Not a duplicate of [`name`], and the difference is the whole reason this exists: `name` is
+    /// the *display* name, which is what a person reads and what nothing can be joined on, while a
+    /// `dependsOn:` list refers to *this*. Reading `dependsOn` out of the pipeline file and
+    /// matching it against display names would silently mis-wire the one pipeline shape that makes
+    /// the difference visible — a template instantiated twice under one `displayName` — which is
+    /// the same trap `PipelineJob::stage_id` exists to avoid.
+    ///
+    /// `None` for GitLab, which has no stage object at all, and for any Azure record that omits it.
+    pub ref_name: Option<String>,
     /// One of [`status`], bucketed exactly like a job's.
     pub status: String,
     pub raw_status: String,

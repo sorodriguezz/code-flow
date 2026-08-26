@@ -867,6 +867,25 @@ export interface GrpcCallRequest {
   options: NetworkOptions;
 }
 
+/**
+ * The request editor's sub-panel strip.
+ *
+ * Declared here rather than in `RequestBuilder` because `apiRuntimeStore` remembers it per tab,
+ * and a store must not import a type from a component.
+ */
+export type ApiPanelId =
+  | "params"
+  | "auth"
+  | "headers"
+  | "body"
+  | "pre"
+  | "tests"
+  | "settings"
+  | "docs";
+
+/** The response panel's sub-tab strip. Here for the same reason as [`ApiPanelId`]. */
+export type ApiResponseTab = "body" | "headers" | "cookies" | "tests" | "console" | "timeline";
+
 export interface GrpcResponse {
   /** JSON of the response message; for server-streaming, a JSON array of messages. */
   message_json: string;

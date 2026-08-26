@@ -220,7 +220,15 @@ interface PrState {
    * Throws on failure so the caller (the modal) can keep itself open and surface the error. */
   createPr: (
     projectId: string,
-    input: { title: string; description: string; sourceBranch: string; targetBranch: string; draft: boolean },
+    input: {
+      title: string;
+      description: string;
+      sourceBranch: string;
+      targetBranch: string;
+      draft: boolean;
+      /** Azure DevOps only — see `createPullRequest`. */
+      workItemIds?: number[];
+    },
   ) => Promise<PullRequestSummary>;
 }
 
@@ -497,6 +505,7 @@ export const usePrStore = create<PrState>((set, get) => ({
       input.sourceBranch,
       input.targetBranch,
       input.draft,
+      input.workItemIds,
     );
     await get().loadPullRequests(projectId);
     set({ selectedPr: pr, selectedPrProjectId: projectId });

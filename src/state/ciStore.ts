@@ -4,6 +4,7 @@ import { notify } from "./notificationStore";
 import { useUiStore } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type { JobLog, PipelineJob, PipelineRun, PipelineRunDetail } from "../types/domain";
+import type { DeclaredStages } from "../lib/pipelineGraph";
 
 /**
  * The Pipelines tab's state: runs, their jobs, their logs, and the polling that keeps the live
@@ -67,6 +68,15 @@ interface CiState {
   /** The `needs:` of a GitHub run's workflow, once read off disk. `null` means "tried and
    *  couldn't" — a distinct state from "not tried", which is the key being absent. */
   needsByRun: Record<string, Map<string, string[]> | null>;
+  /**
+   * The `dependsOn:` and declared job names of an Azure run's pipeline file, once read off disk.
+   * Same "`null` means tried and couldn't" contract as {@link needsByRun}.
+   *
+   * Deliberately a second field rather than a shared one: that map is keyed by *job display name*
+   * and feeds the job graph, this one is keyed by *stage ref name* and feeds the stage board. One
+   * handed to the wrong consumer would match nothing — or, worse, match something.
+   */
+  stagesByRun: Record<string, DeclaredStages | null>;
 
   selection: Selection | null;
   /** Per project, not global. A branch name only means anything inside one repository, and a
@@ -100,6 +110,7 @@ interface CiState {
   setStatusFilter: (status: PipelineRun["status"] | null) => void;
   setGraphMode: (mode: GraphMode) => void;
   rememberNeeds: (key: string, needs: Map<string, string[]> | null) => void;
+  rememberStages: (key: string, stages: DeclaredStages | null) => void;
   setAnalysis: (key: string, patch: Partial<CiState["analysisByJob"][string]>) => void;
   /** Removes the entry outright. `setAnalysis` merges, so it can never empty one — and an
    *  entry left behind with no `text` and no `error` reads as "still running" forever, which
@@ -220,6 +231,7 @@ export const useCiStore = create<CiState>((set, get) => ({
   logBusy: {},
   logError: {},
   needsByRun: {},
+  stagesByRun: {},
   selection: null,
   branchFilterByProject: {},
   branchesSeenByProject: {},
@@ -428,6 +440,11 @@ export const useCiStore = create<CiState>((set, get) => ({
 
   rememberNeeds: (key, needs) =>
     set((s) => (key in s.needsByRun ? {} : { needsByRun: { ...s.needsByRun, [key]: needs } })),
+
+  // Write-once, exactly like `rememberNeeds`: the file is read at most once per run, not once per
+  // render, and a re-read could only ever disagree with the board already on screen.
+  rememberStages: (key, stages) =>
+    set((s) => (key in s.stagesByRun ? {} : { stagesByRun: { ...s.stagesByRun, [key]: stages } })),
 
   setAnalysis: (key, patch) =>
     set((s) => {

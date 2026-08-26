@@ -209,6 +209,10 @@ struct RawIdentity {
 #[derive(Deserialize)]
 struct RawProjectRef {
     name: String,
+    /// The team project's GUID. A work-item artifact link addresses the project by id, never by
+    /// name, and this is the only place the create-PR response hands it to us.
+    #[serde(default)]
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -375,6 +379,7 @@ pub async fn create_pull_request(
     source_branch: &str,
     target_branch: &str,
     draft: bool,
+    work_item_ids: &[i64],
     pat: &str,
 ) -> Result<PullRequestSummary, String> {
     let org_enc = encode_segment(&normalize_org(org));
@@ -404,7 +409,230 @@ pub async fn create_pull_request(
     }
     let pr: RawPullRequest =
         res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
+
+    // Linked after the fact, and only now, because the artifact URL needs the project's GUID and
+    // the pull request's own id — neither of which exists until the call above has returned. See
+    // `link_work_items` for why `workItemRefs` on the create body is not the answer.
+    if !work_item_ids.is_empty() {
+        let project_id = pr
+            .repository
+            .project
+            .as_ref()
+            .map(|project| project.id.clone())
+            .unwrap_or_default();
+        if !project_id.is_empty() {
+            let failures =
+                link_work_items(org, &project_id, repo_id, pr.pull_request_id, work_item_ids, pat)
+                    .await;
+            // Logged, never returned as an error: the pull request exists and the caller must be
+            // told so. A failed link is a missing link on a real PR, not a failed PR — and turning
+            // it into an `Err` here would leave the user believing nothing was created while their
+            // branch already had an open pull request against it.
+            if !failures.is_empty() {
+                crate::applog::warn(&format!(
+                    "pull request {} created, but these work items could not be linked: {}",
+                    pr.pull_request_id,
+                    failures.join(", ")
+                ));
+            }
+        }
+    }
+
     Ok(map_pull_request(&org_enc, &project_enc, pr))
+}
+
+/// One work item, as the picker shows it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkItem {
+    pub id: i64,
+    pub title: String,
+    /// `Bug`, `User Story`, `Task`, … — whatever this project's process template calls it.
+    pub work_item_type: String,
+    pub state: String,
+    pub assigned_to: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawWiqlRef {
+    id: i64,
+}
+
+#[derive(Deserialize)]
+struct RawWiqlResult {
+    #[serde(rename = "workItems", default)]
+    work_items: Vec<RawWiqlRef>,
+}
+
+#[derive(Deserialize)]
+struct RawWorkItem {
+    id: i64,
+    #[serde(default)]
+    fields: serde_json::Value,
+}
+
+/// How many work items a search will pull back. A picker is for recognising the one you meant, not
+/// for browsing a backlog — past a screenful the answer is a better query, not more rows.
+const MAX_WORK_ITEMS: usize = 50;
+
+/// Searches a project's work items by id or by text in the title.
+///
+/// Two round trips, because Azure splits the question in half: WIQL answers *which* ids match and
+/// returns nothing else about them, so the fields the picker draws take a second, batched read.
+///
+/// A query that is just digits is treated as an id first and a title search second, joined with
+/// `OR` — typing `391974` should find work item 391974 whether or not its title contains the
+/// number, and that is overwhelmingly what a number typed into this box means.
+pub async fn search_work_items(
+    org: &str,
+    project: &str,
+    query: &str,
+    pat: &str,
+) -> Result<Vec<WorkItem>, String> {
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let trimmed = query.trim();
+
+    // Single-quote is the escape in WIQL, exactly as in SQL. Without this a title containing an
+    // apostrophe would end the string literal and the query would be rejected — or worse.
+    let escaped = trimmed.replace('\'', "''");
+    let mut clauses: Vec<String> = vec![];
+    if let Ok(id) = trimmed.parse::<i64>() {
+        clauses.push(format!("[System.Id] = {id}"));
+    }
+    if !trimmed.is_empty() {
+        clauses.push(format!("[System.Title] CONTAINS '{escaped}'"));
+    }
+    // An empty box asks for something useful rather than for everything: what is assigned to you
+    // and still open is the list you want before you have typed anything.
+    let where_clause = if clauses.is_empty() {
+        "[System.AssignedTo] = @Me AND [System.State] NOT IN ('Closed', 'Removed', 'Done')".to_string()
+    } else {
+        clauses.join(" OR ")
+    };
+    let wiql = format!(
+        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @Project AND ({where_clause}) \
+         ORDER BY [System.ChangedDate] DESC"
+    );
+
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/wit/wiql?api-version={API_VERSION}"
+    );
+    let res = client()
+        .post(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&serde_json::json!({ "query": wiql }))
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {text}"));
+    }
+    let found: RawWiqlResult =
+        res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
+
+    let ids: Vec<String> = found
+        .work_items
+        .iter()
+        .take(MAX_WORK_ITEMS)
+        .map(|item| item.id.to_string())
+        .collect();
+    if ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Organisation-scoped, not project-scoped: the batch endpoint takes ids across the whole
+    // account, and the ids came from a project-scoped query so they are already the right ones.
+    let fields = "System.Id,System.Title,System.WorkItemType,System.State,System.AssignedTo";
+    let detail_url = format!(
+        "https://dev.azure.com/{org_enc}/_apis/wit/workitems?ids={}&fields={fields}\
+         &$expand=none&errorPolicy=omit&api-version={API_VERSION}",
+        ids.join(",")
+    );
+    let parsed: ListResponse<RawWorkItem> = get_json(&detail_url, pat).await?;
+
+    let text = |value: &serde_json::Value, key: &str| -> String {
+        value.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    };
+    Ok(parsed
+        .value
+        .into_iter()
+        .map(|item| WorkItem {
+            id: item.id,
+            title: text(&item.fields, "System.Title"),
+            work_item_type: text(&item.fields, "System.WorkItemType"),
+            state: text(&item.fields, "System.State"),
+            // `System.AssignedTo` is an identity object, not a string, and is absent when nobody
+            // is assigned — which is ordinary rather than an error.
+            assigned_to: item
+                .fields
+                .get("System.AssignedTo")
+                .and_then(|v| v.get("displayName"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        })
+        .collect())
+}
+
+/// Links work items to a pull request, one JSON-Patch per item.
+///
+/// **Done after the PR exists, not as a field on the create body.** Azure's `GitPullRequest` model
+/// does carry `workItemRefs`, but it is documented as read-only on create and is quietly ignored by
+/// the service — a PR created "with" work items comes back with none. The relation actually lives
+/// on the *work item*, as an `ArtifactLink` pointing at a `vstfs:///Git/PullRequestId/...` URL, so
+/// that is what this writes.
+///
+/// The artifact URL addresses the project by **GUID**, which is why the caller has to read it off
+/// the created PR's own `repository.project.id` rather than reusing the project name it was given.
+///
+/// Failures are collected per item rather than returned on the first one: the pull request has
+/// already been created by the time this runs, and a link that failed must never be reported in a
+/// way that reads as "the PR failed".
+pub async fn link_work_items(
+    org: &str,
+    project_id: &str,
+    repo_id: &str,
+    pr_id: i64,
+    work_item_ids: &[i64],
+    pat: &str,
+) -> Vec<String> {
+    let org_enc = encode_segment(&normalize_org(org));
+    // The separators are part of the value, so they are encoded — Azure stores this string whole.
+    let artifact = format!("vstfs:///Git/PullRequestId/{project_id}%2F{repo_id}%2F{pr_id}");
+    let mut failures = vec![];
+    for id in work_item_ids {
+        let url = format!(
+            "https://dev.azure.com/{org_enc}/_apis/wit/workitems/{id}?api-version={API_VERSION}"
+        );
+        let patch = serde_json::json!([{
+            "op": "add",
+            "path": "/relations/-",
+            "value": {
+                "rel": "ArtifactLink",
+                "url": artifact,
+                "attributes": { "name": "Pull Request" }
+            }
+        }]);
+        let sent = client()
+            .patch(&url)
+            .header("Authorization", auth_header(pat))
+            // Not `application/json`: the work-item update endpoint only accepts JSON-Patch, and
+            // sending the wrong content type is a 400 that says nothing useful.
+            .header("Content-Type", "application/json-patch+json")
+            .body(patch.to_string())
+            .send()
+            .await;
+        match sent {
+            Ok(res) if res.status().is_success() => {}
+            Ok(res) => {
+                let status = res.status();
+                failures.push(format!("#{id}: {status}"));
+            }
+            Err(e) => failures.push(format!("#{id}: {e}")),
+        }
+    }
+    failures
 }
 
 #[derive(Deserialize)]

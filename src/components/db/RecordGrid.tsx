@@ -56,6 +56,10 @@ export function RecordGrid({
   primaryKeys,
   foreignKeys,
   onFollowForeignKey,
+  fieldWidth: fieldWidthProp,
+  onFieldWidth,
+  recordWidth: recordWidthProp,
+  onRecordWidth,
 }: ResultGridProps) {
   const t = useT();
   const model = recordModel(engine);
@@ -63,8 +67,15 @@ export function RecordGrid({
   const [scrollLeft, setScrollLeft] = useState(0);
   const onScrollLeft = useFrameThrottle(setScrollLeft);
   const [viewportWidth, setViewportWidth] = useState(800);
-  const [fieldWidth, setFieldWidth] = useState(DEFAULT_FIELD_WIDTH);
-  const [recordWidth, setRecordWidth] = useState(DEFAULT_RECORD_WIDTH);
+  // Controlled when the caller supplies them, self-managed otherwise: this grid is also used from
+  // modals with no tab to hang a width on, and `null` from a tab that has never been dragged means
+  // the same thing as "no prop" — take the default.
+  const [localFieldWidth, setLocalFieldWidth] = useState(DEFAULT_FIELD_WIDTH);
+  const [localRecordWidth, setLocalRecordWidth] = useState(DEFAULT_RECORD_WIDTH);
+  const fieldWidth = fieldWidthProp ?? localFieldWidth;
+  const recordWidth = recordWidthProp ?? localRecordWidth;
+  const applyFieldWidth = onFieldWidth ?? setLocalFieldWidth;
+  const applyRecordWidth = onRecordWidth ?? setLocalRecordWidth;
   const [editing, setEditing] = useState<{ row: number; column: string } | null>(null);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const sweep = useRecordSweep({ scrollRef, fieldWidth, recordWidth, count: rows.length, onSelectRange });
@@ -145,7 +156,7 @@ export function RecordGrid({
             style={{ width: fieldWidth }}
           >
             {t("db.field")}
-            <Resizer width={fieldWidth} onChange={setFieldWidth} />
+            <Resizer width={fieldWidth} onChange={applyFieldWidth} />
           </div>
           <div style={{ width: leadingGap }} className="shrink-0" />
           {visible.map((row) => {
@@ -191,7 +202,7 @@ export function RecordGrid({
                     ✕
                   </button>
                 )}
-                <Resizer width={recordWidth} onChange={setRecordWidth} />
+                <Resizer width={recordWidth} onChange={applyRecordWidth} />
               </div>
             );
           })}

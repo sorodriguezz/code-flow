@@ -108,29 +108,21 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
    */
   const [selected, setSelected] = useState<Set<number>>(new Set());
   /**
-   * Grid or record: rows across, or one record per column read down the page.
+   * How this tab is being looked at — the grid/record layout, which of the three document views is
+   * up, and whether the query options are expanded.
    *
-   * A view state, so it lives here and not in the store — it is about this look at the data, like
-   * the selection, and a persisted tab that reopened sideways would be surprising.
-   */
-  const [layout, setLayout] = useState<"grid" | "record">("grid");
-  /**
-   * Which of the three Mongo views is up: the document list, the raw text, or the grid.
+   * On the tab record and not in a `useState` here. These are still view state, and still never
+   * persisted (see [`DbDataUi`]) — but `DatabaseView` renders one `DataTabPanel` for every data
+   * tab, so held locally they were one set of toggles shared by all of them: transposing one table
+   * transposed the next, and stepping through a console tab reset the choice instead of leaving it
+   * where it was put.
    *
-   * Only meaningful on an engine that returns documents, and it opens on `documents` there — a
-   * collection is read as documents, and the grid's flattening invents a schema the collection does
-   * not have (see `DocumentList`). On a relational engine this stays `grid` and the switcher is not
-   * drawn at all, because "documents" is not a way of looking at a row.
+   * `optionsOpen` is closed by default: seven boxes above the pager is a lot of screen to spend on
+   * a query that is usually just a filter. It opens itself for a tab that has options set, so a
+   * restored or re-pointed tab never filters by something invisible.
    */
-  const [docView, setDocView] = useState<"documents" | "json" | "grid">("documents");
-  /**
-   * Whether the query options are expanded.
-   *
-   * A view state like the two above, and closed by default: seven boxes above the pager is a lot of
-   * screen to spend on a query that is usually just a filter. It opens itself for a tab that has
-   * options set, so a restored or a re-pointed tab never filters by something invisible.
-   */
-  const [optionsOpen, setOptionsOpen] = useState(false);
+  const { layout, docView, optionsOpen } = tab.ui;
+  const setUi = useDbStore((s) => s.setDataUi);
   /** Where a ⇧-click measures its run from. */
   const anchor = useRef<number | null>(null);
   /** What a ⌘-drag must not throw away: the selection as it stood when the drag began. */
@@ -188,7 +180,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   // A tab that arrived with options set shows them. Only ever opens the panel — closing it again is
   // the user's to do, and re-opening it under them on the next render would be a fight.
   useEffect(() => {
-    if (hasQueryOptions(tab.options)) setOptionsOpen(true);
+    if (hasQueryOptions(tab.options)) setUi(tab.id, { optionsOpen: true });
   }, [tab.id, tab.options]);
 
   // New rows, new indexes. See the note on `selected`.
@@ -313,7 +305,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
    */
   const stageDocument = (text: string) => {
     store.addDocument(tab.id, text);
-    setDocView((current) => (current === "grid" ? "documents" : current));
+    if (docView === "grid") setUi(tab.id, { docView: "documents" });
   };
 
   /** Opens a copy of the document, ready to be inserted as a new one. The `_id` is dropped so the
@@ -829,21 +821,21 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           {hasDocuments && (
             <>
               <ToolbarButton
-                onClick={() => setDocView("documents")}
+                onClick={() => setUi(tab.id, { docView: "documents" })}
                 active={docView === "documents"}
                 title={t("db.documentList")}
               >
                 <List size={12} />
               </ToolbarButton>
               <ToolbarButton
-                onClick={() => setDocView("json")}
+                onClick={() => setUi(tab.id, { docView: "json" })}
                 active={docView === "json"}
                 title={t("db.showJson")}
               >
                 <Braces size={12} />
               </ToolbarButton>
               <ToolbarButton
-                onClick={() => setDocView("grid")}
+                onClick={() => setUi(tab.id, { docView: "grid" })}
                 active={docView === "grid"}
                 title={t("db.showGrid")}
               >
@@ -858,7 +850,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               while documents are up: transposing a grid is a question about a grid. */}
           {(!hasDocuments || docView === "grid") && (
             <ToolbarButton
-              onClick={() => setLayout((current) => (current === "grid" ? "record" : "grid"))}
+              onClick={() => setUi(tab.id, { layout: layout === "grid" ? "record" : "grid" })}
               active={layout === "record"}
               disabled={!tab.result}
               title={layout === "grid" ? t("db.recordLayout") : t("db.gridLayout")}
@@ -1003,7 +995,13 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
                 store.followForeignKey(tab, key, value),
             };
             return layout === "record" ? (
-              <RecordGrid {...shared} />
+              <RecordGrid
+                {...shared}
+                fieldWidth={tab.ui.fieldWidth}
+                onFieldWidth={(fieldWidth) => setUi(tab.id, { fieldWidth })}
+                recordWidth={tab.ui.recordWidth}
+                onRecordWidth={(recordWidth) => setUi(tab.id, { recordWidth })}
+              />
             ) : (
               // Sorting is the grid's alone: it is a click on a column header, and in the record
               // view a column header is a record.
@@ -1016,6 +1014,10 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
                 {...shared}
                 onSort={sortedByOptions ? undefined : cycleSort}
                 sort={sortedByOptions ? [] : tab.sort}
+                // Dragged widths belong to this tab: one `DataTabPanel` serves every data tab, so
+                // grid-local widths were applied by column *name* to whatever table opened next.
+                widths={tab.ui.widths}
+                onWidths={(widths) => setUi(tab.id, { widths })}
               />
             );
           })()
@@ -1177,7 +1179,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
             {documentStore && (
               <span className="relative flex shrink-0 items-center">
                 <ToolbarButton
-                  onClick={() => setOptionsOpen((current) => !current)}
+                  onClick={() => setUi(tab.id, { optionsOpen: !optionsOpen })}
                   active={optionsOpen}
                   title={t("db.queryOptions")}
                 >

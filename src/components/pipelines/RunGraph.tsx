@@ -4,11 +4,16 @@ import { readFileText } from "../../lib/tauri/commands";
 import {
   buildGraph,
   isSettled,
+  layerDeclared,
   layerSpans,
+  orderLayers,
+  parseAzureStages,
   parseWorkflowNeeds,
+  type DeclaredStages,
   type GraphEdge,
   type GraphSource,
   type PipelineGraph,
+  type StageLayout,
 } from "../../lib/pipelineGraph";
 import { useCiStore, runKey } from "../../state/ciStore";
 import { useT } from "../../state/languageStore";
@@ -101,6 +106,41 @@ function useWorkflowNeeds(projectId: string, localPath: string | null, detail: P
   }, [run, key, known, localPath, rememberNeeds]);
 
   return key ? (needsByRun[key] ?? null) : null;
+}
+
+/**
+ * The `dependsOn:` of an Azure run's pipeline file, read off disk once per run.
+ *
+ * A second hook rather than a branch inside [`useWorkflowNeeds`]: two providers, two file formats,
+ * two caches, and — the part that matters — two *opposite* defaults for a missing declaration. One
+ * function serving both is how the wrong default gets applied to the wrong provider.
+ */
+function useStageDeps(
+  projectId: string,
+  localPath: string | null,
+  detail: PipelineRunDetail | undefined,
+): DeclaredStages | null {
+  const rememberStages = useCiStore((s) => s.rememberStages);
+  const stagesByRun = useCiStore((s) => s.stagesByRun);
+  const run = detail?.run;
+  const key = run ? runKey(projectId, run) : null;
+  const known = key !== null && key in stagesByRun;
+
+  useEffect(() => {
+    if (!run || !key || known) return;
+    if (run.provider !== "azure" || !run.definition_path || !localPath) return;
+    let cancelled = false;
+    void (async () => {
+      const text = await readFileText(localPath, run.definition_path!).catch(() => null);
+      if (cancelled) return;
+      rememberStages(key, text ? parseAzureStages(text) : null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [run, key, known, localPath, rememberStages]);
+
+  return key ? (stagesByRun[key] ?? null) : null;
 }
 
 function JobCard({
@@ -526,6 +566,9 @@ function peakOverlap(jobs: PipelineJob[], now: number): number {
 
 /** Everything a card shows that isn't the job rows themselves. */
 interface StageSummary {
+  /** The provider's id for this stage, or `null` when the column had no record to match. Carried
+   *  so the board can reach the stage's `ref_name` without re-deriving the lookup. */
+  stageId: string | null;
   status: PipelineStatus;
   /** The provider's own word for it, for the header's `title`. Empty when nothing was quoted. */
   rawStatus: string;
@@ -541,6 +584,17 @@ interface StageSummary {
    * highlighted nothing.
    */
   placeholder: PipelineJob | null;
+  /**
+   * The job names the pipeline file declares under this stage, filled only when `jobs` is empty.
+   *
+   * Azure expands a stage's jobs into the timeline only when the stage *begins* — job expansion can
+   * depend on runtime expressions — so a stage skipped by a condition arrives with its `Stage`
+   * record and no `Job` records at all. Azure's own page still lists three jobs because it renders
+   * the compiled plan; this is the same information, read from the file, and drawn as ghost rows
+   * that say plainly they never ran. Empty when the file could not be read, and the card then says
+   * what it has always said.
+   */
+  declaredJobs: string[];
   settled: number;
   overlap: number;
 }
@@ -568,6 +622,7 @@ function summarise(
   stageId: string | null,
   columnJobs: PipelineJob[],
   stagesById: Map<string, PipelineStage>,
+  declared: DeclaredStages | null,
   now: number,
 ): StageSummary {
   const record = (stageId !== null ? stagesById.get(stageId) : undefined) ?? null;
@@ -579,16 +634,22 @@ function summarise(
   const jobs = placeholder ? [] : columnJobs;
   const settled = jobs.filter((job) => isSettled(job.status)).length;
   const overlap = peakOverlap(jobs, now);
+  const ref = (record ?? (placeholder ? stagesById.get(placeholder.id) : undefined))?.ref_name;
+  // Only for a stage the host never expanded: where there are real jobs, they are the truth.
+  const declaredJobs =
+    jobs.length === 0 && ref ? (declared?.jobs.get(ref.toLowerCase()) ?? []) : [];
 
-  const declared = record ?? placeholder;
-  if (declared) {
+  const own = record ?? placeholder;
+  if (own) {
     return {
-      status: statusOf(declared.status),
-      rawStatus: declared.raw_status,
-      startedAt: declared.started_at,
-      finishedAt: declared.finished_at,
+      stageId,
+      status: statusOf(own.status),
+      rawStatus: own.raw_status,
+      startedAt: own.started_at,
+      finishedAt: own.finished_at,
       jobs,
       placeholder,
+      declaredJobs,
       settled,
       overlap,
     };
@@ -597,6 +658,7 @@ function summarise(
   const starts = jobs.map((job) => at(job.started_at)).filter((ms): ms is number => ms !== null);
   const ends = jobs.map((job) => at(job.finished_at)).filter((ms): ms is number => ms !== null);
   return {
+    stageId,
     status: deriveStageStatus(jobs),
     rawStatus: "",
     startedAt: starts.length > 0 ? new Date(Math.min(...starts)).toISOString() : null,
@@ -608,6 +670,7 @@ function summarise(
         : null,
     jobs,
     placeholder,
+    declaredJobs,
     settled,
     overlap,
   };
@@ -752,7 +815,9 @@ function StageCard({
                 : "enabled:hover:bg-black/[0.035] dark:enabled:hover:bg-white/[0.05]"
             }`}
           >
-            {t("pipelines.stageNotExpanded")}
+            {summary.declaredJobs.length > 0
+              ? t("pipelines.stageJobDeclared")
+              : t("pipelines.stageNotExpanded")}
           </button>
         ) : (
           summary.jobs.map((job) => (
@@ -765,6 +830,25 @@ function StageCard({
             />
           ))
         )}
+
+        {/* The jobs this stage *would* have run, when the pipeline file could be read.
+
+            The objection the blank above answers — "a guessed name on a CI screen is worse than an
+            honest blank" — is satisfied here: these are not guesses, they are the names written in
+            the file, and the row says out loud that none of them happened. Non-interactive, because
+            there is no log to open: the host reported nothing for them. */}
+        {summary.jobs.length === 0 &&
+          summary.declaredJobs.map((name, at) => (
+            <div
+              key={`${name}:${at}`}
+              title={t("pipelines.stageJobDeclaredHint")}
+              style={{ height: STAGE_ROW_H }}
+              className="flex w-full shrink-0 items-center gap-1.5 rounded-[5px] border border-dashed border-[var(--cf-border)] px-1.5 text-[10.5px] italic text-[var(--cf-text-muted)] opacity-55"
+            >
+              <span className="h-2 w-2 shrink-0 rounded-full border border-current" />
+              <span className="truncate">{name}</span>
+            </div>
+          ))}
       </div>
     </div>
   );
@@ -811,9 +895,10 @@ export interface StageBoardModel {
   edges: GraphEdge[];
   width: number;
   height: number;
-  /** Whether anything actually runs beside anything else. Drives the header badge: until this is
-   *  true the board is a chain, and a chain is what the declared order alone already said. */
+  /** Whether anything actually runs beside anything else. */
   branched: boolean;
+  /** Which of the two arrangements drew it — a declaration, or the clocks. Drives the badge. */
+  layout: StageLayout;
 }
 
 /**
@@ -833,6 +918,7 @@ export interface StageBoardModel {
 function buildStageBoard(
   graph: PipelineGraph,
   stages: PipelineStage[],
+  declared: DeclaredStages | null,
   now: number,
 ): StageBoardModel {
   // By id, not by name: `byStage` already groups the jobs by `stage_id`, and two stages sharing a
@@ -841,30 +927,93 @@ function buildStageBoard(
   const cards = graph.columns.map((column) => ({
     key: column.key,
     name: column.label,
-    summary: summarise(column.jobs[0]?.stage_id ?? null, column.jobs, stagesById, now),
+    summary: summarise(column.jobs[0]?.stage_id ?? null, column.jobs, stagesById, declared, now),
   }));
 
-  const { layers, edges, branched } = layerSpans(
-    cards.map((card) => ({
-      key: card.key,
-      startedAt: card.summary.startedAt,
-      finishedAt: card.summary.finishedAt,
-      settled: isSettled(card.summary.status),
-    })),
+  // What the pipeline file said, when it could be read — and only then. Everything else falls
+  // through to the clocks, which is what this board has always used.
+  const refByKey = new Map(
+    cards.map((card) => [
+      card.key,
+      (card.summary.stageId !== null ? stagesById.get(card.summary.stageId)?.ref_name : null) ?? null,
+    ]),
   );
+  const fromFile = declared
+    ? layerDeclared(
+        cards.map((card) => card.key),
+        (key) => refByKey.get(key) ?? null,
+        declared.deps,
+      )
+    : null;
+  const measured = fromFile
+    ? null
+    : layerSpans(
+        cards.map((card) => ({
+          key: card.key,
+          startedAt: card.summary.startedAt,
+          finishedAt: card.summary.finishedAt,
+          settled: isSettled(card.summary.status),
+        })),
+      );
+  const spans = fromFile ?? measured!;
+  const layout: StageLayout = fromFile ? "dependsOn" : "clocks";
+  const { edges, branched } = spans;
+  // Cross as few arrows as possible, with declaration order as the tie-break so the board cannot
+  // reshuffle itself between two polls of identical data.
+  const layers = orderLayers(spans.layers, edges);
 
   const byKey = new Map(cards.map((card) => [card.key, card]));
+  const heightOf = (key: string) => {
+    const card = byKey.get(key)!;
+    // A stage that never expanded shows the jobs its file declares instead, so the card has to be
+    // tall enough for whichever list it ends up drawing.
+    return stageHeight(Math.max(card.summary.jobs.length, card.summary.declaredJobs.length));
+  };
+
+  /**
+   * Each card pulled toward the centre of what points at it, then pushed clear of its neighbour.
+   *
+   * A plain `top += height` stack per column is what drew the old chain, and it is wrong the moment
+   * a column holds more than one card: `Quality Code` waits on `Testing` alone, so it belongs level
+   * with `Testing` and not at the top of its column beside nothing. Predecessors always sit in a
+   * strictly earlier lane — longest-path layering guarantees it — so one forward pass is exact.
+   */
+  const preds = new Map<string, string[]>();
+  for (const edge of edges) {
+    const existing = preds.get(edge.toId);
+    if (existing) existing.push(edge.fromId);
+    else preds.set(edge.toId, [edge.fromId]);
+  }
+  const top = new Map<string, number>();
+  const centre = (key: string) => top.get(key)! + heightOf(key) / 2;
+  layers.forEach((layer, lane) => {
+    let cursor: number | null = null;
+    for (const key of layer) {
+      const parents = (preds.get(key) ?? []).filter((parent) => top.has(parent));
+      const want =
+        lane === 0 || parents.length === 0
+          ? null
+          : parents.reduce((sum, parent) => sum + centre(parent), 0) / parents.length -
+            heightOf(key) / 2;
+      const y: number = want === null ? (cursor ?? 0) : cursor === null ? want : Math.max(cursor, want);
+      top.set(key, y);
+      cursor = y + heightOf(key) + STAGE_LANE_GAP;
+    }
+  });
+  // Normalised once at the end rather than clamped per card: the pull toward a parent's centre can
+  // legitimately push a later column above the first one, and clamping would flatten exactly the
+  // alignment this pass exists to produce.
+  const shift = Math.min(...top.values());
   const placed: PlacedStage[] = [];
   let height = 0;
   layers.forEach((layer, lane) => {
-    let top = 0;
     for (const key of layer) {
       const card = byKey.get(key)!;
-      const cardHeight = stageHeight(card.summary.jobs.length);
-      placed.push({ ...card, lane, left: stageX(lane), top, height: cardHeight });
-      top += cardHeight + STAGE_LANE_GAP;
+      const cardHeight = heightOf(key);
+      const y = top.get(key)! - shift;
+      placed.push({ ...card, lane, left: stageX(lane), top: y, height: cardHeight });
+      height = Math.max(height, y + cardHeight);
     }
-    height = Math.max(height, top - STAGE_LANE_GAP);
   });
 
   return {
@@ -873,6 +1022,7 @@ function buildStageBoard(
     width: Math.max(1, layers.length * (STAGE_W + STAGE_GUTTER) - STAGE_GUTTER),
     height: Math.max(1, height),
     branched,
+    layout,
   };
 }
 
@@ -901,6 +1051,14 @@ function boardEdges(
     if (!from || !to || from.lane >= to.lane) return [];
     return [{ edge, from, to }];
   });
+
+  // How many arrows leave each card and arrive at each card, so a fan can be told from a chain.
+  const fanOut = new Map<string, number>();
+  const fanIn = new Map<string, number>();
+  for (const { edge } of routed) {
+    fanOut.set(edge.fromId, (fanOut.get(edge.fromId) ?? 0) + 1);
+    fanIn.set(edge.toId, (fanIn.get(edge.toId) ?? 0) + 1);
+  }
 
   // Longest span first, so the arrow that has to travel furthest takes the lane nearest the board
   // and the shorter ones nest under it instead of crossing it. Same packing as `layoutEdges`.
@@ -931,10 +1089,23 @@ function boardEdges(
       const y1 = from.top + from.height / 2;
       const x2 = to.left - HEAD;
       const y2 = to.top + to.height / 2;
+      // A chain stays an elbow; a fan curves.
+      //
+      // `elbow` puts every arrow's vertical leg on the same `midX`, which is right when one card
+      // points at one card and unreadable the moment three siblings leave together: the three legs
+      // land on one corridor and the result is a ladder nobody can trace back. The curve separates
+      // them by construction, and it is the shape Azure's own board draws in exactly this case.
+      const fanning = (fanOut.get(edge.fromId) ?? 0) > 1 || (fanIn.get(edge.toId) ?? 0) > 1;
+      // All N arrows still leave a card from the *same* point. Spreading the exits would imply the
+      // arrows belong to N different things inside the card, and they do not — they belong to it.
+      const pull = Math.max(18, (x2 - x1) * 0.45);
       return {
         key,
         lit,
-        d: elbow(x1, y1, x2, y2),
+        d: fanning
+          ? `M ${x1} ${y1} C ${x1 + pull} ${y1}, ${x2 - pull} ${y2}, ${x2} ${y2}`
+          : elbow(x1, y1, x2, y2),
+        // Both routes arrive horizontal, so one fixed right-pointing triangle serves either.
         head: `M ${x2 + HEAD} ${y2} L ${x2 - 1} ${y2 - 3.6} L ${x2 - 1} ${y2 + 3.6} Z`,
       };
     }
@@ -1128,30 +1299,41 @@ export function RunGraph({
   const setGraphMode = useCiStore((s) => s.setGraphMode);
   const t = useT();
   const needs = useWorkflowNeeds(projectId, localPath, detail);
+  const declaredStages = useStageDeps(projectId, localPath, detail);
 
   // Built once and handed down rather than rebuilt inside each drawing, which is what the two used
   // to do.
   const graph = useMemo(() => (detail ? buildGraph(detail.jobs, { needs }) : null), [detail, needs]);
   const board = useMemo(
     () =>
-      detail && graph?.source === "stage" ? buildStageBoard(graph, detail.stages, now) : null,
-    [graph, detail, now],
+      detail && graph?.source === "stage"
+        ? buildStageBoard(graph, detail.stages, declaredStages, now)
+        : null,
+    [graph, detail, declaredStages, now],
   );
   const source: GraphSource = graph?.source ?? "flat";
-  // A board whose stages all sit one behind another says nothing the declared order didn't already,
-  // so it keeps the plain badge. The moment two stages share a column the arrangement is something
-  // this app worked out from the clocks, and the badge has to stop claiming the provider said it.
+  // Keyed on where the *arrangement* came from, not on whether it happened to come out branched.
+  //
+  // It used to say `sourceStage` — whose hint promises "nothing here is inferred" — for any board
+  // that drew as a chain. But a chain is a result, not a source: the columns were measured off the
+  // stage clocks either way, and a measurement that lands on a straight line is still a
+  // measurement. So a clock-drawn board says so whatever shape it took, and only a board drawn from
+  // a `dependsOn:` read out of the pipeline file gets to claim it was declared.
   const label: TranslationKey =
     mode === "waterfall"
       ? "pipelines.sourceMeasured"
-      : board?.branched
-        ? "pipelines.sourceStageOrder"
+      : board
+        ? board.layout === "dependsOn"
+          ? "pipelines.sourceStageDeps"
+          : "pipelines.sourceStageOrder"
         : SOURCE_LABEL[source];
   const hint: TranslationKey =
     mode === "waterfall"
       ? "pipelines.sourceMeasuredHint"
-      : board?.branched
-        ? "pipelines.sourceStageOrderHint"
+      : board
+        ? board.layout === "dependsOn"
+          ? "pipelines.sourceStageDepsHint"
+          : "pipelines.sourceStageOrderHint"
         : SOURCE_HINT[source];
 
   return (

@@ -186,7 +186,19 @@ pub fn run() {
     // no way to report itself — no console on Windows, no window anywhere — and two of the steps
     // below now move the user's database between directories. See `applog`, which until v1.19 did
     // not exist: `logs/` was created on every launch and had no writer at all.
+    // Read *before* `init`, which writes this session's own marker — asking afterwards would only
+    // ever find the one we just wrote.
+    let unclean = applog::last_session_was_unclean();
     applog::init();
+    // Straight after the log exists and before anything that can fail: from here to the window
+    // appearing there is nowhere else a panic could report itself.
+    applog::install_panic_hook();
+    if unclean {
+        applog::warn(
+            "previous session did not shut down cleanly (crash, force-quit or power loss) — \
+             unsaved editor buffers from it are offered back in the editor",
+        );
+    }
 
     // Then the reset, if one was requested on the previous launch. Must happen before `db::init()`
     // opens the SQLite connection below — see `paths::reset_marker_path`'s doc comment for why the
@@ -434,6 +446,10 @@ pub fn run() {
             commands::repos::update_project_color,
             commands::repos::create_project,
             commands::repos::list_projects,
+            commands::repos::get_workspace_identity,
+            commands::repos::list_workspace_identities,
+            commands::repos::set_workspace_identity,
+            commands::repos::get_effective_identity,
             commands::repos::reorder_projects,
             commands::repos::get_project,
             commands::repos::delete_project,
@@ -639,6 +655,7 @@ pub fn run() {
             commands::ado_cmd::act_on_pr_link,
             commands::ado_cmd::generate_pr_description,
             commands::ado_cmd::create_pull_request,
+            commands::ado_cmd::search_work_items,
             commands::ado_cmd::list_pr_comment_threads,
             commands::ado_cmd::resolve_pr_comment_thread,
             commands::ado_cmd::discard_pr_finding,
@@ -1076,6 +1093,10 @@ pub fn run() {
                 // process holding an index of the repository, and a reparented `rust-analyzer`
                 // keeps several hundred megabytes that nothing is left to reap.
                 tauri::async_runtime::block_on(lsp::stop_all());
+                // Last, once everything above has actually finished: the marker's whole meaning is
+                // "the previous session did not get this far", so clearing it early would call a
+                // shutdown clean that a hang in any of the steps above could still spoil.
+                applog::mark_clean_exit();
             }
         });
 }

@@ -7,6 +7,7 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { TabBar } from "./components/layout/TabBar";
 import { AppRail } from "./components/layout/AppRail";
 import { StatusBar } from "./components/layout/StatusBar";
+import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { AddDependencyModal } from "./components/editor/AddDependencyModal";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
@@ -320,16 +321,25 @@ function MainContent() {
   // sockets the paragraph above exists to keep alive.
   return (
     <>
+      {/* One boundary per view, inside the loop rather than around it — the same reasoning as the
+          `Suspense` it wraps. Hoisted out, a throw in any view would replace *every* mounted view
+          with one fallback, unmounting the terminals and sockets these stay-mounted divs exist to
+          keep alive. Here, a broken screen is a recoverable panel and the shell around it — the
+          sidebar, the tab bar, the status bar — keeps working, so there is somewhere to walk to. */}
       {project &&
         PROJECT_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
           <div key={id} className={activeView === id ? "h-full" : "hidden"}>
-            <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
+            <ErrorBoundary resetKey={id}>
+              <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
+            </ErrorBoundary>
           </div>
         ))}
       {workspaceId !== null &&
         WORKSPACE_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
           <div key={id} className={activeView === id ? "h-full" : "hidden"}>
-            <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
+            <ErrorBoundary resetKey={id}>
+              <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
+            </ErrorBoundary>
           </div>
         ))}
     </>

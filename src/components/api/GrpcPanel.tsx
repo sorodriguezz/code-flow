@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import Editor from "@monaco-editor/react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import {
@@ -19,7 +19,7 @@ import { EmptyState } from "../common/EmptyState";
 import { Select } from "../common/Select";
 import { KeyValueTable } from "./KeyValueTable";
 import { useApiStore } from "../../state/apiStore";
-import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
+import { DEFAULT_GRPC_CALL, useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -89,10 +89,17 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
   const busy = useApiRuntimeStore((s) => s.sending[tabId] ?? false);
   const setSending = useApiRuntimeStore((s) => s.setSending);
 
-  const [describing, setDescribing] = useState(false);
-  const [response, setResponse] = useState<GrpcResponse | null>(null);
-  const [callError, setCallError] = useState<string | null>(null);
-  const callIdRef = useRef<string | null>(null);
+  /**
+   * The call's chrome and its result, per tab.
+   *
+   * `GrpcPanel` is mounted once for every request tab, so all four of these used to be single
+   * slots shared by every gRPC request open: a response from one tab was rendered under another
+   * tab's method, and Cancel on tab A aborted whatever call tab B had started last. `sending` was
+   * already per tab beside them, which is what made the mismatch reachable.
+   */
+  const call = useApiRuntimeStore((s) => s.grpcCalls[tabId] ?? DEFAULT_GRPC_CALL);
+  const setGrpcCall = useApiRuntimeStore((s) => s.setGrpcCall);
+  const { describing, response, error: callError } = call;
 
   const collectionId = tab?.collectionId ?? null;
   const variableContext = useMemo(
@@ -113,7 +120,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
 
   const loadServices = async () => {
     if (!tab || !grpc) return;
-    setDescribing(true);
+    setGrpcCall(tabId, { describing: true });
     try {
       const { endpoint, metadata, options } = await resolveTransport(tabId);
       const loaded = await apiGrpcDescribe({
@@ -139,7 +146,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
     } catch (e) {
       pushErrorToast(t("api.grpc.describeFailed", { error: String(e) }));
     } finally {
-      setDescribing(false);
+      setGrpcCall(tabId, { describing: false });
     }
   };
 
@@ -148,9 +155,8 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
     // Held so Cancel can reach this call: the backend registers gRPC invocations under the same
     // cancellation registry as HTTP, so `api_cancel_http` aborts them by id.
     const callId = `grpc-${tabId}-${Date.now().toString(36)}`;
-    callIdRef.current = callId;
+    setGrpcCall(tabId, { callId, error: null });
     setSending(tabId, true);
-    setCallError(null);
     try {
       const { endpoint, metadata, options } = await resolveTransport(tabId);
       const result = await apiGrpcCall(callId, {
@@ -166,19 +172,21 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
         authority: grpc.authority,
         options,
       });
-      setResponse(result);
+      setGrpcCall(tabId, { response: result });
     } catch (e) {
       // Only a call that never happened lands here — a NOT_FOUND arrives as a `GrpcResponse`.
-      setResponse(null);
-      setCallError(t("api.grpc.callFailed", { error: String(e) }));
+      setGrpcCall(tabId, { response: null, error: t("api.grpc.callFailed", { error: String(e) }) });
     } finally {
-      callIdRef.current = null;
+      // Only disarm if the slot is still this call's: a call that finishes after the user has
+      // started another one on the same tab must not leave Cancel with nothing to fire at.
+      const current = useApiRuntimeStore.getState().grpcCalls[tabId];
+      if (current?.callId === callId) setGrpcCall(tabId, { callId: null });
       setSending(tabId, false);
     }
   };
 
   const cancel = () => {
-    const id = callIdRef.current;
+    const id = useApiRuntimeStore.getState().grpcCalls[tabId]?.callId;
     if (id) void apiCancelHttp(id).catch(() => undefined);
   };
 
@@ -345,6 +353,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
       <div className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
         <CollapsibleSection icon={Tags} title={t("api.tab.metadata")} defaultOpen={grpc.metadata.length > 0}>
           <KeyValueTable
+            key={`${tabId}:metadata`}
             rows={grpc.metadata}
             onChange={(metadata: KeyValue[]) => patch({ metadata })}
             variableContext={variableContext}

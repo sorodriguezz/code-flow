@@ -164,15 +164,18 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 
   const run = (selectionOnly: boolean) => {
     const editor = editorRef.current;
+    // Read at call time rather than through the render's captured `store`: this also runs from a
+    // Monaco chord registered once for the life of the panel — see `commandsRef`.
+    const live = useDbStore.getState();
     if (selectionOnly && editor) {
       const selection = editor.getSelection();
       const text = selection ? editor.getModel()?.getValueInRange(selection) : "";
       if (text && text.trim()) {
-        void store.runConsole(tab.id, text);
+        void live.runConsole(tab.id, text);
         return;
       }
     }
-    void store.runConsole(tab.id);
+    void live.runConsole(tab.id);
   };
 
   /**
@@ -292,16 +295,37 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
     editor.focus();
   };
 
+  /**
+   * What ⌘↵ / ⌘⇧↵ / ⌘S should do *right now*, rewritten on every render.
+   *
+   * The chords are registered once, in `handleMount`, and that used to be enough to make them run
+   * the wrong console's SQL. `@monaco-editor/react` keys its editor by `path`, which means it keeps
+   * **one editor instance** and swaps the model when the tab changes — so `onMount` fires exactly
+   * once, on whichever console was open first, and the callbacks it registered kept that render's
+   * `run` and `tab.id` for the rest of the session. Pressing ⌘↵ in console B therefore executed
+   * console A's statement, against console A's connection.
+   *
+   * That is the same trap `RequestBuilder`'s `actionsRef` exists for, and the same fix: the
+   * registration is stable, the ref is not, and the command reads the ref at the moment it fires.
+   */
+  const commandsRef = useRef<{ run: (selectionOnly: boolean) => void; save: () => void }>({
+    run,
+    save: () => {},
+  });
+  commandsRef.current = {
+    run,
+    save: () => void useDbStore.getState().saveConsole(tab.id),
+  };
+
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => run(false));
-    editor.addCommand(
-      monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter,
-      () => run(true),
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () =>
+      commandsRef.current.run(false),
     );
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () =>
-      void store.saveConsole(tab.id),
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () =>
+      commandsRef.current.run(true),
     );
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => commandsRef.current.save());
   };
 
   /**
@@ -738,20 +762,17 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
   const [menu, setMenu] = useState<{ x: number; y: number; items?: MenuItem[] } | null>(null);
   /** Which of the three document views is up. Mirrors the data tab's switcher exactly, on purpose:
    *  a document looked at from a `find()` and the same document looked at by opening the collection
-   *  should not be two different screens. */
-  const [docView, setDocView] = useState<"documents" | "json" | "grid">("documents");
+   *  should not be two different screens.
+   *
+   *  On the tab record, because one `SqlConsolePanel` instance serves every console tab. It is put
+   *  back to `documents` by `runConsole` when a new result arrives — see the note there for why the
+   *  reset cannot live in an effect here. */
+  const { docView } = tab.ui;
+  const setUi = useDbStore((s) => s.setConsoleUi);
   /** The same gutter selection the data grid has, for the same two reasons: export a few rows, and
    * read a wide one down the page. Read-only here — a console result has no row to delete. */
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const anchor = useRef<number | null>(null);
-
-  // Back to the list on every new result. A `find()` is read as documents — the grid's flattening
-  // invents a schema an arbitrary query has even less claim to than a collection does — and a view
-  // chosen for the last statement should not silently apply to the next one, which may not even be
-  // the same shape.
-  useEffect(() => {
-    setDocView("documents");
-  }, [tab.result, tab.activeResult]);
 
   // New rows, new indexes — a selection made against the previous result means nothing here.
   useEffect(() => {
@@ -955,21 +976,21 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
           {active.documents.length > 0 && (
             <>
               <ToolbarButton
-                onClick={() => setDocView("documents")}
+                onClick={() => setUi(tab.id, { docView: "documents" })}
                 active={docView === "documents"}
                 title={t("db.documentList")}
               >
                 <List size={12} />
               </ToolbarButton>
               <ToolbarButton
-                onClick={() => setDocView("json")}
+                onClick={() => setUi(tab.id, { docView: "json" })}
                 active={docView === "json"}
                 title={t("db.showJson")}
               >
                 <Braces size={12} />
               </ToolbarButton>
               <ToolbarButton
-                onClick={() => setDocView("grid")}
+                onClick={() => setUi(tab.id, { docView: "grid" })}
                 active={docView === "grid"}
                 title={t("db.showGrid")}
               >
@@ -1040,6 +1061,10 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
             engine={kind}
             columns={active.columns}
             rows={active.rows}
+            // Per tab, for the same reason the data tab's are — one panel instance serves every
+            // console, so widths held in the grid were applied by column name across all of them.
+            widths={tab.ui.widths}
+            onWidths={(widths) => setUi(tab.id, { widths })}
             // A console result is read-only — it is whatever the statement returned, not a table
             // with a primary key to write back through — so `onSet` is null and the menu comes out
             // as Copy alone. The three editing entries belong to the data tab, where there is

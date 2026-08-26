@@ -3,8 +3,11 @@ import { onApiStreamMessage, onApiStreamStatus } from "../lib/tauri/events";
 import { exampleToResponse } from "../lib/api/examples";
 import type { GraphqlSchema } from "../lib/api/graphql";
 import type {
+  ApiPanelId,
   ApiResponse,
+  ApiResponseTab,
   ConsoleLine,
+  GrpcResponse,
   GrpcServiceInfo,
   RunnerReport,
   SavedExample,
@@ -43,6 +46,64 @@ export interface ExampleView {
   response: ApiResponse;
 }
 
+/**
+ * What one tab is *looking at* — which sub-panel of the request editor, which response sub-tab,
+ * whether the GraphQL explorer is docked, where the stream transcript is filtered and pinned.
+ *
+ * Per tab and not per component, because one `RequestBuilder` instance serves every tab
+ * (`ApiView.tsx` mounts it without a key, on purpose — a key would remount the editor and
+ * *discard* the choice rather than remember it, along with the Monaco undo stacks underneath).
+ * Held as one `useState` inside the component it meant the opposite of independence: moving to
+ * Body in one tab moved every tab to Body, and coming back to a tab had forgotten where it was.
+ */
+export interface ApiTabView {
+  panel: ApiPanelId;
+  /** The "N hidden headers" disclosure under the headers table. */
+  showImplicit: boolean;
+  responseTab: ApiResponseTab;
+  graphqlExplorerOpen: boolean;
+  graphqlSearch: string;
+  streamFilter: string;
+  streamAutoScroll: boolean;
+}
+
+/** What a tab looks at before anyone has told it otherwise. Spread under every patch, so a tab
+ * that has never been touched reads the same as one that has been reset. */
+export const DEFAULT_TAB_VIEW: ApiTabView = {
+  panel: "params",
+  showImplicit: false,
+  responseTab: "body",
+  graphqlExplorerOpen: true,
+  graphqlSearch: "",
+  streamFilter: "",
+  streamAutoScroll: true,
+};
+
+/** A gRPC call's chrome and result, per tab — beside `sending`, for the same reason it is. */
+export interface GrpcCallState {
+  describing: boolean;
+  /** What `apiCancelGrpc` needs; `null` when nothing is in flight. */
+  callId: string | null;
+  response: GrpcResponse | null;
+  error: string | null;
+}
+
+export const DEFAULT_GRPC_CALL: GrpcCallState = {
+  describing: false,
+  callId: null,
+  response: null,
+  error: null,
+};
+
+/** The last introspection attempt per tab: the busy chrome and its error, never the schema —
+ * that already lives in `graphqlSchemas`. */
+export interface GraphqlIntrospection {
+  fetching: boolean;
+  error: string | null;
+}
+
+export const DEFAULT_GRAPHQL_INTROSPECTION: GraphqlIntrospection = { fetching: false, error: null };
+
 interface ApiRuntimeState {
   /**
    * The live response per tab. Freed on tab close and at no other point.
@@ -75,6 +136,18 @@ interface ApiRuntimeState {
   grpcServices: Record<string, GrpcServiceInfo[]>;
   /** Introspection result per tab, so switching tabs doesn't cost another round trip. */
   graphqlSchemas: Record<string, GraphqlSchema>;
+  /**
+   * What each tab is looking at — see [`ApiTabView`].
+   *
+   * Not persisted, like everything else in this store: a panel selection is a *way of looking at*
+   * a request, not part of the request, and it must never reach the row `saveTab` writes or it
+   * would sync a teammate's cursor position along with the endpoint.
+   */
+  tabView: Record<string, ApiTabView>;
+  /** The in-flight send's cancellation id, by tab — one tab's Cancel must not abort another's. */
+  sendTracks: Record<string, string>;
+  grpcCalls: Record<string, GrpcCallState>;
+  graphqlIntrospection: Record<string, GraphqlIntrospection>;
   consoleLines: ConsoleLine[];
   runnerRunning: boolean;
   /** The last run's report **without its captures** — see where it is written in `RunnerModal`.
@@ -103,6 +176,12 @@ interface ApiRuntimeState {
 
   setGraphqlSchema: (tabId: string, schema: GraphqlSchema) => void;
 
+  setTabView: (tabId: string, patch: Partial<ApiTabView>) => void;
+  /** `null` clears the slot, so a finished send leaves nothing for a later Cancel to fire at. */
+  setSendTrack: (tabId: string, trackId: string | null) => void;
+  setGrpcCall: (tabId: string, patch: Partial<GrpcCallState>) => void;
+  setGraphqlIntrospection: (tabId: string, patch: Partial<GraphqlIntrospection>) => void;
+
   pushConsole: (line: ConsoleLine) => void;
   clearConsole: () => void;
 
@@ -123,6 +202,10 @@ export const useApiRuntimeStore = create<ApiRuntimeState>((set, get) => ({
   messages: {},
   grpcServices: {},
   graphqlSchemas: {},
+  tabView: {},
+  sendTracks: {},
+  grpcCalls: {},
+  graphqlIntrospection: {},
   consoleLines: [],
   runnerRunning: false,
   runnerReport: null,
@@ -217,6 +300,33 @@ export const useApiRuntimeStore = create<ApiRuntimeState>((set, get) => ({
   setGraphqlSchema: (tabId, schema) =>
     set((s) => ({ graphqlSchemas: { ...s.graphqlSchemas, [tabId]: schema } })),
 
+  setTabView: (tabId, patch) =>
+    set((s) => ({
+      tabView: { ...s.tabView, [tabId]: { ...DEFAULT_TAB_VIEW, ...s.tabView[tabId], ...patch } },
+    })),
+
+  setSendTrack: (tabId, trackId) =>
+    set((s) => {
+      if (trackId === null) {
+        const { [tabId]: _done, ...sendTracks } = s.sendTracks;
+        return { sendTracks };
+      }
+      return { sendTracks: { ...s.sendTracks, [tabId]: trackId } };
+    }),
+
+  setGrpcCall: (tabId, patch) =>
+    set((s) => ({
+      grpcCalls: { ...s.grpcCalls, [tabId]: { ...DEFAULT_GRPC_CALL, ...s.grpcCalls[tabId], ...patch } },
+    })),
+
+  setGraphqlIntrospection: (tabId, patch) =>
+    set((s) => ({
+      graphqlIntrospection: {
+        ...s.graphqlIntrospection,
+        [tabId]: { ...DEFAULT_GRAPHQL_INTROSPECTION, ...s.graphqlIntrospection[tabId], ...patch },
+      },
+    })),
+
   pushConsole: (line) =>
     set((s) => {
       const next = [...s.consoleLines, line];
@@ -238,7 +348,23 @@ export const useApiRuntimeStore = create<ApiRuntimeState>((set, get) => ({
       const { [tabId]: _messages, ...messages } = s.messages;
       const { [tabId]: _services, ...grpcServices } = s.grpcServices;
       const { [tabId]: _schema, ...graphqlSchemas } = s.graphqlSchemas;
-      return { responses, exampleViews, sending, connections, messages, grpcServices, graphqlSchemas };
+      const { [tabId]: _view, ...tabView } = s.tabView;
+      const { [tabId]: _track, ...sendTracks } = s.sendTracks;
+      const { [tabId]: _grpc, ...grpcCalls } = s.grpcCalls;
+      const { [tabId]: _introspect, ...graphqlIntrospection } = s.graphqlIntrospection;
+      return {
+        responses,
+        exampleViews,
+        sending,
+        connections,
+        messages,
+        grpcServices,
+        graphqlSchemas,
+        tabView,
+        sendTracks,
+        grpcCalls,
+        graphqlIntrospection,
+      };
     }),
 }));
 

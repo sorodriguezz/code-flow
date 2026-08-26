@@ -204,12 +204,16 @@ pub fn unstage_all(repo_path: String) -> Result<(), String> {
     diff::unstage_all(&repo_path)
 }
 
-#[tauri::command]
+// `(async)` runs this sync body on a worker instead of the main thread. Both discards open the
+// repository and, for the whole-panel one, walk the working tree with untracked recursion — on a
+// repo with a real `node_modules` that is seconds, and on the main thread those are seconds the
+// window does not repaint, which is exactly what "the app freezes" looks like.
+#[tauri::command(async)]
 pub fn discard_file_changes(repo_path: String, file_path: String) -> Result<(), String> {
     diff::discard_file_changes(&repo_path, &file_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discard_all_changes(repo_path: String) -> Result<(), String> {
     diff::discard_all_changes(&repo_path)
 }
