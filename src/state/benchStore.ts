@@ -351,10 +351,17 @@ export const useBenchStore = create<BenchState>((set, get) => ({
   },
 
   resume: async (id) => {
-    const sessionId = await resumeWorkspaceTerminal(id);
+    // Both halves of the reply are applied, and the transcript is not optional. Resuming rewrites
+    // the history — the backend seeds the new shell's recording with the old output, a reset of the
+    // terminal modes the previous process left armed, and a rule marking the seam — and the pane
+    // that mounts on the next line replays whatever is in this row *once*. Keeping the copy read
+    // before the resume would replay the version without the reset, which is a fresh shell wearing
+    // a dead program's mouse reporting and alternate screen. See `RESET_TTY_MODES` in
+    // `terminal_cmd.rs`.
+    const { session_id, transcript } = await resumeWorkspaceTerminal(id);
     set((s) => ({
       terminals: s.terminals.map((terminal) =>
-        terminal.id === id ? { ...terminal, session_id: sessionId } : terminal,
+        terminal.id === id ? { ...terminal, session_id, transcript } : terminal,
       ),
     }));
   },

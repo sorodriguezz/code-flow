@@ -72,6 +72,7 @@ import type {
   Bench,
   BenchTab,
   BenchTerminal,
+  ResumedTerminal,
   TerminalOpened,
   ThreadCloseOutcome,
   Requirement,
@@ -501,10 +502,17 @@ export const renameBenchTab = (tabId: string, title: string) =>
 /** Closes a tab: every shell in it killed, every transcript in it forgotten. */
 export const removeBenchTab = (tabId: string) => invoke<void>("remove_bench_tab", { tabId });
 
-/** Starts a shell for a row that has none, and returns its session id. Idempotent: a row that is
- *  already attached hands back the session it has rather than opening a second one. */
+/**
+ * Starts a shell for a row that has none. Idempotent: a row that is already attached hands back the
+ * session it has rather than opening a second one.
+ *
+ * The transcript comes back with the session because resuming *rewrites* it — the backend appends a
+ * terminal-mode reset and a rule to mark where the old process ended (see `RESET_TTY_MODES` in
+ * `terminal_cmd.rs`). The caller's copy is stale the moment this returns, and a pane replaying that
+ * stale copy is exactly the bug the reset was added for.
+ */
 export const resumeWorkspaceTerminal = (id: string) =>
-  invoke<string>("resume_workspace_terminal", { id });
+  invoke<ResumedTerminal>("resume_workspace_terminal", { id });
 
 export const renameWorkspaceTerminal = (id: string, title: string) =>
   invoke<void>("rename_workspace_terminal", { id, title });

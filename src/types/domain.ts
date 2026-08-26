@@ -1007,6 +1007,21 @@ export interface BenchTerminal {
   session_id: string | null;
 }
 
+/**
+ * What resuming a bench terminal hands back: the shell it started, and the history that shell is
+ * continuing.
+ *
+ * The transcript is here because resuming *changes* it. The backend seeds the new recording with
+ * the old output, a reset of the terminal modes the previous process left armed, and a rule marking
+ * the seam — so the caller's copy is a version behind the moment this arrives, and replaying that
+ * copy into the pane is precisely what the reset exists to prevent. See `RESET_TTY_MODES` in
+ * `terminal_cmd.rs`.
+ */
+export interface ResumedTerminal {
+  session_id: string;
+  transcript: string;
+}
+
 // ---------- user stories (wiki in, Azure Boards out) ----------
 
 /** One wiki of an Azure DevOps project. `kind` is `projectWiki` or `codeWiki`. */

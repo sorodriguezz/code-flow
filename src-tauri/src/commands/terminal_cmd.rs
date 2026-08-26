@@ -125,6 +125,64 @@ pub struct BenchTerminal {
     pub session_id: Option<String>,
 }
 
+/// Modes a resumed terminal must not inherit from the process it is replacing.
+///
+/// **The bug this exists for.** A transcript is replayed into a fresh xterm verbatim — colour,
+/// cursor moves and progress bars redraw exactly as they did, which is the point of recording raw
+/// bytes. But the recording is cut wherever the app stopped, so it routinely ends *inside* a
+/// full-screen program: `claude`, `nvim`, `htop`. Every DEC private mode that program switched on
+/// is switched on again by the replay, on a terminal whose shell is a brand new one that never
+/// asked for any of it.
+///
+/// Pointer reporting is the one that draws blood. Those programs set `?1003h` (report every pointer
+/// move) with `?1006h` (report it in SGR), so after a resume the pane reports to a shell prompt:
+/// resting the mouse over the terminal types `35;104;39M35;105;38M…` at it — the printable
+/// remainder of each `ESC[<35;col;row M` report, once the line editor has eaten the escape —
+/// hundreds of them, into a shell trying to read a command. The alternate screen is the same fault
+/// in disguise: a replay that ends on it leaves the pane showing an empty buffer with the new
+/// prompt at the top and no scrollback, which reads as "my terminal lost my history".
+///
+/// **Written into the seed here, rather than by the pane after every replay.** A pane also replays
+/// the *live* buffer of a session that is still running — that is how the bench survives a
+/// workspace switch — and a terminal running `htop` right now needs exactly these modes left alone.
+/// This function is the one place in the app that knows the process which set them has ended and
+/// that something else is taking its place. Baking the reset into the transcript also persists it
+/// at the seam, so every later replay of this row gets it in the right position rather than tacked
+/// onto the end.
+///
+/// Not a full `ESC c`: that clears the screen and the scrollback, which is the history the replay
+/// just spent a write on. What is stale is the modes, not the text.
+const RESET_TTY_MODES: &str = concat!(
+    // Pointer reporting, and the three encodings that carry it. First, because it is the one that
+    // turns a mouse resting over the pane into typing.
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l",
+    "\x1b[?1005l\x1b[?1006l\x1b[?1015l",
+    // Back to the main buffer, which brings the history above the last full-screen program back
+    // with it. Before the scroll region below, deliberately: margins are per-buffer, and the one
+    // worth fixing is the buffer the new shell is about to print into.
+    "\x1b[?1049l",
+    // Scroll region back to the whole screen, wrap back on.
+    "\x1b[r\x1b[?7h",
+    // Bracketed paste off, cursor keys and keypad back to normal. A shell that wants any of these
+    // sets them itself at its first prompt; inheriting them from a dead process only garbles arrows.
+    "\x1b[?2004l\x1b[?1l\x1b>",
+    // Cursor visible, attributes default: a full-screen program hides the one and leaves the other
+    // mid-colour, and a prompt with no cursor is the clearest possible way to look hung.
+    "\x1b[?25h\x1b[0m",
+);
+
+/// A terminal that has just had a shell started under its stored output.
+///
+/// The transcript comes back with the session because the caller's copy is now stale in a way it
+/// cannot see: resuming *rewrites* the history — see [`RESET_TTY_MODES`] and the rule below it —
+/// and a panel that mounted its pane against the copy it was already holding would replay the
+/// version without them, which is the whole bug this second field exists to avoid.
+#[derive(serde::Serialize)]
+pub struct ResumedTerminal {
+    pub session_id: String,
+    pub transcript: String,
+}
+
 /// The whole bench: its tabs, and the shells filed under them with their live state.
 ///
 /// One call rather than two, because the two halves are only meaningful together — a tab with no
@@ -229,21 +287,52 @@ pub fn add_workspace_terminal(
     Ok(BenchTerminal { row, session_id: Some(session_id) })
 }
 
+/// What a resumed terminal starts its recording from: everything it had already printed, put back
+/// into a state a prompt can live in, and marked off with a rule.
+///
+/// The seed is what stops the next flush from overwriting the history with the new shell's first
+/// two lines — see [`terminal::Recording`].
+///
+/// The reset is what stops the new shell from inheriting the modes of whatever program the
+/// recording happened to be cut inside — see [`RESET_TTY_MODES`]. It goes **before** the rule so
+/// that the rule lands on the restored main screen, rather than on an alternate one some dead
+/// full-screen program left showing.
+///
+/// The rule is for the reader: the text above it came from a process that has since ended, and
+/// without a seam the new shell's prompt reads as the next line of the old one, which is exactly
+/// the misreading that ends in "why did my command not run". Dim, and drawn with the same box
+/// character the app's own dividers use.
+///
+/// An empty history stays empty. There is no earlier process to mark off from, and a terminal that
+/// opens on a horizontal rule is one claiming a past it does not have.
+fn resume_seed(transcript: &str) -> String {
+    if transcript.is_empty() {
+        return String::new();
+    }
+    format!("{transcript}{RESET_TTY_MODES}\r\n\x1b[2m{}\x1b[0m\r\n", "─".repeat(40))
+}
+
 /// Starts a shell for a row that has none — the restart case, and the "it exited and I want it
-/// back" case. The stored transcript is untouched: the panel replays it and the new shell writes
-/// after it, which is what makes a restarted bench read as the same one continued.
+/// back" case. The panel replays the history and the new shell writes after it, which is what makes
+/// a restarted bench read as the same one continued.
+///
+/// **The history comes back with the session, and the caller must use it.** Resuming is not a
+/// read: it rewrites the stored transcript, appending the terminal-mode reset and the seam that
+/// [`resume_seed`] documents. A panel that kept the copy it read before this call would mount its
+/// pane against a version with neither.
 #[tauri::command]
 pub fn resume_workspace_terminal(
     app: AppHandle,
     registry: State<TerminalRegistry>,
     db: State<Db>,
     id: String,
-) -> Result<String, String> {
+) -> Result<ResumedTerminal, String> {
     // Asked first, because the common answer costs nothing further. Already attached — hand back
     // the session it has rather than opening a rival shell into the same transcript: two writers on
-    // one row would interleave into something neither of them said.
-    if let Some((existing, _)) = terminal::recorded_state(&registry).get(&id) {
-        return Ok(existing.clone());
+    // one row would interleave into something neither of them said. Its live buffer comes back
+    // beside it, untouched: nothing ended here, so there is nothing to put back.
+    if let Some((existing, live)) = terminal::recorded_state(&registry).get(&id) {
+        return Ok(ResumedTerminal { session_id: existing.clone(), transcript: live.clone() });
     }
     let (cwd, profile_id, transcript) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -258,26 +347,16 @@ pub fn resume_workspace_terminal(
     // than refusing to open — the same rule `shell_profiles::choose` follows for a stale default.
     let wanted = (!profile_id.is_empty()).then_some(profile_id.as_str());
     let profile = shell_profiles::resolve(&db, wanted).or_else(|_| shell_profiles::resolve(&db, None))?;
-    // Seeded with what this terminal had already printed, and marked off with a rule.
-    //
-    // The seed is what stops the next flush from overwriting the history with this shell's first
-    // two lines — see `terminal::Recording`. The rule is for the reader: the text above it came
-    // from a process that has since ended, and without a seam the new shell's prompt reads as the
-    // next line of the old one, which is exactly the misreading that ends in "why did my command
-    // not run". Dim, and drawn with the same box character the app's own dividers use.
-    let seed = if transcript.is_empty() {
-        transcript
-    } else {
-        format!("{transcript}\r\n\x1b[2m{}\x1b[0m\r\n", "─".repeat(40))
-    };
-    terminal::open_terminal(
+    let seed = resume_seed(&transcript);
+    let session_id = terminal::open_terminal(
         app,
         &registry,
         cwd,
         &profile,
-        Some(terminal::Recording { key: Some(id), seed }),
+        Some(terminal::Recording { key: Some(id), seed: seed.clone() }),
         None,
-    )
+    )?;
+    Ok(ResumedTerminal { session_id, transcript: seed })
 }
 
 #[tauri::command]
@@ -350,4 +429,42 @@ pub fn spawn_transcript_flush(app: AppHandle) {
         std::thread::sleep(FLUSH_INTERVAL);
         flush_transcripts(&app);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of the seed: a history that was cut inside a full-screen program must not
+    /// arm that program's modes on the shell replacing it.
+    ///
+    /// Asserted by *position* rather than by presence, because presence is not the property that
+    /// matters — a reset written after the rule would still be in the string and would still leave
+    /// the rule drawn on a dead program's alternate screen.
+    #[test]
+    fn seed_disarms_the_previous_process_before_drawing_the_seam() {
+        // A transcript cut mid-`claude`: alternate screen, any-event mouse tracking, SGR encoding,
+        // cursor hidden. None of it ever turned off, because the process never got to exit.
+        let cut_mid_tui = "\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?25lsome full-screen ui";
+        let seed = resume_seed(cut_mid_tui);
+
+        let mouse_off = seed.find("\x1b[?1003l").expect("any-event mouse tracking is turned off");
+        let sgr_off = seed.find("\x1b[?1006l").expect("the SGR encoding carrying it is turned off");
+        let main_screen = seed.find("\x1b[?1049l").expect("the alternate screen is left");
+        let cursor_back = seed.find("\x1b[?25h").expect("the cursor is made visible again");
+        let rule = seed.find('─').expect("the seam is drawn");
+
+        assert!(seed.starts_with(cut_mid_tui), "the history itself is kept, verbatim");
+        for (what, at) in [("mouse", mouse_off), ("sgr", sgr_off), ("main screen", main_screen), ("cursor", cursor_back)] {
+            assert!(at > cut_mid_tui.len(), "{what} is reset after the history, not inside it");
+            assert!(at < rule, "{what} is reset before the rule, so the rule lands on a sane screen");
+        }
+    }
+
+    /// A terminal that never printed anything has no earlier process to mark off from, and opening
+    /// on a horizontal rule would be claiming a past it does not have.
+    #[test]
+    fn seed_of_an_empty_history_is_empty() {
+        assert_eq!(resume_seed(""), "");
+    }
 }
