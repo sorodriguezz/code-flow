@@ -332,6 +332,43 @@ jobs:
           # (If you later regenerate the key WITH a password, move this to a secret instead.)
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # Gatekeeper signing, which is a different thing from the updater key above and was
+          # for a long time confused with it. `TAURI_SIGNING_PRIVATE_KEY` is minisign over the
+          # update payload: it proves an update came from us, and says nothing to macOS.
+          #
+          # With no identity set at all, tauri-bundler skips `codesign` entirely, and what ships is
+          # an `.app` with no `Contents/_CodeSignature` — only the ad-hoc signature the linker puts
+          # on the Mach-O. That bundle does not validate:
+          #
+          #     codesign --verify → code has no resources but signature indicates they must be present
+          #
+          # A bundle that fails validation *while quarantined* is the one case macOS reports as
+          # "CodeFlow is damaged and can't be opened", whose only button is Move to Trash. Every
+          # browser download of a release landed there. The in-app updater never did, because it
+          # fetches over Rust's HTTP client rather than through LaunchServices and so never sets
+          # the quarantine attribute — which is exactly why this stayed invisible for 93 releases.
+          #
+          # `-` is tauri's documented pseudo-identity for an ad-hoc signature. Measured on macOS
+          # 26.6.2 against this bundle, quarantined by hand:
+          #
+          #   unsigned (what shipped) │ verify fails      │ "is damaged"  │ no way past it
+          #   ad-hoc (this)           │ valid on disk     │ "Apple cannot │ Open Anyway, under
+          #                           │ + designated req. │  check it"    │ Privacy & Security
+          #
+          # It does not remove the warning and is not meant to. It costs nothing, needs no Apple
+          # account, and turns a dead end into a prompt a user can get past — which matters most in
+          # the case it is actually for: a release that breaks the app badly enough to take the
+          # updater down with it, leaving a manual download as the only way back. `updateStore`
+          # calls `check()` from the frontend, so a build whose frontend does not boot cannot
+          # update itself out of trouble.
+          #
+          # Opening with no warning at all needs a Developer ID certificate and notarization: set
+          # APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD + APPLE_SIGNING_IDENTITY to the real
+          # identity, and add APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID for the notarization pass.
+          # The hardened runtime notarization requires is already on: this signature carries it.
+          #
+          # Harmless on the Windows leg, which never reads it.
+          APPLE_SIGNING_IDENTITY: "-"
         with:
           # `tagName` / `releaseName` / `releaseBody` / `releaseDraft` / `prerelease` are absent on
           # purpose rather than by omission: `src/index.ts` ignores every one of them once
