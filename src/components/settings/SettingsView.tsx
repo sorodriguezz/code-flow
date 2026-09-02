@@ -83,7 +83,7 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
  * A set rather than a field on each entry so the answer to "what is still alpha" is one line to
  * read and one line to change when a section graduates.
  */
-const ALPHA_SECTIONS = new Set<SettingsSectionId>(["remote"]);
+const ALPHA_SECTIONS = new Set<SettingsSectionId>();
 
 /** Sections that carry a sub-nav and scroll the pane beside it rather than the whole column, so
  * their heading and rail stay put while you read down a long list. They need a definite height to

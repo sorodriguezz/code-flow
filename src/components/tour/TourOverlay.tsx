@@ -381,7 +381,14 @@ export function TourOverlay() {
             {isLast && <PartyPopper size={15} className="shrink-0 text-[var(--cf-accent)]" />}
             {t(step.titleKey)}
           </h2>
-          <p id="cf-tour-body" className="text-[13px] leading-relaxed text-[var(--cf-text-muted)]">
+          {/* `whitespace-pre-line` so a body can hold two paragraphs when it carries two ideas —
+              a card that explains a panel *and* the one control on it that leaves the panel reads
+              as two things, and running them together buries the second. Only blank lines survive:
+              ordinary wrapping is untouched, so every card written as one paragraph is unchanged. */}
+          <p
+            id="cf-tour-body"
+            className="whitespace-pre-line text-[13px] leading-relaxed text-[var(--cf-text-muted)]"
+          >
             {/* `{key}` is rendered in the running platform's notation — ⌘I on a Mac, Ctrl+I on
                 Windows — so no card ever spells out both and leaves the reader to pick. */}
             {t(step.bodyKey, step.chord ? { key: chordLabel(step.chord) } : undefined)}

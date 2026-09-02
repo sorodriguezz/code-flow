@@ -1,4 +1,4 @@
-use git2::{ObjectType, ResetType, Repository, StatusOptions};
+use git2::{Config, ObjectType, ResetType, Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +154,58 @@ pub fn reset_to_commit(path: &str, target_oid: &str, mode: &str) -> Result<(), S
     Ok(())
 }
 
+/// Turns a plain folder back into a git repository.
+///
+/// The one repair on offer for a project whose `.git` was deleted from outside the app — see
+/// `commands::repos::project_path_health`, which is what finds them. The alternative the UI
+/// offers beside it is removing the project from the list, and between them they replace the old
+/// behaviour: a row that still looked openable, pointed the git engine at nothing, and answered
+/// every refresh with "could not find repository".
+///
+/// **Refuses a folder that is already a repository.** `git init` on one is documented as harmless
+/// — it reinitialises and keeps the objects — but this is reached from a button labelled "create a
+/// repository here", and running it against a live checkout on a mistaken verdict is not a risk
+/// worth the convenience. The check is the same `.git` test `is_repo_root` makes, with `exists`
+/// rather than `is_dir` so a worktree or submodule (whose `.git` is a file holding a `gitdir:`
+/// pointer) counts as one.
+///
+/// **The initial branch is whatever the user's git would have used.** libgit2 hardcodes `master`
+/// when nothing says otherwise, while git itself has honoured `init.defaultBranch` since 2.28 —
+/// so a repository initialised here would be on a different branch than the same folder
+/// initialised from the terminal, which is exactly the sort of difference that gets discovered
+/// during a push. Read from the default config chain (system, global, per-user), so it picks up
+/// `git config --global init.defaultBranch main`.
+///
+/// Nothing is committed and nothing is staged: this only creates `.git`. What was in the folder
+/// stays exactly where it is, and shows up as untracked on the next status — which is what the
+/// user is about to look at.
+pub fn init(path: &str) -> Result<(), String> {
+    let root = std::path::Path::new(path);
+    if !root.is_dir() {
+        return Err(format!("{path} is not a folder"));
+    }
+    if root.join(".git").exists() {
+        return Err(format!("{path} is already a git repository"));
+    }
+
+    let mut options = git2::RepositoryInitOptions::new();
+    // `Config::open_default` failing is not a reason to refuse: it means this machine has no git
+    // config at all, and the answer to "what would git have done" is then its own default.
+    if let Some(branch) = Config::open_default()
+        .ok()
+        .and_then(|config| config.get_string("init.defaultBranch").ok())
+        .filter(|branch| !branch.trim().is_empty())
+    {
+        options.initial_head(branch.trim());
+    }
+    // Off, and it is the difference between initialising *this* folder and adopting an enclosing
+    // one: with `no_reinit` unset libgit2 will happily return the repository it finds by walking
+    // up, so a folder inside a checkout would silently "become" that checkout.
+    options.no_reinit(true);
+    Repository::init_opts(root, &options).map_err(|e| e.message().to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +234,47 @@ mod tests {
         assert_eq!(status.untracked.len(), 1);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The repair for a project whose `.git` was deleted: the folder is a repository again, and
+    /// everything that was in it is still in it — untracked, because nothing was committed.
+    #[test]
+    fn init_makes_a_plain_folder_a_repository_without_touching_its_contents() {
+        let dir = std::env::temp_dir().join(format!("cf-repo-init-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("keep.txt"), "mine\n").unwrap();
+
+        init(dir.to_str().unwrap()).unwrap();
+
+        assert!(dir.join(".git").exists(), "the folder is a repository now");
+        assert_eq!(fs::read_to_string(dir.join("keep.txt")).unwrap(), "mine\n");
+        let status = get_status(dir.to_str().unwrap()).unwrap();
+        assert_eq!(status.untracked.len(), 1, "the file is there, and uncommitted");
+        assert!(status.staged.is_empty(), "init stages nothing");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The guard that keeps the repair button off a live checkout. `git init` on an existing
+    /// repository is harmless in git's own terms, but this is reached from a verdict about the
+    /// folder, and a wrong verdict must fail loudly rather than reinitialise someone's work.
+    #[test]
+    fn init_refuses_a_folder_that_is_already_a_repository() {
+        let dir = std::env::temp_dir().join(format!("cf-repo-reinit-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        git2::Repository::init(&dir).unwrap();
+
+        assert!(init(dir.to_str().unwrap()).is_err());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A folder that is not there is not something to initialise — the project row for one of
+    /// those offers removal and nothing else, and this is the backstop for the race where the
+    /// folder disappears between the verdict and the click.
+    #[test]
+    fn init_refuses_a_folder_that_is_not_there() {
+        let dir = std::env::temp_dir().join(format!("cf-repo-gone-{}", uuid::Uuid::new_v4()));
+        assert!(init(dir.to_str().unwrap()).is_err());
     }
 }

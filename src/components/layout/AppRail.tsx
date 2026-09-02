@@ -1,4 +1,5 @@
 import {
+  ArrowUpRight,
   Bot,
   KeyRound,
   ClipboardList,
@@ -14,6 +15,7 @@ import { HoldProgress, HoldScrim, slotShift, useHoldReorder } from "../../lib/ho
 import { useLayoutStore } from "../../state/layoutStore";
 import { useUiStore, type ApiWorkspace, type MainView } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useWindowStore } from "../../state/windowStore";
 import { useT } from "../../state/languageStore";
 import { Tooltip } from "../common/Tooltip";
 import { TourLauncher } from "../tour/TourLauncher";
@@ -212,6 +214,12 @@ export function AppRail() {
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const railOrder = useLayoutStore((s) => s.railOrder);
   const setRailOrder = useLayoutStore((s) => s.setRailOrder);
+  // Which of these apps are showing in windows of their own. Read as the whole list rather than a
+  // hook per button: this is six buttons rendered together, and six subscriptions for one answer
+  // they share would re-render all of them on every change anyway.
+  const satellites = useWindowStore((s) => s.satellites);
+  const detach = useWindowStore((s) => s.detach);
+  const focusWindow = useWindowStore((s) => s.focus);
   const t = useT();
 
   const apps = ordered(railOrder);
@@ -230,11 +238,34 @@ export function AppRail() {
     ? t("tabbar.scopeWorkspaceHint", { name: workspace.name })
     : t("tabbar.scopeWorkspaceNone");
 
+  /** The label of the window this app is showing in, or `null` for one that is still in here. */
+  const windowFor = (app: WorkspaceApp) =>
+    satellites.find((s) => s.kind === "app" && s.ref_id === appKey(app))?.label ?? null;
+
   const open = (app: WorkspaceApp) => {
+    // Detaching moves rather than duplicates, so the icon for an app that is elsewhere is a way
+    // *to* that window, not a second copy of the app. Anything else would be two API clients on one
+    // workspace's collections, which is the case this whole design exists to prevent.
+    const label = windowFor(app);
+    if (label) {
+      void focusWindow(label);
+      return;
+    }
     // A view with sub-workspaces needs both set at once, or the tab would open on whichever side
     // was last on screen rather than the one just picked.
     if (app.workspace) openApiWorkspace(app.workspace);
     else setActiveView(app.id);
+  };
+
+  /** Sends the app out to a window of its own, and takes it off this one. */
+  const sendOut = async (app: WorkspaceApp) => {
+    const moved = await detach("app", appKey(app), t(app.labelKey));
+    // Only once the window actually exists: refused (the limit is reached, the backend said no) the
+    // app stays exactly where it was, rather than leaving this window on an empty view.
+    if (!moved) return;
+    if (activeView === app.id && (app.workspace ?? apiWorkspace) === apiWorkspace) {
+      setActiveView("graph");
+    }
   };
 
   return (
@@ -244,7 +275,7 @@ export function AppRail() {
       // something is being dragged; only the z-index does, and only while it has to out-stack the
       // scrim. The accent edge replaces the border for the same moment: the rail stops being a
       // divider between two columns and becomes the one surface still taking input.
-      className={`relative flex w-11 shrink-0 flex-col items-center border-l bg-[var(--cf-surface)] py-2 ${
+      className={`group/rail relative flex w-11 shrink-0 flex-col items-center border-l bg-[var(--cf-surface)] py-2 ${
         drag
           ? "z-[9999] border-[var(--cf-accent)] shadow-[-10px_0_28px_rgba(0,0,0,0.35)]"
           : "border-[var(--cf-border)]"
@@ -296,7 +327,12 @@ export function AppRail() {
         {apps.map((app, index) => {
           const Icon = app.icon;
           const key = appKey(app);
-          const isActive = app.id === activeView && (app.workspace ?? apiWorkspace) === apiWorkspace;
+          // Showing in a window of its own. It stays on the rail and stays pressable — that is the
+          // whole of "detaching moves": the icon is now the way back to that window rather than a
+          // second copy of the app.
+          const detachedTo = windowFor(app);
+          const isActive =
+            !detachedTo && app.id === activeView && (app.workspace ?? apiWorkspace) === apiWorkspace;
           const lifted = drag?.key === key;
           const name = t(app.labelKey);
           // The lifted icon follows the pointer; the ones it has passed step aside by a slot. Both
@@ -319,7 +355,7 @@ export function AppRail() {
               disabled={drag !== null}
               description={
                 <>
-                  {t(app.descriptionKey)}
+                  {detachedTo ? t("windows.focusWindow") : t(app.descriptionKey)}
                   {/* The only announcement the hold gets. Quieter than the description
                       above it: it is about the rail rather than about this app, and it is read
                       once. */}
@@ -343,7 +379,7 @@ export function AppRail() {
                 open(app);
               }}
               aria-current={isActive ? "page" : undefined}
-              aria-label={name}
+              aria-label={detachedTo ? `${name} — ${t("windows.inOtherWindow")}` : name}
               // Only while a drag is on: an idle rail is six buttons with no transform at all,
               // rather than six `translateY(0)`s each generating a containing block for nothing.
               style={
@@ -364,11 +400,13 @@ export function AppRail() {
               } ${
                 isActive
                   ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : `text-[var(--cf-text-muted)] ${
+                  : detachedTo
+                    ? "border border-dashed border-[var(--cf-accent)]/55 text-[var(--cf-accent)]"
+                    : `text-[var(--cf-text-muted)] ${
                       lifted
                         ? "bg-[var(--cf-surface-raised)] text-[var(--cf-text)]"
                         : "hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
-                    }`
+                      }`
               }`}
             >
               {/* Pushed out of the button and onto the rail's own left edge, so the mark points at
@@ -378,6 +416,47 @@ export function AppRail() {
               )}
               <Icon size={15} />
               {reorder.arming === key && <HoldProgress shape="ring" />}
+              {/* The corner mark, and the one control on this rail that is not the app itself.
+                  Always drawn rather than revealed on hover: this rail is reachable by touch and by
+                  keyboard, and a gesture that only exists under a pointer is a gesture half the
+                  ways into the app cannot perform. Dimmed until wanted, so six of them do not read
+                  as six badges.
+
+                  Once the app is out, the same corner becomes a *statement* — a plain arrow, not a
+                  button — because there is nothing left to ask for: the button underneath it is
+                  already the way to that window. */}
+              {detachedTo ? (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-[3px] border border-[var(--cf-accent)]/55 bg-[var(--cf-surface)] text-[var(--cf-accent)]"
+                >
+                  <ArrowUpRight size={9} />
+                </span>
+              ) : (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${name} — ${t("windows.openInWindow")}`}
+                  title={t("windows.openInWindow")}
+                  // The rail's own gesture is a *hold*, and this sits inside the surface that
+                  // starts one — so both events have to be stopped, or aiming at the corner would
+                  // pick the icon up instead.
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void sendOut(app);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void sendOut(app);
+                  }}
+                  className="absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-[3px] border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] focus-visible:opacity-100 group-hover/rail:opacity-70"
+                >
+                  <ArrowUpRight size={9} />
+                </span>
+              )}
               {/* The word, not a dot. A coloured dot in the corner of a control already means
                   "something new is waiting for you" everywhere else in this app — the title bar's
                   tour button, the notification bell — and it read as an alert here rather than as a

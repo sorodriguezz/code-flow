@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { cancelAiRun } from "../lib/tauri/commands";
+import { broadcast } from "../lib/windowBus";
 import {
   onAiDone,
   onAiEngine,
@@ -120,7 +121,25 @@ interface AiRunState {
    * a model running with nothing on screen to say so. */
   start: (runId: string, about?: AiRunAbout) => void;
   finish: (runId: string) => void;
+  /**
+   * Registers a run that began in **another window**, so this one lists it too.
+   *
+   * The status bar lives in the main window; a review launched from a detached API client, or a
+   * turn started in a repository window, is a model running on this machine and has to show up
+   * there or the bar is lying by omission. It is the same run either way — the process is in Rust,
+   * and `ai:output-batch` already reaches every window — so adopting it gives a real row: named,
+   * filling with output, with a working stop button.
+   *
+   * Identical to [`start`] but for the announcement, which is exactly what must not happen: a
+   * window echoing what it was told would put the two into a loop.
+   */
+  adopt: (runId: string, about?: AiRunAbout) => void;
   cancel: (runId: string) => Promise<void>;
+  /** [`finish`] without the announcement — what the other windows call when they are told. */
+  settle: (runId: string) => void;
+  /** The body of [`start`], shared with [`adopt`]. Not for direct use: a run that begins here must
+   *  go through `start` so the other windows hear about it. */
+  register: (runId: string, about?: AiRunAbout) => void;
   clear: (runId: string) => void;
   linesFor: (runId: string) => AiRunLine[];
 }
@@ -277,6 +296,16 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
   },
 
   start: (runId, about) => {
+    // Every other window hears about it, and the main window is the one that must: its status bar
+    // is the only place in the app that claims to list everything running. Before the local
+    // bookkeeping rather than after, so a slow `set` cannot delay the announcement.
+    broadcast({ kind: "run-started", runId, about: about ?? null });
+    get().register(runId, about);
+  },
+
+  adopt: (runId, about) => get().register(runId, about),
+
+  register: (runId, about) => {
     // Subscribing here (rather than leaving it to whatever renders the log) guarantees the
     // listener is attached before the process can print its first line.
     get().init();
@@ -318,7 +347,12 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
     });
   },
 
-  finish: (runId) =>
+  finish: (runId) => {
+    broadcast({ kind: "run-finished", runId });
+    get().settle(runId);
+  },
+
+  settle: (runId) =>
     set((s) => ({
       active: { ...s.active, [runId]: false },
       cancelling: { ...s.cancelling, [runId]: false },

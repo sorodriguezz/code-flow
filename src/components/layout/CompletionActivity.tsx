@@ -33,6 +33,10 @@ import { useLocalAiStore } from "../../state/localAiStore";
 export function CompletionActivity() {
   const t = useT();
   const thinking = useLocalAiStore((store) => store.thinking);
+  // Or in any other window. Same orb, same meaning: a model on this machine is producing tokens,
+  // and this bar is where the app says so. A boolean rather than the list, so the bar re-renders
+  // only when the answer flips.
+  const elsewhere = useLocalAiStore((store) => store.foreignThinking.length > 0);
   const state = useLocalAiStore((store) => store.state);
   const load = useLocalAiStore((store) => store.load);
 
@@ -50,7 +54,7 @@ export function CompletionActivity() {
   const warming = engine.kind === "starting";
   const failed = engine.kind === "failed";
 
-  if (!warming && !thinking && !failed) return null;
+  if (!warming && !thinking && !elsewhere && !failed) return null;
 
   if (failed) {
     return (

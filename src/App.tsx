@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
 import { AnimatePresence } from "framer-motion";
-import { FolderGit2 } from "lucide-react";
+import { FolderGit2, GitBranchPlus, Loader2, Trash2, Unlink } from "lucide-react";
 import { useT } from "./state/languageStore";
 import { TitleBar } from "./components/layout/TitleBar";
 import { Sidebar } from "./components/layout/Sidebar";
@@ -28,7 +28,12 @@ import { useThemeStore } from "./state/themeStore";
 import { useUiStore, type MainView } from "./state/uiStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectionsStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
-import { useMissingProjectsStore } from "./state/missingProjectsStore";
+import { useMissingProjectsStore, useProjectNotARepo } from "./state/missingProjectsStore";
+import { useWindowStore } from "./state/windowStore";
+import { useLocalAiStore } from "./state/localAiStore";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { restoreSatellites } from "./lib/tauri/windows";
+import { onWindowMessage } from "./lib/windowBus";
 import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
 import { useApiStore } from "./state/apiStore";
@@ -51,7 +56,9 @@ import { useBlameStore } from "./state/blameStore";
 import { useChainStore } from "./state/chainStore";
 import { useAgentsStore } from "./state/agentsStore";
 import { notify } from "./state/notificationStore";
-import { pushErrorToast } from "./state/toastStore";
+import { pushErrorToast, pushSuccessToast } from "./state/toastStore";
+import { confirmAction } from "./state/confirmStore";
+import type { Project } from "./types/domain";
 import { useJobsStore } from "./state/jobsStore";
 import { useAiRunStore } from "./state/aiRunStore";
 import { useChatHistoryStore } from "./state/activityStore";
@@ -106,8 +113,8 @@ const DiagramsView = lazy(() =>
   import("./components/diagrams/DiagramsView").then((m) => ({ default: m.DiagramsView })),
 );
 
-const loadTerminalDock = () =>
-  import("./components/terminal/TerminalDock").then((m) => ({ default: m.TerminalDock }));
+const loadServicesDock = () =>
+  import("./components/services/ServicesDock").then((m) => ({ default: m.ServicesDock }));
 const loadSettingsView = () =>
   import("./components/settings/SettingsView").then((m) => ({ default: m.SettingsView }));
 const loadCommandPalette = () =>
@@ -119,7 +126,7 @@ const loadBranchSwitcherModal = () =>
 const loadOpenPrLinkModal = () =>
   import("./components/layout/OpenPrLinkModal").then((m) => ({ default: m.OpenPrLinkModal }));
 
-const TerminalDock = lazy(loadTerminalDock);
+const ServicesDock = lazy(loadServicesDock);
 const SettingsView = lazy(loadSettingsView);
 const CommandPalette = lazy(loadCommandPalette);
 const ShortcutsModal = lazy(loadShortcutsModal);
@@ -141,7 +148,7 @@ const OpenPrLinkModal = lazy(loadOpenPrLinkModal);
  * synchronous freeze they used to cause at launch.
  */
 const WARM_CHUNKS = [
-  loadTerminalDock,
+  loadServicesDock,
   loadSettingsView,
   loadCommandPalette,
   loadShortcutsModal,
@@ -273,6 +280,100 @@ const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "vault", render: () => <VaultView /> },
 ];
 
+/**
+ * What the window shows when the open repository's `.git` has been deleted out from under it.
+ *
+ * The case this answers used to be the worst-behaved state in the app, precisely because nothing
+ * about it looked broken: the folder is still in the sidebar, still selectable, still full of the
+ * user's files — and every view over it fails, one error toast per refresh, none of them saying
+ * the thing that is actually wrong. `missingProjectsStore` now names it, the sidebar row stops
+ * offering to open it, and this is what stands in for the views while it is in that state.
+ *
+ * **It replaces the project views rather than covering them**, which is what takes the failing
+ * refreshes off the screen instead of leaving them running behind a banner. Nothing durable is
+ * lost to the unmount: shell sessions live in the Rust process and the terminal dock is outside
+ * this component, and unsaved editor buffers are drafts on disk (see `lib/editorDrafts`). The
+ * workspace views — the API client, the agent console, notes — are untouched, because they are
+ * not about a repository and there is nothing wrong with them.
+ *
+ * Two ways out, and both are the sidebar's, repeated here because the sidebar is not where the
+ * user is looking when this appears.
+ */
+function NotARepoPanel({ project }: { project: Project }) {
+  const initRepo = useMissingProjectsStore((s) => s.initRepo);
+  const removeProject = useWorkspaceStore((s) => s.removeProject);
+  const [initializing, setInitializing] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const t = useT();
+
+  const init = async () => {
+    const ok = await confirmAction(
+      t("common.initRepoConfirm", { path: project.local_path }),
+      false,
+      t("common.initRepo"),
+    );
+    if (!ok) return;
+    setInitializing(true);
+    try {
+      await initRepo(project.local_path);
+      // The panel is about to be replaced by the views it stood in for — the store's own re-check
+      // is what takes this project out of `notARepo`, and `initRepo` awaits it before returning.
+      // So `repoStore` is asked to read the repository that now exists, which it last failed to.
+      await useRepoStore.getState().setRepoPath(project.local_path);
+      pushSuccessToast(t("common.initRepoDone", { name: project.name }));
+    } catch (err) {
+      pushErrorToast(String(err));
+      setInitializing(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!(await confirmAction(t("settings.removeProjectConfirm", { name: project.name })))) return;
+    setRemoving(true);
+    try {
+      await removeProject(project.id, project.workspace_id);
+      // No `setRemoving(false)`: the project this panel is about is gone, and so is the panel.
+    } catch (err) {
+      pushErrorToast(String(err));
+      setRemoving(false);
+    }
+  };
+
+  const busy = initializing || removing;
+
+  return (
+    <EmptyState
+      icon={Unlink}
+      title={t("common.notARepoTitle", { name: project.name })}
+      subtitle={t("common.notARepoBody")}
+      action={
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => void init()}
+            disabled={busy}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+          >
+            {initializing ? (
+              <Loader2 size={13} className="animate-spin" />
+            ) : (
+              <GitBranchPlus size={13} />
+            )}
+            {t("common.initRepo")}
+          </button>
+          <button
+            onClick={() => void remove()}
+            disabled={busy}
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+          >
+            {removing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+            {t("common.removeFromList")}
+          </button>
+        </div>
+      }
+    />
+  );
+}
+
 function MainContent() {
   const activeView = useUiStore((s) => s.activeView);
   const project = useWorkspaceStore((s) => s.activeProject());
@@ -305,10 +406,21 @@ function MainContent() {
   const workspaceViewOpen =
     workspaceId !== null && WORKSPACE_VIEWS.some((v) => v.id === activeView);
 
+  // Unconditional, and with an empty path when there is no project — a hook cannot be called
+  // behind the early returns below, and `""` is in no verdict, so it answers `false`.
+  const openProjectNotARepo = useProjectNotARepo(project?.local_path ?? "");
+
   if (!project && !workspaceViewOpen) {
     return (
       <EmptyState icon={FolderGit2} title={t("common.noProjectOpen")} subtitle={t("common.openProjectHint")} />
     );
+  }
+
+  // After the "no project" state and before the views: the repository is open, and its `.git` has
+  // gone. `!workspaceViewOpen` because the API client and the rest are not about a repository —
+  // being in one of those is not a reason to be shown a repair screen. See `NotARepoPanel`.
+  if (project && openProjectNotARepo && !workspaceViewOpen) {
+    return <NotARepoPanel project={project} />;
   }
 
   // Once a view has been opened it stays mounted (just hidden) so switching tabs doesn't kill
@@ -441,6 +553,11 @@ export default function App() {
         // disappears based on the answer, and a tab that shows up a second after the window does
         // reads as a glitch. Three `get_setting` reads against the local database.
         useVcsConnectionsStore.getState().refresh(),
+        // Which apps and repositories are already in windows of their own. In this batch for the
+        // same reason: the rail marks them, and an icon that changes state a second after the
+        // window opens reads as a glitch. Only ever non-empty after a reload of the main window
+        // with satellites still up.
+        useWindowStore.getState().init(),
       ]);
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
       // Reads whether the guided tour has already been run, and — if it hasn't — arms the
@@ -540,6 +657,66 @@ export default function App() {
   // re-checks when the project list changes and when the window comes back — no timer: the change
   // it is watching for is one the user makes by hand and then comes here to see the result of.
   useEffect(() => useMissingProjectsStore.getState().watch(), []);
+
+  /**
+   * A window that went away mid-completion.
+   *
+   * `foreignThinking` is a set of labels rather than a count precisely so this sweep is possible: a
+   * satellite closed while its editor had a request in flight never sends the `busy: false` that
+   * would clear it, and the orb in the bar would stay lit for the rest of the session. The list of
+   * open windows changing is the one signal that says a label is now meaningless.
+   */
+  const satellites = useWindowStore((s) => s.satellites);
+  useEffect(() => {
+    const open = new Set(satellites.map((s) => s.label));
+    for (const label of useLocalAiStore.getState().foreignThinking) {
+      if (!open.has(label)) useLocalAiStore.getState().setForeignThinking(label, false);
+    }
+  }, [satellites]);
+
+  /**
+   * What the other windows say.
+   *
+   * The main window is the only one that has to listen to all of it, because it is the only one
+   * that owns something on everybody's behalf: the status bar that claims to list every model
+   * running, and the agent-chain executor. See `lib/windowBus`.
+   */
+  useEffect(
+    () =>
+      onWindowMessage((message, from) => {
+        switch (message.kind) {
+          case "run-started":
+            // A model started in a satellite. Registered here as a real run, not a placeholder:
+            // the process is in Rust and its `ai:output-batch` events already reach this window,
+            // so the row names it, fills with its output and can stop it.
+            useAiRunStore.getState().adopt(message.runId, message.about ?? undefined);
+            break;
+          case "run-finished":
+            useAiRunStore.getState().settle(message.runId);
+            break;
+          case "pump":
+            // A satellite asking for a chain to be advanced. This window is the only one that may
+            // — see the guard at the top of `pump`.
+            void useChainStore.getState().pump(message.chainId);
+            break;
+          case "completion":
+            // Inline completion thinking in another window. The orb in this bar is the app's only
+            // claim about what models are doing, and it has to cover every window or it is a claim
+            // about this one.
+            useLocalAiStore.getState().setForeignThinking(from, message.busy);
+            break;
+          case "focus-main":
+            // A satellite is closing and handing its contents back. Coming forward is what makes
+            // that read as "returned here" rather than "thrown away".
+            void getCurrentWindow().setFocus();
+            break;
+          case "workspace":
+            // Only the main window sends these, and it never hears its own.
+            break;
+        }
+      }),
+    [],
+  );
 
   // Looks for a newer release: once on launch, then every hour for as long as the app is open.
   // The focus listener is the catch-up for a machine that slept through several ticks — a
@@ -860,7 +1037,22 @@ export default function App() {
       void useRepoStore.getState().refreshStatus({ silent: true });
     };
     window.addEventListener("focus", onReturn);
-    const unlisten = onAppForeground(onReturn);
+    /**
+     * The tray restore, and only the tray restore, puts the satellites back.
+     *
+     * Hiding to the tray closes them (`windows::close_all`) because a satellite with no main window
+     * is an app the user cannot navigate — so bringing the app back has to undo that, or the close
+     * button quietly becomes a way to lose your windows.
+     *
+     * Deliberately **not** on `focus`, and deliberately not at boot. `focus` is alt-tab, which
+     * closed nothing and must therefore reopen nothing. Boot is the case this used to get wrong: a
+     * fresh launch opened every window the previous session had, before the user had done anything.
+     * Draining on the Rust side means a second foreground cannot reopen what has been closed since.
+     */
+    const unlisten = onAppForeground(() => {
+      onReturn();
+      void restoreSatellites().catch(() => 0);
+    });
     return () => {
       window.removeEventListener("focus", onReturn);
       void unlisten.then((f) => f());
@@ -899,7 +1091,7 @@ export default function App() {
           <AnimatePresence initial={false}>
             {terminalPanelOpen && (
               <Suspense key="terminal-dock" fallback={null}>
-                <TerminalDock />
+                <ServicesDock />
               </Suspense>
             )}
           </AnimatePresence>

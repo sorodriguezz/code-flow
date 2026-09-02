@@ -108,6 +108,14 @@ pub const TABLES: &[&str] = &[
     "remote_hosts",
     "remote_snippets",
     "remote_log",
+    // The Services workspace. Groups before services: a service points at the group it is filed in.
+    //
+    // Worth carrying, and the reason is the same one that makes the feature useful: a service is a
+    // *definition* — a command, a folder, an order — that somebody worked out once and does not
+    // want to work out again on a new laptop. Nothing about a running process is in these rows (see
+    // `db/service_queries.rs`), so there is no stale pid to restore.
+    "service_groups",
+    "services",
     // History, activity and agent work. Last because every one of them hangs off a project or a
     // workspace, and `agent_chain_steps` and `agent_chain_repos` hang off `agent_chains` in turn.
     "activity_log",
@@ -188,6 +196,13 @@ pub const CORE_TABLES: &[&str] = &[
     "workspace_chain_templates",
     "workspace_chain_template_steps",
     "agent_projects",
+    // The Services workspace's definitions. Core rather than an optional group, and beside the
+    // agent roster rather than beside the Remote hosts, because of what they *are*: a service is
+    // configuration — the command, the folder, the order somebody worked out once — not content
+    // somebody might reasonably choose to leave behind. They are also tiny, so there is nothing to
+    // trim by dropping them. Groups first: a service points at the group it is filed in.
+    "service_groups",
+    "services",
 ];
 
 /// The optional groups, in the order the panel lists them.

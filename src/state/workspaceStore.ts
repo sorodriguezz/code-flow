@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
+import { broadcast } from "../lib/windowBus";
 import { pushErrorToast } from "./toastStore";
 import type { NewProject, Project, Workspace } from "../types/domain";
 
@@ -52,6 +53,18 @@ interface WorkspaceState {
   /** The same gesture one level up, for the workspaces themselves. Optimistic for the same reason. */
   reorderWorkspace: (id: string, toIndex: number) => Promise<void>;
   setActiveWorkspace: (id: string) => void;
+  /**
+   * Adopts the workspace the **main window** moved to, without writing it back.
+   *
+   * The difference from `setActiveWorkspace` is the whole reason this exists: that one persists
+   * `last_active_workspace_id`, and a satellite persisting it would have two windows writing the
+   * same row — so a satellite that happened to settle last would decide where the *next* launch
+   * opens. One writer, and it is the window with the switcher in it.
+   *
+   * `null` is a real argument: the main window can be between workspaces (one was just deleted),
+   * and a satellite left pointing at the previous one would be showing rows that are gone.
+   */
+  followWorkspace: (id: string | null) => Promise<void>;
   setActiveProject: (id: string) => void;
   /** Brings a project into focus from anywhere, crossing workspaces if it lives in another one —
    * awaitable, so a caller that needs `activeProject()` to already resolve (opening a PR from a
@@ -272,11 +285,21 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     set({ activeWorkspaceId: id, activeProjectId: null });
     void api.setSetting(LAST_WORKSPACE_KEY, id);
     void get().loadProjects(id);
+    // Every satellite follows this window. Broadcast after the local switch, not before: if the
+    // emit were first, a satellite could load its projects for the new workspace while this window
+    // is still on the old one, and the two would be describing different things for a frame.
+    broadcast({ kind: "workspace", workspaceId: id });
   },
 
   setActiveProject: (id) => {
     set({ activeProjectId: id });
     void api.setSetting(LAST_PROJECT_KEY, id);
+  },
+
+  followWorkspace: async (id) => {
+    if (get().activeWorkspaceId === id) return;
+    set({ activeWorkspaceId: id, activeProjectId: null });
+    if (id) await get().loadProjects(id);
   },
 
   focusProject: async (workspaceId, projectId) => {

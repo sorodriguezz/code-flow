@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { broadcast } from "../lib/windowBus";
+import { isMainWindow } from "../lib/windowIdentity";
 import { listen } from "@tauri-apps/api/event";
 import {
   abortChain,
@@ -480,6 +482,22 @@ export const useChainStore = create<ChainState>((set, get) => ({
   },
 
   pump: async (chainId, opts) => {
+    // # The single most important guard in the multi-window work
+    //
+    // This function *claims* a step: it asks the backend for the next one, marks it running and
+    // launches an engine against a real working copy. Two windows running it would both claim —
+    // the backend refuses the second, so nothing is corrupted, but the round trip is wasted and,
+    // worse, whichever window lost the race would sit watching for output that is being produced
+    // on behalf of the other's claim.
+    //
+    // So exactly one window advances chains, and it is the main one — which is also the window
+    // that is always open, and the only one with a status bar to show the run in. A satellite with
+    // a genuine reason to advance a chain (its Agents view has a start button and gates to
+    // approve) asks for it instead.
+    if (!isMainWindow()) {
+      broadcast({ kind: "pump", chainId });
+      return;
+    }
     // Recorded before either guard, and that ordering matters twice over. What follows may leave the
     // chain queued for `settleStep` to pick up minutes from now, by which time the tap that
     // authorised it is long over — and an approval that lands while this chain is already mid-advance
@@ -1006,34 +1024,44 @@ useWorkspaceStore.subscribe((state, previous) => {
   }
 });
 
-/** The app's first real queue: after *any* agent turn in a repository — chained or hand-typed —
- * every chain waiting on that repository gets another go.
+/**
+ * Everything below drains the queue, and only the main window may.
  *
- * "Waiting on that repository" is a question about the chain's *steps*, not about the chain: on a
- * multi-repo plan the next step routinely runs somewhere other than the repository the chain is
- * filed under, and matching on `chain.project_id` alone left those parked until something else
- * happened to nudge them. A chain whose briefs have not loaded yet is pumped anyway — the claim
- * refuses whatever is not runnable, so the cost of asking is one round trip. */
-onTurnSettled((projectId) => {
-  const store = useChainStore.getState();
-  for (const chain of store.chains) {
-    if (chain.status !== "queued") continue;
-    const briefs = store.briefsByChain[chain.id];
-    const waiting =
-      chain.project_id === projectId ||
-      briefs === undefined ||
-      briefs.some((brief) => brief.project_id === projectId && brief.status === "pending");
-    if (waiting) void store.pump(chain.id);
-  }
-});
+ * `pump` refuses in a satellite anyway (see its own note), so this is belt as well as braces — but
+ * the braces matter: without it a satellite would keep a full copy of the queue-draining machinery
+ * running, sending one refused broadcast per settled turn per window. The guard is read once, at
+ * module scope, because a window never changes what it is.
+ */
+if (isMainWindow()) {
+  /** The app's first real queue: after *any* agent turn in a repository — chained or hand-typed —
+   * every chain waiting on that repository gets another go.
+   *
+   * "Waiting on that repository" is a question about the chain's *steps*, not about the chain: on a
+   * multi-repo plan the next step routinely runs somewhere other than the repository the chain is
+   * filed under, and matching on `chain.project_id` alone left those parked until something else
+   * happened to nudge them. A chain whose briefs have not loaded yet is pumped anyway — the claim
+   * refuses whatever is not runnable, so the cost of asking is one round trip. */
+  onTurnSettled((projectId) => {
+    const store = useChainStore.getState();
+    for (const chain of store.chains) {
+      if (chain.status !== "queued") continue;
+      const briefs = store.briefsByChain[chain.id];
+      const waiting =
+        chain.project_id === projectId ||
+        briefs === undefined ||
+        briefs.some((brief) => brief.project_id === projectId && brief.status === "pending");
+      if (waiting) void store.pump(chain.id);
+    }
+  });
 
-// Hiding the window does not stop the webview, so without this a chain would keep launching
-// engines with nothing on screen to show them and no button to stop them.
-void listen("app:background", () => useChainStore.setState({ background: true }));
-void listen("app:foreground", () => {
-  useChainStore.setState({ background: false });
-  const store = useChainStore.getState();
-  for (const chain of store.chains) {
-    if (chain.status === "queued") void store.pump(chain.id);
-  }
-});
+  // Hiding the window does not stop the webview, so without this a chain would keep launching
+  // engines with nothing on screen to show them and no button to stop them.
+  void listen("app:background", () => useChainStore.setState({ background: true }));
+  void listen("app:foreground", () => {
+    useChainStore.setState({ background: false });
+    const store = useChainStore.getState();
+    for (const chain of store.chains) {
+      if (chain.status === "queued") void store.pump(chain.id);
+    }
+  });
+}

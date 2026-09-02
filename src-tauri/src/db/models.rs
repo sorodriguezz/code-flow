@@ -1400,3 +1400,48 @@ pub struct VaultAuditRow {
     pub action: String,
     pub at: String,
 }
+
+/// One named runnable. See `db/service_queries.rs` for what is deliberately *not* on it.
+///
+/// `env`, `ports` and `depends_on` cross the IPC boundary as the JSON strings they are stored as,
+/// parsed on the frontend. Keeping them opaque here means adding a field to a service's environment
+/// is a frontend change and nothing else.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Service {
+    pub id: String,
+    pub workspace_id: String,
+    pub group_id: Option<String>,
+    pub name: String,
+    /// `shell` | `script` | `compose`.
+    pub kind: String,
+    /// The repository the working directory is relative to, when there is one. Storing the project
+    /// rather than an absolute path is what lets a service survive its checkout being moved.
+    pub project_id: Option<String>,
+    pub cwd: String,
+    pub command: String,
+    /// JSON object.
+    pub env: String,
+    /// JSON array of numbers.
+    pub ports: String,
+    /// `none` | `port` | `log` | `http`.
+    pub ready_kind: String,
+    pub ready_value: String,
+    /// JSON array of service ids.
+    pub depends_on: String,
+    pub autorestart: bool,
+    pub color: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A folder of services that start together, in dependency order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceGroup {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}

@@ -40,6 +40,17 @@ export default defineConfig(async () => ({
     // bundle and Tauri packages whatever is in `dist`.
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
     rollupOptions: {
+      // Two entries, not one. `window.html` is what a satellite window loads, and its whole reason
+      // for existing is that the shell is not in its module graph: `src/satellite.tsx` never
+      // reaches `Sidebar`, `AppRail`, `SettingsView`, `CommandPalette` or the guided tour, so none
+      // of them can be fetched, parsed or held resident by a window that shows one thing.
+      //
+      // `mobile.html` is deliberately absent: it is built by `vite.mobile.config.ts` against a
+      // different source tree and a different set of assumptions.
+      input: {
+        main: "index.html",
+        window: "window.html",
+      },
       output: {
         // Split by *lifetime*, not by size. Monaco, xterm and noVNC are behind dynamic imports
         // (`App` lazies the Editor, the terminal dock and the Remote view), so naming them here

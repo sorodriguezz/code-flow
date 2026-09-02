@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window. Note the four maximize/restore commands: the title bar's maximize button doesn't use `toggle_maximize`, because on undecorated Windows that grows the window but doesn't put the rectangle back — `src/lib/windowControls.ts` restores by hand, and needs `maximize`, `unmaximize`, `set_size` and `set_position`. `core:default` grants none of them, so leaving them out has every click on the button rejected before it reaches the window.",
-  "windows": ["main"],
+  "description": "Capability for the main window and every satellite (`sat-*`), which draw the same title bar and therefore need the same window controls. Note the four maximize/restore commands: the title bar's maximize button doesn't use `toggle_maximize`, because on undecorated Windows that grows the window but doesn't put the rectangle back — `src/lib/windowControls.ts` restores by hand, and needs `maximize`, `unmaximize`, `set_size` and `set_position`. `core:default` grants none of them, so leaving them out has every click on the button rejected before it reaches the window.",
+  "windows": ["main", "sat-*"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

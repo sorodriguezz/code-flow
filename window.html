@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/tauri.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Replaced at runtime with what the window holds. The literal is what shows for the frame
+         before React mounts, and "CodeFlow" is a better thing to see than "window". -->
+    <title>CodeFlow</title>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <!-- A different entry from `index.html`, and that is the point: the shell — sidebar, app rail,
+         command palette, settings, the guided tour — is not reachable from this module graph, so it
+         cannot end up in a satellite's bundle. See `src-tauri/src/windows.rs`. -->
+    <script type="module" src="/src/satellite.tsx"></script>
+  </body>
+</html>

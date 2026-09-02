@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import {
   Archive,
+  ArrowUpRight,
   Check,
   ChevronDown,
   ChevronRight,
@@ -40,7 +41,12 @@ import {
 } from "../../lib/holdReorder";
 import { useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { useProjectMissing } from "../../state/missingProjectsStore";
+import { useDetachedLabel, useWindowStore } from "../../state/windowStore";
+import {
+  useMissingProjectsStore,
+  useProjectMissing,
+  useProjectNotARepo,
+} from "../../state/missingProjectsStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -83,7 +89,7 @@ import { ConnectGithubModal } from "./ConnectGithubModal";
 import { ConnectGitlabModal } from "./ConnectGitlabModal";
 import { CreatePrModal } from "./CreatePrModal";
 import { StashDiffModal } from "./StashDiffModal";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
@@ -206,6 +212,48 @@ function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: ()
 }
 
 /**
+ * The repair offered to a repository whose `.git` was deleted, wherever a row draws it.
+ *
+ * A hook rather than a component because the two rows that offer it — the unfolded one and the
+ * folded rail's chip — have nothing in common but this: one draws a button in a strip of them, the
+ * other *is* one button. Sharing the button would mean styling it from the outside; sharing the
+ * behaviour costs nothing and keeps the two from drifting on the part that matters, which is the
+ * confirmation.
+ *
+ * It is confirmed even though it destroys nothing, and that is deliberate: `git init` is one of the
+ * few operations whose *effect* is invisible in the folder afterwards, so the dialog is where the
+ * user gets told what will and will not happen to their files before it does.
+ */
+function useInitRepo(project: Project): { initializing: boolean; init: () => Promise<void> } {
+  const initRepo = useMissingProjectsStore((s) => s.initRepo);
+  const [initializing, setInitializing] = useState(false);
+  const t = useT();
+
+  const init = async () => {
+    const ok = await confirmAction(
+      t("common.initRepoConfirm", { path: project.local_path }),
+      false,
+      t("common.initRepo"),
+    );
+    if (!ok) return;
+    setInitializing(true);
+    try {
+      await initRepo(project.local_path);
+      // Said out loud because the folder looks identical afterwards — `.git` is hidden, and the
+      // only visible change is a row that stopped being struck out.
+      pushSuccessToast(t("common.initRepoDone", { name: project.name }));
+    } catch (err) {
+      pushErrorToast(String(err));
+    } finally {
+      // Unconditional, unlike `removeMissing` below: this row survives its own success.
+      setInitializing(false);
+    }
+  };
+
+  return { initializing, init };
+}
+
+/**
  * One repository as a 24px square, and the folded rail's answer to a folder that is gone.
  *
  * Its own component only because the verdict is a hook: `useProjectMissing` cannot be called from
@@ -231,6 +279,13 @@ function CollapsedProjectChip({
 }) {
   const removeProject = useWorkspaceStore((s) => s.removeProject);
   const missing = useProjectMissing(project.local_path);
+  const notARepo = useProjectNotARepo(project.local_path);
+  // The folded rail's answer to a repository that is out in a window of its own: the chip becomes
+  // the way to that window. There is no room here for a second control, so the rail offers only the
+  // focus — detaching is done from the unfolded row, and re-attaching from the window itself.
+  const detachedTo = useDetachedLabel("repo", project.id);
+  const focusWindow = useWindowStore((s) => s.focus);
+  const { initializing, init } = useInitRepo(project);
   const [removing, setRemoving] = useState(false);
   const t = useT();
 
@@ -247,6 +302,34 @@ function CollapsedProjectChip({
       setRemoving(false);
     }
   };
+
+  // Before the missing branch and shaped like it, but the chip does the *other* thing: the folder
+  // is still there and full of the user's files, so the one press this rail has room for is the
+  // repair rather than the removal. Taking the project off the list stays available where there is
+  // room to offer both — the unfolded row, and Settings.
+  if (notARepo) {
+    return (
+      <Tooltip
+        side="right"
+        label={project.name}
+        description={`${t("sidebar.projectNotARepo", { path: project.local_path })} ${t(
+          "sidebar.initProject",
+        )}`}
+        disabled={drag !== null}
+        leading={<Unlink size={12} className="shrink-0 text-[var(--cf-text-muted)]" />}
+      >
+        <button
+          onClick={() => void init()}
+          disabled={initializing}
+          aria-label={`${project.name} — ${t("common.initRepo")}`}
+          style={riseDelay(at)}
+          className="cf-rise relative flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--cf-border)] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-40"
+        >
+          {initializing ? <Loader2 size={12} className="animate-spin" /> : <Unlink size={12} />}
+        </button>
+      </Tooltip>
+    );
+  }
 
   if (missing) {
     return (
@@ -279,7 +362,7 @@ function CollapsedProjectChip({
           <Tooltip
             side="right"
             label={project.name}
-            description={t("sidebar.reorderHint")}
+            description={detachedTo ? t("windows.focusWindow") : t("sidebar.reorderHint")}
             // A label naming the chip under the pointer is a label about the wrong thing while
             // that chip is being moved, and it would sit across the rail being rearranged.
             disabled={drag !== null}
@@ -295,10 +378,16 @@ function CollapsedProjectChip({
               onPointerDown={(e) => reorder.beginHold(e, at, project.id)}
               onClick={() => {
                 if (reorder.swallowsClick()) return;
+                if (detachedTo) {
+                  void focusWindow(detachedTo);
+                  return;
+                }
                 onSelect(project.id);
               }}
-              aria-label={project.name}
-              aria-current={project.id === activeProjectId ? "true" : undefined}
+              aria-label={
+                detachedTo ? `${project.name} — ${t("windows.inOtherWindow")}` : project.name
+              }
+              aria-current={!detachedTo && project.id === activeProjectId ? "true" : undefined}
               style={{
                 ...riseDelay(at),
                 background: project.color,
@@ -315,7 +404,7 @@ function CollapsedProjectChip({
                     ? "transition-transform duration-150 ease-out"
                     : "transition-[box-shadow,opacity]"
               } ${
-                project.id === activeProjectId && !held
+                !detachedTo && project.id === activeProjectId && !held
                   ? "ring-2 ring-[var(--cf-accent)] ring-offset-2 ring-offset-[var(--cf-surface)]"
                   : held
                     ? ""
@@ -324,6 +413,16 @@ function CollapsedProjectChip({
             >
               <Folder size={12} />
               {reorder.arming === project.id && <HoldProgress shape="ring" />}
+              {/* The rail is one chip wide, so the mark has to sit on the chip itself. A statement,
+                  not a control: the chip underneath already goes to that window. */}
+              {detachedTo && (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute -right-1 -top-1 flex h-3 w-3 items-center justify-center rounded-[3px] border border-[var(--cf-accent)] bg-[var(--cf-surface)] text-[var(--cf-accent)]"
+                >
+                  <ArrowUpRight size={8} />
+                </span>
+              )}
             </button>
           </Tooltip>
   );
@@ -1179,6 +1278,23 @@ function ProjectRow({
   // means something — take it off the list. Opening it was never going to work; it pointed the git
   // engine at nothing and produced seven failures at once instead of naming the problem.
   const missing = useProjectMissing(project.local_path);
+  // The other way a row can stop working, and the one with something to do about it: the folder is
+  // right there, its `.git` is not. Everything the row takes away for `missing` it also takes away
+  // here — opening it would point the git engine at a folder that is not a repository, which is the
+  // pile of "could not find repository" failures this pair of verdicts exists to replace — but the
+  // strip of actions keeps two entries instead of one, because the files are still on disk.
+  const notARepo = useProjectNotARepo(project.local_path);
+  // Showing in a window of its own. The row stays here and stays pressable — that is what
+  // "detaching moves" looks like on a repository: pressing it brings that window forward instead of
+  // opening the repo a second time. Two windows on one working copy would mean two editors over the
+  // same files and two filesystem watchers on the same folder.
+  const detachedTo = useDetachedLabel("repo", project.id);
+  const detachRepo = useWindowStore((s) => s.detach);
+  const focusWindow = useWindowStore((s) => s.focus);
+  const { initializing, init } = useInitRepo(project);
+  /** Neither kind of broken row opens, drags or unfolds. Where the two differ is what is *offered*,
+   *  which is the only thing below that reads `missing` and `notARepo` apart. */
+  const broken = missing || notARepo;
   const branches = useRepoStore((s) => s.branches);
   const status = useRepoStore((s) => s.status);
   const checkoutBranch = useRepoStore((s) => s.checkoutBranch);
@@ -1218,7 +1334,21 @@ function ProjectRow({
 
   const reduceMotion = useReducedMotion();
 
-  const select = () => setActiveProject(project.id);
+  const select = () => {
+    if (detachedTo) {
+      void focusWindow(detachedTo);
+      return;
+    }
+    setActiveProject(project.id);
+  };
+
+  /** Sends the repository out to a window of its own — the frontend-and-backend-at-once case. */
+  const sendOut = async () => {
+    const moved = await detachRepo("repo", project.id, project.name);
+    // Only once the window exists. Refused, the repository stays selected here rather than leaving
+    // the main window on a repo it has just stopped being able to show.
+    if (moved && activeProjectId === project.id) setActiveProject("");
+  };
 
   /** Takes the repository off the list. Nothing on disk is touched — there is nothing left to
    *  touch, which is the whole reason this row is offering it. */
@@ -1247,11 +1377,12 @@ function ProjectRow({
   /**
    * How the row is tinted, and whether it answers the pointer at all.
    *
-   * A repository whose folder is gone gets neither the selection colours nor a hover: there is
-   * nothing to select and nothing to hover *for*. It keeps the muted text so it stays readable as
-   * a list entry, and everything that said "this is a thing you open" comes off.
+   * A repository that cannot be opened — its folder gone, or its folder no longer a repository —
+   * gets neither the selection colours nor a hover: there is nothing to select and nothing to hover
+   * *for*. It keeps the muted text so it stays readable as a list entry, and everything that said
+   * "this is a thing you open" comes off.
    */
-  const rowTone = missing
+  const rowTone = broken
     ? "cursor-default text-[var(--cf-text-muted)]"
     : `${held ? "cursor-grabbing opacity-40" : "cursor-pointer"} ${
         isActive
@@ -1269,14 +1400,23 @@ function ProjectRow({
         data-reorder={project.id}
         // A repository that is not on disk is not something to pick up and rearrange either. The
         // hold comes off with the click, so the row has exactly one gesture left on it — the bin.
-        onPointerDown={missing ? undefined : (e) => reorder.beginHold(e, at, project.id)}
+        onPointerDown={broken ? undefined : (e) => reorder.beginHold(e, at, project.id)}
         onClick={() => {
-          if (missing || reorder.swallowsClick()) return;
+          if (broken || reorder.swallowsClick()) return;
           select();
         }}
         // The one place the *reason* fits. The row itself can only afford the strike-through; the
-        // path is what turns "this is broken" into "I moved that folder last week".
-        title={missing ? t("sidebar.projectMissing", { path: project.local_path }) : undefined}
+        // path is what turns "this is broken" into "I moved that folder last week", and for the
+        // other verdict what turns it into "I deleted that .git on purpose last night".
+        title={
+          missing
+            ? t("sidebar.projectMissing", { path: project.local_path })
+            : notARepo
+              ? t("sidebar.projectNotARepo", { path: project.local_path })
+              : detachedTo
+                ? t("windows.focusWindow")
+                : undefined
+        }
         style={riseDelay(at)}
         className={`cf-rise group relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors ${rowTone}`}
       >
@@ -1288,10 +1428,10 @@ function ProjectRow({
             Not drawn on a missing repository even while it is still the active one: the folder
             disappearing under an open project is exactly the case where "this is the repo
             everything else on screen is about" has stopped being true. */}
-        {isActive && !missing && <ActivePill layoutId="cf-project-pill" radius="rounded-lg" />}
+        {isActive && !broken && !detachedTo && <ActivePill layoutId="cf-project-pill" radius="rounded-lg" />}
         {/* After the pill, so the hold reads on the open repository too — which is the one most
             likely to be dragged, and the one whose selection fill would otherwise cover it. */}
-        {!missing && reorder.arming === project.id && <HoldProgress shape="bar" />}
+        {!broken && reorder.arming === project.id && <HoldProgress shape="bar" />}
         {dropEdge && (
           <span
             aria-hidden
@@ -1300,16 +1440,19 @@ function ProjectRow({
             }`}
           />
         )}
-        {missing ? (
-          // In place of the reveal button, not beside it: there is no folder to reveal, and a
-          // control that opens a file manager on nothing is worse than no control. It also drops
-          // the project's colour, which is the most saturated thing in the row — a repository that
-          // cannot be opened should not be the first thing the eye lands on in the list.
+        {broken ? (
+          // In place of the reveal button, not beside it: for a folder that is gone there is
+          // nothing to reveal, and a control that opens a file manager on nothing is worse than no
+          // control — while for one that is merely not a repository, revealing it is the least
+          // useful of the three things the row now offers. It also drops the project's colour,
+          // which is the most saturated thing in the row: a repository that cannot be opened should
+          // not be the first thing the eye lands on in the list. The two glyphs differ because the
+          // two states do — an absent folder, and a folder with no git in it.
           <span
             aria-hidden
             className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)]"
           >
-            <FolderX size={13} />
+            {missing ? <FolderX size={13} /> : <Unlink size={13} />}
           </span>
         ) : (
           <button
@@ -1335,22 +1478,46 @@ function ProjectRow({
             // strength drowned both. On hover it comes back, so pointing at a row still shows its
             // colour as it really is.
             className={`cf-chip-button relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-white transition-opacity ${
-              isActive ? "" : "opacity-60 group-hover:opacity-100"
+              isActive || detachedTo ? "" : "opacity-60 group-hover:opacity-100"
             }`}
             style={{ background: project.color }}
           >
             {revealing ? <Loader2 size={12} className="animate-spin" /> : <Folder size={12} />}
+            {/* The one mark that says this repository is not in this window. On the chip rather
+                than beside the name, because the chip is the row's anchor and the name is the part
+                that has to stay readable. */}
+            {detachedTo && (
+              <span
+                aria-hidden
+                className="pointer-events-none absolute -right-1 -top-1 flex h-3 w-3 items-center justify-center rounded-[3px] border border-[var(--cf-accent)] bg-[var(--cf-surface)] text-[var(--cf-accent)]"
+              >
+                <ArrowUpRight size={8} />
+              </span>
+            )}
           </button>
         )}
-        {missing ? (
+        {broken ? (
           // A span, not a button: a disabled button is still a tab stop's worth of furniture
           // promising something, and the strike-through is the whole message. Screen readers get
           // the same sentence the pointer gets, since the row's `title` is not announced.
+          //
+          // Struck through only for a folder that is gone. A repository whose `.git` was deleted
+          // still *is* the folder the name says it is — the files are all there — so striking out
+          // its name would be claiming something that isn't true. Muted, unopenable and carrying
+          // its own two buttons is the whole of what is wrong with it.
           <span className="relative flex min-w-0 flex-1 items-center gap-2 self-stretch">
-            <span className="min-w-0 flex-1 truncate font-medium line-through decoration-[1.5px]">
+            <span
+              className={`min-w-0 flex-1 truncate font-medium ${
+                missing ? "line-through decoration-[1.5px]" : ""
+              }`}
+            >
               {project.name}
             </span>
-            <span className="sr-only">{t("sidebar.projectMissing", { path: project.local_path })}</span>
+            <span className="sr-only">
+              {missing
+                ? t("sidebar.projectMissing", { path: project.local_path })
+                : t("sidebar.projectNotARepo", { path: project.local_path })}
+            </span>
           </span>
         ) : (
           <>
@@ -1373,28 +1540,71 @@ function ProjectRow({
             </button>
           </>
         )}
-        {missing ? (
-          // The one action left, and the only one in this row that is not hover-revealed: a row
-          // that has lost everything else it could do must not also hide the thing it can.
-          <button
-            title={t("sidebar.removeMissingProject")}
-            aria-label={t("sidebar.removeMissingProject")}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              void removeMissing();
-            }}
-            disabled={removing}
-            className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
-          >
-            {removing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-          </button>
+        {broken ? (
+          // What is left of the strip, and none of it hover-revealed: a row that has lost
+          // everything else it could do must not also hide the things it can.
+          //
+          // The repair comes first and only exists for the second verdict — there is nothing to
+          // initialise in a folder that is not there. Its hover is the accent rather than the
+          // danger colour, because between these two buttons one keeps the project and one drops
+          // it, and that difference should be readable before the click rather than in the dialog.
+          <>
+            {notARepo && (
+              <button
+                title={t("sidebar.initProject")}
+                aria-label={`${project.name} — ${t("common.initRepo")}`}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void init();
+                }}
+                disabled={initializing}
+                className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-accent)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+              >
+                {initializing ? (
+                  <Loader2 size={13} className="animate-spin" />
+                ) : (
+                  <GitBranchPlus size={13} />
+                )}
+              </button>
+            )}
+            <button
+              title={t("sidebar.removeMissingProject")}
+              aria-label={t("sidebar.removeMissingProject")}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                void removeMissing();
+              }}
+              disabled={removing}
+              className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+            >
+              {removing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+            </button>
+          </>
         ) : (
           <>
             {/* Both row actions wear the same square as the "clone" and "add repository" chips above
                 the list — `h-5 w-5`, rounded, with a hover fill — so a control that only appears on
                 row hover still says it is one once it's there. They were bare icons, which lit up
                 nothing at all under the pointer. */}
+            {/* First in the strip, because it is the one action here that changes where the
+                repository *is* rather than what is done to it. Absent once it is out: the row
+                itself is already the way back to that window. */}
+            {!detachedTo && (
+              <button
+                title={t("windows.openInWindow")}
+                aria-label={`${project.name} — ${t("windows.openInWindow")}`}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void sendOut();
+                }}
+                className={ROW_ACTION_CLASS}
+              >
+                <ArrowUpRight size={13} />
+              </button>
+            )}
             <button
               title={t("sidebar.openInVsCode")}
               onPointerDown={(e) => e.stopPropagation()}
@@ -1438,12 +1648,12 @@ function ProjectRow({
           slide down with it rather than being shoved. `initial={false}` keeps the app's first paint
           from playing it: on launch there is no previous project to have come from. */}
       <AnimatePresence initial={false}>
-        {/* `!missing` for the same reason the pill above comes off: branches, stashes and pull
-            requests read from `repoStore`, which is still pointed at the folder that vanished, so
-            what would unfold under a struck-out row is the last thing it managed to read before the
-            folder went. It folds away rather than disappearing, because the exit animation is the
-            one thing here that still works. */}
-        {isActive && !missing && (
+        {/* `!broken` for the same reason the pill above comes off: branches, stashes and pull
+            requests read from `repoStore`, which is still pointed at the folder that vanished — or
+            at the folder whose `.git` did — so what would unfold under one of these rows is the
+            last thing it managed to read before that happened. It folds away rather than
+            disappearing, because the exit animation is the one thing here that still works. */}
+        {isActive && !broken && !detachedTo && (
           <motion.div
             key="project-tree"
             initial={{ height: 0, opacity: 0 }}

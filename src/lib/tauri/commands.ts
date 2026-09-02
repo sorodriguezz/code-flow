@@ -180,18 +180,39 @@ export interface FolderScan {
  *  purpose: it stats one level and stops. */
 export const scanFolder = (path: string) => invoke<FolderScan>("scan_folder", { path });
 
+/** What is wrong with a set of repository folders. See [`projectPathHealth`]. */
+export interface ProjectPathHealth {
+  /** Paths with no folder at them any more. */
+  missing: string[];
+  /** Paths whose folder is there but is no longer a git repository — its `.git` is gone. */
+  not_a_repo: string[];
+}
+
 /**
- * Of these repository folders, the ones that are no longer on disk.
+ * Of these repository folders, the ones that are broken, and how.
  *
- * `local_path` is written once, when a project is added, and a folder moved or deleted from
- * outside the app leaves the row pointing at nothing. Answers with the missing paths only, so the
- * common case — everything present — is an empty array rather than a parallel list of `true`s.
+ * `local_path` is written once, when a project is added, and two different things can have
+ * happened to it since: the folder was moved or deleted, or the folder is still there and its
+ * `.git` is not. They are separate lists because they are separate offers — a folder that is gone
+ * can only be taken off the list, one that stopped being a repository can also be initialised
+ * again. Answers with the broken paths only, so the common case — everything healthy — is two
+ * empty arrays rather than a parallel list of verdicts.
  *
  * Asked in one call for the whole list on purpose: this runs on window focus, and twenty round
  * trips per focus is twenty chances to stat a dead network mount one after another.
  */
-export const missingProjectPaths = (paths: string[]) =>
-  invoke<string[]>("missing_project_paths", { paths });
+export const projectPathHealth = (paths: string[]) =>
+  invoke<ProjectPathHealth>("project_path_health", { paths });
+
+/**
+ * Creates a git repository in a folder that has stopped being one.
+ *
+ * Only ever called for a path [`projectPathHealth`] reported under `not_a_repo`; the backend
+ * refuses a folder that is already a repository rather than reinitialising it, so a stale verdict
+ * fails loudly instead of touching a live checkout.
+ */
+export const initRepository = (repoPath: string) =>
+  invoke<void>("init_repository", { repoPath });
 
 /** Why an incoming repository is the one the workspace already holds: literally the same folder,
  *  or a different folder cloned from the same remote. */

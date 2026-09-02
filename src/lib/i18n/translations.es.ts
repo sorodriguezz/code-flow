@@ -48,6 +48,102 @@ export const es = {
   "sidebar.openInVsCode": "Abrir en VS Code",
   "sidebar.projectMissing": "La carpeta ya no está en {path}, así que este repositorio no se puede abrir.",
   "sidebar.removeMissingProject": "Quitar de la lista: no se borra nada del disco.",
+  "sidebar.projectNotARepo":
+    "La carpeta sigue en {path}, pero su .git ya no está: no hay historial, ni ramas, ni nada a lo que hacer commit.",
+  "sidebar.initProject": "Crear aquí un repositorio. Tus archivos se quedan exactamente donde están.",
+  "sidebar.initProjectBusy": "Creando el repositorio…",
+  "windows.openInWindow": "Abrir en su propia ventana",
+  "windows.openInWindowHint": "Lo saca de esta ventana: se queda aquí marcado, y al pulsarlo trae esa ventana al frente.",
+  "windows.focusWindow": "Ya está abierto en otra ventana — traerla al frente",
+  "windows.limitReached":
+    "Ya hay {limit} ventanas abiertas. Cierra una, o sube el límite en Ajustes → General.",
+  "windows.reattach": "Devolverlo aquí",
+  "windows.reattachHint": "Cierra esta ventana y devuelve lo que hay dentro a la principal. No se pierde nada.",
+  "windows.followsMain": "Sigue al workspace de la ventana principal.",
+  "windows.unknownApp": "Esta ventana guarda algo que esta versión no conoce",
+  "windows.repoElsewhereShort": "No está en este workspace",
+  "windows.repoElsewhereTitle": "Este repositorio está en otro workspace",
+  "windows.repoElsewhereBody":
+    "La ventana principal se ha movido a otro sitio, y esta la sigue. Vuelve al workspace al que pertenece este repositorio y reaparecerá aquí: no se ha cerrado nada.",
+  "windows.limitLabel": "Ventanas a la vez",
+  "windows.limitHint":
+    "Cuántas apps y repositorios pueden estar abiertos en ventanas propias, además de la principal. Cada una es un webview: unos 60 MB para una app, 140 MB para un repositorio con el editor abierto.",
+  "windows.inOtherWindow": "En otra ventana",
+  "windows.openNow": "{count} abiertas ahora mismo.",
+  "services.title": "Servicios",
+  "services.dockEmpty": "Aún no hay servicios: añade el primero",
+  "services.loading": "Cargando…",
+  "services.newService": "Nuevo servicio",
+  "services.editTitle": "Editar servicio",
+  "services.newGroup": "Nuevo grupo",
+  "services.createGroup": "Crear grupo",
+  "services.groupNamePlaceholder": "POC, staging, todo…",
+  "services.renameGroup": "Renombrar grupo",
+  "services.deleteGroup": "Eliminar grupo",
+  "services.deleteGroupConfirm":
+    "¿Eliminar el grupo «{name}»? Los servicios que contiene se mantienen: solo dejan de estar agrupados.",
+  "services.ungrouped": "Sin grupo",
+  "services.startGroup": "Arrancar el grupo",
+  "services.startGroupHint": "En orden de dependencias, esperando a que cada uno esté listo antes del siguiente.",
+  "services.stopAll": "Parar todo",
+  "services.stopAllHint": "Todos los servicios corriendo, en todos los workspaces, no solo los de esta lista.",
+  "services.start": "Arrancar",
+  "services.stop": "Parar",
+  "services.restart": "Reiniciar",
+  "services.edit": "Editar",
+  "services.delete": "Eliminar",
+  "services.deleteConfirm": "¿Eliminar el servicio «{name}»? No se toca nada del disco.",
+  "services.pickOne": "Elige un servicio para ver su consola",
+  "services.notRunning": "No está corriendo",
+  "services.emptyBody":
+    "Aquí no hay nada todavía. Un servicio es un comando con nombre, una carpeta y una definición de «ya está listo», para que un grupo pueda arrancar en el orden correcto.",
+  "services.name": "Nombre",
+  "services.kind": "Tipo",
+  "services.kindShell": "Comando",
+  "services.kindScript": "Script de package.json",
+  "services.kindCompose": "Docker Compose",
+  "services.group": "Grupo",
+  "services.command": "Comando",
+  "services.commandHint": "Se ejecuta con tu shell, así que las tuberías, && y las comillas funcionan igual que en una terminal.",
+  "services.repository": "Repositorio",
+  "services.repositoryHint": "Nombrar uno mantiene el servicio funcionando aunque muevas la copia local.",
+  "services.noRepository": "Ninguno — ruta absoluta",
+  "services.cwd": "Carpeta",
+  "services.cwdRelativeHint": "Relativa al repositorio. En blanco es su raíz.",
+  "services.cwdMissing": "No hay ninguna carpeta en esta ruta.",
+  "services.readyWhen": "Está listo cuando",
+  "services.readyWhenHint": "Es lo que esperan los servicios que dependen de este.",
+  "services.readyNone": "El comando termina",
+  "services.readyPort": "Un puerto escucha",
+  "services.readyLog": "Aparece una línea",
+  "services.readyHttp": "Una URL responde",
+  "services.readyValue": "Valor",
+  "services.readyNoneLabel": "listo cuando el comando termina",
+  "services.readyPortLabel": "listo cuando el puerto {port} escucha",
+  "services.readyLogLabel": "listo cuando la salida dice «{pattern}»",
+  "services.readyHttpLabel": "listo cuando {url} responde",
+  "services.ports": "Puertos",
+  "services.portsHint": "Para el enlace de la fila. Separados por comas.",
+  "services.dependsOn": "Espera a",
+  "services.dependsOnHint": "Estos arrancan antes, y este espera a que cada uno esté listo.",
+  "services.dependsOnList": "espera a {names}",
+  "services.noDependencies": "no espera a nada",
+  "services.autorestart": "Reiniciarlo si se cae",
+  "services.autorestartHint": "Hasta tres veces. Un servicio que no puede arrancar entraría en bucle.",
+  "services.status.stopped": "parado",
+  "services.status.waiting": "esperando",
+  "services.status.starting": "arrancando",
+  "services.status.ready": "listo",
+  "services.status.failed": "ha fallado",
+  "services.exited": "se ha parado solo",
+  "services.gateTimedOut": "nunca ha dicho que estuviera listo",
+  "services.dependencyFailed": "algo de lo que depende ha fallado",
+  "services.statusBar": "{count} corriendo",
+  "services.statusBarHint": "Corriendo ahora mismo. Pulsa para abrir el panel.",
+  "services.statusBarElsewhere":
+    "{count} de ellos están corriendo en otro workspace. El panel los lista, con la vuelta.",
+  "services.elsewhere": "Corriendo en otro sitio",
+  "services.goToWorkspace": "Ir a {name}",
   "sidebar.noProjects": "Aún no hay proyectos — haz clic en + para abrir un repo local.",
   "sidebar.localBranches": "Ramas locales",
   "sidebar.remoteBranches": "Ramas remotas",
@@ -772,8 +868,8 @@ export const es = {
   "remote.groupPairing": "Emparejamiento",
   "remote.groupTerminal": "Terminal",
   "remote.groupAccess": "Acceso",
-  "remote.alphaNote":
-    "Esta función es nueva y todavía se está asentando. Los ajustes de aquí pueden cambiar de nombre o de comportamiento en una versión próxima, así que revisa las notas de la versión antes de depender de ella — y apaga el servidor cuando no lo estés usando.",
+  "remote.serverNote":
+    "Esto abre un puerto en esta máquina y le da autoridad real sobre ella a los dispositivos emparejados. Apaga el servidor cuando no lo estés usando.",
   "remote.subtitle":
     "Maneja esta instalación desde tu celular o tablet en la misma red — mira las corridas de agentes, responde el gate de una cadena, haz commit y push sin volver al escritorio.",
   "remote.enable": "Activar el servidor",
@@ -1915,6 +2011,10 @@ export const es = {
   "settings.filterNoMatches": "Nada coincide con el filtro.",
   "settings.projectMissing": "No encontrado",
   "settings.projectMissingHint": "Ya no hay ninguna carpeta en esta ruta. Vuelve a dejarla donde estaba, o quita el proyecto.",
+  "settings.projectNotARepo": "Sin repositorio",
+  "settings.projectNotARepoHint":
+    "La carpeta sigue aquí, pero su .git ya no está. Crea un repositorio en ella, o quita el proyecto.",
+  "settings.initProject": "Crear un repositorio en esta carpeta",
   "settings.removeProject": "Eliminar proyecto",
   "settings.removeProjectConfirm": '¿Quitar "{name}" de CodeFlow? No se borra nada del disco, solo deja de rastrearse aquí.',
   "settings.onlyWorkspace": "No puedes eliminar el único workspace",
@@ -3054,6 +3154,8 @@ export const es = {
   "editor.dropSkipped": "Ya estaban ahí, no se tocaron: {names}",
 
   "terminal.noProject": "No hay proyecto abierto",
+  "terminal.title": "Terminales",
+  "terminal.forRepo": "Terminales · {name}",
   "terminal.emptyHint": "No hay terminales abiertas — haz clic en + para iniciar una.",
   "terminal.new": "Nueva terminal",
   "terminal.selectProfile": "Abrir otro shell",
@@ -3063,7 +3165,7 @@ export const es = {
   "terminal.close": "Cerrar terminal",
   "terminal.rename": "Renombrar pestaña (o doble clic)",
   "terminal.hide": "Ocultar panel",
-  "terminal.toggle": "Mostrar/ocultar panel de terminal",
+  "terminal.toggle": "Mostrar/ocultar el panel de servicios",
   "terminal.copy": "Copiar",
   "terminal.paste": "Pegar",
   "terminal.copied": "Copiado",
@@ -3281,6 +3383,14 @@ export const es = {
   "common.confirm": "Confirmar",
   "common.noProjectOpen": "No hay proyecto abierto",
   "common.openProjectHint": "Abre un repositorio local desde el botón + de la barra lateral para comenzar.",
+  "common.notARepoTitle": "{name} ya no es un repositorio git",
+  "common.notARepoBody":
+    "La carpeta sigue ahí y tus archivos están intactos, pero su .git ya no está, así que no hay nada de lo que mostrar historial, diferencias ni ramas. Crea un repositorio en ella, o quítala de la lista.",
+  "common.initRepo": "Crear aquí un repositorio",
+  "common.initRepoConfirm":
+    "¿Crear un repositorio git nuevo en {path}? Tus archivos se quedan tal cual: no se añade, ni se prepara, ni se hace commit de nada.",
+  "common.initRepoDone": "{name} vuelve a ser un repositorio git. Todo lo que hay en la carpeta está sin seguimiento hasta el primer commit.",
+  "common.removeFromList": "Quitar de la lista",
 
   "md.undo": "Deshacer",
   "md.redo": "Rehacer",
@@ -5837,7 +5947,7 @@ export const es = {
   // ── La ventana principal ─────────────────────────────────────────────────────────────────
   "tour.welcome.title": "Te damos la bienvenida a CodeFlow",
   "tour.welcome.body":
-    "Un recorrido rápido por esta ventana, cosa de un minuto. Todo lo que ves es la app real, no capturas: los paneles se van a abrir y cerrar sobre la marcha, y al final quedan exactamente como los tenías. Se detiene en el borde de esta ventana a propósito. Las apps del workspace que viven dentro — cliente de API, bases de datos, agentes, especificaciones, remoto — tienen cada una su propio tour detallado, y vamos a pasar por el botón que los abre en el camino.",
+    "Un recorrido rápido por esta ventana, cosa de un minuto. Todo lo que ves es la app real, no capturas: los paneles se van a abrir y cerrar sobre la marcha, y al final quedan exactamente como los tenías. Se detiene en el borde de esta ventana a propósito. Las apps del workspace que viven dentro tienen cada una su propio tour detallado, y vamos a pasar por el botón que los abre en el camino.",
 
   "tour.workspaces.title": "Workspaces: la caja que contiene todo",
   "tour.workspaces.body":
@@ -5867,13 +5977,13 @@ export const es = {
   "tour.prReview.body":
     "Dos caminos, y ninguno te obliga a tener el código descargado. Los pull requests de los repositorios que agregaste se listan en el panel que acabas de ver: eliges uno y CodeFlow revisa el diff, y puede publicar los comentarios de vuelta en Azure DevOps, GitHub o GitLab. O pulsas estos lentes y pegas la URL de cualquier pull request: el diff se trae por la API, no se clona nada y no hace falta tener ningún repositorio abierto, que es la vía rápida para revisar el trabajo de un compañero en un servicio que nunca has tocado.",
 
-  "tour.terminal.title": "La terminal",
+  "tour.terminal.title": "Servicios y terminales",
   "tour.terminal.body":
-    "Una shell de verdad, acoplada bajo la vista y que se abre desde este botón. Arranca en la carpeta del repositorio seleccionado, mantiene sus propias pestañas por repositorio y sobrevive a los cambios de vista: una compilación que dejaste corriendo sigue corriendo mientras lees un diff. Arrastra su borde superior para hacerla más alta.",
+    "Todo lo que este workspace tiene corriendo, en un solo panel. Arriba: los servicios — un comando con nombre, carpeta y una definición de «ya está listo», para que un grupo arranque en el orden correcto. Abajo: shells normales, un juego por repositorio, arrancando en su carpeta. Ambos sobreviven a los cambios de vista: una compilación que dejaste corriendo sigue corriendo mientras lees un diff. Arrastra el borde superior para hacerlo más alto.",
 
-  "tour.workspaceApps.title": "Las seis apps, y un tour para cada una",
+  "tour.workspaceApps.title": "Las apps, y un tour para cada una",
   "tour.workspaceApps.body":
-    "Todo lo que hay en este menú pertenece al workspace y no a un repositorio en particular, y por eso no es una pestaña junto a las otras tres: cambiar de repositorio no cambia lo que hay aquí dentro. Viven seis apps. El cliente de API envía HTTP; Bases de datos se conecta a tus bases; Agentes ejecuta tareas de IA por su cuenta; Especificaciones convierte documentación en backlog y de vuelta; Remoto guarda las máquinas a las que despliegas; Notas es el cuaderno en Markdown — libros, etiquetas y plantillas para las decisiones, los runbooks y las reuniones que rodean al código. Cada una es una pantalla completa, y para eso está el birrete que ves junto al menú: abre un tour detallado de la que tengas en pantalla — sus paneles, qué hace cada uno y dónde se configura en Ajustes. Abre otra app y el birrete la sigue. Ahí está el resto de este recorrido: de a una app y cuando lo necesites, en vez de las seis ahora.",
+    "Todo lo que hay en este menú pertenece al workspace y no a un repositorio en particular, y por eso no es una pestaña junto a las otras tres: cambiar de repositorio no cambia lo que hay aquí dentro. El cliente de API envía HTTP; Bases de datos se conecta a tus bases; Agentes ejecuta tareas de IA por su cuenta; Especificaciones convierte documentación en backlog y de vuelta; Remoto guarda las máquinas a las que despliegas; Notas es el cuaderno en Markdown; Diagramas es el tablero de dibujo; y el llavero guarda tus credenciales. Cada una es una pantalla completa, y para eso está el birrete que ves junto al menú: abre un tour detallado de la que tengas en pantalla. Abre otra app y el birrete la sigue.\n\nLa flechita de un icono abre esa app en una ventana propia — útil cuando le estás pegando al API y mirando la base de datos a la vez. La *mueve*, no la copia: el icono se queda aquí marcado, y pulsarlo trae esa ventana al frente en vez de abrir una segunda copia.",
 
   "tour.settingsAi.title": "Configuración, y los modelos de IA",
   "tour.settingsAi.body":
@@ -5999,7 +6109,7 @@ export const es = {
 
   "tour.agents.bench.title": "Terminales del workspace",
   "tour.agents.bench.body":
-    "No es el dock de terminales del repositorio — este pertenece al workspace, así que sus shells sobreviven a cambiar de repositorio y siguen ahí cuando vuelves. Pestañas de paneles en mosaico, cada uno con el perfil de shell que elijas, y cada uno grabado: cerrar el panel lo guarda sin matar nada. Abren en tu carpeta personal, porque un workspace es un conjunto de repositorios y no uno solo.",
+    "No son las terminales del panel de servicios — esas son del repositorio, y estas del workspace, así que sus shells sobreviven a cambiar de repositorio y siguen ahí cuando vuelves. Pestañas de paneles en mosaico, cada uno con el perfil de shell que elijas, y cada uno grabado: cerrar el panel lo guarda sin matar nada. Abren en tu carpeta personal, porque un workspace es un conjunto de repositorios y no uno solo.",
   "tour.agents.roster.title": "Dónde se define un agente",
   "tour.agents.roster.body":
     "Este panel es lo que la gente sale a buscar. Un agente es un nombre, un rol, el proveedor y modelo con el que corre, y las instrucciones que se lleva a cada tarea que le tocan. El roster pertenece al workspace, así que los mismos agentes están disponibles para todos sus repositorios, y uno se puede desactivar sin borrarlo — útil para el agente que solo corres cuando liberas versión.",

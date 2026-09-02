@@ -22,6 +22,15 @@ use crate::remote;
 // real races on `index.write()`. Reads are safe to run concurrently because libgit2 reads take
 // their own snapshot — a read racing a write returns stale data or an error, never corruption.
 
+/// Creates a repository in a folder that has stopped being one.
+///
+/// The repair half of `commands::repos::project_path_health` — the other half being removing the
+/// project from the list. A write, so no `(async)`: see the note above.
+#[tauri::command]
+pub fn init_repository(repo_path: String) -> Result<(), String> {
+    repo::init(&repo_path)
+}
+
 #[tauri::command(async)]
 pub fn get_status(repo_path: String) -> Result<repo::RepoStatusInfo, String> {
     repo::get_status(&repo_path)

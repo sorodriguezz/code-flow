@@ -5,7 +5,7 @@ import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { usePlatform } from "../../lib/platform";
 import { Checkbox } from "../common/Checkbox";
-import { Actions, Group, Note, Panel, SettingsHeader, Status, Tag } from "../api/settingsChrome";
+import { Actions, Group, Note, Panel, SettingsHeader, Status } from "../api/settingsChrome";
 import {
   closeTerminal,
   remotectlCancelPairing,
@@ -203,20 +203,15 @@ export function RemoteSettings() {
     // here from Backup or Git moved every control several centimetres sideways, which reads as the
     // window resettling rather than as a different page of the same window.
     <section>
-      {/* The badge again on the heading, not only in the nav. The nav row is easy to arrive past —
-          from the command palette, from a deep link, from a tooltip in another screen — and this is
-          the one place every route into the section goes through. `aside` is the header's slot for
-          a mark belonging to the whole section, which is exactly what this is. */}
-      <SettingsHeader
-        title={t("remote.title")}
-        hint={t("remote.subtitle")}
-        aside={<Tag tone="warning">{t("settings.alpha")}</Tag>}
-      />
+      <SettingsHeader title={t("remote.title")} hint={t("remote.subtitle")} />
 
       {/* Above the panel rather than inside it: it is about the section, not about any group in
           it. `warning` rather than the section's own amber paragraph — this is the tone the app
-          keeps for "this can cost you something", and opening a port on the machine qualifies. */}
-      <Note tone="warning">{t("remote.alphaNote")}</Note>
+          keeps for "this can cost you something", and opening a port on the machine qualifies.
+          What it no longer says is that the feature is young: that was a promise about the
+          *software*, and it has been kept long enough to stop making. This is a promise about the
+          *machine*, and it stays true whatever version this is. */}
+      <Note tone="warning">{t("remote.serverNote")}</Note>
 
       {/* One panel of groups, the same surface the AI, backup and integrations sections are built
           from. It replaced five separately bordered cards stacked down the column — a shape used

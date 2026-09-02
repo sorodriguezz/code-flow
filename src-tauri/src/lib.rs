@@ -61,6 +61,7 @@ mod tsserver;
 mod tray;
 mod watcher;
 mod window_state;
+mod windows;
 
 use tauri::Manager;
 use api::ApiRegistry;
@@ -294,12 +295,20 @@ pub fn run() {
         .manage(tray::QuittingFlag::default())
         .manage(window_state::WindowTracker::default())
         .manage(remotectl::RemoteCtl::default())
+        // Which app or repository is open in a window of its own. Managed rather than derived
+        // from the platform's window list because the label is a lossy derivation of the id it
+        // holds — see `windows::label_for`.
+        .manage(windows::SatelliteRegistry::default())
         .setup(|app| {
             // First, and before anything that can fail out of this closure: the window is created
             // hidden (`"visible": false` in `tauri.conf.json`) so that being resized and maximized
             // back to where the last session left it does not happen in front of the user, and
             // this is what ends that — a `?` above it would leave the app running with no window.
             window_state::restore(app.handle());
+            // A row an earlier build left behind: it held the satellites open at the last quit, and
+            // reopening them at launch turned out to be the wrong idea twice over. See
+            // `windows::SatelliteRegistry::parked`.
+            windows::forget_persisted_desk(app.handle());
             tray::setup(&app.handle())?;
             // The usage meter's way to the database. Set here because `setup` is the only place
             // with an `AppHandle`, and the recording point is deep inside `ai::run`, where threading
@@ -367,8 +376,21 @@ pub fn run() {
             // red traffic light, right-click "Close window" on the taskbar) all raise this
             // same event — hiding instead of exiting is what keeps background jobs (Claude
             // reviews, terminals) alive while the window is "closed", Docker Desktop–style.
+            // A satellite that has actually gone comes out of the registry, which is what
+            // un-marks its icon in the main window's rail. `Destroyed` and not `CloseRequested`:
+            // see `windows::forget`.
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                windows::forget(window.app_handle(), window.label());
+            }
+
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
+                // A satellite closing is just a window closing: nothing it held was only there.
+                // Everything below is about the main window, and running it for a satellite would
+                // hide the *main* window on the first satellite the user closes.
+                if windows::is_satellite(window.label()) {
+                    return;
+                }
                 // Written down here as well as on the way out, because these two ends of the app
                 // are further apart than they look: closing the window leaves it running in the
                 // background for hours, and whatever ends that session — a real quit, a reboot, a
@@ -389,6 +411,10 @@ pub fn run() {
                     // one connect. Without this, closing the window looks like quitting and holds
                     // every session anyway, which is the worst of both.
                     app.state::<DbRegistry>().close_idle();
+                    // Before the main window leaves the screen, not after: a satellite has no
+                    // sidebar to pick a workspace with and no rail to reattach itself to, so one
+                    // left alone is an app the user cannot navigate. See `windows::close_all`.
+                    windows::close_all(app);
                     hide_to_background(window);
                 }
             }
@@ -433,9 +459,27 @@ pub fn run() {
             commands::backup_cmd::backup_restore_onedrive,
             commands::backup_cmd::backup_pick_folder,
             commands::backup_cmd::backup_reveal_folder,
+            windows::open_satellite,
+            windows::focus_satellite,
+            windows::list_satellites,
+            windows::satellite_spec,
+            windows::restore_satellites,
+            commands::services_cmd::list_services,
+            commands::services_cmd::list_service_groups,
+            commands::services_cmd::create_service,
+            commands::services_cmd::update_service,
+            commands::services_cmd::delete_service,
+            commands::services_cmd::create_service_group,
+            commands::services_cmd::rename_service_group,
+            commands::services_cmd::delete_service_group,
+            commands::services_cmd::reorder_services,
+            commands::services_cmd::start_service,
+            commands::services_cmd::probe_port,
+            commands::services_cmd::probe_http,
+            commands::services_cmd::service_path_exists,
             commands::repos::pick_folder,
             commands::repos::scan_folder,
-            commands::repos::missing_project_paths,
+            commands::repos::project_path_health,
             commands::repos::find_duplicate_projects,
             commands::repos::default_clone_dir,
             commands::repos::create_workspace,
@@ -455,6 +499,7 @@ pub fn run() {
             commands::repos::get_project,
             commands::repos::delete_project,
             commands::repos::move_project_to_workspace,
+            commands::git_ops::init_repository,
             commands::git_ops::get_status,
             commands::git_ops::list_commits,
             commands::git_ops::list_unpushed_commits,

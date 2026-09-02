@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useMissingProjectsStore } from "../../state/missingProjectsStore";
+import { useWindowStore } from "../../state/windowStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore, type MainView, type PaletteScope, type SettingsSectionId } from "../../state/uiStore";
 import { useTerminalStore } from "../../state/terminalStore";
@@ -98,6 +99,11 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const missing = useMissingProjectsStore((s) => s.missing);
+  const notARepo = useMissingProjectsStore((s) => s.notARepo);
+  // Repositories that are open in windows of their own. Left out for the same reason the
+  // broken ones are: pressing Return here would select a repository this window has moved out,
+  // and the row that *is* the way to that window is in the sidebar.
+  const satellites = useWindowStore((s) => s.satellites);
   const branches = useRepoStore((s) => s.branches);
   const checkoutBranch = useRepoStore((s) => s.checkoutBranch);
   const checkoutRemoteBranch = useRepoStore((s) => s.checkoutRemoteBranch);
@@ -117,12 +123,18 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       onSelect: () => setActiveWorkspace(w.id),
     }));
 
-    // Repositories whose folder is gone are left out rather than listed and refused: every entry
-    // in this palette is something that happens when you press Return on it, and the sidebar has
-    // already taken "open" off these — see `missingProjectsStore`. They are still in the sidebar
-    // and in Settings, which is where the row that says why, and the button that removes it, live.
+    // Repositories that cannot be opened — the folder gone, or the folder no longer a repository —
+    // are left out rather than listed and refused: every entry in this palette is something that
+    // happens when you press Return on it, and the sidebar has already taken "open" off these —
+    // see `missingProjectsStore`. They are still in the sidebar and in Settings, which is where the
+    // row that says why, and the buttons that repair or remove it, live.
     const projectItems: PaletteItem[] = projects
-      .filter((p) => !missing.has(p.local_path))
+      .filter(
+        (p) =>
+          !missing.has(p.local_path) &&
+          !notARepo.has(p.local_path) &&
+          !satellites.some((s) => s.kind === "repo" && s.ref_id === p.id),
+      )
       .map((p) => ({
         key: `project:${p.id}`,
         icon: FolderGit2,
@@ -227,6 +239,8 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     workspaces,
     projects,
     missing,
+    notARepo,
+    satellites,
     branches,
     t,
     setActiveWorkspace,

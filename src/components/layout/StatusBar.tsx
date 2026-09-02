@@ -1,6 +1,7 @@
 import { ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, Lock, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
 import { NotificationBell } from "./NotificationBell";
 import { AgentActivity } from "./AgentActivity";
+import { ServicesActivity } from "./ServicesActivity";
 import { CompletionActivity } from "./CompletionActivity";
 import { BatteryMeter } from "./BatteryMeter";
 import { SystemMeter } from "./SystemMeter";
@@ -180,6 +181,7 @@ export function StatusBar() {
             workspace, not to a repository, so they can finish while this bar is in its empty state. */}
         <div className="cf-bar-group ml-auto flex items-center">
           <AgentActivity />
+          <ServicesActivity />
           <CompletionActivity />
           <SystemMeter />
           <BatteryMeter />

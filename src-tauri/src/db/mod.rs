@@ -9,6 +9,7 @@ pub mod models;
 pub mod note_queries;
 pub mod queries;
 pub mod remote_queries;
+pub mod service_queries;
 
 use rusqlite::Connection;
 use std::sync::Mutex;

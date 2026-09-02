@@ -24,6 +24,7 @@ pub mod repos;
 pub mod review_pipeline;
 pub mod secret_scan_cmd;
 pub mod secrets_cmd;
+pub mod services_cmd;
 pub mod settings;
 pub mod skills_cmd;
 pub mod stories_cmd;

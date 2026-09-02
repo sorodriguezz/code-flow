@@ -1555,6 +1555,73 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         -- Every authenticated request is a lookup by hash, and it is the only lookup there is.
         CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_devices_token
             ON remote_devices (token_hash);
+
+        -- ── Services ────────────────────────────────────────────────────────────────────────
+        --
+        -- A named runnable and a group of them, for the case one terminal cannot hold: two
+        -- containers, two backends and two frontends brought up in the right order, every morning.
+        --
+        -- **Scoped to the workspace, not to a repository**, and that is the whole design. The thing
+        -- being started is a *system*, and a system spans repositories — the frontend is one
+        -- checkout and the API another. A service filed under a repository could not name the
+        -- backend it waits for.
+        --
+        -- There is no `pid`, no `status` and no `session_id` column here, deliberately: what is
+        -- running is a fact about this process, not about the database, and a row claiming a pid
+        -- that died with the last launch is worse than no row at all. The live state lives in the
+        -- terminal registry, keyed by the session the service was started into.
+        CREATE TABLE IF NOT EXISTS service_groups (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS services (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- Ungrouped services are legal and common — one `docker compose up` on its own is a
+            -- service. `ON DELETE SET NULL` so deleting a group keeps its services rather than
+            -- taking the user's definitions with it.
+            group_id     TEXT REFERENCES service_groups(id) ON DELETE SET NULL,
+            name         TEXT NOT NULL,
+            -- shell | script | compose. Decides how `command` is built, not what it can do: all
+            -- three end up as one line typed into a pty.
+            kind         TEXT NOT NULL DEFAULT 'shell',
+            -- Where it runs. A project id when the directory is a repository in this workspace,
+            -- which is what lets the definition survive the folder being moved; `cwd` is then
+            -- relative to it. With no project, `cwd` is absolute.
+            project_id   TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            cwd          TEXT NOT NULL DEFAULT '',
+            command      TEXT NOT NULL DEFAULT '',
+            -- JSON object. Values may be `{"vault":"<entry id>"}` rather than a literal, so a
+            -- secret stays in the keyring and never becomes a row in this table.
+            env          TEXT NOT NULL DEFAULT '{}',
+            -- JSON array of numbers, for the `localhost:5173` link on the row. Declared rather than
+            -- discovered: reading them out of the output is a guess, and a wrong link is worse than
+            -- none.
+            ports        TEXT NOT NULL DEFAULT '[]',
+            -- What "it is up" means: none | port | log | http. Without one, `depends_on` is a lie —
+            -- starting the API the instant the database *process* exists is the failure this is
+            -- here to prevent.
+            ready_kind   TEXT NOT NULL DEFAULT 'none',
+            -- The port number, the pattern to look for, or the URL — whichever `ready_kind` needs.
+            ready_value  TEXT NOT NULL DEFAULT '',
+            -- JSON array of service ids in this workspace. A cycle is refused on save, naming the
+            -- services involved.
+            depends_on   TEXT NOT NULL DEFAULT '[]',
+            -- Off by default and capped when on: a service that restarts itself in a loop is a fan
+            -- at full speed and a flat battery.
+            autorestart  INTEGER NOT NULL DEFAULT 0,
+            color        TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_services_workspace
+            ON services (workspace_id, sort_order);
         "#,
     )?;
 

@@ -42,7 +42,8 @@ export type LayoutKey =
   | "dbmlEditorWidth"
   | "dbmlInspectorWidth"
   | "pipelinesListWidth"
-  | "pipelinesGraphHeight";
+  | "pipelinesGraphHeight"
+  | "servicesListWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -86,6 +87,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   dbmlInspectorWidth: "layout_dbml_inspector_width",
   pipelinesListWidth: "layout_pipelines_list_width",
   pipelinesGraphHeight: "layout_pipelines_graph_height",
+  servicesListWidth: "layout_services_list_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -168,6 +170,10 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // The graph, above the log. Tall enough for four job cards stacked in one stage — which is the
   // shape this pane exists to be able to draw — before it starts scrolling.
   pipelinesGraphHeight: 268,
+  // The bottom panel's list, beside the console. Narrower than a full-height sidebar would be —
+  // this column sits under the editor, so every pixel it takes is one the console loses — but wide
+  // enough for a name, a status dot and a port chip before the hover actions arrive on top.
+  servicesListWidth: 210,
 };
 
 /**

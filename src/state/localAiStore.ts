@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { broadcast } from "../lib/windowBus";
 import {
   localAiCancelDownload,
   localAiDeleteModel,
@@ -42,6 +43,16 @@ interface LocalAiStore {
    */
   thinking: boolean;
   setThinking: (thinking: boolean) => void;
+  /**
+   * Window labels where inline completion is thinking right now, this one excluded.
+   *
+   * The status bar lives in the main window and claims to show what the models on this machine are
+   * doing; a completion running in a detached repository window is a model on this machine. Held as
+   * a set of labels rather than a count so a window that closes mid-request cannot leave the count
+   * stuck above zero — the label simply stops being re-announced, and the close sweeps it.
+   */
+  foreignThinking: string[];
+  setForeignThinking: (label: string, busy: boolean) => void;
 
   load: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -61,8 +72,23 @@ export const useLocalAiStore = create<LocalAiStore>((set, get) => ({
   progress: {},
   loading: false,
   thinking: false,
+  foreignThinking: [],
 
-  setThinking: (thinking) => set({ thinking }),
+  setThinking: (thinking) => {
+    set({ thinking });
+    // Announced rather than kept private: the bar that draws this is in the main window, and a
+    // completion running in a satellite is still a model running on this machine.
+    broadcast({ kind: "completion", busy: thinking });
+  },
+
+  setForeignThinking: (label, busy) =>
+    set((s) => {
+      const without = s.foreignThinking.filter((held) => held !== label);
+      const next = busy ? [...without, label] : without;
+      // Same length means the same set here — labels are unique and only ever added once — so this
+      // avoids re-rendering the bar on every idle announcement.
+      return next.length === s.foreignThinking.length ? {} : { foreignThinking: next };
+    }),
 
   load: async () => {
     if (!subscribed) {

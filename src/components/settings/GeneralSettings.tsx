@@ -9,6 +9,8 @@ import { deleteLegacyData, quitApp, resetAppData, revealInFileManager } from "..
 import { confirmAction } from "../../state/confirmStore";
 import { useDataDirsStore } from "../../state/dataDirsStore";
 import { useToastStore } from "../../state/toastStore";
+import { usePreferencesStore } from "../../state/preferencesStore";
+import { useWindowStore } from "../../state/windowStore";
 // Shared with the backup panel, which formats the same kind of number for the same reason.
 import { formatBytes } from "../../lib/tauri/backupCommands";
 import { UpdateSection } from "./UpdateSection";
@@ -33,6 +35,9 @@ export function GeneralSettings() {
   const layout = useDataDirsStore((s) => s.status);
   const loadLayout = useDataDirsStore((s) => s.load);
   const refreshLayout = useDataDirsStore((s) => s.refresh);
+  const satelliteLimit = usePreferencesStore((s) => s.satelliteLimit);
+  const setSatelliteLimit = usePreferencesStore((s) => s.setSatelliteLimit);
+  const openWindows = useWindowStore((s) => s.satellites.length);
   const [deleting, setDeleting] = useState(false);
   const pushToast = useToastStore((s) => s.pushToast);
   const dataPath = layout?.stateDir ?? "…";
@@ -82,6 +87,38 @@ export function GeneralSettings() {
       <p className="mt-2 text-[11px] text-[var(--cf-text-muted)]">{t("settings.translationNote")}</p>
 
       <UpdateSection />
+
+      <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
+        <h3 className="mb-1 text-sm font-semibold">{t("windows.limitLabel")}</h3>
+        <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("windows.limitHint")}</p>
+        {/* Buttons rather than a number field: the useful range is 0–8 and every value in it is one
+            press away, which is faster to set and impossible to mistype. Zero is a real choice —
+            "never open a second window" — so it is offered rather than clamped away. */}
+        <div className="flex flex-wrap gap-1.5">
+          {[0, 1, 2, 3, 4, 5, 6, 8].map((n) => (
+            <button
+              key={n}
+              onClick={() => void setSatelliteLimit(n)}
+              aria-pressed={satelliteLimit === n}
+              className={`relative min-w-9 rounded-md border px-2.5 py-1.5 text-[13px] tabular-nums ${
+                satelliteLimit === n
+                  ? "border-transparent font-medium text-[var(--cf-accent)]"
+                  : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              }`}
+            >
+              {satelliteLimit === n && (
+                <ActivePill layoutId="cf-window-limit-pill" inset="-inset-px" radius="rounded-md" />
+              )}
+              <span className="relative">{n}</span>
+            </button>
+          ))}
+        </div>
+        {/* What is open right now, so raising or lowering the limit is a decision with the current
+            state in front of it rather than an abstract number. */}
+        <p className="mt-2 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+          {t("windows.openNow", { count: String(openWindows) })}
+        </p>
+      </div>
 
       <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
         <h3 className="mb-1 text-sm font-semibold">{t("tour.settingsTitle")}</h3>

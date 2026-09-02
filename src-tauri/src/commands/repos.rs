@@ -487,36 +487,66 @@ pub fn update_project_color(db: State<Db>, id: String, color: String) -> Result<
     queries::update_project_color(&conn, &id, &color).map_err(|e| e.to_string())
 }
 
-/// Which of these repository folders are no longer where the project says they are.
+/// What is wrong with these repository folders, if anything.
 ///
-/// The answer the sidebar and Settings need to stop offering a repository that has been moved,
-/// renamed or deleted from outside the app: `local_path` is written once, when the project is
-/// added, and nothing has ever gone back to check it. Opening one of those rows pointed the git
-/// engine at nothing and produced a row of failures from seven refreshes at once, with no reading
-/// of the actual problem — the folder is gone.
+/// `projects.local_path` is written once, when the project is added, and nothing goes back to
+/// check it. Two different things can have happened to it since, and until now the app only knew
+/// about one:
 ///
-/// Takes the whole list and returns only the missing ones, rather than a `bool` per path: a caller
-/// with twenty projects and none missing gets an empty vector, and the frontend keys its lookup on
-/// the path either way.
+/// * **Missing** — the folder was moved, renamed or deleted. Opening the row pointed the git
+///   engine at nothing and produced a row of failures from seven refreshes at once, with no
+///   reading of the actual problem.
+/// * **Not a repository** — the folder is right there, but its `.git` is gone: deleted by hand,
+///   lost to a "copy the files, not the history" move, or never restored after an archive was
+///   unpacked over it. This one looked *worse* than missing, because everything about the row
+///   claimed to work: it opened, it was selectable, and every git call under it failed with
+///   "could not find repository" for a folder the user could see in Finder.
 ///
-/// **The check is the folder's own existence, not `is_repo_root`.** A repository whose `.git` was
-/// deleted is a different sentence to write on screen than one whose folder is not there, and this
-/// one only claims the second. `is_dir` and not `exists` so a path that has become a *file* — a
-/// folder replaced by an archive of the same name — reads as missing, which is what it is to a
-/// repository.
+/// They are two different sentences to write on screen and two different offers to make — the
+/// first can only be removed from the list, the second can also be repaired with `git init` (see
+/// [`crate::git::repo::init`]) — so they are answered separately rather than collapsed into one
+/// "broken" flag.
+///
+/// Returns only the paths that are wrong, rather than a verdict per path: a caller with twenty
+/// healthy projects gets two empty vectors, and the frontend keys its lookup on the path either
+/// way. A path is in at most one list — a folder that is not there cannot also be a folder that
+/// is not a repository.
+///
+/// `is_dir` and not `exists` for the missing check, so a path that has become a *file* — a folder
+/// replaced by an archive of the same name — reads as missing, which is what it is to a
+/// repository. The repository check is `.git` with `exists` rather than `is_dir`, because a
+/// worktree or a submodule records it as a file holding a `gitdir:` pointer; both are real
+/// repositories to work in. Same test as [`is_repo_root`], which is why it calls it.
 ///
 /// `async` with the stats moved onto the blocking pool because `local_path` can be an unmounted
 /// network share or a stale automount, where a single `stat` blocks for the mount timeout. A plain
 /// `#[tauri::command]` runs on the main thread (see `pick_folder` above for the other half of that
 /// rule), so one dead share would freeze the window for as long as the kernel takes to give up.
+#[derive(Default, serde::Serialize)]
+pub struct ProjectPathHealth {
+    /// Paths with no folder at them any more.
+    pub missing: Vec<String>,
+    /// Paths whose folder is there but is no longer a git repository.
+    pub not_a_repo: Vec<String>,
+}
+
 #[tauri::command]
-pub async fn missing_project_paths(paths: Vec<String>) -> Vec<String> {
+pub async fn project_path_health(paths: Vec<String>) -> ProjectPathHealth {
     tauri::async_runtime::spawn_blocking(move || {
-        paths.into_iter().filter(|path| !Path::new(path).is_dir()).collect()
+        let mut health = ProjectPathHealth::default();
+        for path in paths {
+            let dir = Path::new(&path);
+            if !dir.is_dir() {
+                health.missing.push(path);
+            } else if !is_repo_root(dir) {
+                health.not_a_repo.push(path);
+            }
+        }
+        health
     })
     .await
     // A join error is a panic in the stat loop, which `is_dir` cannot produce. Reporting "nothing
-    // is missing" is the safe direction to be wrong in: it leaves every row usable rather than
+    // is wrong" is the safe direction to be wrong in: it leaves every row usable rather than
     // striking out a whole workspace on a runtime hiccup.
     .unwrap_or_default()
 }
@@ -658,10 +688,11 @@ mod tests {
         assert!(scan_folder(temp.0.join("nope").to_string_lossy().to_string()).is_err());
     }
 
-    /// The check the sidebar strikes a row out on. A folder that is there is not reported; one
-    /// that has been deleted, renamed or replaced by a file is.
+    /// The check the sidebar strikes a row out on. A folder that is there and is a repository is
+    /// not reported; one that has been deleted, renamed or replaced by a file is missing; one that
+    /// is there but has lost its `.git` is the *other* verdict, and the two never overlap.
     #[tokio::test]
-    async fn only_the_folders_that_are_gone_come_back() {
+    async fn each_broken_path_lands_in_exactly_one_list() {
         let temp = Temp::new();
         temp.repo("api");
         temp.plain("notes");
@@ -673,7 +704,7 @@ mod tests {
         let gone = temp.0.join("moved-away").to_string_lossy().to_string();
         let now_a_file = file.to_string_lossy().to_string();
 
-        let missing = missing_project_paths(vec![
+        let health = project_path_health(vec![
             here.clone(),
             plain.clone(),
             gone.clone(),
@@ -681,15 +712,33 @@ mod tests {
         ])
         .await;
 
-        assert_eq!(missing, vec![gone, now_a_file]);
-        assert!(!missing.contains(&here));
-        // A folder that is not a repository is still *there*: this command answers about the path,
-        // and "the folder is gone" is the only thing the row it feeds is allowed to say.
-        assert!(!missing.contains(&plain));
+        assert_eq!(health.missing, vec![gone, now_a_file]);
+        // The folder is right there — it just isn't a repository any more, which is the case the
+        // row can offer to repair rather than only remove.
+        assert_eq!(health.not_a_repo, vec![plain]);
+        assert!(!health.missing.contains(&here));
+        assert!(!health.not_a_repo.contains(&here));
+    }
+
+    /// A `.git` that is a *file* is a worktree or a submodule, and both are real repositories to
+    /// work in — the row must not offer to initialise over one.
+    #[tokio::test]
+    async fn a_worktree_pointer_file_counts_as_a_repository() {
+        let temp = Temp::new();
+        temp.plain("wt");
+        std::fs::write(temp.0.join("wt").join(".git"), "gitdir: ../main/.git/worktrees/wt\n").unwrap();
+
+        let path = temp.0.join("wt").to_string_lossy().to_string();
+        let health = project_path_health(vec![path]).await;
+
+        assert!(health.missing.is_empty());
+        assert!(health.not_a_repo.is_empty());
     }
 
     #[tokio::test]
-    async fn nothing_asked_is_nothing_missing() {
-        assert!(missing_project_paths(Vec::new()).await.is_empty());
+    async fn nothing_asked_is_nothing_wrong() {
+        let health = project_path_health(Vec::new()).await;
+        assert!(health.missing.is_empty());
+        assert!(health.not_a_repo.is_empty());
     }
 }

@@ -2,6 +2,7 @@ import { useUiStore, type ApiWorkspace, type MainView } from "../state/uiStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useMissingProjectsStore } from "../state/missingProjectsStore";
+import { useWindowStore } from "../state/windowStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { useNavigationStore } from "../state/navigationStore";
 import { useEditorCommandStore } from "../state/editorCommandStore";
@@ -222,11 +223,20 @@ function cycleProject(delta: number): void {
   const { activeWorkspaceId, projectsByWorkspace, activeProjectId, setActiveProject } =
     useWorkspaceStore.getState();
   const all = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
-  // A repository whose folder is gone is not a stop on the way round. The sidebar already refuses
-  // to open one — see `missingProjectsStore` — and a shortcut that landed on it would put the git
-  // engine somewhere the row itself will not send it.
-  const { missing } = useMissingProjectsStore.getState();
-  const projects = all.filter((p) => !missing.has(p.local_path));
+  // A repository that cannot be opened is not a stop on the way round — whether its folder is gone
+  // or its folder has stopped being a repository. The sidebar already refuses to open either — see
+  // `missingProjectsStore` — and a shortcut that landed on one would put the git engine somewhere
+  // the row itself will not send it.
+  const { missing, notARepo } = useMissingProjectsStore.getState();
+  // And nor is one this window has moved out into a window of its own — cycling onto it would
+  // select a repository whose views are not in this window at all.
+  const { satellites } = useWindowStore.getState();
+  const projects = all.filter(
+    (p) =>
+      !missing.has(p.local_path) &&
+      !notARepo.has(p.local_path) &&
+      !satellites.some((s) => s.kind === "repo" && s.ref_id === p.id),
+  );
   if (projects.length === 0) return;
   const index = projects.findIndex((p) => p.id === activeProjectId);
   const next = index < 0 ? 0 : (index + delta + projects.length) % projects.length;

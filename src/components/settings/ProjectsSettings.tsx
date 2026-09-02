@@ -4,12 +4,15 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  GitBranchPlus,
   GripVertical,
+  Loader2,
   Pencil,
   Plus,
   FolderX,
   Search,
   Trash2,
+  Unlink,
   X,
 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -115,10 +118,14 @@ export function ProjectsSettings() {
   // second row's field closes the first rather than leaving two drafts on screen.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
-  // Which repositories are not on disk any more. Read as the whole set rather than per row: this
+  // Which repositories cannot be opened, and why. Read as whole sets rather than per row: this
   // panel lists every workspace's repositories at once, and a hook per row would be a subscription
-  // per row for one answer they all share.
+  // per row for two answers they all share.
   const missing = useMissingProjectsStore((s) => s.missing);
+  const notARepo = useMissingProjectsStore((s) => s.notARepo);
+  const initRepo = useMissingProjectsStore((s) => s.initRepo);
+  /** The path currently being initialised, so only its own button spins. `null` when none is. */
+  const [initializing, setInitializing] = useState<string | null>(null);
   const [drag, setDrag] = useState<RowDrag | null>(null);
   /** One entry per workspace, so a repository drag can measure the list it started in. */
   const listRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -253,6 +260,31 @@ export function ProjectsSettings() {
     setCopiedPath(path);
     useToastStore.getState().pushToast(t("settings.pathCopied"), "success");
     setTimeout(() => setCopiedPath((prev) => (prev === path ? null : prev)), 1500);
+  };
+
+  /**
+   * Makes a folder that has lost its `.git` a repository again.
+   *
+   * Confirmed even though it destroys nothing — `git init` leaves a folder looking identical, so
+   * the dialog is where the user is told what will and will not happen to their files. Same
+   * decision, and the same wording, as the sidebar's copy of this: see `useInitRepo` there.
+   */
+  const initProject = async (project: Project) => {
+    const ok = await confirmAction(
+      t("common.initRepoConfirm", { path: project.local_path }),
+      false,
+      t("common.initRepo"),
+    );
+    if (!ok) return;
+    setInitializing(project.local_path);
+    try {
+      await initRepo(project.local_path);
+      useToastStore.getState().pushToast(t("common.initRepoDone", { name: project.name }), "success");
+    } catch (err) {
+      useToastStore.getState().pushToast(String(err), "error");
+    } finally {
+      setInitializing((prev) => (prev === project.local_path ? null : prev));
+    }
   };
 
   const addNewWorkspace = async () => {
@@ -474,6 +506,12 @@ export function ProjectsSettings() {
                     // look like one of the working ones — and the bin beside it is the only thing
                     // still worth doing to it, so it stops being muted and says so.
                     const gone = missing.has(p.local_path);
+                    // The other way a row stops working: the folder is right there, its `.git` is
+                    // not. Not struck through — the folder really is the one the name says, and its
+                    // files are all in it — but it loses its colour the same way, and it gains the
+                    // button `gone` cannot have, because there is something on disk to act on.
+                    const unlinked = notARepo.has(p.local_path);
+                    const broken = gone || unlinked;
                     return (
                     <div
                       key={p.id}
@@ -496,35 +534,62 @@ export function ProjectsSettings() {
                             bin and a copy-the-path button, and a press anywhere on it that might
                             turn into a drag makes all three feel unreliable. */}
                         {dragHandle(t("settings.reorderProject"), (e) => beginProjectDrag(e, ws.id, p.id))}
-                        {gone ? (
+                        {broken ? (
                           // In place of the swatch, not beside it: picking a colour for a
-                          // repository that is not there is arranging furniture in a room that has
-                          // been demolished, and the icon is what tells the two kinds of row apart
-                          // at a glance down the list.
+                          // repository that cannot be opened is arranging furniture in a room that
+                          // has been demolished, and the icon is what tells the kinds of row apart
+                          // at a glance down the list — an absent folder, and a folder with no git
+                          // in it.
                           <span
-                            title={t("settings.projectMissingHint")}
+                            title={gone ? t("settings.projectMissingHint") : t("settings.projectNotARepoHint")}
                             className="flex h-4 w-4 shrink-0 items-center justify-center text-[var(--cf-text-muted)]"
                           >
-                            <FolderX size={13} />
+                            {gone ? <FolderX size={13} /> : <Unlink size={13} />}
                           </span>
                         ) : (
                           <ColorSwatchPicker value={p.color} onChange={(color) => setProjectColor(p.id, ws.id, color)} />
                         )}
                         <span
-                          title={gone ? t("settings.projectMissingHint") : undefined}
+                          title={
+                            gone
+                              ? t("settings.projectMissingHint")
+                              : unlinked
+                                ? t("settings.projectNotARepoHint")
+                                : undefined
+                          }
                           className={`flex-1 truncate font-medium ${
-                            gone ? "text-[var(--cf-text-muted)] line-through decoration-[1.5px]" : ""
-                          }`}
+                            broken ? "text-[var(--cf-text-muted)]" : ""
+                          } ${gone ? "line-through decoration-[1.5px]" : ""}`}
                         >
                           {p.name}
                         </span>
-                        {gone && (
-                          // The word the strike-through cannot say on its own. Every other row in
-                          // this list is a repository that works, so "this one is different" needs
-                          // to be readable rather than inferred from a line through a name.
+                        {broken && (
+                          // The word the strike-through cannot say on its own — and for the
+                          // unlinked row, which has no strike-through, the only thing that says it
+                          // at all. Every other row in this list is a repository that works, so
+                          // "this one is different" needs to be readable rather than inferred.
                           <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-                            {t("settings.projectMissing")}
+                            {gone ? t("settings.projectMissing") : t("settings.projectNotARepo")}
                           </span>
+                        )}
+                        {unlinked && (
+                          // Before the bin, and the only row action in this panel that keeps a
+                          // project rather than dropping one. Its hover is the accent colour for
+                          // exactly that reason — the two buttons now side by side go opposite
+                          // ways, and that has to read before the click.
+                          <button
+                            onClick={() => void initProject(p)}
+                            disabled={initializing === p.local_path}
+                            title={t("settings.initProject")}
+                            aria-label={`${p.name} — ${t("common.initRepo")}`}
+                            className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-40"
+                          >
+                            {initializing === p.local_path ? (
+                              <Loader2 size={13} className="animate-spin" />
+                            ) : (
+                              <GitBranchPlus size={13} />
+                            )}
+                          </button>
                         )}
                         <button
                           onClick={async () => {
@@ -542,7 +607,13 @@ export function ProjectsSettings() {
                       </div>
                       <button
                         onClick={() => copyPath(p.local_path)}
-                        title={gone ? t("settings.projectMissingHint") : t("settings.copyPath")}
+                        title={
+                          gone
+                            ? t("settings.projectMissingHint")
+                            : unlinked
+                              ? t("settings.projectNotARepoHint")
+                              : t("settings.copyPath")
+                        }
                         className="mt-1.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                       >
                         {copiedPath === p.local_path && <Check size={11} className="shrink-0 text-[var(--cf-success)]" />}

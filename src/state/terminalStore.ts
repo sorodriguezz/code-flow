@@ -89,7 +89,7 @@ export interface TerminalSink {
 /**
  * `terminal:output` / `terminal:exit`, routed once for the whole app.
  *
- * Every terminal ever opened stays mounted (see the note in `TerminalDock`), and each pane used
+ * Every terminal ever opened stays mounted (see the note in `ServicesDock`), and each pane used
  * to hold its own `terminal:output` subscription that compared `e.id` against its own session id
  * and threw away everything else. A dozen shells open across a few projects therefore meant a
  * dozen closure calls and a dozen string compares for *every* pty chunk, most of them on behalf
