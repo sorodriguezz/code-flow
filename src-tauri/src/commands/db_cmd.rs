@@ -101,6 +101,13 @@ pub fn db_reorder_connections(db: State<Db>, ids: Vec<String>) -> Result<(), Str
 // Groups
 // ---------------------------------------------------------------------------
 
+/// Writes the order the folders are drawn in; `ids` is the whole list.
+#[tauri::command]
+pub fn db_reorder_groups(db: State<Db>, ids: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::reorder_groups(&conn, &ids).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn db_create_group(
     db: State<Db>,
@@ -815,6 +822,11 @@ fn render_outcome(results: &[DbRunOutcome]) -> String {
 /// The scope is the console's own database and schema rather than the whole server. A model given
 /// three hundred tables answers worse than one given the thirty the question is about, and the
 /// pickers in the console toolbar are already how the user says which those are.
+///
+/// `history` is everything already said in this console's panel, oldest first — see
+/// [`crate::ai::DbAssistantTurn`]. It is what makes the panel a conversation: these engines are
+/// one-shot processes with no session to resume, so a follow-up only means something if the turns
+/// it refers to are sent again. Empty for the first question.
 #[tauri::command]
 pub async fn db_ai_assist(
     app: tauri::AppHandle,
@@ -826,6 +838,7 @@ pub async fn db_ai_assist(
     question: String,
     editor_sql: String,
     last_results: Vec<DbRunOutcome>,
+    history: Vec<crate::ai::DbAssistantTurn>,
     run_id: Option<String>,
 ) -> Result<DbAiAnswer, String> {
     let config = resolve_config(&db, &connection_id)?;
@@ -888,6 +901,7 @@ pub async fn db_ai_assist(
                 schema: &rendered,
                 editor: &editor_sql,
                 outcome: &outcome,
+                history: &history,
                 question: &question,
             },
         )

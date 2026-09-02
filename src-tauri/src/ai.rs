@@ -1143,6 +1143,11 @@ async fn spawn_once(
     // The engines build their own `Command`, so the no-console-window flag is applied here —
     // the one place every engine's command passes through on its way to being spawned.
     crate::proc::hide_console(&mut cmd);
+    // And the process group, for the same reason and in the same place. It is what makes Stop stop
+    // the *whole* run: these CLIs spawn MCP servers, search tools and subagents of their own, and
+    // killing the one process we hold a handle to leaves all of them running. See
+    // `ai_runs::kill_tree`, which is the other half.
+    crate::proc::own_process_group(&mut cmd);
 
     let mut child = cmd
         .spawn()
@@ -2340,12 +2345,26 @@ pub const MAX_DB_SCHEMA_CHARS: usize = 30_000;
 /// plus the script around it; not a whole migration file.
 pub const MAX_DB_EDITOR_CHARS: usize = 12_000;
 
+/// How many earlier turns of a console conversation are sent back.
+///
+/// Sixteen is eight exchanges, which is far past where a question about one query goes before it is
+/// really a question about a different one — and the cap is on the *oldest* end, so the turns being
+/// referred to are always the ones that survive.
+pub const MAX_DB_HISTORY_TURNS: usize = 16;
+/// And how much of each. A turn holding a pasted result or a long explanation is trimmed rather
+/// than dropped: its first paragraph is what the follow-up refers to.
+pub const MAX_DB_HISTORY_TURN_CHARS: usize = 4_000;
+
 pub const DEFAULT_DB_ASSISTANT_PROMPT: &str =
     "Eres un ingeniero de bases de datos ayudando a alguien que está delante de una consola \
      conectada a una base de datos real. Por stdin recibes el motor y su versión, el ámbito \
      (base/esquema), el ESQUEMA de la base tal y como está hoy, lo que hay escrito ahora mismo en \
      la consola, el resultado o el error de la última ejecución si lo hubo, y la pregunta del \
      usuario.\n\n\
+     Si hay CONVERSACIÓN HASTA AHORA, es este mismo chat: lo que ya te preguntaron y lo que ya \
+     respondiste sobre esta misma consola. Trátalo como contexto tuyo — cuando te digan \"ahora \
+     agrúpalo por mes\" o \"el join está mal\", se refieren a la consulta que tú acabas de \
+     proponer, no a una nueva pregunta suelta.\n\n\
      El usuario puede estar pidiendo dos cosas distintas, y tienes que distinguirlas por ti mismo:\n\
      1. QUE ESCRIBAS UNA CONSULTA — \"necesito los usuarios con pagos sobre mil pesos\".\n\
      2. QUE EXPLIQUES ALGO — por qué una consulta no devuelve filas, qué hace, por qué va lenta, \
@@ -2394,7 +2413,24 @@ pub struct DbAssistantContext<'a> {
     /// The last run's error or row count, when the console has one. The difference between "no
     /// devuelve datos" meaning zero rows and meaning it never ran.
     pub outcome: &'a str,
+    /// Everything already said in this console's conversation, oldest first.
+    ///
+    /// The engines here are one-shot processes with no session to resume, so a follow-up question
+    /// only means something if the turns it refers to travel with it: "and now group that by month"
+    /// is unanswerable on its own, and re-asking from scratch was the only thing the panel could do
+    /// before. Empty for the first question, in which case the section is omitted entirely.
+    pub history: &'a [DbAssistantTurn],
     pub question: &'a str,
+}
+
+/// One earlier turn of the console's conversation.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DbAssistantTurn {
+    /// `"user"` or `"assistant"`. Anything else is rendered as the user, which is the safe
+    /// direction: a turn mislabelled as the model's would be text the model treats as its own
+    /// prior reasoning.
+    pub role: String,
+    pub text: String,
 }
 
 /// What came back: the prose, and the statement to drop into the editor if one was proposed.
@@ -2442,6 +2478,19 @@ pub async fn db_assistant(
     }
     if !ctx.outcome.trim().is_empty() {
         stdin_payload.push_str(&format!("\n=== ÚLTIMA EJECUCIÓN ===\n{}\n", ctx.outcome));
+    }
+    // The conversation, oldest first, and capped from the *end*: the turns nearest the question are
+    // the ones it refers to, so a transcript that has outgrown its budget loses its opening rather
+    // than the exchange the user is in the middle of. Each turn is trimmed on its own as well —
+    // one pasted stack trace must not push out ten turns of context around it.
+    if !ctx.history.is_empty() {
+        stdin_payload.push_str("\n=== CONVERSACIÓN HASTA AHORA ===\n");
+        let start = ctx.history.len().saturating_sub(MAX_DB_HISTORY_TURNS);
+        for turn in &ctx.history[start..] {
+            let who = if turn.role == "assistant" { "ASISTENTE" } else { "USUARIO" };
+            let text: String = turn.text.chars().take(MAX_DB_HISTORY_TURN_CHARS).collect();
+            stdin_payload.push_str(&format!("[{who}]\n{text}\n\n"));
+        }
     }
     stdin_payload.push_str(&format!("\n=== PREGUNTA ===\n{}", ctx.question));
 

@@ -487,6 +487,40 @@ pub fn update_project_color(db: State<Db>, id: String, color: String) -> Result<
     queries::update_project_color(&conn, &id, &color).map_err(|e| e.to_string())
 }
 
+/// Which of these repository folders are no longer where the project says they are.
+///
+/// The answer the sidebar and Settings need to stop offering a repository that has been moved,
+/// renamed or deleted from outside the app: `local_path` is written once, when the project is
+/// added, and nothing has ever gone back to check it. Opening one of those rows pointed the git
+/// engine at nothing and produced a row of failures from seven refreshes at once, with no reading
+/// of the actual problem — the folder is gone.
+///
+/// Takes the whole list and returns only the missing ones, rather than a `bool` per path: a caller
+/// with twenty projects and none missing gets an empty vector, and the frontend keys its lookup on
+/// the path either way.
+///
+/// **The check is the folder's own existence, not `is_repo_root`.** A repository whose `.git` was
+/// deleted is a different sentence to write on screen than one whose folder is not there, and this
+/// one only claims the second. `is_dir` and not `exists` so a path that has become a *file* — a
+/// folder replaced by an archive of the same name — reads as missing, which is what it is to a
+/// repository.
+///
+/// `async` with the stats moved onto the blocking pool because `local_path` can be an unmounted
+/// network share or a stale automount, where a single `stat` blocks for the mount timeout. A plain
+/// `#[tauri::command]` runs on the main thread (see `pick_folder` above for the other half of that
+/// rule), so one dead share would freeze the window for as long as the kernel takes to give up.
+#[tauri::command]
+pub async fn missing_project_paths(paths: Vec<String>) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths.into_iter().filter(|path| !Path::new(path).is_dir()).collect()
+    })
+    .await
+    // A join error is a panic in the stat loop, which `is_dir` cannot produce. Reporting "nothing
+    // is missing" is the safe direction to be wrong in: it leaves every row usable rather than
+    // striking out a whole workspace on a runtime hiccup.
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,5 +656,40 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         assert!(scan_folder(file.to_string_lossy().to_string()).is_err());
         assert!(scan_folder(temp.0.join("nope").to_string_lossy().to_string()).is_err());
+    }
+
+    /// The check the sidebar strikes a row out on. A folder that is there is not reported; one
+    /// that has been deleted, renamed or replaced by a file is.
+    #[tokio::test]
+    async fn only_the_folders_that_are_gone_come_back() {
+        let temp = Temp::new();
+        temp.repo("api");
+        temp.plain("notes");
+        let file = temp.0.join("archive.zip");
+        std::fs::write(&file, "x").unwrap();
+
+        let here = temp.0.join("api").to_string_lossy().to_string();
+        let plain = temp.0.join("notes").to_string_lossy().to_string();
+        let gone = temp.0.join("moved-away").to_string_lossy().to_string();
+        let now_a_file = file.to_string_lossy().to_string();
+
+        let missing = missing_project_paths(vec![
+            here.clone(),
+            plain.clone(),
+            gone.clone(),
+            now_a_file.clone(),
+        ])
+        .await;
+
+        assert_eq!(missing, vec![gone, now_a_file]);
+        assert!(!missing.contains(&here));
+        // A folder that is not a repository is still *there*: this command answers about the path,
+        // and "the folder is gone" is the only thing the row it feeds is allowed to say.
+        assert!(!missing.contains(&plain));
+    }
+
+    #[tokio::test]
+    async fn nothing_asked_is_nothing_missing() {
+        assert!(missing_project_paths(Vec::new()).await.is_empty());
     }
 }

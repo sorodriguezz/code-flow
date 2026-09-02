@@ -161,6 +161,65 @@ export interface DiagramLink {
   selfReference: boolean;
 }
 
+/**
+ * What a relationship's two ends say — `1`, `0..1`, `0..N`.
+ *
+ * A line with an arrow on it says *which way* a foreign key points and nothing else. It cannot say
+ * whether a child must have a parent, or whether the pair is one-to-one, and those are the two
+ * questions a schema drawing is read to answer. The catalog already knows both; this is that
+ * knowledge written where the line is.
+ *
+ * Read the way the words go: the label at the **parent** end answers "how many of *that* for one of
+ * these", and vice versa.
+ */
+export interface LinkCardinality {
+  /** Beside the table that holds the foreign key. */
+  from: string;
+  /** Beside the table it points at. */
+  to: string;
+}
+
+/** Exactly one — the parent a `NOT NULL` foreign key must have. */
+const ONE = "1";
+/** None or one: a nullable key, or the child side of a one-to-one. */
+const ZERO_ONE = "0..1";
+/** Any number, the ordinary child side of a foreign key. */
+const ZERO_MANY = "0..N";
+
+/**
+ * The two ends of one relationship, from what the catalog says about the key column.
+ *
+ * Two facts decide it, and both are already on the column:
+ *
+ * - **Is the foreign key nullable?** If it is, a child row is allowed to point at nothing, so the
+ *   parent end is `0..1`. If it is `NOT NULL`, every child has exactly one parent — `1`.
+ * - **Is the foreign key also the child's primary key?** Then no two children can share a parent,
+ *   which is what a one-to-one *is*: the child end becomes `0..1` instead of `0..N`.
+ *
+ * Uniqueness short of a primary key (a `UNIQUE` constraint on the FK column) is the case this
+ * cannot see — the diagram payload carries keys and nullability, not indexes — and it comes out as
+ * `0..N` where `0..1` would have been truer. Wrong in the direction of claiming *less*, which is
+ * the right direction for a drawing somebody is about to design against.
+ *
+ * A self-reference is not special: `manager_id → employee.id` is a nullable key onto a primary one,
+ * and `0..N` / `0..1` is exactly right for it.
+ */
+export function linkCardinality(
+  link: DiagramLink,
+  fromNode: DiagramNode | undefined,
+): LinkCardinality {
+  // `columns`, not `visible`: in keys-only mode the row may not be drawn, and whether a relationship
+  // is optional is not a function of what the canvas has room for.
+  const key = fromNode?.columns.find((column) => column.name === link.fromColumn);
+  // An edge whose column is not in the payload at all — an inferred Mongo reference into a stub
+  // table. The neutral reading is the one that claims least.
+  if (!key) return { from: ZERO_MANY, to: ZERO_ONE };
+  return {
+    from: key.primary_key ? ZERO_ONE : ZERO_MANY,
+    to: key.nullable ? ZERO_ONE : ONE,
+  };
+}
+
 export interface DiagramLayout {
   nodes: DiagramNode[];
   links: DiagramLink[];
@@ -748,10 +807,21 @@ export function toMermaid(diagram: DbSchemaDiagram): string {
     const key = `${edge.from_table}|${edge.to_table}|${edge.constraint}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    // `}o--||` — many-optional on the referencing side, exactly-one on the referenced side, which
-    // is what a nullable foreign key into a primary key means.
+    // The same two facts the canvas labels read — see `linkCardinality` — in Mermaid's own
+    // notation, instead of the `||--o{` this used to emit for every edge regardless. The left
+    // marker belongs to the referenced table and the right one to the referencing table:
+    //
+    //   `||` exactly one   `|o` zero or one   `o{` zero or more   `o|` zero or one (right side)
+    //
+    // So a `NOT NULL` key is `||` on the parent, a nullable one `|o`; a key that is also the
+    // child's primary key is a one-to-one and takes `o|` instead of `o{`.
+    const fk = diagram.tables
+      .find((table) => table.name === edge.from_table)
+      ?.columns.find((column) => column.name === edge.from_column);
+    const parent = fk?.nullable === false ? "||" : "|o";
+    const child = fk?.primary_key ? "o|" : "o{";
     lines.push(
-      `  ${safe(edge.to_table)} ||--o{ ${safe(edge.from_table)} : "${edge.from_column}"`,
+      `  ${safe(edge.to_table)} ${parent}--${child} ${safe(edge.from_table)} : "${edge.from_column}"`,
     );
   }
 

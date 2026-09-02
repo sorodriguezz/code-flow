@@ -1,5 +1,6 @@
 import type { languages as MonacoLanguages } from "monaco-editor";
 import { monaco } from "../monacoSetup";
+import { registerCompletionContext } from "../inlineCompletion";
 import { nodeKey, useDbStore, type DbConsoleTab } from "../../state/dbStore";
 import { translate } from "../../state/languageStore";
 import type { DbNode, DbNodeRef } from "../../types/database";
@@ -328,6 +329,66 @@ function childrenNow(
   warm(connectionId, ref, key);
   return { nodes: [], pending: true };
 }
+
+/**
+ * The schema the console is pointed at, as SQL comments, for the local completion model.
+ *
+ * # Why the ghost text needs this and the widget does not
+ *
+ * They are asked the same question and given wildly different amounts to answer it with. The
+ * suggest widget above gets the catalog handed to it as a list; the FIM model gets nothing but the
+ * buffer, and a console buffer is routinely three lines long. `SELECT * FROM u` in an empty file
+ * tells a model that has never seen this database absolutely nothing — so it invents a column list,
+ * which is worse than staying quiet because it looks like knowledge.
+ *
+ * Prepended to the prefix rather than sent as a separate field, because `localai::complete::Request`
+ * takes `input_prefix` and `input_suffix` and nothing else: the engine assembles the FIM prompt from
+ * the model's own vocabulary, and there is no third slot to put a system message in. Comments are
+ * the one thing that can be added to a SQL prefix without changing what the prefix *is*.
+ *
+ * # It never awaits, and never warms
+ *
+ * Same rule as the provider — see the header — with one addition: this deliberately does *not* call
+ * `warm`. A keystroke that misses the cache must not start a catalog read on the strength of a
+ * completion nobody asked for; the widget is what warms the tree, and this rides whatever the widget
+ * and the explorer have already read. On a cold cache it returns the engine and the scope alone,
+ * which is still more than the model had.
+ */
+export function sqlContextHeader(uri: string, sql: string): string {
+  const tab = consoleOf(uri);
+  if (!tab) return "";
+
+  const state = useDbStore.getState();
+  const connection = state.connections.find((entry) => entry.id === tab.connectionId);
+  const lines: string[] = [];
+  if (connection?.kind) lines.push(`-- Database engine: ${connection.kind}`);
+  const scope = [tab.database, tab.schema].filter(Boolean).join(".");
+  if (scope) lines.push(`-- Current scope: ${scope}`);
+
+  // Only the relations this statement already names. The whole catalog would be both enormous and
+  // mostly irrelevant, and the prefix has a hard character cap on the Rust side — spending it on
+  // two hundred tables the statement does not mention would push out the statement itself.
+  const named = referencedRelations(sql).slice(0, MAX_CONTEXT_RELATIONS);
+  const seen = new Set<string>();
+  for (const relation of named) {
+    const key = `${relation.schema ?? ""}.${relation.table}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const cached = state.children[nodeKey(tab.connectionId, columnRef(tab, relation))];
+    if (!cached || cached.length === 0) continue;
+    const columns = cached
+      .slice(0, MAX_CONTEXT_COLUMNS)
+      .map((node) => (node.column?.data_type ? `${node.name} ${node.column.data_type}` : node.name))
+      .join(", ");
+    lines.push(`-- Table ${relation.table}(${columns})`);
+  }
+
+  return lines.length > 0 ? `${lines.join("\n")}\n` : "";
+}
+
+/** Past this the header stops being context and starts being the prompt. */
+const MAX_CONTEXT_RELATIONS = 6;
+const MAX_CONTEXT_COLUMNS = 40;
 
 /**
  * Monaco's suggest controller, as much of it as this file uses.
@@ -742,4 +803,8 @@ export function installSqlCompletions(): void {
   });
 
   monaco.languages.registerCompletionItemProvider("sql", sqlProvider);
+  // And the header the local completion model gets for a `cf-db:` buffer. Registered from here so
+  // `lib/inlineCompletion` — which is installed at startup — does not have to import the database
+  // store to know how to build one. See `registerCompletionContext`.
+  registerCompletionContext("cf-db", sqlContextHeader);
 }

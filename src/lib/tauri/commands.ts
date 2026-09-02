@@ -180,6 +180,19 @@ export interface FolderScan {
  *  purpose: it stats one level and stops. */
 export const scanFolder = (path: string) => invoke<FolderScan>("scan_folder", { path });
 
+/**
+ * Of these repository folders, the ones that are no longer on disk.
+ *
+ * `local_path` is written once, when a project is added, and a folder moved or deleted from
+ * outside the app leaves the row pointing at nothing. Answers with the missing paths only, so the
+ * common case — everything present — is an empty array rather than a parallel list of `true`s.
+ *
+ * Asked in one call for the whole list on purpose: this runs on window focus, and twenty round
+ * trips per focus is twenty chances to stat a dead network mount one after another.
+ */
+export const missingProjectPaths = (paths: string[]) =>
+  invoke<string[]>("missing_project_paths", { paths });
+
 /** Why an incoming repository is the one the workspace already holds: literally the same folder,
  *  or a different folder cloned from the same remote. */
 export type DuplicateReason = "path" | "remote";

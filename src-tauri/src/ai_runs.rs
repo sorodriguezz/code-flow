@@ -46,6 +46,14 @@ const BATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// a firehose never builds a queue the user is waiting behind.
 const BATCH_MAX_LINES: usize = 32;
 
+/// How long a stopped run is given to exit on its own before it is killed outright.
+///
+/// Long enough for a Node CLI to flush its session file and shut its MCP servers down, short enough
+/// that Stop still reads as immediate — this is a button somebody just pressed, and a spinner that
+/// lingers for a second and a half is the longest anyone reads as "working on it".
+#[cfg(unix)]
+const TERM_GRACE: Duration = Duration::from_millis(1_500);
+
 #[derive(Clone)]
 pub struct RunCtx {
     pub app: AppHandle,
@@ -335,12 +343,25 @@ pub fn emit_line(ctx: &RunCtx, stream: &'static str, line: &str) {
     }
 }
 
-/// Kills a spawned CLI *and its children*.
+/// Stops a run's process **and everything it started**.
 ///
-/// `child.kill()` only signals the immediate process, which on Windows is usually a `.cmd` shim
-/// whose real work happens in a node grandchild — killing the shim there would leave the model
-/// call running and billing. `taskkill /T` takes the whole tree; on Unix the CLIs are the process
-/// we spawned, so the direct kill is the right one.
+/// `Child::kill` sends SIGKILL to exactly one process. That was this whole function on Unix, and it
+/// is why Stop appeared to do nothing on a run that had been going for a while: every engine here
+/// is a Node CLI that spawns children of its own — MCP servers, ripgrep, subagent processes — and a
+/// run that has just started has none of them yet while one twenty minutes in has a tree. Killing
+/// the root reparented the rest to init, where they carried on working and burning tokens with
+/// nothing on screen left to say so.
+///
+/// So the group is signalled rather than the process. `proc::own_process_group` is the other half:
+/// the child is spawned as its own group leader, which makes its pid the group id and makes this
+/// safe — a group signal cannot reach back into CodeFlow's own group.
+///
+/// **SIGTERM, a moment, then SIGKILL.** These CLIs flush a session file and release their MCP
+/// servers on SIGTERM, and a run stopped with SIGKILL alone can leave a half-written transcript
+/// behind. The grace period is short because Stop is a button somebody just pressed: anything still
+/// alive after it gets no further say.
+///
+/// Windows keeps `taskkill /T /F`, which walks the tree from a pid by itself.
 pub async fn kill_tree(child: &mut tokio::process::Child) {
     #[cfg(target_os = "windows")]
     if let Some(pid) = child.id() {
@@ -354,5 +375,26 @@ pub async fn kill_tree(child: &mut tokio::process::Child) {
             return;
         }
     }
+
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // The pid *is* the group id — see `proc::own_process_group`. A negative pid is how every
+        // Unix names a process group.
+        let group = -(pid as i32);
+        // SAFETY: `kill` is async-signal-safe and takes only integers. A group that has already
+        // exited answers `ESRCH`, which is why the result is discarded rather than checked: this is
+        // "make sure it is gone", not "report whether it was there".
+        unsafe { libc::kill(group, libc::SIGTERM) };
+        // Given a chance to leave cleanly, and no more than that.
+        if tokio::time::timeout(TERM_GRACE, child.wait()).await.is_ok() {
+            // The root is gone, but a descendant that ignored SIGTERM would still be running: the
+            // group signal below is what closes that off, and it costs nothing when the group is
+            // already empty.
+            unsafe { libc::kill(group, libc::SIGKILL) };
+            return;
+        }
+        unsafe { libc::kill(group, libc::SIGKILL) };
+    }
+
     let _ = child.kill().await;
 }

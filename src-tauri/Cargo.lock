@@ -783,6 +783,7 @@ dependencies = [
  "hickory-resolver",
  "hmac 0.12.1",
  "keyring",
+ "libc",
  "md-5 0.10.6",
  "mongodb",
  "notify",

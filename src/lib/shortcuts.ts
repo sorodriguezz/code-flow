@@ -1,6 +1,7 @@
 import { useUiStore, type ApiWorkspace, type MainView } from "../state/uiStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
+import { useMissingProjectsStore } from "../state/missingProjectsStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { useNavigationStore } from "../state/navigationStore";
 import { useEditorCommandStore } from "../state/editorCommandStore";
@@ -220,10 +221,17 @@ function saveActive(): void {
 function cycleProject(delta: number): void {
   const { activeWorkspaceId, projectsByWorkspace, activeProjectId, setActiveProject } =
     useWorkspaceStore.getState();
-  const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
-  if (projects.length < 2) return;
+  const all = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
+  // A repository whose folder is gone is not a stop on the way round. The sidebar already refuses
+  // to open one — see `missingProjectsStore` — and a shortcut that landed on it would put the git
+  // engine somewhere the row itself will not send it.
+  const { missing } = useMissingProjectsStore.getState();
+  const projects = all.filter((p) => !missing.has(p.local_path));
+  if (projects.length === 0) return;
   const index = projects.findIndex((p) => p.id === activeProjectId);
   const next = index < 0 ? 0 : (index + delta + projects.length) % projects.length;
+  // Covers both "there is only one repository" and "the cycle came back to where it started".
+  if (projects[next].id === activeProjectId) return;
   setActiveProject(projects[next].id);
 }
 

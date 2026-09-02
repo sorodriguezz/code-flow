@@ -1,12 +1,14 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "1.18.15",
+  "version": "1.18.16",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview",
     "dev:mobile": "vite --config vite.mobile.config.ts",
     "build:mobile": "vite build --config vite.mobile.config.ts",
@@ -54,6 +56,7 @@
     "monaco-editor": "^0.56.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^4.1.11"
   }
 }

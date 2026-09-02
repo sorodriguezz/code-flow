@@ -14,6 +14,7 @@ import {
   Eye,
   Folder,
   FolderInput,
+  FolderX,
   GitBranch,
   GitBranchPlus,
   GitFork,
@@ -39,6 +40,7 @@ import {
 } from "../../lib/holdReorder";
 import { useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useProjectMissing } from "../../state/missingProjectsStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -82,6 +84,7 @@ import { ConnectGitlabModal } from "./ConnectGitlabModal";
 import { CreatePrModal } from "./CreatePrModal";
 import { StashDiffModal } from "./StashDiffModal";
 import { pushErrorToast } from "../../state/toastStore";
+import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { riseDelay } from "../../lib/rise";
@@ -178,12 +181,102 @@ function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: ()
       {/* The chip's own colour, repeated in the tooltip. Folded down to 24px squares the projects
           are told apart by colour alone, so the label that names one should be carrying the same
           colour the eye followed to ask. */}
-      {projects.map((project, at) => {
-        const held = drag?.key === project.id;
-        const offset = drag ? (held ? drag.dy : slotShift(at, drag)) : 0;
-        return (
+      {projects.map((project, at) => (
+        <CollapsedProjectChip
+          key={project.id}
+          project={project}
+          at={at}
+          drag={drag}
+          reorder={reorder}
+          activeProjectId={activeProjectId}
+          onSelect={setActiveProject}
+        />
+      ))}
+      <Tooltip side="right" label={t("sidebar.addProject")}>
+        <button
+          onClick={onAdd}
+          aria-label={t("sidebar.addProject")}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+        >
+          <Plus size={13} />
+        </button>
+      </Tooltip>
+    </div>
+  );
+}
+
+/**
+ * One repository as a 24px square, and the folded rail's answer to a folder that is gone.
+ *
+ * Its own component only because the verdict is a hook: `useProjectMissing` cannot be called from
+ * inside the `.map` that used to draw these. What it buys beyond that is the chip keeping the same
+ * rule as the unfolded row — a missing repository is not openable and not draggable, and the one
+ * thing left on it is "take it off the list", which here *is* the chip rather than a control beside
+ * it. There is no room beside it: the rail is one chip wide by definition.
+ */
+function CollapsedProjectChip({
+  project,
+  at,
+  drag,
+  reorder,
+  activeProjectId,
+  onSelect,
+}: {
+  project: Project;
+  at: number;
+  drag: HoldReorder["drag"];
+  reorder: HoldReorder;
+  activeProjectId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const removeProject = useWorkspaceStore((s) => s.removeProject);
+  const missing = useProjectMissing(project.local_path);
+  const [removing, setRemoving] = useState(false);
+  const t = useT();
+
+  const held = drag?.key === project.id;
+  const offset = drag ? (held ? drag.dy : slotShift(at, drag)) : 0;
+
+  const removeMissing = async () => {
+    if (!(await confirmAction(t("settings.removeProjectConfirm", { name: project.name })))) return;
+    setRemoving(true);
+    try {
+      await removeProject(project.id, project.workspace_id);
+    } catch (err) {
+      pushErrorToast(String(err));
+      setRemoving(false);
+    }
+  };
+
+  if (missing) {
+    return (
+      <Tooltip
+        side="right"
+        label={project.name}
+        // Folded, the tooltip is the only prose the rail has. It carries the whole story, because
+        // the square underneath can only say "not this one" — and clicking it removes a project,
+        // which is not something to leave a user guessing at.
+        description={`${t("sidebar.projectMissing", { path: project.local_path })} ${t(
+          "sidebar.removeMissingProject",
+        )}`}
+        disabled={drag !== null}
+        leading={<FolderX size={12} className="shrink-0 text-[var(--cf-text-muted)]" />}
+      >
+        <button
+          onClick={() => void removeMissing()}
+          disabled={removing}
+          aria-label={`${project.name} — ${t("sidebar.removeMissingProject")}`}
+          style={riseDelay(at)}
+          className="cf-rise relative flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--cf-border)] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-40"
+        >
+          {removing ? <Loader2 size={12} className="animate-spin" /> : <FolderX size={12} />}
+        </button>
+      </Tooltip>
+    );
+  }
+
+  return (
           <Tooltip
-            key={project.id}
             side="right"
             label={project.name}
             description={t("sidebar.reorderHint")}
@@ -202,7 +295,7 @@ function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: ()
               onPointerDown={(e) => reorder.beginHold(e, at, project.id)}
               onClick={() => {
                 if (reorder.swallowsClick()) return;
-                setActiveProject(project.id);
+                onSelect(project.id);
               }}
               aria-label={project.name}
               aria-current={project.id === activeProjectId ? "true" : undefined}
@@ -233,18 +326,6 @@ function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: ()
               {reorder.arming === project.id && <HoldProgress shape="ring" />}
             </button>
           </Tooltip>
-        );
-      })}
-      <Tooltip side="right" label={t("sidebar.addProject")}>
-        <button
-          onClick={onAdd}
-          aria-label={t("sidebar.addProject")}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-        >
-          <Plus size={13} />
-        </button>
-      </Tooltip>
-    </div>
   );
 }
 
@@ -1091,7 +1172,13 @@ function ProjectRow({
 }) {
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
+  const removeProject = useWorkspaceStore((s) => s.removeProject);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
+  // The folder this row points at is gone. Everything below reads off this: the row stops being
+  // openable, draggable and unfoldable, and the strip of actions collapses to the one that still
+  // means something — take it off the list. Opening it was never going to work; it pointed the git
+  // engine at nothing and produced seven failures at once instead of naming the problem.
+  const missing = useProjectMissing(project.local_path);
   const branches = useRepoStore((s) => s.branches);
   const status = useRepoStore((s) => s.status);
   const checkoutBranch = useRepoStore((s) => s.checkoutBranch);
@@ -1122,6 +1209,7 @@ function ProjectRow({
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [openingVsCode, setOpeningVsCode] = useState(false);
+  const [removing, setRemoving] = useState(false);
   // Keyed on the repository and not on `branches`: this component stays mounted for inactive projects,
   // and the array is replaced on every filesystem-watcher tick. See `useIncremental`.
   const repoPath = useRepoStore((s) => s.repoPath);
@@ -1131,6 +1219,20 @@ function ProjectRow({
   const reduceMotion = useReducedMotion();
 
   const select = () => setActiveProject(project.id);
+
+  /** Takes the repository off the list. Nothing on disk is touched — there is nothing left to
+   *  touch, which is the whole reason this row is offering it. */
+  const removeMissing = async () => {
+    if (!(await confirmAction(t("settings.removeProjectConfirm", { name: project.name })))) return;
+    setRemoving(true);
+    try {
+      await removeProject(project.id, project.workspace_id);
+      // No `setRemoving(false)` on success: the row it belongs to is gone with the project.
+    } catch (err) {
+      pushErrorToast(String(err));
+      setRemoving(false);
+    }
+  };
 
   const otherWorkspaces = workspaces.filter((w) => w.id !== project.workspace_id);
 
@@ -1142,6 +1244,21 @@ function ProjectRow({
   const dropEdge =
     drag && drag.to === at && drag.from !== at ? (drag.from < drag.to ? "bottom" : "top") : null;
 
+  /**
+   * How the row is tinted, and whether it answers the pointer at all.
+   *
+   * A repository whose folder is gone gets neither the selection colours nor a hover: there is
+   * nothing to select and nothing to hover *for*. It keeps the muted text so it stays readable as
+   * a list entry, and everything that said "this is a thing you open" comes off.
+   */
+  const rowTone = missing
+    ? "cursor-default text-[var(--cf-text-muted)]"
+    : `${held ? "cursor-grabbing opacity-40" : "cursor-pointer"} ${
+        isActive
+          ? "text-[var(--cf-text)]"
+          : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      }`;
+
   return (
     <div>
       {/* The click target is the whole row, not just its label. The row is a strip of controls, so
@@ -1150,28 +1267,31 @@ function ProjectRow({
           doing nothing. Every control inside stops propagation, so each still means only itself. */}
       <div
         data-reorder={project.id}
-        onPointerDown={(e) => reorder.beginHold(e, at, project.id)}
+        // A repository that is not on disk is not something to pick up and rearrange either. The
+        // hold comes off with the click, so the row has exactly one gesture left on it — the bin.
+        onPointerDown={missing ? undefined : (e) => reorder.beginHold(e, at, project.id)}
         onClick={() => {
-          if (reorder.swallowsClick()) return;
+          if (missing || reorder.swallowsClick()) return;
           select();
         }}
+        // The one place the *reason* fits. The row itself can only afford the strike-through; the
+        // path is what turns "this is broken" into "I moved that folder last week".
+        title={missing ? t("sidebar.projectMissing", { path: project.local_path }) : undefined}
         style={riseDelay(at)}
-        className={`cf-rise group relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors ${
-          held ? "cursor-grabbing opacity-40" : "cursor-pointer"
-        } ${
-          isActive
-            ? "text-[var(--cf-text)]"
-            : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-        }`}
+        className={`cf-rise group relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors ${rowTone}`}
       >
         {/* The fill *slides* from the project you left to the one you picked, instead of blinking
             off one row and on at another — the same shared pill the Settings nav uses, and the same
             spring, so the two selections in the app move at one speed. The rows stay mounted while
-            it travels, which is the condition the tween needs (see `ActivePill`). */}
-        {isActive && <ActivePill layoutId="cf-project-pill" radius="rounded-lg" />}
+            it travels, which is the condition the tween needs (see `ActivePill`).
+
+            Not drawn on a missing repository even while it is still the active one: the folder
+            disappearing under an open project is exactly the case where "this is the repo
+            everything else on screen is about" has stopped being true. */}
+        {isActive && !missing && <ActivePill layoutId="cf-project-pill" radius="rounded-lg" />}
         {/* After the pill, so the hold reads on the open repository too — which is the one most
             likely to be dragged, and the one whose selection fill would otherwise cover it. */}
-        {reorder.arming === project.id && <HoldProgress shape="bar" />}
+        {!missing && reorder.arming === project.id && <HoldProgress shape="bar" />}
         {dropEdge && (
           <span
             aria-hidden
@@ -1180,86 +1300,133 @@ function ProjectRow({
             }`}
           />
         )}
-        <button
-          title={t("sidebar.revealInFileManager")}
-          // A press on a control that does its own thing is not a press on the row: without this,
-          // resting on the folder chip long enough picks the repository up instead.
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={async (e) => {
-            e.stopPropagation();
-            setRevealing(true);
-            try {
-              await revealInFileManager(project.local_path);
-            } finally {
-              setRevealing(false);
-            }
-          }}
-          // `cf-chip-button` rings the square on hover (see index.css) — without it the chip was
-          // the one control in the row that gave no sign of being one.
-          //
-          // Dimmed while this isn't the open project, the same as the folded rail does it. The row
-          // already says which one is open twice — a tinted background and a brighter label — but
-          // the chip is the most saturated thing in the whole column, and four of them at full
-          // strength drowned both. On hover it comes back, so pointing at a row still shows its
-          // colour as it really is.
-          className={`cf-chip-button relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-white transition-opacity ${
-            isActive ? "" : "opacity-60 group-hover:opacity-100"
-          }`}
-          style={{ background: project.color }}
-        >
-          {revealing ? <Loader2 size={12} className="animate-spin" /> : <Folder size={12} />}
-        </button>
-        {/* Kept as a button so the row is still reachable and activatable from the keyboard — the
-            container's handler covers the pointer, this covers focus. `stopPropagation` so a click
-            landing on the name selects once rather than twice. */}
-        {/* No `onPointerDown` guard here, unlike the chips either side of it: the name is most of
-            the row's width and the natural place to grab it, so the hold has to reach through. The
-            click it swallows afterwards is this button's own — it stops propagation, so the row's
-            handler never runs and exactly one of the two consumes the flag. */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            if (reorder.swallowsClick()) return;
-            select();
-          }}
-          className="relative flex min-w-0 flex-1 items-center gap-2 self-stretch text-left"
-        >
-          <span className="min-w-0 flex-1 truncate font-medium">{project.name}</span>
-        </button>
-        {/* Both row actions wear the same square as the "clone" and "add repository" chips above
-            the list — `h-5 w-5`, rounded, with a hover fill — so a control that only appears on
-            row hover still says it is one once it's there. They were bare icons, which lit up
-            nothing at all under the pointer. */}
-        <button
-          title={t("sidebar.openInVsCode")}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={async (e) => {
-            e.stopPropagation();
-            setOpeningVsCode(true);
-            try {
-              await openInVsCode(project.local_path);
-            } catch (err) {
-              pushErrorToast(String(err));
-            } finally {
-              setOpeningVsCode(false);
-            }
-          }}
-          className={ROW_ACTION_CLASS}
-        >
-          {openingVsCode ? <Loader2 size={13} className="animate-spin" /> : <Code2 size={13} />}
-        </button>
-        {otherWorkspaces.length > 0 && (
+        {missing ? (
+          // In place of the reveal button, not beside it: there is no folder to reveal, and a
+          // control that opens a file manager on nothing is worse than no control. It also drops
+          // the project's colour, which is the most saturated thing in the row — a repository that
+          // cannot be opened should not be the first thing the eye lands on in the list.
+          <span
+            aria-hidden
+            className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)]"
+          >
+            <FolderX size={13} />
+          </span>
+        ) : (
           <button
-            title={t("sidebar.moveToWorkspace")}
+            title={t("sidebar.revealInFileManager")}
+            // A press on a control that does its own thing is not a press on the row: without this,
+            // resting on the folder chip long enough picks the repository up instead.
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={async (e) => {
+              e.stopPropagation();
+              setRevealing(true);
+              try {
+                await revealInFileManager(project.local_path);
+              } finally {
+                setRevealing(false);
+              }
+            }}
+            // `cf-chip-button` rings the square on hover (see index.css) — without it the chip was
+            // the one control in the row that gave no sign of being one.
+            //
+            // Dimmed while this isn't the open project, the same as the folded rail does it. The row
+            // already says which one is open twice — a tinted background and a brighter label — but
+            // the chip is the most saturated thing in the whole column, and four of them at full
+            // strength drowned both. On hover it comes back, so pointing at a row still shows its
+            // colour as it really is.
+            className={`cf-chip-button relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-white transition-opacity ${
+              isActive ? "" : "opacity-60 group-hover:opacity-100"
+            }`}
+            style={{ background: project.color }}
+          >
+            {revealing ? <Loader2 size={12} className="animate-spin" /> : <Folder size={12} />}
+          </button>
+        )}
+        {missing ? (
+          // A span, not a button: a disabled button is still a tab stop's worth of furniture
+          // promising something, and the strike-through is the whole message. Screen readers get
+          // the same sentence the pointer gets, since the row's `title` is not announced.
+          <span className="relative flex min-w-0 flex-1 items-center gap-2 self-stretch">
+            <span className="min-w-0 flex-1 truncate font-medium line-through decoration-[1.5px]">
+              {project.name}
+            </span>
+            <span className="sr-only">{t("sidebar.projectMissing", { path: project.local_path })}</span>
+          </span>
+        ) : (
+          <>
+            {/* Kept as a button so the row is still reachable and activatable from the keyboard — the
+                container's handler covers the pointer, this covers focus. `stopPropagation` so a click
+                landing on the name selects once rather than twice. */}
+            {/* No `onPointerDown` guard here, unlike the chips either side of it: the name is most of
+                the row's width and the natural place to grab it, so the hold has to reach through. The
+                click it swallows afterwards is this button's own — it stops propagation, so the row's
+                handler never runs and exactly one of the two consumes the flag. */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (reorder.swallowsClick()) return;
+                select();
+              }}
+              className="relative flex min-w-0 flex-1 items-center gap-2 self-stretch text-left"
+            >
+              <span className="min-w-0 flex-1 truncate font-medium">{project.name}</span>
+            </button>
+          </>
+        )}
+        {missing ? (
+          // The one action left, and the only one in this row that is not hover-revealed: a row
+          // that has lost everything else it could do must not also hide the thing it can.
+          <button
+            title={t("sidebar.removeMissingProject")}
+            aria-label={t("sidebar.removeMissingProject")}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
-              setShowMoveModal(true);
+              void removeMissing();
             }}
-            className={ROW_ACTION_CLASS}
+            disabled={removing}
+            className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
           >
-            <FolderInput size={13} />
+            {removing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
           </button>
+        ) : (
+          <>
+            {/* Both row actions wear the same square as the "clone" and "add repository" chips above
+                the list — `h-5 w-5`, rounded, with a hover fill — so a control that only appears on
+                row hover still says it is one once it's there. They were bare icons, which lit up
+                nothing at all under the pointer. */}
+            <button
+              title={t("sidebar.openInVsCode")}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={async (e) => {
+                e.stopPropagation();
+                setOpeningVsCode(true);
+                try {
+                  await openInVsCode(project.local_path);
+                } catch (err) {
+                  pushErrorToast(String(err));
+                } finally {
+                  setOpeningVsCode(false);
+                }
+              }}
+              className={ROW_ACTION_CLASS}
+            >
+              {openingVsCode ? <Loader2 size={13} className="animate-spin" /> : <Code2 size={13} />}
+            </button>
+            {otherWorkspaces.length > 0 && (
+              <button
+                title={t("sidebar.moveToWorkspace")}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowMoveModal(true);
+                }}
+                className={ROW_ACTION_CLASS}
+              >
+                <FolderInput size={13} />
+              </button>
+            )}
+          </>
         )}
       </div>
 
@@ -1271,7 +1438,12 @@ function ProjectRow({
           slide down with it rather than being shoved. `initial={false}` keeps the app's first paint
           from playing it: on launch there is no previous project to have come from. */}
       <AnimatePresence initial={false}>
-        {isActive && (
+        {/* `!missing` for the same reason the pill above comes off: branches, stashes and pull
+            requests read from `repoStore`, which is still pointed at the folder that vanished, so
+            what would unfold under a struck-out row is the last thing it managed to read before the
+            folder went. It folds away rather than disappearing, because the exit animation is the
+            one thing here that still works. */}
+        {isActive && !missing && (
           <motion.div
             key="project-tree"
             initial={{ height: 0, opacity: 0 }}

@@ -86,6 +86,17 @@ export function createTemplate(
   return `CREATE TABLE ${target} (\n${id},\n  ${quote("nombre", kind)} VARCHAR(120) NOT NULL,\n${stamp}\n)`;
 }
 
+/**
+ * One identifier, quoted the way this engine spells them.
+ *
+ * Exported because the drop actions (`lib/db/dropObject.ts`) name schemas, which have no `DbNode`
+ * for `objectReference` to qualify — and a second quoting rule written next door is a second
+ * quoting rule to get wrong on SQL Server.
+ */
+export function quoteIdent(name: string, kind: DbKind): string {
+  return quote(name, kind);
+}
+
 function quote(name: string, kind: DbKind): string {
   if (kind === "sqlserver") return `[${name.replace(/]/g, "]]")}]`;
   return `"${name.replace(/"/g, '""')}"`;

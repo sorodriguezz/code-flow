@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import type { editor as MonacoEditorNS, languages, Position } from "monaco-editor";
+import type { IRange, editor as MonacoEditorNS, languages, Position } from "monaco-editor";
 import type { Monaco } from "@monaco-editor/react";
 import {
   TS_LANGUAGES,
@@ -11,6 +11,7 @@ import {
   tsRequest,
   tsStart,
   type TsCompletionDetail,
+  type TsCodeFixAction,
   type TsDiagnostic,
   type TsCompletionInfo,
   type TsDefinitionInfo,
@@ -169,6 +170,154 @@ function modelUriFor(monaco: Monaco, file: string) {
  * nothing to collide with — and a `useId` would be a per-pane id on a registration that is not.
  */
 const INSTALL_COMMAND = "cf.npm.installMissing";
+
+/**
+ * The diagnostic codes worth asking the compiler for a fix on, restricted to the ones this quick
+ * fix exists for.
+ *
+ * **`getCodeFixes` is asked per error code, and asking for all of them is not free**: tsserver
+ * computes every registered fix for every code it is handed, and the import fixes alone walk the
+ * whole module graph. So the list is the "this name is not defined here" family and nothing else —
+ * which is exactly the set that `@Module`, `@Column` and `@Entity` land in.
+ *
+ * - `2304` cannot find name — the ordinary case, an undecorated `Module` with no import.
+ * - `2552` / `2551` cannot find name, did you mean… — the same thing with a near miss suggested.
+ * - `2503` cannot find namespace, for `Foo.Bar` used as a type.
+ * - `2686` refers to a UMD global — a `.tsx` using `React` under `isolatedModules`.
+ * - `2osen`… no: `2663` / `2662` are the class-member forms, and `2724` is "has no exported member
+ *   named X, did you mean Y", which is the fix that *rewrites* an existing import.
+ * - `18004` no value exists for the shorthand property, which is `{ Module }` written by hand.
+ *
+ * Everything else Ctrl+. could offer — remove-unused, implement-interface, add-missing-member — is
+ * deliberately out of scope here. They are worth having and they are a different set of codes; this
+ * is the one the user cannot work around, because the alternative is knowing which package a
+ * decorator came from.
+ */
+const IMPORT_FIX_CODES = [2304, 2551, 2552, 2503, 2662, 2663, 2686, 2724, 18004];
+
+/**
+ * "Import X from 'y'" — the fix the compiler already knows and nothing here used to ask for.
+ *
+ * The gap this closes: the editor could *complete* a name into an import (see `resolveCompletionItem`,
+ * where `codeActions` rides along with the completion), but only while the name was being typed.
+ * A name already written — pasted in, or typed before the package was installed — had a red
+ * underline and no lightbulb, so `@Module` from `@nestjs/common` and `@Column` from `typeorm` were
+ * something you had to know by heart and write by hand. `getCodeFixes` is the same machinery from
+ * the other end, and the compiler's answer names the real module, from this project's real
+ * `node_modules` and `paths` mapping, rather than a guess.
+ *
+ * **The whole answer is applied, including changes to other files.** That is the opposite of the
+ * rule `resolveCompletionItem` follows, and deliberately: a completion is a keystroke and must not
+ * quietly rewrite a file you are not looking at, while a quick fix is an explicit choice from a
+ * menu that named what it was going to do. In practice an import fix only ever touches this file;
+ * the others are edits the user asked for. A file outside the repository is still dropped — there
+ * is no model this app could edit for it (see `modelUriFor`).
+ */
+async function compilerFixes(
+  monaco: Monaco,
+  model: MonacoEditorNS.ITextModel,
+  range: IRange,
+  context: languages.CodeActionContext,
+): Promise<languages.CodeAction[]> {
+  const file = fileOf(model);
+  if (!file || !running) return [];
+  // A request for one specific kind — the "fix all on save" family, `source.*` — is not this. Left
+  // unguarded it would be a tsserver round trip per save that can only ever produce quick fixes
+  // Monaco then filters out.
+  if (context.only && !context.only.startsWith("quickfix")) return [];
+
+  // Only the markers this request is actually about — Monaco hands over the ones intersecting the
+  // range, which for a Ctrl+. is the caret's line. `code` is written as `TS2304` where the protocol
+  // wants the number; see where the markers are built.
+  const codes = new Set<number>();
+  const diagnostics: MonacoEditorNS.IMarkerData[] = [];
+  for (const marker of context.markers) {
+    const numeric = Number(String(marker.code ?? "").replace(/^TS/i, ""));
+    if (!IMPORT_FIX_CODES.includes(numeric)) continue;
+    codes.add(numeric);
+    diagnostics.push(marker);
+  }
+  if (codes.size === 0) return [];
+
+  // The span asked about is the diagnostics' own, widened to cover all of them — not the caret
+  // range Monaco handed over. `getCodeFixes` answers for errors whose span *intersects* what it is
+  // given, and a Ctrl+. with nothing selected is a zero-width range: it happens to intersect a name
+  // it sits inside, and happens not to when the caret is one character past the end of it. Asking
+  // about the underline itself is the version that cannot be off by one.
+  const span = diagnostics.reduce(
+    (acc, marker) => ({
+      startLineNumber: Math.min(acc.startLineNumber, marker.startLineNumber),
+      startColumn:
+        marker.startLineNumber < acc.startLineNumber
+          ? marker.startColumn
+          : Math.min(acc.startColumn, marker.startColumn),
+      endLineNumber: Math.max(acc.endLineNumber, marker.endLineNumber),
+      endColumn:
+        marker.endLineNumber > acc.endLineNumber
+          ? marker.endColumn
+          : Math.max(acc.endColumn, marker.endColumn),
+    }),
+    {
+      startLineNumber: range.startLineNumber,
+      startColumn: range.startColumn,
+      endLineNumber: range.endLineNumber,
+      endColumn: range.endColumn,
+    },
+  );
+
+  const fixes = await tsRequest<TsCodeFixAction[]>("getCodeFixes", {
+    file,
+    startLine: span.startLineNumber,
+    startOffset: span.startColumn,
+    endLine: span.endLineNumber,
+    endOffset: span.endColumn,
+    errorCodes: [...codes],
+  }).catch(() => null);
+  if (!fixes || fixes.length === 0) return [];
+
+  const actions: languages.CodeAction[] = [];
+  for (const fix of fixes) {
+    const edits: languages.IWorkspaceTextEdit[] = [];
+    for (const change of fix.changes) {
+      const uri = change.fileName === file ? model.uri : modelUriFor(monaco, change.fileName);
+      if (!uri) continue;
+      for (const edit of change.textChanges) {
+        edits.push({
+          resource: uri,
+          versionId: undefined,
+          textEdit: {
+            range: new monaco.Range(
+              edit.start.line,
+              edit.start.offset,
+              edit.end.line,
+              edit.end.offset,
+            ),
+            text: edit.newText,
+          },
+        });
+      }
+    }
+    // A fix whose every change landed outside the repository has nothing left to apply, and an
+    // empty action in the menu is a row that does nothing when you pick it.
+    if (edits.length === 0) continue;
+    actions.push({
+      // tsserver's own sentence, which already reads as a menu row ("Import 'Module' from
+      // \"@nestjs/common\"") and — unlike anything written here — names the module it found.
+      title: fix.description,
+      kind: "quickfix",
+      diagnostics,
+      // The import is what you came for. `isPreferred` is what puts it under the caret when Ctrl+.
+      // opens, and what makes "fix this" without reading the list do the right thing.
+      isPreferred: fix.fixName === "import",
+      edit: { edits },
+    });
+  }
+  // Imports first whatever order the server answered in: with several fixes offered for one name,
+  // the other kinds are consolation prizes.
+  return actions.sort(
+    (a, b) => Number(b.isPreferred ?? false) - Number(a.isPreferred ?? false),
+  );
+}
 
 /**
  * Everything tsserver answers, installed once for the whole app.
@@ -355,9 +504,9 @@ function installProviders(monaco: Monaco): void {
   );
 
   monaco.languages.registerCodeActionProvider(TS_LANGUAGES, {
-    provideCodeActions: (
+    provideCodeActions: async (
       model: MonacoEditorNS.ITextModel,
-      _range: unknown,
+      range: IRange,
       context: languages.CodeActionContext,
     ) => {
       const project = current;
@@ -378,6 +527,7 @@ function installProviders(monaco: Monaco): void {
           command: { id: INSTALL_COMMAND, title: "install", arguments: [wanted.name, wanted.dev] },
         });
       }
+      actions.push(...(await compilerFixes(monaco, model, range, context)));
       return { actions, dispose: () => undefined };
     },
   });

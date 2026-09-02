@@ -10,8 +10,12 @@ import {
   useState,
 } from "react";
 import { clip, edgeEnds, edgePath } from "../../lib/diagramSvg";
-import { layoutDbml, type DbmlLayout } from "../../lib/dbml/layout";
+import { layoutDbml, type DbmlLayout, type DbmlMarkKind, type DbmlMarks } from "../../lib/dbml/layout";
 import { highlightFor, type DbmlSchema } from "../../lib/dbml/types";
+import { ArrowLeftRight, Eraser, ListOrdered, Pencil, Plus, Table2, Trash2 } from "lucide-react";
+import type { RefEnd } from "../../lib/dbml/edit";
+import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { useT } from "../../state/languageStore";
 import type { DbDiagramColumn } from "../../types/database";
 import type { DiagramColumnMode, DiagramDensity, DiagramNode } from "../../lib/db/erLayout";
 
@@ -73,6 +77,22 @@ const LINK_COLOUR = "var(--cf-blue)";
 const ENUM_COLOUR = "var(--cf-violet)";
 
 /**
+ * The review marks: a fourth colour family, and the only one that means a *decision* rather than a
+ * property of the schema.
+ *
+ * It reuses `--cf-warning`, which is also the PK badge's. That is allowed here and is not a repeat
+ * of the mistake the legend note above describes: the rule there is that the badges must be
+ * distinct **from each other**, because they sit side by side on one row. A mark never appears on a
+ * column row — it is a spine down the box's left edge and a dot in its header — so it is never read
+ * against a PK badge, and the three semantic colours are the ones a reader already knows.
+ */
+const MARK_COLOUR: Record<DbmlMarkKind, string> = {
+  remove: "var(--cf-danger)",
+  review: "var(--cf-warning)",
+  keep: "var(--cf-success)",
+};
+
+/**
  * The face the cards are set in.
  *
  * Monospace, like the document they are drawn from: a column list is a list of identifiers, and the
@@ -126,6 +146,36 @@ export const DbmlCanvas = forwardRef<
     query?: string;
     /** How many tables the query matched, for a toolbar that wants to say so. */
     onMatchCount?: (count: number) => void;
+    /** Review marks, by table id and by ref id. Drawn whether or not the canvas is editable. */
+    marks?: DbmlMarks;
+    /**
+     * Turns the canvas into something you can build a schema on. Omitted by the read-only callers
+     * (`DiagramAiPanel`, `editor/DbmlDiagram`), which then get exactly the canvas they had.
+     *
+     * Optional as a whole rather than a flag plus a pile of handlers, for the same reason
+     * `onMoveTable` is: the canvas asks "may I", the answer is the presence of the callback, and a
+     * caller that has nothing to write to cannot accidentally be asked to.
+     */
+    editing?: {
+      blocked: boolean;
+      /**
+       * Sets or clears a review mark. `null` clears.
+       *
+       * Deliberately *not* gated on `blocked`: every other operation here rewrites DBML and so
+       * cannot run against a schema that no longer describes the text, but a mark is written to the
+       * sidecar comment and touches no DBML at all. Reviewing a model is exactly the activity you
+       * are doing when the document is half-typed, so this is the one control that stays live.
+       */
+      setMark: (id: string, mark: DbmlMarkKind | null) => void;
+      connect: (from: RefEnd, to: RefEnd) => void;
+      rename: (from: string, to: string) => void;
+      addField: (table: string) => void;
+      dropTable: (name: string) => void;
+      addTable: () => void;
+      addEnum: () => void;
+      dropRef: (from: RefEnd, to: RefEnd) => void;
+      flipRef: (from: RefEnd, to: RefEnd) => void;
+    };
     className?: string;
   }
 >(function DbmlCanvas(
@@ -141,10 +191,13 @@ export const DbmlCanvas = forwardRef<
     density,
     query = "",
     onMatchCount,
+    marks = {},
+    editing,
     className,
   },
   ref,
 ) {
+  const t = useT();
   const frameRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const canvasRef = useRef<SVGGElement>(null);
@@ -154,12 +207,32 @@ export const DbmlCanvas = forwardRef<
   const dragRef = useRef<
     | { kind: "canvas"; x: number; y: number; viewX: number; viewY: number; moved: boolean }
     | { kind: "node"; id: string; x: number; y: number; nodeX: number; nodeY: number; moved: boolean }
+    // Dragging a relationship out of a column. Carries the diagram-space point it started from so
+    // the provisional line has an anchor that survives a pan mid-gesture.
+    | { kind: "port"; from: RefEnd; fromId: string; ox: number; oy: number; moved: boolean }
     | null
   >(null);
   /** The table under the pointer, which previews the selection its click would make. */
   const [hovered, setHovered] = useState<string | null>(null);
   /** The *line* under the pointer, by ref id. Its own state because it feeds a different question. */
   const [hoveredLink, setHoveredLink] = useState<string | null>(null);
+  /** The row under the pointer, `"<tableId>|<column>"`, so its connect handle can appear. */
+  const [hoveredRow, setHoveredRow] = useState<string | null>(null);
+  /** The live end of a relationship being dragged out, in diagram space. */
+  const [wire, setWire] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
+  /** Where a right-click landed and what it landed on. */
+  const [menu, setMenu] = useState<
+    | { x: number; y: number; on: { kind: "table"; id: string; name: string; mark?: DbmlMarkKind } }
+    | {
+        x: number;
+        y: number;
+        on: { kind: "ref"; id: string; from: RefEnd; to: RefEnd; mark?: DbmlMarkKind };
+      }
+    | { x: number; y: number; on: { kind: "canvas" } }
+    | null
+  >(null);
+  /** The table whose name is being typed over, and the box it sits in. */
+  const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
   /** The current search hits and which one Enter last landed on. Refs, not state: they drive an
    *  imperative move and nothing on screen reads them. */
   const matchRef = useRef<string[]>([]);
@@ -172,6 +245,53 @@ export const DbmlCanvas = forwardRef<
   const nodeById = useMemo(
     () => new Map(layout.nodes.map((node) => [node.id, node])),
     [layout.nodes],
+  );
+
+  /** A client point in the diagram's own coordinates — the inverse of the group's transform. */
+  const toDiagram = useCallback((clientX: number, clientY: number) => {
+    const box = frameRef.current?.getBoundingClientRect();
+    const view = viewRef.current;
+    return {
+      x: (clientX - (box?.left ?? 0) - view.x) / view.k,
+      y: (clientY - (box?.top ?? 0) - view.y) / view.k,
+    };
+  }, []);
+
+  /**
+   * The column row at a diagram point, or `null`.
+   *
+   * Arithmetic rather than `elementFromPoint`, because the whole gesture happens under a pointer
+   * capture: from the moment the drag starts the browser sends every event to the frame and stops
+   * hit-testing the rows underneath, so asking the DOM what is beneath the cursor answers "the
+   * frame" for the entire drag. The rows are on a grid this component defines, so the grid is what
+   * it reads.
+   */
+  const rowAt = useCallback(
+    (point: { x: number; y: number }): { node: DiagramNode; column: string } | null => {
+      for (const node of layout.nodes) {
+        if (point.x < node.x || point.x > node.x + node.width) continue;
+        if (point.y < node.y + HEADER_H || point.y > node.y + node.height) continue;
+        const index = Math.floor((point.y - node.y - HEADER_H) / ROW_H);
+        const column = node.visible[index];
+        if (column) return { node, column: column.name };
+      }
+      return null;
+    },
+    [layout.nodes],
+  );
+
+  /** The two ends of a link, as the edit operations name them. */
+  const endsOf = useCallback(
+    (constraint: string): { from: RefEnd; to: RefEnd } | null => {
+      const ref = schema.refs.find((entry) => entry.id === constraint);
+      if (!ref) return null;
+      const name = (id: string) => nodeById.get(id)?.name ?? id;
+      return {
+        from: { table: name(ref.from.table), column: ref.from.fields[0] },
+        to: { table: name(ref.to.table), column: ref.to.fields[0] },
+      };
+    },
+    [schema.refs, nodeById],
   );
 
   // Held in refs so the two readouts are not dependencies of every callback that pans or searches.
@@ -367,9 +487,37 @@ export const DbmlCanvas = forwardRef<
     if (node) onSelect(node.id);
   };
 
+  /** Begins dragging a relationship out of one column. */
+  const startWire = (event: React.PointerEvent, node: DiagramNode, column: string, cy: number) => {
+    if (event.button !== 0 || !editing || editing.blocked) return;
+    event.stopPropagation();
+    event.preventDefault();
+    frameRef.current?.setPointerCapture?.(event.pointerId);
+    const ox = node.x + node.width;
+    const oy = node.y + cy;
+    dragRef.current = {
+      kind: "port",
+      from: { table: node.name, column },
+      fromId: node.id,
+      ox,
+      oy,
+      moved: false,
+    };
+    setWire({ x1: ox, y1: oy, x2: ox, y2: oy });
+  };
+
   const onPointerMove = (event: React.PointerEvent) => {
     const drag = dragRef.current;
     if (!drag) return;
+    if (drag.kind === "port") {
+      drag.moved = true;
+      const point = toDiagram(event.clientX, event.clientY);
+      setWire({ x1: drag.ox, y1: drag.oy, x2: point.x, y2: point.y });
+      // The row it would land on lights up, so the drop target is visible before the release.
+      const over = rowAt(point);
+      setHoveredRow(over ? `${over.node.id}|${over.column}` : null);
+      return;
+    }
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
     if (drag.kind === "canvas") {
@@ -383,8 +531,20 @@ export const DbmlCanvas = forwardRef<
     onMoveTable(drag.id, Math.round(drag.nodeX + dx / viewRef.current.k), Math.round(drag.nodeY + dy / viewRef.current.k));
   };
 
-  const endDrag = () => {
+  const endDrag = (event?: React.PointerEvent) => {
     const drag = dragRef.current;
+    if (drag?.kind === "port") {
+      dragRef.current = null;
+      setWire(null);
+      setHoveredRow(null);
+      if (!event) return;
+      const over = rowAt(toDiagram(event.clientX, event.clientY));
+      // Dropping on the column it came from is how you abandon the gesture, so it is not an error.
+      if (over && over.node.id !== drag.fromId) {
+        editing?.connect(drag.from, { table: over.node.name, column: over.column });
+      }
+      return;
+    }
     if (drag?.kind === "canvas") commitView();
     // A gesture that actually moved almost certainly left the line it started on — and it cannot
     // tell us so itself, because while the pointer is captured the browser stops delivering
@@ -433,6 +593,32 @@ export const DbmlCanvas = forwardRef<
   const matches = useMemo(() => (matchIds ? new Set(matchIds) : null), [matchIds]);
 
   /**
+   * The boxes in painting order: receded first, selected last.
+   *
+   * SVG has no `z-index` — document order is the only thing that decides what covers what — so a
+   * canvas whose boxes may overlap has to sort them itself. Drawing them in layout order meant the
+   * one on top was whichever the layout engine happened to emit last, so selecting a table could
+   * leave it *behind* an unrelated one: the thing you had just asked to look at was the thing
+   * partly hidden.
+   *
+   * Four ranks rather than two, because "in front" has more than one degree here: the selection
+   * outranks its neighbourhood, the neighbourhood outranks tables that are merely present, and
+   * anything receded goes to the back where it belongs. `sort` is stable, so tables of equal rank
+   * keep the order the layout gave them and nothing shuffles as the pointer moves across the
+   * canvas.
+   */
+  const painted = useMemo(() => {
+    const rank = (id: string) => {
+      if (selected === id) return 3;
+      if (highlight?.tables.has(id)) return 2;
+      const receded =
+        (highlight !== null && !highlight.tables.has(id)) || (matches !== null && !matches.has(id));
+      return receded ? 0 : 1;
+    };
+    return [...layout.nodes].sort((a, b) => rank(a.id) - rank(b.id));
+  }, [layout.nodes, selected, highlight, matches]);
+
+  /**
    * Centres on the first hit as the query changes — and only when the *set of hits* changes.
    *
    * Keyed on the ids rather than on the array, because the layout is rebuilt on every keystroke of
@@ -467,10 +653,19 @@ export const DbmlCanvas = forwardRef<
       }}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
-      onPointerCancel={endDrag}
+      onPointerCancel={() => endDrag()}
+      onContextMenu={
+        editing
+          ? (event) => {
+              event.preventDefault();
+              setMenu({ x: event.clientX, y: event.clientY, on: { kind: "canvas" } });
+            }
+          : undefined
+      }
       onPointerLeave={() => {
         setHovered(null);
         setHoveredLink(null);
+        setHoveredRow(null);
       }}
       // `select-none` on the class *and* the property here, and a `preventDefault` on the press
       // below. Any one of the three left out and dragging a box runs the browser's own text
@@ -505,20 +700,30 @@ export const DbmlCanvas = forwardRef<
             <feDropShadow
               dx="0"
               dy="0"
-              stdDeviation="8"
+              stdDeviation="9"
               floodColor="var(--cf-accent)"
-              floodOpacity="0.42"
-              style={{ floodColor: "var(--cf-accent)", floodOpacity: 0.42 }}
+              floodOpacity="0.5"
+              style={{ floodColor: "var(--cf-accent)", floodOpacity: 0.5 }}
             />
           </filter>
+          {/* The neighbourhood's halo, and it is deliberately *far* below the one above rather than
+              a step down from it.
+
+              Both haloes are the same hue, so the only thing separating "the table I clicked" from
+              "the five it joins" is how much light each throws. At a quarter of the selection's
+              strength — instead of the two thirds this used to be — the neighbours still read as a
+              lit set, but the eye lands on the selection first and without effort. The rest of what
+              marks a neighbour is untouched: it keeps the accent border, the lit header band and
+              the wash on its joined columns, which is what stops the smaller halo from reading as
+              "not selected either". */}
           <filter id="cf-dbml-glow-soft" x="-45%" y="-45%" width="190%" height="190%">
             <feDropShadow
               dx="0"
               dy="0"
-              stdDeviation="6"
+              stdDeviation="4"
               floodColor="var(--cf-accent)"
-              floodOpacity="0.26"
-              style={{ floodColor: "var(--cf-accent)", floodOpacity: 0.26 }}
+              floodOpacity="0.12"
+              style={{ floodColor: "var(--cf-accent)", floodOpacity: 0.12 }}
             />
           </filter>
         </defs>
@@ -585,6 +790,11 @@ export const DbmlCanvas = forwardRef<
             const ends = edgeEnds(from, to, link.fromColumn, link.toColumn);
             const opacity = dim ? 0.16 : lit ? 0.95 : 0.42;
             const d = edgePath(from, to, link.fromColumn, link.toColumn);
+            // A marked relationship is drawn in its mark's colour rather than the accent, and a
+            // removal candidate is dashed as well — at the zoom where a whole model fits, colour
+            // alone is a few pixels of hue on a hairline and the dash is what carries.
+            const mark = marks[link.constraint];
+            const stroke = mark ? MARK_COLOUR[mark] : "var(--cf-accent)";
             return (
               <g key={link.id}>
                 {/* The part you can actually hit. A 1.4px curve is not a pointer target at any
@@ -597,6 +807,27 @@ export const DbmlCanvas = forwardRef<
                   strokeWidth={14}
                   pointerEvents="stroke"
                   style={{ cursor: "pointer" }}
+                  onContextMenu={
+                    editing
+                      ? (event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const ends = endsOf(link.constraint);
+                          if (ends) {
+                            setMenu({
+                              x: event.clientX,
+                              y: event.clientY,
+                              on: {
+                                kind: "ref",
+                                id: link.constraint,
+                                mark: marks[link.constraint],
+                                ...ends,
+                              },
+                            });
+                          }
+                        }
+                      : undefined
+                  }
                   onPointerEnter={() => setHoveredLink(link.constraint)}
                   onPointerLeave={() =>
                     setHoveredLink((current) =>
@@ -610,14 +841,15 @@ export const DbmlCanvas = forwardRef<
                   <path
                     d={d}
                     fill="none"
-                    stroke="var(--cf-accent)"
+                    stroke={stroke}
                     strokeWidth={lit ? 2 : 1.4}
                     strokeLinecap="round"
+                    strokeDasharray={mark === "remove" ? "5 4" : undefined}
                   />
                   {/* Dots rather than an arrowhead: the direction is already in the badges and the
                       cardinality, and a head large enough to see at 40% zoom is a blob at 200%. */}
-                  <circle cx={ends.x1} cy={ends.y1} r={lit ? 3.4 : 2.6} fill="var(--cf-accent)" />
-                  <circle cx={ends.x2} cy={ends.y2} r={lit ? 3.4 : 2.6} fill="var(--cf-accent)" />
+                  <circle cx={ends.x1} cy={ends.y1} r={lit ? 3.4 : 2.6} fill={stroke} />
+                  <circle cx={ends.x2} cy={ends.y2} r={lit ? 3.4 : 2.6} fill={stroke} />
                 </g>
               </g>
             );
@@ -651,12 +883,42 @@ export const DbmlCanvas = forwardRef<
               );
             })}
 
-          {layout.nodes.map((node) => (
+          {painted.map((node) => (
             <SchemaBox
               key={node.id}
               node={node}
               isEnum={layout.enumIds.has(node.id)}
+              mark={marks[node.id]}
               selected={selected === node.id}
+              connect={
+                editing && !editing.blocked
+                  ? {
+                      hoveredRow,
+                      hint: t("dbml.connectHint"),
+                      onHoverRow: setHoveredRow,
+                      onStart: (column, cy, event) => startWire(event, node, column, cy),
+                    }
+                  : undefined
+              }
+              onContextMenu={
+                editing
+                  ? (event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onSelect(node.id);
+                      setMenu({
+                        x: event.clientX,
+                        y: event.clientY,
+                        on: { kind: "table", id: node.id, name: node.name, mark: marks[node.id] },
+                      });
+                    }
+                  : undefined
+              }
+              onRename={
+                editing && !editing.blocked
+                  ? () => setRenaming({ id: node.id, name: node.name })
+                  : undefined
+              }
               related={highlight !== null && highlight.tables.has(node.id) && selected !== node.id}
               dimmed={
                 (highlight !== null && !highlight.tables.has(node.id)) ||
@@ -670,11 +932,169 @@ export const DbmlCanvas = forwardRef<
               onOpen={() => onOpen?.(node.id)}
             />
           ))}
+
+          {/* The relationship being dragged out, drawn last so it is over every box it crosses.
+              A straight line rather than the curve the settled ones get: this one is following a
+              cursor, and a spline whose control points chase the pointer reads as lag. */}
+          {wire && (
+            <g pointerEvents="none">
+              <line
+                x1={wire.x1}
+                y1={wire.y1}
+                x2={wire.x2}
+                y2={wire.y2}
+                stroke="var(--cf-accent)"
+                strokeWidth={1.8}
+                strokeDasharray="4 3"
+                strokeLinecap="round"
+              />
+              <circle cx={wire.x1} cy={wire.y1} r={3.4} fill="var(--cf-accent)" />
+              <circle cx={wire.x2} cy={wire.y2} r={3.4} fill="var(--cf-accent)" />
+            </g>
+          )}
         </g>
       </svg>
+
+      {/* Renaming happens in an HTML input over the box rather than in the SVG. `foreignObject` is
+          the SVG-native answer and it is the wrong one here: it inherits the panned group's
+          transform, so the field would scale with the zoom and be four pixels tall at 15%. This is
+          positioned *from* the transform instead, so it is always the size a text field should be. */}
+      {renaming && nodeById.get(renaming.id) && (
+        <input
+          autoFocus
+          defaultValue={renaming.name}
+          onBlur={(event) => {
+            const next = event.target.value.trim();
+            if (next && next !== renaming.name) editing?.rename(renaming.name, next);
+            setRenaming(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") setRenaming(null);
+          }}
+          style={{
+            left: view.x + (nodeById.get(renaming.id)?.x ?? 0) * view.k,
+            top: view.y + (nodeById.get(renaming.id)?.y ?? 0) * view.k,
+            width: Math.max(120, (nodeById.get(renaming.id)?.width ?? 0) * view.k),
+          }}
+          className="absolute z-20 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-1.5 py-[3px] font-mono text-[12px] font-semibold text-[var(--cf-text)] shadow-[var(--cf-shadow)] outline-none"
+        />
+      )}
+
+      {menu && editing && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={menuItems(menu.on, editing, t, setRenaming)}
+        />
+      )}
     </div>
   );
 });
+
+/**
+ * What the right button offers, by what it landed on.
+ *
+ * Outside the component because it is a pure function of the three arguments, and because a menu
+ * that is rebuilt on every pan frame is a menu that closes itself mid-gesture.
+ *
+ * Every entry is disabled rather than absent while the document does not parse — see the note on
+ * `applyEdit` in the workbench for why editing stops there — so the menu is the same shape whether
+ * or not the schema is currently valid.
+ */
+/**
+ * The three marks plus a way out, as menu rows.
+ *
+ * First in the menu, above the edits, because on a model being reviewed this is the thing you press
+ * thirty times and "delete this table" is the thing you press once at the end. The mark already on
+ * the thing is offered as "clear" rather than repeated as a no-op row.
+ */
+function markItems(
+  id: string,
+  current: DbmlMarkKind | undefined,
+  editing: NonNullable<React.ComponentProps<typeof DbmlCanvas>["editing"]>,
+  t: (key: Parameters<ReturnType<typeof useT>>[0]) => string,
+): MenuItem[] {
+  const rows: MenuItem[] = (["remove", "review", "keep"] as const)
+    .filter((kind) => kind !== current)
+    .map((kind) => ({
+      label: t(`dbml.mark.${kind}` as "dbml.mark.remove"),
+      leading: (
+        <span
+          className="h-2 w-2 shrink-0 rounded-full"
+          style={{ background: MARK_COLOUR[kind] }}
+        />
+      ),
+      onClick: () => editing.setMark(id, kind),
+    }));
+  if (current) {
+    rows.push({ label: t("dbml.mark.clear"), icon: Eraser, onClick: () => editing.setMark(id, null) });
+  }
+  return rows;
+}
+
+function menuItems(
+  on:
+    | { kind: "table"; id: string; name: string; mark?: DbmlMarkKind }
+    | { kind: "ref"; id: string; from: RefEnd; to: RefEnd; mark?: DbmlMarkKind }
+    | { kind: "canvas" },
+  editing: NonNullable<React.ComponentProps<typeof DbmlCanvas>["editing"]>,
+  t: (key: Parameters<ReturnType<typeof useT>>[0]) => string,
+  setRenaming: (next: { id: string; name: string }) => void,
+): MenuItem[] {
+  const off = editing.blocked;
+  if (on.kind === "table") {
+    return [
+      ...markItems(on.id, on.mark, editing, t),
+      {
+        label: t("dbml.inspector.addField"),
+        icon: Plus,
+        disabled: off,
+        separated: true,
+        onClick: () => editing.addField(on.name),
+      },
+      {
+        label: t("dbml.inspector.rename"),
+        icon: Pencil,
+        disabled: off,
+        onClick: () => setRenaming({ id: on.id, name: on.name }),
+      },
+      {
+        label: t("dbml.dropTable"),
+        icon: Trash2,
+        danger: true,
+        separated: true,
+        disabled: off,
+        onClick: () => editing.dropTable(on.name),
+      },
+    ];
+  }
+  if (on.kind === "ref") {
+    return [
+      ...markItems(on.id, on.mark, editing, t),
+      {
+        label: t("dbml.flipRelation"),
+        icon: ArrowLeftRight,
+        disabled: off,
+        separated: true,
+        onClick: () => editing.flipRef(on.from, on.to),
+      },
+      {
+        label: t("dbml.inspector.dropRelation"),
+        icon: Trash2,
+        danger: true,
+        separated: true,
+        disabled: off,
+        onClick: () => editing.dropRef(on.from, on.to),
+      },
+    ];
+  }
+  return [
+    { label: t("dbml.addTable"), icon: Table2, disabled: off, onClick: editing.addTable },
+    { label: t("dbml.addEnum"), icon: ListOrdered, disabled: off, onClick: editing.addEnum },
+  ];
+}
 
 /**
  * The `1` or `N` at one end of a lit line, sat just off the box it belongs to.
@@ -733,11 +1153,15 @@ function Cardinality({
 const SchemaBox = memo(function SchemaBox({
   node,
   isEnum,
+  mark,
   selected,
   related,
   dimmed,
   joinedColumns,
   draggable,
+  connect,
+  onContextMenu,
+  onRename,
   onPointerDown,
   onPointerEnter,
   onPointerLeave,
@@ -745,11 +1169,23 @@ const SchemaBox = memo(function SchemaBox({
 }: {
   node: DiagramNode;
   isEnum: boolean;
+  /** The review mark on this table, if it has one. */
+  mark?: DbmlMarkKind;
   selected: boolean;
   related: boolean;
   dimmed: boolean;
   joinedColumns: Set<string> | null;
   draggable: boolean;
+  /** Present when relationships can be drawn out of this box's rows. */
+  connect?: {
+    hoveredRow: string | null;
+    hint: string;
+    onHoverRow: (key: string | null) => void;
+    onStart: (column: string, cy: number, event: React.PointerEvent) => void;
+  };
+  onContextMenu?: (event: React.MouseEvent) => void;
+  /** Double-click on the header band. Distinct from `onOpen`, which is the body's. */
+  onRename?: () => void;
   onPointerDown: (event: React.PointerEvent) => void;
   onPointerEnter: () => void;
   onPointerLeave: () => void;
@@ -757,41 +1193,83 @@ const SchemaBox = memo(function SchemaBox({
 }) {
   const accent = isEnum ? ENUM_COLOUR : "var(--cf-accent)";
   const lit = selected || related;
+  /** Held rather than inlined: the strikethrough has to be exactly as wide as the drawn name. */
+  const title = clip(
+    node.schema ? `${node.schema}.${node.name}` : node.name,
+    node.width - 56,
+    12 * MONO_ADVANCE,
+  );
   // The band brightens with the selection, so a lit table is legible as lit from its header alone —
   // which is the part still visible when the boxes are packed tight enough to overlap their glows.
-  const bandOpacity = selected ? 0.2 : related ? 0.15 : 0.09;
+  //
+  // The three values are close together on purpose, and they are what carries the neighbourhood now
+  // that its halo is a quarter of the selection's (see `cf-dbml-glow-soft`). A neighbour has to stay
+  // legible as *lit* at a glance; what it must not do is compete for the first look. So the marks
+  // that say "in the set" stay strong and the mark that says "look here" — the halo — is the one
+  // that separates them.
+  const bandOpacity = selected ? 0.22 : related ? 0.115 : 0.09;
 
   return (
     <g
       transform={`translate(${node.x} ${node.y})`}
-      // Receding, not vanishing. The selection is *marked* — an accent border, a halo, lit lines,
-      // the joined columns washed — and the dim is only there to push the rest behind that. Taken
-      // further it stops reading as focus and starts reading as a diagram that failed to load.
-      opacity={dimmed ? 0.45 : 1}
       filter={selected ? "url(#cf-dbml-glow)" : related ? "url(#cf-dbml-glow-soft)" : undefined}
       onPointerDown={onPointerDown}
       onPointerEnter={onPointerEnter}
       onPointerLeave={onPointerLeave}
+      onContextMenu={onContextMenu}
       onDoubleClick={onOpen}
       style={{ cursor: draggable ? "move" : "pointer" }}
     >
+      {/* The card itself: opaque, and *outside* the fade below.
+
+          Boxes overlap — the layout allows it, and dragging one onto another is a thing people do —
+          so a card has to hide what is under it. Fading the whole group, which is what this used to
+          do, made every receded table translucent: two overlapping boxes showed both sets of column
+          names through each other, and the result reads as a rendering fault rather than as focus.
+          The backing stays at full alpha and only what is *printed on it* recedes. */}
+      <rect width={node.width} height={node.height} rx={12} fill="var(--cf-surface)" />
+
+      <g
+        // Receding, not vanishing. The selection is *marked* — an accent border, a halo, lit lines,
+        // the joined columns washed — and the dim is only there to push the rest behind that. Taken
+        // further it stops reading as focus and starts reading as a diagram that failed to load.
+        //
+        // A removal candidate recedes a little even when nothing is selected: it is still part of
+        // the model, and it is on its way out of it. Not as far as `dimmed`, which means "not what
+        // you asked about" and has to stay distinguishable from "marked".
+        opacity={dimmed ? 0.45 : mark === "remove" ? 0.82 : 1}
+      >
       <rect
         width={node.width}
         height={node.height}
         rx={12}
-        fill="var(--cf-surface)"
+        fill="none"
         stroke={lit ? accent : "var(--cf-border)"}
-        strokeWidth={selected ? 1.8 : related ? 1.4 : 1}
+        strokeWidth={selected ? 1.8 : related ? 1.15 : 1}
       />
 
       {/* The header band. Two rectangles because SVG has no per-corner radius: the rounded one
-          gives the top two corners, the square one fills the join to the first row. */}
+          gives the top two corners, the square one fills the join to the first row.
+
+          Double-clicking it renames the table, while double-clicking the body still jumps to the
+          declaration. Splitting the gesture by *where* rather than giving rename its own button is
+          what keeps the box a box: the name is the thing on the header, so the header is where you
+          go to change it — the same reasoning as the inspector's title. */}
       <rect
         width={node.width}
         height={HEADER_H}
         rx={12}
         fill={accent}
         fillOpacity={bandOpacity}
+        onDoubleClick={
+          onRename
+            ? (event) => {
+                event.stopPropagation();
+                onRename();
+              }
+            : undefined
+        }
+        style={onRename ? { cursor: "text" } : undefined}
       />
       <rect
         y={HEADER_H - 12}
@@ -809,6 +1287,23 @@ const SchemaBox = memo(function SchemaBox({
         strokeWidth={1}
       />
 
+      {/* The mark, as a spine down the left edge.
+          Inset from the corners rather than drawn as a full-height bar, because the box is rounded
+          and a bar at x=0 pokes out of the radius at both ends. A spine is the one mark that stays
+          legible at the zoom where thirty tables fit on screen — at that size a header dot is two
+          pixels and the strikethrough is gone, but a coloured edge still reads as a column of
+          decisions down the diagram. */}
+      {mark && (
+        <rect
+          x={1.5}
+          y={10}
+          width={3.5}
+          height={Math.max(0, node.height - 20)}
+          rx={1.75}
+          fill={MARK_COLOUR[mark]}
+        />
+      )}
+
       {/* The glyph: a table for a table, three stacked bars for an enum. Small enough to read as
           punctuation on the name rather than as an icon competing with it. */}
       {isEnum ? (
@@ -822,20 +1317,51 @@ const SchemaBox = memo(function SchemaBox({
         </g>
       )}
 
+      {/* The name, in the text colour rather than in the accent.
+          The accent is chrome — the band, the border, the lines, the glyph — and the name is
+          content. Setting it in the accent made the title's legibility a function of which accent
+          was picked: a bright one over its own 20%-opacity band is a pale word on a pale strip, and
+          on Amber it glowed rather than read. `--cf-text` is contrast-checked against the surface
+          in both themes by definition, so the title is readable whatever the accent is, and the box
+          still reads as themed from everything around the word.
+
+          Not `color-mix` toward the accent, which would keep a trace of the hue: the export
+          resolver in `diagramSvg` substitutes `var(--…)` and nothing else, so a mixed colour would
+          survive on screen and reach the PNG as a function the `<img>` renderer cannot evaluate. */}
       <text
         x={PAD_X + 14}
         y={21.5}
         fontSize={12}
         fontFamily={MONO}
         fontWeight={600}
-        fill={accent}
+        fill="var(--cf-text)"
       >
-        {clip(
-          node.schema ? `${node.schema}.${node.name}` : node.name,
-          node.width - 56,
-          12 * MONO_ADVANCE,
-        )}
+        {title}
       </text>
+
+      {/* Struck through when it is going. The one mark that needs no legend: everybody already
+          knows what a line through a name means, and it survives being read in a screenshot by
+          somebody who has never opened this app. */}
+      {mark === "remove" && (
+        <line
+          x1={PAD_X + 13}
+          y1={17.5}
+          x2={PAD_X + 15 + title.length * 12 * MONO_ADVANCE}
+          y2={17.5}
+          stroke={MARK_COLOUR.remove}
+          strokeWidth={1.4}
+          strokeLinecap="round"
+        />
+      )}
+      {/* The same mark again, as a dot beside the column count. The spine says *that* the table is
+          marked from across the diagram; this says *which* mark at the zoom where you are reading
+          the columns, without spending a word on it. */}
+      {mark && (
+        <circle cx={node.width - PAD_X - 17} cy={17} r={3.5} fill={MARK_COLOUR[mark]}>
+          <title>{mark}</title>
+        </circle>
+      )}
+
       <text
         x={node.width - PAD_X}
         y={21.5}
@@ -855,6 +1381,18 @@ const SchemaBox = memo(function SchemaBox({
           width={node.width}
           first={index === 0}
           isEnum={isEnum}
+          connect={
+            connect && !isEnum
+              ? {
+                  lit: connect.hoveredRow === `${node.id}|${column.name}`,
+                  hint: connect.hint,
+                  onEnter: () => connect.onHoverRow(`${node.id}|${column.name}`),
+                  onLeave: () => connect.onHoverRow(null),
+                  onStart: (event) =>
+                    connect.onStart(column.name, HEADER_H + index * ROW_H + ROW_H / 2, event),
+                }
+              : undefined
+          }
           // The column the selected relationship is actually made of, on both sides of it. Without
           // this a highlighted pair of tables still leaves you counting rows to find the join.
           joined={joinedColumns?.has(`${node.id}|${column.name}`) ?? false}
@@ -872,6 +1410,7 @@ const SchemaBox = memo(function SchemaBox({
           {`+${node.hidden}`}
         </text>
       )}
+      </g>
     </g>
   );
 });
@@ -890,6 +1429,7 @@ function Row({
   first,
   isEnum,
   joined,
+  connect,
 }: {
   column: DbDiagramColumn;
   y: number;
@@ -897,6 +1437,14 @@ function Row({
   first: boolean;
   isEnum: boolean;
   joined: boolean;
+  /** Present when a relationship can be dragged out of this row. */
+  connect?: {
+    lit: boolean;
+    hint: string;
+    onEnter: () => void;
+    onLeave: () => void;
+    onStart: (event: React.PointerEvent) => void;
+  };
 }) {
   const badgeY = y + (ROW_H - BADGE_H) / 2;
   const marks: { label: string; colour: string; width: number }[] = [];
@@ -922,12 +1470,51 @@ function Row({
   const nameX = PAD_X + (column.primary_key ? 13 : 0);
 
   return (
-    <g>
+    <g
+      onPointerEnter={connect?.onEnter}
+      onPointerLeave={connect?.onLeave}
+    >
       {joined && (
         <rect y={y} width={width} height={ROW_H} fill="var(--cf-accent)" fillOpacity={0.1} />
       )}
+      {/* The row lit as a drop target while a relationship is being dragged over it. Same wash as
+          a joined column, because it is about to become one. */}
+      {connect?.lit && (
+        <rect y={y} width={width} height={ROW_H} fill="var(--cf-accent)" fillOpacity={0.16} />
+      )}
       {!first && (
         <line y1={y} x2={width} y2={y} stroke="var(--cf-border)" strokeOpacity={0.9} />
+      )}
+
+      {/* The grab handle for a new relationship, on the right edge where the lines already leave.
+          Only under the pointer: a dot on every row of every table is forty dots of furniture on a
+          diagram whose whole problem is that it is busy. The invisible disc around it is the actual
+          target — 4.5px is not something anybody hits at 60% zoom. */}
+      {connect && (
+        <g
+          onPointerDown={connect.onStart}
+          style={{ cursor: "crosshair" }}
+        >
+          <circle
+            cx={width}
+            cy={y + ROW_H / 2}
+            r={9}
+            fill="transparent"
+            pointerEvents="all"
+          >
+            <title>{connect.hint}</title>
+          </circle>
+          <circle
+            cx={width}
+            cy={y + ROW_H / 2}
+            r={4.5}
+            fill="var(--cf-surface)"
+            stroke="var(--cf-accent)"
+            strokeWidth={1.6}
+            opacity={connect.lit ? 1 : 0}
+            pointerEvents="none"
+          />
+        </g>
       )}
 
       {column.primary_key && (

@@ -200,11 +200,15 @@ export interface MenuItem {
 /** A floating menu at a point, portalled so no scroll container can clip it. Positioned after
  * mount because its size is only known once it's rendered — the clamp is what keeps a menu opened
  * near the bottom of the window from hanging off the edge. */
+/** How far a button-anchored menu sits from its trigger. */
+const ANCHOR_GAP = 4;
+
 export function ContextMenu({
   x,
   y,
   items,
   heading,
+  anchor,
   onClose,
 }: {
   x: number;
@@ -213,6 +217,19 @@ export function ContextMenu({
   /** A question or label over the set. A menu of alternatives ("which engine?") needs one; a menu
    * of actions on the thing you right-clicked does not. */
   heading?: string;
+  /**
+   * The rect of the button this menu belongs to, when it has one.
+   *
+   * Without it the menu is placed at `x`/`y` and merely *clamped* to the window, which is right for
+   * a right-click — the pointer is a point, and a menu that cannot fit below it should slide up.
+   * It is wrong for a button: clamping a menu opened from a control near the bottom of the window
+   * lays it over that control and everything around it, which is what it did over the canvas's own
+   * View button and the status bar beneath it.
+   *
+   * Given a rect, the menu behaves like a dropdown instead: below the trigger by preference, above
+   * it when there is not room below, and never over it.
+   */
+  anchor?: { top: number; bottom: number; left: number; right: number; align?: "start" | "end" };
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -225,11 +242,41 @@ export function ContextMenu({
     const el = ref.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
+
+    // The horizontal edge the menu grows from. `end` hangs it off the trigger's right edge, which is
+    // what a control in a right-hand corner needs — growing rightwards from there only to be clamped
+    // back leaves the menu at a position that has nothing to do with the button.
+    const wantLeft = anchor
+      ? anchor.align === "end"
+        ? anchor.right - rect.width
+        : anchor.left
+      : x;
+
+    let wantTop: number;
+    if (anchor) {
+      const below = anchor.bottom + ANCHOR_GAP;
+      const above = anchor.top - rect.height - ANCHOR_GAP;
+      // Below unless it would not fit; then above. Never overlapping the trigger.
+      wantTop = below + rect.height + 4 <= window.innerHeight ? below : Math.max(4, above);
+    } else {
+      wantTop = y;
+    }
+
     setPos({
-      left: Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)),
-      top: Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)),
+      left: Math.max(4, Math.min(wantLeft, window.innerWidth - rect.width - 4)),
+      top: Math.max(4, Math.min(wantTop, window.innerHeight - rect.height - 4)),
     });
-  }, [x, y, items.length, heading]);
+  }, [
+    x,
+    y,
+    items.length,
+    heading,
+    anchor?.top,
+    anchor?.bottom,
+    anchor?.left,
+    anchor?.right,
+    anchor?.align,
+  ]);
 
   // The press and Escape go through the shared hook — this menu is the one every tree in the app
   // opens, the diagrams explorer included, so it is the single place that decides whether a press

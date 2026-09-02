@@ -20,6 +20,7 @@ export type LayoutKey =
   | "apiResponseHeight"
   | "dbSidebarWidth"
   | "dbResultHeight"
+  | "dbAiWidth"
   | "agentsListWidth"
   | "agentsRosterWidth"
   | "storiesListWidth"
@@ -62,6 +63,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   apiResponseHeight: "layout_api_response_height",
   dbSidebarWidth: "layout_db_sidebar_width",
   dbResultHeight: "layout_db_result_height",
+  dbAiWidth: "layout_db_ai_width",
   agentsListWidth: "layout_agents_list_width",
   agentsRosterWidth: "layout_agents_roster_width",
   storiesListWidth: "layout_stories_list_width",
@@ -105,6 +107,10 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   apiResponseHeight: 320,
   dbSidebarWidth: 300,
   dbResultHeight: 340,
+  // The console assistant, which is a column beside the query rather than a bar above it. Wider
+  // than the AI panel's 340 because what it holds is a conversation *and* the SQL it proposes:
+  // a statement wrapped at 340px is unreadable, and reading the statement is the point.
+  dbAiWidth: 380,
   agentsListWidth: 320,
   agentsRosterWidth: 300,
   storiesListWidth: 300,

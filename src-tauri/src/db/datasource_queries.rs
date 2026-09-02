@@ -264,6 +264,22 @@ pub fn reorder_connections(conn: &Connection, ids: &[String]) -> rusqlite::Resul
 // Groups
 // ---------------------------------------------------------------------------
 
+/// Writes the order the folders are drawn in. `ids` is the whole list, in the order wanted.
+///
+/// The same shape as [`reorder_connections`], and for the same reason: the caller has the complete
+/// list on screen and sending it whole is the only version that cannot leave two rows claiming one
+/// position. A group named by a connection but with no row of its own has no id to send and is not
+/// orderable — it is drawn after the real folders; see `groupConnections` on the frontend.
+pub fn reorder_groups(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> {
+    for (index, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE db_groups SET sort_order = ?2 WHERE id = ?1",
+            params![id, index as i64],
+        )?;
+    }
+    Ok(())
+}
+
 /// Creates an empty group, or returns the one already carrying that name.
 ///
 /// Idempotent on purpose: "New group" typed twice with the same name is a user who wants that

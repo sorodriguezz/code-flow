@@ -7,9 +7,11 @@ export function CollapsibleSection({
   action,
   defaultOpen = false,
   onOpenChange,
+  dense = false,
   children,
 }: {
-  icon: LucideIcon;
+  /** Optional only because `dense` does not draw one — every full-size section should have one. */
+  icon?: LucideIcon;
   title: string;
   // Header buttons — the "+" ones in particular — usually reveal a form or a modal that lives
   // in `children`, and `children` isn't mounted while the section is collapsed, so their state
@@ -27,6 +29,18 @@ export function CollapsibleSection({
    * until this fires.
    */
   onOpenChange?: (open: boolean) => void;
+  /**
+   * The panel-width variant: smaller type, tighter tracking, no icon.
+   *
+   * For a narrow column rather than a settings pane — the DBML inspector is 236px by default, and
+   * at that width the standard header's 11px uppercase with an icon in front of it takes a third of
+   * the line before the title starts. This matches the heading the inspector already drew before it
+   * had a chevron, so folding arrived there as a new *behaviour* rather than as a restyle.
+   *
+   * A variant rather than a fork: the two headers do the same job and one of them being a size
+   * smaller is not a reason for a second component to keep in step with this one.
+   */
+  dense?: boolean;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -42,14 +56,22 @@ export function CollapsibleSection({
 
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between">
+      <div className={`flex items-center justify-between ${dense ? "mb-0.5" : "mb-1"}`}>
         <button
           onClick={() => change(!open)}
-          className="flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className={`flex min-w-0 items-center gap-1 font-semibold uppercase text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] ${
+            dense ? "text-[9px] tracking-[0.09em]" : "text-[11px] tracking-wide"
+          }`}
         >
-          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-          <Icon size={12} />
-          {title}
+          {open ? (
+            <ChevronDown size={dense ? 10 : 11} className="shrink-0" />
+          ) : (
+            <ChevronRight size={dense ? 10 : 11} className="shrink-0" />
+          )}
+          {/* The glyph is what goes first when the row gets narrow: at 9px the chevron already says
+              "this folds", and the title is the only part that cannot be inferred. */}
+          {!dense && Icon && <Icon size={12} />}
+          <span className="truncate">{title}</span>
         </button>
         {typeof action === "function" ? action({ open, expand: () => change(true) }) : action}
       </div>

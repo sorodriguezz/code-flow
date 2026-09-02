@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import {
   AlertTriangle,
+  ArrowUp,
   Braces,
   Check,
   CornerDownLeft,
   Database,
   Download,
   Copy,
+  Eraser,
   FolderCode,
   Layers,
   List,
@@ -24,6 +26,7 @@ import {
 } from "lucide-react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { installSqlCompletions } from "../../lib/db/sqlCompletion";
+import { firstStatement, type ConsoleLanguage } from "../../lib/db/statements";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
@@ -34,7 +37,13 @@ import { ResultGrid } from "./ResultGrid";
 import { cellMenuItems } from "./cellMenu";
 import { ScopePicker } from "./ScopePicker";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
-import { nodeKey, useDbStore, type DbConsoleAi, type DbConsoleTab } from "../../state/dbStore";
+import {
+  nodeKey,
+  useDbStore,
+  type DbAiTurn,
+  type DbConsoleAi,
+  type DbConsoleTab,
+} from "../../state/dbStore";
 import { useDbCommandStore } from "../../state/dbCommandStore";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useDbObjectDragStore } from "../../state/dbObjectDragStore";
@@ -112,6 +121,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
   const t = useT();
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
   const height = useLayoutStore((s) => s.sizes.dbResultHeight);
+  const aiWidth = useLayoutStore((s) => s.sizes.dbAiWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const connection = useDbStore((s) => s.connections.find((c) => c.id === tab.connectionId));
@@ -138,6 +148,9 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
         : "sql";
   const monacoExtension =
     engine?.consoleLanguage === "redis" ? "redis" : isSql ? "sql" : "js";
+  /** The grammar the buffer is cut into statements by — see `lib/db/statements.ts`. `"sql"` for a
+   *  console whose connection has been deleted, which is what every other read here falls back to. */
+  const consoleLanguage: ConsoleLanguage = engine?.consoleLanguage ?? "sql";
   /** The connection's folder, shown ahead of its name in the toolbar. Trimmed and empty for the
    *  ungrouped bucket, which is the same `""` the tree keys that bucket by — see `UNGROUPED`. */
   const group = connection?.group_name.trim() ?? "";
@@ -162,20 +175,45 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
     [children, dbKey, tab.database],
   );
 
-  const run = (selectionOnly: boolean) => {
+  /**
+   * What the two run buttons do, and the one rule they share.
+   *
+   * **A selection always wins.** Highlighting a fragment is the most explicit thing a console
+   * offers, and it means the same on both buttons — so the difference between them is only what
+   * happens when nothing is highlighted:
+   *
+   * - `"one"` (Run, ⌘↵) runs the **first** statement in the buffer. A console is a script you build
+   *   up and re-run the top of; a Run button that fired every statement in it meant the safe,
+   *   obvious key was the one that ran the whole file.
+   * - `"all"` (⇧⌘↵) runs the buffer end to end, in order. That is the deliberate act, so it is the
+   *   one on the button you have to go and find.
+   *
+   * Nothing is sent for an empty console, or for one holding only comments: `firstStatement`
+   * answers `null` there rather than pretending the first blank line is a statement.
+   */
+  const run = (mode: "one" | "all") => {
     const editor = editorRef.current;
     // Read at call time rather than through the render's captured `store`: this also runs from a
     // Monaco chord registered once for the life of the panel — see `commandsRef`.
     const live = useDbStore.getState();
-    if (selectionOnly && editor) {
-      const selection = editor.getSelection();
-      const text = selection ? editor.getModel()?.getValueInRange(selection) : "";
-      if (text && text.trim()) {
-        void live.runConsole(tab.id, text);
-        return;
-      }
+    const selection = editor?.getSelection();
+    const selected =
+      selection && !selection.isEmpty() ? editor?.getModel()?.getValueInRange(selection) ?? "" : "";
+    if (selected.trim()) {
+      void live.runConsole(tab.id, selected);
+      return;
     }
-    void live.runConsole(tab.id);
+    if (mode === "all") {
+      void live.runConsole(tab.id);
+      return;
+    }
+    // Read off the store, not off the render's `tab`: the ⌘↵ chord is registered once for the life
+    // of the panel and fires long after this closure was built — the same staleness `commandsRef`
+    // exists for. Monaco's `onChange` writes straight into the tab, so this is the live text.
+    const current = live.tabs.find((entry) => entry.id === tab.id);
+    const body = current?.kind === "console" ? current.body : tab.body;
+    const first = firstStatement(body, consoleLanguage);
+    if (first) void live.runConsole(tab.id, first);
   };
 
   /**
@@ -308,7 +346,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
    * That is the same trap `RequestBuilder`'s `actionsRef` exists for, and the same fix: the
    * registration is stable, the ref is not, and the command reads the ref at the moment it fires.
    */
-  const commandsRef = useRef<{ run: (selectionOnly: boolean) => void; save: () => void }>({
+  const commandsRef = useRef<{ run: (mode: "one" | "all") => void; save: () => void }>({
     run,
     save: () => {},
   });
@@ -320,10 +358,10 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () =>
-      commandsRef.current.run(false),
+      commandsRef.current.run("one"),
     );
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () =>
-      commandsRef.current.run(true),
+      commandsRef.current.run("all"),
     );
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => commandsRef.current.save());
   };
@@ -436,7 +474,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
             </button>
           ) : (
             <button
-              onClick={() => run(false)}
+              onClick={() => run("one")}
               title={t("db.runHint")}
               className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-[3px] text-[12px] font-medium text-white hover:brightness-110"
             >
@@ -445,9 +483,9 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
             </button>
           )}
           <ToolbarButton
-            onClick={() => run(true)}
+            onClick={() => run("all")}
             disabled={tab.running}
-            title={t("db.runSelectionHint")}
+            title={t("db.runAllHint")}
           >
             <Waypoints size={13} />
           </ToolbarButton>
@@ -464,9 +502,9 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
             active={tab.ai !== null}
             dataTour="db-ai"
           >
-            {/* The orb reaches the toolbar too, so a console scrolled away from the answer panel
-                still shows that something is running — and so the button that would close the bar
-                (and cancel the run) says what it is about to interrupt. */}
+            {/* The orb reaches the toolbar too, so a console with the panel closed still shows that
+                something is running — and so the button that would close it (and cancel the run)
+                says what it is about to interrupt. */}
             {tab.ai?.running ? <ThinkingOrb size="sm" /> : <Sparkles size={13} />}
           </ToolbarButton>
           <ToolbarButton
@@ -479,63 +517,93 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
         </div>
       </div>
 
-      {tab.ai && <ConsoleAiBar tab={tab} ai={tab.ai} onInsert={insertAtCursor} />}
-
-      {/* Editor */}
-      <div
-        ref={editorBoxRef}
-        className="relative min-h-0 flex-1"
-        // Highlight only — the drop is handled from `window` above, because these handlers sit on
-        // top of Monaco's own DOM and are not guaranteed to see a release inside it. `pointerenter`
-        // covers the drag arriving from the tree; `pointermove` is the belt to its braces, for one
-        // that begins with the pointer already inside. Guarded, so it is a comparison per move
-        // rather than a render.
-        onPointerEnter={() => {
-          if (acceptsDrop) setDropOver(true);
-        }}
-        onPointerMove={() => {
-          if (acceptsDrop && !dropOver) setDropOver(true);
-        }}
-        onPointerLeave={() => setDropOver(false)}
-      >
-        <Editor
-          height="100%"
-          // One model per tab, so two consoles keep their own undo history and cursor. The scheme
-          // is this panel's own — `cf-editor` URIs are file models and would be offered to
-          // "go to definition".
-          path={`cf-db:/console/${tab.id}.${monacoExtension}`}
-          language={monacoLanguage}
-          value={tab.body}
-          theme={monacoTheme}
-          onChange={(value) => store.updateConsole(tab.id, { body: value ?? "", dirty: true })}
-          onMount={handleMount}
-          options={EDITOR_OPTIONS}
-        />
-        {/* `pointer-events-none` so the drop still reaches the wrapper's handler and Monaco can
-            still resolve the position under the pointer — an overlay that swallowed the release
-            would be a drop target you cannot drop on. */}
-        {dropOver && objectDrag && (
-          <div className="pointer-events-none absolute inset-0 z-10 flex justify-center rounded-sm border-2 border-dashed border-[var(--cf-accent)] bg-[color-mix(in_oklab,var(--cf-accent)_7%,transparent)]">
-            <span className="mt-3 h-fit rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2 py-1 text-[11px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]">
-              {t("db.dropObjectHint", { name: objectDrag.label })}
-            </span>
+      {/* The console proper and, beside it, the assistant.
+          **Beside, not above.** The panel used to be a bar between the toolbar and the editor, and
+          it grew downwards as the answer came in — so asking a question pushed the query you were
+          asking about off the screen, which is the one thing you need to keep reading while you
+          read the reply. A column keeps both: the statement stays where it was, at the height it
+          was, and the conversation runs down its own edge. It is also the shape a chat wants —
+          turns stack vertically, and a 340px-tall bar can hold about one. */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {/* Editor */}
+          <div
+            ref={editorBoxRef}
+            className="relative min-h-0 flex-1"
+            // Highlight only — the drop is handled from `window` above, because these handlers sit on
+            // top of Monaco's own DOM and are not guaranteed to see a release inside it. `pointerenter`
+            // covers the drag arriving from the tree; `pointermove` is the belt to its braces, for one
+            // that begins with the pointer already inside. Guarded, so it is a comparison per move
+            // rather than a render.
+            onPointerEnter={() => {
+              if (acceptsDrop) setDropOver(true);
+            }}
+            onPointerMove={() => {
+              if (acceptsDrop && !dropOver) setDropOver(true);
+            }}
+            onPointerLeave={() => setDropOver(false)}
+          >
+            <Editor
+              height="100%"
+              // One model per tab, so two consoles keep their own undo history and cursor. The scheme
+              // is this panel's own — `cf-editor` URIs are file models and would be offered to
+              // "go to definition".
+              path={`cf-db:/console/${tab.id}.${monacoExtension}`}
+              language={monacoLanguage}
+              value={tab.body}
+              theme={monacoTheme}
+              onChange={(value) => store.updateConsole(tab.id, { body: value ?? "", dirty: true })}
+              onMount={handleMount}
+              options={EDITOR_OPTIONS}
+            />
+            {/* `pointer-events-none` so the drop still reaches the wrapper's handler and Monaco can
+                still resolve the position under the pointer — an overlay that swallowed the release
+                would be a drop target you cannot drop on. */}
+            {dropOver && objectDrag && (
+              <div className="pointer-events-none absolute inset-0 z-10 flex justify-center rounded-sm border-2 border-dashed border-[var(--cf-accent)] bg-[color-mix(in_oklab,var(--cf-accent)_7%,transparent)]">
+                <span className="mt-3 h-fit rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2 py-1 text-[11px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]">
+                  {t("db.dropObjectHint", { name: objectDrag.label })}
+                </span>
+              </div>
+            )}
           </div>
+
+          <ResizeHandle
+            axis="y"
+            value={height}
+            min={140}
+            max={900}
+            invert
+            onChange={(value) => setSize("dbResultHeight", value)}
+            onCommit={(value) => commitSize("dbResultHeight", value)}
+          />
+
+          {/* No `border-t`: the handle above is the seam, and a border here doubled it. */}
+          <div style={{ height }} className="flex shrink-0 flex-col overflow-hidden">
+            <ConsoleResults tab={tab} />
+          </div>
+        </div>
+
+        {tab.ai && (
+          <>
+            <ResizeHandle
+              axis="x"
+              value={aiWidth}
+              min={280}
+              max={720}
+              invert
+              onChange={(value) => setSize("dbAiWidth", value)}
+              onCommit={(value) => commitSize("dbAiWidth", value)}
+            />
+            <ConsoleAiPanel
+              tab={tab}
+              ai={tab.ai}
+              width={aiWidth}
+              onInsert={insertAtCursor}
+              onRun={(sql) => void useDbStore.getState().runConsole(tab.id, sql)}
+            />
+          </>
         )}
-      </div>
-
-      <ResizeHandle
-        axis="y"
-        value={height}
-        min={140}
-        max={900}
-        invert
-        onChange={(value) => setSize("dbResultHeight", value)}
-        onCommit={(value) => commitSize("dbResultHeight", value)}
-      />
-
-      {/* No `border-t`: the handle above is the seam, and a border here doubled it. */}
-      <div style={{ height }} className="flex shrink-0 flex-col overflow-hidden">
-        <ConsoleResults tab={tab} />
       </div>
     </div>
   );
@@ -545,42 +613,146 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 // Assistant
 // ---------------------------------------------------------------------------
 
-/**
- * Ask the connected database a question in words — ⌘I, or the sparkle in the toolbar.
- *
- * It sits between the toolbar and the editor rather than in the results pane, and that placement is
- * the design: the answer is read *while* looking at the query it is about, and running a statement
- * doesn't wipe it the way it wipes a plan. The two things a console gets asked — "write me a query
- * for X" and "why does this one not return anything" — are one input here on purpose. Which of them
- * was meant is obvious from the sentence, so making the user pick a mode first would be asking them
- * to classify their own question before they are allowed to type it.
- *
- * The engine never touches the database. The schema is read by CodeFlow's own driver on the Rust
- * side and put on stdin, and a proposed statement lands in the editor for the user to read and run
- * — nothing here executes anything.
- */
 /** The routing key this assistant runs under — the same one Settings' "Model per task" writes,
  *  and `AiTask::DbQuery` on the Rust side. */
 const TASK = "db_query";
 
-function ConsoleAiBar({
+/**
+ * One turn on screen: what was asked, or what came back and what can be done with it.
+ *
+ * Split out of the panel because the two roles are genuinely different objects — a question is a
+ * line of text, an answer is Markdown with a statement under it and three things you can do to
+ * that statement — and because a transcript re-renders on every token of the run in flight while
+ * the turns behind it have not changed.
+ */
+const AiTurn = memo(function AiTurn({
+  turn,
+  onInsert,
+  onReplace,
+  onRun,
+}: {
+  turn: DbAiTurn;
+  onInsert: (text: string) => void;
+  onReplace: (text: string) => void;
+  onRun: (text: string) => void;
+}) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+
+  const copy = (text: string) => {
+    void navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+
+  if (turn.role === "user") {
+    return (
+      // The question, right-aligned and in a tinted bubble — the one convention every chat shares,
+      // and the cheapest way to tell two speakers apart down a narrow column without a label per
+      // turn. `whitespace-pre-wrap` because a pasted query keeps its own lines.
+      <div className="flex justify-end px-2.5">
+        <p className="max-w-[92%] whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-[var(--cf-accent-soft)] px-2.5 py-1.5 text-[12px] leading-relaxed text-[var(--cf-text)]">
+          {turn.text}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-2.5">
+      <Markdown
+        source={turn.text}
+        className="cf-markdown-preview text-[12px] leading-relaxed"
+      />
+      {turn.query && (
+        // The three things a proposed statement is for. Not hidden behind the last turn: scrolling
+        // back to the query from four questions ago and being able to insert *that* one is most of
+        // why the transcript is kept at all.
+        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <button
+            onClick={() => onInsert(turn.query as string)}
+            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          >
+            <CornerDownLeft size={10} />
+            {t("db.aiInsert")}
+          </button>
+          <button
+            onClick={() => onReplace(turn.query as string)}
+            className="rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          >
+            {t("db.aiReplace")}
+          </button>
+          {/* Puts it in the editor *and* runs it — the two clicks this panel was making everybody
+              do in sequence. Still through the console, so the `DELETE` with no `WHERE` guard and
+              the read-only flag apply exactly as they do to anything typed by hand. */}
+          <button
+            onClick={() => onRun(turn.query as string)}
+            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          >
+            <Play size={10} />
+            {t("db.aiRun")}
+          </button>
+          <button
+            onClick={() => copy(turn.query as string)}
+            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          >
+            {copied ? <Check size={10} /> : <Copy size={10} />}
+            {t("db.copy")}
+          </button>
+        </div>
+      )}
+      {/* What the answer was based on. A model that names a table you don't have is nearly always a
+          model that was shown a different scope than the one you meant, so the count and the
+          truncation warning belong next to the answer, not in a log. */}
+      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+        {turn.schemaTruncated && (
+          <span className="text-[var(--cf-warning)]">{t("db.aiSchemaTruncated")}</span>
+        )}
+        {turn.tablesSeen !== undefined && t("db.aiTablesSeen", { count: turn.tablesSeen })}
+        <RunEngineChip runId={turn.runId ?? undefined} />
+      </div>
+    </div>
+  );
+});
+
+/**
+ * A conversation with the connected database — ⌘I, or the sparkle in the toolbar.
+ *
+ * **A column beside the query, and a chat rather than a single answer.** Both of those were the
+ * same complaint. It used to be a bar between the toolbar and the editor holding exactly one
+ * question and one reply: a long answer pushed the statement it was about off the screen, and the
+ * only things you could do with the reply were insert it, replace with it, or close — so "and now
+ * group that by month" meant retyping the whole question with the previous answer pasted into it.
+ * Here the turns stack down their own edge, the editor keeps its height, and every question is
+ * asked with what has already been said (see `askConsoleAi`).
+ *
+ * The engine never touches the database. The schema is read by CodeFlow's own driver on the Rust
+ * side and put on stdin, and a proposed statement is only ever *offered* — the buttons under it go
+ * through the editor and the console's own guards, which is what keeps "run it" from being a way
+ * around the `DELETE`-without-`WHERE` refusal or the connection's read-only flag.
+ */
+function ConsoleAiPanel({
   tab,
   ai,
+  width,
   onInsert,
+  onRun,
 }: {
   tab: DbConsoleTab;
   ai: DbConsoleAi;
+  width: number;
   onInsert: (text: string) => void;
+  onRun: (text: string) => void;
 }) {
   const t = useT();
   const store = useDbStore.getState();
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const [copied, setCopied] = useState(false);
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const defaultProvider = useAiProviderStore((s) => s.providerId);
   const routedProvider = useAiProviderStore((s) => s.taskProviders[TASK]);
   const engineModel = useAiProviderStore((s) => s.taskModels[TASK]) ?? "";
 
-  // Opening the bar puts the caret in it — the point of the shortcut is to type the question, and
+  // Opening the panel puts the caret in it — the point of the shortcut is to type the question, and
   // a second ⌘I with it already open comes back here rather than closing what is being read.
   useEffect(() => {
     inputRef.current?.focus();
@@ -591,13 +763,23 @@ function ConsoleAiBar({
     return () => window.removeEventListener("cf-db-ai-focus", refocus);
   }, [tab.id]);
 
-  const copy = (text: string) => {
-    void navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1200);
-  };
+  // The box grows with what is in it rather than standing two lines tall while empty. A pasted
+  // statement is what actually makes this field tall, and 160px is where it stops growing and
+  // starts scrolling — past that it would be eating the transcript it is asking about.
+  useEffect(() => {
+    const field = inputRef.current;
+    if (!field) return;
+    field.style.height = "0px";
+    field.style.height = `${Math.min(field.scrollHeight, 160)}px`;
+  }, [ai.question, width]);
 
-  const answer = ai.answer;
+  // Follows the conversation down. Keyed on the turn count and on `running`, which are the two
+  // moments something is added to the bottom — not on every render, which would fight a user
+  // scrolled up reading an earlier answer.
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  }, [ai.messages.length, ai.running]);
 
   // Resolved through the same fallback chain the backend uses (`ai_provider_db_query` → the global
   // default; `{provider}_db_query_model` → the provider's base model), so what this names cannot
@@ -606,134 +788,151 @@ function ConsoleAiBar({
   const engineMeta = AI_PROVIDERS.find((entry) => entry.id === engineId);
   const engineLabel = engineMeta?.label ?? (engineMeta?.labelKey ? t(engineMeta.labelKey) : engineId);
 
+  const replace = (sql: string) => store.updateConsole(tab.id, { body: sql, dirty: true });
+
+  /** Nothing said yet — the transcript is a centred pitch rather than a column with one line at the
+   *  top of it. Also what picks the composer's placeholder. */
+  const idle = ai.messages.length === 0 && !ai.running;
+
   return (
-    <div className="shrink-0 border-b border-[var(--cf-border)] bg-[var(--cf-surface-raised)]">
-      <div className="flex items-start gap-1.5 px-2 py-1.5">
-        <Sparkles size={13} className="mt-[5px] shrink-0 text-[var(--cf-accent)]" />
-        <textarea
-          ref={inputRef}
-          rows={1}
-          value={ai.question}
-          placeholder={t("db.aiPlaceholder")}
-          onChange={(e) => store.setConsoleAiQuestion(tab.id, e.target.value)}
-          onKeyDown={(e) => {
-            // Enter asks, ⇧Enter is a newline. A question long enough to need two lines is rare,
-            // but "why doesn't this work" pasted with a query is exactly that case.
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void store.askConsoleAi(tab.id);
-            }
-            if (e.key === "Escape") {
-              e.preventDefault();
-              store.toggleConsoleAi(tab.id);
-            }
-          }}
-          className="min-h-[24px] flex-1 resize-none bg-transparent py-[3px] text-[12.5px] leading-[18px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
-        />
-        {ai.running ? (
-          <button
-            onClick={() => void store.cancelConsoleAi(tab.id)}
-            className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-danger)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-danger)] hover:bg-[var(--cf-danger)]/10"
-          >
-            <Square size={10} />
-            {t("db.cancel")}
-          </button>
-        ) : (
-          <button
-            onClick={() => void store.askConsoleAi(tab.id)}
-            disabled={!ai.question.trim()}
-            className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-[3px] text-[11.5px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <CornerDownLeft size={10} />
-            {t("db.aiAsk")}
-          </button>
+    <aside
+      style={{ width }}
+      className="flex shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)] bg-[var(--cf-surface-raised)]"
+    >
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
+        <Sparkles size={13} className="shrink-0 text-[var(--cf-accent)]" />
+        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">
+          {t("db.aiTitle")}
+        </span>
+        {/* Emptying the transcript without closing the panel. A conversation is what the next
+            question is answered *against*, so one that has wandered onto another table is a cost —
+            and closing the panel to be rid of it would also lose its place on screen. */}
+        {ai.messages.length > 0 && (
+          <ToolbarButton onClick={() => store.clearConsoleAi(tab.id)} title={t("db.aiClearChat")}>
+            <Eraser size={13} />
+          </ToolbarButton>
         )}
         <ToolbarButton onClick={() => store.toggleConsoleAi(tab.id)} title={t("common.close")}>
           <X size={13} />
         </ToolbarButton>
       </div>
 
-      {/* **One strip, three states, and they answer the same question at three moments.** Idle: the
-          engine this *will* run on. Running: the one it is on. Answered: the one that wrote it, from
-          `RunEngineChip`. Before this, the first and third were simply missing — the panel named an
-          engine only while it was busy, which is the moment nobody is reading. */}
-      {!ai.running && !answer && (
-        <div className="flex items-center gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
-          <ProviderGlyph providerId={engineId} size={11} />
-          <span className="min-w-0 truncate">
-            {engineLabel} · {modelDisplayLabel(engineId, engineModel, t)}
-          </span>
-        </div>
-      )}
-
-      {ai.running && (
-        <div className="flex items-center gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
-          {/* The orb and not a spinner: this is an engine burning context, which is the one thing
-              the orb says and a rotating ring does not. Same mark the agent console uses. */}
-          <ThinkingOrb size="sm" />
-          {t("db.aiThinking")}
-          <RunEngineChip runId={ai.runId ?? undefined} />
-        </div>
-      )}
-
-      {ai.error && !ai.running && (
-        <div className="flex items-start gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5 text-[11.5px] text-[var(--cf-danger)]">
-          <AlertTriangle size={12} className="mt-[2px] shrink-0" />
-          <span className="min-w-0 break-words">{ai.error}</span>
-        </div>
-      )}
-
-      {answer && !ai.running && (
-        <div className="border-t border-[var(--cf-border)]">
-          {/* Capped and scrollable: the editor underneath is the point of the screen, and a long
-              answer must not push it out of view. */}
-          <Markdown
-            source={answer.answer}
-            className="cf-markdown-preview max-h-[260px] overflow-auto px-2.5 py-2 text-[12px] leading-relaxed"
-          />
-          <div className="flex flex-wrap items-center gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5">
-            {answer.query && (
-              <>
-                <button
-                  onClick={() => onInsert(answer.query as string)}
-                  className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                >
-                  <CornerDownLeft size={10} />
-                  {t("db.aiInsert")}
-                </button>
-                <button
-                  onClick={() =>
-                    store.updateConsole(tab.id, { body: answer.query as string, dirty: true })
-                  }
-                  className="rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                >
-                  {t("db.aiReplace")}
-                </button>
-                <button
-                  onClick={() => copy(answer.query as string)}
-                  className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                >
-                  {copied ? <Check size={10} /> : <Copy size={10} />}
-                  {t("db.copy")}
-                </button>
-              </>
-            )}
-            {/* What the answer was based on. A model that names a table you don't have is nearly
-                always a model that was shown a different scope than the one you meant, so the
-                count and the truncation warning belong next to the answer, not in a log. */}
-            <span className="ml-auto flex items-center gap-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
-              {answer.schema_truncated && (
-                <span className="text-[var(--cf-warning)]">{t("db.aiSchemaTruncated")}</span>
-              )}
-              {t("db.aiTablesSeen", { count: answer.tables_seen })}
-              <RunEngineChip runId={ai.runId ?? undefined} />
+      <div
+        ref={scrollerRef}
+        className={`min-h-0 flex-1 space-y-3 overflow-y-auto py-2.5 ${
+          idle ? "flex flex-col justify-center" : ""
+        }`}
+      >
+        {idle && (
+          // What the panel is for, centred in the column it is about to fill, and only that. The
+          // engine used to be named here as well, which answered "what is about to answer me" in
+          // the one state that stops existing the moment you ask it something; it sits on the
+          // composer now, where it is still on screen at the fourth question.
+          <div className="flex shrink-0 flex-col items-center gap-2 px-5 text-center">
+            <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--cf-accent-soft)]">
+              <Sparkles size={14} className="text-[var(--cf-accent)]" />
             </span>
+            <p className="text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
+              {t("db.aiPlaceholder")}
+            </p>
+          </div>
+        )}
+
+        {ai.messages.map((turn, at) => (
+          <AiTurn
+            key={at}
+            turn={turn}
+            onInsert={onInsert}
+            onReplace={replace}
+            onRun={onRun}
+          />
+        ))}
+
+        {ai.running && (
+          <div className="flex items-center gap-1.5 px-2.5 text-[11.5px] text-[var(--cf-text-muted)]">
+            {/* The orb and not a spinner: this is an engine burning context, which is the one thing
+                the orb says and a rotating ring does not. Same mark the agent console uses. */}
+            <ThinkingOrb size="sm" />
+            {t("db.aiThinking")}
+            <RunEngineChip runId={ai.runId ?? undefined} />
+          </div>
+        )}
+
+        {ai.error && !ai.running && (
+          <div className="mx-2.5 flex items-start gap-1.5 rounded-md border border-[var(--cf-danger)] px-2 py-1.5 text-[11.5px] text-[var(--cf-danger)]">
+            <AlertTriangle size={12} className="mt-[2px] shrink-0" />
+            <span className="min-w-0 break-words">{ai.error}</span>
+          </div>
+        )}
+      </div>
+
+      {/* The composer as one field rather than a field with a button beside it. In a 280px column a
+          labelled button took a third of the width and made the box read as half of one, so the
+          send control moved onto the field's own bottom edge — and the engine line came down with
+          it. Naming the engine here rather than in the empty state is the point of the move: what
+          is about to answer is a question you have at the fourth turn too, and the empty state is
+          the one place that has already stopped existing by then. */}
+      <div className="shrink-0 border-t border-[var(--cf-border)] p-2">
+        <div className="rounded-lg border border-[var(--cf-field-border)] bg-[var(--cf-field)] transition-colors focus-within:border-[var(--cf-accent)]">
+          <textarea
+            ref={inputRef}
+            rows={1}
+            value={ai.question}
+            placeholder={
+              ai.messages.length > 0 ? t("db.aiFollowUp") : t("db.aiComposerPlaceholder")
+            }
+            onChange={(e) => store.setConsoleAiQuestion(tab.id, e.target.value)}
+            onKeyDown={(e) => {
+              // Enter asks, ⇧Enter is a newline — the shape of every chat box, and the one that
+              // keeps a pasted query on its own lines.
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void store.askConsoleAi(tab.id);
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                store.toggleConsoleAi(tab.id);
+              }
+            }}
+            className="block max-h-[160px] w-full resize-none bg-transparent px-2.5 pb-1 pt-2 text-[12.5px] leading-[18px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
+          />
+          <div className="flex items-center gap-1.5 px-2 pb-1.5">
+            {/* A label, never a control. Changing the routing is Settings' job — a picker here would
+                be the second place to set it, which is how two places end up disagreeing. */}
+            <ProviderGlyph providerId={engineId} size={11} />
+            <span
+              className="min-w-0 flex-1 truncate text-[10.5px] text-[var(--cf-text-muted)]"
+              title={`${engineLabel} · ${modelDisplayLabel(engineId, engineModel, t)}`}
+            >
+              {engineLabel} · {modelDisplayLabel(engineId, engineModel, t)}
+            </span>
+            {ai.running ? (
+              <button
+                onClick={() => void store.cancelConsoleAi(tab.id)}
+                title={t("db.cancel")}
+                aria-label={t("db.cancel")}
+                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md border border-[var(--cf-danger)] text-[var(--cf-danger)] hover:bg-[var(--cf-danger)]/10"
+              >
+                <Square size={9} />
+              </button>
+            ) : (
+              <button
+                onClick={() => void store.askConsoleAi(tab.id)}
+                disabled={!ai.question.trim()}
+                title={t("db.aiAsk")}
+                aria-label={t("db.aiAsk")}
+                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent)] text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-30"
+              >
+                <ArrowUp size={12} />
+              </button>
+            )}
           </div>
         </div>
-      )}
-    </div>
+      </div>
+    </aside>
   );
 }
+
 
 // ---------------------------------------------------------------------------
 // Results

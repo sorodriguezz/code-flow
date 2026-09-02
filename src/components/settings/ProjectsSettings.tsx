@@ -7,11 +7,13 @@ import {
   GripVertical,
   Pencil,
   Plus,
+  FolderX,
   Search,
   Trash2,
   X,
 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useMissingProjectsStore } from "../../state/missingProjectsStore";
 import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import { useToastStore } from "../../state/toastStore";
@@ -113,6 +115,10 @@ export function ProjectsSettings() {
   // second row's field closes the first rather than leaving two drafts on screen.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
+  // Which repositories are not on disk any more. Read as the whole set rather than per row: this
+  // panel lists every workspace's repositories at once, and a hook per row would be a subscription
+  // per row for one answer they all share.
+  const missing = useMissingProjectsStore((s) => s.missing);
   const [drag, setDrag] = useState<RowDrag | null>(null);
   /** One entry per workspace, so a repository drag can measure the list it started in. */
   const listRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -462,7 +468,13 @@ export function ProjectsSettings() {
                   }}
                   className="space-y-1.5"
                 >
-                  {shown.map((p, at) => (
+                  {shown.map((p, at) => {
+                    // The folder this row names is not on disk. The name is struck through and the
+                    // row loses its colour, because a repository that cannot be opened should not
+                    // look like one of the working ones — and the bin beside it is the only thing
+                    // still worth doing to it, so it stops being muted and says so.
+                    const gone = missing.has(p.local_path);
+                    return (
                     <div
                       key={p.id}
                       data-project-row
@@ -484,8 +496,36 @@ export function ProjectsSettings() {
                             bin and a copy-the-path button, and a press anywhere on it that might
                             turn into a drag makes all three feel unreliable. */}
                         {dragHandle(t("settings.reorderProject"), (e) => beginProjectDrag(e, ws.id, p.id))}
-                        <ColorSwatchPicker value={p.color} onChange={(color) => setProjectColor(p.id, ws.id, color)} />
-                        <span className="flex-1 truncate font-medium">{p.name}</span>
+                        {gone ? (
+                          // In place of the swatch, not beside it: picking a colour for a
+                          // repository that is not there is arranging furniture in a room that has
+                          // been demolished, and the icon is what tells the two kinds of row apart
+                          // at a glance down the list.
+                          <span
+                            title={t("settings.projectMissingHint")}
+                            className="flex h-4 w-4 shrink-0 items-center justify-center text-[var(--cf-text-muted)]"
+                          >
+                            <FolderX size={13} />
+                          </span>
+                        ) : (
+                          <ColorSwatchPicker value={p.color} onChange={(color) => setProjectColor(p.id, ws.id, color)} />
+                        )}
+                        <span
+                          title={gone ? t("settings.projectMissingHint") : undefined}
+                          className={`flex-1 truncate font-medium ${
+                            gone ? "text-[var(--cf-text-muted)] line-through decoration-[1.5px]" : ""
+                          }`}
+                        >
+                          {p.name}
+                        </span>
+                        {gone && (
+                          // The word the strike-through cannot say on its own. Every other row in
+                          // this list is a repository that works, so "this one is different" needs
+                          // to be readable rather than inferred from a line through a name.
+                          <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+                            {t("settings.projectMissing")}
+                          </span>
+                        )}
                         <button
                           onClick={async () => {
                             if (await confirmAction(t("settings.removeProjectConfirm", { name: p.name }))) {
@@ -493,21 +533,28 @@ export function ProjectsSettings() {
                             }
                           }}
                           title={t("settings.removeProject")}
-                          className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                          className={`shrink-0 hover:text-[var(--cf-danger)] ${
+                            gone ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
+                          }`}
                         >
                           <Trash2 size={13} />
                         </button>
                       </div>
                       <button
                         onClick={() => copyPath(p.local_path)}
-                        title={t("settings.copyPath")}
+                        title={gone ? t("settings.projectMissingHint") : t("settings.copyPath")}
                         className="mt-1.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                       >
                         {copiedPath === p.local_path && <Check size={11} className="shrink-0 text-[var(--cf-success)]" />}
-                        <span className="truncate">{copiedPath === p.local_path ? t("settings.pathCopied") : p.local_path}</span>
+                        {/* The path stays copyable even when it leads nowhere — it is the one
+                            thing on the row that says *where* to put the folder back. */}
+                        <span className={`truncate ${gone && copiedPath !== p.local_path ? "line-through" : ""}`}>
+                          {copiedPath === p.local_path ? t("settings.pathCopied") : p.local_path}
+                        </span>
                       </button>
                     </div>
-                  ))}
+                    );
+                  })}
                   {shown.length === 0 && (
                     <p className="text-[12px] text-[var(--cf-text-muted)]">{t("settings.noProjectsInWorkspace")}</p>
                   )}

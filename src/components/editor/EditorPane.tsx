@@ -2254,8 +2254,9 @@ export function EditorPane({
           /**
            * Ghost text. On for every editor, because the provider — not this flag — is what decides
            * whether there is anything to draw: with the feature off, no model downloaded, or a
-           * buffer that is not a repository file, `useInlineCompletion` returns nothing and this
-           * costs a branch.
+           * buffer belonging to none of the surfaces it serves, `lib/inlineCompletion` returns
+           * nothing and this costs a branch. (Those surfaces are this editor, the DBML workbench
+           * and the database console — see `SURFACES` there.)
            *
            * `subwordSmart` rather than the `prefix` default: it keeps the suggestion on screen when
            * the user types a character the model also predicted but in a different position within

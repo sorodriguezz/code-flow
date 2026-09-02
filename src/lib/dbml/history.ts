@@ -35,6 +35,8 @@
 export type RevisionCause =
   | "edited"
   | "moved"
+  /** A review mark set or cleared. Its own cause because it changes no DBML — only the sidecar. */
+  | "marked"
   | "formatted"
   | "rearranged"
   | "imported"

@@ -14,6 +14,7 @@ import {
   RefreshCw,
   Search,
   Shrink,
+  Spline,
   Table2,
   Unlink,
   View,
@@ -27,11 +28,12 @@ import { apiSaveBinaryFile, apiSaveFile } from "../../lib/tauri/apiCommands";
 import {
   diagramStats,
   layoutDiagram,
+  linkCardinality,
   toMermaid,
   type DiagramLayout,
   type DiagramNode,
 } from "../../lib/db/erLayout";
-import { clip, edgePath, rasterize, standaloneSvg } from "../../lib/diagramSvg";
+import { clip, edgeEnds, edgePath, rasterize, standaloneSvg } from "../../lib/diagramSvg";
 import { schemaToDbml } from "../../lib/dbml/fromSchema";
 import { FORMAT_DBML } from "../../lib/diagrams/doc";
 import { useDbStore, type DbDiagramTab } from "../../state/dbStore";
@@ -81,6 +83,9 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
    * imperatively through `viewRef`, not by React state.
    */
   const { mode, density, pinned, selected, query, highlight } = tab.ui;
+  // `?? true` so a diagram tab restored from a session written before this existed still shows
+  // them — the field is persisted nowhere, but the object is rebuilt from a stored shape.
+  const showCardinality = tab.ui.cardinality ?? true;
   const setUi = useDbStore((s) => s.setDiagramUi);
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   /** Where the export menu was opened from, or `null` when it is closed. */
@@ -489,6 +494,17 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
           >
             <Shrink size={12} />
           </ToolbarButton>
+          {/* The multiplicities on the lines. Lit means they are showing; the title describes the
+              click, the way the two toggles above it do. */}
+          <ToolbarButton
+            onClick={() => setUi(tab.id, { cardinality: !showCardinality })}
+            active={showCardinality}
+            title={
+              showCardinality ? t("db.diagram.hideCardinality") : t("db.diagram.showCardinality")
+            }
+          >
+            <Spline size={12} />
+          </ToolbarButton>
           <ToolbarButton onClick={() => zoomBy(1.2)} title={t("db.diagram.zoomIn")}>
             <ZoomIn size={12} />
           </ToolbarButton>
@@ -589,21 +605,51 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
               const to = nodeById.get(link.to);
               if (!from || !to) return null;
               const dim = related !== null && !(related.has(link.from) && related.has(link.to));
+              const ends = edgeEnds(from, to, link.fromColumn, link.toColumn);
+              const cardinality = linkCardinality(link, from);
+              // Which way the curve leaves each box, so a label sits *outside* the table it belongs
+              // to rather than on top of its last column. `c1` is `x1 ± reach` — see `edgeEnds` —
+              // so its side of `x1` is the direction the line goes.
+              const outward = ends.c1 > ends.x1 ? 1 : -1;
               return (
-                <path
-                  key={link.id}
-                  d={edgePath(from, to, link.fromColumn, link.toColumn)}
-                  fill="none"
-                  stroke="var(--cf-accent)"
-                  strokeWidth={dim ? 1 : 1.4}
-                  strokeOpacity={dim ? 0.14 : 0.6}
-                  strokeDasharray={link.inferred ? "5 4" : undefined}
-                  markerEnd="url(#cf-er-arrow)"
-                >
-                  <title>
-                    {`${link.from}.${link.fromColumn} → ${link.to}.${link.toColumn}\n${link.constraint}`}
-                  </title>
-                </path>
+                <g key={link.id}>
+                  <path
+                    d={edgePath(from, to, link.fromColumn, link.toColumn)}
+                    fill="none"
+                    stroke="var(--cf-accent)"
+                    strokeWidth={dim ? 1 : 1.4}
+                    strokeOpacity={dim ? 0.14 : 0.6}
+                    strokeDasharray={link.inferred ? "5 4" : undefined}
+                    markerEnd="url(#cf-er-arrow)"
+                  >
+                    <title>
+                      {`${link.from}.${link.fromColumn} (${cardinality.from}) → ${link.to}.${link.toColumn} (${cardinality.to})\n${link.constraint}`}
+                    </title>
+                  </path>
+                  {/* The multiplicities, at the end each one is about. An arrow says which way the
+                      key points; it cannot say whether the parent is optional or whether the pair is
+                      one-to-one, and those are the two things a schema drawing is read for.
+
+                      Hidden while the canvas is dimming this edge — at that point the line is
+                      background and two more numbers on it are noise — and hidden with the toggle,
+                      because on a schema of eighty relationships they are worth turning off. */}
+                  {showCardinality && !dim && (
+                    <>
+                      <EdgeLabel
+                        x={ends.x1 + outward * 11}
+                        y={ends.y1 - 5}
+                        anchor={outward > 0 ? "start" : "end"}
+                        text={cardinality.from}
+                      />
+                      <EdgeLabel
+                        x={ends.x2 - outward * 11}
+                        y={ends.y2 - 5}
+                        anchor={outward > 0 ? "end" : "start"}
+                        text={cardinality.to}
+                      />
+                    </>
+                  )}
+                </g>
               );
             })}
 
@@ -655,6 +701,46 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
 // ---------------------------------------------------------------------------
 // One table
 // ---------------------------------------------------------------------------
+
+/**
+ * One multiplicity, drawn on the canvas beside the end of a relationship it describes.
+ *
+ * The halo is the whole trick: `paint-order: stroke` puts a thick stroke in the page's own
+ * background colour *under* the glyphs, so the number stays readable where it crosses its own line
+ * or another table's edge — without a rectangle behind it, which at this size is a smudge. It
+ * survives the export, because `standaloneSvg` resolves `var(--cf-bg)` to a literal on the clone.
+ *
+ * `pointerEvents: none` so a label never eats the press that pans the canvas or picks up a table.
+ */
+function EdgeLabel({
+  x,
+  y,
+  anchor,
+  text,
+}: {
+  x: number;
+  y: number;
+  anchor: "start" | "end";
+  text: string;
+}) {
+  return (
+    <text
+      x={x}
+      y={y}
+      textAnchor={anchor}
+      fontSize={9}
+      fontWeight={600}
+      fill="var(--cf-text-muted)"
+      stroke="var(--cf-bg)"
+      strokeWidth={3}
+      paintOrder="stroke"
+      strokeLinejoin="round"
+      style={{ pointerEvents: "none" }}
+    >
+      {text}
+    </text>
+  );
+}
 
 function TableBox({
   node,

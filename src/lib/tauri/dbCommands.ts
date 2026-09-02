@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   DbAiAnswer,
+  DbAiHistoryTurn,
   DbRunOutcome,
   DbConnectionConfig,
   DbConnectionRow,
@@ -81,6 +82,9 @@ export const dbReorderConnections = (ids: string[]) =>
 /** Idempotent: creating a group that already exists returns the existing one. */
 export const dbCreateGroup = (workspaceId: string, name: string) =>
   invoke<DbGroupRow>("db_create_group", { workspaceId, name });
+
+/** Writes the order the folders are drawn in; `ids` is the whole list, in the order wanted. */
+export const dbReorderGroups = (ids: string[]) => invoke<void>("db_reorder_groups", { ids });
 
 /** Renaming onto an existing group merges the two rather than failing. */
 export const dbRenameGroup = (workspaceId: string, from: string, to: string) =>
@@ -254,6 +258,7 @@ export const dbAiAssist = (
   question: string,
   editorSql: string,
   lastResults: DbRunOutcome[],
+  history: DbAiHistoryTurn[],
   runId: string,
 ) =>
   invoke<DbAiAnswer>("db_ai_assist", {
@@ -263,5 +268,6 @@ export const dbAiAssist = (
     question,
     editorSql,
     lastResults,
+    history,
     runId,
   });

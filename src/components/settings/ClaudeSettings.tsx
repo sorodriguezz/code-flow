@@ -1,7 +1,8 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { ChartColumn, Cpu, FileText, Gauge, Server, type LucideIcon } from "lucide-react";
+import { ChartColumn, Cpu, FileText, Gauge, Server, Sparkles, type LucideIcon } from "lucide-react";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
+import { AiCompletionSettings } from "./AiCompletionSettings";
 import { useT } from "../../state/languageStore";
 import { PromptTemplates } from "./PromptTemplates";
 import { ProvidersSection } from "./ProvidersSection";
@@ -11,17 +12,29 @@ import { UsageStatsSection } from "./UsageStatsSection";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
 
-type AiTab = "providers" | "routing" | "templates" | "limits" | "usage";
+type AiTab = "providers" | "routing" | "templates" | "completion" | "limits" | "usage";
 
 /**
  * The groups, in the order you'd actually set them up:
  *   1. **Providers** — which engines exist, whether they're installed, how each is configured.
  *   2. **Model per task** — which of those engines (and model) handles each action.
  *   3. **Prompt templates** — shared instructions, independent of who runs them.
- *   4. **Limits** — how far through each provider's plan you are, as the provider reports it.
- *   5. **Usage** — what all of that has actually spent, as this app measured it.
+ *   4. **Autocomplete** — the model that runs on this machine and finishes what you type.
+ *   5. **Limits** — how far through each provider's plan you are, as the provider reports it.
+ *   6. **Usage** — what all of that has actually spent, as this app measured it.
  *
- * The last two configure nothing; they read back the consequences of the three above. They are two
+ * Autocomplete sits fourth, after the three that configure the assistant and before the two that
+ * report on it, and it arrived here from the Editor section — where it was filed while it *was* an
+ * editor feature. It is not one any more: the same local model now finishes DBML in the schema
+ * workbench and SQL in the database console. A capability three surfaces share belongs with the
+ * other AI settings; leaving it under Editor would have meant the database console's completion
+ * being configured from a pane named after something else.
+ *
+ * It is also the only entry here that is not about a *provider*: the engine is bundled and the
+ * weights are on disk, so nothing about it is an account or a key. That is the reason it is not
+ * first, and the reason it is not mixed into Providers.
+ *
+ * The last two configure nothing; they read back the consequences of the four above. They are two
  * tabs and not one because they are two different claims: a limit is the provider's statement about
  * a window still running, spend is this app's record of windows already over. Stacked on one screen
  * they read as one table with two halves, and the usage screen's 5h/30d picker appeared to govern
@@ -31,6 +44,7 @@ const TABS: { id: AiTab; labelKey: TranslationKey; hintKey: TranslationKey; icon
   { id: "providers", labelKey: "settings.providersTitle", hintKey: "settings.providersHint", icon: Server },
   { id: "routing", labelKey: "settings.taskRoutingTitle", hintKey: "settings.taskRoutingHint", icon: Cpu },
   { id: "templates", labelKey: "settings.templatesTitle", hintKey: "settings.templatesSharedHint", icon: FileText },
+  { id: "completion", labelKey: "localai.title", hintKey: "localai.hint", icon: Sparkles },
   { id: "limits", labelKey: "quota.title", hintKey: "quota.hint", icon: Gauge },
   { id: "usage", labelKey: "usage.statsTitle", hintKey: "usage.statsHint", icon: ChartColumn },
 ];
@@ -126,6 +140,7 @@ export function ClaudeSettings() {
             {tab === "providers" && <ProvidersSection />}
             {tab === "routing" && <TaskRouting />}
             {tab === "templates" && <PromptTemplates />}
+            {tab === "completion" && <AiCompletionSettings />}
             {tab === "limits" && <QuotaSection />}
             {tab === "usage" && <UsageStatsSection />}
           </Panel>

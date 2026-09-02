@@ -1,16 +1,16 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { Braces, Palette, Scissors, Sparkles, type LucideIcon } from "lucide-react";
+import { ArrowUpRight, Braces, Palette, Scissors, Sparkles, type LucideIcon } from "lucide-react";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import { useT } from "../../state/languageStore";
+import { useUiStore } from "../../state/uiStore";
 import { SnippetsSettings } from "./SnippetsSettings";
 import { LanguageServersSettings } from "./LanguageServersSettings";
 import { IconRulesSettings } from "./IconRulesSettings";
-import { AiCompletionSettings } from "./AiCompletionSettings";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
 
-type EditorTab = "snippets" | "languageServers" | "completion" | "icons";
+type EditorTab = "snippets" | "languageServers" | "icons";
 
 /**
  * What the editor does while you type, and what it draws while you read, behind one rail.
@@ -30,11 +30,16 @@ type EditorTab = "snippets" | "languageServers" | "completion" | "icons";
 const TABS: { id: EditorTab; labelKey: TranslationKey; hintKey: TranslationKey; icon: LucideIcon }[] = [
   { id: "snippets", labelKey: "snippets.title", hintKey: "snippets.hint", icon: Scissors },
   { id: "languageServers", labelKey: "settings.lspTitle", hintKey: "settings.lspHint", icon: Braces },
-  // Third, and it belongs with the two above rather than under the AI section: those answer "where
-  // do my completions come from", and so does this — the difference is only that this source is a
-  // model rather than a snippet file or a compiler. Putting it beside the cloud review engines
-  // would file it by *what it is* instead of by what it does to the editor.
-  { id: "completion", labelKey: "localai.title", hintKey: "localai.hint", icon: Sparkles },
+  // AI autocomplete used to be third in this list, on the argument that these three all answer
+  // "where do my completions come from" and that filing the model one under the AI section would be
+  // filing it by what it *is* instead of by what it does to the editor.
+  //
+  // That argument died when the thing itself changed. The same local model now finishes DBML in the
+  // schema workbench and SQL in the database console, so it is not the editor's feature any more —
+  // and a pane named "Editor" is the wrong place to turn on completion for the database console.
+  // It lives under the AI assistant now; the row at the foot of this pane is the signpost, because
+  // "completion" is still a word people will come here looking for.
+  //
   // Last, and a little apart in kind from the two above: they answer "where do my completions come
   // from", this one answers "why does that file look like that". It is here rather than under
   // Appearance because it is the editor's tree it repaints, and because it belongs with the other
@@ -45,6 +50,7 @@ const TABS: { id: EditorTab; labelKey: TranslationKey; hintKey: TranslationKey; 
 export function EditorSettings() {
   const t = useT();
   const [tab, setTab] = useState<EditorTab>("snippets");
+  const openSettings = useUiStore((state) => state.openSettings);
   const active = TABS.find((entry) => entry.id === tab) ?? TABS[0];
 
   // The two panes are nowhere near the same height — a long snippet list and a fourteen-row server
@@ -87,6 +93,21 @@ export function EditorSettings() {
               </span>
             </button>
           ))}
+          {/* The signpost for what used to be the third entry above.
+
+              A moved setting that leaves nothing behind is a setting the user has to be told about,
+              and nobody reads a changelog to find a checkbox. It sits under the rail rather than in
+              it because it is not a fourth pane — it leaves this section — and it is worded as
+              where the thing went rather than as what it does, since the pane it lands on says
+              that. */}
+          <button
+            onClick={() => openSettings("claude")}
+            className="mt-2 flex w-full items-center gap-1.5 rounded-md border border-dashed border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+          >
+            <Sparkles size={12} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate">{t("localai.title")}</span>
+            <ArrowUpRight size={12} className="shrink-0" />
+          </button>
         </motion.nav>
 
         <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
@@ -97,7 +118,6 @@ export function EditorSettings() {
 
             {tab === "snippets" && <SnippetsSettings />}
             {tab === "languageServers" && <LanguageServersSettings />}
-            {tab === "completion" && <AiCompletionSettings />}
             {tab === "icons" && <IconRulesSettings />}
           </Panel>
         </div>

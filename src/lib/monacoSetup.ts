@@ -3,6 +3,7 @@ import { loader } from "@monaco-editor/react";
 import { ALL_THEMES, monacoThemeName, tokenRulesFor } from "./codeThemes";
 import { installGoToDefinition } from "./goToDefinition";
 import { installSnippets } from "./monacoSnippets";
+import { installInlineCompletion } from "./inlineCompletion";
 import { registerDbmlLanguage } from "./monacoDbml";
 import { registerObjectScript } from "./monacoObjectScript";
 // Subpaths go through the package's own `exports` map (`./*` → `./esm/vs/*.js`), so these are
@@ -174,6 +175,13 @@ installGoToDefinition();
 // The user's own snippets, offered in the completion dropdown of every language. Registered after
 // `registerObjectScript` for the same reason as the line above — the language list is read here.
 installSnippets();
+
+// Ghost text from the model on this machine, in the three editors it is wanted in — see `SURFACES`
+// in `useInlineCompletion`. Here rather than in `EditorPane` because it is not the code editor's
+// feature any more: the DBML workbench and the database console get it too, and installing it from
+// a pane means it is missing until that pane has been opened. The provider declines every model
+// that is not one of the three, and declines all of them while the feature is off.
+installInlineCompletion(monaco);
 
 /**
  * Options every embedded editor needs so its overlay widgets aren't clipped.

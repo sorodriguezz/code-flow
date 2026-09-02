@@ -101,6 +101,24 @@ export interface TsCodeAction {
   changes: TsFileCodeEdits[];
 }
 
+/**
+ * One fix tsserver is offering for a diagnostic — what `getCodeFixes` answers with.
+ *
+ * A superset of [`TsCodeAction`], which is the shape the same edits arrive in when they ride along
+ * with a *completion*. The extra fields are what tell one fix from another: `fixName` is the stable
+ * identifier (`"import"` for the auto-import this exists for, `"unusedIdentifier"`, `"fixMissingMember"`…)
+ * while `description` is a sentence in the server's own locale and only fit for a menu label.
+ *
+ * `fixId` and `fixAllDescription` are present on the fixes that can be applied to every occurrence
+ * in the file. Carried but unused for now — offering "fix all" needs a second request
+ * (`getCombinedCodeFix`), and the one-at-a-time fix is the whole of what Ctrl+. is for.
+ */
+export interface TsCodeFixAction extends TsCodeAction {
+  fixName: string;
+  fixId?: string;
+  fixAllDescription?: string;
+}
+
 export interface TsCompletionDetail {
   name: string;
   displayParts: TsSymbolDisplayPart[];

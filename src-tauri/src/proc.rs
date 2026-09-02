@@ -50,6 +50,30 @@ pub fn hide_console_std(cmd: &mut std::process::Command) -> &mut std::process::C
     cmd
 }
 
+/// Puts the child in a **process group of its own**, so it can later be stopped along with
+/// everything it starts.
+///
+/// Unix only, and it is half of a pair — the other half is [`crate::ai_runs::kill_tree`], which
+/// signals the group. Without this the two are useless to each other: a child that inherits
+/// CodeFlow's own process group cannot be signalled as a group, because doing so would signal
+/// CodeFlow.
+///
+/// The reason it matters is what these children *are*. Every AI CLI here is a Node process that
+/// spawns more — MCP servers, ripgrep, its own subagents — and `Child::kill` sends SIGKILL to the
+/// one process it holds a handle to. The CLI dies; its children are reparented to init and carry on
+/// burning tokens, which is precisely the "Stop did nothing" a long agentic run reports. A run that
+/// has only just started usually has no descendants yet, which is why this looked like it worked.
+///
+/// Windows needs nothing here: `taskkill /T` walks the process tree from a pid on its own, and
+/// `CREATE_NEW_PROCESS_GROUP` there would change Ctrl-C handling rather than help.
+pub fn own_process_group(cmd: &mut tokio::process::Command) -> &mut tokio::process::Command {
+    // `0` means "a new group whose id is the child's own pid" — which is what makes the pid the
+    // caller already has double as the group to signal.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd
+}
+
 /// Adds `extra` Windows creation flags **on top of** `CREATE_NO_WINDOW`.
 ///
 /// `creation_flags` *replaces* the whole flag word rather than OR-ing into it — std stores it

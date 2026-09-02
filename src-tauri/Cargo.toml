@@ -333,6 +333,14 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 # often can't.
 hickory-resolver = "0.26"
 
+# Sending a signal to a *process group*, which is what stopping an AI run needs: `child.kill()`
+# reaches the CLI and nothing it started, and every one of these CLIs is a Node process that spawns
+# more (MCP servers, ripgrep, its own subagents). Already in the tree — tokio depends on it on
+# unix — so naming it here compiles nothing new; it only makes `killpg` ours to call. See
+# `ai_runs::kill_tree`. Windows is covered by `taskkill /T`, which walks the tree itself.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # `keyring` ships with no OS credential-store backend enabled by default — without one
 # of these, Entry::set_password()/get_password() silently round-trip through a
 # non-persistent stub (writes "succeed", reads come back empty).

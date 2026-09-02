@@ -62,6 +62,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import type { RowScope } from "../../types/domain";
 import { dbChildren } from "../../lib/tauri/dbCommands";
 import { riseDelay } from "../../lib/rise";
+import { canDropObjects, type SchemaContents } from "../../lib/db/dropObject";
 import {
   createTemplate,
   objectReference,
@@ -70,6 +71,7 @@ import {
 } from "../../lib/db/sqlTemplates";
 import {
   engineInfo,
+  nodeRefOf,
   type DbConnectionRow,
   type DbConsole,
   type DbNode,
@@ -292,18 +294,6 @@ function TreeRow({
 // The lazy subtree
 // ---------------------------------------------------------------------------
 
-function refOf(node: DbNode): DbNodeRef {
-  return {
-    kind: node.kind,
-    database: node.database,
-    schema: node.schema,
-    // A column/index/key node's *own* name isn't what identifies its parent relation, so folders
-    // and children under a table carry the table through `name`. For a relation, both are the same.
-    name: node.kind === "column" || node.kind === "index" || node.kind === "key"
-      ? node.table
-      : node.table ?? node.name,
-  };
-}
 
 /**
  * A drag released over a row or a heading.
@@ -330,14 +320,21 @@ function NodeSubtree({
   node,
   depth,
   at,
+  parentRef,
+  parentKey,
 }: {
   connectionId: string;
   node: DbNode;
   depth: number;
   at: number;
+  /** The node this one hangs under, so a drop can re-read the list the row disappears from.
+   *  Threaded down rather than derived: "what is above me" is a fact the tree has and a
+   *  `DbNodeRef` does not — a table's parent is a folder whose own name is `Tables`. */
+  parentRef: DbNodeRef;
+  parentKey: string;
 }) {
   const t = useT();
-  const nodeRef = useMemo(() => refOf(node), [node]);
+  const nodeRef = useMemo(() => nodeRefOf(node), [node]);
   const key = nodeKey(connectionId, nodeRef);
   const expanded = useDbStore((s) => s.expanded.includes(key));
   const loading = useDbStore((s) => s.loadingNodes.includes(key));
@@ -445,6 +442,75 @@ function NodeSubtree({
       node.schema ?? undefined,
       sqlTemplate(template, node, kind, columns.map((column) => column.name)),
     );
+  };
+
+  /**
+   * The engine's own kind, or `null` for a connection row that has gone.
+   *
+   * Read once here rather than through `connectionRow?.kind ?? "postgres"`, which is the fallback
+   * the *labels* above use and is exactly wrong for a destructive action: quoting a name as
+   * Postgres would on what is actually SQL Server is how a drop hits something else.
+   */
+  const engineKindOrNull = connectionRow?.kind ?? null;
+  /** Whether this engine has drop-from-the-tree at all — see `canDropObjects`. */
+  const droppable = engineKindOrNull !== null && canDropObjects(engineKindOrNull);
+
+  /**
+   * What is inside the schema about to be dropped.
+   *
+   * Read before the question is asked, not after it is answered: "drop this schema?" and "drop this
+   * schema and the 14 tables in it?" are different questions, and only the second one can be
+   * answered honestly. A read that fails still asks — with the vaguer wording — rather than
+   * refusing an action because the count could not be fetched.
+   */
+  const readContents = async (): Promise<SchemaContents> => {
+    const base = { database: node.database, schema: node.schema ?? node.name };
+    // Mongo's container is the database and its children are collections, with no folder level in
+    // between — so there is one read here and it is a different one.
+    if (!generatesSql) {
+      const collections = await dbChildren(connectionId, nodeRef).catch(() => [] as DbNode[]);
+      return { tables: collections, views: [] };
+    }
+    const [tables, views] = await Promise.all([
+      dbChildren(connectionId, { ...base, kind: "table_folder", name: "Tables" }).catch(
+        () => [] as DbNode[],
+      ),
+      dbChildren(connectionId, { ...base, kind: "view_folder", name: "Views" }).catch(
+        () => [] as DbNode[],
+      ),
+    ]);
+    return { tables, views };
+  };
+
+  /** Asks, then drops. The confirmation is the safeguard here — there is no draft to read first. */
+  const dropRelation = async () => {
+    const message =
+      node.kind === "view"
+        ? t("db.dropViewConfirm", { name: node.name })
+        : t("db.dropTableConfirm", { name: node.name });
+    if (!(await confirmAction(message, true, t("db.dropConfirmLabel")))) return;
+    await store.dropObject({
+      connectionId,
+      node,
+      scope: "relation",
+      parent: { ref: parentRef, key: parentKey },
+    });
+  };
+
+  const dropContainer = async () => {
+    const contents = await readContents();
+    const count = contents.tables.length;
+    const message = generatesSql
+      ? t("db.dropSchemaConfirm", { name: node.name, count: String(count) })
+      : t("db.dropDatabaseConfirm", { name: node.name, count: String(count) });
+    if (!(await confirmAction(message, true, t("db.dropConfirmLabel")))) return;
+    await store.dropObject({
+      connectionId,
+      node,
+      scope: "container",
+      contents,
+      parent: { ref: parentRef, key: parentKey },
+    });
   };
 
   const menuItems: MenuItem[] = [];
@@ -584,6 +650,42 @@ function NodeSubtree({
       onClick: () => void store.refreshNode(connectionId, nodeRef, key),
     });
   }
+  /**
+   * Dropping, from the tree.
+   *
+   * Last in the menu and marked as danger, which is the whole of its placement argument: every row
+   * above this one is reversible or read-only, and the one that is not belongs at the far end where
+   * nothing is reached on the way to something else. It is the only row in this menu that runs a
+   * statement against the server without a console in between, which is why the confirmation names
+   * the object and says what goes with it.
+   *
+   * Redis is excluded rather than served badly: its "tables" are keys, and `DEL` is already in the
+   * generator menu under the name it actually has.
+   */
+  if (droppable && isRelation) {
+    menuItems.push({
+      label:
+        node.kind === "view"
+          ? t("db.dropView")
+          : node.kind === "collection"
+            ? t("db.dropCollection")
+            : t("db.dropTable"),
+      icon: Trash2,
+      danger: true,
+      separated: true,
+      onClick: () => void dropRelation(),
+    });
+  } else if (droppable && isSchemaLike) {
+    menuItems.push({
+      // Mongo has no schema level, so the container being dropped is the database — and the row
+      // says the word that engine uses rather than one it has no concept of.
+      label: generatesSql ? t("db.dropSchema") : t("db.dropDatabase"),
+      icon: Trash2,
+      danger: true,
+      separated: true,
+      onClick: () => void dropContainer(),
+    });
+  }
 
   return (
     <>
@@ -686,6 +788,8 @@ function NodeSubtree({
             node={child}
             depth={depth + 1}
             at={index}
+            parentRef={nodeRef}
+            parentKey={key}
           />
         ))}
       {expanded && !error && children?.length === 0 && (
@@ -1090,7 +1194,15 @@ function ConnectionBranch({
       {expanded &&
         !error &&
         children?.map((child, childIndex) => (
-          <NodeSubtree key={child.id} connectionId={row.id} node={child} depth={1} at={childIndex} />
+          <NodeSubtree
+            key={child.id}
+            connectionId={row.id}
+            node={child}
+            depth={1}
+            at={childIndex}
+            parentRef={rootRef}
+            parentKey={key}
+          />
         ))}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
@@ -1382,6 +1494,11 @@ function GroupSection({
   // renaming it would write a literal name onto every connection that deliberately has none, and
   // deleting it would have nothing to delete.
   if (group !== UNGROUPED) {
+    // Where this folder sits among the ones that can be ordered. `-1` for a group implied by a
+    // connection's `group_name` with no `db_groups` row: it has no `sort_order` to write, so it is
+    // drawn after the real folders and the two rows below are not offered on it — see
+    // `groupConnections`.
+    const orderedAt = groups.findIndex((entry) => entry.name.trim() === group);
     menuItems.push(
       {
         label: t("db.renameGroup"),
@@ -1389,6 +1506,26 @@ function GroupSection({
         separated: true,
         onClick: () => setRenaming(true),
       },
+    );
+    // The same pair the connection rows carry, one level up — see `moveGroup`. Offered only where
+    // there is somewhere to go, so the menu never holds a row that does nothing.
+    if (orderedAt > 0) {
+      menuItems.push({
+        label: t("db.moveUp"),
+        icon: ArrowUp,
+        separated: true,
+        onClick: () => void useDbStore.getState().moveGroup(group, -1),
+      });
+    }
+    if (orderedAt >= 0 && orderedAt < groups.length - 1) {
+      menuItems.push({
+        label: t("db.moveDown"),
+        icon: ArrowDown,
+        separated: orderedAt === 0,
+        onClick: () => void useDbStore.getState().moveGroup(group, 1),
+      });
+    }
+    menuItems.push(
       ...scopeMenuItems({
         scope: groupScope,
         anchor: menu ?? { x: 0, y: 0 },
@@ -1614,7 +1751,7 @@ function SearchResults({ query }: { query: string }) {
         return (
           <button
             key={`${connectionId}|${node.id}`}
-            onClick={() => store.openData(connectionId, refOf(node), node.name)}
+            onClick={() => store.openData(connectionId, nodeRefOf(node), node.name)}
             className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
           >
             <Icon size={12} className="shrink-0 text-[var(--cf-text-muted)]" />

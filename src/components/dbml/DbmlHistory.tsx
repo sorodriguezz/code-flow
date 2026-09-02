@@ -21,6 +21,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 const CAUSE_LABEL: Record<Revision["cause"], TranslationKey> = {
   edited: "dbml.history.edited",
   moved: "dbml.history.moved",
+  marked: "dbml.history.marked",
   formatted: "dbml.history.formatted",
   rearranged: "dbml.history.rearranged",
   imported: "dbml.history.imported",

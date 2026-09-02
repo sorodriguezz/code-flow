@@ -229,10 +229,15 @@ function RowTwisty({
  * two that come from outside, in `EditorView`), the maps and sets are `useMemo`s — because a single
  * re-identified prop turns this from a wall into a per-row comparison that never stops anything.
  */
+/** One frozen empty set, so "nothing is selected" is the *same* prop across renders and the
+ *  `memo` on every row below still holds. */
+const EMPTY_SELECTION: ReadonlySet<string> = new Set<string>();
+
 const TreeNode = memo(function TreeNode({
   entry,
   depth,
   selectedPath,
+  marked,
   focusedDir,
   focusedFile,
   expanded,
@@ -245,6 +250,7 @@ const TreeNode = memo(function TreeNode({
   renaming,
   onToggleDir,
   onSelectFile,
+  onMarkRow,
   onOpenFile,
   onSubmitDraft,
   onCancelDraft,
@@ -264,6 +270,14 @@ const TreeNode = memo(function TreeNode({
   /** Place among its siblings, which is all the entry animation needs to stagger. */
   at: number;
   selectedPath: string | null;
+  /**
+   * Every row the user has picked out with ⌘/Ctrl or ⇧ — see `marked` in `FileTree`.
+   *
+   * A second reason for a row to read as selected, alongside the two below. It has to be, because
+   * those two are singular by construction: `selectedPath` is the *open file* and `focusedDir` the
+   * last folder clicked, and neither can describe four files chosen for deletion.
+   */
+  marked: ReadonlySet<string>;
   /** The clicked directory, when the last click landed on one — null while a file holds the
    * selection, so only ever one row reads as selected. */
   focusedDir: string | null;
@@ -303,6 +317,8 @@ const TreeNode = memo(function TreeNode({
   renaming: string | null;
   onToggleDir: (path: string) => void;
   onSelectFile: (path: string) => void;
+  /** A ⌘/Ctrl- or ⇧-click: marks rows without opening anything. See `markRow`. */
+  onMarkRow: (entry: FileEntry, mode: "toggle" | "range") => void;
   onOpenFile?: (path: string) => void;
   onSubmitDraft: (name: string) => void;
   onCancelDraft: () => void;
@@ -343,7 +359,9 @@ const TreeNode = memo(function TreeNode({
   const hoverKey = `tree:${entry.path}`;
   const isHovered = useRowHoverStore((s) => s.key === hoverKey);
 
-  const isSelected = entry.is_dir ? focusedDir === entry.path : selectedPath === entry.path;
+  const isSelected =
+    marked.has(entry.path) ||
+    (entry.is_dir ? focusedDir === entry.path : selectedPath === entry.path);
   // See `focusedFile`: the ring stands in for the highlight when the revealed file is not the one
   // open in the editor. Never both — a row that is already selected says so with its background.
   const isRevealed = !entry.is_dir && !isSelected && focusedFile === entry.path;
@@ -388,6 +406,7 @@ const TreeNode = memo(function TreeNode({
    */
   const inherited = {
     selectedPath,
+    marked,
     focusedDir,
     focusedFile,
     expanded,
@@ -400,6 +419,7 @@ const TreeNode = memo(function TreeNode({
     renaming,
     onToggleDir,
     onSelectFile,
+    onMarkRow,
     onOpenFile,
     onSubmitDraft,
     onCancelDraft,
@@ -426,10 +446,21 @@ const TreeNode = memo(function TreeNode({
         // while leaving click and double-click intact.
         onMouseDown={(e) => e.preventDefault()}
         onContextMenu={(e) => onContextMenu(e, entry)}
-        onClick={() => {
+        onClick={(e) => {
           // A drag ends with a click on the row it started from; the tree must not also treat
           // that as a selection.
           if (suppressClick()) return;
+          // ⌘/Ctrl adds or removes one row, ⇧ takes the range — and neither opens the file, which
+          // is the point: you are picking rows out to do something to them, not reading them.
+          // `metaKey` and `ctrlKey` both, so the same gesture works on either platform.
+          if (e.shiftKey) {
+            onMarkRow(entry, "range");
+            return;
+          }
+          if (e.metaKey || e.ctrlKey) {
+            onMarkRow(entry, "toggle");
+            return;
+          }
           if (entry.is_dir) onToggleDir(entry.path);
           else onSelectFile(entry.path);
         }}
@@ -634,6 +665,29 @@ export function FileTree({
   // The clicked row, which is what decides where a new file/folder lands, mirroring VS Code:
   // inside the clicked directory, or alongside the clicked file, or at the root.
   const [focus, setFocus] = useState<{ path: string; isDir: boolean }>({ path: "", isDir: true });
+  /**
+   * Every row that is selected, which on a plain click is exactly one and after ⌘/Ctrl or ⇧ is
+   * however many were picked.
+   *
+   * A set beside `focus` rather than in place of it, because the two answer different questions and
+   * always did. `focus` is *where the next thing happens* — the folder a new file lands in, the row
+   * a rename opens on — and those are singular no matter how many rows are highlighted. This is
+   * *what the next thing happens to*, and delete, move and copy-path all wanted it to be plural.
+   * `focus.path` is a member whenever it names a real row, so a single click leaves the two saying
+   * the same thing and every existing caller keeps working.
+   *
+   * Paths only, with no `isDir` alongside: the entries are looked up when they are used, and a set
+   * of strings is what makes `has` on every row cheap.
+   */
+  const [marked, setMarked] = useState<ReadonlySet<string>>(EMPTY_SELECTION);
+  /**
+   * Where a ⇧-click measures its range from — the last row picked *without* Shift.
+   *
+   * Separate from `focus` because Shift moves the focus as it extends: without an anchor of its
+   * own, two Shift-clicks in a row would measure the second from the end of the first and the
+   * selection would crawl instead of pivoting, which is not how any file manager behaves.
+   */
+  const anchorRef = useRef<string | null>(null);
   /** `t` behind a ref, so the callbacks that only *read* a string when they run don't have to
    * re-create on every language render. */
   const tRef = useRef(t);
@@ -705,6 +759,10 @@ export function FileTree({
     setExpanded(new Set());
     setNestOpen(new Set());
     setFocus({ path: "", isDir: true });
+    // A selection is a list of paths in the repository being left. Carrying it across would mark
+    // rows in the new tree purely because the two projects happen to share a filename.
+    setMarked(EMPTY_SELECTION);
+    anchorRef.current = null;
     setDraft(null);
     setRenaming(null);
     setMenu(null);
@@ -720,9 +778,29 @@ export function FileTree({
     };
   }, [repoPath]);
 
+  /**
+   * A file opened from *outside* this tree drops the multi-selection.
+   *
+   * A tab click, a go-to-definition, a reveal from the editor — each moves `selectedPath`, and each
+   * would otherwise leave four rows still highlighted from a ⌘-click a minute ago plus a fifth that
+   * is merely open. Two kinds of "selected" on screen at once, and a Delete aimed at the four the
+   * user has stopped thinking about.
+   *
+   * The size guard is what keeps a click *inside* the tree from being caught by this: those go
+   * through `handleSelectFile`, which has already replaced the selection with the single row, so a
+   * set still holding several means the change came from somewhere else.
+   */
+  useEffect(() => {
+    setMarked((prev) => (prev.size <= 1 ? prev : EMPTY_SELECTION));
+  }, [selectedPath]);
+
   const toggleDir = useCallback(
     (path: string) => {
       setFocus({ path, isDir: true });
+      // A plain click is "just this one", whatever was selected before — the rule every file
+      // manager follows, and the reason the modifiers are the only way to keep a selection alive.
+      setMarked(new Set([path]));
+      anchorRef.current = path;
       setExpanded((prev) => {
         const next = new Set(prev);
         if (next.has(path)) next.delete(path);
@@ -883,6 +961,39 @@ export function FileTree({
   const cancelRename = useCallback(() => setRenaming(null), []);
 
   /**
+   * Whether a selected path is a folder, read off the row that draws it.
+   *
+   * The selection is paths and nothing else — see `marked` — so the one caller that needs the flag
+   * asks the DOM, which already carries it for the drag hit-testing. That is also the only place it
+   * is guaranteed current: a path's kind comes from a listing, and the listing for a folder deep in
+   * a collapsed branch may not have been fetched.
+   */
+  const isDirPath = useCallback((path: string): boolean => {
+    const row = scrollerRef.current?.querySelector<HTMLElement>(
+      `[data-cf-treepath="${CSS.escape(path)}"]`,
+    );
+    return row?.dataset.cfTreedir === "1";
+  }, []);
+
+  /**
+   * The rows an action applies to, oldest question in this file answered plurally.
+   *
+   * `focus.path` is included even when it is not in `marked` — a reveal moves the focus without
+   * touching the selection — and the empty path (the repo root, which `focus` uses to mean "no
+   * row") never is. Sorted deepest-first, which matters for exactly one caller: deleting a folder
+   * and something inside it in the same pass has to take the child before the parent, or the second
+   * delete is aimed at a path that no longer exists.
+   */
+  const selectedPaths = useCallback((): string[] => {
+    const paths = new Set(marked);
+    if (focus.path) paths.add(focus.path);
+    paths.delete("");
+    return [...paths].sort((a, b) => b.split("/").length - a.split("/").length || a.localeCompare(b));
+  }, [marked, focus.path]);
+  const selectedPathsRef = useRef(selectedPaths);
+  selectedPathsRef.current = selectedPaths;
+
+  /**
    * Deleting the focused row.
    *
    * Confirmed first and then sent to the OS trash rather than unlinked — see `fsops::delete_path`.
@@ -890,34 +1001,54 @@ export function FileTree({
    * is one click away from being the wrong folder.
    */
   const deleteFocused = useCallback(async () => {
-    const target = focus.path;
-    if (!target) return;
-    const name = target.split("/").pop() ?? target;
-    if (!(await confirmAction(tRef.current("editor.deleteConfirm", { name })))) return;
-    try {
-      await deletePath(repoPath, target);
-    } catch (e) {
-      pushErrorToast(String(e));
-      return;
+    // Deepest-first, which is what makes deleting a folder and a file inside it in one pass work —
+    // see `selectedPaths`. One is the common case and reads exactly as it always did.
+    const targets = selectedPathsRef.current();
+    if (targets.length === 0) return;
+    const message =
+      targets.length === 1
+        ? tRef.current("editor.deleteConfirm", { name: targets[0].split("/").pop() ?? targets[0] })
+        : tRef.current("editor.deleteManyConfirm", { n: String(targets.length) });
+    if (!(await confirmAction(message))) return;
+
+    // Every one attempted, and the failures collected rather than the first one stopping the rest:
+    // a selection with one protected file in it must not leave the other nine undeleted, and the
+    // user has to be told which one refused. A path already gone — taken by its parent a moment
+    // ago — is the one failure this cannot tell apart from a real one, which is why the order is
+    // deepest-first in the first place.
+    const removed: string[] = [];
+    const failures: string[] = [];
+    for (const target of targets) {
+      try {
+        await deletePath(repoPath, target);
+        removed.push(target);
+      } catch (e) {
+        failures.push(String(e));
+      }
     }
-    const parent = parentDir(target);
-    setFocus({ path: parent, isDir: true });
+    if (failures.length > 0) pushErrorToast(failures[0]);
+    if (removed.length === 0) return;
+
+    const parents = [...new Set(removed.map((target) => parentDir(target)))];
+    setFocus({ path: parents[0] ?? "", isDir: true });
+    setMarked(EMPTY_SELECTION);
+    anchorRef.current = null;
+    const orphaned = (path: string) =>
+      removed.some((target) => path === target || path.startsWith(`${target}/`));
     setExpanded((prev) => {
       // A deleted folder leaves its own key and its descendants' behind in the expanded set,
       // which would re-list paths that no longer exist on the next refresh.
-      const next = new Set([...prev].filter((p) => p !== target && !p.startsWith(`${target}/`)));
+      const next = new Set([...prev].filter((p) => !orphaned(p)));
       return next;
     });
     // The same tidy-up for nests: a deleted file leaves its own key behind, and a deleted *folder*
     // leaves every unfolded nest under it. Neither would ever be drawn again, but both would keep
     // a path that no longer exists alive in state for the rest of the session.
-    setNestOpen((prev) =>
-      new Set([...prev].filter((p) => p !== target && !p.startsWith(`${target}/`))),
-    );
-    await loadDir(parent);
+    setNestOpen((prev) => new Set([...prev].filter((p) => !orphaned(p))));
+    await Promise.all(parents.map((parent) => loadDir(parent).catch(() => {})));
     void useRepoStore.getState().refreshStatus();
-    onPathRemoved?.(target);
-  }, [focus.path, repoPath, loadDir, onPathRemoved]);
+    for (const target of removed) onPathRemoved?.(target);
+  }, [repoPath, loadDir, onPathRemoved]);
 
   // The menu is built once per open and its items are closures; reading the actions through refs
   // keeps a click on "Delete" running against the *current* focus rather than whatever it was when
@@ -955,6 +1086,13 @@ export function FileTree({
     // Right-clicking *is* a selection: every item in the menu acts on the focused row, so the row
     // under the pointer has to become that row before the menu opens.
     setFocus(entry ? { path: entry.path, isDir: entry.is_dir } : { path: "", isDir: true });
+    // …unless the pointer is already inside a selection, which is the one case where replacing it
+    // would be wrong: picking out six files and then right-clicking one of them is how you reach
+    // "delete these six", and a menu that had just cut the selection down to one would delete the
+    // wrong thing without ever saying so. Landing anywhere else clears it, the same as a click.
+    setMarked((prev) =>
+      entry && prev.has(entry.path) ? prev : new Set(entry ? [entry.path] : []),
+    );
     setMenu({ x: e.clientX, y: e.clientY, entry });
   }, []);
 
@@ -964,11 +1102,14 @@ export function FileTree({
         { label: t("editor.newFile"), icon: FilePlus, onClick: () => startDraftRef.current("file") },
         { label: t("editor.newFolder"), icon: FolderPlus, onClick: () => startDraftRef.current("dir") },
       ];
+      // How many rows the menu is about. Rename stays singular whatever it says — there is no
+      // sensible "rename these four" — so only the actions that can act on a list say so.
+      const count = selectedPathsRef.current().length;
       if (entry) {
         items.push(
           { label: t("editor.rename"), icon: PenLine, separated: true, onClick: () => setRenaming(entry.path) },
           {
-            label: t("editor.delete"),
+            label: count > 1 ? t("editor.deleteN", { n: String(count) }) : t("editor.delete"),
             icon: Trash2,
             danger: true,
             onClick: () => void deleteFocusedRef.current(),
@@ -979,14 +1120,19 @@ export function FileTree({
         // Its own group, away from Delete: the two are the actions most easily confused here, and
         // the one that touches the disk must not sit next to the one that only stops drawing a row.
         items.push({
-          label: t("editor.hide"),
+          label: count > 1 ? t("editor.hideN", { n: String(count) }) : t("editor.hide"),
           icon: EyeOff,
           separated: true,
           onClick: () => {
-            hideEntry({ path: entry.path, isDir: entry.is_dir });
+            // Every selected row, not just the one under the pointer: hiding is the action people
+            // reach for with `dist`, `coverage` and `.turbo` all picked out at once.
+            for (const path of selectedPathsRef.current()) {
+              hideEntry({ path, isDir: isDirPath(path) });
+            }
             // The focused row decides where "new file" lands; leaving the focus on something that
             // is no longer drawn would aim the next creation at an invisible folder.
             setFocus({ path: "", isDir: true });
+            setMarked(EMPTY_SELECTION);
           },
         });
       }
@@ -1020,25 +1166,107 @@ export function FileTree({
       if (entry) {
         items.push(
           {
-            label: t("editor.copyPath"),
+            // One path per line when several are selected — which is the form every terminal,
+            // editor and chat window accepts back.
+            label: count > 1 ? t("editor.copyPathsN", { n: String(count) }) : t("editor.copyPath"),
             icon: ClipboardCopy,
-            onClick: () => copyToClipboard(`${repoPath}/${entry.path}`),
+            onClick: () =>
+              copyToClipboard(
+                selectedPathsRef
+                  .current()
+                  .map((path) => `${repoPath}/${path}`)
+                  .join("\n"),
+              ),
           },
-          { label: t("editor.copyRelativePath"), icon: ClipboardCopy, onClick: () => copyToClipboard(entry.path) },
+          {
+            label: count > 1 ? t("editor.copyRelativePathsN", { n: String(count) }) : t("editor.copyRelativePath"),
+            icon: ClipboardCopy,
+            onClick: () => copyToClipboard(selectedPathsRef.current().join("\n")),
+          },
         );
       }
       return items;
     },
-    [t, revealInOs, copyToClipboard, repoPath, hideEntry, nestingEnabled, toggleNest],
+    [
+      t,
+      revealInOs,
+      copyToClipboard,
+      repoPath,
+      hideEntry,
+      isDirPath,
+      nestingEnabled,
+      toggleNest,
+      // The menu's labels count the selection, so it has to be rebuilt when that count moves.
+      marked,
+      focus.path,
+    ],
   );
 
   const handleSelectFile = useCallback(
     (path: string) => {
       setFocus({ path, isDir: false });
+      setMarked(new Set([path]));
+      anchorRef.current = path;
       onSelectFile(path);
     },
     [onSelectFile],
   );
+
+  /**
+   * ⌘/Ctrl-click and ⇧-click: the two gestures that turn one selected row into several.
+   *
+   * **Neither opens the file.** A plain click on a file row selects it *and* opens it in the
+   * editor, which is right for one row and wrong the moment you are picking out four to delete —
+   * so the modified click marks and stops there. That split is the whole reason this is a separate
+   * handler rather than a flag threaded through `handleSelectFile`.
+   *
+   * `"toggle"` adds or removes the one row, exactly as ⌘-click does everywhere. `"range"` replaces
+   * the selection with every row between the anchor and this one **as they are drawn** — which is
+   * why the order comes off the DOM rather than out of the model: the visible sequence is folders
+   * expanded or not, nests unfolded or not, filtered or not, and the rows themselves are the only
+   * place all of that has already been resolved. The drag hit-testing reads the same markers for
+   * the same reason.
+   *
+   * A range with no anchor (a first click that happened to be a ⇧-click) is treated as a plain
+   * pick of that row: better than selecting from the top of the tree to wherever the user aimed.
+   */
+  const markRow = useCallback((entry: FileEntry, mode: "toggle" | "range") => {
+    const path = entry.path;
+    setFocus({ path, isDir: entry.is_dir });
+
+    if (mode === "toggle") {
+      setMarked((prev) => {
+        const next = new Set(prev);
+        if (next.has(path)) next.delete(path);
+        else next.add(path);
+        return next;
+      });
+      anchorRef.current = path;
+      return;
+    }
+
+    const anchor = anchorRef.current;
+    if (!anchor || anchor === path) {
+      setMarked(new Set([path]));
+      anchorRef.current = path;
+      return;
+    }
+    const order = [...(scrollerRef.current?.querySelectorAll<HTMLElement>("[data-cf-treepath]") ?? [])]
+      .map((row) => row.dataset.cfTreepath)
+      .filter((value): value is string => value !== undefined);
+    const from = order.indexOf(anchor);
+    const to = order.indexOf(path);
+    // The anchor scrolled out of the tree, was collapsed away, or was filtered out. Falling back to
+    // the single row is the honest answer — a range needs two ends.
+    if (from < 0 || to < 0) {
+      setMarked(new Set([path]));
+      anchorRef.current = path;
+      return;
+    }
+    setMarked(new Set(order.slice(Math.min(from, to), Math.max(from, to) + 1)));
+    // The anchor deliberately stays where it was: that is what lets a second ⇧-click re-aim the
+    // same range from the same pivot instead of walking it along.
+  }, []);
 
   /**
    * Moving a file or folder by dragging it onto another folder.
@@ -1118,7 +1346,24 @@ export function FileTree({
       const dest = dirAt(ev.clientX, ev.clientY);
       setDragCursor(false);
       useTreeDragStore.getState().end();
-      if (dest !== null) void applyMoveRef.current(dragged.path, dest);
+      if (dest === null) return;
+      // Dragging a row that is part of a selection moves the whole selection; dragging one that is
+      // not moves only it — and, above, replaced the selection with it. That is the rule every file
+      // manager uses, and the alternative (a drag that silently takes rows you had picked out
+      // somewhere off-screen) is the one that loses work.
+      //
+      // Deepest-first, so moving a folder and something inside it in one gesture takes the child
+      // while its path still resolves. A destination inside the selection is refused by
+      // `canDropInto` for the dragged row already; the others are attempted and the ones that
+      // cannot land report their own error.
+      const batch = selectedPathsRef
+        .current()
+        .filter((path) => path === dragged.path || markedRef.current.has(path));
+      const moving = batch.includes(dragged.path) ? batch : [dragged.path];
+      for (const path of moving) void applyMoveRef.current(path, dest);
+      // The rows the selection named are about to be at different paths, so keeping it would leave
+      // a highlight on names that have moved out from under it.
+      if (moving.length > 1) setMarkedRef.current(EMPTY_SELECTION);
     };
 
     window.addEventListener("pointermove", onMove);
@@ -1128,6 +1373,12 @@ export function FileTree({
 
   const applyMoveRef = useRef(applyMove);
   applyMoveRef.current = applyMove;
+  /** `beginDrag` is a `useCallback` with no dependencies — registered once and holding its
+   *  closure for the life of the tree — so the selection has to reach it through a ref. */
+  const markedRef = useRef(marked);
+  markedRef.current = marked;
+  const setMarkedRef = useRef(setMarked);
+  setMarkedRef.current = setMarked;
 
   const takeSuppressedClick = useCallback(() => {
     if (!suppressClickRef.current) return false;
@@ -1431,7 +1682,11 @@ export function FileTree({
         // Clicking empty space below the tree targets the repo root, so a new file created
         // right after lands at the top level instead of inside a previously clicked folder.
         onClick={(e) => {
-          if (e.target === e.currentTarget) setFocus({ path: "", isDir: true });
+          if (e.target !== e.currentTarget) return;
+          setFocus({ path: "", isDir: true });
+          // Clicking away is how you drop a selection, here as everywhere else.
+          setMarked(EMPTY_SELECTION);
+          anchorRef.current = null;
         }}
         // Right-clicking the empty space below the tree is the root's menu — the only way to reach
         // "new file at the top level" once a folder deep in the tree has the focus.
@@ -1457,6 +1712,7 @@ export function FileTree({
                 depth={0}
                 at={index}
                 selectedPath={selectedPath}
+                marked={marked}
                 focusedDir={focus.isDir ? focus.path : null}
                 focusedFile={focus.isDir ? null : focus.path}
                 expanded={expanded}
@@ -1469,6 +1725,7 @@ export function FileTree({
                 renaming={renaming}
                 onToggleDir={toggleDir}
                 onSelectFile={handleSelectFile}
+                onMarkRow={markRow}
                 onOpenFile={onOpenFile}
                 onSubmitDraft={submitDraft}
                 onCancelDraft={cancelDraft}
@@ -1501,7 +1758,9 @@ export function FileTree({
             style={{ transform: `translate(${treeOrigin.x + 12}px, ${treeOrigin.y + 12}px)` }}
             className="pointer-events-none fixed left-0 top-0 z-[100] rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface)] px-2 py-1 text-[11px] text-[var(--cf-text)] shadow-lg"
           >
-            {treeDrag.path.split("/").pop()}
+            {marked.size > 1 && marked.has(treeDrag.path)
+              ? t("editor.movingN", { n: String(marked.size) })
+              : treeDrag.path.split("/").pop()}
           </div>,
           document.body,
         )}

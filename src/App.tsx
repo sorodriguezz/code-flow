@@ -28,6 +28,7 @@ import { useThemeStore } from "./state/themeStore";
 import { useUiStore, type MainView } from "./state/uiStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectionsStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
+import { useMissingProjectsStore } from "./state/missingProjectsStore";
 import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
 import { useApiStore } from "./state/apiStore";
@@ -532,6 +533,13 @@ export default function App() {
     // workspace it was first opened in. A store's own file is the only place that rule cannot be
     // forgotten from.
   }, [workspaceId]);
+
+  // Keeps track of which registered repositories are still on disk. A folder moved or deleted from
+  // outside CodeFlow used to leave a row that still looked openable and, opened, pointed the git
+  // engine at nothing; those rows are struck out and reduced to a remove button instead. The store
+  // re-checks when the project list changes and when the window comes back — no timer: the change
+  // it is watching for is one the user makes by hand and then comes here to see the result of.
+  useEffect(() => useMissingProjectsStore.getState().watch(), []);
 
   // Looks for a newer release: once on launch, then every hour for as long as the app is open.
   // The focus listener is the catch-up for a machine that slept through several ticks — a

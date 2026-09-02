@@ -344,11 +344,47 @@ export function nodeIdOf(schema: string, name: string): string {
  */
 const LAYOUT_MARKER = "// codeflow:layout ";
 
+/**
+ * The second sidecar line: what the reader has decided about each table and relationship.
+ *
+ * # Why it is a comment and not part of the schema
+ *
+ * A mark is a note about the *review*, not about the database — "this table is probably going" is
+ * not a fact about the model, it is a fact about the person reading it. Writing it into the DBML
+ * (as a `note`, say) would mean exporting the schema exports somebody's working notes, and would
+ * change the parsed model on every click. As a comment it is invisible to `@dbml/core`, invisible
+ * to every generator, and travels with the document exactly like the dragged box positions do.
+ *
+ * # Why a second marker and not a field in the first
+ *
+ * `codeflow:layout` is `id → [x, y]` and is validated as such — a value that is not a pair of
+ * finite numbers is dropped, deliberately, because a hand-edited file must not be able to put a box
+ * at coordinates the canvas can never scroll to. Marks are a different shape with a different
+ * validation, and stuffing them into the same object would mean one of the two has to stop being
+ * simple. Two lines cost nothing: both are stripped by the same pass in `readLayout`.
+ */
+const MARKS_MARKER = "// codeflow:marks ";
+
+/**
+ * What a table or a relationship has been marked as, while a model is being reviewed.
+ *
+ * Three, because triage has three answers and no more: it goes, it stays, or somebody has to look
+ * at it. A fourth would be a tag system, which is a different feature.
+ */
+export type DbmlMarkKind = "remove" | "review" | "keep";
+
+const MARK_KINDS = new Set<string>(["remove", "review", "keep"]);
+
+/** Keyed by table id (which is its qualified name) or by ref id. */
+export type DbmlMarks = Record<string, DbmlMarkKind>;
+
 export interface DbmlDocument {
-  /** The DBML itself, with the marker line removed. This is what the parser and the editor see. */
+  /** The DBML itself, with the marker lines removed. This is what the parser and the editor see. */
   source: string;
   /** Table id → where the user dragged it. Empty when nothing has been dragged. */
   positions: Record<string, { x: number; y: number }>;
+  /** Table or ref id → how it has been marked. Empty when nothing has been marked. */
+  marks: DbmlMarks;
 }
 
 /**
@@ -360,41 +396,67 @@ export interface DbmlDocument {
  */
 export function readLayout(doc: string): DbmlDocument {
   const lines = doc.split("\n");
-  const at = lines.findIndex((line) => line.trimStart().startsWith(LAYOUT_MARKER));
-  if (at === -1) return { source: doc, positions: {} };
+  const isMarker = (line: string) => {
+    const text = line.trimStart();
+    return text.startsWith(LAYOUT_MARKER) || text.startsWith(MARKS_MARKER);
+  };
+  if (!lines.some(isMarker)) return { source: doc, positions: {}, marks: {} };
 
-  const payload = lines[at].trimStart().slice(LAYOUT_MARKER.length);
-  const rest = [...lines.slice(0, at), ...lines.slice(at + 1)];
+  const payloads = new Map<string, string>();
+  const rest: string[] = [];
+  for (const line of lines) {
+    const text = line.trimStart();
+    if (text.startsWith(LAYOUT_MARKER)) payloads.set(LAYOUT_MARKER, text.slice(LAYOUT_MARKER.length));
+    else if (text.startsWith(MARKS_MARKER)) payloads.set(MARKS_MARKER, text.slice(MARKS_MARKER.length));
+    else rest.push(line);
+  }
+
   /**
-   * Exactly the two lines the writer added, and not one more.
+   * Exactly the newline the writer added, and not one more.
    *
-   * `writeLayout` puts a newline in front of the marker and one after it, so undoing it removes the
-   * marker line and one trailing empty element — never "trailing blank lines" in general. The
-   * difference is not pedantry: the editor's text is this `source`, so trimming whitespace here
+   * `writeLayout` puts a newline in front of the first marker and one after the last, so undoing it
+   * removes the marker lines and *one* trailing empty element — never "trailing blank lines" in
+   * general, and one regardless of how many markers there were, because they are written as a run.
+   * The difference is not pedantry: the editor's text is this `source`, so trimming whitespace here
    * *deletes what is being typed*. Press Enter twice at the end of a schema whose boxes have been
    * dragged and, with a greedy trim, the second one is swallowed before the key is released.
    */
   if (rest.length > 0 && rest[rest.length - 1] === "") rest.pop();
 
   const positions: Record<string, { x: number; y: number }> = {};
+  parse(payloads.get(LAYOUT_MARKER), (id, value) => {
+    // `[x, y]` and nothing else. A stored file is not a trusted input: it can be hand-edited,
+    // and a NaN reaching the layout puts a box at coordinates the canvas can never scroll to.
+    if (!Array.isArray(value) || value.length < 2) return;
+    const [x, y] = value;
+    if (typeof x !== "number" || typeof y !== "number") return;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    positions[id] = { x: Math.round(x), y: Math.round(y) };
+  });
+
+  const marks: DbmlMarks = {};
+  parse(payloads.get(MARKS_MARKER), (id, value) => {
+    // Same rule, same reason: an unknown mark from a hand-edited file would reach the canvas as a
+    // colour lookup that finds nothing and paints a table in `undefined`.
+    if (typeof value === "string" && MARK_KINDS.has(value)) marks[id] = value as DbmlMarkKind;
+  });
+
+  return { source: rest.join("\n"), positions, marks };
+}
+
+/** Walks one marker's JSON payload, ignoring anything that is not an object. */
+function parse(payload: string | undefined, take: (id: string, value: unknown) => void): void {
+  if (!payload) return;
   try {
     const parsed: unknown = JSON.parse(payload);
-    if (parsed && typeof parsed === "object") {
-      for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
-        // `[x, y]` and nothing else. A stored file is not a trusted input: it can be hand-edited,
-        // and a NaN reaching the layout puts a box at coordinates the canvas can never scroll to.
-        if (!Array.isArray(value) || value.length < 2) continue;
-        const [x, y] = value;
-        if (typeof x !== "number" || typeof y !== "number") continue;
-        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        positions[id] = { x: Math.round(x), y: Math.round(y) };
-      }
-    }
+    if (!parsed || typeof parsed !== "object") return;
+    for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) take(id, value);
   } catch {
-    // Left empty: see the comment above.
+    // Left empty: a stored file is not a trusted input, and a broken sidecar must cost the boxes
+    // their arrangement rather than cost the user their schema.
   }
-  return { source: rest.join("\n"), positions };
 }
+
 
 /**
  * Puts a document back together for storage.
@@ -405,16 +467,35 @@ export function readLayout(doc: string): DbmlDocument {
  * `readLayout(writeLayout(x, p)).source === x` hold for every `x`; see `readLayout` for why that
  * matters while somebody is typing into it.
  */
-export function writeLayout(source: string, positions: Record<string, { x: number; y: number }>): string {
-  const entries = Object.entries(positions);
-  if (entries.length === 0) return source;
+export function writeLayout(
+  source: string,
+  positions: Record<string, { x: number; y: number }>,
+  marks: DbmlMarks = {},
+): string {
+  const placed = Object.entries(positions);
+  const marked = Object.entries(marks);
+  if (placed.length === 0 && marked.length === 0) return source;
+
   // Sorted, so two saves of the same arrangement produce the same bytes: an unordered object would
   // make every autosave a diff, and this document is stored, exported and compared.
-  entries.sort(([a], [b]) => a.localeCompare(b));
-  const payload = JSON.stringify(
-    Object.fromEntries(entries.map(([id, at]) => [id, [Math.round(at.x), Math.round(at.y)]])),
-  );
-  return `${source}\n${LAYOUT_MARKER}${payload}\n`;
+  placed.sort(([a], [b]) => a.localeCompare(b));
+  marked.sort(([a], [b]) => a.localeCompare(b));
+
+  const lines: string[] = [];
+  if (placed.length > 0) {
+    lines.push(
+      LAYOUT_MARKER +
+        JSON.stringify(
+          Object.fromEntries(placed.map(([id, at]) => [id, [Math.round(at.x), Math.round(at.y)]])),
+        ),
+    );
+  }
+  if (marked.length > 0) {
+    lines.push(MARKS_MARKER + JSON.stringify(Object.fromEntries(marked)));
+  }
+  // One run, one trailing newline — which is what `readLayout` undoes by dropping a single empty
+  // element however many markers there were.
+  return `${source}\n${lines.join("\n")}\n`;
 }
 
 /** Re-exported so consumers take the layout vocabulary from here rather than reaching into `db/`. */

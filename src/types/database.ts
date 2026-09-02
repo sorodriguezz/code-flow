@@ -279,6 +279,20 @@ export interface DbRunOutcome {
   duration_ms: number;
 }
 
+/**
+ * One earlier turn, sent back with the next question.
+ *
+ * The engines are one-shot CLIs with no session to resume, so a conversation is carried by the
+ * caller: everything the model is allowed to remember about this console travels in the payload of
+ * every request. Trimmed to role and text on purpose — the statement an answer proposed is already
+ * *in* its text, inside the fenced block, and sending it twice would spend the prompt's budget
+ * saying the same thing.
+ */
+export interface DbAiHistoryTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
 /** What the console's AI assistant answered. */
 export interface DbAiAnswer {
   /** The reply, in Markdown. */
@@ -313,6 +327,28 @@ export interface DbSchemaGroup {
  * What a node in the explorer is. The `*_folder` kinds are the grouping rows ("Tables", "Columns")
  * that carry no server object of their own.
  */
+/**
+ * The `DbNodeRef` that addresses a tree node — how a `DbNode` the backend handed back is named when
+ * it is handed *to* the backend again.
+ *
+ * Here rather than in the explorer that used to own it because the drop actions need the same
+ * answer: a store deriving its own would be a second copy of the column/index/key rule below, and
+ * that rule is exactly the kind that is copied wrong once and then diverges quietly.
+ */
+export function nodeRefOf(node: DbNode): DbNodeRef {
+  return {
+    kind: node.kind,
+    database: node.database,
+    schema: node.schema,
+    // A column/index/key node's *own* name isn't what identifies its parent relation, so folders
+    // and children under a table carry the table through `name`. For a relation, both are the same.
+    name:
+      node.kind === "column" || node.kind === "index" || node.kind === "key"
+        ? node.table
+        : node.table ?? node.name,
+  };
+}
+
 export type DbNodeKind =
   | "root"
   | "database"

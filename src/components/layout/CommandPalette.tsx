@@ -20,6 +20,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useMissingProjectsStore } from "../../state/missingProjectsStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore, type MainView, type PaletteScope, type SettingsSectionId } from "../../state/uiStore";
 import { useTerminalStore } from "../../state/terminalStore";
@@ -96,6 +97,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
+  const missing = useMissingProjectsStore((s) => s.missing);
   const branches = useRepoStore((s) => s.branches);
   const checkoutBranch = useRepoStore((s) => s.checkoutBranch);
   const checkoutRemoteBranch = useRepoStore((s) => s.checkoutRemoteBranch);
@@ -115,13 +117,19 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       onSelect: () => setActiveWorkspace(w.id),
     }));
 
-    const projectItems: PaletteItem[] = projects.map((p) => ({
-      key: `project:${p.id}`,
-      icon: FolderGit2,
-      label: p.name,
-      group: "projects",
-      onSelect: () => setActiveProject(p.id),
-    }));
+    // Repositories whose folder is gone are left out rather than listed and refused: every entry
+    // in this palette is something that happens when you press Return on it, and the sidebar has
+    // already taken "open" off these — see `missingProjectsStore`. They are still in the sidebar
+    // and in Settings, which is where the row that says why, and the button that removes it, live.
+    const projectItems: PaletteItem[] = projects
+      .filter((p) => !missing.has(p.local_path))
+      .map((p) => ({
+        key: `project:${p.id}`,
+        icon: FolderGit2,
+        label: p.name,
+        group: "projects",
+        onSelect: () => setActiveProject(p.id),
+      }));
 
     const branchItems: PaletteItem[] = branches.map((b) => ({
       key: `branch:${b.name}`,
@@ -218,6 +226,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   }, [
     workspaces,
     projects,
+    missing,
     branches,
     t,
     setActiveWorkspace,

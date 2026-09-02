@@ -8,12 +8,12 @@ import {
   ChevronRight,
   Columns3,
   Download,
-  FileCode2,
   History,
   LayoutGrid,
   Maximize2,
   Search,
   Shrink,
+  SlidersHorizontal,
   X,
   Sparkles,
   Table2,
@@ -35,11 +35,12 @@ import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ViewSkeleton } from "../common/ViewSkeleton";
 import { ToolbarButton } from "../db/dbChrome";
+import * as edits from "../../lib/dbml/edit";
 import { formatDbml } from "../../lib/dbml/format";
 import { hintFor } from "../../lib/dbml/errors";
 import { mergeDbml } from "../../lib/dbml/merge";
 import { pushRevision, type Revision, type RevisionCause } from "../../lib/dbml/history";
-import { readLayout, writeLayout } from "../../lib/dbml/layout";
+import { readLayout, writeLayout, type DbmlMarkKind, type DbmlMarks } from "../../lib/dbml/layout";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
 import type { SqlImportDialect } from "../../lib/dbml/parse";
 import { rasterize, standaloneSvg } from "../../lib/diagramSvg";
@@ -82,6 +83,19 @@ import { useT } from "../../state/languageStore";
  * formatter, the ten generators, the diff — is ordinary code with no such cost, which is why only
  * this one thing is deferred.
  */
+
+/**
+ * What the overlays fade to when the pointer is not on the canvas.
+ *
+ * Low enough that the drawing is what you see and the controls are not part of it; high enough that
+ * you can still tell what and where they are, so arriving at one is aiming rather than hunting.
+ * They are receded, never hidden — a control that disappears is a control you have to remember
+ * exists.
+ */
+const DIMMED = 0.32;
+
+/** `motion-reduce` drops the *transition*, not the fade: the fade is the information. */
+const CHROME_FADE = "transition-opacity duration-200 motion-reduce:transition-none";
 
 /** How long after the last keystroke the document is re-parsed. */
 const PARSE_DEBOUNCE_MS = 260;
@@ -148,6 +162,29 @@ export function DbmlWorkbench({
   const [revisions, setRevisions] = useState<Revision[]>([]);
   const [density, setDensity] = useState<DiagramDensity>("roomy");
   const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * The "View" button's rect while its menu is open, or `null`.
+   *
+   * A rect and not a point, unlike the export menu in the toolbar: this button sits in the *bottom*
+   * right corner of the canvas, and a menu placed at the click and then merely clamped to the window
+   * ends up lying over the button it came from and the status bar under it. `ContextMenu` opens
+   * upwards from a trigger when it is given one — see its `anchor` prop.
+   */
+  const [viewAt, setViewAt] = useState<DOMRect | null>(null);
+  /**
+   * The pointer is over the canvas, so the tools are wanted.
+   *
+   * The controls on the drawing are for working on it, and while you are *reading* one they are
+   * five bright objects sitting on top of the thing you are trying to read. Off the canvas they
+   * fall back to a low opacity — still there, still legible enough to find, no longer competing —
+   * and come back the moment the pointer arrives.
+   *
+   * The search box is exempt whenever it holds text or the focus: it is not a tool at that point
+   * but a filter that is still applied, and fading a live filter hides the reason half the schema
+   * is dimmed. Same for the menus, which are held open by a click that has already left the canvas.
+   */
+  const [chromeHot, setChromeHot] = useState(false);
+  const [searchHot, setSearchHot] = useState(false);
 
   const canvas = useRef<DbmlCanvasHandle>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -160,7 +197,7 @@ export function DbmlWorkbench({
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
 
   /** The document, split. Recomputed on every keystroke, which is a string scan and nothing more. */
-  const { source, positions } = useMemo(() => readLayout(doc ?? ""), [doc]);
+  const { source, positions, marks } = useMemo(() => readLayout(doc ?? ""), [doc]);
 
   // ---- the parser, and what it produced -----------------------------------
 
@@ -229,19 +266,173 @@ export function DbmlWorkbench({
     [pinned],
   );
 
-  /** One edit to the DBML itself, with the dragged boxes carried through untouched. */
+  /**
+   * The sidecar as it stands, in a ref.
+   *
+   * `writeSource` is called by Monaco's own `onChange`, which fires *during* the edit that changed
+   * the text — before React has re-rendered with a new `marks` or `positions`. An operation that
+   * has to change both halves at once (renaming a table also renames the key its mark and its
+   * pinned position are filed under) can therefore not do it by setting state: the write would
+   * carry the values from the render it started in, and the migration would be lost.
+   *
+   * So the two sidecar halves are mutated here first and read from here on the way out. It is the
+   * same trick `cause` uses one screen down, and for the same reason: a value that has to be true
+   * by the time a callback fires cannot live in state.
+   */
+  const sidecar = useRef({ positions, marks });
+  sidecar.current = { positions, marks };
+
+  /** One edit to the DBML itself, with the dragged boxes and the marks carried through. */
   const writeSource = useCallback(
-    (next: string) => editDoc(writeLayout(next, positions)),
-    [editDoc, positions],
+    (next: string) => editDoc(writeLayout(next, sidecar.current.positions, sidecar.current.marks)),
+    [editDoc],
+  );
+
+  /**
+   * Renames a key in both halves of the sidecar, or drops it from both.
+   *
+   * A table's mark and its dragged position are filed under its name, so renaming the table without
+   * this silently loses both — the box jumps back to wherever the layout engine puts it and the
+   * mark stops being drawn — and leaves a key behind that will never match anything again.
+   */
+  const moveSidecarKey = (from: string, to: string | null) => {
+    const { positions: at, marks: mark } = sidecar.current;
+    const nextAt = { ...at };
+    const nextMark = { ...mark };
+    const place = nextAt[from];
+    const flag = nextMark[from];
+    delete nextAt[from];
+    delete nextMark[from];
+    if (to !== null) {
+      if (place) nextAt[to] = place;
+      if (flag) nextMark[to] = flag;
+    }
+    sidecar.current = { positions: nextAt, marks: nextMark };
+  };
+
+  /**
+   * One structural edit to the schema, from a click rather than from typing.
+   *
+   * # Through Monaco, not around it
+   *
+   * The edit is applied with `executeEdits` whenever the text pane is mounted, and only falls back
+   * to `writeSource` when it is folded away. That is not a detail: `executeEdits` puts the change on
+   * Monaco's undo stack, so ⌘Z takes back "add a column" exactly as it takes back a keystroke, and
+   * the two kinds of edit share one history instead of the visual ones being unreachable from the
+   * keyboard. Assigning through the `value` prop instead would reset that stack.
+   *
+   * The write still lands in the store the same way, because Monaco's own `onChange` calls
+   * `writeSource` — so there is one path out of here regardless of which branch ran.
+   *
+   * # Refused while the document does not parse
+   *
+   * `edit.ts` works on text and would happily do the edit. The problem is upstream of it: with a
+   * syntax error the parsed schema is empty or stale, so the *table this edit names* comes from a
+   * model that no longer describes the document — and "add a column to `orders`" can land in a table
+   * the author has since renamed. Buttons are disabled on the same condition, so this is the
+   * backstop rather than the message.
+   */
+  const applyEdit = useCallback(
+    (edit: (current: string) => string) => {
+      if (schema.error) return;
+      const next = edit(source);
+      if (next === source) return;
+      cause.current = "edited";
+
+      const editor = editorRef.current;
+      const model = editor?.getModel();
+      if (editor && model) {
+        editor.executeEdits("cf-dbml-visual", [{ range: model.getFullModelRange(), text: next }]);
+        editor.pushUndoStop();
+        return;
+      }
+      writeSource(next);
+    },
+    [schema.error, source, writeSource],
+  );
+
+  /**
+   * Sets or clears a review mark.
+   *
+   * Writes the sidecar only, so unlike everything in `editing` below it stays available while the
+   * document does not parse — see the note on `setMark` in `DbmlCanvas`. It also goes straight to
+   * `editDoc` rather than through `applyEdit`: `applyEdit` routes through Monaco's `executeEdits`
+   * so that ⌘Z takes back a structural change, and a mark changes no character the editor is
+   * showing, so there would be nothing for Monaco to undo.
+   */
+  const setMark = useCallback(
+    (id: string, mark: DbmlMarkKind | null) => {
+      const next: DbmlMarks = { ...marks };
+      if (mark) next[id] = mark;
+      else delete next[id];
+      cause.current = "marked";
+      editDoc(writeLayout(source, positions, next));
+    },
+    [editDoc, source, positions, marks],
+  );
+
+  /** How the review is going, for the strip along the bottom. */
+  const marked = useMemo(() => {
+    const counts = { remove: 0, review: 0, keep: 0 };
+    for (const mark of Object.values(marks)) counts[mark] += 1;
+    return counts;
+  }, [marks]);
+
+  /** Every table and enum name in the document — what a new one has to avoid colliding with. */
+  const declared = useMemo(
+    () => [...schema.tables.map((entry) => entry.name), ...schema.enums.map((entry) => entry.name)],
+    [schema],
+  );
+
+  /**
+   * The schema operations, bound to `applyEdit`.
+   *
+   * A single object handed to both the inspector and the canvas, so the two surfaces cannot end up
+   * writing the document by different routes — every one of these is `applyEdit(edits.something)`,
+   * and `applyEdit` is the only thing in this component that knows how a change reaches Monaco.
+   */
+  const editing = useMemo(
+    () => ({
+      blocked: Boolean(schema.error),
+      blockedReason: t("dbml.editBlocked"),
+      addField: (table: string, field: edits.FieldEdit) =>
+        applyEdit((current) => edits.addField(current, table, field)),
+      updateField: (table: string, name: string, field: edits.FieldEdit) =>
+        applyEdit((current) => edits.updateField(current, table, name, field)),
+      dropField: (table: string, name: string) =>
+        applyEdit((current) => edits.dropField(current, table, name)),
+      addTable: (name: string) => applyEdit((current) => edits.addTable(current, name)),
+      addEnum: (name: string) => applyEdit((current) => edits.addEnum(current, name)),
+      renameTable: (from: string, to: string) => {
+        moveSidecarKey(from, to);
+        applyEdit((current) => edits.renameTable(current, from, to));
+      },
+      dropTable: (name: string) => {
+        moveSidecarKey(name, null);
+        applyEdit((current) => edits.dropTable(current, name));
+      },
+      setNote: (table: string, note: string) =>
+        applyEdit((current) => edits.setTableNote(current, table, note)),
+      addRef: (from: edits.RefEnd, to: edits.RefEnd, cardinality: edits.Cardinality) =>
+        applyEdit((current) => edits.addRef(current, from, to, cardinality)),
+      dropRef: (from: edits.RefEnd, to: edits.RefEnd) =>
+        applyEdit((current) => edits.dropRef(current, from, to)),
+      setRefCardinality: (
+        from: edits.RefEnd,
+        to: edits.RefEnd,
+        cardinality: edits.Cardinality,
+      ) => applyEdit((current) => edits.setRefCardinality(current, from, to, cardinality)),
+    }),
+    [applyEdit, schema.error, t],
   );
 
   /** One box moved. Only the layout comment changes, so Monaco's value does not — see the header. */
   const moveTable = useCallback(
     (id: string, x: number, y: number) => {
       cause.current = "moved";
-      editDoc(writeLayout(source, { ...positions, [id]: { x, y } }));
+      editDoc(writeLayout(source, { ...positions, [id]: { x, y } }, marks));
     },
-    [editDoc, source, positions],
+    [editDoc, source, positions, marks],
   );
 
   const tidy = () => {
@@ -259,7 +450,8 @@ export function DbmlWorkbench({
       return;
     }
     cause.current = "rearranged";
-    editDoc(writeLayout(source, {}));
+    // The marks are about the model, not about where its boxes sit — a re-layout keeps them.
+    editDoc(writeLayout(source, {}, marks));
     useToastStore.getState().pushToast(t("dbml.layoutReset"), "success");
   };
 
@@ -591,129 +783,212 @@ export function DbmlWorkbench({
               />
             ) : (
               <div className="flex h-full min-h-0">
-                <div className="relative min-w-0 flex-1">
-                  <DbmlCanvas
-                    ref={canvas}
-                    schema={schema}
-                    positions={positions}
-                    onMoveTable={moveTable}
-                    selected={selected}
-                    onSelect={selectFromCanvas}
-                    onOpen={revealTable}
-                    onMatchCount={setHits}
-                    onZoom={(scale) =>
-                      setZoom((current) =>
-                        Math.round(scale * 100) === Math.round(current * 100) ? current : scale,
-                      )
-                    }
-                    mode={mode}
-                    density={density}
-                    query={query}
-                    className="h-full"
-                  />
-
-                  {/* What is in here, and how close you are to it. Over the canvas rather than in
-                      the toolbar: they describe the picture, and they change as you move it. */}
-                  <div className="pointer-events-none absolute left-4 top-2 flex flex-col items-start gap-1.5">
-                    <div className="flex items-center gap-1">
-                      <Chip>{t("dbml.chipTables", { count: String(schema.tables.length) })}</Chip>
-                      <Chip>{t("dbml.chipRefs", { count: String(schema.refs.length) })}</Chip>
-                      <Chip>{`${Math.round(zoom * 100)}%`}</Chip>
-                    </div>
-                    <div className="pointer-events-auto relative">
-                      <Search
-                        size={11}
-                        className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
-                      />
-                      <input
-                        ref={searchRef}
-                        value={query}
-                        onChange={(event) => setQuery(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Escape") {
-                            setQuery("");
-                            event.currentTarget.blur();
-                          }
-                          // Enter walks the hits left to right rather than re-running the search,
-                          // which is what a search box that has already found everything is for.
-                          if (event.key === "Enter") canvas.current?.nextMatch();
-                        }}
-                        placeholder={t("dbml.searchPlaceholder")}
-                        className={`w-56 rounded-lg border bg-[var(--cf-surface-raised)]/90 py-[5px] pl-[26px] text-[11px] shadow-[var(--cf-shadow)] outline-none backdrop-blur transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] ${
-                          query ? "pr-[52px]" : "pr-2"
-                        } ${
-                          query && hits === 0
-                            ? "border-[var(--cf-danger)]"
-                            : "border-[var(--cf-border)]"
-                        }`}
-                      />
-                      {query && (
-                        <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
-                          <span className="text-[9.5px] tabular-nums text-[var(--cf-text-muted)]">
-                            {hits ?? 0}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setQuery("");
-                              searchRef.current?.focus();
-                            }}
-                            title={t("dbml.clearSearch")}
-                            aria-label={t("dbml.clearSearch")}
-                            className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
-                          >
-                            <X size={11} />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* The two files anybody actually asks for. The menu in the toolbar still has
-                      these and `.dbml` besides — this is the shortcut, not the only way. */}
-                  <div className="absolute right-4 top-2 flex items-center gap-1">
-                    <Pill onClick={() => void exportAs("png")} title={t("diagrams.exportAs.png")}>
-                      <Download size={11} />
-                      PNG
-                    </Pill>
-                    <Pill onClick={() => void exportAs("svg")} title={t("diagrams.exportAs.svg")}>
-                      <FileCode2 size={11} />
-                      SVG
-                    </Pill>
-                  </div>
-
-                  {/* How the picture is drawn and where it sits, stacked in the corner nearest the
-                      hand that is already on the canvas. */}
-                  <div className="absolute bottom-2 right-4 flex flex-col gap-1">
-                    <Pad
-                      onClick={() => setMode((current) => (current === "all" ? "keys" : "all"))}
-                      title={t(mode === "all" ? "dbml.columnsAll" : "dbml.columnsKeys")}
-                      active={mode === "keys"}
-                    >
-                      <Columns3 size={13} />
-                    </Pad>
-                    <Pad
-                      onClick={() =>
-                        setDensity((current) => (current === "roomy" ? "compact" : "roomy"))
+                <div
+                  className="relative flex min-w-0 flex-1 flex-col"
+                  onPointerEnter={() => setChromeHot(true)}
+                  onPointerLeave={() => setChromeHot(false)}
+                >
+                  <div className="relative min-h-0 flex-1">
+                    <DbmlCanvas
+                      ref={canvas}
+                      schema={schema}
+                      positions={positions}
+                      onMoveTable={moveTable}
+                      selected={selected}
+                      onSelect={selectFromCanvas}
+                      onOpen={revealTable}
+                      onMatchCount={setHits}
+                      onZoom={(scale) =>
+                        setZoom((current) =>
+                          Math.round(scale * 100) === Math.round(current * 100) ? current : scale,
+                        )
                       }
-                      title={t(density === "roomy" ? "dbml.roomy" : "dbml.compact")}
-                      active={density === "compact"}
+                      mode={mode}
+                      density={density}
+                      query={query}
+                      marks={marks}
+                      editing={{
+                        blocked: editing.blocked,
+                        // A drawn relationship is a foreign key until told otherwise, which is what
+                        // `>` means and what nine of ten drawn relationships are. The inspector's
+                        // form is where the other three arrows live.
+                        connect: (from, to) => editing.addRef(from, to, ">"),
+                        rename: editing.renameTable,
+                        // Every one of these invents a name, so every one of them has to check that
+                        // the name is free — see `freeName`. A second `new_table` does not make a
+                        // messy schema, it makes one that does not parse.
+                        addField: (table) => {
+                          const target = schema.tables.find((entry) => entry.name === table);
+                          editing.addField(table, {
+                            name: edits.freeName(
+                              (target?.fields ?? []).map((field) => field.name),
+                              "column",
+                            ),
+                            type: "varchar",
+                          });
+                        },
+                        dropTable: editing.dropTable,
+                        addTable: () => editing.addTable(edits.freeName(declared, t("dbml.newTable"))),
+                        addEnum: () => editing.addEnum(edits.freeName(declared, t("dbml.newEnum"))),
+                        setMark,
+                        dropRef: editing.dropRef,
+                        // The arrow the canvas offers is the one it does not already have. `>` and
+                        // `<` are the same relationship read from the two ends, so "flip" is the
+                        // one gesture that needs no dialog to choose between them.
+                        flipRef: (from, to) => editing.setRefCardinality(from, to, "<"),
+                      }}
+                      className="h-full"
+                    />
+
+                    {/* Just the search now. The three chips that used to sit above it — tables, refs,
+                        zoom — said what the document *is*, which is a job for a status bar and not
+                        for the middle of the drawing; the first two are in the one along the bottom
+                        and the zoom reads off the control that changes it. */}
+                    <div
+                      className={`absolute left-4 top-2 ${CHROME_FADE}`}
+                      style={{ opacity: chromeHot || searchHot || query ? 1 : DIMMED }}
                     >
-                      <Shrink size={13} />
-                    </Pad>
-                    <Pad onClick={rearrange} title={t("dbml.autoLayout")}>
-                      <LayoutGrid size={13} />
-                    </Pad>
-                    <Pad onClick={() => canvas.current?.fit()} title={t("dbml.fit")}>
-                      <Maximize2 size={13} />
-                    </Pad>
-                    <Pad onClick={() => canvas.current?.zoomBy(1.2)} title={t("dbml.zoomIn")}>
-                      <ZoomIn size={13} />
-                    </Pad>
-                    <Pad onClick={() => canvas.current?.zoomBy(1 / 1.2)} title={t("dbml.zoomOut")}>
-                      <ZoomOut size={13} />
-                    </Pad>
+                      <div className="relative">
+                        <Search
+                          size={11}
+                          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+                        />
+                        <input
+                          ref={searchRef}
+                          value={query}
+                          onChange={(event) => setQuery(event.target.value)}
+                          onFocus={() => setSearchHot(true)}
+                          onBlur={() => setSearchHot(false)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Escape") {
+                              setQuery("");
+                              event.currentTarget.blur();
+                            }
+                            // Enter walks the hits left to right rather than re-running the search,
+                            // which is what a search box that has already found everything is for.
+                            if (event.key === "Enter") canvas.current?.nextMatch();
+                          }}
+                          placeholder={t("dbml.searchPlaceholder")}
+                          className={`w-56 rounded-lg border bg-[var(--cf-surface-raised)]/90 py-[5px] pl-[26px] text-[11px] shadow-[var(--cf-shadow)] outline-none backdrop-blur transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] ${
+                            query ? "pr-[52px]" : "pr-2"
+                          } ${
+                            query && hits === 0
+                              ? "border-[var(--cf-danger)]"
+                              : "border-[var(--cf-border)]"
+                          }`}
+                        />
+                        {query && (
+                          <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                            <span className="text-[9.5px] tabular-nums text-[var(--cf-text-muted)]">
+                              {hits ?? 0}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setQuery("");
+                                searchRef.current?.focus();
+                              }}
+                              title={t("dbml.clearSearch")}
+                              aria-label={t("dbml.clearSearch")}
+                              className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
+                            >
+                              <X size={11} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
                   </div>
+
+                  {/* Six stacked pads became two things.
+
+                      The zoom cluster is one control rather than three, because `−`, the number and
+                      `+` are one idea and the number was a chip in the opposite corner — you
+                      changed the zoom here and read it over there. Everything else about how the
+                      picture is drawn is behind "View": those four are settings you reach for once
+                      and then leave alone, and a button you press twice an hour does not deserve
+                      permanent floor space over the drawing.
+
+                      The PNG and SVG pills are gone from the canvas entirely. They were a shortcut
+                      to two entries of the export menu that is still two inches away in the
+                      toolbar, and they were the only overlay in the top-right corner — which is
+                      where the boxes of a left-to-right layout end up. */}
+                  <div
+                    className={`absolute bottom-2 right-4 flex items-center gap-1 ${CHROME_FADE}`}
+                    style={{ opacity: chromeHot || viewAt ? 1 : DIMMED }}
+                  >
+                    <button
+                      type="button"
+                      onClick={(event) =>
+                        setViewAt(viewAt ? null : event.currentTarget.getBoundingClientRect())
+                      }
+                      aria-expanded={Boolean(viewAt)}
+                      title={t("dbml.view")}
+                      className="flex items-center gap-1 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 px-2 py-[5px] text-[10.5px] font-medium text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] backdrop-blur transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                    >
+                      <SlidersHorizontal size={12} />
+                      {t("dbml.view")}
+                    </button>
+
+                    <div className="flex items-center rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 shadow-[var(--cf-shadow)] backdrop-blur">
+                      <ZoomStep onClick={() => canvas.current?.zoomBy(1 / 1.2)} title={t("dbml.zoomOut")}>
+                        <ZoomOut size={13} />
+                      </ZoomStep>
+                      {/* The readout doubles as "fit": the number tells you the zoom is wrong and
+                          this is the control you are already looking at when it does. */}
+                      <button
+                        type="button"
+                        onClick={() => canvas.current?.fit()}
+                        title={t("dbml.fit")}
+                        className="min-w-[42px] px-1 py-[5px] text-[10.5px] tabular-nums text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
+                      >
+                        {`${Math.round(zoom * 100)}%`}
+                      </button>
+                      <ZoomStep onClick={() => canvas.current?.zoomBy(1.2)} title={t("dbml.zoomIn")}>
+                        <ZoomIn size={13} />
+                      </ZoomStep>
+                    </div>
+                  </div>
+
+                  {viewAt && (
+                    <ContextMenu
+                      x={viewAt.left}
+                      y={viewAt.top}
+                      // Right-aligned and opening upward: the button is in the bottom-right corner
+                      // of the canvas, so those are the only two directions with room.
+                      anchor={{
+                        top: viewAt.top,
+                        bottom: viewAt.bottom,
+                        left: viewAt.left,
+                        right: viewAt.right,
+                        align: "end",
+                      }}
+                      heading={t("dbml.view")}
+                      onClose={() => setViewAt(null)}
+                      items={[
+                        {
+                          // The label is the state it switches *to*, which is how every other menu
+                          // in this app reads. The pads said the state they were in and relied on
+                          // a fill to mean "active"; a menu row has no fill to lean on.
+                          label: t(mode === "all" ? "dbml.columnsKeys" : "dbml.columnsAll"),
+                          icon: Columns3,
+                          onClick: () => setMode((current) => (current === "all" ? "keys" : "all")),
+                        },
+                        {
+                          label: t(density === "roomy" ? "dbml.compact" : "dbml.roomy"),
+                          icon: Shrink,
+                          onClick: () =>
+                            setDensity((current) => (current === "roomy" ? "compact" : "roomy")),
+                        },
+                        {
+                          label: t("dbml.autoLayout"),
+                          icon: LayoutGrid,
+                          onClick: rearrange,
+                          separated: true,
+                        },
+                        { label: t("dbml.fit"), icon: Maximize2, onClick: () => canvas.current?.fit() },
+                      ]}
+                    />
+                  )}
 
                   <EdgeTab
                     side="right"
@@ -721,6 +996,32 @@ export function DbmlWorkbench({
                     title={t(inspector ? "dbml.collapseInspector" : "dbml.expandInspector")}
                     onClick={() => setInspector((open) => !open)}
                   />
+                  </div>
+
+                  {/* What the picture contains, in the strip along the bottom — the same place and
+                      the same treatment as the line and character counts under the text pane. The
+                      two numbers describe the document rather than the view, so they belong in
+                      furniture that is always there and never in front of the drawing. */}
+                  <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-2.5 py-[3px] text-[9.5px] tabular-nums text-[var(--cf-text-muted)]">
+                    <span>{t("dbml.chipTables", { count: String(schema.tables.length) })}</span>
+                    <span>{t("dbml.chipRefs", { count: String(schema.refs.length) })}</span>
+                    {/* How the review is going. Only the two counts that are a to-do list — a
+                        "settled" tally is a number that only ever goes up and asks nothing of
+                        anybody. Each is hidden at zero rather than shown as "0 to remove", which
+                        would put a permanent red nought under a diagram nobody is reviewing. */}
+                    {marked.remove > 0 && (
+                      <span style={{ color: "var(--cf-danger)" }}>
+                        {t("dbml.mark.countRemove", { count: String(marked.remove) })}
+                      </span>
+                    )}
+                    {marked.review > 0 && (
+                      <span style={{ color: "var(--cf-warning)" }}>
+                        {t("dbml.mark.countReview", { count: String(marked.review) })}
+                      </span>
+                    )}
+                    <span className="flex-1" />
+                    {query && <span>{t("dbml.searchHits", { count: String(hits ?? 0) })}</span>}
+                  </div>
                 </div>
 
                 {inspector && (
@@ -750,6 +1051,12 @@ export function DbmlWorkbench({
                     onOpen={revealTable}
                     pinned={pinned}
                     onTogglePin={() => setPinned((held) => !held)}
+                    mark={
+                      selected
+                        ? { current: marks[selected], set: (next) => setMark(selected, next) }
+                        : undefined
+                    }
+                    edit={editing}
                   />
                 )}
               </div>
@@ -843,50 +1150,25 @@ function EdgeTab({
 }
 
 /**
- * The three shapes of floating control the canvas wears.
+ * One step of the zoom cluster.
  *
- * All three share one surface — translucent raised, hairline border, the app's own shadow — because
- * they are all the same thing: chrome sitting *on* the drawing rather than around it, which has to
- * stay legible over a dotted ground and over a table that happens to be underneath it.
+ * Was three separate `Pad`s — two zoom buttons in a stack of six, and the percentage as a chip in
+ * the opposite corner. Joining them into one bordered group is the whole point: `−`, the number and
+ * `+` are one control, and the number is the readout of the two buttons beside it rather than a
+ * fourth fact about the document.
+ *
+ * The group keeps the surface every floating control here wears — translucent raised, hairline
+ * border, the app's own shadow — because it is still chrome sitting *on* the drawing, and has to
+ * stay legible over a dotted ground and over whatever table it lands on. Its two siblings, `Chip`
+ * and `Pill`, went with the overlays they drew.
  */
-function Chip({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 px-2 py-[3px] text-[10.5px] tabular-nums text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] backdrop-blur">
-      {children}
-    </span>
-  );
-}
-
-function Pill({
+function ZoomStep({
   onClick,
   title,
   children,
 }: {
   onClick: () => void;
   title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 px-2 py-[4px] text-[10.5px] font-medium text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] backdrop-blur transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-    >
-      {children}
-    </button>
-  );
-}
-
-function Pad({
-  onClick,
-  title,
-  active,
-  children,
-}: {
-  onClick: () => void;
-  title: string;
-  active?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -895,12 +1177,7 @@ function Pad({
       onClick={onClick}
       title={title}
       aria-label={title}
-      aria-pressed={active}
-      className={`flex h-8 w-8 items-center justify-center rounded-md border shadow-[var(--cf-shadow)] backdrop-blur transition-colors ${
-        active
-          ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-      }`}
+      className="flex h-[26px] w-[26px] items-center justify-center text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
     >
       {children}
     </button>

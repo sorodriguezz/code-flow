@@ -12,6 +12,7 @@ import {
   dbCreateConnection,
   dbCreateConsole,
   dbCreateGroup,
+  dbReorderGroups,
   dbDeleteConnection,
   dbDeleteConsole,
   dbDeleteGroup,
@@ -44,6 +45,11 @@ import { getSetting, setSetting } from "../lib/tauri/commands";
 // server, this stops a CLI subprocess. The assistant runs on the second and never the first.
 import { isCancellation, newRunId as newAiRunId, useAiRunStore } from "./aiRunStore";
 import { unguardedDelete } from "../lib/db/sqlGuards";
+import {
+  dropContainerSql,
+  dropRelationSql,
+  type SchemaContents,
+} from "../lib/db/dropObject";
 import { firstRefusedRedisCommand } from "../lib/db/redisGuards";
 import { notify } from "./notificationStore";
 import { translate } from "./languageStore";
@@ -55,7 +61,7 @@ import {
   EMPTY_QUERY_OPTIONS,
   defaultConnectionConfig,
   engineInfo,
-  type DbAiAnswer,
+  nodeRefOf,
   type DbConnectionConfig,
   type DbFilterTarget,
   type DbForeignKey,
@@ -193,6 +199,15 @@ export interface DbDiagramUi {
   selected: string | null;
   query: string;
   highlight: "none" | "noPrimaryKey" | "isolated";
+  /**
+   * Whether each relationship shows its two multiplicities — `1`, `0..1`, `0..N`.
+   *
+   * On by default, because an arrow on its own answers "which way does the key point" and a reader
+   * of a schema drawing is asking "must every order have a customer, and can a customer have two".
+   * A toggle rather than a constant all the same: at eighty relationships the numbers are the
+   * densest thing on the canvas, and the person zooming out to see the shape wants the shape.
+   */
+  cardinality: boolean;
 }
 
 export const DEFAULT_DIAGRAM_UI: DbDiagramUi = {
@@ -202,6 +217,7 @@ export const DEFAULT_DIAGRAM_UI: DbDiagramUi = {
   selected: null,
   query: "",
   highlight: "none",
+  cardinality: true,
 };
 
 /** A statement to run, and what came back. */
@@ -240,10 +256,45 @@ export interface DbConsoleTab {
  * query: two consoles open on two schemas asking one shared assistant would answer the second
  * question against the first one's tables.
  */
+/**
+ * One turn of the console's conversation with the model.
+ *
+ * The assistant used to hold exactly one answer, which decided what it could be asked: a question,
+ * a reply, and three buttons — insert, replace, close. Anything that began "and now group that by
+ * month" had to be re-asked from scratch, with the schema re-read and the previous answer retyped
+ * into the question. Keeping the turns is what makes the second question cheap, and what lets the
+ * model see the statement it just wrote when you say "the join is wrong".
+ *
+ * The user's turns carry nothing but their text. The assistant's carry what the answer panel used
+ * to hold on the single answer, per turn, so scrolling back to an earlier statement still offers to
+ * insert *that* one and still names the engine that wrote it.
+ */
+export interface DbAiTurn {
+  role: "user" | "assistant";
+  /** Markdown for an assistant turn, plain text for a question. */
+  text: string;
+  /** The runnable statement this turn proposed, when it proposed one. `null` for a pure
+   *  explanation, which is an ordinary outcome and not a parse failure. */
+  query?: string | null;
+  /** The AI run that produced it — the key `RunEngineChip` resolves the model through. */
+  runId?: string | null;
+  /** How much schema the model was shown, for the caveat under the answer. */
+  tablesSeen?: number;
+  schemaTruncated?: boolean;
+}
+
 export interface DbConsoleAi {
   /** What is typed in the ask box, kept across tab switches so a half-written question survives
    * going to look at the schema tree for the name you were missing. */
   question: string;
+  /**
+   * The conversation so far, oldest first.
+   *
+   * Sent back with the next question (see `askConsoleAi`), which is what makes this a chat rather
+   * than a list of unrelated answers: the engine is a one-shot CLI with no session of its own, so
+   * "and now group that by month" only means anything if the turn it refers to travels with it.
+   */
+  messages: DbAiTurn[];
   running: boolean;
   /** The **AI** run registry's id — this is `cancelAiRun`'s handle, not `dbCancel`'s. No statement
    * runs on the database here, so there is nothing on that side to stop.
@@ -253,7 +304,6 @@ export interface DbConsoleAi {
    * past the end of a run for exactly that read. Clearing it here used to blank that chip the
    * instant the answer arrived — the one moment somebody wants to know which model wrote it. */
   runId: string | null;
-  answer: DbAiAnswer | null;
   /** Kept on the panel rather than shown as a toast: an answer that failed is something you retry
    * with a reworded question, which means reading the reason while you rewrite it. */
   error: string | null;
@@ -498,6 +548,17 @@ interface DbState {
 
   /** Creates an empty folder. Idempotent on the name — the backend deduplicates. */
   createGroup: (name: string) => Promise<void>;
+  /**
+   * Moves one folder a place up or down the list.
+   *
+   * The same shape `moveConnection` has, and offered from the same place in the menu, because it is
+   * the same question one level up. A drag would be the other answer; it is not the one the tree
+   * already speaks, and the folders are a short list where two clicks beat a gesture.
+   *
+   * A folder implied by a connection's `group_name` with no `db_groups` row of its own has no id to
+   * order, so it cannot move and is not offered the row — see `groupConnections`.
+   */
+  moveGroup: (name: string, direction: -1 | 1) => Promise<void>;
   /** Renaming onto an existing group merges the two. */
   renameGroup: (from: string, to: string) => Promise<void>;
   /** Deletes the folder. Its connections move to ungrouped — never deleted with it. */
@@ -525,6 +586,30 @@ interface DbState {
 
   toggleNode: (connectionId: string, node: DbNodeRef, key: string) => Promise<void>;
   refreshNode: (connectionId: string, node: DbNodeRef, key: string) => Promise<void>;
+  /**
+   * Removes a table, a view, a collection or a whole schema — from the tree, without writing SQL.
+   *
+   * The statement is built here (see `lib/db/dropObject.ts`) and sent through the same `db_execute`
+   * a console uses, so the connection's read-only flag refuses it in exactly the place every other
+   * write is refused. The caller is responsible for asking first: the confirmation names the object
+   * and what goes with it, and this runs the moment it is called.
+   *
+   * `parent` is the tree node the dropped object hung under, re-read afterwards so the row
+   * disappears. Passed in rather than derived, because "the node above this one" is a fact the tree
+   * has and a `DbNodeRef` does not.
+   *
+   * Resolves to whether everything ran. A batch that fails halfway — the case `dropContainerSql`
+   * documents for the engines with no `CASCADE` — still refreshes and still reports, because the
+   * statements before the failure did take effect.
+   */
+  dropObject: (args: {
+    connectionId: string;
+    node: DbNode;
+    scope: "relation" | "container";
+    /** Only read for a container drop on an engine with no `CASCADE`; see `dropContainerSql`. */
+    contents?: SchemaContents;
+    parent: { ref: DbNodeRef; key: string };
+  }) => Promise<boolean>;
   /** `refreshNode` for a reader nobody asked to be one — the SQL console's completion, which reads
    * catalog nodes the user never expanded. Fills `children` and says nothing else: no spinner on a
    * row nobody clicked, and no error painted onto the tree for a table that was a typo. `false`
@@ -550,6 +635,14 @@ interface DbState {
    * usual second question is a follow-up on what it just said. */
   toggleConsoleAi: (tabId: string) => void;
   setConsoleAiQuestion: (tabId: string, question: string) => void;
+  /**
+   * Empties the transcript without closing the panel.
+   *
+   * A conversation is what the next question is answered against, so a long one that has wandered
+   * is a *cost* — the model is being shown ten turns about a different table. This is the way out
+   * of that which does not also lose the panel, its scope and its place on screen.
+   */
+  clearConsoleAi: (tabId: string) => void;
   /** Asks the assistant, with this console's scope, text and last outcome as the context. */
   askConsoleAi: (tabId: string) => Promise<void>;
   cancelConsoleAi: (tabId: string) => Promise<void>;
@@ -710,9 +803,22 @@ export function groupConnections(
   }
   // An ungrouped bucket that nothing fell into is a heading over nothing.
   if (groups.get(UNGROUPED)?.length === 0) groups.delete(UNGROUPED);
+
+  // The order the folders were *given* in, which is `db_groups.sort_order` — `load_tree` reads them
+  // `ORDER BY sort_order, name`. This used to sort alphabetically here, which threw that away and
+  // made the column unreachable: a user with `Prod`, `Staging` and `Local` could not put them in
+  // that order, only in that spelling. A group with no row of its own — a `group_name` nobody
+  // created, which the loop above adds — has no `sort_order` to place it by, so it goes after the
+  // real folders and among those it is alphabetical.
+  const rank = new Map(folders.map((folder, at) => [folder.name.trim(), at]));
   return [...groups.entries()].sort(([a], [b]) => {
     if (a === UNGROUPED) return -1;
     if (b === UNGROUPED) return 1;
+    const rankA = rank.get(a);
+    const rankB = rank.get(b);
+    if (rankA !== undefined && rankB !== undefined) return rankA - rankB;
+    if (rankA !== undefined) return -1;
+    if (rankB !== undefined) return 1;
     return a.localeCompare(b);
   });
 }
@@ -1028,6 +1134,24 @@ export const useDbStore = create<DbState>((set, get) => ({
 
   // ------------------------------------------------------------------ groups
 
+  moveGroup: async (name, direction) => {
+    const groups = get().groups;
+    const at = groups.findIndex((group) => group.name.trim() === name.trim());
+    const swap = at + direction;
+    if (at < 0 || swap < 0 || swap >= groups.length) return;
+    const next = [...groups];
+    [next[at], next[swap]] = [next[swap], next[at]];
+    // Optimistic, the way `reorderConnections` is: the folder is where it was dropped before the
+    // write goes out, because a list that snaps back for a frame reads as a refused action.
+    set({ groups: next });
+    try {
+      await dbReorderGroups(next.map((group) => group.id));
+    } catch (e) {
+      pushErrorToast(String(e));
+      set({ groups });
+    }
+  },
+
   createGroup: async (name) => {
     const workspaceId = get().workspaceId;
     const trimmed = name.trim();
@@ -1292,6 +1416,64 @@ export const useDbStore = create<DbState>((set, get) => ({
     } catch {
       return false;
     }
+  },
+
+  dropObject: async ({ connectionId, node, scope, contents, parent }) => {
+    const kind = get().connections.find((c) => c.id === connectionId)?.kind;
+    if (!kind) return false;
+    const sql =
+      scope === "relation"
+        ? dropRelationSql(node, kind)
+        : dropContainerSql(node, kind, contents ?? { tables: [], views: [] });
+    // `null` means this engine has no such operation. The menu already refuses to offer the row, so
+    // reaching here is a bug rather than a user action — and silence is the right answer to it.
+    if (!sql) return false;
+
+    const runId = newRunId();
+    // The scope the statement runs in. A Mongo `dropDatabase` is the reason this is not always the
+    // console's current context: `db` in that shell *is* `ctx.database`, so dropping the database
+    // you right-clicked means naming it here. `max_rows: 0` — a DROP returns nothing to cap.
+    const ctx = {
+      database: node.database ?? null,
+      schema: scope === "relation" ? node.schema ?? null : null,
+      max_rows: 0,
+    };
+
+    const result = await guarded(() => dbExecute(connectionId, sql, ctx, runId));
+    // The tree is re-read either way: a batch that failed on its fourth statement still dropped
+    // three tables, and a tree that goes on listing them is worse than one that is a little ahead
+    // of the error message.
+    await get().refreshNode(connectionId, parent.ref, parent.key);
+    void get().syncConnected();
+    if (!result) return false;
+
+    // `db_execute` resolves for a statement the server *rejected* — the error rides on the result
+    // rather than on the promise, which is what lets a console show four green rows and one red
+    // one. Here there is no grid to show it in, so the first failure becomes the toast.
+    const failed = result.results.find((entry) => entry.error);
+    if (failed?.error) {
+      pushErrorToast(failed.error);
+      return false;
+    }
+
+    // Tabs opened on what has just been dropped. A data grid pointed at a table that no longer
+    // exists is a panel that can only ever error, and its refresh runs on a timer — so it would
+    // keep erroring. Compared on the ref rather than the name so a table dropped in one schema
+    // leaves a same-named one in another alone. A container drop takes everything under it, which
+    // `sameNode` cannot express: the match there is on database and schema.
+    const gone = get().tabs.filter((tab) => {
+      if (tab.connectionId !== connectionId) return false;
+      if (!("node" in tab)) return false;
+      if (scope === "relation") return sameNode(tab.node, nodeRefOf(node));
+      const schema = node.schema ?? node.name;
+      return (tab.node.database ?? "") === (node.database ?? "") && (tab.node.schema ?? "") === schema;
+    });
+    for (const tab of gone) get().closeTab(tab.id);
+
+    useToastStore
+      .getState()
+      .pushToast(translate("db.dropDone", { name: node.name }), "success");
+    return true;
   },
 
   // ---------------------------------------------------------------- consoles
@@ -1645,8 +1827,14 @@ export const useDbStore = create<DbState>((set, get) => ({
       ...tab,
       ai: tab.ai
         ? null
-        : { question: "", running: false, runId: null, answer: null, error: null },
+        : { question: "", messages: [], running: false, runId: null, error: null },
     }));
+  },
+
+  clearConsoleAi: (tabId) => {
+    patchTab<DbConsoleTab>(set, tabId, "console", (tab) =>
+      tab.ai ? { ...tab, ai: { ...tab.ai, messages: [], error: null } } : tab,
+    );
   },
 
   setConsoleAiQuestion: (tabId, question) => {
@@ -1673,9 +1861,26 @@ export const useDbStore = create<DbState>((set, get) => ({
     useAiRunStore
       .getState()
       .start(runId, { kindKey: "agents.liveKindDb", detail: question, workspaceId: runWorkspaceId });
+    // The conversation as it stood *before* this question — what the model is shown. Taken here,
+    // ahead of the optimistic write below, or the question would be in its own history.
+    const history = (tab.ai?.messages ?? []).map((turn) => ({ role: turn.role, text: turn.text }));
     patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
       current.ai
-        ? { ...current, ai: { ...current.ai, running: true, runId, error: null } }
+        ? {
+            ...current,
+            ai: {
+              ...current.ai,
+              // The question joins the transcript the moment it is asked, and the box empties. That
+              // is what makes this read as a chat rather than as a form: what you typed is on
+              // screen, above the answer that is being written for it, instead of sitting in the
+              // input until something comes back.
+              messages: [...current.ai.messages, { role: "user" as const, text: question }],
+              question: "",
+              running: true,
+              runId,
+              error: null,
+            },
+          }
         : current,
     );
     try {
@@ -1696,6 +1901,7 @@ export const useDbStore = create<DbState>((set, get) => ({
           rows_affected: result.rows_affected,
           duration_ms: result.duration_ms,
         })),
+        history,
         runId,
       );
       // `current.ai?.runId === runId`, not just `current.ai`, on this and both writes below. The bar
@@ -1706,7 +1912,24 @@ export const useDbStore = create<DbState>((set, get) => ({
       // stop button and letting a third question start on top of it.
       patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
         current.ai?.runId === runId
-          ? { ...current, ai: { ...current.ai, answer, error: null } }
+          ? {
+              ...current,
+              ai: {
+                ...current.ai,
+                messages: [
+                  ...current.ai.messages,
+                  {
+                    role: "assistant" as const,
+                    text: answer.answer,
+                    query: answer.query,
+                    runId,
+                    tablesSeen: answer.tables_seen,
+                    schemaTruncated: answer.schema_truncated,
+                  },
+                ],
+                error: null,
+              },
+            }
           : current,
       );
       // The only run in this workspace that used to report nothing when it finished. It is also one
