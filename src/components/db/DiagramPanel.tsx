@@ -23,7 +23,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { ToolbarButton, formatCount } from "./dbChrome";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { apiSaveBinaryFile, apiSaveFile } from "../../lib/tauri/apiCommands";
 import {
   diagramStats,

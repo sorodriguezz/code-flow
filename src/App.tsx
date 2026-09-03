@@ -8,6 +8,7 @@ import { TabBar } from "./components/layout/TabBar";
 import { AppRail } from "./components/layout/AppRail";
 import { StatusBar } from "./components/layout/StatusBar";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+import { listenToAppMenu } from "./lib/menuBridge";
 import { AddDependencyModal } from "./components/editor/AddDependencyModal";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
@@ -824,6 +825,15 @@ export default function App() {
     // review showed no working row and left no trace here.
     useAiRunStore.getState().init();
 
+    // The macOS menu bar's items — ⌘, for settings, Help, "Check for Updates". The menu itself is
+    // built in Rust because AppKit resolves its key equivalents before the webview sees them; what
+    // the items *mean* lives in `menuBridge`. A no-op on Windows and Linux, where no such menu is
+    // installed and the event is never emitted.
+    let stopMenu: (() => void) | undefined;
+    void listenToAppMenu().then((unlisten) => {
+      stopMenu = unlisten;
+    });
+
     const unlisten = onRepoFsChanged((e) => {
       const activePath = useWorkspaceStore.getState().activeProject()?.local_path;
       if (e.repo_path !== activePath) return;
@@ -978,6 +988,7 @@ export default function App() {
       refreshFar.cancel();
       void unlisten.then((f) => f());
       void unlistenInvalidate.then((f) => f());
+      stopMenu?.();
     };
   }, []);
 

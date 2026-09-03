@@ -16,6 +16,7 @@ use crate::db::models::{
     DiagramFolderRow, DiagramMeta, DiagramRow, DiagramTemplateRow, DiagramThumbnail,
     DiagramsWorkspaceTree,
 };
+use crate::db::version_queries::{self, DocVersion};
 use crate::db::{diagram_queries, Db};
 
 use super::claude_cmd::{load_ai_config, AiTask};
@@ -99,7 +100,34 @@ pub fn diagrams_save_diagram(
     thumbnail: String,
 ) -> Result<Option<DiagramMeta>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // Before the write, so the snapshot holds what the diagram *was* — see the same call in
+    // `notes_save_note`. The thumbnail is deliberately not versioned: it is derived from the doc,
+    // and storing fifty copies of an SVG to recover a drawing that regenerates it is waste.
+    if let Ok(Some(previous)) = diagram_queries::get_diagram(&conn, &id) {
+        let _ = version_queries::record_version(
+            &conn,
+            "diagram",
+            &id,
+            &previous.title,
+            &previous.doc,
+            &crate::db::queries::now(),
+        );
+    }
     diagram_queries::save_diagram(&conn, &id, &doc, &format, &thumbnail).map_err(|e| e.to_string())
+}
+
+// ---------- version history ----------
+
+#[tauri::command]
+pub fn diagrams_list_versions(db: State<Db>, id: String) -> Result<Vec<DocVersion>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    version_queries::list_versions(&conn, "diagram", &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn diagrams_version_content(db: State<Db>, version_id: String) -> Result<Option<String>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    version_queries::version_content(&conn, &version_id).map_err(|e| e.to_string())
 }
 
 /// Rejects a blank title here rather than in the tree, so that every path into a rename — the
@@ -156,7 +184,11 @@ pub fn diagrams_set_pinned(db: State<Db>, id: String, pinned: bool) -> Result<()
 #[tauri::command]
 pub fn diagrams_delete_diagram(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    diagram_queries::delete_diagram(&conn, &id).map_err(|e| e.to_string())
+    diagram_queries::delete_diagram(&conn, &id).map_err(|e| e.to_string())?;
+    // Same reasoning as `notes_delete_note`: the document is gone, so its snapshots have nothing
+    // left to be snapshots of.
+    let _ = version_queries::delete_versions(&conn, "diagram", &id);
+    Ok(())
 }
 
 /// `title` is passed in because "Copy of …" is translated and Rust has no language.

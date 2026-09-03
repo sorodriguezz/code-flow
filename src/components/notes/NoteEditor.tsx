@@ -22,12 +22,16 @@ import {
   PinOff,
   Trash2,
   X,
+  History as HistoryIcon,
 } from "lucide-react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { NotePreview } from "./NotePreview";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { NoteToolbar } from "./NoteToolbar";
+import { NoteBacklinks } from "./NoteBacklinks";
+import { VersionHistoryModal } from "../common/VersionHistoryModal";
+import { notesListVersions, notesVersionContent } from "../../lib/tauri/notesCommands";
 import { NoteOutline } from "./NoteOutline";
 import { NoteTagBar } from "./NoteTagBar";
 import { SaveTemplateModal } from "./SaveTemplateModal";
@@ -73,6 +77,8 @@ export function NoteEditor() {
   const books = useNotesStore((s) => s.books);
   const viewMode = useNotesStore((s) => s.viewMode);
   const outlineOpen = useNotesStore((s) => s.outlineOpen);
+  /** The version-history dialog. Local state: nothing outside this editor opens it. */
+  const [historyOpen, setHistoryOpen] = useState(false);
   const saving = useNotesStore((s) => s.saving);
   const savedAt = useNotesStore((s) => s.savedAt);
   /** The open note's AI run, if it has one. A stable object reference, so this costs nothing on the
@@ -335,6 +341,16 @@ export function NoteEditor() {
 
           <button
             type="button"
+            onClick={() => setHistoryOpen(true)}
+            title={t("versions.open")}
+            aria-label={t("versions.open")}
+            className={ICON_BUTTON}
+          >
+            <HistoryIcon size={13} />
+          </button>
+
+          <button
+            type="button"
             onClick={() => void togglePinned(note.id)}
             title={note.pinned ? t("notes.unpin") : t("notes.pin")}
             aria-label={note.pinned ? t("notes.unpin") : t("notes.pin")}
@@ -502,8 +518,12 @@ export function NoteEditor() {
             />
             <div
               style={{ width: outlineWidth }}
-              className="shrink-0 border-l border-[var(--cf-border)]"
+              className="flex shrink-0 flex-col border-l border-[var(--cf-border)]"
             >
+              {/* The outline takes the room it needs and the backlinks take what is left, capped —
+                  a note with forty headings must not push "what links here" off the bottom, and a
+                  note with two must not leave two thirds of the rail empty above it. */}
+              <div className="min-h-0 flex-1 overflow-hidden">
               <NoteOutline
                 headings={headings}
                 activeLine={caretHeadingLine}
@@ -522,6 +542,12 @@ export function NoteEditor() {
                     ?.scrollIntoView({ behavior: "smooth", block: "start" });
                 }}
               />
+              </div>
+              {note && (
+                <div className="max-h-[45%] min-h-[92px] shrink-0">
+                  <NoteBacklinks noteId={note.id} title={note.title} />
+                </div>
+              )}
             </div>
           </>
         )}
@@ -556,6 +582,27 @@ export function NoteEditor() {
         <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
       )}
       {templating && <SaveTemplateModal onClose={() => setTemplating(false)} />}
+
+      {historyOpen && note && (
+        <VersionHistoryModal
+          title={note.title || t("notes.untitled")}
+          listVersions={() => notesListVersions(note.id)}
+          readVersion={(versionId) => notesVersionContent(versionId)}
+          // Through the store's own save, not a direct command: the store is what keeps the open
+          // buffer, the excerpt and the tree row in step, and writing behind it would leave the
+          // editor showing the old text over the restored one.
+          // Through the draft the editor already holds, then a flush: `editDraft` is what the
+          // Monaco buffer, the excerpt and the tree row all read from, so writing behind it would
+          // leave the editor showing the old text over the restored one. `flush` is what the
+          // autosave calls, and it is what records the pre-restore text as a version on the way
+          // past — which is what makes "I restored the wrong one" recoverable.
+          onRestore={async (content) => {
+            useNotesStore.getState().editDraft({ content });
+            await useNotesStore.getState().flush();
+          }}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
     </div>
   );
 }

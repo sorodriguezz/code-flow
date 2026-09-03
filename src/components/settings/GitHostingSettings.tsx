@@ -12,6 +12,7 @@ import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
+import { RAIL_WIDTH } from "./settingsNav";
 
 /** One hint per provider, as a lookup rather than a ternary: a chain of `?:` silently falls
  * through to Azure for anything it doesn't name, which is exactly how a third provider ends up
@@ -67,7 +68,11 @@ export function GitHostingSettings() {
             rail is sticky, so the pill's before/after rects would otherwise be measured against a
             scroll position the arriving pane has just changed, and the slide would land as a jump.
             Measuring against the rail — which never moves — keeps it a slide. */}
-        <motion.nav layoutRoot className="sticky top-0 w-[168px] shrink-0 self-start">
+        <motion.nav
+          layoutRoot
+          style={{ width: RAIL_WIDTH }}
+          className="sticky top-0 shrink-0 self-start"
+        >
           {HOSTING_PROVIDERS.map(({ id, label, icon: Icon, available }) => (
             <button
               key={id}
@@ -77,7 +82,7 @@ export function GitHostingSettings() {
               title={label}
               // Colour and the pill carry the selection; no weight change, which would re-measure
               // the label and reflow the row.
-              className={`relative mb-0.5 flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+              className={`relative mb-0.5 flex w-full items-start rounded-md px-2.5 py-1.5 text-left text-[12.5px] leading-[1.35] transition-colors ${
                 provider === id
                   ? "text-[var(--cf-accent)]"
                   : available
@@ -89,13 +94,16 @@ export function GitHostingSettings() {
                   between the two the moment both are on screen. */}
               {provider === id && <ActivePill layoutId="cf-vcs-provider-pill" />}
               {/* Above the pill, which covers the whole button. */}
-              <span className="relative flex min-w-0 flex-1 items-center gap-1.5">
+              <span className="relative flex min-w-0 flex-1 items-start gap-1.5">
                 {/* The platform's own mark where one exists, and the registry's Lucide glyph
                     where it does not — see `brandLogos.ts` on why Azure DevOps has none. */}
-                <BrandGlyph id={id} size={13} fallback={<Icon size={13} className="shrink-0" />} />
-                <span className="truncate">{label}</span>
+                <span className="mt-[2px] shrink-0">
+                  <BrandGlyph id={id} size={13} fallback={<Icon size={13} className="shrink-0" />} />
+                </span>
+                {/* Wraps rather than truncates — see `settingsNav`, whose rail this one mirrors. */}
+                <span className="min-w-0 flex-1 break-words">{label}</span>
                 {!available && (
-                  <span className="ml-auto shrink-0 rounded bg-black/10 px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide dark:bg-white/10">
+                  <span className="mt-[1px] shrink-0 rounded bg-black/10 px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide dark:bg-white/10">
                     {t("settings.comingSoon")}
                   </span>
                 )}

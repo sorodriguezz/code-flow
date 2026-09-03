@@ -3,6 +3,7 @@ pub mod branch;
 pub mod checkpoint;
 pub mod diff;
 pub mod graph;
+pub mod history;
 pub mod hunk;
 pub mod identity;
 pub mod lock_rules;

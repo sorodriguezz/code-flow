@@ -1,5 +1,5 @@
 import { Ban, ClipboardPaste, Copy, Scissors } from "lucide-react";
-import type { MenuItem } from "../api/CollectionTree";
+import type { MenuItem } from "../common/ContextMenu";
 import { pushErrorToast } from "../../state/toastStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 

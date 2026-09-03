@@ -546,8 +546,8 @@ export function SnippetsSettings() {
           <div className="mb-1 flex items-center gap-1 px-2">
             <div className="grid min-w-0 flex-1 gap-2" style={{ gridTemplateColumns: SUMMARY_GRID }}>
               <span />
-              <span className={`truncate ${HEAD}`}>{t("snippets.prefix")}</span>
-              <span className={`truncate ${HEAD}`}>{t("snippets.description")}</span>
+              <span className={HEAD}>{t("snippets.prefix")}</span>
+              <span className={HEAD}>{t("snippets.description")}</span>
             </div>
             <span className="w-7 shrink-0" />
           </div>

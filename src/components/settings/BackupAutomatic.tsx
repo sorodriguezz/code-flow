@@ -709,7 +709,7 @@ export function BackupAutomatic({
                 >
                   {index + 1}
                 </span>
-                <span className="truncate">{t(labelKey)}</span>
+                <span className="min-w-0 break-words leading-snug">{t(labelKey)}</span>
               </button>
             </li>
           );

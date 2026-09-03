@@ -12,7 +12,7 @@ import {
   Search,
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ShelfCard, ShelfRow } from "../common/ShelfCard";
 import { ICON_BUTTON, TagPill, bookInk, readingMinutes, relativeTime } from "./notesChrome";
 import type { Note, NoteBookRow, NoteSort } from "../../types/notes";

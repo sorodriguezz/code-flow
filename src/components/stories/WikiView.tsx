@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { TaskModelTag } from "../ai/ModelTag";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
 import { MarkdownEditor } from "../common/MarkdownEditor";

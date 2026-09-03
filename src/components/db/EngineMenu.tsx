@@ -1,4 +1,4 @@
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { EngineGlyph } from "./dbChrome";
 import { useT } from "../../state/languageStore";
 import { DB_ENGINES, type DbKind } from "../../types/database";

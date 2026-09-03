@@ -84,7 +84,7 @@ function Row({
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="truncate text-[12.5px] text-[var(--cf-text)]">{model.label}</span>
+            <span className="min-w-0 break-words text-[12.5px] leading-snug text-[var(--cf-text)]">{model.label}</span>
             {active && (
               <span className="shrink-0 rounded bg-[var(--cf-accent)]/15 px-1.5 py-px text-[10px] font-medium text-[var(--cf-accent)]">
                 {t("localai.active")}

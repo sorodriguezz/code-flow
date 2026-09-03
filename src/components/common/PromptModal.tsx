@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
+import { useFocusTrap } from "../../lib/useFocusTrap";
 import { usePromptStore } from "../../state/promptStore";
 import { useT } from "../../state/languageStore";
 
@@ -16,6 +17,7 @@ import { useT } from "../../state/languageStore";
  * value satisfies it.
  */
 export function PromptModal() {
+  const panelRef = useRef<HTMLDivElement>(null);
   const request = usePromptStore((s) => s.request);
   const respond = usePromptStore((s) => s.respond);
   const t = useT();
@@ -40,13 +42,19 @@ export function PromptModal() {
   const problem = trimmed ? (request.validate?.(trimmed) ?? null) : null;
   const ready = trimmed.length > 0 && !problem;
 
+  useFocusTrap(panelRef, request !== null);
+
   return (
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4"
       onClick={() => respond(null)}
     >
       <div
+        ref={panelRef}
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
         className="cf-fade-in max-h-[calc(100vh-2rem)] w-[380px] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
       >
         <div className="mb-3 flex items-start gap-3">

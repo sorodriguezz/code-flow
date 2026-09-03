@@ -30,7 +30,7 @@ import { DbmlReference } from "./DbmlReference";
 import { DbmlConvertPanel } from "./DbmlConvertPanel";
 import { DbmlDiffPanel } from "./DbmlDiffPanel";
 import { DbmlImportPanel } from "./DbmlImportPanel";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ViewSkeleton } from "../common/ViewSkeleton";

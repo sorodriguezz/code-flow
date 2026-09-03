@@ -23,6 +23,8 @@ import type {
   BranchInfo,
   ChatConversationSummary,
   CommitInfo,
+  CommitPage,
+  TagInfo,
   ConflictFile,
   FileBlame,
   FileDiffInfo,
@@ -295,6 +297,63 @@ export const getStatus = (repoPath: string) => invoke<RepoStatusInfo>("get_statu
 
 export const listCommits = (repoPath: string, allRefs: boolean, limit: number) =>
   invoke<CommitInfo[]>("list_commits", { repoPath, allRefs, limit });
+
+/**
+ * One page of history, and whether there is more behind it.
+ *
+ * `listCommits` above still exists and is still right for the fixed windows other screens want; the
+ * graph uses this one, because a hard cap with no "load more" is a history that silently stops.
+ */
+export const listCommitsPage = (repoPath: string, allRefs: boolean, skip: number, limit: number) =>
+  invoke<CommitPage>("list_commits_page", { repoPath, allRefs, skip, limit });
+
+/** Commits that touched one path, newest first. The complement of blame. */
+export const fileHistory = (repoPath: string, relPath: string, limit: number) =>
+  invoke<CommitInfo[]>("file_history", { repoPath, relPath, limit });
+
+/** The last commit's message, so the amend dialog opens on it rather than on an empty box. */
+export const headCommitMessage = (repoPath: string) =>
+  invoke<string>("head_commit_message", { repoPath });
+
+/** Replaces the last commit. The author and their date are preserved; the committer becomes you. */
+export const amendCommit = (
+  repoPath: string,
+  message: string,
+  authorName?: string | null,
+  authorEmail?: string | null,
+) => invoke<string>("amend_commit", { repoPath, message, authorName, authorEmail });
+
+/** Applies the inverse of a commit and commits it. Refuses on a dirty tree. */
+export const revertCommit = (
+  repoPath: string,
+  oid: string,
+  authorName?: string | null,
+  authorEmail?: string | null,
+) => invoke<string>("revert_commit", { repoPath, oid, authorName, authorEmail });
+
+/** Applies a commit from elsewhere on top of HEAD. `commitNow: false` leaves it staged. */
+export const cherryPickCommit = (
+  repoPath: string,
+  oid: string,
+  commitNow: boolean,
+  authorName?: string | null,
+  authorEmail?: string | null,
+) => invoke<string>("cherry_pick_commit", { repoPath, oid, commitNow, authorName, authorEmail });
+
+export const listTags = (repoPath: string) => invoke<TagInfo[]>("list_tags", { repoPath });
+
+/** An empty `message` makes it a lightweight tag; anything else makes it annotated. */
+export const createTag = (
+  repoPath: string,
+  name: string,
+  oid: string,
+  message: string,
+  authorName?: string | null,
+  authorEmail?: string | null,
+) => invoke<void>("create_tag", { repoPath, name, oid, message, authorName, authorEmail });
+
+export const deleteTag = (repoPath: string, name: string) =>
+  invoke<void>("delete_tag", { repoPath, name });
 
 export const listUnpushedCommits = (repoPath: string) =>
   invoke<CommitInfo[]>("list_unpushed_commits", { repoPath });
@@ -1180,9 +1239,12 @@ export const defaultCommitTemplate = () => invoke<string>("default_commit_templa
 
 export const defaultAnalyzeTemplate = () => invoke<string>("default_analyze_template");
 
-export const defaultPrDescriptionTemplate = () => invoke<string>("default_pr_description_template");
-
 export const defaultResolveConflictTemplate = () => invoke<string>("default_resolve_conflict_template");
+
+/** The built-in prompt behind the `pipeline_template` setting — see `aiPrompts`. There is no
+ *  `defaultPrDescriptionTemplate` beside these three: the PR description prompt is per workspace,
+ *  so its default comes from `defaultWorkspacePrompt("pr_description")` like every other kind. */
+export const defaultPipelineTemplate = () => invoke<string>("default_pipeline_template");
 
 export const analyzeWorkingChanges = (projectId: string, jobId: string, agent?: ChatAgentOverride | null) =>
   invoke<string>("analyze_working_changes", {
@@ -1319,6 +1381,20 @@ export const listPipelineRuns = (projectId: string, branch: string | null, limit
  * status can only be settled once the jobs are known — GitHub has no "passed with warnings" and
  * GitLab doesn't put it in the list response. The row in the list is corrected from this.
  */
+/**
+ * Runs a pipeline again.
+ *
+ * `failedOnly` is honoured where the host has a verb for it and ignored where its only retry verb
+ * already means that — see `rerun_pipeline`. The UI names what it is about to do per provider
+ * rather than offering one option that means three things.
+ */
+export const rerunPipeline = (projectId: string, runId: string, failedOnly: boolean) =>
+  invoke<void>("rerun_pipeline", { projectId, runId, failedOnly });
+
+/** Stops a run that is still going. */
+export const cancelPipeline = (projectId: string, runId: string) =>
+  invoke<void>("cancel_pipeline", { projectId, runId });
+
 export const pipelineRunDetail = (projectId: string, runId: string) =>
   invoke<PipelineRunDetail>("pipeline_run_detail", { projectId, runId });
 

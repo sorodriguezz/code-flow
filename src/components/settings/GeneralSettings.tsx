@@ -150,7 +150,7 @@ export function GeneralSettings() {
               className="flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-left text-[13px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
             >
               <Icon size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
-              <span className="min-w-0 truncate">{t(labelKey)}</span>
+              <span className="min-w-0 break-words leading-snug">{t(labelKey)}</span>
               <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
                 {t("tour.stepCount", { n: tourLength(tour) })}
               </span>

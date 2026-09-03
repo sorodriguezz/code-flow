@@ -178,7 +178,7 @@ function Tile({
     <div className="rounded-lg border border-[var(--cf-border)] px-3 py-2">
       <div className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
         <Icon size={11} className="shrink-0" />
-        <span className="min-w-0 truncate">{label}</span>
+        <span className="min-w-0 break-words leading-snug">{label}</span>
       </div>
       <p className="mt-0.5 text-[17px] font-semibold tabular-nums">{value}</p>
       {note && <p className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]">{note}</p>}
@@ -296,7 +296,7 @@ function ProviderSplit({ providers, total }: { providers: ProviderStat[]; total:
                 className="h-2 w-2 shrink-0 rounded-full"
                 style={{ background: colourFor(provider.provider) }}
               />
-              <span className="min-w-0 flex-1 truncate">{providerLabel(provider.provider)}</span>
+              <span className="min-w-0 flex-1 break-words leading-snug">{providerLabel(provider.provider)}</span>
               <span className="shrink-0 tabular-nums text-[var(--cf-text-muted)]">
                 {t("usage.runsN", { n: provider.runs })}
               </span>
@@ -334,7 +334,7 @@ function TaskTable({ tasks }: { tasks: TaskStat[] }) {
         {tasks.map((task) => (
           <div key={task.task || "unknown"}>
             <div className="flex items-center gap-1.5 text-[12px]">
-              <span className="min-w-0 flex-1 truncate">{taskLabel(task.task, t)}</span>
+              <span className="min-w-0 flex-1 break-words leading-snug">{taskLabel(task.task, t)}</span>
               <span className="shrink-0 tabular-nums text-[var(--cf-text-muted)]">
                 {t("usage.runsN", { n: task.runs })}
               </span>

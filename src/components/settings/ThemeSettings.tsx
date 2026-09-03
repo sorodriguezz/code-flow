@@ -63,7 +63,7 @@ function AccentSummary() {
         className="h-3.5 w-3.5 shrink-0 rounded-full"
         style={{ background: resolved === "dark" ? option.dark : option.light }}
       />
-      <span className="truncate text-[12px] text-[var(--cf-text-muted)]">{option.label}</span>
+      <span className="break-words text-[12px] leading-snug text-[var(--cf-text-muted)]">{option.label}</span>
     </>
   );
 }

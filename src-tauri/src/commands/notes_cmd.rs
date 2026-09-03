@@ -18,6 +18,7 @@ use crate::ai_runs;
 use crate::db::models::{
     NoteBookRow, NoteMeta, NoteRow, NoteSearchHit, NoteTemplateRow, NotesWorkspaceTree,
 };
+use crate::db::version_queries::{self, DocVersion};
 use crate::db::{note_queries, Db};
 
 /// Hits returned by one search. Well past what the panel can show, and the point of the cap is
@@ -67,7 +68,36 @@ pub fn notes_save_note(
     tags: String,
 ) -> Result<Option<NoteMeta>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // Before the write, so the version holds what the note *was*: a snapshot taken afterwards is a
+    // copy of the change rather than of what it replaced, which is useless for going back. Its own
+    // guards keep this cheap on the autosave path — see `record_version`.
+    if let Ok(Some(previous)) = note_queries::get_note(&conn, &id) {
+        let _ = version_queries::record_version(
+            &conn,
+            "note",
+            &id,
+            &previous.title,
+            &previous.content,
+            &crate::db::queries::now(),
+        );
+    }
     note_queries::save_note(&conn, &id, &title, &content, &tags).map_err(|e| e.to_string())
+}
+
+// ---------- version history ----------
+
+/// One note's past versions, newest first, without their bodies.
+#[tauri::command]
+pub fn notes_list_versions(db: State<Db>, id: String) -> Result<Vec<DocVersion>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    version_queries::list_versions(&conn, "note", &id).map_err(|e| e.to_string())
+}
+
+/// One version's full text — read when the reader opens it, not with the list.
+#[tauri::command]
+pub fn notes_version_content(db: State<Db>, version_id: String) -> Result<Option<String>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    version_queries::version_content(&conn, &version_id).map_err(|e| e.to_string())
 }
 
 /// Refiles a note into another book. There is no "out of every book" — see [`notes_create_note`].
@@ -102,7 +132,14 @@ pub fn notes_set_pinned(db: State<Db>, id: String, pinned: bool) -> Result<(), S
 #[tauri::command]
 pub fn notes_delete_note(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    note_queries::delete_note(&conn, &id).map_err(|e| e.to_string())
+    note_queries::delete_note(&conn, &id)
+        .map_err(|e| e.to_string())?;
+    // The note is gone for good, so its history has nothing left to be the history *of*. Deliberately
+    // not a foreign-key cascade — see `version_queries::delete_versions` on why the table is not
+    // wired to one — and best effort: a note that deleted cleanly must not report a failure because
+    // its snapshots did not.
+    let _ = version_queries::delete_versions(&conn, "note", &id);
+    Ok(())
 }
 
 /// `title` comes from the caller because "Copy of …" is a translated string — see
@@ -241,6 +278,22 @@ pub fn notes_search(
 ) -> Result<Vec<NoteSearchHit>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     note_queries::search_notes(&conn, &workspace_id, &query, SEARCH_LIMIT)
+        .map_err(|e| e.to_string())
+}
+
+/// The notes that point at this one with a `[[wiki link]]`.
+///
+/// The other direction of a feature that only worked forwards — see `note_queries::backlinks`.
+/// Capped at the same `SEARCH_LIMIT` as the search, and for the same reason: this reads bodies.
+#[tauri::command]
+pub fn notes_backlinks(
+    db: State<Db>,
+    workspace_id: String,
+    title: String,
+    exclude_id: String,
+) -> Result<Vec<NoteSearchHit>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::backlinks(&conn, &workspace_id, &title, &exclude_id, SEARCH_LIMIT)
         .map_err(|e| e.to_string())
 }
 

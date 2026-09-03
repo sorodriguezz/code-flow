@@ -83,6 +83,8 @@ import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ImportReposModal } from "./ImportReposModal";
 import { CreateBranchModal } from "./CreateBranchModal";
+import { ContextMenu } from "../common/ContextMenu";
+import { projectMenuItems } from "./projectMenu";
 import { MoveProjectModal } from "./MoveProjectModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
@@ -144,8 +146,12 @@ const UNFOLD = { duration: 0.24, ease: [0.22, 1, 0.36, 1] } as const;
 
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 440;
-/** Folded, the panel is exactly wide enough for a centred project chip inside its own padding —
- * the same trade the settings nav makes at 50px. */
+/** Folded, the panel is exactly wide enough for a centred project chip inside its own padding.
+ *
+ * The settings nav folds to the same 50px and no longer makes quite the same trade: it drops its
+ * scroll gutter entirely (`cf-no-scrollbar`), because it holds a fixed set of sections in a
+ * fixed-height dialog and cannot realistically overflow. This panel keeps its bar and budgets for
+ * it — a project list has no bound — which is what `px-0.5` below is paying for. */
 const SIDEBAR_COLLAPSED = 50;
 
 /** `defaultOpen` is the open one and only the open one: it's the group with work still in it, and
@@ -1298,6 +1304,9 @@ function ProjectRow({
   const branches = useRepoStore((s) => s.branches);
   const status = useRepoStore((s) => s.status);
   const checkoutBranch = useRepoStore((s) => s.checkoutBranch);
+  /** Where the right-click menu was opened, if it is open. */
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const openSettings = useUiStore((s) => s.openSettings);
   const checkoutDetached = useRepoStore((s) => s.checkoutDetached);
   const deleteBranch = useRepoStore((s) => s.deleteBranch);
   const setBranchLocked = useRepoStore((s) => s.setBranchLocked);
@@ -1404,6 +1413,14 @@ function ProjectRow({
         onClick={() => {
           if (broken || reorder.swallowsClick()) return;
           select();
+        }}
+        // Right-click. The row already carries the actions it has room for — open in a window,
+        // remove — behind a hover strip; this is where the rest live. The sidebar had no menu at
+        // all, and because the app swallows the webview's own (see `contextMenuGuard`), a
+        // right-click on a repository did nothing whatsoever.
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
         }}
         // The one place the *reason* fits. The row itself can only afford the strike-through; the
         // path is what turns "this is broken" into "I moved that folder last week", and for the
@@ -1833,6 +1850,35 @@ function ProjectRow({
       {showCreateBranch && (
         <CreateBranchModal branches={branches} onClose={() => setShowCreateBranch(false)} />
       )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          heading={project.name}
+          items={projectMenuItems({
+            project,
+            broken,
+            detached: detachedTo !== null,
+            t,
+            onOpen: select,
+            onDetach: () => void sendOut(),
+            onFocusWindow: () => detachedTo && void focusWindow(detachedTo),
+            onReveal: () =>
+              void revealInFileManager(project.local_path).catch((e: unknown) => pushErrorToast(String(e))),
+            onCopyPath: () => {
+              void navigator.clipboard
+                .writeText(project.local_path)
+                .then(() => pushSuccessToast(t("common.copied")))
+                .catch((e: unknown) => pushErrorToast(String(e)));
+            },
+            onNewBranch: () => setShowCreateBranch(true),
+            onSettings: () => openSettings("projects"),
+            onRemove: () => void removeMissing(),
+          })}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1855,10 +1901,14 @@ export function Sidebar() {
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
+  // In the store rather than in local state so the command palette can open the same modal — the
+  // sidebar still owns it and renders it below.
+  const cloneModalOpen = useUiStore((s) => s.cloneModalOpen);
+  const openCloneModal = useUiStore((s) => s.openCloneModal);
+  const closeCloneModal = useUiStore((s) => s.closeCloneModal);
   const t = useT();
   // ⌘B still folds the panel; the button that used to carry that hint left the title bar with it.
   const hint = useShortcutHint();
-  const [showCloneModal, setShowCloneModal] = useState(false);
   /** The repositories a pick turned up, waiting for the user to choose which to import. */
   const [folderScan, setFolderScan] = useState<{
     folders: string[];
@@ -2156,7 +2206,7 @@ export function Sidebar() {
                     <Glasses size={13} />
                   </button>
                   <button
-                    onClick={() => setShowCloneModal(true)}
+                    onClick={openCloneModal}
                     data-tour="clone-repo"
                     className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
                     title={t("sidebar.cloneRepo")}
@@ -2201,8 +2251,8 @@ export function Sidebar() {
             onClose={() => setFolderScan(null)}
           />
         )}
-        {showCloneModal && activeWorkspaceId && (
-          <CloneRepoModal workspaceId={activeWorkspaceId} onClose={() => setShowCloneModal(false)} />
+        {cloneModalOpen && activeWorkspaceId && (
+          <CloneRepoModal workspaceId={activeWorkspaceId} onClose={closeCloneModal} />
         )}
       </motion.aside>
       {/* Folded, there is nothing to drag: the panel is exactly one chip wide by definition, and a
@@ -2231,8 +2281,11 @@ export function Sidebar() {
           paints across the button, and the handle's grab area takes the clicks aimed at it.
 
           The *height* is where the two part company, deliberately: this one is centred and the
-          settings one sits at the top. See the note there for why — in short, that seam is short,
-          fixed and never dragged, and this one is none of those things.
+          settings one sits at the top. Its reason is on its own side and does not generalise —
+          `top-6` puts it on the line of the content pane's heading, which that dialog has and this
+          panel does not. (The claim that used to be here, that the settings seam is "short, fixed
+          and never dragged", was wrong on all three counts: it carries a live `ResizeHandle` from
+          160 to 320, and since the search box arrived that nav scrolls.)
 
           Centred on the seam rather than at its top. Up there it came out level with the tab bar's
           own row of controls, close enough to read as one more of them — a button about the *panel*

@@ -1,6 +1,6 @@
 use tauri::AppHandle;
 
-use crate::git::{blame, branch, diff, graph, hunk, identity, merge, remotes, repo, stash};
+use crate::git::{blame, branch, diff, graph, history, hunk, identity, merge, remotes, repo, stash};
 use crate::remote;
 
 // ---------- why the read commands carry `(async)` and the write ones don't ----------
@@ -277,6 +277,84 @@ pub fn commit(
 #[tauri::command]
 pub fn reset_to_commit(repo_path: String, oid: String, mode: String) -> Result<(), String> {
     repo::reset_to_commit(&repo_path, &oid, &mode)
+}
+
+// ---------------------------------------------------------------------------
+// History: paging, per-file log, and the three operations on an existing commit
+// ---------------------------------------------------------------------------
+
+#[tauri::command(async)]
+pub fn list_commits_page(
+    repo_path: String,
+    all_refs: bool,
+    skip: usize,
+    limit: usize,
+) -> Result<graph::CommitPage, String> {
+    graph::list_commits_page(&repo_path, all_refs, skip, limit)
+}
+
+#[tauri::command(async)]
+pub fn file_history(repo_path: String, rel_path: String, limit: usize) -> Result<Vec<graph::CommitInfo>, String> {
+    graph::file_history(&repo_path, &rel_path, limit)
+}
+
+/// The message the amend dialog opens on — see `history::head_commit_message`.
+#[tauri::command]
+pub fn head_commit_message(repo_path: String) -> Result<String, String> {
+    history::head_commit_message(&repo_path)
+}
+
+#[tauri::command]
+pub fn amend_commit(
+    repo_path: String,
+    message: String,
+    author_name: Option<String>,
+    author_email: Option<String>,
+) -> Result<String, String> {
+    history::amend_commit(&repo_path, &message, author_name, author_email)
+}
+
+#[tauri::command(async)]
+pub fn revert_commit(
+    repo_path: String,
+    oid: String,
+    author_name: Option<String>,
+    author_email: Option<String>,
+) -> Result<String, String> {
+    history::revert_commit(&repo_path, &oid, author_name, author_email)
+}
+
+#[tauri::command(async)]
+pub fn cherry_pick_commit(
+    repo_path: String,
+    oid: String,
+    commit_now: bool,
+    author_name: Option<String>,
+    author_email: Option<String>,
+) -> Result<String, String> {
+    history::cherry_pick_commit(&repo_path, &oid, commit_now, author_name, author_email)
+}
+
+#[tauri::command(async)]
+pub fn list_tags(repo_path: String) -> Result<Vec<history::TagInfo>, String> {
+    history::list_tags(&repo_path)
+}
+
+#[tauri::command]
+pub fn create_tag(
+    repo_path: String,
+    name: String,
+    oid: String,
+    message: String,
+    author_name: Option<String>,
+    author_email: Option<String>,
+) -> Result<(), String> {
+    history::create_tag(&repo_path, &name, &oid, &message, author_name, author_email)
+}
+
+#[tauri::command]
+pub fn delete_tag(repo_path: String, name: String) -> Result<(), String> {
+    history::delete_tag(&repo_path, &name)
 }
 
 #[tauri::command(async)]

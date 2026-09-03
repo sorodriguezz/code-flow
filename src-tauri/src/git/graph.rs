@@ -141,6 +141,107 @@ pub fn list_commits(path: &str, all_refs: bool, limit: usize) -> Result<Vec<Comm
     Ok(commits)
 }
 
+/// One page of history, and whether there is more behind it.
+///
+/// The graph used to ask for a flat 500 commits with no way to ask for the next one, so on any real
+/// repository the history simply stopped — with nothing on screen to say that it had. `skip` walks
+/// past what the caller already holds rather than re-sending it; `has_more` is what the "load more"
+/// row keys off, and it is computed by asking the walk for one commit past the page rather than by
+/// counting the whole history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitPage {
+    pub commits: Vec<CommitInfo>,
+    pub has_more: bool,
+}
+
+/// A page of the same walk `list_commits` does.
+///
+/// Kept beside it rather than replacing it: `list_commits` is still the right call for the fixed
+/// windows other screens want (the unpushed strip, the branch comparison), and a caller that wants
+/// "the first N" should not have to think about paging.
+pub fn list_commits_page(
+    path: &str,
+    all_refs: bool,
+    skip: usize,
+    limit: usize,
+) -> Result<CommitPage, String> {
+    let repo = open(path)?;
+    let ref_map = build_ref_map(&repo);
+
+    let mut walk = repo.revwalk().map_err(|e| e.message().to_string())?;
+    walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME).map_err(|e| e.message().to_string())?;
+    if all_refs {
+        walk.push_glob("refs/heads/*").map_err(|e| e.message().to_string())?;
+        walk.push_glob("refs/remotes/*").map_err(|e| e.message().to_string())?;
+    } else {
+        walk.push_head().map_err(|e| e.message().to_string())?;
+    }
+
+    let mut commits = Vec::with_capacity(limit.min(1024));
+    let mut has_more = false;
+    // `limit + 1` and stop: the extra one is never built into a `CommitInfo`, it only answers
+    // whether the walk had anything left.
+    for (index, oid) in walk.skip(skip).take(limit + 1).enumerate() {
+        let oid = oid.map_err(|e| e.message().to_string())?;
+        if index == limit {
+            has_more = true;
+            break;
+        }
+        commits.push(build_commit_info(&repo, oid, &ref_map)?);
+    }
+
+    Ok(CommitPage { commits, has_more })
+}
+
+/// Commits touching one path, newest first — "how did this file get here".
+///
+/// The complement of blame, which answers who wrote a line. A revwalk with a pathspec-shaped filter
+/// done by hand: libgit2 has no `--follow`, and this deliberately does not pretend to — a rename is
+/// where the history stops, which is honest and is what `git log <path>` does without `--follow`
+/// too.
+pub fn file_history(path: &str, rel_path: &str, limit: usize) -> Result<Vec<CommitInfo>, String> {
+    let repo = open(path)?;
+    let ref_map = build_ref_map(&repo);
+    let target = std::path::Path::new(rel_path);
+
+    let mut walk = repo.revwalk().map_err(|e| e.message().to_string())?;
+    walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME).map_err(|e| e.message().to_string())?;
+    walk.push_head().map_err(|e| e.message().to_string())?;
+
+    let mut out = Vec::new();
+    for oid in walk {
+        if out.len() >= limit {
+            break;
+        }
+        let oid = oid.map_err(|e| e.message().to_string())?;
+        let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
+        let tree = commit.tree().map_err(|e| e.message().to_string())?;
+        let entry = tree.get_path(target).ok();
+
+        // A commit counts when the blob at that path differs from every parent's — which is also
+        // what makes the *first* commit of a file count, since it has no parent holding it.
+        let changed = if commit.parent_count() == 0 {
+            entry.is_some()
+        } else {
+            let mut differs = false;
+            for parent in commit.parents() {
+                let parent_entry = parent.tree().ok().and_then(|t| t.get_path(target).ok());
+                if entry.as_ref().map(|e| e.id()) != parent_entry.as_ref().map(|e| e.id()) {
+                    differs = true;
+                    break;
+                }
+            }
+            differs
+        };
+
+        if changed {
+            out.push(build_commit_info(&repo, oid, &ref_map)?);
+        }
+    }
+
+    Ok(out)
+}
+
 /// Commits reachable from HEAD but not yet on its upstream — i.e. what `git push` would
 /// send. Empty if the current branch has no upstream configured (nothing to compare against).
 pub fn list_unpushed_commits(path: &str) -> Result<Vec<CommitInfo>, String> {

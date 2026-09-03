@@ -20,7 +20,7 @@ import { TerminalPane } from "../terminal/TerminalPane";
 import { agentFromCommand } from "../../lib/agentInTerminal";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { PaneTree } from "./PaneTree";
-import { ContextMenu } from "../api/CollectionTree";
+import { ContextMenu } from "../common/ContextMenu";
 import { listShellProfiles } from "../../lib/tauri/commands";
 import type { BenchTerminal, ShellProfile } from "../../types/domain";
 

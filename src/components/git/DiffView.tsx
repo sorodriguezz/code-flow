@@ -1,9 +1,9 @@
 import { lazy, memo, Suspense, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Columns2, FileDiff, Rows3, X } from "lucide-react";
-import type { FileDiffInfo } from "../../types/domain";
+import type { DiffLine, FileDiffInfo } from "../../types/domain";
 import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
-import { lineClasses } from "../../lib/diffText";
+import { inlineSpans, lineClasses, pairHunkLines, worthHighlighting } from "../../lib/diffText";
 import { fileStatusLabelKey, fileStatusColor as statusColor } from "../../lib/fileStatus";
 
 /**
@@ -188,6 +188,53 @@ function ChangeMap({
   );
 }
 
+/**
+ * A line's text, with the part that actually changed picked out.
+ *
+ * The diff has always been line-level: a line where one character moved was painted end to end and
+ * finding the change was the reader's job. This pairs each removed line with its added counterpart
+ * inside the hunk and marks the differing run — see `inlineSpans`, and `worthHighlighting` for why
+ * two lines that merely sit next to each other are left alone.
+ *
+ * The pairing is memoised per hunk rather than per line: it is one pass over the origins, and doing
+ * it inside each of a thousand rows would make it a thousand passes.
+ */
+function InlineContent({ line, lines, index }: { line: DiffLine; lines: DiffLine[]; index: number }) {
+  const pairs = useMemo(() => pairHunkLines(lines.map((entry) => entry.origin)), [lines]);
+
+  const partnerIndex = pairs.get(index);
+  const partner = partnerIndex === undefined ? null : lines[partnerIndex];
+  if (!partner || !worthHighlighting(line.content, partner.content)) return <>{line.content}</>;
+
+  const spans =
+    line.origin === "-"
+      ? inlineSpans(line.content, partner.content).before
+      : inlineSpans(partner.content, line.content).after;
+
+  return (
+    <>
+      {spans.map((span, i) =>
+        span.changed ? (
+          // A stronger tint of the row's own colour rather than a new hue: the row already says
+          // added or removed, and this says *where* — a second colour would be a second claim.
+          <span
+            key={i}
+            className={
+              line.origin === "+"
+                ? "rounded-[2px] bg-[color-mix(in_oklab,var(--cf-success)_26%,transparent)]"
+                : "rounded-[2px] bg-[color-mix(in_oklab,var(--cf-danger)_24%,transparent)]"
+            }
+          >
+            {span.text}
+          </span>
+        ) : (
+          <span key={i}>{span.text}</span>
+        ),
+      )}
+    </>
+  );
+}
+
 function DiffViewImpl({
   files,
   onClose,
@@ -362,7 +409,7 @@ function DiffViewImpl({
                           </span>
                           <span className="whitespace-pre-wrap break-all">
                             {line.origin === "+" || line.origin === "-" ? line.origin : " "}
-                            {line.content}
+                            <InlineContent line={line} lines={hunk.lines} index={lIdx} />
                           </span>
                         </div>
                       ))}

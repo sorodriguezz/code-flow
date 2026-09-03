@@ -1,73 +1,57 @@
-import { useLayoutEffect, useRef, useState } from "react";
-import { ChartColumn, Cpu, FileText, Gauge, Server, Sparkles, type LucideIcon } from "lucide-react";
-import { motion } from "framer-motion";
-import { ActivePill } from "../common/ActivePill";
+import { useLayoutEffect, useRef } from "react";
 import { AiCompletionSettings } from "./AiCompletionSettings";
+import { AiTasksSettings } from "./AiTasksSettings";
 import { useT } from "../../state/languageStore";
-import { PromptTemplates } from "./PromptTemplates";
 import { ProvidersSection } from "./ProvidersSection";
 import { QuotaSection } from "./QuotaSection";
-import { TaskRouting } from "./TaskRouting";
 import { UsageStatsSection } from "./UsageStatsSection";
-import type { TranslationKey } from "../../lib/i18n/translations";
+import { SettingsRail, useSectionTab } from "./settingsNav";
+import { tabsFor } from "../../lib/settingsCatalog";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
-
-type AiTab = "providers" | "routing" | "templates" | "completion" | "limits" | "usage";
-
-/**
- * The groups, in the order you'd actually set them up:
- *   1. **Providers** — which engines exist, whether they're installed, how each is configured.
- *   2. **Model per task** — which of those engines (and model) handles each action.
- *   3. **Prompt templates** — shared instructions, independent of who runs them.
- *   4. **Autocomplete** — the model that runs on this machine and finishes what you type.
- *   5. **Limits** — how far through each provider's plan you are, as the provider reports it.
- *   6. **Usage** — what all of that has actually spent, as this app measured it.
- *
- * Autocomplete sits fourth, after the three that configure the assistant and before the two that
- * report on it, and it arrived here from the Editor section — where it was filed while it *was* an
- * editor feature. It is not one any more: the same local model now finishes DBML in the schema
- * workbench and SQL in the database console. A capability three surfaces share belongs with the
- * other AI settings; leaving it under Editor would have meant the database console's completion
- * being configured from a pane named after something else.
- *
- * It is also the only entry here that is not about a *provider*: the engine is bundled and the
- * weights are on disk, so nothing about it is an account or a key. That is the reason it is not
- * first, and the reason it is not mixed into Providers.
- *
- * The last two configure nothing; they read back the consequences of the four above. They are two
- * tabs and not one because they are two different claims: a limit is the provider's statement about
- * a window still running, spend is this app's record of windows already over. Stacked on one screen
- * they read as one table with two halves, and the usage screen's 5h/30d picker appeared to govern
- * bars it has no say over.
- */
-const TABS: { id: AiTab; labelKey: TranslationKey; hintKey: TranslationKey; icon: LucideIcon }[] = [
-  { id: "providers", labelKey: "settings.providersTitle", hintKey: "settings.providersHint", icon: Server },
-  { id: "routing", labelKey: "settings.taskRoutingTitle", hintKey: "settings.taskRoutingHint", icon: Cpu },
-  { id: "templates", labelKey: "settings.templatesTitle", hintKey: "settings.templatesSharedHint", icon: FileText },
-  { id: "completion", labelKey: "localai.title", hintKey: "localai.hint", icon: Sparkles },
-  { id: "limits", labelKey: "quota.title", hintKey: "quota.hint", icon: Gauge },
-  { id: "usage", labelKey: "usage.statsTitle", hintKey: "usage.statsHint", icon: ChartColumn },
-];
 
 /**
  * The AI assistant settings, behind a side rail — the same shape as the API client's settings,
  * down to the sliding pill, so a nested nav reads as part of the furniture the Settings window
  * already uses rather than as a second idea.
  *
- * It replaces three stacked cards that all opened collapsed: every group cost a click to reach,
- * opening one pushed the others off screen, and the provider list is long enough that scrolling
- * past it was the only way to reach the two below. One rail, one pane, nothing to unfold.
+ * The panes, in the order you'd actually set them up:
+ *   1. **Providers** — which engines exist, whether they're installed, how each is configured.
+ *   2. **Tasks and prompts** — which engine runs each action, and what it is told to do.
+ *   3. **Autocomplete** — the model that runs on this machine and finishes what you type.
+ *   4. **Limits** — how far through each provider's plan you are, as the provider reports it.
+ *   5. **Usage** — what all of that has actually spent, as this app measured it.
+ *
+ * Two used to be five and are now one. "Model per task" and "Prompt templates" were separate tabs
+ * describing the same sixteen actions from two sides, and the templates pane had to import the
+ * routing store just to print which engine would run each prompt — see `AiTasksSettings`.
+ *
+ * Autocomplete sits third, after the two that configure the assistant and before the two that
+ * report on it, and it arrived here from the Editor section — where it was filed while it *was* an
+ * editor feature. It is not one any more: the same local model now finishes DBML in the schema
+ * workbench and SQL in the database console. A capability three surfaces share belongs with the
+ * other AI settings; leaving it under Editor would have meant the database console's completion
+ * being configured from a pane named after something else.
+ *
+ * The last two configure nothing; they read back the consequences of the ones above. They are two
+ * tabs and not one because they are two different claims: a limit is the provider's statement about
+ * a window still running, spend is this app's record of windows already over. Stacked on one screen
+ * they read as one table with two halves, and the usage screen's 5h/30d picker appeared to govern
+ * bars it has no say over.
+ *
+ * The tab list itself lives in `settingsCatalog` now, so the settings search can offer these five
+ * panes by name and open one directly.
  */
 export function ClaudeSettings() {
   const t = useT();
-  const [tab, setTab] = useState<AiTab>("providers");
-  const active = TABS.find((entry) => entry.id === tab) ?? TABS[0];
+  const tabs = tabsFor("claude");
+  const [tab, setTab] = useSectionTab("claude", tabs, "providers");
+  const active = tabs.find((entry) => entry.id === tab) ?? tabs[0];
 
-  // The three panes are nowhere near the same height — arriving at a short one while scrolled down
+  // The panes are nowhere near the same height — arriving at a short one while scrolled down
   // through the long provider list left it starting somewhere in the middle. Same fix, and same
   // reason for the layout effect, as `ApiSettingsBody`: land at the top before the frame is painted
-  // rather than as a visible correction after it. It scrolls the *pane* now, which is the element
-  // that moves — see the layout note below.
+  // rather than as a visible correction after it. It scrolls the *pane*, which is the element that
+  // moves — see the layout note below.
   const paneRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     paneRef.current?.scrollTo({ top: 0 });
@@ -86,37 +70,7 @@ export function ClaudeSettings() {
       </div>
 
       <div className="flex min-h-0 flex-1 gap-4">
-        {/* `layoutRoot` on a `motion.nav`, for the reason spelled out in `ApiSettingsBody`: the
-            pill's before/after rects would otherwise be measured against a scroll position the
-            arriving pane has just changed, and the slide would land as a jump. Measuring against
-            the rail — which never moves — keeps it a slide. It no longer needs `sticky`: it is
-            outside the scrolling element now, so it cannot move in the first place. */}
-        <motion.nav layoutRoot className="w-[168px] shrink-0 self-start">
-          {TABS.map(({ id, labelKey, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setTab(id)}
-              aria-current={tab === id ? "page" : undefined}
-              title={t(labelKey)}
-              // Colour and the pill carry the selection; no weight change, which would re-measure
-              // the label and reflow the row.
-              className={`relative mb-0.5 flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
-                tab === id
-                  ? "text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
-              }`}
-            >
-              {/* Its own `layoutId`: sharing one with another group's pill would send it flying
-                  between the two the moment both are on screen. */}
-              {tab === id && <ActivePill layoutId="cf-ai-settings-pill" />}
-              {/* Above the pill, which covers the whole button. */}
-              <span className="relative flex min-w-0 flex-1 items-center gap-1.5">
-                <Icon size={13} className="shrink-0" />
-                <span className="truncate">{t(labelKey)}</span>
-              </span>
-            </button>
-          ))}
-        </motion.nav>
+        <SettingsRail tabs={tabs} active={tab} onSelect={setTab} layoutId="cf-ai-settings-pill" />
 
         {/* The one moving part. `overflow-y-scroll`, not `auto`: the app styles its scrollbars, so
             one is a real 10px of layout rather than an overlay. Letting it come and go as a pane
@@ -127,19 +81,16 @@ export function ClaudeSettings() {
             the pane ends where the dialog does, and a last row flush against that edge reads as cut
             off rather than as the end of the list. */}
         <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
-          {/* The API client's own panel, not a second box that looks nearly like it: a raised fill
-              and a wider radius here made this pane read as a different kind of surface from the
-              one two sections away, which is the sort of difference nobody can name and everybody
-              notices. */}
           <Panel>
             {/* The rail names the pane, so there's no heading repeated here — but the hint says
                 something the label can't (what "inherit" falls back to, that a prompt is shared
                 across engines), so it stays. */}
-            <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+            {active?.hintKey && (
+              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+            )}
 
             {tab === "providers" && <ProvidersSection />}
-            {tab === "routing" && <TaskRouting />}
-            {tab === "templates" && <PromptTemplates />}
+            {tab === "tasks" && <AiTasksSettings />}
             {tab === "completion" && <AiCompletionSettings />}
             {tab === "limits" && <QuotaSection />}
             {tab === "usage" && <UsageStatsSection />}

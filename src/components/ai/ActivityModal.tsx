@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Globe, Pencil, Search, Trash2, X } from "lucide-react";
+import { Globe, Loader2, Pencil, Search, Trash2, X } from "lucide-react";
 import { openPipelineAnalysis } from "../../state/ciStore";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
@@ -78,6 +78,18 @@ export function ActivityModal({
     if (!q) return entries;
     return entries.filter((e) => entryTitle(e).toLowerCase().includes(q));
   }, [entries, query]);
+
+  /**
+   * Whether either bucket still has pages to read.
+   *
+   * Both are drained in the background, so this is a progress note rather than a control — see the
+   * line it renders.
+   */
+  const stillLoading = useJobsStore(
+    (s) =>
+      (projectId ? s.hasMore[projectId] === true : false) ||
+      (workspaceBucket ? s.hasMore[workspaceBucket] === true : false),
+  );
 
   const activeEntryKey = findActiveEntryKey(entries, {
     selectedPrId: selectedPr?.id ?? null,
@@ -273,6 +285,20 @@ export function ActivityModal({
                   </div>
                 );
               })}
+
+              {/* The tail of the history is still arriving.
+                  It is read a page at a time and drained in the background (see
+                  `jobsStore.drainHistory`), so this list genuinely does grow for a moment after it
+                  opens on a long-lived install. Saying so is the whole fix: without it, a search
+                  that finds nothing looks like an answer rather than like a question asked too
+                  early. Not a "load more" button — there is nothing for the reader to do, and a
+                  button that does what is already happening is a button that lies. */}
+              {stillLoading && (
+                <p className="flex items-center justify-center gap-1.5 px-2 py-3 text-[11px] text-[var(--cf-text-muted)]">
+                  <Loader2 size={11} className="animate-spin" />
+                  {t("ai.loadingOlder")}
+                </p>
+              )}
             </div>
           )}
         </div>

@@ -33,7 +33,7 @@ function QuotaFreshness({ lastReadAt, loading }: { lastReadAt: number; loading: 
         : t("quota.updatedAgo", { minutes: age });
 
   return (
-    <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--cf-text-muted)]">{label}</span>
+    <span className="min-w-0 flex-1 break-words text-[11px] leading-snug text-[var(--cf-text-muted)]">{label}</span>
   );
 }
 

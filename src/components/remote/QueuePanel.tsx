@@ -26,7 +26,7 @@ import { ColumnsModal } from "../common/ColumnsModal";
 import { DataGrid, autoFitWidth, autoFitWidths, type GridColumn } from "../common/DataGrid";
 import { range } from "../common/gridBits";
 import { useColumnPrefs } from "../common/useColumnPrefs";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CARD, ToolbarButton, WorkBar, formatWhen } from "./remoteChrome";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";

@@ -21,7 +21,7 @@ import {
 import { AGENT_STATUS } from "./agentStatus";
 import { chainRollup } from "./chainStatus";
 import { RenameRow, Row, menuBlocks } from "./TreeRow";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { relativeTime } from "../api/settingsChrome";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { OPEN_BY_DEFAULT, useAgentsStore } from "../../state/agentsStore";

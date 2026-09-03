@@ -64,7 +64,7 @@ import {
   type ReviewTab,
   type TaskProposal,
 } from "../../state/workItemReviewStore";
-import { ContextMenu } from "../api/CollectionTree";
+import { ContextMenu } from "../common/ContextMenu";
 import { useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
 import { TaskModelTag } from "../ai/ModelTag";

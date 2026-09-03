@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ClipboardCopy, ListTree, Pin, PinOff, SplitSquareHorizontal, X } from "lucide-react";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { FileGlyph } from "../common/FileGlyph";
 import { DRAG_THRESHOLD, preventMiddleClickAutoscroll, setDragCursor } from "../../lib/pointerDrag";
 import { useRowHoverStore } from "../../state/rowHoverStore";

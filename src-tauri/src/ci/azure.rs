@@ -1495,3 +1495,102 @@ mod tests {
         assert!(!belongs_to_repo(&anonymous, "MiRepo"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Writes: re-queue and cancel
+// ---------------------------------------------------------------------------
+
+/// What a re-queue needs from the build being re-run: which definition, which branch, which commit.
+///
+/// A separate read rather than fields on `PipelineRun`, because only Azure needs any of it — adding
+/// a `definition_id` to the shared type for one provider's write path would put a null in every
+/// GitHub and GitLab row forever.
+pub async fn requeue_info(
+    org: &str,
+    project: &str,
+    build_id: &str,
+    pat: &str,
+) -> Result<(i64, String, String), String> {
+    require_pat(pat)?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let id = encode_segment(build_id);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds/{id}?api-version={API_VERSION}"
+    );
+    let request = http::client().get(&url).header("Authorization", auth_header(pat));
+    let raw: RawBuild = http::get_json(request, http::Provider::Azure).await?;
+    let definition = raw
+        .definition
+        .as_ref()
+        .map(|definition| definition.id)
+        .ok_or_else(|| "That build does not say which pipeline it came from".to_string())?;
+    Ok((
+        definition,
+        raw.source_branch.clone(),
+        raw.source_version.clone(),
+    ))
+}
+
+/// Queues the same definition again, on the same branch and commit.
+///
+/// Azure has no "re-run this build" verb: a build is queued from its *definition*, so re-running
+/// means reading the finished build to find out which definition, branch and commit it came from
+/// and queuing a new one with the same three. That is what the portal's "Run new" does with the
+/// fields pre-filled, and the result — a new build number — is honest about it.
+pub async fn requeue(
+    org: &str,
+    project: &str,
+    definition_id: i64,
+    branch: &str,
+    commit: &str,
+    pat: &str,
+) -> Result<(), String> {
+    require_pat(pat)?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds?api-version={API_VERSION}"
+    );
+
+    let mut body = serde_json::json!({ "definition": { "id": definition_id } });
+    // Both are optional to Azure and both matter here: without them the queued build takes the
+    // definition's default branch, which for a re-run of a PR build is the wrong code entirely.
+    if !branch.trim().is_empty() {
+        let full = if branch.starts_with("refs/") {
+            branch.to_string()
+        } else {
+            format!("refs/heads/{branch}")
+        };
+        body["sourceBranch"] = serde_json::Value::String(full);
+    }
+    if !commit.trim().is_empty() {
+        body["sourceVersion"] = serde_json::Value::String(commit.to_string());
+    }
+
+    let request = http::client()
+        .post(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&body);
+    http::send_write(request, http::Provider::Azure).await
+}
+
+/// Cancels a running build.
+///
+/// A PATCH setting `status: cancelling` — Azure has no cancel verb either. The state it moves to is
+/// `cancelling`, not `cancelled`: the agent has to notice, so the run stays live in the list for a
+/// few seconds afterwards, which is correct rather than a lag.
+pub async fn cancel(org: &str, project: &str, build_id: &str, pat: &str) -> Result<(), String> {
+    require_pat(pat)?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let id = encode_segment(build_id);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds/{id}?api-version={API_VERSION}"
+    );
+    let request = http::client()
+        .patch(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&serde_json::json!({ "status": "cancelling" }));
+    http::send_write(request, http::Provider::Azure).await
+}

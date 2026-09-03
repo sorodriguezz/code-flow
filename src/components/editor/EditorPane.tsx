@@ -53,7 +53,7 @@ import { BouncingDots } from "../common/BouncingDots";
 import { EmptyState } from "../common/EmptyState";
 import type { BlameHunkInfo, FileDiffInfo, Project } from "../../types/domain";
 import { usePackageJsonLens } from "./usePackageJsonLens";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { useTypeScript } from "./useTypeScript";
 import { useLanguageServer } from "./useLanguageServer";
 import { useInlineCompletion } from "./useInlineCompletion";

@@ -18,7 +18,8 @@ import {
 } from "lucide-react";
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
-import { CollectionTree, ContextMenu, MethodBadge, type MenuItem } from "./CollectionTree";
+import { CollectionTree, MethodBadge } from "./CollectionTree";
+import { ContextMenu, type MenuItem} from "../common/ContextMenu";
 import { EnvironmentBar } from "./EnvironmentBar";
 import { HistoryList } from "./HistoryList";
 import { CARD } from "./panelChrome";

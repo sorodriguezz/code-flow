@@ -25,7 +25,7 @@ import { AGENT_STATUS, STATUS_ORDER } from "./agentStatus";
 import { ContinueWithModal } from "./ContinueWithModal";
 import { TaskTree } from "./TaskTree";
 import { RenameRow, Row, menuBlocks, type RowMenu } from "./TreeRow";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CARD } from "../api/panelChrome";
 import { relativeTime } from "../api/settingsChrome";
 import { ToolbarButton } from "../db/dbChrome";

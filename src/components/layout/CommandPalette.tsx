@@ -6,24 +6,31 @@ import {
   ClipboardList,
   NotebookPen,
   Cloud,
-  Cog,
+  Database,
+  ArrowDownToLine,
+  ArrowUpFromLine,
   Download,
+  RefreshCw,
   FolderGit2,
   FolderPlus,
   GitBranch,
   Glasses,
   History,
   MessageCircle,
+  MonitorSmartphone,
   Plus,
+  Route,
   TerminalSquare,
   Workflow,
   Zap,
 } from "lucide-react";
+import { fetchNow, pullNow, pushNow } from "../../lib/gitActions";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useMissingProjectsStore } from "../../state/missingProjectsStore";
 import { useWindowStore } from "../../state/windowStore";
 import { useRepoStore } from "../../state/repoStore";
-import { useUiStore, type MainView, type PaletteScope, type SettingsSectionId } from "../../state/uiStore";
+import { useUiStore, type ApiWorkspace, type MainView, type PaletteScope } from "../../state/uiStore";
+import { SETTINGS_SECTIONS } from "../../lib/settingsCatalog";
 import { useTerminalStore } from "../../state/terminalStore";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
@@ -48,30 +55,35 @@ const SCOPE_GROUPS: Record<PaletteScope, PaletteGroup[]> = {
   projects: ["projects"],
 };
 
-const VIEW_ITEMS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBranch }[] = [
+/**
+ * Everywhere "go to…" can take you.
+ *
+ * Kept in step with the app rail on purpose: this list was missing Remote and Pipelines outright,
+ * and folded the API tab's two workspaces into one row, so three of the eleven destinations could
+ * only be reached with the mouse. `workspace` is how the two halves of the API tab get a row each —
+ * the same field the rail uses, for the same reason.
+ */
+const VIEW_ITEMS: {
+  id: MainView;
+  labelKey: TranslationKey;
+  icon: typeof GitBranch;
+  workspace?: ApiWorkspace;
+}[] = [
   { id: "graph", labelKey: "tabbar.graph", icon: History },
   { id: "changes", labelKey: "tabbar.changes", icon: GitBranch },
   { id: "editor", labelKey: "tabbar.editor", icon: FolderGit2 },
-  { id: "api", labelKey: "api.title", icon: Zap },
+  // Conditional in the tab bar — it exists only on a repository linked to a host with CI — but
+  // unconditional here: the palette is how you find out a screen exists, and a row that vanishes
+  // depending on which repository is selected is one nobody learns.
+  { id: "pipelines", labelKey: "tabbar.pipelines", icon: Route },
+  { id: "api", workspace: "requests", labelKey: "tabbar.api", icon: Zap },
+  { id: "api", workspace: "database", labelKey: "tabbar.databases", icon: Database },
   { id: "agents", labelKey: "tabbar.agents", icon: Bot },
   { id: "stories", labelKey: "tabbar.stories", icon: ClipboardList },
+  { id: "remote", labelKey: "tabbar.remote", icon: MonitorSmartphone },
   { id: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
   { id: "diagrams", labelKey: "tabbar.diagrams", icon: Workflow },
   { id: "vault", labelKey: "tabbar.vault", icon: KeyRound },
-];
-
-const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [
-  { id: "appearance", labelKey: "settings.appearance" },
-  { id: "general", labelKey: "settings.general" },
-  { id: "keybindings", labelKey: "shortcuts.title" },
-  { id: "editor", labelKey: "settings.editorSection" },
-  { id: "projects", labelKey: "settings.projects" },
-  { id: "git", labelKey: "settings.git" },
-  { id: "azure", labelKey: "settings.integrationsSection" },
-  { id: "claude", labelKey: "settings.aiSection" },
-  { id: "review", labelKey: "settings.review" },
-  { id: "skills", labelKey: "settings.skills" },
-  { id: "api", labelKey: "api.settings.title" },
 ];
 
 const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {
@@ -109,8 +121,11 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const checkoutRemoteBranch = useRepoStore((s) => s.checkoutRemoteBranch);
   const setActiveView = useUiStore((s) => s.setActiveView);
   const openSettings = useUiStore((s) => s.openSettings);
+  const openSettingsAt = useUiStore((s) => s.openSettingsAt);
+  const openApiWorkspace = useUiStore((s) => s.openApiWorkspace);
   const openApiModal = useApiModalStore((s) => s.openApiModal);
   const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
+  const openCloneModal = useUiStore((s) => s.openCloneModal);
   const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
   const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
 
@@ -152,12 +167,12 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     }));
 
     const viewItems: PaletteItem[] = [
-      ...VIEW_ITEMS.map(({ id, labelKey, icon }) => ({
-        key: `view:${id}`,
+      ...VIEW_ITEMS.map(({ id, labelKey, icon, workspace }) => ({
+        key: `view:${id}:${workspace ?? ""}`,
         icon,
         label: t(labelKey),
         group: "views" as const,
-        onSelect: () => setActiveView(id),
+        onSelect: () => (workspace ? openApiWorkspace(workspace) : setActiveView(id)),
       })),
       {
         key: "view:ai-panel",
@@ -175,14 +190,54 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       },
     ];
 
-    // Reviewing a PR from its link needs nothing but the link — no project open, no repo picked.
+    /**
+     * Things to *do*, as opposed to places to go.
+     *
+     * This group held exactly one entry for a long time — review a PR from its link — which made a
+     * "command palette" a navigator with one command in it. These are the actions that are worth
+     * reaching without knowing where their button is: the three git verbs everyone runs all day,
+     * and the two ways a repository gets into the app in the first place.
+     *
+     * Deliberately no destructive verbs. Discard, delete and force-push are one fuzzy match and a
+     * Return away from each other in a list like this, and none of them should ever be reachable
+     * that fast.
+     */
     const actionItems: PaletteItem[] = [
+      // Needs nothing but the link — no project open, no repository picked.
       {
         key: "action:pr-from-link",
         icon: Glasses,
         label: t("prLink.menuItem"),
         group: "actions",
         onSelect: () => openPrLinkModal(),
+      },
+      {
+        key: "action:fetch",
+        icon: RefreshCw,
+        label: t("statusbar.fetch"),
+        group: "actions",
+        onSelect: () => fetchNow(),
+      },
+      {
+        key: "action:pull",
+        icon: ArrowDownToLine,
+        label: t("statusbar.pull"),
+        group: "actions",
+        onSelect: () => pullNow(),
+      },
+      {
+        key: "action:push",
+        icon: ArrowUpFromLine,
+        label: t("statusbar.push"),
+        group: "actions",
+        onSelect: () => pushNow(),
+      },
+      {
+        key: "action:clone",
+        icon: Download,
+        label: t("sidebar.cloneRepo"),
+        group: "actions",
+        onSelect: () => openCloneModal(),
       },
     ];
 
@@ -218,13 +273,32 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       },
     ];
 
-    const settingsItems: PaletteItem[] = SETTINGS_ITEMS.map(({ id, labelKey }) => ({
-      key: `settings:${id}`,
-      icon: Cog,
-      label: t(labelKey),
-      group: "settings",
-      onSelect: () => openSettings(id),
-    }));
+    /**
+     * Every settings destination, panes included, straight from the catalog.
+     *
+     * It used to be a hand-written list of eleven ids that had drifted three behind the real nav —
+     * Terminal, Remote and Backup were unreachable from here — and it had never known about the
+     * sub-tabs at all, so "proxy" or "snippets" matched nothing. Reading the catalog means adding a
+     * pane makes it findable here without anybody remembering to.
+     */
+    const settingsItems: PaletteItem[] = SETTINGS_SECTIONS.flatMap((section) => [
+      {
+        key: `settings:${section.id}`,
+        icon: section.icon,
+        label: t(section.labelKey),
+        group: "settings" as const,
+        onSelect: () => openSettings(section.id),
+      },
+      ...(section.tabs ?? []).map((tab) => ({
+        key: `settings:${section.id}:${tab.id}`,
+        icon: tab.icon,
+        // Named with its section, because half these panes share a word with another one —
+        // there is a "General" in the API client's settings and a "General" at the top level.
+        label: `${t(section.labelKey)} › ${t(tab.labelKey)}`,
+        group: "settings" as const,
+        onSelect: () => openSettingsAt(section.id, tab.id),
+      })),
+    ]);
 
     return [
       ...workspaceItems,
@@ -249,8 +323,11 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     checkoutRemoteBranch,
     setActiveView,
     openSettings,
+    openSettingsAt,
+    openApiWorkspace,
     openApiModal,
     openPrLinkModal,
+    openCloneModal,
     toggleAiPanel,
     toggleTerminalPanel,
   ]);

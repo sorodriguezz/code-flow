@@ -25,7 +25,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useVaultDragStore, type VaultDrag } from "../../state/vaultDragStore";
 import { useVaultModalStore } from "../../state/vaultModalStore";

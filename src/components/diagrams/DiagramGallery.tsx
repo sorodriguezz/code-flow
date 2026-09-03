@@ -14,7 +14,7 @@ import {
   Table2,
   Workflow,
 } from "lucide-react";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { folderInk, ICON_BUTTON } from "./diagramsChrome";
 // Reused rather than reimplemented: "how long ago" is not a notes idea, and two implementations of
 // it is how one workspace starts saying "2 days ago" while the other says the date.

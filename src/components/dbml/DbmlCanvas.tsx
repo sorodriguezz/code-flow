@@ -14,7 +14,7 @@ import { layoutDbml, type DbmlLayout, type DbmlMarkKind, type DbmlMarks } from "
 import { highlightFor, type DbmlSchema } from "../../lib/dbml/types";
 import { ArrowLeftRight, Eraser, ListOrdered, Pencil, Plus, Table2, Trash2 } from "lucide-react";
 import type { RefEnd } from "../../lib/dbml/edit";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { useT } from "../../state/languageStore";
 import type { DbDiagramColumn } from "../../types/database";
 import type { DiagramColumnMode, DiagramDensity, DiagramNode } from "../../lib/db/erLayout";

@@ -22,7 +22,12 @@ export type ShortcutGroup =
   | "database"
   | "navigation"
   | "workspace"
-  | "git";
+  | "git"
+  /** The API client's own two: send, and close the tab. They were hardcoded `keydown` listeners
+   *  inside `ApiView` and so appeared in neither the cheat sheet nor the keybindings screen. */
+  | "api"
+  /** The keyring. One entry so far — locking it — and it is the one that matters. */
+  | "vault";
 
 export type ShortcutId =
   | "app.commandPalette"
@@ -42,12 +47,16 @@ export type ShortcutId =
   | "view.notes"
   | "view.diagrams"
   | "view.vault"
+  | "view.remote"
+  | "view.pipelines"
   | "db.newConsole"
   | "db.connections"
   | "db.refresh"
   | "db.filter"
   | "db.apply"
   | "db.askAi"
+  | "api.send"
+  | "vault.lock"
   | "view.next"
   | "view.prev"
   | "editor.goToFile"
@@ -125,6 +134,8 @@ export const SHORTCUT_GROUP_LABELS: Record<ShortcutGroup, TranslationKey> = {
   navigation: "shortcuts.navigation",
   workspace: "shortcuts.groupWorkspace",
   git: "shortcuts.groupGit",
+  api: "api.title",
+  vault: "tabbar.vault",
 };
 
 /**
@@ -400,6 +411,28 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     run: () => useUiStore.getState().setActiveView("vault"),
   },
   {
+    // The rail has had a Remote button since that workspace shipped; this list had no way to reach
+    // it, which made it the one app you could only open with the mouse.
+    id: "view.remote",
+    group: "views",
+    labelKey: "tabbar.remote",
+    // The digits are all spoken for (Mod+1..0 above), so the two views added here take Mod+Shift
+    // with the letter of the thing they open.
+    defaultChord: "Mod+Shift+M",
+    run: () => useUiStore.getState().setActiveView("remote"),
+  },
+  {
+    // Conditional, unlike every other view: the tab only exists on a repository linked to a host
+    // with CI. The shortcut is registered unconditionally and the run is what checks — a binding
+    // that appears and disappears from the cheat sheet with the selected repository is worse than
+    // one that occasionally says why it did nothing.
+    id: "view.pipelines",
+    group: "views",
+    labelKey: "tabbar.pipelines",
+    defaultChord: "Mod+Shift+P",
+    run: () => useUiStore.getState().setActiveView("pipelines"),
+  },
+  {
     id: "view.next",
     group: "views",
     labelKey: "shortcuts.cmdViewNext",
@@ -617,7 +650,14 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     group: "editor",
     labelKey: "editor.closeTab",
     defaultChord: "Mod+W",
-    run: () => useEditorCommandStore.getState().send("closeTab"),
+    // Two owners, one chord — exactly like ⌘S above, and for the same reason: `activeChords` keeps
+    // one command per chord, so a second registry entry for the API client would silently lose its
+    // binding to this one. The API client is offered it first and says whether it took it; its
+    // `send` returns false unless the requests workspace is on screen.
+    run: () => {
+      if (useApiCommandStore.getState().send("closeTab")) return;
+      useEditorCommandStore.getState().send("closeTab");
+    },
   },
   {
     id: "editor.nextTab",
@@ -824,6 +864,37 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "prLink.menuItem",
     defaultChord: "Mod+Shift+L",
     run: () => useUiStore.getState().togglePrLinkModal(),
+  },
+
+  /*
+   * The API client's two.
+   *
+   * They existed before this — as a `keydown` listener inside `ApiView` comparing `e.key` to
+   * "Enter" and "w" — which is to say they worked and could not be seen: not in the cheat sheet,
+   * not in the keybindings screen, and not rebindable. `send` returns false when the requests
+   * workspace is not on screen, so the chord falls through exactly as an unbound one would.
+   */
+  {
+    id: "api.send",
+    group: "api",
+    labelKey: "api.send",
+    defaultChord: "Mod+Enter",
+    run: () => {
+      useApiCommandStore.getState().send("send");
+    },
+  },
+  {
+    id: "vault.lock",
+    group: "vault",
+    labelKey: "vault.lock",
+    // Deliberately not a bare chord: locking throws away the in-memory key, and every unsaved
+    // entry with it. ⌘⇧L is the nearest thing to "put it away" that nothing else claims.
+    defaultChord: "Mod+Shift+K",
+    run: () => {
+      void import("../state/vaultStore").then(({ useVaultStore }) => {
+        if (useVaultStore.getState().unlocked) void useVaultStore.getState().lock();
+      });
+    },
   },
 ];
 

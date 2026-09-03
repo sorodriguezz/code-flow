@@ -261,6 +261,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
+        // Native OS notifications. The app deliberately keeps running in the tray with the window
+        // hidden, so "your review finished" had nowhere to land except a bell nobody could see.
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // The startup layout verdict, decided above and read by `app_paths`. Managed rather
         // than recomputed, because "did this launch migrate" is a fact about *this* launch and
@@ -511,6 +514,15 @@ pub fn run() {
             commands::git_ops::checkout_detached,
             commands::git_ops::checkout_remote_tracking,
             commands::git_ops::reset_to_commit,
+            commands::git_ops::list_commits_page,
+            commands::git_ops::file_history,
+            commands::git_ops::head_commit_message,
+            commands::git_ops::amend_commit,
+            commands::git_ops::revert_commit,
+            commands::git_ops::cherry_pick_commit,
+            commands::git_ops::list_tags,
+            commands::git_ops::create_tag,
+            commands::git_ops::delete_tag,
             commands::git_ops::list_stashes,
             commands::git_ops::stash_save,
             commands::git_ops::stash_apply,
@@ -665,7 +677,7 @@ pub fn run() {
             commands::ado_cmd::open_external_url,
             commands::claude_cmd::default_commit_template,
             commands::claude_cmd::default_analyze_template,
-            commands::claude_cmd::default_pr_description_template,
+            commands::claude_cmd::default_pipeline_template,
             commands::claude_cmd::default_resolve_conflict_template,
             commands::claude_cmd::analyze_working_changes,
             commands::claude_cmd::resolve_conflict_with_ai,
@@ -690,6 +702,8 @@ pub fn run() {
             commands::ci_cmd::list_pipeline_runs,
             commands::ci_cmd::pipeline_run_detail,
             commands::ci_cmd::fetch_pipeline_job_log,
+            commands::ci_cmd::rerun_pipeline,
+            commands::ci_cmd::cancel_pipeline,
             commands::ci_cmd::analyze_pipeline_failure,
             commands::ado_cmd::resolve_pr_link,
             commands::ado_cmd::review_pr_from_link,
@@ -885,6 +899,7 @@ pub fn run() {
             commands::keyvault_cmd::keyvault_reset,
             commands::keyvault_cmd::keyvault_load_tree,
             commands::keyvault_cmd::keyvault_list_trash,
+            commands::keyvault_cmd::keyvault_password_health,
             commands::keyvault_cmd::keyvault_get_item,
             commands::keyvault_cmd::keyvault_create_item,
             commands::keyvault_cmd::keyvault_update_item,
@@ -929,6 +944,9 @@ pub fn run() {
             commands::notes_cmd::notes_update_template,
             commands::notes_cmd::notes_delete_template,
             commands::notes_cmd::notes_search,
+            commands::notes_cmd::notes_backlinks,
+            commands::notes_cmd::notes_list_versions,
+            commands::notes_cmd::notes_version_content,
             commands::notes_cmd::notes_write_with_ai,
             commands::notes_cmd::notes_set_book_scope,
             commands::notes_cmd::notes_move_book_to_workspace,
@@ -938,6 +956,8 @@ pub fn run() {
             commands::diagrams_cmd::diagrams_load_thumbnails,
             commands::diagrams_cmd::diagrams_create_diagram,
             commands::diagrams_cmd::diagrams_save_diagram,
+            commands::diagrams_cmd::diagrams_list_versions,
+            commands::diagrams_cmd::diagrams_version_content,
             commands::diagrams_cmd::diagrams_rename_diagram,
             commands::diagrams_cmd::diagrams_set_tags,
             commands::diagrams_cmd::diagrams_move_diagram,

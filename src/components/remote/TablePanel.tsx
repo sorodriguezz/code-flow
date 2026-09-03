@@ -23,7 +23,7 @@ import { ColumnsModal } from "../common/ColumnsModal";
 import { DataGrid, autoFitWidth, autoFitWidths } from "../common/DataGrid";
 import { range } from "../common/gridBits";
 import { useColumnPrefs } from "../common/useColumnPrefs";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { EntityEditorModal } from "./EntityEditorModal";
 import { cellText, entityColumns } from "./EntityGrid";
 import { CARD, ToolbarButton, WorkBar } from "./remoteChrome";

@@ -1345,6 +1345,36 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         -- a change of mind about the first, is a new value here rather than a rewrite of every row
         -- and every query. Nothing in Rust parses `doc` except `shape_count`, which switches on
         -- this column and falls back to zero for a dialect it does not know.
+        -- Past versions of a note or a diagram.
+        --
+        -- One table for both, because a version is the same three facts either way — which
+        -- document, when, and what it said — and two tables would be two sets of pruning rules to
+        -- keep in step. `kind` is 'note' or 'diagram'; `doc_id` is deliberately *not* a foreign key
+        -- to either table: a version's whole job is to outlive a mistake, and a cascade that
+        -- deleted the history along with the document would delete it exactly when it is wanted.
+        -- `prune_versions` handles the rows a deleted document leaves behind.
+        --
+        -- **Why this exists at all**: notes and diagrams autosave, and they are the two workspaces
+        -- whose content is original rather than a reflection of something on disk. Everywhere else
+        -- in the app the file system or git is the undo; here there was none, so a select-all and
+        -- a keystroke was final once the editor session ended. The DBML workbench next door has had
+        -- a history panel since it shipped, which is what made the absence conspicuous.
+        CREATE TABLE IF NOT EXISTS doc_versions (
+            id         TEXT PRIMARY KEY,
+            kind       TEXT NOT NULL,
+            doc_id     TEXT NOT NULL,
+            -- The full text as it was. Not a diff: these documents are kilobytes, the reader wants
+            -- to *restore* one rather than reconstruct it, and a chain of diffs is a chain that
+            -- breaks in the middle.
+            content    TEXT NOT NULL,
+            -- The title at the time, so a restored version can put the name back too — renaming is
+            -- one of the things people undo.
+            title      TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_doc_versions_doc
+            ON doc_versions (kind, doc_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS diagrams (
             id           TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

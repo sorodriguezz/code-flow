@@ -10,6 +10,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { JobLogPane } from "./JobLogPane";
+import { RunActions } from "./RunActions";
 import { RunGraph } from "./RunGraph";
 import { RunList } from "./RunList";
 import type { PipelineAvailability, PipelineRun } from "../../types/domain";
@@ -132,6 +133,7 @@ export function PipelinesView() {
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div
+          data-tour="pipelines-list"
           style={{ width: listWidth }}
           className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
         >
@@ -158,7 +160,16 @@ export function PipelinesView() {
             <EmptyState icon={Route} title={t("pipelines.errorTitle")} subtitle={error} />
           ) : (
             <>
+              {/* Above the waterfall rather than inside it: the verbs act on the *run*, and the
+                  graph is one of three things showing it. */}
+              {detail?.run && (
+                <div data-tour="pipelines-actions">
+                  <RunActions projectId={project.id} run={detail.run} />
+                </div>
+              )}
+
               <div
+                data-tour="pipelines-graph"
                 style={{ height: graphHeight }}
                 className="flex shrink-0 flex-col overflow-hidden border-b border-[var(--cf-border)]"
               >
@@ -181,7 +192,7 @@ export function PipelinesView() {
                 onCommit={(value) => commitSize("pipelinesGraphHeight", value)}
               />
 
-              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div data-tour="pipelines-log" className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 {/* `loading` covers the gap the log pane cannot see out of: until the run's detail
                     lands there are no jobs, so `job` is undefined and the pane would say "pick a
                     job" about a run that is still being fetched. */}

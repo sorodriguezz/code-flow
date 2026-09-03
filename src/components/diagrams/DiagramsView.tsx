@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { ArrowLeft, Sparkles, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, History as HistoryIcon, Sparkles, Undo2, Workflow } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ViewSkeleton } from "../common/ViewSkeleton";
@@ -17,7 +17,9 @@ const DbmlWorkbench = lazy(() =>
 );
 import { DiagramAiPanel } from "./DiagramAiPanel";
 import { ExportImageModal } from "./ExportImageModal";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { VersionHistoryModal } from "../common/VersionHistoryModal";
+import { diagramsListVersions, diagramsVersionContent } from "../../lib/tauri/diagramsCommands";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CARD, ICON_BUTTON } from "./diagramsChrome";
 import { relativeTime } from "../notes/notesChrome";
 import { FORMAT_DBML } from "../../lib/diagrams/doc";
@@ -108,6 +110,11 @@ export function DiagramsView() {
    * boolean that changes twice per export does not undo that.
    */
   const [optionsFor, setOptionsFor] = useState<ImageExportFormat | null>(null);
+  /** The version-history dialog. Local: nothing outside this view opens it. */
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const activeTitle = useDiagramsStore(
+    (s) => s.diagrams.find((entry) => entry.id === s.activeId)?.title ?? "",
+  );
 
   useEffect(() => {
     void ensureDiagramsStoreLoaded();
@@ -226,6 +233,15 @@ export function DiagramsView() {
               >
                 <ArrowLeft size={14} />
               </button>
+              <button
+                type="button"
+                className={ICON_BUTTON}
+                title={t("versions.open")}
+                aria-label={t("versions.open")}
+                onClick={() => setHistoryOpen(true)}
+              >
+                <HistoryIcon size={14} />
+              </button>
               {/* Only while undoing the generation is still what the user would mean by "undo".
                   It disappears on the next real edit — see `clearGenerationUndo`. draw.io's own
                   ⌘Z cannot do this: a `load` resets its undo stack. */}
@@ -328,6 +344,23 @@ export function DiagramsView() {
       )}
 
       {optionsFor && <ExportImageModal format={optionsFor} onClose={() => setOptionsFor(null)} />}
+
+      {historyOpen && activeId && (
+        <VersionHistoryModal
+          title={activeTitle}
+          listVersions={() => diagramsListVersions(activeId)}
+          readVersion={(versionId) => diagramsVersionContent(versionId)}
+          // Through `editDoc` and then `flush`, not a direct write: `editDoc` is what the draw.io
+          // frame is reloaded from, and `flush` is what records the pre-restore drawing as a
+          // version on the way past. See the same pair in `NoteEditor`.
+          onRestore={async (doc) => {
+            useDiagramsStore.getState().editDoc(doc);
+            await useDiagramsStore.getState().flush();
+            await useDiagramsStore.getState().openDiagram(activeId);
+          }}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
     </div>
   );
 }

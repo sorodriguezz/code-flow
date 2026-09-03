@@ -16,7 +16,15 @@ import { useUiStore } from "./uiStore";
  * which drops "save" when the editor isn't the active view, and nothing at all was saved.
  */
 
-export type ApiCommand = "save";
+/**
+ * `send` and `closeTab` joined `save` when the registry took over the API client's keyboard.
+ *
+ * They were a `keydown` listener on `window` inside `ApiView` matching ⌘Enter and ⌘W by hand —
+ * which worked, and was invisible: not in the keybindings screen, not in the cheat sheet, and not
+ * rebindable. Routing them through the same bus as `save` costs one branch in the consumer and
+ * makes them ordinary commands like every other chord in the app.
+ */
+export type ApiCommand = "save" | "send" | "closeTab";
 
 interface ApiCommandState {
   /**

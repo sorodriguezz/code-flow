@@ -151,3 +151,19 @@ export interface NoteBook extends NoteBookRow {
   /** Children, so the flattener can walk without re-scanning the array per level. */
   children: NoteBook[];
 }
+
+/**
+ * One past version of a note or a diagram.
+ *
+ * Shared by both because a version is the same three facts either way — which document, when, and
+ * what it said. `size` is characters, so the list can say how big a version is without carrying
+ * fifty bodies to find out.
+ */
+export interface DocVersion {
+  id: string;
+  kind: "note" | "diagram";
+  doc_id: string;
+  title: string;
+  created_at: string;
+  size: number;
+}

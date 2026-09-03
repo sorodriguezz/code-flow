@@ -73,6 +73,11 @@ pub const TABLES: &[&str] = &[
     "diagram_folders",
     "diagrams",
     "diagram_templates",
+    // Past versions of both. One table for notes and diagrams, and it rides with whichever of the
+    // two groups is selected — see the note on that in `GROUPS`. Last of the authored content
+    // because it points at rows in the two tables above it (by id, not by foreign key: a version's
+    // job is to outlive a deletion, so a cascade would defeat it).
+    "doc_versions",
     // The keyring. Meta first — the wrapped key, without which every row below it is unreadable —
     // then folders before items (an item points at a folder), then blobs, which point at an item.
     //
@@ -278,6 +283,19 @@ pub const GROUPS: &[Group] = &[
         key: "agentWork",
         tables: &["agent_tasks", "agent_chains", "agent_chain_repos", "agent_chain_steps"],
     },
+    Group {
+        // Its own switch rather than riding with `notes` or `diagrams`, and the reason is the
+        // invariant `every_table_belongs_to_exactly_one_group` enforces: one table, one group. The
+        // history of both lives in one table (a version is the same three facts either way — see
+        // `version_queries`), so it cannot be filed under either without lying about the other.
+        //
+        // Which turns out to be the better switch anyway. Version history is the most droppable
+        // thing in the file: it is recovery data *for the documents*, so somebody trimming a
+        // backup to fit a shared drive should be able to keep everything they wrote and leave
+        // behind the fifty snapshots of each of it.
+        key: "doc_versions",
+        tables: &["doc_versions"],
+    },
     Group { key: "cookies", tables: &["api_cookies"] },
 ];
 
@@ -297,6 +315,8 @@ pub struct Selection {
     pub authored: bool,
     pub notes: bool,
     pub diagrams: bool,
+    /// Past versions of notes and diagrams — see the `doc_versions` group.
+    pub doc_versions: bool,
     pub vault: bool,
     pub request_history: bool,
     pub conversations: bool,
@@ -315,6 +335,7 @@ impl Default for Selection {
             authored: true,
             notes: true,
             diagrams: true,
+            doc_versions: true,
             vault: true,
             request_history: true,
             conversations: true,
@@ -334,6 +355,7 @@ impl Selection {
             "authored" => self.authored,
             "notes" => self.notes,
             "diagrams" => self.diagrams,
+            "doc_versions" => self.doc_versions,
             "vault" => self.vault,
             "requestHistory" => self.request_history,
             "conversations" => self.conversations,

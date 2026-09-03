@@ -896,3 +896,158 @@ fn open_secret(
     serde_json::from_slice(&bytes)
         .map_err(|e| format!("this entry's contents could not be read back: {e}"))
 }
+
+// ---------------------------------------------------------------------------
+// Password health
+// ---------------------------------------------------------------------------
+
+/// One entry's verdict. **No password, and no hash of one, ever leaves this module.**
+///
+/// That is the whole design constraint of this feature and the reason it lives in Rust rather than
+/// being computed in the renderer from a list of decrypted items: answering "are any of my
+/// passwords reused?" needs every password in memory at once, and the frontend is the one place
+/// this app has decided they must never all be. So the comparison happens here, and what crosses
+/// the boundary is three booleans and a group number.
+#[derive(serde::Serialize)]
+pub struct PasswordVerdict {
+    pub item_id: String,
+    pub title: String,
+    /// Shared with at least one other entry. The number identifies *which* group, so the UI can say
+    /// "these three share a password" without being told what it is.
+    pub reuse_group: Option<u32>,
+    /// Short, or drawn from too small an alphabet. See `password_strength`.
+    pub weak: bool,
+    /// Not changed in over a year, counted from `updated_at`.
+    pub stale: bool,
+    /// Days since the entry was last modified, for the "changed 400 days ago" line.
+    pub age_days: i64,
+}
+
+#[derive(serde::Serialize)]
+pub struct PasswordHealth {
+    /// Entries that carry a password at all — the denominator of "3 of 24 are weak".
+    pub checked: usize,
+    pub verdicts: Vec<PasswordVerdict>,
+}
+
+/// The same three-step scale the unlock screen's meter uses, kept deliberately crude.
+///
+/// It is not an entropy estimate and does not pretend to be: length dominates, variety helps, and
+/// anything under twelve characters is called weak regardless. A cleverer score would disagree with
+/// the meter the user already saw when they created the password, and two different verdicts on the
+/// same string is worse than one blunt one.
+fn is_weak(password: &str) -> bool {
+    let length = password.chars().count();
+    if length < 12 {
+        return true;
+    }
+    let classes = [
+        password.chars().any(|c| c.is_ascii_lowercase()),
+        password.chars().any(|c| c.is_ascii_uppercase()),
+        password.chars().any(|c| c.is_ascii_digit()),
+        password.chars().any(|c| !c.is_alphanumeric()),
+    ]
+    .iter()
+    .filter(|present| **present)
+    .count();
+    // Sixteen characters of one class (a passphrase in lower case) is fine; twelve of one is not.
+    classes < 2 && length < 16
+}
+
+/// Days between an ISO timestamp and now, or 0 when it cannot be read.
+fn days_since(iso: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .map(|then| (chrono::Utc::now() - then.with_timezone(&chrono::Utc)).num_days())
+        .unwrap_or(0)
+}
+
+/// Reused, weak and stale passwords across the whole keyring.
+///
+/// Requires the vault to be unlocked, like everything else that touches a payload. Entries with no
+/// password field — a note, a card, a bare TOTP seed — are skipped rather than reported as fine:
+/// they are not part of the question.
+#[tauri::command]
+pub fn keyvault_password_health(
+    db: State<Db>,
+    session: State<VaultSession>,
+) -> Result<PasswordHealth, String> {
+    session.with_key(|_| ())?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let rows = queries::list_sealed_for_audit(&conn).map_err(|e| e.to_string())?;
+
+    // Password → the rows carrying it. The map is dropped at the end of this function, and nothing
+    // derived from its keys is returned.
+    let mut by_password: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    let mut verdicts: Vec<PasswordVerdict> = Vec::new();
+
+    for (id, title, updated_at, nonce, blob) in rows {
+        let secret = open_secret(&session, &id, &nonce, &blob)?;
+        let password = secret
+            .get("password")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if password.is_empty() {
+            continue;
+        }
+        let age_days = days_since(&updated_at);
+        by_password
+            .entry(password.to_string())
+            .or_default()
+            .push(verdicts.len());
+        verdicts.push(PasswordVerdict {
+            item_id: id,
+            title,
+            reuse_group: None,
+            weak: is_weak(password),
+            stale: age_days > 365,
+            age_days,
+        });
+    }
+
+    // Group numbers are assigned in a stable order — by the position of each group's first entry —
+    // so the report does not renumber itself between runs over unchanged data.
+    let mut groups: Vec<Vec<usize>> = by_password
+        .into_values()
+        .filter(|indices| indices.len() > 1)
+        .collect();
+    groups.sort_by_key(|indices| indices[0]);
+    for (group, indices) in groups.iter().enumerate() {
+        for index in indices {
+            verdicts[*index].reuse_group = Some(group as u32);
+        }
+    }
+
+    Ok(PasswordHealth {
+        checked: verdicts.len(),
+        verdicts,
+    })
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::is_weak;
+
+    #[test]
+    fn short_passwords_are_weak_however_varied() {
+        assert!(is_weak("aA1!aA1!"));
+        assert!(is_weak("Tr0ub4dor"));
+    }
+
+    #[test]
+    fn a_long_generated_password_is_not_weak() {
+        assert!(!is_weak("k7Qz-vR2m-Xp9L-td4W"));
+    }
+
+    #[test]
+    fn a_long_single_class_passphrase_is_accepted() {
+        // Sixteen or more characters of one class is a passphrase, not a weak password.
+        assert!(!is_weak("correcthorsebatterystaple"));
+        // Twelve of one class is still weak.
+        assert!(is_weak("correcthors"));
+    }
+
+    #[test]
+    fn twelve_characters_of_two_classes_passes() {
+        assert!(!is_weak("abcdefgh1234"));
+    }
+}

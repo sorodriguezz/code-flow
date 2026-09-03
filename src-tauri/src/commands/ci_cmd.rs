@@ -145,6 +145,65 @@ pub async fn pipeline_run_detail(
     }
 }
 
+/// Runs a pipeline again.
+///
+/// `failed_only` is honoured where the host has a verb for it and ignored where its only retry
+/// verb already means that — GitLab's `retry` re-runs the failed jobs and nothing else, and Azure
+/// has no re-run at all, only "queue this definition again". The frontend says which of the three
+/// it is about to do rather than offering an option that silently means something different per
+/// host; see `pipelineRerunKind`.
+#[tauri::command]
+pub async fn rerun_pipeline(
+    db: State<'_, Db>,
+    project_id: String,
+    run_id: String,
+    failed_only: bool,
+) -> Result<(), String> {
+    let project = load_project(&db, &project_id)?;
+    match linked_repo(&project)? {
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            ci::github::rerun(&host, &owner, &repo, &run_id, &token, failed_only).await
+        }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(&host)?;
+            ci::gitlab::retry(&host, &path, &run_id, &token).await
+        }
+        LinkedRepo::Azure { org, project: ado_project, .. } => {
+            let pat = pat_for_org(&org)?;
+            // Two calls, because Azure queues from a *definition* and a build reference does not
+            // carry one. See `requeue_info`.
+            let (definition, branch, commit) =
+                ci::azure::requeue_info(&org, &ado_project, &run_id, &pat).await?;
+            ci::azure::requeue(&org, &ado_project, definition, &branch, &commit, &pat).await
+        }
+    }
+}
+
+/// Stops a run that is still going.
+#[tauri::command]
+pub async fn cancel_pipeline(
+    db: State<'_, Db>,
+    project_id: String,
+    run_id: String,
+) -> Result<(), String> {
+    let project = load_project(&db, &project_id)?;
+    match linked_repo(&project)? {
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            ci::github::cancel(&host, &owner, &repo, &run_id, &token).await
+        }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(&host)?;
+            ci::gitlab::cancel(&host, &path, &run_id, &token).await
+        }
+        LinkedRepo::Azure { org, project: ado_project, .. } => {
+            let pat = pat_for_org(&org)?;
+            ci::azure::cancel(&org, &ado_project, &run_id, &pat).await
+        }
+    }
+}
+
 /// One job's log, as the host served it.
 ///
 /// Two identifiers rather than one because Azure needs two: its logs hang off timeline *records*,

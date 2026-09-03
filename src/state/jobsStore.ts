@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { advancePage, type PageOutcome } from "../lib/historyPaging";
 import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
 import {
   getJobResult,
@@ -68,8 +69,10 @@ const PAGE_SIZE = 50;
 /** How many persisted rows each bucket has read so far — the offset the next page starts at.
  * Bookkeeping rather than state: nothing renders it. */
 const fetchedRows = new Map<string, number>();
-/** Buckets with a page in flight, so a double click on "load more" doesn't fetch it twice. */
+/** Buckets with a page in flight, so two walkers can't share one offset. */
 const pagingBuckets = new Set<string>();
+/** Consecutive all-duplicate pages per bucket — the walk's stuck-detector. See `advancePage`. */
+const repeatedPages = new Map<string, number>();
 /** Buckets whose background read-through has already been started, so it happens once per
  * session no matter how many times a view remounts and calls `load`. */
 const drainedBuckets = new Set<string>();
@@ -461,6 +464,8 @@ export const useJobsStore = create<JobsState>((set, get) => ({
 
     const rows = await fetchActivityPage(projectId, 0);
     fetchedRows.set(projectId, rows.length);
+    // A fresh first page restarts the stuck-detector: this bucket has never repeated anything yet.
+    repeatedPages.set(projectId, 0);
     const loadedJobs: Job[] = rows.map((row) => toJob(projectId, row));
     set((s) => {
       const existing = s.byProject[projectId] ?? [];
@@ -490,23 +495,49 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     try {
       const offset = fetchedRows.get(projectId) ?? 0;
       const rows = await fetchActivityPage(projectId, offset);
-      fetchedRows.set(projectId, offset + rows.length);
       const older: Job[] = rows.map((row) => toJob(projectId, row));
+
+      // The dedup has to read the list *inside* `set`, against the snapshot being written to. A
+      // page takes a round trip, and a run finishing during it appends to this same bucket through
+      // `run()`; deduping against a copy read before the write would let that row through twice —
+      // which React then renders as two items with one key.
+      //
+      // `outcome` is captured out of the reducer because zustand calls it synchronously, exactly
+      // once. The paging bookkeeping is written after it returns rather than from inside, so the
+      // reducer stays a function of its argument.
+      let outcome: PageOutcome | null = null;
       set((s) => {
         const existing = s.byProject[projectId] ?? [];
         const existingIds = new Set(existing.map((j) => j.id));
         const fresh = older.filter((j) => !existingIds.has(j.id));
+
+        // Whether to keep walking is its own decision, and a subtle one — see `advancePage`. It
+        // used to be `fresh.length > 0 && rows.length === PAGE_SIZE` inline, which read "a page
+        // that brought nothing new is the end". That is true of a walk that has run out of table
+        // and false of one whose window shifted: delete fifty rows above the cursor and the next
+        // page *is* the previous one, so the old rule ended the walk there and left everything
+        // older unreachable for the rest of the session, with nothing on screen to say so.
+        outcome = advancePage({
+          pageSize: PAGE_SIZE,
+          returned: rows.length,
+          fresh: fresh.length,
+          offset,
+          repeats: repeatedPages.get(projectId) ?? 0,
+        });
+
         return {
           byProject: {
             ...s.byProject,
             [projectId]: [...existing, ...fresh].sort((a, b) => b.createdAt - a.createdAt),
           },
-          // A page that brought nothing new is the end of the history, whatever its length said.
-          // Belt and braces around the length check: it is also what stops `drainHistory` if a
-          // caller ever hands back a page it has already seen.
-          hasMore: { ...s.hasMore, [projectId]: fresh.length > 0 && rows.length === PAGE_SIZE },
+          hasMore: { ...s.hasMore, [projectId]: outcome.hasMore },
         };
       });
+
+      if (outcome) {
+        fetchedRows.set(projectId, (outcome as PageOutcome).offset);
+        repeatedPages.set(projectId, (outcome as PageOutcome).repeats);
+      }
     } finally {
       pagingBuckets.delete(projectId);
     }

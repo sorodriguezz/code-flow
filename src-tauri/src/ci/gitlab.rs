@@ -698,3 +698,26 @@ mod tests {
         assert_eq!(run_name(Some("Deploy".into()), "main"), "Deploy");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Writes: retry and cancel
+// ---------------------------------------------------------------------------
+
+/// Retries a pipeline. GitLab's `retry` re-runs only the jobs that failed or were cancelled, which
+/// is the behaviour GitHub reserves for its `rerun-failed-jobs` endpoint — so there is no
+/// `failed_only` flag here to honour, and the caller's is deliberately ignored rather than faked.
+pub async fn retry(host: &str, project: &str, pipeline_id: &str, token: &str) -> Result<(), String> {
+    let root = api_root(host);
+    let encoded = encode_path(project);
+    let id = encode_path(pipeline_id);
+    let url = format!("{root}/projects/{encoded}/pipelines/{id}/retry");
+    http::send_write(authed(http::client().post(&url), token), http::Provider::GitLab).await
+}
+
+pub async fn cancel(host: &str, project: &str, pipeline_id: &str, token: &str) -> Result<(), String> {
+    let root = api_root(host);
+    let encoded = encode_path(project);
+    let id = encode_path(pipeline_id);
+    let url = format!("{root}/projects/{encoded}/pipelines/{id}/cancel");
+    http::send_write(authed(http::client().post(&url), token), http::Provider::GitLab).await
+}

@@ -7,6 +7,7 @@ import type {
   DiagramThumbnailRow,
   DiagramsWorkspaceTree,
 } from "../../types/diagrams";
+import type { DocVersion } from "../../types/notes";
 
 /**
  * IPC surface for the Diagrams workspace.
@@ -74,6 +75,19 @@ export const diagramsSaveDiagram = (
   format: string,
   thumbnail: string,
 ) => invoke<DiagramMetaRow | null>("diagrams_save_diagram", { id, doc, format, thumbnail });
+
+
+/**
+ * One diagram's past versions, newest first and without their bodies.
+ *
+ * The same feature as the notes' — see `notesListVersions`. Both go through one table and one set
+ * of pruning rules, because a version is the same three facts either way.
+ */
+export const diagramsListVersions = (id: string) =>
+  invoke<DocVersion[]>("diagrams_list_versions", { id });
+
+export const diagramsVersionContent = (versionId: string) =>
+  invoke<string | null>("diagrams_version_content", { versionId });
 
 /** Rejects a blank title in Rust, so every path into a rename is held to the same rule. */
 export const diagramsRenameDiagram = (id: string, title: string) =>

@@ -18,7 +18,7 @@
 
 import { Globe, House, FolderInput } from "lucide-react";
 
-import type { MenuItem } from "../components/api/CollectionTree";
+import type { MenuItem } from "../components/common/ContextMenu";
 import { translate } from "../state/languageStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import type { RowScope } from "../types/domain";

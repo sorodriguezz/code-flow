@@ -71,6 +71,13 @@ export interface BackupInclude {
    *  carries a rendered thumbnail per row, which makes this the group most able to dominate a
    *  backup's size. */
   diagrams: boolean;
+  /** Past versions of notes and diagrams.
+   *
+   *  Its own switch because the history of both lives in one table, so it can be filed under
+   *  neither — and because it is the most droppable thing in the file: it is recovery data *for*
+   *  the documents, and somebody trimming a backup should be able to keep what they wrote and
+   *  leave behind the fifty snapshots of each of it. */
+  docVersions: boolean;
   /** The keyring: its wrapped key, folders, entries, attachments and audit log.
    *
    *  Safe to carry — every payload is sealed and the master password is deliberately *not* in the
@@ -93,6 +100,7 @@ export const INCLUDE_KEYS: readonly (keyof BackupInclude)[] = [
   "authored",
   "notes",
   "diagrams",
+  "docVersions",
   "vault",
   "requestHistory",
   "conversations",

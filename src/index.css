@@ -210,6 +210,69 @@ body {
   background: transparent;
 }
 
+/* Two quieter scrollbars, for the two places the app-wide one is wrong.
+ *
+ * The global bar is a 2px hairline at rest — the right call for a document pane, where a permanent
+ * mark saying *where in the scroll you are* is worth two pixels. It is the wrong call for a nav
+ * rail, for two different reasons, and each gets its own class.
+ */
+
+/* `cf-quiet-scroll` — keeps the 10px gutter, paints nothing in it until you reach for it.
+ *
+ * For a scroller whose right edge is somebody else's line. The settings nav ends at the
+ * `ResizeHandle` seam, so the resting hairline landed two pixels from a 1px border and the pair
+ * read as one thick doubled edge rather than as a bar beside a seam.
+ *
+ * The gutter is deliberately *kept*: `scrollbar-width: none` would remove the 10px itself, so the
+ * content would jump sideways the moment the bar came back on hover. Reserving it and painting
+ * nothing costs 10px that were already spent and moves nothing, ever.
+ *
+ * `[data-cf-scrolling]` is stamped by `scrollFeedback`, which listens on the document in the
+ * capture phase — so every scroller gets it and this needs no wiring. Same shape as
+ * `.cf-tab-strip` below, which hides its bar for the neighbouring reason (three pixels of gutter
+ * has nothing left to inset). */
+.cf-quiet-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+/* Only `background`, deliberately — no `border-width` here. The global ladder above already
+ * supplies the weights (3px border while scrolling, 2px on hover), and a `border-width` on this
+ * selector wins on specificity (0,2,1 against 0,1,1), which would cap this one bar at 4px visible
+ * where every other scroller in the app reaches 6px under the pointer. `.cf-tab-strip` below sets
+ * only `background` for the same reason. */
+.cf-quiet-scroll:hover::-webkit-scrollbar-thumb,
+.cf-quiet-scroll[data-cf-scrolling]::-webkit-scrollbar-thumb {
+  background: var(--cf-border);
+}
+
+/* `cf-no-scrollbar` — no gutter at all.
+ *
+ * For a rail too narrow to spend any of its width on one. The settings nav folds to 50px, where a
+ * 10px gutter is a fifth of the rail *and* pushes the centred 14px icon five pixels off centre —
+ * the bar would not merely be ugly, it would move the thing it sits beside.
+ *
+ * The trade is a folded rail with no scroll affordance if it ever overflows (it fits at the
+ * dialog's normal height; a very short window is the case). The wheel still scrolls it, and a
+ * column of icons has nothing to aim a thumb at anyway.
+ *
+ * Note that the app's *other* 50px fold rail — the projects sidebar — has not adopted this: it
+ * keeps its bar and budgets for it (`overflow-y-auto px-0.5`, so its selection ring still closes
+ * once enough projects bring the 10px in). That rail is a list of arbitrary length inside a
+ * full-height window, so it genuinely can overflow; this one is a fixed set of sections in a
+ * fixed-height dialog. Two answers to the same width, each right for its own list — written down
+ * here so the next reader finds a decision rather than a drift.
+ *
+ * Both properties are needed: `scrollbar-width` is the standard one Firefox reads, the pseudo
+ * element is what WebKit and Chromium read. */
+.cf-no-scrollbar {
+  scrollbar-width: none;
+}
+
+.cf-no-scrollbar::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 /* Dragging the window is left entirely to the `data-tauri-drag-region` attribute: Tauri's injected
    mousedown handler walks the event path and gives up as soon as it meets a button, link, input or
    anything with an interactive role, so the title bar's own controls keep their clicks.

@@ -100,6 +100,35 @@ pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(
         .map_err(|e| format!("unexpected response from {}: {e}", provider.label()))
 }
 
+/// Sends a prepared request that is expected to change something, and reads nothing back.
+///
+/// The write counterpart of `get_json`, and it exists because every one of these three APIs answers
+/// a successful re-run or cancel with a body nobody wants: GitHub sends `201` and an empty object,
+/// GitLab the whole pipeline again, Azure the whole build. The caller re-reads the run afterwards
+/// anyway — that is the only way to learn the new status — so decoding the response here would be
+/// three wire types maintained for values that are thrown away.
+///
+/// The error path is the same `describe` every read goes through, so "your token cannot do that"
+/// reads the same whether it happened while listing or while cancelling.
+pub(crate) async fn send_write(request: reqwest::RequestBuilder, provider: Provider) -> Result<(), String> {
+    let response = send(request, provider).await?;
+    let status = response.status();
+    let html = looks_like_html(&response);
+    let quota = quota_note(response.headers());
+
+    // Azure's sign-in-page-instead-of-401 trap, exactly as `get_json` documents it. It matters more
+    // here, not less: a 203 that is treated as success is a re-run the user is told happened and
+    // that never reached the server.
+    if provider == Provider::Azure && (status.as_u16() == 203 || html) {
+        return Err(crate::ado::BAD_CREDENTIALS.to_string());
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(describe(provider, Asked::Pipeline, status, &body, quota));
+    }
+    Ok(())
+}
+
 /// Sends a prepared request and reads its body as a log: plain text, capped, never buffered whole
 /// before the cap is applied.
 pub(crate) async fn get_log(

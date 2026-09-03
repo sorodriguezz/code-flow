@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { IconGlyph } from "../common/FileGlyph";
 import { Select } from "../common/Select";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import {
   iconCatalogReady,
   loadIconCatalog,
@@ -239,7 +239,7 @@ function RuleRow({
               {t("icons.duplicate")}
             </span>
           ) : (
-            <span className="truncate text-[10.5px] leading-tight text-[var(--cf-text-muted)]">
+            <span className="break-words text-[10.5px] leading-tight text-[var(--cf-text-muted)]">
               {rule.pattern.trim()
                 ? t(iconPatternDescription(rule) as TranslationKey, { pattern: rule.pattern })
                 : t("icons.saysNothing")}
@@ -644,8 +644,8 @@ export function IconRulesSettings() {
           )}
         </button>
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-[12px] text-[var(--cf-text)]">{t("icons.defaultFolder")}</span>
-          <span className="truncate text-[10.5px] leading-tight text-[var(--cf-text-muted)]">
+          <span className="break-words text-[12px] leading-snug text-[var(--cf-text)]">{t("icons.defaultFolder")}</span>
+          <span className="break-words text-[10.5px] leading-tight text-[var(--cf-text-muted)]">
             {defaultFolderIcon ? t("icons.defaultFolderCustom") : t("icons.defaultFolderBuiltIn")}
           </span>
         </span>

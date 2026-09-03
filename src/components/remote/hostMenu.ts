@@ -12,7 +12,7 @@ import {
   Waypoints,
   type LucideIcon,
 } from "lucide-react";
-import type { MenuItem } from "../api/CollectionTree";
+import type { MenuItem } from "../common/ContextMenu";
 import { AZURE_SERVICE_ICON, AZURE_SERVICE_LABEL, kindIcon } from "./remoteChrome";
 import {
   disconnectHost,

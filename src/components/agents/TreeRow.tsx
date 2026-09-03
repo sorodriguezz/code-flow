@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { MoreHorizontal, Pencil, Pin } from "lucide-react";
-import type { MenuItem } from "../api/CollectionTree";
+import type { MenuItem } from "../common/ContextMenu";
 import { riseDelay } from "../../lib/rise";
 
 /** Where a row's menu was asked for. Only the id is kept, never the row itself: a turn landing

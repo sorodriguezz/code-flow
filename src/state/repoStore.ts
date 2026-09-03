@@ -17,11 +17,38 @@ import type {
   StashInfo,
 } from "../types/domain";
 
+/**
+ * How many commits a page of history holds.
+ *
+ * 500 was the old hard ceiling for the whole graph; it is a sensible *page*. Small enough that the
+ * first screen arrives immediately, large enough that nobody pages through a week of work.
+ */
+const COMMIT_PAGE = 500;
+
 interface RepoState {
   repoPath: string | null;
   status: RepoStatusInfo | null;
   branches: BranchInfo[];
   commits: CommitInfo[];
+  /**
+   * Whether the walk had more behind the last page.
+   *
+   * The graph used to ask for a flat 500 and stop there, with nothing on screen saying so — on any
+   * repository with real history, everything older than those 500 commits was unreachable from
+   * inside the app. This is what the "load more" row keys off.
+   */
+  commitsHasMore: boolean;
+  /**
+   * The graph's filter box.
+   *
+   * Session state, deliberately not persisted: a filter is something you are doing, and a graph
+   * that opens tomorrow already showing three commits out of four thousand is a graph that looks
+   * broken. Matched against the message, the author and the hash — see `matchesCommit`.
+   */
+  commitQuery: string;
+  /** True while a *further* page is arriving, so the button can say so without the whole table
+   *  going back to skeletons. */
+  commitsLoadingMore: boolean;
   unpushedCommits: CommitInfo[];
   stashes: StashInfo[];
   remotes: RemoteInfo[];
@@ -88,6 +115,8 @@ interface RepoState {
   refreshStatus: (options?: RefreshOptions) => Promise<void>;
   refreshBranches: () => Promise<void>;
   refreshCommits: (options?: RefreshOptions) => Promise<void>;
+  loadMoreCommits: () => Promise<void>;
+  setCommitQuery: (query: string) => void;
   refreshUnpushedCommits: () => Promise<void>;
   refreshStashes: () => Promise<void>;
   refreshRemotes: () => Promise<void>;
@@ -461,6 +490,9 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   status: null,
   branches: [],
   commits: [],
+  commitsHasMore: false,
+  commitQuery: "",
+  commitsLoadingMore: false,
   unpushedCommits: [],
   stashes: [],
   remotes: [],
@@ -580,11 +612,17 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const silent = options?.silent === true;
     if (!silent) set({ commitsLoading: true });
     try {
-      const commits = await api.listCommits(repoPath, true, 500);
+      // A refresh re-reads only as much as is already on screen, rounded up to a page: a watcher
+      // tick must not silently throw away four pages the user scrolled to, and must not re-fetch
+      // ten thousand commits either.
+      const shown = Math.max(get().commits.length, COMMIT_PAGE);
+      const page = await api.listCommitsPage(repoPath, true, 0, shown);
+      const commits = page.commits;
+      const commitsHasMore = page.has_more;
       // One write, not two. `commits` and `commitsLoading` used to land in separate `set()` calls
       // either side of a `finally`, and because the table re-renders on both that was three render
       // passes per refresh over up to 500 rows. Merged, the success path is two.
-      set(silent ? { commits } : { commits, commitsLoading: false });
+      set(silent ? { commits, commitsHasMore } : { commits, commitsHasMore, commitsLoading: false });
     } catch (e) {
       // The old `finally` cleared the flag on the failure path too, and it still has to: a listing
       // that throws must not leave the table showing skeletons forever.
@@ -592,6 +630,34 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       throw e;
     }
   },
+
+  /**
+   * Appends the next page of history.
+   *
+   * Guarded against overlapping calls: the "load more" row is at the bottom of a long scroll and is
+   * easy to hit twice, and two pages arriving for the same `skip` would duplicate every row.
+   */
+  loadMoreCommits: async () => {
+    const { repoPath, commits, commitsLoadingMore, commitsHasMore } = get();
+    if (!repoPath || commitsLoadingMore || !commitsHasMore) return;
+    set({ commitsLoadingMore: true });
+    try {
+      const page = await api.listCommitsPage(repoPath, true, commits.length, COMMIT_PAGE);
+      set((state) => ({
+        // Re-read from the store rather than closing over `commits`: a watcher refresh may have
+        // replaced the list while this page was in flight, and concatenating onto the stale copy
+        // would resurrect commits that are no longer there.
+        commits: [...state.commits, ...page.commits],
+        commitsHasMore: page.has_more,
+        commitsLoadingMore: false,
+      }));
+    } catch (e) {
+      set({ commitsLoadingMore: false });
+      throw e;
+    }
+  },
+
+  setCommitQuery: (commitQuery) => set({ commitQuery }),
 
   refreshUnpushedCommits: async () => {
     const { repoPath } = get();

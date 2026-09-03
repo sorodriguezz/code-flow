@@ -440,13 +440,18 @@ pub fn default_analyze_template() -> String {
 }
 
 #[tauri::command]
-pub fn default_pr_description_template() -> String {
-    ai::DEFAULT_PR_DESCRIPTION_TEMPLATE.to_string()
-}
-
-#[tauri::command]
 pub fn default_resolve_conflict_template() -> String {
     ai::DEFAULT_RESOLVE_CONFLICT_TEMPLATE.to_string()
+}
+
+/// The built-in prompt the CI failure analyser runs when `pipeline_template` is blank.
+///
+/// Added late: the setting has been honoured by `analyze_pipeline_failure` since that feature
+/// shipped, but with no command exposing the default there was no way to build an editor for it —
+/// so the one prompt about reading a build log was the one prompt nobody could change.
+#[tauri::command]
+pub fn default_pipeline_template() -> String {
+    ai::DEFAULT_PIPELINE_TEMPLATE.to_string()
 }
 
 /// Scans whatever's currently sitting in the working directory (the "Changes" list —

@@ -68,7 +68,9 @@ export function Group({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const frame = "mt-3 border-t border-[var(--cf-border)] pt-2.5 first:mt-0 first:border-0 first:pt-0";
-  const heading = "truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]";
+  // A group heading wraps rather than truncating: it names the block under it, and a cut one
+  // names nothing. Uppercase and letter-spaced, so it runs out of room sooner than most labels.
+  const heading = "break-words text-[11px] font-semibold uppercase leading-snug tracking-wide text-[var(--cf-text-muted)]";
 
   if (!collapsible) {
     return (

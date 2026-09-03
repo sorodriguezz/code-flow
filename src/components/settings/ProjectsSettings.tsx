@@ -460,7 +460,7 @@ export function ProjectsSettings() {
                         <ChevronRight size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
                       )}
                       <Briefcase size={13} style={{ color: ws.color }} className="shrink-0" />
-                      <span className="flex-1 truncate">{ws.name}</span>
+                      <span className="min-w-0 flex-1 break-words leading-snug">{ws.name}</span>
                       {!expanded && (
                         <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
                           {shown.length}

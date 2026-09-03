@@ -7,6 +7,7 @@ pub mod keyvault_queries;
 pub mod migrations;
 pub mod models;
 pub mod note_queries;
+pub mod version_queries;
 pub mod queries;
 pub mod remote_queries;
 pub mod service_queries;

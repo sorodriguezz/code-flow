@@ -171,6 +171,29 @@ export interface VaultAuditRow {
   at: string;
 }
 
+/**
+ * One entry's password-health verdict, as the backend reports it.
+ *
+ * Carries no password and no derivative of one — `reuse_group` is a group number, not a hash. See
+ * `keyvault_password_health` for why the comparison happens in Rust.
+ */
+export interface PasswordVerdict {
+  item_id: string;
+  title: string;
+  /** Set when this password is shared with at least one other entry; equal numbers share. */
+  reuse_group: number | null;
+  weak: boolean;
+  /** Not changed in over a year. */
+  stale: boolean;
+  age_days: number;
+}
+
+export interface PasswordHealth {
+  /** Entries that carry a password at all — the denominator of "3 of 24". */
+  checked: number;
+  verdicts: PasswordVerdict[];
+}
+
 export interface PasswordRecipe {
   length: number;
   uppercase: boolean;

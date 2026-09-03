@@ -29,7 +29,7 @@ import { installSqlCompletions } from "../../lib/db/sqlCompletion";
 import { firstStatement, type ConsoleLanguage } from "../../lib/db/statements";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { recordModel } from "../../lib/db/engineModel";
 import { DocumentList } from "./DocumentList";
 import { DocumentsView } from "./DocumentsView";

@@ -24,7 +24,7 @@ import {
   Waypoints,
   X,
 } from "lucide-react";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRemoteDragStore } from "../../state/remoteDragStore";

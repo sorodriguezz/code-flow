@@ -45,8 +45,10 @@ function NumberField({
   return (
     <label className="flex items-center justify-between gap-3 py-1">
       <span className="min-w-0">
-        <span className="block truncate text-[12px] text-[var(--cf-text)]">{label}</span>
-        {hint && <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{hint}</span>}
+        <span className="block break-words text-[12px] leading-snug text-[var(--cf-text)]">{label}</span>
+        {hint && (
+        <span className="block break-words text-[11px] leading-snug text-[var(--cf-text-muted)]">{hint}</span>
+      )}
       </span>
       <input
         type="number"
@@ -80,8 +82,10 @@ function ToggleField({
   return (
     <label className="flex cursor-pointer items-center justify-between gap-3 py-1">
       <span className="min-w-0">
-        <span className="block truncate text-[12px] text-[var(--cf-text)]">{label}</span>
-        {hint && <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{hint}</span>}
+        <span className="block break-words text-[12px] leading-snug text-[var(--cf-text)]">{label}</span>
+        {hint && (
+        <span className="block break-words text-[11px] leading-snug text-[var(--cf-text-muted)]">{hint}</span>
+      )}
       </span>
       <Checkbox checked={checked} onChange={onChange} />
     </label>
@@ -108,7 +112,7 @@ function ChipPicker({
             type="button"
             title={option.title}
             onClick={() => onToggle(option.value)}
-            className={`max-w-full truncate rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+            className={`max-w-full rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${
               on
                 ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
                 : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"

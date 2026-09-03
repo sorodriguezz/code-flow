@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
 import { notify } from "./notificationStore";
+import { usePreferencesStore } from "./preferencesStore";
 import { useUiStore } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type { JobLog, PipelineJob, PipelineRun, PipelineRunDetail } from "../types/domain";
@@ -124,7 +125,19 @@ interface CiState {
 /** How many runs a page asks for. One screen of scrolling; more is a rate limit spent on history. */
 const PAGE = 50;
 
-/** Every 5 s while something is moving — fast enough that a job finishing feels immediate. */
+/**
+ * How often a live run is re-read, in seconds, and what it may be set to.
+ *
+ * A setting rather than a constant because the right answer is about the host, not about the app:
+ * five seconds is 720 requests an hour against a GitHub rate limit of 5,000, which is fine for one
+ * person and not fine for a machine watching four repositories on a shared token. The list is short
+ * and named so nobody can type 1.
+ */
+export const PIPELINE_POLL_CHOICES = [5, 10, 15, 30, 60] as const;
+export const DEFAULT_PIPELINE_POLL = 5;
+
+/** Every 5 s by default while something is moving — fast enough that a job finishing feels
+ *  immediate. Overridden by `pipeline_poll_seconds`; see `PIPELINE_POLL_CHOICES`. */
 const LIVE_MS = 5_000;
 /** Every 30 s when nothing is. A new push is the only thing that can change the list, and it
  *  arrives from outside the app. */
@@ -138,6 +151,19 @@ const BACKOFF_MAX_MS = 5 * 60_000;
 
 // --- module-scope watcher state, exactly as powerStore/systemLoadStore hold theirs -------------
 let timer: ReturnType<typeof setInterval> | undefined;
+
+/**
+ * The user's polling interval, in milliseconds.
+ *
+ * Read straight from the preferences store rather than mirrored here: it changes rarely, and a
+ * second copy is a second thing to keep in step. Falls back to the default for a value from a
+ * future build that this one does not offer.
+ */
+function pollIntervalMs(): number {
+  const seconds = usePreferencesStore.getState().pipelinePollSeconds;
+  const valid = (PIPELINE_POLL_CHOICES as readonly number[]).includes(seconds);
+  return (valid ? seconds : DEFAULT_PIPELINE_POLL) * 1000;
+}
 let watchers = 0;
 let sinceLastPoll = 0;
 /** Consecutive failures per project, and the moment each is allowed to try again. */
@@ -519,7 +545,9 @@ export const useCiStore = create<CiState>((set, get) => ({
 
     if (!timer) {
       sinceLastPoll = TICK_MS; // so the first tick after mounting polls immediately
-      timer = setInterval(tick, TICK_MS);
+      // Read at subscribe time rather than captured at module load, so changing it in Settings
+      // takes effect the next time the tab is opened rather than on the next restart.
+      timer = setInterval(tick, pollIntervalMs());
       document.addEventListener("visibilitychange", wake);
       window.addEventListener("focus", wake);
     }

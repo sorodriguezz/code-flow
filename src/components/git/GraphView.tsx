@@ -3,11 +3,30 @@ import { computeGraphLayout, laneColor } from "../../lib/graphLayout";
 import { useRepoStore } from "../../state/repoStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
+import { promptAction } from "../../state/promptStore";
+import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
+import * as api from "../../lib/tauri/commands";
 import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
-import { ChevronDown, ChevronRight, Cloud, GitBranch, History, RotateCcw, Tag, X, type LucideIcon } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Cloud,
+  GitBranch,
+  History,
+  Loader2,
+  RotateCcw,
+  Search,
+  Tag,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { useT } from "../../state/languageStore";
+import { ContextMenu } from "../common/ContextMenu";
+import { matchesCommit } from "../../lib/gitActions";
+import { commitMenuItems } from "./commitMenu";
+import type { CommitInfo } from "../../types/domain";
 import { Skeleton, SkeletonRows } from "../common/Skeleton";
 import { fileStatusColor, fileStatusLabelKey, fileStatusLetter } from "../../lib/fileStatus";
 import type { CommitRef, FileDiffInfo, RefKind } from "../../types/domain";
@@ -213,8 +232,12 @@ function CommitFileRow({
  * panel's resize handle — which only touches `graphDiffWidth` — doesn't force this
  * potentially long commit list to re-render on every pointermove tick. */
 const CommitTable = memo(function CommitTable() {
-  const commits = useRepoStore((s) => s.commits);
+  const allCommits = useRepoStore((s) => s.commits);
+  const commitQuery = useRepoStore((s) => s.commitQuery);
   const commitsLoading = useRepoStore((s) => s.commitsLoading);
+  const commitsHasMore = useRepoStore((s) => s.commitsHasMore);
+  const commitsLoadingMore = useRepoStore((s) => s.commitsLoadingMore);
+  const loadMoreCommits = useRepoStore((s) => s.loadMoreCommits);
   const status = useRepoStore((s) => s.status);
   const selectedCommitId = useRepoStore((s) => s.selectedCommitId);
   // The expanded row's file list, and the reason it costs nothing extra: selecting a commit already
@@ -234,6 +257,142 @@ const CommitTable = memo(function CommitTable() {
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const t = useT();
+
+  /**
+   * The rows the filter box leaves.
+   *
+   * Filtered here rather than in the store so the full history stays loaded — clearing the box has
+   * to be instant, and re-fetching four pages because somebody deleted a character would be a
+   * second of blank table for no reason. `computeGraphLayout` already drops an edge whose parent is
+   * outside the list it was given, so a filtered graph loses its lines rather than drawing wrong
+   * ones.
+   */
+  const commits = useMemo(
+    () => (commitQuery.trim() ? allCommits.filter((c) => matchesCommit(c, commitQuery)) : allCommits),
+    [allCommits, commitQuery],
+  );
+  const filtering = commitQuery.trim().length > 0;
+
+  /** The row the context menu was opened on, and where to draw it. */
+  const [menu, setMenu] = useState<{ commit: CommitInfo; x: number; y: number } | null>(null);
+
+  /**
+   * Anything staged or modified. Revert and cherry-pick refuse it — the backend does too, and this
+   * is only so the menu can grey the entry and say why rather than failing a second after the click.
+   */
+  const dirty =
+    (status?.staged.length ?? 0) > 0 ||
+    (status?.unstaged.length ?? 0) > 0 ||
+    (status?.conflicted.length ?? 0) > 0;
+
+  /**
+   * The four write operations behind the menu.
+   *
+   * Each one refreshes the history afterwards rather than mutating the list here: amend and revert
+   * both change what HEAD is, and half the screen (the branch strip, the unpushed count, the status
+   * bar) reads that from the same refresh.
+   */
+  const runAndRefresh = async (work: () => Promise<unknown>, done: string) => {
+    const repoPath = useRepoStore.getState().repoPath;
+    if (!repoPath) return;
+    try {
+      await work();
+      await useRepoStore.getState().refreshAll();
+      pushSuccessToast(done);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
+  const openAmend = () => {
+    void (async () => {
+      const repoPath = useRepoStore.getState().repoPath;
+      if (!repoPath) return;
+      // Opens on the existing message rather than on an empty box: an amend is almost always a
+      // correction to what is already there, and retyping it from memory is how the rest of it
+      // gets lost.
+      const current = await api.headCommitMessage(repoPath).catch(() => "");
+      const message = await promptAction(t("graph.amendPrompt"), {
+        initial: current.trim(),
+        confirmLabel: t("graph.menuAmend"),
+        validate: (value) => (value.trim() ? null : t("graph.amendEmpty")),
+      });
+      if (message === null) return;
+      await runAndRefresh(() => api.amendCommit(repoPath, message), t("graph.amendDone"));
+    })();
+  };
+
+  const openCreateBranch = (oid: string) => {
+    void (async () => {
+      const repoPath = useRepoStore.getState().repoPath;
+      if (!repoPath) return;
+      const name = await promptAction(t("graph.branchHerePrompt"), {
+        placeholder: t("graph.branchHerePlaceholder"),
+        confirmLabel: t("graph.menuBranchHere"),
+        validate: (value) => (value.trim() ? null : t("graph.branchHereEmpty")),
+      });
+      if (!name) return;
+      await runAndRefresh(
+        () => useRepoStore.getState().createBranch(name, oid),
+        t("graph.branchHereDone", { name }),
+      );
+    })();
+  };
+
+  const openTagModal = (oid: string) => {
+    void (async () => {
+      const repoPath = useRepoStore.getState().repoPath;
+      if (!repoPath) return;
+      const name = await promptAction(t("graph.tagPrompt"), {
+        placeholder: t("graph.tagPlaceholder"),
+        confirmLabel: t("graph.menuTag"),
+        validate: (value) => (value.trim() ? null : t("graph.tagEmpty")),
+      });
+      if (!name) return;
+      // A second box rather than one with a convention in it: an annotated tag and a lightweight
+      // one are different objects, and "leave it blank for a plain tag" is the honest way to offer
+      // the choice without a checkbox nobody reads.
+      const message = await promptAction(t("graph.tagMessagePrompt", { name }), {
+        placeholder: t("graph.tagMessagePlaceholder"),
+        confirmLabel: t("graph.menuTag"),
+      });
+      if (message === null) return;
+      await runAndRefresh(
+        () => api.createTag(repoPath, name, oid, message),
+        t("graph.tagDone", { name }),
+      );
+    })();
+  };
+
+  const revertHere = async (commit: CommitInfo) => {
+    const repoPath = useRepoStore.getState().repoPath;
+    if (!repoPath) return;
+    const summary = commit.summary;
+    if (!(await confirmAction(t("graph.revertConfirm", { summary }), false, t("graph.menuRevert")))) return;
+    await runAndRefresh(() => api.revertCommit(repoPath, commit.id), t("graph.revertDone"));
+  };
+
+  const cherryPickHere = async (commit: CommitInfo) => {
+    const repoPath = useRepoStore.getState().repoPath;
+    if (!repoPath) return;
+    const summary = commit.summary;
+    if (!(await confirmAction(t("graph.cherryPickConfirm", { summary }), false, t("graph.menuCherryPick"))))
+      return;
+    await runAndRefresh(
+      () => api.cherryPickCommit(repoPath, commit.id, true),
+      t("graph.cherryPickDone"),
+    );
+  };
+
+  /** Clipboard, with the same toast every other copy in the app uses. */
+  const copyText = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      pushSuccessToast(t("common.copied"));
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
 
   const layout = useMemo(() => computeGraphLayout(commits), [commits]);
 
@@ -402,7 +561,17 @@ const CommitTable = memo(function CommitTable() {
   }
 
   if (commits.length === 0) {
-    return <EmptyState icon={History} title={t("graph.noCommits")} subtitle={t("graph.noCommitsHint")} />;
+    // Two different empty states, because they mean opposite things: an empty repository is a fact
+    // about the repository, and an empty filter result is a fact about what you typed.
+    return filtering ? (
+      <EmptyState
+        icon={Search}
+        title={t("graph.noMatches", { query: commitQuery.trim() })}
+        subtitle={t("graph.noMatchesHint")}
+      />
+    ) : (
+      <EmptyState icon={History} title={t("graph.noCommits")} subtitle={t("graph.noCommitsHint")} />
+    );
   }
 
   // Left-to-right order: Commit, Date, Author, Message, Refs, then the lane graph —
@@ -587,6 +756,10 @@ const CommitTable = memo(function CommitTable() {
                       }
                     : null),
                 }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setMenu({ commit: r.commit, x: event.clientX, y: event.clientY });
+                }}
                 className={`group flex w-full items-center gap-2 px-3 text-[13px] ${
                   isSelected ? "rounded-md" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                 }`}
@@ -720,7 +893,50 @@ const CommitTable = memo(function CommitTable() {
             )}
           </div>
         )}
+
+        {/* The end of the history, or the way to more of it.
+            Inside the scrolling content and after the absolutely-positioned rows, so it sits below
+            the last one at `contentHeight` — a button that floated over row four hundred would be
+            unreachable without scrolling past everything. Hidden while filtering: "load more" next
+            to a filtered list implies the next page is more matches, and it is not. */}
+        {!filtering && commitsHasMore && (
+          <div
+            style={{ position: "absolute", left: 0, right: 0, top: contentHeight }}
+            className="flex justify-center py-3"
+          >
+            <button
+              type="button"
+              onClick={() => void loadMoreCommits()}
+              disabled={commitsLoadingMore}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)] disabled:opacity-60"
+            >
+              {commitsLoadingMore && <Loader2 size={12} className="animate-spin" />}
+              {commitsLoadingMore ? t("graph.loadingMore") : t("graph.loadMore")}
+            </button>
+          </div>
+        )}
       </div>
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={commitMenuItems({
+            commit: menu.commit,
+            headCommitId,
+            dirty,
+            t,
+            onCopyHash: (commit) => void copyText(commit.id),
+            onCopyMessage: (commit) => void copyText(commit.summary),
+            onBranchHere: (commit) => openCreateBranch(commit.id),
+            onTag: (commit) => openTagModal(commit.id),
+            onAmend: openAmend,
+            onRevert: (commit) => void revertHere(commit),
+            onCherryPick: (commit) => void cherryPickHere(commit),
+          })}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 });
@@ -734,6 +950,70 @@ const CommitTable = memo(function CommitTable() {
  * Now the commit expands into its file list in the table, and the panel opens on the file you
  * click. One file, full context, nothing to scroll past.
  */
+/**
+ * The filter box above the history.
+ *
+ * Its own component so it can own the input's focus and still not re-render `CommitTable` on every
+ * keystroke — the table is memoised and reads the query from the store, so typing costs one render
+ * of this bar and one of the table, rather than one of everything between them.
+ *
+ * A filter rather than a jump-to-match: "which commits mention login" is the question people
+ * actually have, and highlighting one match at a time in a list of four thousand answers a
+ * different one.
+ */
+function GraphToolbar() {
+  const t = useT();
+  const query = useRepoStore((s) => s.commitQuery);
+  const setQuery = useRepoStore((s) => s.setCommitQuery);
+  const total = useRepoStore((s) => s.commits.length);
+  const shown = useRepoStore((s) =>
+    s.commitQuery.trim() ? s.commits.filter((c) => matchesCommit(c, s.commitQuery)).length : s.commits.length,
+  );
+
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
+      <div className="relative min-w-0 flex-1">
+        <Search
+          size={12}
+          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+        />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => {
+            // Escape clears rather than blurs: the box is one field on a screen with no other
+            // keyboard mode, so the only thing Escape can usefully mean here is "never mind".
+            if (e.key === "Escape" && query) {
+              e.stopPropagation();
+              setQuery("");
+            }
+          }}
+          placeholder={t("graph.searchPlaceholder")}
+          aria-label={t("graph.searchPlaceholder")}
+          className="w-full rounded-md border border-[var(--cf-border)] bg-transparent py-1 pl-7 pr-6 text-[12px] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery("")}
+            aria-label={t("common.clear")}
+            className="absolute right-1 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          >
+            <X size={11} />
+          </button>
+        )}
+      </div>
+      {/* Only while filtering, and it says both numbers: "12" alone leaves you wondering whether
+          that is all the history or all the matches. */}
+      {query.trim() && (
+        <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+          {t("graph.searchCount", { shown, total })}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export function GraphView() {
   const commits = useRepoStore((s) => s.commits);
   const selectedCommitId = useRepoStore((s) => s.selectedCommitId);
@@ -752,6 +1032,7 @@ export function GraphView() {
   return (
     <div className="flex h-full min-h-0">
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)]">
+        <GraphToolbar />
         <CommitTable />
       </div>
 

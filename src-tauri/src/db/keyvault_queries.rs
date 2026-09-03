@@ -222,6 +222,27 @@ pub fn list_trash(conn: &Connection) -> rusqlite::Result<Vec<VaultItemMeta>> {
     Ok(rows)
 }
 
+/// Every live entry's id, title and sealed payload, for the health audit to open one at a time.
+///
+/// The one query in this file that hands out ciphertext in bulk, and it is deliberately narrow: no
+/// `VaultItemMeta`, no tags, no folder — an id, a title to name the row in the report, when it was
+/// last touched, and the sealed blob. Its only caller decrypts each blob, derives a verdict, and
+/// drops the plaintext before returning; see `keyvault_password_health`.
+pub fn list_sealed_for_audit(
+    conn: &Connection,
+) -> rusqlite::Result<Vec<(String, String, String, String, String)>> {
+    let mut statement = conn.prepare(
+        "SELECT id, title, updated_at, secret_nonce, secret_blob FROM vault_items \
+         WHERE deleted_at = '' ORDER BY title COLLATE NOCASE",
+    )?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// One entry's metadata and its **sealed** payload, for the caller to open.
 pub fn get_sealed(
     conn: &Connection,

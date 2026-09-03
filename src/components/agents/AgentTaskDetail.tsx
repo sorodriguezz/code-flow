@@ -20,7 +20,7 @@ import { ContinueWithModal } from "./ContinueWithModal";
 import { useChainStore } from "../../state/chainStore";
 import { AiErrorBanner } from "../ai/AiErrorBanner";
 import { AiRunLog } from "../ai/AiRunLog";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Select } from "../common/Select";
 import { useAgentsStore } from "../../state/agentsStore";

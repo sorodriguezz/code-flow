@@ -59,7 +59,16 @@ function render(
  * that reads a locale), it has to join this dependency array or the UI will keep the old wording
  * after a switch.
  */
-export function useT() {
+/**
+ * The translator's type, for components that take `t` as a prop.
+ *
+ * Named rather than re-declared inline at each call site: a sub-component that types it as
+ * `(key: TranslationKey) => string` compiles fine and then silently cannot pass interpolation
+ * params, which is how a row ends up rendering "{n} edited" verbatim.
+ */
+export type Translate = (key: TranslationKey, params?: Record<string, string | number>) => string;
+
+export function useT(): Translate {
   const language = useLanguageStore((s) => s.language);
   return useMemo(
     () => (key: TranslationKey, params?: Record<string, string | number>) => render(language, key, params),

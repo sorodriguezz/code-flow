@@ -5,6 +5,7 @@ import {
   KeyRound,
   MonitorSmartphone,
   NotebookPen,
+  Route,
   Send,
   Workflow,
   type LucideIcon,
@@ -79,7 +80,10 @@ export type TourId =
   | "remote"
   | "notes"
   | "diagrams"
-  | "vault";
+  | "vault"
+  /** The CI screen. Added last because it was the only app without one — and the one whose central
+   *  idea (a run is a waterfall, not a list) most needs saying out loud. */
+  | "pipelines";
 
 /**
  * The one-screen tour of the main window.
@@ -1104,6 +1108,70 @@ const VAULT_TOUR: TourStep[] = [
   ),
 ];
 
+const PIPELINES_STAGE: TourStage = { view: "pipelines" };
+
+/**
+ * The CI tour.
+ *
+ * Short on purpose — five steps — because the screen is three panes and one idea. The idea is the
+ * second step: the graph is a *waterfall*, so four jobs that ran at once are drawn side by side
+ * rather than stacked, which is the whole reason to look at it here instead of on the host.
+ *
+ * It is the only tour whose screen may not exist: the tab appears only on a repository linked to a
+ * host with CI. The launcher offers it from that tab, so by the time anybody starts it the tab is
+ * there.
+ */
+const PIPELINES_TOUR: TourStep[] = [
+  {
+    id: "pipelines.intro",
+    chapterKey: "tour.chapter.pipelines",
+    titleKey: "tour.pipelines.intro.title",
+    bodyKey: "tour.pipelines.intro.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: PIPELINES_STAGE,
+  },
+  {
+    id: "pipelines.list",
+    chapterKey: "tour.chapter.pipelines",
+    titleKey: "tour.pipelines.list.title",
+    bodyKey: "tour.pipelines.list.body",
+    anchors: ['[data-tour="pipelines-list"]', '[data-tour="main-content"]'],
+    stage: PIPELINES_STAGE,
+  },
+  {
+    id: "pipelines.graph",
+    chapterKey: "tour.chapter.pipelines",
+    titleKey: "tour.pipelines.graph.title",
+    bodyKey: "tour.pipelines.graph.body",
+    anchors: ['[data-tour="pipelines-graph"]', '[data-tour="main-content"]'],
+    stage: PIPELINES_STAGE,
+  },
+  {
+    id: "pipelines.actions",
+    chapterKey: "tour.chapter.pipelines",
+    titleKey: "tour.pipelines.actions.title",
+    bodyKey: "tour.pipelines.actions.body",
+    anchors: ['[data-tour="pipelines-actions"]', '[data-tour="main-content"]'],
+    stage: PIPELINES_STAGE,
+  },
+  {
+    id: "pipelines.log",
+    chapterKey: "tour.chapter.pipelines",
+    titleKey: "tour.pipelines.log.title",
+    bodyKey: "tour.pipelines.log.body",
+    anchors: ['[data-tour="pipelines-log"]', '[data-tour="main-content"]'],
+    stage: PIPELINES_STAGE,
+  },
+  closingStep(
+    "pipelines",
+    "tour.chapter.pipelines",
+    "tour.pipelines.done.title",
+    "tour.pipelines.done.body",
+    PIPELINES_STAGE,
+  ),
+];
+
 export const TOURS: Record<TourId, TourStep[]> = {
   main: MAIN_TOUR,
   api: API_TOUR,
@@ -1114,6 +1182,7 @@ export const TOURS: Record<TourId, TourStep[]> = {
   notes: NOTES_TOUR,
   diagrams: DIAGRAMS_TOUR,
   vault: VAULT_TOUR,
+  pipelines: PIPELINES_TOUR,
 };
 
 /**
@@ -1151,6 +1220,9 @@ export const APP_TOURS: AppTour[] = [
   { tour: "notes", view: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
   { tour: "diagrams", view: "diagrams", labelKey: "tabbar.diagrams", icon: Workflow },
   { tour: "vault", view: "vault", labelKey: "tabbar.vault", icon: KeyRound },
+  // Last, and the only one on a repository-scoped view: the tab exists only where the repository
+  // is linked to a host with CI, so the launcher offers this exactly where the screen is real.
+  { tour: "pipelines", view: "pipelines", labelKey: "tabbar.pipelines", icon: Route },
 ];
 
 /** The app tour for the current view, or `null` on the three repository views — which are what the

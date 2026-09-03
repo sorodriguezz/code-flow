@@ -11,7 +11,7 @@ import { TypedLineBuffer } from "../../lib/remote/typedLines";
 import { currentPlatform, isMac } from "../../lib/platform";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import { ContextMenu } from "../api/CollectionTree";
+import { ContextMenu } from "../common/ContextMenu";
 
 /**
  * The selection wash, spelled out rather than left to xterm.

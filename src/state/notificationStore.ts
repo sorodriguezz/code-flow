@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { translate } from "./languageStore";
+import { usePreferencesStore } from "./preferencesStore";
+import { sendNativeNotification } from "../lib/nativeNotify";
 import { useUiStore, type MainView, type StoriesMode } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { workspaceIdFromBucket } from "../lib/prTarget";
@@ -186,6 +188,11 @@ export const useNotificationStore = create<NotificationState>((set) => ({
 
   push: (input) =>
     set((s) => {
+      // A muted source is not recorded at all, rather than recorded and hidden: the unread badge
+      // has to agree with the list it opens, and a count that includes rows the panel filters out
+      // is a badge that never clears. See `mutedNotificationSources`.
+      if (usePreferencesStore.getState().mutedNotificationSources.includes(input.source)) return s;
+
       const item: AppNotification = {
         ...input,
         // No fallback to the active workspace. It used to be here, and it was the single line that
@@ -196,6 +203,7 @@ export const useNotificationStore = create<NotificationState>((set) => ({
         finishedAt: Date.now(),
         seen: false,
       };
+      raiseNative(item);
       return { items: [item, ...s.items].slice(0, MAX_ITEMS) };
     }),
 
@@ -206,6 +214,24 @@ export const useNotificationStore = create<NotificationState>((set) => ({
   markAllSeen: () =>
     set((s) => (s.items.some((n) => !n.seen) ? { items: s.items.map((n) => ({ ...n, seen: true })) } : s)),
 }));
+
+/**
+ * Raises the operating system's own notification for a row that was just filed, when the user has
+ * asked for them.
+ *
+ * Called from inside the `set` above, which is why it can neither throw nor await: `sendNative`
+ * swallows everything and returns immediately. The visibility check is `document.hidden`, which
+ * covers the two states that matter — the window minimised, and the window hidden to the tray,
+ * which is this app's own close behaviour — and deliberately not focus: a window sitting visible on
+ * a second monitor is one the user can see.
+ */
+function raiseNative(item: AppNotification): void {
+  const prefs = usePreferencesStore.getState();
+  if (!prefs.nativeNotificationsEnabled) return;
+  if (prefs.nativeNotificationsOnlyBackground && !document.hidden) return;
+  const title = translate(item.titleKey, item.params);
+  sendNativeNotification(title, item.detail ?? "");
+}
 
 /**
  * Report finished background work, from anywhere — stores, plain modules, event handlers.

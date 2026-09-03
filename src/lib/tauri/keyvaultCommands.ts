@@ -21,6 +21,7 @@ import type {
   VaultSecret,
   VaultStatus,
   VaultTreeRows,
+  PasswordHealth,
 } from "../../types/vault";
 
 // ---------- opening and closing ----------
@@ -62,6 +63,15 @@ export const keyvaultLoadTree = (workspaceId: string) =>
   invoke<VaultTreeRows>("keyvault_load_tree", { workspaceId });
 
 export const keyvaultListTrash = () => invoke<VaultItemRow[]>("keyvault_list_trash");
+
+/**
+ * Reused, weak and stale passwords across the whole keyring.
+ *
+ * The comparison runs in Rust and returns verdicts only — never a password, never a hash of one.
+ * See `keyvault_password_health`: answering "is anything reused" needs every password in memory at
+ * once, and this app has decided that place is not the renderer.
+ */
+export const keyvaultPasswordHealth = () => invoke<PasswordHealth>("keyvault_password_health");
 
 /** One entry, decrypted. The only call that returns a plaintext secret, and it returns exactly one. */
 export const keyvaultGetItem = (id: string) =>

@@ -927,6 +927,180 @@ pub fn search_notes(
     Ok(hits)
 }
 
+/// The notes that reference `title` with a `[[wiki link]]`, newest first.
+///
+/// The other half of a feature that only worked one way. Writing `[[Retro 12 May]]` in a note has
+/// resolved to that note for a while; standing *in* "Retro 12 May" and asking what points at it had
+/// no answer, so the note graph could only ever be walked forwards.
+///
+/// Matched with the same per-character folding `search_notes` documents at length, and for exactly
+/// the same reason: a link written `[[configuracion]]` has to find a note called "Configuración",
+/// which is precisely the case ASCII-only `LIKE` gets wrong. Whitespace inside the brackets is
+/// normalised because people type `[[ Retro ]]`.
+///
+/// `exclude_id` keeps a note out of its own backlinks — a note that links to itself is a typo, not
+/// a relationship worth drawing.
+pub fn backlinks(
+    conn: &Connection,
+    workspace_id: &str,
+    title: &str,
+    exclude_id: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<NoteSearchHit>> {
+    let wanted = fold_for_match(title);
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = conn.prepare(
+        "SELECT id, content FROM notes WHERE (workspace_id = ?1 OR scope = 'global') AND id != ?2 \
+         ORDER BY pinned DESC, updated_at DESC",
+    )?;
+    let mut rows = statement.query(params![workspace_id, exclude_id])?;
+
+    let mut hits = Vec::new();
+    while let Some(row) = rows.next()? {
+        let content: String = row.get(1)?;
+        let Some(offset) = find_wiki_link(&content, &wanted) else {
+            continue;
+        };
+        // The snippet is taken around the literal `[[`, so the reader sees the sentence the link
+        // sits in rather than the link on its own.
+        let chars: Vec<char> = content.chars().collect();
+        let start = offset.saturating_sub(60);
+        let end = (offset + 120).min(chars.len());
+        let snippet: String = chars[start..end].iter().collect();
+        hits.push(NoteSearchHit {
+            id: row.get(0)?,
+            snippet,
+            match_start: (offset - start) as i64,
+            match_len: 2,
+        });
+        if hits.len() as i64 >= limit {
+            break;
+        }
+    }
+    Ok(hits)
+}
+
+/// Case- and accent-insensitive folding, plus whitespace collapsed — the same comparison
+/// `foldTitle` makes in the frontend, so a link resolves and back-links identically.
+fn fold_for_match(text: &str) -> String {
+    let lowered: String = text.trim().to_lowercase();
+    let mut out = String::with_capacity(lowered.len());
+    let mut last_was_space = false;
+    for ch in lowered.chars() {
+        // Combining marks dropped so `ó` and `o` compare equal. `nfd` is not available without a
+        // unicode crate, so the common Latin-1 vowels are mapped directly — which is what the
+        // titles in question actually contain.
+        let mapped = match ch {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            other => other,
+        };
+        if mapped.is_whitespace() {
+            if !last_was_space && !out.is_empty() {
+                out.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            out.push(mapped);
+            last_was_space = false;
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// The character offset of the first `[[title]]` in `content` matching the already-folded `wanted`.
+fn find_wiki_link(content: &str, wanted: &str) -> Option<usize> {
+    let chars: Vec<char> = content.chars().collect();
+    let mut index = 0;
+    while index + 1 < chars.len() {
+        if chars[index] != '[' || chars[index + 1] != '[' {
+            index += 1;
+            continue;
+        }
+        // Find the closing `]]`, bounded two ways.
+        //
+        // The length cap is the obvious one: an unclosed `[[` is a typo, not a reason to scan the
+        // rest of the note. The second is the one a test caught — stopping at the *next* `[[` as
+        // well. Without it a stray opener swallows everything up to the closing brackets of a real
+        // link further down, so the note that genuinely contains `[[a]]` is reported as containing
+        // no link at all. A nested opener means the first one was never closed.
+        let mut cursor = index + 2;
+        let mut close = None;
+        while cursor + 1 < chars.len() && cursor < index + 2 + 200 {
+            if chars[cursor] == '[' && chars[cursor + 1] == '[' {
+                break;
+            }
+            if chars[cursor] == ']' && chars[cursor + 1] == ']' {
+                close = Some(cursor);
+                break;
+            }
+            cursor += 1;
+        }
+        let Some(close) = close else {
+            index += 2;
+            continue;
+        };
+        let inner: String = chars[index + 2..close].iter().collect();
+        // A `[[Title|label]]` link points at the part before the pipe.
+        let target = inner.split('|').next().unwrap_or("");
+        if fold_for_match(target) == wanted {
+            return Some(index);
+        }
+        index = close + 2;
+    }
+    None
+}
+
+#[cfg(test)]
+mod backlink_tests {
+    use super::{find_wiki_link, fold_for_match};
+
+    #[test]
+    fn folding_ignores_case_accents_and_extra_spaces() {
+        assert_eq!(fold_for_match("  Configuración  "), "configuracion");
+        assert_eq!(fold_for_match("RETRO   12  May"), "retro 12 may");
+        assert_eq!(fold_for_match("Año Nuevo"), "ano nuevo");
+    }
+
+    #[test]
+    fn finds_a_link_regardless_of_how_it_was_typed() {
+        let wanted = fold_for_match("Configuración");
+        assert!(find_wiki_link("see [[configuracion]] for more", &wanted).is_some());
+        assert!(find_wiki_link("see [[ Configuración ]] for more", &wanted).is_some());
+        // The label form points at the part before the pipe.
+        assert!(find_wiki_link("see [[Configuración|the setup]]", &wanted).is_some());
+    }
+
+    #[test]
+    fn does_not_match_a_different_note() {
+        let wanted = fold_for_match("Retro");
+        assert!(find_wiki_link("see [[Retro 12 May]]", &wanted).is_none());
+        assert!(find_wiki_link("the word retro appears bare", &wanted).is_none());
+    }
+
+    #[test]
+    fn reports_the_offset_of_the_brackets() {
+        let wanted = fold_for_match("a");
+        assert_eq!(find_wiki_link("xx [[a]]", &wanted), Some(3));
+    }
+
+    #[test]
+    fn survives_an_unclosed_bracket_pair() {
+        let wanted = fold_for_match("a");
+        // The stray `[[` must not swallow the rest of the note: the real link is at 29, where the
+        // second `[[` starts.
+        assert_eq!(find_wiki_link("[[ never closed ... and then [[a]]", &wanted), Some(29));
+    }
+}
+
 /// A window of `content` around the first case-insensitive occurrence of `needle`, plus where the
 /// match landed *inside that window*.
 ///

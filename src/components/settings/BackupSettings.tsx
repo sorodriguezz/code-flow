@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
-  BookOpen,
   ChevronDown,
   ChevronRight,
   Clock,
@@ -8,7 +7,6 @@ import {
   Download,
   FolderOpen,
   KeyRound,
-  ListChecks,
   Lock,
   RefreshCw,
   Upload,
@@ -16,8 +14,10 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { ApiModal, Field, GhostButton, PrimaryButton, Row } from "../api/ApiModal";
-import { ActivePill, ActiveUnderline } from "../common/ActivePill";
+import { ActiveUnderline } from "../common/ActivePill";
 import { Actions, HelpLink, Note, Panel, SettingsHeader, Status } from "../api/settingsChrome";
+import { SettingsRail, useSectionTab } from "./settingsNav";
+import { tabsFor } from "../../lib/settingsCatalog";
 import { Checkbox } from "../common/Checkbox";
 import { BackupAutomatic } from "./BackupAutomatic";
 import { DriveGuide, ICloudGuide, OneDriveGuide, SyncedFolderGuide } from "./backupGuides";
@@ -80,7 +80,6 @@ const MIN_PASSPHRASE = 8;
 /** The lowest rung of [`passphraseStrength`] this panel will accept — "fair". */
 const MIN_STRENGTH = 2;
 
-type BackupTab = "content" | "password" | "backup" | "restore" | "guides";
 
 /**
  * The five panes, in the order you would actually set this up: decide what goes in the file, give it
@@ -95,13 +94,6 @@ type BackupTab = "content" | "password" | "backup" | "restore" | "guides";
  * `hintKey` is optional because one pane doesn't need one: `backup` opens on its own two tabs, which
  * say what its two halves are more directly than a paragraph summarising both ever did.
  */
-const TABS: { id: BackupTab; labelKey: TranslationKey; hintKey?: TranslationKey; icon: LucideIcon }[] = [
-  { id: "content", labelKey: "backup.tabContent", hintKey: "backup.tabContentHint", icon: ListChecks },
-  { id: "password", labelKey: "backup.tabPassword", hintKey: "backup.tabPasswordHint", icon: KeyRound },
-  { id: "backup", labelKey: "backup.tabBackup", icon: Upload },
-  { id: "restore", labelKey: "backup.tabRestore", icon: Download },
-  { id: "guides", labelKey: "backup.tabGuides", hintKey: "backup.tabGuidesHint", icon: BookOpen },
-];
 
 /** The two halves of the "Back up" pane: one file written now, or the schedule that writes them. */
 type BackupMode = "manual" | "automatic";
@@ -361,7 +353,8 @@ function IncludeRow({
           ) : (
             <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
           )}
-          <span className="truncate">{label}</span>
+          {/* Wraps — the switch labels are what say which half of the backup you are turning off. */}
+          <span className="min-w-0 break-words leading-snug">{label}</span>
         </button>
         <span className="shrink-0">
           {alwaysLabel !== undefined ? (
@@ -713,9 +706,10 @@ export function BackupSettings() {
   /** What is sitting at the destination. `null` until it has been looked for. */
   const [atDestination, setAtDestination] = useState<BackupInfo[] | null>(null);
   const [listing, setListing] = useState(false);
-  const [tab, setTab] = useState<BackupTab>("content");
+  const tabs = tabsFor("backup");
+  const [tab, setTab] = useSectionTab("backup", tabs, "content");
   const [mode, setMode] = useState<BackupMode>("manual");
-  const activeTab = TABS.find((entry) => entry.id === tab) ?? TABS[0];
+  const activeTab = tabs.find((entry) => entry.id === tab) ?? tabs[0];
 
   // The five panes are nowhere near the same height — arriving at the password pane while scrolled
   // to the bottom of the guides left it starting somewhere in its middle. Same fix and same reason
@@ -976,28 +970,7 @@ export function BackupSettings() {
         {/* `layoutRoot` on a `motion.nav`, for the reason spelled out in `ApiSettingsBody`: the
             pill's before/after rects would otherwise be measured against a scroll position the
             arriving pane has just changed, and the slide would land as a jump. */}
-        <motion.nav layoutRoot className="w-[168px] shrink-0 self-start">
-          {TABS.map(({ id, labelKey, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setTab(id)}
-              aria-current={tab === id ? "page" : undefined}
-              title={t(labelKey)}
-              className={`relative mb-0.5 flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
-                tab === id
-                  ? "text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
-              }`}
-            >
-              {/* Its own `layoutId`, so the pill can't fly between this rail and another's. */}
-              {tab === id && <ActivePill layoutId="cf-backup-settings-pill" />}
-              <span className="relative flex min-w-0 flex-1 items-center gap-1.5">
-                <Icon size={13} className="shrink-0" />
-                <span className="truncate">{t(labelKey)}</span>
-              </span>
-            </button>
-          ))}
-        </motion.nav>
+        <SettingsRail tabs={tabs} active={tab} onSelect={setTab} layoutId="cf-backup-settings-pill" />
 
         {/* The one moving part. `overflow-y-scroll`, not `auto`: the app styles its scrollbars, so
             one is a real 10px of layout rather than an overlay. Letting it come and go as a pane
@@ -1013,7 +986,7 @@ export function BackupSettings() {
           <Panel>
             {/* The rail names the pane, so no heading is repeated here — but the hint says what the
                 label cannot, which is why it stays for the panes that have one. */}
-            {activeTab.hintKey && (
+            {activeTab?.hintKey && (
               <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
                 {t(activeTab.hintKey)}
               </p>

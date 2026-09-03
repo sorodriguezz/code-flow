@@ -126,6 +126,22 @@ export interface CommitInfo {
   refs: CommitRef[];
 }
 
+/** One page of `list_commits_page`, with the flag the "load more" row keys off. */
+export interface CommitPage {
+  commits: CommitInfo[];
+  has_more: boolean;
+}
+
+/** A tag, with its target already peeled to a commit — an annotated tag points at a tag object and
+ *  the UI only ever wants the commit behind it. */
+export interface TagInfo {
+  name: string;
+  target_oid: string;
+  /** Annotated tags carry one; lightweight ones are a bare ref. */
+  message: string;
+  annotated: boolean;
+}
+
 export interface BranchInfo {
   name: string;
   is_head: boolean;

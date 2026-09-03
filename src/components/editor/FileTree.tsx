@@ -23,7 +23,7 @@ import {
   renamePath,
   revealInFileManager,
 } from "../../lib/tauri/commands";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { HiddenFilesSection } from "./HiddenFilesSection";
 import {
   EMPTY_NESTS,

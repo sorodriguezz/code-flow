@@ -42,7 +42,7 @@ import { ColumnsModal } from "../common/ColumnsModal";
 import { DataGrid, autoFitWidth, autoFitWidths, type GridColumn } from "../common/DataGrid";
 import { range } from "../common/gridBits";
 import { useColumnPrefs } from "../common/useColumnPrefs";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { useRemoteStore } from "../../state/remoteStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { confirmAction } from "../../state/confirmStore";

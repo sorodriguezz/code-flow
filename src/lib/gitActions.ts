@@ -1,7 +1,7 @@
 import { useRepoStore } from "../state/repoStore";
 import { usePreferencesStore } from "../state/preferencesStore";
 import { useFetchTimerStore } from "../state/fetchTimerStore";
-import type { BranchInfo } from "../types/domain";
+import type { BranchInfo, CommitInfo } from "../types/domain";
 
 /**
  * Remote actions and the rules for when they're available, in one place so the status bar's
@@ -64,4 +64,30 @@ export function pushNow(): void {
   }
   if (!canPush(branch)) return;
   void useRepoStore.getState().push(false);
+}
+
+/**
+ * Whether a commit answers the graph's filter box.
+ *
+ * Message, author name, author email and hash, folded for accents and case — the four things
+ * somebody actually remembers about a commit they are looking for. The hash matches on *prefix*
+ * only, because a 40-character hex string contains almost every short hex string by accident and
+ * matching anywhere would make `ab` select half the history.
+ *
+ * A multi-word query is treated as "all of these", not as a phrase: "sofia fix login" should find
+ * the login fix Sofía made, and it does not appear in that order in anything.
+ */
+export function matchesCommit(commit: CommitInfo, query: string): boolean {
+  const wanted = fold(query).split(/\s+/).filter(Boolean);
+  if (wanted.length === 0) return true;
+  const haystack = fold(`${commit.summary} ${commit.author_name} ${commit.author_email}`);
+  const id = commit.id.toLowerCase();
+  return wanted.every((term) => haystack.includes(term) || id.startsWith(term));
+}
+
+function fold(text: string): string {
+  return text
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase();
 }

@@ -828,3 +828,48 @@ mod tests {
     }
 
 }
+
+// ---------------------------------------------------------------------------
+// Writes: re-run and cancel
+// ---------------------------------------------------------------------------
+
+/// The POST counterpart of [`request`] — same three headers, no body.
+///
+/// Every write in this file is a bare POST with an empty body; GitHub's re-run and cancel endpoints
+/// take no parameters at all.
+fn post(url: &str, token: &str) -> reqwest::RequestBuilder {
+    http::client()
+        .post(url)
+        .header("Authorization", bearer(token))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", API_VERSION)
+        .header("Content-Length", "0")
+}
+
+/// Runs a workflow run again.
+///
+/// `failed_only` picks the `rerun-failed-jobs` endpoint instead, which is the one people actually
+/// want after a flaky test: it reuses the successful jobs rather than paying for the whole matrix
+/// a second time.
+pub async fn rerun(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    run_id: &str,
+    token: &str,
+    failed_only: bool,
+) -> Result<(), String> {
+    let root = api_root(host);
+    let id = encode(run_id);
+    let verb = if failed_only { "rerun-failed-jobs" } else { "rerun" };
+    let url = format!("{root}/repos/{owner}/{repo}/actions/runs/{id}/{verb}");
+    http::send_write(post(&url, token), http::Provider::GitHub).await
+}
+
+/// Cancels a run that is still going.
+pub async fn cancel(host: &str, owner: &str, repo: &str, run_id: &str, token: &str) -> Result<(), String> {
+    let root = api_root(host);
+    let id = encode(run_id);
+    let url = format!("{root}/repos/{owner}/{repo}/actions/runs/{id}/cancel");
+    http::send_write(post(&url, token), http::Provider::GitHub).await
+}

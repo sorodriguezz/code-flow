@@ -3,7 +3,7 @@ import { Boxes, ChevronDown, Copy, Folder, Plus, ShieldAlert, X } from "lucide-r
 import { createPortal } from "react-dom";
 import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
 import { preventMiddleClickAutoscroll } from "../../lib/pointerDrag";
-import { ContextMenu, type MenuItem } from "./CollectionTree";
+import { ContextMenu, type MenuItem} from "../common/ContextMenu";
 import { useApiStore, type ApiEntityTab, type ApiTab } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore } from "../../state/collabStore";

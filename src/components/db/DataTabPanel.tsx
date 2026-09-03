@@ -24,7 +24,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { recordModel } from "../../lib/db/engineModel";
 import { documentWithoutId } from "../../lib/db/mongoDocument";
 import { DocumentList, type DocumentActions, type DocumentState } from "./DocumentList";

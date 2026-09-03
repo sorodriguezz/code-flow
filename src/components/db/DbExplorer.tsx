@@ -34,7 +34,7 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ActivePill } from "../common/ActivePill";
 import { CARD, ConnectionDot, ToolbarButton, engineColor, engineIcon, nodeIcon } from "./dbChrome";

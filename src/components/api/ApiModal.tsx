@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { useFocusTrap } from "../../lib/useFocusTrap";
 import { createPortal } from "react-dom";
 import { X, type LucideIcon } from "lucide-react";
 import { useT } from "../../state/languageStore";
@@ -77,6 +78,7 @@ export function ApiModal({
 }) {
   const t = useT();
   /** Whether the press that produced the current click started on the backdrop. */
+  const panelRef = useRef<HTMLDivElement>(null);
   const pressedBackdrop = useRef(false);
 
   useEffect(() => {
@@ -92,6 +94,8 @@ export function ApiModal({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [busy, onClose]);
+
+  useFocusTrap(panelRef);
 
   return createPortal(
     <div
@@ -117,7 +121,15 @@ export function ApiModal({
           cap, and because the backdrop centers it the overflow is split between both edges: the
           left of the panel ends up off-screen instead of merely scrolling. */}
       <div
+        ref={panelRef}
         data-tour={tourAnchor}
+        // `role`/`aria-modal`/`aria-label` and the focus trap arrive together, because each is half
+        // an answer: the roles tell a screen reader that everything behind this is inert, and the
+        // trap is what makes that true for the keyboard. Sixty dialogs in this app had neither.
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        tabIndex={-1}
         className={`flex max-h-[80vh] w-full min-w-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${width} ${height ?? ""}`}
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-4 py-2.5">

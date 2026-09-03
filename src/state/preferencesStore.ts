@@ -9,6 +9,10 @@ import {
 import { useRepoStore } from "./repoStore";
 import { DEFAULT_SATELLITE_LIMIT, useWindowStore } from "./windowStore";
 
+const NATIVE_NOTIFICATIONS_KEY = "native_notifications_enabled";
+const NATIVE_ONLY_BACKGROUND_KEY = "native_notifications_only_background";
+const MUTED_SOURCES_KEY = "muted_notification_sources";
+const PIPELINE_POLL_KEY = "pipeline_poll_seconds";
 const KEY = "auto_fetch_interval_seconds";
 const SECRET_SCAN_KEY = "secret_scan_enabled";
 const NOTIFICATION_SOUND_KEY = "notification_sound_enabled";
@@ -42,6 +46,38 @@ interface PreferencesState {
    * start playing chords at them.
    */
   notificationSoundEnabled: boolean;
+  /**
+   * Whether finished work also raises an operating-system notification.
+   *
+   * Defaults to **off** for the same reason the sound does, plus one of its own: turning it on is
+   * what asks the OS for permission, and a permission prompt on first launch — before the user has
+   * seen anything finish — is one people dismiss on reflex and can then only undo in System
+   * Settings. So the prompt happens the moment somebody asks for the feature.
+   */
+  nativeNotificationsEnabled: boolean;
+  /**
+   * Whether a system notification is suppressed while the window is in front.
+   *
+   * On by default, because that is the whole point of the feature: a banner telling you about
+   * something you are already looking at is noise. Off, every completion notifies — which some
+   * people genuinely want on a second monitor.
+   */
+  nativeNotificationsOnlyBackground: boolean;
+  /**
+   * Sources whose completions are not recorded at all, by `NotificationSource` id.
+   *
+   * Suppressed rather than hidden: a muted source never reaches the bell, so the unread count
+   * matches what the list will show. Stored as a comma-separated string because that is what a
+   * settings row holds, and the set is a dozen short ids.
+   */
+  mutedNotificationSources: string[];
+  /**
+   * How often a live pipeline run is re-read, in seconds.
+   *
+   * The Pipelines tab is this app's only polling client, and the cost lands on somebody else's rate
+   * limit — see `PIPELINE_POLL_CHOICES`. Five seconds is the default and the fastest offered.
+   */
+  pipelinePollSeconds: number;
   /**
    * Whether the editor annotates the caret's line with who last changed it. Defaults to **off**, for
    * the same kind of reason the sound above does but a stronger one: nothing is at risk if this is
@@ -87,6 +123,10 @@ interface PreferencesState {
   setAutoFetchSeconds: (seconds: number) => Promise<void>;
   setSecretScanEnabled: (enabled: boolean) => Promise<void>;
   setNotificationSoundEnabled: (enabled: boolean) => Promise<void>;
+  setNativeNotificationsEnabled: (enabled: boolean) => Promise<void>;
+  setNativeNotificationsOnlyBackground: (enabled: boolean) => Promise<void>;
+  setNotificationSourceMuted: (source: string, muted: boolean) => Promise<void>;
+  setPipelinePollSeconds: (seconds: number) => Promise<void>;
   setBlameAnnotationEnabled: (enabled: boolean) => Promise<void>;
   setSatelliteLimit: (limit: number) => Promise<void>;
   /** Saves the list and adopts the normalised version the backend stored. */
@@ -106,6 +146,10 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   autoFetchSeconds: 0,
   secretScanEnabled: true,
   notificationSoundEnabled: false,
+  nativeNotificationsEnabled: false,
+  nativeNotificationsOnlyBackground: true,
+  mutedNotificationSources: [],
+  pipelinePollSeconds: 5,
   blameAnnotationEnabled: false,
   satelliteLimit: DEFAULT_SATELLITE_LIMIT,
   lockedBranchRules: null,
@@ -121,6 +165,10 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         KEY,
         SECRET_SCAN_KEY,
         NOTIFICATION_SOUND_KEY,
+        NATIVE_NOTIFICATIONS_KEY,
+        NATIVE_ONLY_BACKGROUND_KEY,
+        MUTED_SOURCES_KEY,
+        PIPELINE_POLL_KEY,
         BLAME_ANNOTATION_KEY,
         WINDOW_LIMIT_KEY,
       ]).catch(
@@ -143,6 +191,17 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       // The sound is the other way round: unset means silent, so `=== "true"` covers both an
       // absent setting and an explicit "false" without a special case for either.
       notificationSoundEnabled: soundRaw === "true",
+      // Same shape: unset and explicit-false both mean "don't".
+      nativeNotificationsEnabled: stored[NATIVE_NOTIFICATIONS_KEY] === "true",
+      // The one boolean here that defaults to *on*, so unset has to be its own branch.
+      nativeNotificationsOnlyBackground: (stored[NATIVE_ONLY_BACKGROUND_KEY] ?? null) === null
+        ? true
+        : stored[NATIVE_ONLY_BACKGROUND_KEY] === "true",
+      pipelinePollSeconds: Number(stored[PIPELINE_POLL_KEY]) || 5,
+      mutedNotificationSources: (stored[MUTED_SOURCES_KEY] ?? "")
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean),
       // Same one-liner, same reason: unset and explicit-false are both "don't blame anything".
       blameAnnotationEnabled: stored[BLAME_ANNOTATION_KEY] === "true",
       satelliteLimit: clampWindows(stored[WINDOW_LIMIT_KEY]),
@@ -167,6 +226,29 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   setNotificationSoundEnabled: async (enabled) => {
     set({ notificationSoundEnabled: enabled });
     await setSetting(NOTIFICATION_SOUND_KEY, String(enabled));
+  },
+
+  setNativeNotificationsEnabled: async (enabled) => {
+    set({ nativeNotificationsEnabled: enabled });
+    await setSetting(NATIVE_NOTIFICATIONS_KEY, String(enabled));
+  },
+
+  setNativeNotificationsOnlyBackground: async (enabled) => {
+    set({ nativeNotificationsOnlyBackground: enabled });
+    await setSetting(NATIVE_ONLY_BACKGROUND_KEY, String(enabled));
+  },
+
+  setPipelinePollSeconds: async (seconds) => {
+    set({ pipelinePollSeconds: seconds });
+    await setSetting(PIPELINE_POLL_KEY, String(seconds));
+  },
+
+  setNotificationSourceMuted: async (source, muted) => {
+    const next = muted
+      ? Array.from(new Set([...get().mutedNotificationSources, source]))
+      : get().mutedNotificationSources.filter((entry) => entry !== source);
+    set({ mutedNotificationSources: next });
+    await setSetting(MUTED_SOURCES_KEY, next.join(","));
   },
 
   // Optimistic like the three above, and for the reason spelled out below `setLockedBranchRules`:

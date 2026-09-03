@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { BATCH_STATUS, SOURCE_KIND } from "./storyStatus";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CARD } from "../api/panelChrome";
 import { relativeTime } from "../api/settingsChrome";
 import { ToolbarButton } from "../db/dbChrome";

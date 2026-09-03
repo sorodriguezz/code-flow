@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  DocVersion,
   NoteBookRow,
   NoteMetaRow,
   NoteRow,
@@ -136,6 +137,32 @@ export const notesDeleteTemplate = (id: string) => invoke<void>("notes_delete_te
  */
 export const notesSearch = (workspaceId: string, query: string) =>
   invoke<NoteSearchHit[]>("notes_search", { workspaceId, query });
+
+/**
+ * The notes that link *to* this one.
+ *
+ * The reverse of `[[Title]]`, which has resolved forwards for a while: standing in a note and
+ * asking what points at it had no answer, so the note graph could only be walked one way. Read in
+ * Rust because it looks inside bodies the frontend never loads — the same reason `notesSearch`
+ * exists.
+ */
+export const notesBacklinks = (workspaceId: string, title: string, excludeId: string) =>
+  invoke<NoteSearchHit[]>("notes_backlinks", { workspaceId, title, excludeId });
+
+// ---------- version history ----------
+
+/**
+ * One note's past versions, newest first and without their bodies.
+ *
+ * Notes autosave, and until this existed a select-all and a keystroke was final once the editor
+ * session ended — the two authored-content workspaces were the only ones in the app with no undo
+ * that outlives the session. See `version_queries` for the throttle and the cap.
+ */
+export const notesListVersions = (id: string) => invoke<DocVersion[]>("notes_list_versions", { id });
+
+/** One version's full text — read when the reader opens it, not with the list. */
+export const notesVersionContent = (versionId: string) =>
+  invoke<string | null>("notes_version_content", { versionId });
 
 // ---------- writing with AI ----------
 

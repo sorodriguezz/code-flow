@@ -16,7 +16,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { NoteTreeRow } from "./NoteTreeRow";
 import { TemplatePickerModal } from "./TemplatePickerModal";
 import { ICON_BUTTON, TagPill } from "./notesChrome";

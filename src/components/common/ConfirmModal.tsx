@@ -1,10 +1,12 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { TriangleAlert } from "lucide-react";
+import { useFocusTrap } from "../../lib/useFocusTrap";
 import { useConfirmStore } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { ConfirmFlowDiagram } from "./ConfirmFlowDiagram";
 
 export function ConfirmModal() {
+  const panelRef = useRef<HTMLDivElement>(null);
   const request = useConfirmStore((s) => s.request);
   const respond = useConfirmStore((s) => s.respond);
   const t = useT();
@@ -19,12 +21,18 @@ export function ConfirmModal() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [request, respond]);
 
+  useFocusTrap(panelRef, request !== null);
+
   if (!request) return null;
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4" onClick={() => respond(false)}>
       <div
+        ref={panelRef}
         onClick={(e) => e.stopPropagation()}
+        role="alertdialog"
+        aria-modal="true"
+        tabIndex={-1}
         // Wider with a diagram than without: the two branch pills split the width between them,
         // so each one only ever gets half of it — and a name that wraps to three lines in a pill
         // is harder to read than the same name on one.

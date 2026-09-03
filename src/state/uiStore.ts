@@ -44,6 +44,15 @@ export type SettingsSectionId =
   | "claude"
   | "backup"
   | "remote"
+  /** The password manager's own settings — auto-lock, clipboard, generator defaults. They used to
+   *  live in a modal inside the vault, which is the one place a setting is looked for last. */
+  | "vault"
+  /** What the app tells you about, and how loudly. Split out of the notification bell's popover,
+   *  where a global preference had no business hiding. */
+  | "notifications"
+  /** The CI tab's polling interval. Its own section rather than a line under Git: the tab is
+   *  repository-scoped but the cost is per host, and it is the app's only polling client. */
+  | "pipelines"
   | "review"
   | "skills"
   | "api";
@@ -111,6 +120,9 @@ interface UiState {
    * sidebar and a shortcut, none of which own the modal, so it lives here and is rendered once
    * at the app root. */
   prLinkModalOpen: boolean;
+  /** "Clone a repository", lifted out of the sidebar's local state so the command palette can open
+   *  it too — the sidebar still owns the modal and renders it. */
+  cloneModalOpen: boolean;
   /** Which sub-tab the API client's settings section should open on, when asked for a specific one. */
   apiSettingsTab: ApiSettingsTab | undefined;
   /** Which of the API tab's two workspaces is on screen. */
@@ -119,7 +131,20 @@ interface UiState {
   setStoriesMode: (mode: StoriesMode) => void;
   /** Opens the stories section on a given sub-tab, in one move. */
   openStories: (mode: StoriesMode) => void;
+  /**
+   * The sub-tab a section should open on, consumed once and then cleared.
+   *
+   * Generic — a bare string rather than a union per section — because the settings search can land
+   * on any pane in the window and would otherwise need a typed opener per section. The section that
+   * reads it validates the value against its own tab list, so a stale id from a renamed pane falls
+   * back to the first tab instead of rendering nothing. `apiSettingsTab` stays as it is: it is a
+   * public entry point used from the API client itself, not just from search.
+   */
+  settingsTab: string | null;
   openSettings: (section: SettingsSectionId, hostingProvider?: HostingProvider) => void;
+  /** Opens a section straight onto one of its panes — what a search result does when picked. */
+  openSettingsAt: (section: SettingsSectionId, tab: string) => void;
+  clearSettingsTab: () => void;
   /**
    * Opens the settings window on the API client's section, optionally on one of its sub-tabs.
    *
@@ -149,6 +174,8 @@ interface UiState {
   toggleBranchSwitcher: () => void;
   closeBranchSwitcher: () => void;
   openPrLinkModal: () => void;
+  openCloneModal: () => void;
+  closeCloneModal: () => void;
   togglePrLinkModal: () => void;
   closePrLinkModal: () => void;
 }
@@ -159,6 +186,7 @@ export const useUiStore = create<UiState>((set) => ({
   settingsOpen: false,
   settingsSection: "general",
   settingsHostingProvider: "azure",
+  settingsTab: null,
   apiSettingsTab: undefined,
   apiWorkspace: "requests",
   pendingEditorPath: null,
@@ -170,6 +198,7 @@ export const useUiStore = create<UiState>((set) => ({
   shortcutsModalGroups: null,
   branchSwitcherOpen: false,
   prLinkModalOpen: false,
+  cloneModalOpen: false,
   setActiveView: (view) => set({ activeView: view, settingsOpen: false }),
   setStoriesMode: (mode) => set({ storiesMode: mode }),
   // Settings closed too: it covers the whole app, and landing behind it looks like nothing
@@ -180,7 +209,13 @@ export const useUiStore = create<UiState>((set) => ({
       settingsOpen: true,
       settingsSection: section,
       settingsHostingProvider: hostingProvider ?? s.settingsHostingProvider,
+      // Cleared, not carried: opening a section from the nav means "show me this section", and
+      // landing on whichever pane a search picked half an hour ago is not that.
+      settingsTab: null,
     })),
+  openSettingsAt: (section, tab) =>
+    set({ settingsOpen: true, settingsSection: section, settingsTab: tab }),
+  clearSettingsTab: () => set({ settingsTab: null }),
   openApiSettings: (tab) =>
     set({ settingsOpen: true, settingsSection: "api", apiSettingsTab: tab }),
   setApiWorkspace: (apiWorkspace) => set({ apiWorkspace }),
@@ -216,6 +251,8 @@ export const useUiStore = create<UiState>((set) => ({
   toggleBranchSwitcher: () => set((s) => ({ branchSwitcherOpen: !s.branchSwitcherOpen })),
   closeBranchSwitcher: () => set({ branchSwitcherOpen: false }),
   openPrLinkModal: () => set({ prLinkModalOpen: true }),
+  openCloneModal: () => set({ cloneModalOpen: true }),
+  closeCloneModal: () => set({ cloneModalOpen: false }),
   togglePrLinkModal: () => set((s) => ({ prLinkModalOpen: !s.prLinkModalOpen })),
   closePrLinkModal: () => set({ prLinkModalOpen: false }),
 }));

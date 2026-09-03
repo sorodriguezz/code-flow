@@ -1,20 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Info,
-  Network,
   Plus,
-  Settings2,
-  Share2,
-  ShieldCheck,
   Trash2,
-  Waypoints,
-  type LucideIcon,
 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
-import { motion } from "framer-motion";
-import { ActivePill } from "../common/ActivePill";
 import { Field, GhostButton, Row } from "./ApiModal";
 import { Panel, SettingsHeader } from "./settingsChrome";
+import { SettingsRail } from "../settings/settingsNav";
+import { tabsFor } from "../../lib/settingsCatalog";
 import { CollaborationPanel } from "./CollaborationPanel";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
 import { useUiStore } from "../../state/uiStore";
@@ -24,7 +18,6 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { apiPickFile } from "../../lib/tauri/apiCommands";
 import type { ClientCert } from "../../types/api";
-import type { TranslationKey } from "../../lib/i18n/translations";
 
 const CERT_EXTENSIONS = ["p12", "pfx", "pem", "crt", "cer"];
 const KEY_EXTENSIONS = ["pem", "key"];
@@ -335,13 +328,6 @@ function GeneralPanel() {
 
 // ---------------------------------------------------------------------------
 
-const TABS: { id: ApiSettingsTab; labelKey: TranslationKey; icon: LucideIcon }[] = [
-  { id: "network", labelKey: "api.settings.network", icon: Network },
-  { id: "proxy", labelKey: "api.settings.proxy", icon: Waypoints },
-  { id: "certificates", labelKey: "api.settings.certificates", icon: ShieldCheck },
-  { id: "general", labelKey: "settings.general", icon: Settings2 },
-  { id: "collab", labelKey: "api.collab.title", icon: Share2 },
-];
 
 /**
  * The settings themselves, without the modal around them, so the `api` section of the main
@@ -366,7 +352,18 @@ export function ApiSettingsBody() {
     void ensureApiStoreLoaded();
   }, []);
 
+  const tabs = tabsFor("api");
   const [tab, setTab] = useState<ApiSettingsTab>(initialTab ?? "network");
+
+  // The settings search can land on any of these panes, through the generic `settingsTab` rather
+  // than through `apiSettingsTab` — which stays as it is because the API client itself uses it.
+  const pendingTab = useUiStore((s) => (s.settingsSection === "api" ? s.settingsTab : null));
+  const clearSettingsTab = useUiStore((s) => s.clearSettingsTab);
+  useEffect(() => {
+    if (!pendingTab) return;
+    if (tabs.some((entry) => entry.id === pendingTab)) setTab(pendingTab as ApiSettingsTab);
+    clearSettingsTab();
+  }, [pendingTab, tabs, clearSettingsTab]);
 
   // Initial state alone would only be read on mount, and a caller that asks for a tab while this
   // is already on screen would be silently ignored.
@@ -413,30 +410,7 @@ export function ApiSettingsBody() {
           arrived as a jump. The rail no longer moves at all now that the pane beside it does the
           scrolling, but `layoutRoot` stays: it makes this element the frame of reference, which is
           what the tween should have been measured against all along. */}
-      <motion.nav layoutRoot className="w-[168px] shrink-0 self-start">
-        {TABS.map(({ id, labelKey, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            aria-current={tab === id ? "page" : undefined}
-            title={t(labelKey)}
-            // Colour and the pill carry the selection; no weight change, for the same reason the
-            // outer nav avoids one — bolding re-measures the label and reflows the row.
-            className={`relative mb-0.5 flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
-              tab === id
-                ? "text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
-            }`}
-          >
-            {tab === id && <ActivePill layoutId="cf-api-settings-pill" />}
-            {/* Above the pill, which covers the whole button. */}
-            <span className="relative flex min-w-0 flex-1 items-center gap-1.5">
-              <Icon size={13} className="shrink-0" />
-              <span className="truncate">{t(labelKey)}</span>
-            </span>
-          </button>
-        ))}
-      </motion.nav>
+      <SettingsRail tabs={tabs} active={tab} onSelect={(id) => setTab(id as ApiSettingsTab)} layoutId="cf-api-settings-pill" />
 
         {/* `overflow-y-scroll`, not `auto`: the app styles its scrollbars, so one is a real 10px of
             layout rather than an overlay. Letting it come and go as a pane grows past the height

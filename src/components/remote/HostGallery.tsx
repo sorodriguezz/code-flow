@@ -13,7 +13,7 @@ import {
   Terminal,
   Waypoints,
 } from "lucide-react";
-import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { HostDot, KindGlyph, OsGlyph, Pill } from "./remoteChrome";
 import { useHostMenu, useNewConnectionMenu, useOpenPrimary } from "./hostMenu";
 import {
