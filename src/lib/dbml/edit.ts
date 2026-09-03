@@ -80,6 +80,42 @@ export function freeName(taken: Iterable<string>, base: string): string {
   }
 }
 
+/**
+ * Whether some *other* block already answers to `name`.
+ *
+ * `freeName` is for names this app invents and can therefore count upwards from. This is for names
+ * a **person typed**, where counting up would silently produce something they did not ask for, so
+ * the only honest answer is to decline — see `renameTable`.
+ *
+ * Two rules, both load-bearing and both measured against `@dbml/core` 8.3.1 rather than assumed:
+ *
+ * - **Enums count.** `Table status` and `Enum status` parse together perfectly happily, so the
+ *   parser will not catch this one. The collision is further downstream: `toSchemaDiagram` pours
+ *   tables and enums into one node list and both derive their id from `qualify(schema, name)`, so
+ *   two boxes end up sharing an id — one of them unreachable, the table drawn in the enum's colour,
+ *   and no error anywhere to say so.
+ * - **Aliases count.** `findBlock` resolves an alias *before* a name, so a table named after some
+ *   other table's alias makes the next edit land on the wrong block entirely.
+ *
+ * Compared case-insensitively. That is stricter than the parser — `Table users` and `Table Users`
+ * do coexist — and deliberately so, for parity with `freeName`: two names a reader cannot tell
+ * apart are not worth the ambiguity. `exceptName` is what keeps a pure re-casing of a block's own
+ * name legal.
+ */
+export function nameIsTaken(source: string, name: string, exceptName?: string): boolean {
+  const blocks = blocksOf(source);
+  const self = exceptName
+    ? (findBlock(blocks, exceptName, "table") ?? findBlock(blocks, exceptName, "enum"))
+    : undefined;
+  const wanted = name.toLowerCase();
+  return blocks.some(
+    (other) =>
+      other !== self &&
+      (other.kind === "table" || other.kind === "enum") &&
+      (other.name.toLowerCase() === wanted || other.alias?.toLowerCase() === wanted),
+  );
+}
+
 /** DBML needs quotes only when the name is not a bare identifier. */
 export function quoteName(name: string): string {
   return /^[A-Za-z_]\w*$/.test(name) ? name : `"${name}"`;
@@ -223,11 +259,20 @@ export function addTable(source: string, name: string): string {
  * would also rewrite a column called `orders`, a note that mentions one, and the word inside
  * `order_items`. Each site is found structurally instead — the declaration from `blocksOf`, the
  * endpoints from the `Ref` lines' own shape.
+ *
+ * **Declines a name that is already taken**, byte-for-byte, rather than writing it. Two blocks of
+ * one name is not an untidy schema, it is one that does not parse — so the canvas blanks, the error
+ * flips `editing.blocked`, and every visual control including the rename that caused it goes inert.
+ * Renaming onto an *enum*'s name is worse still: it parses, so nothing is disabled and nothing is
+ * reported, and the reader is left with two boxes sharing an id. See `nameIsTaken`. Returning
+ * `source` unchanged is also what makes `applyEdit` bail on its own `next === source` check, so the
+ * refusal costs no undo entry — the caller is the half that says why.
  */
 export function renameTable(source: string, from: string, to: string): string {
   const blocks = blocksOf(source);
   const block = findBlock(blocks, from, "table") ?? findBlock(blocks, from, "enum");
   if (!block) return source;
+  if (nameIsTaken(source, to, from)) return source;
 
   const lines = source.split("\n");
   // The declaration: replace only the name token, so `as`, the settings and any trailing comment
@@ -237,17 +282,26 @@ export function renameTable(source: string, from: string, to: string): string {
     (_all, head: string) => `${head}${quotePath(to)}`,
   );
 
-  const source2 = lines.join("\n");
-  return rewriteRefEndpoints(source2, block.name, to);
+  const source2 = rewriteRefEndpoints(lines.join("\n"), block.name, to);
+  // Third pass, and it is not optional: a `TableGroup` naming a table that no longer exists is a
+  // hard parse error, not an untidy document.
+  const source3 = renameGroupMember(source2, block.name, to);
+  // Fourth, for an enum only: the columns typed with it. See `renameEnumType` for why this one is
+  // the dangerous kind of miss rather than the loud kind.
+  return block.kind === "enum" ? renameEnumType(source3, block.name, to) : source3;
 }
 
-/** Removes a table and every relationship that mentions it. */
+/** Removes a table, every relationship that mentions it, and its entry in any table group. */
 export function dropTable(source: string, name: string): string {
   const blocks = blocksOf(source);
   const block = findBlock(blocks, name, "table") ?? findBlock(blocks, name, "enum");
   if (!block) return source;
 
-  const withoutRefs = dropRefsTouching(source, block.name, block.alias);
+  const withoutRefs = dropGroupMember(
+    dropRefsTouching(source, block.name, block.alias),
+    block.name,
+    block.alias,
+  );
   const after = blocksOf(withoutRefs);
   const target = findBlock(after, name, block.kind);
   if (!target) return withoutRefs;
@@ -494,8 +548,15 @@ export function addEnum(source: string, name: string, values: string[] = []): st
  * a capturing version returns `[left, ">", right]` and every caller that reads `parts[1]` gets the
  * arrow where it expected the second endpoint. Every relationship operation in this file goes
  * through that split.
+ *
+ * `)` is in the lookbehind for the **composite** form — `Ref: orders.(a, b) > users.(a, b)`, which
+ * is legal DBML and whose left endpoint therefore ends in a bracket. Without it the split found no
+ * arrow, `refEndsOf` answered `null`, and every operation here skipped the block in silence:
+ * renaming or dropping either table left the ref dangling and the document stopped parsing, and
+ * "delete this relationship" was a no-op. It cannot over-match: the only text this is ever run
+ * against is the inside of a `Ref` block.
  */
-const ARROW = /(?<=[\w"\].])\s*(?:<>|[<>-])\s*(?=[\w"])/;
+const ARROW = /(?<=[\w")\].])\s*(?:<>|[<>-])\s*(?=[\w"])/;
 
 /**
  * Relationships written *inside* a column, and why they need their own pass.
@@ -620,10 +681,23 @@ function same(a: RefEnd, b: RefEnd): boolean {
   return bare(a.table) === bare(b.table) && a.column.toLowerCase() === b.column.toLowerCase();
 }
 
-/** The two ends of a `Ref`, however it was written. `null` when the line does not parse as one. */
+/**
+ * The two ends of a `Ref`, however it was written. `null` when the text does not parse as one.
+ *
+ * DBML gives a relationship two shapes and both are idiomatic:
+ *
+ *     Ref name: orders.uid > users.id      // the short form, the name optional
+ *     Ref name { orders.uid > users.id }   // the braced form, the name optional
+ *
+ * The `{` used to be missed, so `mapRefs` and `filterRefs` skipped every braced block — renaming or
+ * dropping a table left those refs pointing at something that no longer existed, which is not an
+ * untidy document but one that stops parsing. Measured against `@dbml/core` 8.3.1: a braced block
+ * holds **exactly one** relationship ("A Ref can only contain one binary relationship"), which is
+ * why one pair of ends for the whole block is still the right model.
+ */
 function refEndsOf(text: string): { left: RefEnd; right: RefEnd } | null {
-  // Everything after the first `:` that is not part of a name — `Ref name: a.b > c.d`.
-  const body = /:(.*)$/s.exec(text.replace(/^\s*ref\b/i, ""))?.[1];
+  // Everything past the delimiter that opens the body, skipping the optional name before it.
+  const body = /^[^:{]*[:{](.*)$/s.exec(text.replace(/^\s*ref\b/i, ""))?.[1];
   if (!body) return null;
   const parts = body.split(ARROW);
   if (parts.length < 2) return null;
@@ -683,6 +757,135 @@ function rewriteRefColumnBlocks(source: string, table: string, from: string, to:
         )
       : line,
   );
+}
+
+// ---- enum types ------------------------------------------------------------
+
+/**
+ * A renamed enum, wherever a column is typed with it.
+ *
+ * This one does **not** stop the document parsing, which is exactly why it needed finding: DBML
+ * accepts any word as a type, so renaming `Enum estado` to `situacion` leaves `state estado` reading
+ * as a perfectly legal column of some type nobody declared. Nothing errors, the badge and the enum
+ * box's link quietly stop matching, and the schema is wrong in a way only a person notices.
+ *
+ * The type is the **second token** of a column line, and only a bare one is a candidate: a
+ * parametrised type (`varchar(255)`) or a quoted one can never be an enum reference.
+ */
+function renameEnumType(source: string, from: string, to: string): string {
+  const lines = source.split("\n");
+  let touched = false;
+  for (const block of blocksOf(source)) {
+    if (block.kind !== "table") continue;
+    const { start, end } = bodyRange(source, block);
+    let depth = 0;
+    // A triple-quoted note's body is prose, and prose is not columns. It carries no braces, so
+    // `braceDelta` leaves the depth at 0 and every line of it reached the column regex below —
+    // where "el estado del pedido" reads as a column `el` of type `estado` and got rewritten in
+    // the middle of a sentence. Counted rather than tested, because the opening line is
+    // `note: ` plus the delimiter, and a line carrying two delimiters opens and closes in place.
+    let inNote = false;
+    for (let at = start; at < end; at += 1) {
+      const text = lines[at];
+      const trimmed = text.trim();
+      const here = depth;
+      depth += braceDelta(text);
+      const wasInNote = inNote;
+      if ((trimmed.split(NOTE_FENCE).length - 1) % 2 === 1) inNote = !inNote;
+      if (wasInNote || inNote) continue;
+      // `here !== 0` skips the inside of `indexes { … }`, where the words are column names.
+      if (here !== 0 || !trimmed || trimmed.startsWith("//") || /^note\s*:/i.test(trimmed)) continue;
+      // The type may be schema-qualified (`core.estado`) — that is how a column references an enum
+      // in another schema, and what renaming `Enum core.estado` has to be able to find.
+      const match = /^(\s*(?:"[^"]*"|[\w]+)\s+)((?:[\w]+\.)*[\w]+)(?=\s|\[|$)/.exec(text);
+      if (!match || match[2].toLowerCase() !== from.toLowerCase()) continue;
+      lines[at] = `${match[1]}${quotePath(to)}${text.slice(match[0].length)}`;
+      touched = true;
+    }
+  }
+  return touched ? lines.join("\n") : source;
+}
+
+// ---- table groups ----------------------------------------------------------
+
+/**
+ * `TableGroup` lists its members by name, and nothing here was looking at them.
+ *
+ * A group naming a table that no longer exists does not make a messy document — `@dbml/core` fails
+ * it outright with "Table 'users' does not exist in Schema 'public'". So renaming or dropping a
+ * table had to reach in here too, and until it did, either operation on a grouped table blanked the
+ * canvas. An **empty** group is legal (measured), so dropping the last member needs no special case.
+ *
+ * Only a line that is nothing but a name is a member: a group body may also carry `note:` and the
+ * declaration may carry settings, and neither of those is a table.
+ */
+/** DBML's multi-line note delimiter, as a constant so this file never has to quote it inline. */
+const NOTE_FENCE = "'".repeat(3);
+
+const GROUP_MEMBER = /^((?:"[^"]*"|[\w]+)(?:\.(?:"[^"]*"|[\w]+))*)\s*(?:\/\/.*)?$/;
+
+function groupMembers(source: string): { line: number; name: string }[] {
+  const lines = source.split("\n");
+  const out: { line: number; name: string }[] = [];
+  for (const block of blocksOf(source)) {
+    if (block.kind !== "tablegroup") continue;
+    const { start, end } = bodyRange(source, block);
+    let depth = 0;
+    for (let at = start; at < end; at += 1) {
+      const text = lines[at].trim();
+      const here = depth;
+      depth += braceDelta(lines[at]);
+      if (here !== 0 || !text || text.startsWith("//")) continue;
+      const member = GROUP_MEMBER.exec(text);
+      if (member) out.push({ line: at, name: member[1].replace(/"/g, "") });
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a group's member line names this exact block.
+ *
+ * The full name, not its last segment — which is both what DBML means and what stops this eating
+ * the wrong row. A group member is resolved in the schema it names (a bare `users` inside a group
+ * is `public.users`, and a document whose only `users` lives in `core` does not parse), so an exact
+ * comparison is the semantics rather than a conservatism. Comparing bare halves looked harmless and
+ * was not: with both `Table core.users` and `Table users` declared, renaming the public one
+ * rewrote *both* group lines to the same name, which `@dbml/core` rejects with "Table .clientes is
+ * already in the group" — the canvas blanking on a rename that looked like it worked, which is the
+ * exact failure this whole pass exists to prevent.
+ */
+function sameMember(member: string, name: string): boolean {
+  return member.toLowerCase() === name.toLowerCase();
+}
+
+/** A renamed table, wherever a group lists it. */
+function renameGroupMember(source: string, from: string, to: string): string {
+  const found = groupMembers(source).filter((member) => sameMember(member.name, from));
+  if (found.length === 0) return source;
+  const lines = source.split("\n");
+  for (const member of found) {
+    lines[member.line] = lines[member.line].replace(
+      /^(\s*)(?:"[^"]*"|[\w]+)(?:\.(?:"[^"]*"|[\w]+))*/,
+      (_all, indent: string) => `${indent}${quotePath(to)}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/** Every group entry naming a dropped table, removed. */
+function dropGroupMember(source: string, name: string, alias: string | null): string {
+  const names = [name, alias].filter(Boolean) as string[];
+  const gone = new Set(
+    groupMembers(source)
+      .filter((member) => names.some((entry) => sameMember(member.name, entry)))
+      .map((member) => member.line),
+  );
+  if (gone.size === 0) return source;
+  return source
+    .split("\n")
+    .filter((_line, at) => !gone.has(at))
+    .join("\n");
 }
 
 /** Drops every relationship with `table` at either end — blocks and inline settings alike. */

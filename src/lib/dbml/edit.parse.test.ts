@@ -393,3 +393,365 @@ describe("relationships written as column settings", () => {
     expect(doc).not.toMatch(/ref:/i);
   });
 });
+
+/**
+ * The shapes a relationship can take that the rewriting engine used to be blind to.
+ *
+ * Each of these is legal in the dialect this app parses with (`Parser.parse(source, "dbml")`, see
+ * `parse.ts`) and each one used to make `refEndsOf` answer `null`, so `mapRefs` and `filterRefs`
+ * skipped the block entirely and `renameTable`/`dropTable` left an endpoint naming something that
+ * no longer existed. That does not produce an untidy schema — `@dbml/core` rejects it outright — so
+ * the canvas blanked on an edit that looked like it had worked, and with the document no longer
+ * parsing every visual control went inert behind `editing.blocked`. String assertions cannot catch
+ * any of this, which is the whole reason this suite exists.
+ *
+ * Watch the dialect when adding a fixture here. `TableGroup` settings and a group `Note:` are v2
+ * only and are rejected by the v1 parser this app uses, as is a `Ref:` whose endpoints sit on the
+ * next line — `edit.ts` handles all three defensively, but they cannot be asserted through
+ * `expectParses`.
+ */
+const BRACED = `Table usuarios {
+  id integer [pk]
+}
+
+Table historias {
+  usuario_id integer
+}
+
+Ref {
+  historias.usuario_id > usuarios.id
+}
+`;
+
+const COMPOSITE = `Table usuarios {
+  tenant integer
+  id     integer
+}
+
+Table historias {
+  tenant     integer
+  usuario_id integer
+}
+
+Ref: historias.(tenant, usuario_id) > usuarios.(tenant, id)
+`;
+
+const GROUPED = `Table usuarios {
+  id integer [pk]
+}
+
+Table historias {
+  id integer [pk]
+}
+
+TableGroup nucleo {
+  usuarios
+  historias
+}
+`;
+
+describe("every shape a relationship can be written in", () => {
+  const fixtures = [
+    ["a braced Ref block", BRACED],
+    ["a composite Ref", COMPOSITE],
+    ["a TableGroup member", GROUPED],
+  ] as const;
+
+  for (const [what, doc] of fixtures) {
+    it(`${what}: the fixture is valid`, () => {
+      expectParses(doc, what);
+    });
+
+    it(`${what}: survives a rename`, () => {
+      const got = renameTable(doc, "usuarios", "clientes");
+      expect(got).not.toBe(doc);
+      expect(got).not.toMatch(/\busuarios\b/);
+      expectParses(got, `renameTable (${what})`);
+    });
+
+    it(`${what}: survives a drop`, () => {
+      const got = dropTable(doc, "usuarios");
+      expect(got).not.toContain("Table usuarios");
+      expectParses(got, `dropTable (${what})`);
+    });
+  }
+
+  // A group whose last member goes is legal, and emptying it is the right answer: the alternative
+  // is deciding on the user's behalf that the group should go too.
+  it("empties a TableGroup rather than leaving a member that is gone", () => {
+    let doc = dropTable(GROUPED, "usuarios");
+    doc = dropTable(doc, "historias");
+    expect(doc).toContain("TableGroup nucleo");
+    expect(doc).not.toMatch(/^\s+usuarios\s*$/m);
+    expectParses(doc, "dropTable (last group member)");
+  });
+
+  // The one that reads as a dead button rather than as a corruption, and so went unreported.
+  it("deletes a composite relationship instead of silently keeping it", () => {
+    const got = dropRef(
+      COMPOSITE,
+      { table: "historias", column: "tenant" },
+      { table: "usuarios", column: "tenant" },
+    );
+    expect(got).not.toMatch(/^Ref:/m);
+    expectParses(got, "dropRef (composite)");
+  });
+});
+
+/**
+ * A rename onto a name that is already spoken for.
+ *
+ * The report was "renaming created another table and everything broke", and this is exactly that:
+ * `renameTable` wrote the new name into the declaration without checking, leaving the document with
+ * two blocks of one name. The enum case is the one most worth a test, because it is the variant the
+ * parser does *not* catch — two boxes end up sharing a node id with no error anywhere. See
+ * `nameIsTaken`.
+ */
+describe("a rename declines a name that is taken", () => {
+  const TAKEN = `Table usuarios {
+  id integer [pk]
+}
+
+Table historias {
+  id integer [pk]
+}
+
+Enum estado {
+  borrador
+  publicado
+}
+
+Table clientes as c {
+  id integer [pk]
+}
+`;
+
+  it("the fixture is valid", () => {
+    expectParses(TAKEN, "the taken fixture");
+  });
+
+  for (const [what, to] of [
+    ["another table", "historias"],
+    ["an enum", "estado"],
+    ["another table's alias", "c"],
+    ["the same name in another case", "HISTORIAS"],
+  ] as const) {
+    it(`refuses ${what}, byte for byte`, () => {
+      // Identity, not merely "still parses": a refused edit has to leave the document alone, or
+      // `applyEdit`'s `next === source` guard misses and Monaco takes an undo entry for a change
+      // nobody made.
+      expect(renameTable(TAKEN, "usuarios", to)).toBe(TAKEN);
+    });
+  }
+
+  it("still allows a block to be re-cased", () => {
+    const got = renameTable(TAKEN, "usuarios", "Usuarios");
+    expect(got).toContain("Table Usuarios {");
+    expectParses(got, "renameTable (re-case)");
+  });
+
+  it("still allows an ordinary rename", () => {
+    const got = renameTable(TAKEN, "usuarios", "clientes_finales");
+    expect(got).toContain("Table clientes_finales {");
+    expectParses(got, "renameTable (free name)");
+  });
+});
+
+/**
+ * Renaming an enum, which is the quiet one.
+ *
+ * DBML takes any bare word as a column type, so an enum renamed without this leaves every column
+ * that used it reading `state estado` — legal, parseable, and no longer an enum reference. Nothing
+ * errors and nothing is disabled; the badge and the enum box's link just stop matching, and the
+ * schema is wrong in a way only a person notices.
+ */
+describe("renaming an enum carries the columns typed with it", () => {
+  const ENUMS = `Enum estado {
+  borrador
+  publicado
+}
+
+Table posts {
+  id           integer     [pk, increment]
+  state        estado      [not null]
+  title        varchar(200)
+  estado_note  text
+
+  indexes {
+    (state) [name: 'estado']
+  }
+  note: 'menciona estado en prosa'
+}
+`;
+
+  it("the fixture is valid", () => {
+    expectParses(ENUMS, "the enum fixture");
+  });
+
+  it("rewrites the column's type", () => {
+    const got = renameTable(ENUMS, "estado", "situacion");
+    expect(got).toContain("Enum situacion {");
+    // The trailing run of spaces is the one the author wrote, not a re-alignment: `edit.ts` copies
+    // every byte it did not have to change, and re-flowing the column would be the Format button's
+    // job rather than a rename's.
+    expect(got).toContain("state        situacion      [not null]");
+    expectParses(got, "renameTable (enum)");
+  });
+
+  it("touches nothing else that happens to say the same word", () => {
+    const got = renameTable(ENUMS, "estado", "situacion");
+    // A column *named* after it, a parametrised type, an index name and prose in a note are all
+    // words that are not the type token of a column line.
+    expect(got).toContain("estado_note  text");
+    expect(got).toContain("varchar(200)");
+    expect(got).toContain("(state) [name: 'estado']");
+    expect(got).toContain("note: 'menciona estado en prosa'");
+  });
+});
+
+/**
+ * The four shapes an adversarial pass found after the first round of fixes.
+ *
+ * Each one was produced by a change that was *itself* a fix — which is the argument for this suite:
+ * the first three do not merely look wrong, they emit DBML the parser rejects, and the fourth
+ * rewrites prose in the middle of a sentence while still parsing perfectly.
+ */
+const NOTE_FENCE = "'".repeat(3);
+
+describe("shapes that broke the first round of fixes", () => {
+  // The block-splitter used to stop on the arrow, which for this shape is one line short of the
+  // closing brace — so a delete spliced half the block and left the `}` behind.
+  const BRACE_ON_ITS_OWN_LINE = `Table usuarios {
+  id integer [pk]
+}
+
+Table historias {
+  usuario_id integer
+}
+
+Ref
+{
+  historias.usuario_id > usuarios.id
+}
+`;
+
+  // And a blank line inside a braced body used to end the block for the same reason.
+  const BLANK_INSIDE = `Table usuarios {
+  id integer [pk]
+}
+
+Table historias {
+  usuario_id integer
+}
+
+Ref {
+
+  historias.usuario_id > usuarios.id
+}
+`;
+
+  for (const [what, doc] of [
+    ["a Ref whose brace is on its own line", BRACE_ON_ITS_OWN_LINE],
+    ["a Ref with a blank line in its body", BLANK_INSIDE],
+  ] as const) {
+    it(`${what}: the fixture is valid`, () => {
+      expectParses(doc, what);
+    });
+
+    it(`${what}: deleting the relationship leaves no orphan brace`, () => {
+      const got = dropRef(
+        doc,
+        { table: "historias", column: "usuario_id" },
+        { table: "usuarios", column: "id" },
+      );
+      // Parsing is the assertion that matters — an orphan `}` is a syntax error, and the tables'
+      // own closing braces make a "no lone brace" regex meaningless.
+      expect(got).not.toMatch(/\bRef\b/i);
+      expectParses(got, `dropRef (${what})`);
+    });
+
+    it(`${what}: dropping a table takes the whole block`, () => {
+      const got = dropTable(doc, "usuarios");
+      expect(got).not.toContain("usuarios");
+      expectParses(got, `dropTable (${what})`);
+    });
+  }
+
+  // Group members resolve in the schema they name, so matching on the bare half rewrote the
+  // namesake in another schema as well — two group lines with one name, which DBML rejects.
+  const TWO_SCHEMAS = `Table core.users {
+  id integer [pk]
+}
+
+Table users {
+  id integer [pk]
+}
+
+TableGroup g {
+  core.users
+  users
+}
+`;
+
+  it("a cross-schema namesake is a different table", () => {
+    expectParses(TWO_SCHEMAS, "the two-schema fixture");
+
+    const renamed = renameTable(TWO_SCHEMAS, "users", "clientes");
+    expect(renamed).toContain("  core.users\n  clientes\n");
+    expectParses(renamed, "renameTable (public half of a namesake pair)");
+
+    const qualified = renameTable(TWO_SCHEMAS, "core.users", "core.clientes");
+    expect(qualified).toContain("  core.clientes\n  users\n");
+    expectParses(qualified, "renameTable (qualified half of a namesake pair)");
+
+    const dropped = dropTable(TWO_SCHEMAS, "users");
+    expect(dropped).toContain("  core.users\n");
+    expect(dropped).not.toMatch(/^\s+users\s*$/m);
+    expectParses(dropped, "dropTable (public half of a namesake pair)");
+  });
+
+  // The enum pass walks column lines, and a multi-line note's body carries no braces — so every
+  // line of the prose reached the column regex, where "el estado del pedido" read as a column `el`
+  // of type `estado`. It parses either way; that is what makes it worth a test.
+  const PROSE = `Enum estado {
+  borrador
+  publicado
+}
+
+Table posts {
+  id    integer [pk]
+  state estado
+  note: ${NOTE_FENCE}
+  el estado del pedido
+  otra linea estado aqui
+  ${NOTE_FENCE}
+}
+`;
+
+  it("leaves a multi-line note's prose alone", () => {
+    expectParses(PROSE, "the prose fixture");
+    const got = renameTable(PROSE, "estado", "situacion");
+    expect(got).toContain("state situacion");
+    expect(got).toContain("el estado del pedido");
+    expect(got).toContain("otra linea estado aqui");
+    expectParses(got, "renameTable (enum with a prose note)");
+  });
+
+  it("finds a column typed with a schema-qualified enum", () => {
+    const doc = `Enum core.estado {
+  borrador
+  publicado
+}
+
+Table posts {
+  id    integer [pk]
+  state core.estado
+}
+`;
+    expectParses(doc, "the qualified-enum fixture");
+    const got = renameTable(doc, "core.estado", "core.situacion");
+    expect(got).toContain("Enum core.situacion {");
+    expect(got).toContain("state core.situacion");
+    expectParses(got, "renameTable (qualified enum)");
+  });
+});

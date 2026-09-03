@@ -63,6 +63,7 @@ export function DbmlInspector({
   onSelect,
   onClose,
   onOpen,
+  onHoverRef,
   pinned = false,
   onTogglePin,
   width,
@@ -76,6 +77,15 @@ export function DbmlInspector({
   onClose: () => void;
   /** Jumps to the declaration in the editor. */
   onOpen?: (id: string) => void;
+  /**
+   * The relationship the pointer is on, or `null`.
+   *
+   * Reading a relation row and finding the line it names are the same question asked twice: the
+   * panel says `usuarios.id < historias.usuario_id` and the canvas has forty lines on it. Hovering
+   * the row narrows the drawing to that one relationship — the same highlight hovering the line
+   * itself produces, driven from the other end.
+   */
+  onHoverRef?: (id: string | null) => void;
   /** Held: the canvas can no longer change what is being read. */
   pinned?: boolean;
   onTogglePin?: () => void;
@@ -102,7 +112,12 @@ export function DbmlInspector({
     addField: (table: string, field: FieldEdit) => void;
     updateField: (table: string, name: string, field: FieldEdit) => void;
     dropField: (table: string, name: string) => void;
+    /** Both arguments are table **ids** — the sidecar carrying the mark and the dragged position is
+     *  keyed by them. See `moveSidecarKey` in the workbench. */
     renameTable: (from: string, to: string) => void;
+    /** Removes the selected table — or enum, which `edits.dropTable` also handles — along with
+     *  every relationship that named it and its entry in any table group. Takes the **id**. */
+    dropTable: (id: string) => void;
     setNote: (table: string, note: string) => void;
     addRef: (from: RefEnd, to: RefEnd, cardinality: Cardinality) => void;
     dropRef: (from: RefEnd, to: RefEnd) => void;
@@ -121,6 +136,11 @@ export function DbmlInspector({
 
   // A form left open while the selection moves would submit against the table now on screen.
   useEffect(() => setAdding(null), [id]);
+
+  // The row's own `pointerleave` covers the ordinary case. This covers the two that are not:
+  // the selection moving out from under the pointer, and a row being deleted while hovered —
+  // both of which would otherwise leave the canvas lit for a relationship nobody is looking at.
+  useEffect(() => () => onHoverRef?.(null), [id, onHoverRef]);
 
   /**
    * What the type box offers: this document's enums, then the types it already uses, then the
@@ -196,9 +216,14 @@ export function DbmlInspector({
                 thing. A pencil would be a fifth control in a header that already has two. */}
             <InlineName
               value={table ? table.name : (asEnum?.name ?? "")}
-              editable={Boolean(edit) && !edit?.blocked && Boolean(table)}
+              // Enums too, now that `renameTable` rewrites the columns typed with them — without
+              // that pass a renamed enum left `state estado` behind, which parses (DBML takes any
+              // word as a type) and silently stops being an enum reference.
+              editable={Boolean(edit) && !edit?.blocked && Boolean(table || asEnum)}
               title={edit?.blocked ? edit.blockedReason : t("dbml.inspector.rename")}
-              onCommit={(next) => table && edit?.renameTable(table.name, next)}
+              // The id, not the name: the sidecar holding this table's mark and its dragged
+              // position is keyed by it. See `moveSidecarKey` in the workbench.
+              onCommit={(next) => id && edit?.renameTable(id, next)}
             />
             <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10px] text-[var(--cf-text-muted)]">
               {related > 0 && <span>{t("dbml.relatedCount", { count: String(related) })}</span>}
@@ -374,6 +399,7 @@ export function DbmlInspector({
                       <Relation
                         key={`out-${ref.id}`}
                         refer={ref}
+                        onHover={onHoverRef}
                         onClick={() => onSelect(ref.to.table)}
                         onRemove={
                           edit && !edit.blocked
@@ -394,6 +420,7 @@ export function DbmlInspector({
                       <Relation
                         key={`in-${ref.id}`}
                         refer={ref}
+                        onHover={onHoverRef}
                         onClick={() => onSelect(ref.from.table)}
                         onRemove={
                           edit && !edit.blocked
@@ -435,6 +462,32 @@ export function DbmlInspector({
           className="shrink-0 border-t border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
         >
           {t("dbml.goToDefinition")}
+        </button>
+      )}
+
+      {/* Deleting the whole thing, in the footer rather than the header or behind a fold. The
+          header already refuses a third control, a hover row action needs a row and a table has
+          none, and a section holding one button is a button you have to unfold to find. Outside the
+          scroller, so it is in the same place on a two-column table and on a forty-column one — and
+          last, so a destructive control is never the thing directly above what you were reaching
+          for. No confirmation, matching this panel's own `dropField`/`dropRelation` and the canvas
+          menu: the change is one text edit on Monaco's undo stack and in the history panel. */}
+      {edit && id && (table || asEnum) && (
+        <button
+          type="button"
+          disabled={edit.blocked}
+          title={edit.blocked ? edit.blockedReason : undefined}
+          onClick={() => {
+            edit.dropTable(id);
+            // The selection self-heals once the re-parse notices the id is gone, but that is a
+            // parse debounce away — long enough to read as a panel still describing what you just
+            // deleted.
+            onClose();
+          }}
+          className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[10.5px] text-[var(--cf-danger)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-danger)_12%,transparent)] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+        >
+          <Trash2 size={12} className="shrink-0 opacity-80" />
+          {t(asEnum ? "dbml.dropEnum" : "dbml.dropTable")}
         </button>
       )}
     </aside>
@@ -1122,10 +1175,13 @@ function Relation({
   refer,
   onClick,
   onRemove,
+  onHover,
 }: {
   refer: DbmlRef;
   onClick: () => void;
   onRemove?: () => void;
+  /** Lights this relationship on the canvas while the pointer is on the row. */
+  onHover?: (id: string | null) => void;
 }) {
   const t = useT();
   const [one, many] =
@@ -1134,7 +1190,14 @@ function Relation({
   return (
     // A row rather than a button, now that there are two things to click on it: a button inside a
     // button is invalid, and the walk-the-schema click is still the whole width of the label.
-    <div className="group/rel flex w-full items-center gap-1.5 rounded px-1 py-[3px] transition-colors hover:bg-[var(--cf-accent-soft)]">
+    <div
+      // `pointerenter`/`pointerleave` rather than `mouseover`/`mouseout`: those bubble from the two
+      // buttons inside the row, so moving between the label and the delete icon would report a
+      // leave and re-light the whole neighbourhood for a frame.
+      onPointerEnter={() => onHover?.(refer.id)}
+      onPointerLeave={() => onHover?.(null)}
+      className="group/rel flex w-full items-center gap-1.5 rounded px-1 py-[3px] transition-colors hover:bg-[var(--cf-accent-soft)]"
+    >
       <Link2 size={10} className="shrink-0 text-[var(--cf-accent)]" />
       <button
         type="button"

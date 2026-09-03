@@ -139,6 +139,30 @@ export function ContextMenu({
     <div
       ref={ref}
       role="menu"
+      // # The press stops here
+      //
+      // A portal moves the DOM node to `document.body`; it does **not** move the event. React
+      // dispatches through the *component* tree, so a press on a menu row is still delivered to
+      // whatever rendered `<ContextMenu>` — and if that is a gesture surface, the surface handles a
+      // press it never received. On `DbmlCanvas` that meant `setPointerCapture` on the frame, and a
+      // captured pointer retargets the following `pointerup` *and the `click`* to the capturing
+      // element: the row's own `onClick` never ran, so every entry in the schema canvas's menu did
+      // nothing at all (verified in WKWebView, the engine Tauri renders in). It also cleared the
+      // selection under the menu and armed a pan, so drifting a pixel while choosing slid the
+      // diagram.
+      //
+      // Stopping here rather than in that one canvas, because any surface with pointer handlers can
+      // reintroduce it and there are forty-odd menus in this app. Dismissal is unaffected:
+      // `useDismissOnOutside` listens natively in the capture phase on `document`, which runs
+      // before React dispatches anything.
+      onPointerDown={(event) => event.stopPropagation()}
+      onPointerUp={(event) => event.stopPropagation()}
+      onMouseDown={(event) => event.stopPropagation()}
+      // A right-click inside an open menu should close it, not open a second one over the first.
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
       style={{ position: "fixed", left: pos.left, top: pos.top }}
       className="z-[9999] min-w-[172px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
     >

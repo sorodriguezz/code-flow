@@ -9,10 +9,22 @@ import {
   useRef,
   useState,
 } from "react";
-import { clip, edgeEnds, edgePath } from "../../lib/diagramSvg";
+import { clip } from "../../lib/diagramSvg";
+import { routeEdges, type EdgeRouting } from "../../lib/dbml/route";
 import { layoutDbml, type DbmlLayout, type DbmlMarkKind, type DbmlMarks } from "../../lib/dbml/layout";
 import { highlightFor, type DbmlSchema } from "../../lib/dbml/types";
-import { ArrowLeftRight, Eraser, ListOrdered, Pencil, Plus, Table2, Trash2 } from "lucide-react";
+import {
+  ArrowLeftRight,
+  Code2,
+  Eraser,
+  LayoutGrid,
+  ListOrdered,
+  Pencil,
+  Plus,
+  Table2,
+  Trash2,
+  Waypoints,
+} from "lucide-react";
 import type { RefEnd } from "../../lib/dbml/edit";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { useT } from "../../state/languageStore";
@@ -142,12 +154,33 @@ export const DbmlCanvas = forwardRef<
     onZoom?: (scale: number) => void;
     mode: DiagramColumnMode;
     density: DiagramDensity;
+    /** Curved cubics, or right angles that go around the boxes. Defaults to the curve every caller
+     *  had before there was a choice. */
+    routing?: EdgeRouting;
     /** Dims everything that does not match, and centres on the first hit. Empty means "no search". */
     query?: string;
     /** How many tables the query matched, for a toolbar that wants to say so. */
     onMatchCount?: (count: number) => void;
+    /**
+     * How many boxes the layout produced.
+     *
+     * Not the same as counting the schema's tables and enums, which is what a toolbar would
+     * otherwise do: the layout engine can add a node the document never declared. `routeEdges`
+     * gates the orthogonal router on *this* number, so a control that offers the toggle has to
+     * decide from it too — or it enables a switch that silently does nothing.
+     */
+    onNodeCount?: (count: number) => void;
     /** Review marks, by table id and by ref id. Drawn whether or not the canvas is editable. */
     marks?: DbmlMarks;
+    /**
+     * One relationship to light, from outside the canvas — the inspector's relation rows.
+     *
+     * It **outranks the selection**, which is the whole point: the inspector only lists relations
+     * while a table is selected, so the canvas is already lit up with that table's entire
+     * neighbourhood. Narrowing to the single line the pointer is on is the answer to "which of
+     * these is that row"; deferring to the selection would light everything and answer nothing.
+     */
+    focusRef?: string | null;
     /**
      * Turns the canvas into something you can build a schema on. Omitted by the read-only callers
      * (`DiagramAiPanel`, `editor/DbmlDiagram`), which then get exactly the canvas they had.
@@ -167,10 +200,23 @@ export const DbmlCanvas = forwardRef<
        * are doing when the document is half-typed, so this is the one control that stays live.
        */
       setMark: (id: string, mark: DbmlMarkKind | null) => void;
+      /**
+       * Throws the hand-arrangement away and lets the layout engine place every box.
+       *
+       * Not gated on `blocked` either, and for the same reason as `setMark`: it writes the sidecar
+       * comment and no DBML. Tidying the picture is a thing you want most while the text is
+       * mid-edit, not least.
+       */
+      autoArrange: () => void;
+      /** Whether the lines currently go around the boxes, so the menu can offer the other one. */
+      orthogonal: boolean;
+      toggleRouting: () => void;
       connect: (from: RefEnd, to: RefEnd) => void;
-      rename: (from: string, to: string) => void;
+      /** Both arguments are table **ids** — see `moveSidecarKey` in the workbench. */
+      rename: (id: string, to: string) => void;
       addField: (table: string) => void;
-      dropTable: (name: string) => void;
+      /** The table **id**, for the same reason `rename` takes one. */
+      dropTable: (id: string) => void;
       addTable: () => void;
       addEnum: () => void;
       dropRef: (from: RefEnd, to: RefEnd) => void;
@@ -188,10 +234,13 @@ export const DbmlCanvas = forwardRef<
     onOpen,
     onZoom,
     mode,
+    routing = "curved",
     density,
     query = "",
     onMatchCount,
+    onNodeCount,
     marks = {},
+    focusRef = null,
     editing,
     className,
   },
@@ -222,7 +271,13 @@ export const DbmlCanvas = forwardRef<
   const [wire, setWire] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   /** Where a right-click landed and what it landed on. */
   const [menu, setMenu] = useState<
-    | { x: number; y: number; on: { kind: "table"; id: string; name: string; mark?: DbmlMarkKind } }
+    | {
+        x: number;
+        y: number;
+        // `isEnum` because enum boxes are painted by the same component and get the same menu, and
+        // "Delete this table" over an enum is a label that describes the wrong thing.
+        on: { kind: "table"; id: string; name: string; isEnum: boolean; mark?: DbmlMarkKind };
+      }
     | {
         x: number;
         y: number;
@@ -233,6 +288,30 @@ export const DbmlCanvas = forwardRef<
   >(null);
   /** The table whose name is being typed over, and the box it sits in. */
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
+  /**
+   * Set by Escape, read by the blur that follows it — see the rename field.
+   *
+   * Cleared when a rename *opens*, not when one ends. Some engines do not dispatch `focusout` when
+   * the focused node is removed, and Escape removes it: clearing on blur meant that on those
+   * engines the flag stayed true for the rest of the session, and the *next* rename was silently
+   * thrown away while its field stayed floating over the diagram with no way to dismiss it.
+   */
+  const abandoned = useRef(false);
+  /** Whether the open rename field still owes its one select-all. See `beginRename`. */
+  const selectPending = useRef(false);
+
+  /**
+   * Opens the rename field on a box.
+   *
+   * A function rather than two `setRenaming` calls, because opening one has three parts and getting
+   * two of them right is the same as getting none: the flags are what make Escape mean Escape and
+   * make the first keystroke replace the old name.
+   */
+  const beginRename = useCallback((id: string, name: string) => {
+    abandoned.current = false;
+    selectPending.current = true;
+    setRenaming({ id, name });
+  }, []);
   /** The current search hits and which one Enter last landed on. Refs, not state: they drive an
    *  imperative move and nothing on screen reads them. */
   const matchRef = useRef<string[]>([]);
@@ -246,6 +325,20 @@ export const DbmlCanvas = forwardRef<
     () => new Map(layout.nodes.map((node) => [node.id, node])),
     [layout.nodes],
   );
+  /**
+   * Every line's geometry, computed once for the set rather than per edge.
+   *
+   * Beside the layout memo and with the same deps through it, so a drag — which produces a new
+   * `positions` object per frame — re-routes exactly as often as it re-lays-out and no more.
+   */
+  const routes = useMemo(
+    () => routeEdges(layout, routing, density),
+    [layout, routing, density],
+  );
+
+  useEffect(() => {
+    onNodeCount?.(layout.nodes.length);
+  }, [layout.nodes.length, onNodeCount]);
 
   /** A client point in the diagram's own coordinates — the inverse of the group's transform. */
   const toDiagram = useCallback((clientX: number, clientY: number) => {
@@ -531,6 +624,23 @@ export const DbmlCanvas = forwardRef<
     onMoveTable(drag.id, Math.round(drag.nodeX + dx / viewRef.current.k), Math.round(drag.nodeY + dy / viewRef.current.k));
   };
 
+  /**
+   * Whether a press landed on the drawing itself, rather than on something sitting over it.
+   *
+   * The frame carries the pan and zoom gestures, and two things that are not the drawing live
+   * inside it: the inline rename field, which is a real DOM child, and the context menu, which is
+   * portalled to `document.body` but still a React child — React propagates a portal's events
+   * through the component tree, not the DOM tree. Both used to run the canvas's press handler, and
+   * that handler captures the pointer and takes focus.
+   *
+   * `target !== frameRef.current` is the second arm on purpose: a press on a sliver of the frame
+   * the `<svg>` does not cover is still a press on the canvas and should still pan.
+   */
+  const onCanvas = (event: React.PointerEvent | React.MouseEvent) => {
+    const target = event.target as Node;
+    return target === frameRef.current || Boolean(svgRef.current?.contains(target));
+  };
+
   const endDrag = (event?: React.PointerEvent) => {
     const drag = dragRef.current;
     if (drag?.kind === "port") {
@@ -570,8 +680,10 @@ export const DbmlCanvas = forwardRef<
    * 3. **A hovered table**, when neither of the above applies, so the neighbourhood can be previewed
    *    by moving the pointer — which is how you find the table you meant to click.
    */
-  const focusKind = !selected && hoveredLink ? "ref" : "table";
-  const focusId = selected ?? hoveredLink ?? hovered;
+  // `focusRef` first: it is a deliberate hover on a named relationship and there is nothing
+  // more specific to defer to. Then the selection, then a line under the pointer, then a box.
+  const focusKind = focusRef || (!selected && hoveredLink) ? "ref" : "table";
+  const focusId = focusRef ?? selected ?? hoveredLink ?? hovered;
   const highlight = useMemo(
     () => highlightFor(schema, focusId ? { kind: focusKind, id: focusId } : null),
     [focusKind, focusId, schema],
@@ -646,10 +758,18 @@ export const DbmlCanvas = forwardRef<
       // of the session, and every keystroke meant for the canvas goes into the query.
       tabIndex={-1}
       onPointerDown={(event) => {
+        // The frame is not only the drawing: the rename field is positioned over it, and anything
+        // portalled from inside this component still reaches here through the React tree. Running
+        // the canvas press on one of those captures the pointer on the frame and pulls focus to it
+        // — which for the rename field means it blurs the instant you click into it, and the rename
+        // closes. Only a press that actually landed on the `<svg>` (or on a sliver of frame the svg
+        // does not cover) is a press on the canvas.
+        if (!onCanvas(event)) return;
         onPointerDown(event);
         // A press on the background clears the selection, which is the only way back to seeing the
-        // whole schema at full contrast once a table has been clicked.
-        onSelect(null);
+        // whole schema at full contrast once a table has been clicked. Left button only: the right
+        // one is opening a menu *about* the selection.
+        if (event.button === 0) onSelect(null);
       }}
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
@@ -657,6 +777,7 @@ export const DbmlCanvas = forwardRef<
       onContextMenu={
         editing
           ? (event) => {
+              if (!onCanvas(event)) return;
               event.preventDefault();
               setMenu({ x: event.clientX, y: event.clientY, on: { kind: "canvas" } });
             }
@@ -787,9 +908,10 @@ export const DbmlCanvas = forwardRef<
             // from its endpoints.
             const lit = highlight ? highlight.refs.has(link.constraint) : false;
             const dim = highlight !== null && !lit;
-            const ends = edgeEnds(from, to, link.fromColumn, link.toColumn);
+            const route = routes.get(link.id);
+            if (!route) return null;
             const opacity = dim ? 0.16 : lit ? 0.95 : 0.42;
-            const d = edgePath(from, to, link.fromColumn, link.toColumn);
+            const d = route.d;
             // A marked relationship is drawn in its mark's colour rather than the accent, and a
             // removal candidate is dashed as well — at the zoom where a whole model fits, colour
             // alone is a few pixels of hue on a hairline and the dash is what carries.
@@ -844,12 +966,15 @@ export const DbmlCanvas = forwardRef<
                     stroke={stroke}
                     strokeWidth={lit ? 2 : 1.4}
                     strokeLinecap="round"
+                    // A right angle at 1.4px shows its mitre without this, which reads as a nick in
+                    // the line rather than as a corner.
+                    strokeLinejoin="round"
                     strokeDasharray={mark === "remove" ? "5 4" : undefined}
                   />
                   {/* Dots rather than an arrowhead: the direction is already in the badges and the
                       cardinality, and a head large enough to see at 40% zoom is a blob at 200%. */}
-                  <circle cx={ends.x1} cy={ends.y1} r={lit ? 3.4 : 2.6} fill={stroke} />
-                  <circle cx={ends.x2} cy={ends.y2} r={lit ? 3.4 : 2.6} fill={stroke} />
+                  <circle cx={route.x1} cy={route.y1} r={lit ? 3.4 : 2.6} fill={stroke} />
+                  <circle cx={route.x2} cy={route.y2} r={lit ? 3.4 : 2.6} fill={stroke} />
                 </g>
               </g>
             );
@@ -864,19 +989,20 @@ export const DbmlCanvas = forwardRef<
               const from = nodeById.get(link.from);
               const to = nodeById.get(link.to);
               const ref = schema.refs.find((entry) => entry.id === link.constraint);
-              if (!from || !to || !ref) return null;
+              const route = routes.get(link.id);
+              if (!from || !to || !ref || !route) return null;
               return (
                 <g key={`card-${link.id}`} pointerEvents="none">
                   <Cardinality
                     node={from}
-                    other={to}
                     column={link.fromColumn}
+                    leavesRight={route.fromRight}
                     label={ref.from.relation === "*" ? "N" : "1"}
                   />
                   <Cardinality
                     node={to}
-                    other={from}
                     column={link.toColumn}
+                    leavesRight={route.toRight}
                     label={ref.to.relation === "*" ? "N" : "1"}
                   />
                 </g>
@@ -909,14 +1035,20 @@ export const DbmlCanvas = forwardRef<
                       setMenu({
                         x: event.clientX,
                         y: event.clientY,
-                        on: { kind: "table", id: node.id, name: node.name, mark: marks[node.id] },
+                        on: {
+                          kind: "table",
+                          id: node.id,
+                          name: node.name,
+                          isEnum: layout.enumIds.has(node.id),
+                          mark: marks[node.id],
+                        },
                       });
                     }
                   : undefined
               }
               onRename={
                 editing && !editing.blocked
-                  ? () => setRenaming({ id: node.id, name: node.name })
+                  ? () => beginRename(node.id, node.name)
                   : undefined
               }
               related={highlight !== null && highlight.tables.has(node.id) && selected !== node.id}
@@ -963,14 +1095,36 @@ export const DbmlCanvas = forwardRef<
         <input
           autoFocus
           defaultValue={renaming.name}
+          // Selected once, not on every render. An inline ref callback is a new function each
+          // commit, so React re-runs it every time — and this component re-renders from its own
+          // hover state while the field is open. The effect was that moving the pointer mid-rename
+          // re-selected whatever had been typed so far, and the next keystroke replaced it: the
+          // name silently became its own last fragment.
+          ref={(el) => {
+            if (!el || !selectPending.current) return;
+            selectPending.current = false;
+            el.select();
+          }}
           onBlur={(event) => {
+            if (abandoned.current) {
+              abandoned.current = false;
+              return;
+            }
             const next = event.target.value.trim();
-            if (next && next !== renaming.name) editing?.rename(renaming.name, next);
+            // The **id**, not the name — the sidecar that carries the mark and the dragged position
+            // is keyed by it. See `moveSidecarKey` in the workbench.
+            if (next && next !== renaming.name) editing?.rename(renaming.id, next);
             setRenaming(null);
           }}
           onKeyDown={(event) => {
             if (event.key === "Enter") event.currentTarget.blur();
-            if (event.key === "Escape") setRenaming(null);
+            if (event.key === "Escape") {
+              // Flagged before the unmount, because removing a focused node makes some engines
+              // dispatch `focusout` — and an Escape that commits the half-typed name is the exact
+              // opposite of what Escape means.
+              abandoned.current = true;
+              setRenaming(null);
+            }
           }}
           style={{
             left: view.x + (nodeById.get(renaming.id)?.x ?? 0) * view.k,
@@ -986,7 +1140,7 @@ export const DbmlCanvas = forwardRef<
           x={menu.x}
           y={menu.y}
           onClose={() => setMenu(null)}
-          items={menuItems(menu.on, editing, t, setRenaming)}
+          items={menuItems(menu.on, editing, t, beginRename, onOpen)}
         />
       )}
     </div>
@@ -1036,37 +1190,58 @@ function markItems(
 
 function menuItems(
   on:
-    | { kind: "table"; id: string; name: string; mark?: DbmlMarkKind }
+    | { kind: "table"; id: string; name: string; isEnum: boolean; mark?: DbmlMarkKind }
     | { kind: "ref"; id: string; from: RefEnd; to: RefEnd; mark?: DbmlMarkKind }
     | { kind: "canvas" },
   editing: NonNullable<React.ComponentProps<typeof DbmlCanvas>["editing"]>,
   t: (key: Parameters<ReturnType<typeof useT>>[0]) => string,
-  setRenaming: (next: { id: string; name: string }) => void,
+  beginRename: (id: string, name: string) => void,
+  /** The jump to the declaration in the text pane. Absent on a canvas whose caller has no editor. */
+  onOpen?: (id: string) => void,
 ): MenuItem[] {
   const off = editing.blocked;
   if (on.kind === "table") {
     return [
       ...markItems(on.id, on.mark, editing, t),
+      // Navigation, between the marks and the edits, and — like the marks — **not** gated on
+      // `blocked`. Everything below rewrites DBML and so cannot run against a schema that no longer
+      // describes the text; this one searches the text itself and moves a cursor. The worst a stale
+      // name can do here is fail to find a line.
+      ...(onOpen
+        ? [
+            {
+              label: t("dbml.goToDefinition"),
+              icon: Code2,
+              separated: true,
+              onClick: () => onOpen(on.id),
+            } satisfies MenuItem,
+          ]
+        : []),
       {
         label: t("dbml.inspector.addField"),
         icon: Plus,
-        disabled: off,
+        disabled: off || on.isEnum,
         separated: true,
         onClick: () => editing.addField(on.name),
       },
       {
-        label: t("dbml.inspector.rename"),
+        // The action, not the hint. This used to be `dbml.inspector.rename`, which is the *tooltip*
+        // string "Double-click to rename" — a menu row that reads as an instruction is one you have
+        // to click to find out what it does.
+        label: t(on.isEnum ? "dbml.renameEnum" : "dbml.renameTable"),
         icon: Pencil,
         disabled: off,
-        onClick: () => setRenaming({ id: on.id, name: on.name }),
+        onClick: () => beginRename(on.id, on.name),
       },
       {
-        label: t("dbml.dropTable"),
+        label: t(on.isEnum ? "dbml.dropEnum" : "dbml.dropTable"),
         icon: Trash2,
         danger: true,
         separated: true,
         disabled: off,
-        onClick: () => editing.dropTable(on.name),
+        // The id, not the name: it is what the sidecar carrying the mark and the dragged position
+        // is keyed by. See `moveSidecarKey` in the workbench.
+        onClick: () => editing.dropTable(on.id),
       },
     ];
   }
@@ -1093,29 +1268,45 @@ function menuItems(
   return [
     { label: t("dbml.addTable"), icon: Table2, disabled: off, onClick: editing.addTable },
     { label: t("dbml.addEnum"), icon: ListOrdered, disabled: off, onClick: editing.addEnum },
+    // Not gated on `blocked` either: it writes the sidecar comment and no DBML at all, same as the
+    // marks. Arranging the boxes is often exactly what you want while the text is mid-edit.
+    {
+      label: t("dbml.autoLayout"),
+      icon: LayoutGrid,
+      separated: true,
+      onClick: editing.autoArrange,
+    },
+    // Same reasoning as `autoArrange`: it changes how the picture is drawn and no DBML at all, so
+    // it stays live while the document does not parse.
+    {
+      label: t(editing.orthogonal ? "dbml.routingCurved" : "dbml.routingOrthogonal"),
+      icon: Waypoints,
+      onClick: editing.toggleRouting,
+    },
   ];
 }
 
 /**
  * The `1` or `N` at one end of a lit line, sat just off the box it belongs to.
  *
- * Placed on the side the line actually leaves from, decided by the same comparison `edgePath` uses
- * — box centres — because reading it off the wrong edge puts the marker on the far side of the
- * table from its own line, which is worse than not drawing it.
+ * Placed on the side the line actually leaves from, which the router reports rather than this
+ * recomputing it: reading it off the wrong edge puts the marker on the far side of the table from
+ * its own line, which is worse than not drawing it at all.
  */
 function Cardinality({
   node,
-  other,
   column,
+  leavesRight,
   label,
 }: {
   node: DiagramNode;
-  other: DiagramNode;
   column: string;
+  /** Taken from the route rather than recomputed: the marker has to sit on the face its own line
+   *  actually leaves from, and two copies of that decision are two chances to disagree. */
+  leavesRight: boolean;
   label: string;
 }) {
   const y = node.y + (node.rowY[column] ?? node.height / 2);
-  const leavesRight = node.x + node.width / 2 <= other.x + other.width / 2;
   const x = leavesRight ? node.x + node.width + 17 : node.x - 17;
   return (
     <>

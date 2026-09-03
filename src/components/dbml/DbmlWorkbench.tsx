@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { createPortal } from "react-dom";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import {
@@ -8,12 +16,15 @@ import {
   ChevronRight,
   Columns3,
   Download,
+  Expand,
   History,
   LayoutGrid,
   Maximize2,
+  Minimize,
   Search,
   Shrink,
   SlidersHorizontal,
+  Spline,
   X,
   Sparkles,
   Table2,
@@ -50,11 +61,15 @@ import { rasterize, standaloneSvg } from "../../lib/diagramSvg";
 import { THUMBNAIL_MAX_CHARS } from "../../lib/diagrams/embed";
 import { safeFileName, saveBytes } from "../../lib/diagrams/exportFile";
 import type { DiagramColumnMode, DiagramDensity } from "../../lib/db/erLayout";
+import { ROUTING_NODE_LIMIT, type EdgeRouting } from "../../lib/dbml/route";
 import { useDiagramsStore } from "../../state/diagramsStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useThemeStore } from "../../state/themeStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { isMac as platformIsMac } from "../../lib/platform";
+import { getWindowStatus, subscribeWindowStatus } from "../../lib/windowControls";
+import { isTypingTarget } from "../../lib/keys";
 
 /**
  * The editor for a diagram whose format is `dbml`.
@@ -128,6 +143,8 @@ export function DbmlWorkbench({
   const draftId = useDiagramsStore((s) => s.draft?.id ?? null);
   const title = useDiagramsStore((s) => s.diagrams.find((d) => d.id === diagramId)?.title ?? "");
   const editDoc = useDiagramsStore((s) => s.editDoc);
+  /** Read only so full screen can get out of the AI panel's way — see the effect below. */
+  const aiOpen = useDiagramsStore((s) => s.aiOpen);
 
   const editorWidth = useLayoutStore((s) => s.sizes.dbmlEditorWidth);
   const inspectorWidth = useLayoutStore((s) => s.sizes.dbmlInspectorWidth);
@@ -142,6 +159,11 @@ export function DbmlWorkbench({
   const [zoom, setZoom] = useState(1);
   /** How many tables the query hit. `null` when there is no query. */
   const [hits, setHits] = useState<number | null>(null);
+  /** The relationship the pointer is on in the inspector, lit on the canvas. See `focusRef`. */
+  const [hoveredRef, setHoveredRef] = useState<string | null>(null);
+  /** How many boxes the layout produced — see `onNodeCount` on the canvas. Read only by the
+   *  routing row, which must decide from the same number `routeEdges` gates on. */
+  const [nodeCount, setNodeCount] = useState(0);
   /**
    * The selection, held.
    *
@@ -152,6 +174,8 @@ export function DbmlWorkbench({
    */
   const [pinned, setPinned] = useState(false);
   const [mode, setMode] = useState<DiagramColumnMode>("all");
+  /** Curved or right-angled relationship lines. Session state, like `mode` and `density`. */
+  const [routing, setRouting] = useState<EdgeRouting>("curved");
   /** The two side panes. Both on by default and both closable from the canvas's own edges, because
    *  three columns is a lot of window and which one you want depends on whether you are writing the
    *  schema or reading it. */
@@ -159,6 +183,16 @@ export function DbmlWorkbench({
   const [editorOpen, setEditorOpen] = useState(true);
   const [reference, setReference] = useState(false);
   const [history, setHistory] = useState(false);
+  /**
+   * Full screen: the diagram and nothing else.
+   *
+   * The **snapshot is the flag**. Holding what the panes were doing when zen started, rather than a
+   * separate boolean beside it, is what makes "put them back exactly as they were" impossible to
+   * get out of step with "are we in zen" — there is only one piece of state and it carries both
+   * answers.
+   */
+  const [zenFrom, setZenFrom] = useState<{ editor: boolean; inspector: boolean } | null>(null);
+  const zen = zenFrom !== null;
   const [revisions, setRevisions] = useState<Revision[]>([]);
   const [density, setDensity] = useState<DiagramDensity>("roomy");
   const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
@@ -195,6 +229,8 @@ export function DbmlWorkbench({
   const cause = useRef<RevisionCause>("edited");
   const nextRevision = useRef(1);
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
+  /** A declaration to jump to as soon as the text pane has an editor again. See `revealTable`. */
+  const pendingReveal = useRef<string | null>(null);
 
   /** The document, split. Recomputed on every keystroke, which is a string scan and nothing more. */
   const { source, positions, marks } = useMemo(() => readLayout(doc ?? ""), [doc]);
@@ -291,9 +327,17 @@ export function DbmlWorkbench({
   /**
    * Renames a key in both halves of the sidecar, or drops it from both.
    *
-   * A table's mark and its dragged position are filed under its name, so renaming the table without
-   * this silently loses both — the box jumps back to wherever the layout engine puts it and the
-   * mark stops being drawn — and leaves a key behind that will never match anything again.
+   * A table's mark and its dragged position are filed under its **id** — the qualified name — so
+   * renaming the table without this silently loses both (the box jumps back to wherever the layout
+   * engine puts it and the mark stops being drawn) and leaves a key behind that will never match
+   * anything again. Every caller therefore hands this an id and not a bare name: they used to hand
+   * it names, which for `Table core.users` deleted a key that was never there.
+   *
+   * Called from inside `applyEdit`'s callback, never before it. `applyEdit` has two early exits —
+   * a document that does not parse, and an edit that changed nothing — and running ahead of them
+   * meant a *refused* rename still moved the mark and the pinned position. Inside the callback the
+   * ordering still works, because `applyEdit` computes the new text before it hands it to Monaco,
+   * so the ref is mutated before `writeSource` reads it from `onChange`.
    */
   const moveSidecarKey = (from: string, to: string | null) => {
     const { positions: at, marks: mark } = sidecar.current;
@@ -403,13 +447,29 @@ export function DbmlWorkbench({
         applyEdit((current) => edits.dropField(current, table, name)),
       addTable: (name: string) => applyEdit((current) => edits.addTable(current, name)),
       addEnum: (name: string) => applyEdit((current) => edits.addEnum(current, name)),
+      // `from` and `name` are **ids**, not bare names — see `moveSidecarKey`. `edit.ts` finds the
+      // block by either (`blocksOf` captures `core.users` whole and `findBlock` matches the full
+      // name), so passing the id costs the text edit nothing and buys the sidecar correctness.
       renameTable: (from: string, to: string) => {
-        moveSidecarKey(from, to);
-        applyEdit((current) => edits.renameTable(current, from, to));
+        // Refused loudly here rather than silently in `edit.ts`, which declines by returning the
+        // document untouched. A control that does nothing when pressed reads as broken; the reason
+        // is the whole message. See `nameIsTaken` for why an enum's name counts as taken.
+        if (edits.nameIsTaken(source, to, from)) {
+          pushErrorToast(t("dbml.nameTaken", { name: to }));
+          return;
+        }
+        applyEdit((current) => {
+          const next = edits.renameTable(current, from, to);
+          if (next !== current) moveSidecarKey(from, to);
+          return next;
+        });
       },
       dropTable: (name: string) => {
-        moveSidecarKey(name, null);
-        applyEdit((current) => edits.dropTable(current, name));
+        applyEdit((current) => {
+          const next = edits.dropTable(current, name);
+          if (next !== current) moveSidecarKey(name, null);
+          return next;
+        });
       },
       setNote: (table: string, note: string) =>
         applyEdit((current) => edits.setTableNote(current, table, note)),
@@ -423,7 +483,10 @@ export function DbmlWorkbench({
         cardinality: edits.Cardinality,
       ) => applyEdit((current) => edits.setRefCardinality(current, from, to, cardinality)),
     }),
-    [applyEdit, schema.error, t],
+    // `source` for the name check in `renameTable`. It does not widen anything in practice —
+    // `applyEdit` already closes over the same string, so this memo was rebuilding per keystroke
+    // regardless.
+    [applyEdit, schema.error, source, t],
   );
 
   /** One box moved. Only the layout comment changes, so Monaco's value does not — see the header. */
@@ -435,6 +498,34 @@ export function DbmlWorkbench({
     [editDoc, source, positions, marks],
   );
 
+  /**
+   * Into and out of full screen.
+   *
+   * Zen is **only** a view state: it moves no character of the document, never touches `sidecar`,
+   * and writes nothing. Leaving it puts the two panes back exactly as they were rather than to
+   * their defaults, which is the whole reason the snapshot is the flag.
+   */
+  const enterZen = () => {
+    setZenFrom({ editor: editorOpen, inspector });
+    setEditorOpen(false);
+    setInspector(false);
+    // Anything floating over the canvas goes with them, or it is left hanging over a black screen
+    // with the control that opened it no longer on screen.
+    setReference(false);
+    setHistory(false);
+    setViewAt(null);
+    setExportAt(null);
+  };
+
+  const leaveZen = useCallback(() => {
+    setZenFrom((from) => {
+      if (!from) return null;
+      setEditorOpen(from.editor);
+      setInspector(from.inspector);
+      return null;
+    });
+  }, []);
+
   const tidy = () => {
     const formatted = formatDbml(source);
     if (formatted === source) return;
@@ -443,10 +534,19 @@ export function DbmlWorkbench({
     useToastStore.getState().pushToast(t("dbml.formatted"), "success");
   };
 
-  /** Throws the hand-arrangement away, which puts every box back under the layout engine. */
+  /**
+   * Throws the hand-arrangement away, which puts every box back under the layout engine.
+   *
+   * **Says so when there was nothing to throw away.** With no dragged boxes this can only re-fit
+   * the viewport, because the engine had already placed everything — and a button that moves
+   * nothing and reports nothing reads as broken to exactly the person most likely to press it: the
+   * one looking at a freshly generated, imported or AI-written schema, where nothing has been
+   * dragged yet.
+   */
   const rearrange = () => {
     if (Object.keys(positions).length === 0) {
       canvas.current?.fit();
+      useToastStore.getState().pushToast(t("dbml.layoutAlready"), "info");
       return;
     }
     cause.current = "rearranged";
@@ -462,11 +562,15 @@ export function DbmlWorkbench({
     useToastStore.getState().pushToast(t("dbml.history.done"), "success");
   };
 
-  /** Puts the cursor on a table's declaration. What double-clicking a box does. */
-  const revealTable = useCallback(
-    (id: string) => {
-      const editor = editorRef.current;
-      if (!editor) return;
+  /**
+   * Puts the cursor on a declaration, in an editor we already have.
+   *
+   * Works on the **text**: `findMatches` is a regex over the model and nothing here reads `schema`.
+   * That is what lets the menu row it backs stay live while the document does not parse — the worst
+   * a stale name can do is fail to find a line.
+   */
+  const revealIn = useCallback(
+    (editor: MonacoEditorNS.IStandaloneCodeEditor, id: string) => {
       const model = editor.getModel();
       if (!model) return;
       const bare = id.includes(".") ? id.slice(id.indexOf(".") + 1) : id;
@@ -486,6 +590,38 @@ export function DbmlWorkbench({
       editor.focus();
     },
     [],
+  );
+
+  /**
+   * Jumps to a table's — or an enum's — declaration. What double-clicking a box does, and what its
+   * context menu offers.
+   *
+   * **Opens the text pane if it is shut.** Folding it away unmounts `<Editor>`, which disposes the
+   * editor and its model, so a jump made with the pane closed would find nothing and quietly do
+   * nothing. Double-click has behaved that way since it shipped and nobody noticed, because you
+   * cannot double-click a box and reasonably expect a pane you closed to react; a menu row that
+   * says "go to its definition" and does nothing is a bug the moment it ships. The id is parked and
+   * replayed from `onEditorMount` rather than after a timeout — the editor is created
+   * asynchronously and there is no number of frames that is the right guess.
+   */
+  const revealTable = useCallback(
+    (id: string) => {
+      const editor = editorRef.current;
+      if (editor?.getModel()) {
+        revealIn(editor, id);
+        return;
+      }
+      pendingReveal.current = id;
+      // Asking for the code is asking to leave full screen, since the text pane is the thing full
+      // screen hides. `setZenFrom` directly rather than `leaveZen`, so the snapshot can put the
+      // inspector back without also restoring an editor the user has just asked to see.
+      setZenFrom((from) => {
+        if (from) setInspector(from.inspector);
+        return null;
+      });
+      setEditorOpen(true);
+    },
+    [revealIn],
   );
 
   // ---- the change history --------------------------------------------------
@@ -595,6 +731,61 @@ export function DbmlWorkbench({
     }
   };
 
+  /**
+   * Escape leaves full screen — but only when nothing nearer wants the press.
+   *
+   * Four things in this workbench already answer Escape and each of them must win it: the history
+   * and reference panels close themselves, the View and export menus dismiss, and every text field
+   * on screen (the search box, the canvas's rename input, the inspector's editors) treats it as
+   * "abandon what I am typing". Hence the guards on the subscription rather than inside the
+   * handler: while any of those is open this listener is not bound at all.
+   */
+  useEffect(() => {
+    if (!zen || history || reference || viewAt !== null || exportAt !== null) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (isTypingTarget(event.target)) return;
+      leaveZen();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zen, history, reference, viewAt, exportAt, leaveZen]);
+
+  /**
+   * Re-fit on the way into and out of full screen.
+   *
+   * The canvas fits once on its first layout and never measures again, so a frame that suddenly
+   * became the whole window would still be drawn at the old scale and translate — the schema
+   * parked in a corner of an empty screen. One frame of delay is required rather than optimistic:
+   * `fit()` reads the frame's `clientWidth`, which is only correct after the browser has laid the
+   * new box out.
+   *
+   * Deliberately *not* on every pane toggle. Hiding the inspector should not throw away the zoom a
+   * user set on one table; entering full screen is a request to see the whole thing.
+   */
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => canvas.current?.fit());
+    return () => cancelAnimationFrame(frame);
+  }, [zen]);
+
+  /**
+   * The AI panel wins over full screen.
+   *
+   * `DiagramAiPanel` is `absolute z-30` inside the Diagrams pane, so the zen canvas — portalled over
+   * the whole window — buries it. The sparkle in the shared header, the parked-generation button
+   * and ⌘⇧A can all open it from outside this component, and "the panel opened behind the black
+   * screen" is not a state anyone can diagnose.
+   */
+  useEffect(() => {
+    if (aiOpen && zen) leaveZen();
+  }, [aiOpen, zen, leaveZen]);
+
+  /** Whether the OS window is in macOS fullscreen — AppKit takes the traffic lights away when it is. */
+  const windowFullscreen = useSyncExternalStore(
+    subscribeWindowStatus,
+    () => platformIsMac() && getWindowStatus().fullscreen,
+  );
+
   const exportItems: MenuItem[] = [
     { label: t("diagrams.exportAs.png"), onClick: () => void exportAs("png") },
     { label: t("diagrams.exportAs.svg"), onClick: () => void exportAs("svg") },
@@ -603,6 +794,17 @@ export function DbmlWorkbench({
 
   const onEditorMount: OnMount = (editor) => {
     editorRef.current = editor;
+    // A disposed editor answers `getModel()` with `null` rather than throwing, and this ref is
+    // otherwise never cleared — so without this, folding the text pane away leaves a live-looking
+    // editor here forever and everything that checks it silently does nothing.
+    editor.onDidDispose(() => {
+      if (editorRef.current === editor) editorRef.current = null;
+    });
+    // Replay a jump that was asked for while the pane was shut. Cleared *before* the reveal, so a
+    // jump that finds nothing does not stay armed for the next time the pane is opened by hand.
+    const pending = pendingReveal.current;
+    pendingReveal.current = null;
+    if (pending) revealIn(editor, pending);
   };
 
   // The document has not arrived from the database yet, or belongs to another diagram.
@@ -611,8 +813,47 @@ export function DbmlWorkbench({
   const hint = schema.error ? hintFor(schema.error) : null;
   const lineCount = source === "" ? 0 : source.split("\n").length;
 
-  return (
-    <div className="relative flex h-full min-h-0 flex-col">
+  const workbench = (
+    <div
+      className={
+        zen
+          ? // Between the app chrome and the things that must still be heard over it. `z-30` is the
+            // title bar, `z-40` the popovers, and `z-50` is where the toasts and every modal live —
+            // so full screen covers the app and a "name already taken" message still reaches the
+            // person who is in it. At `z-[55]` the toast was painted behind an opaque background
+            // and full screen became a mode where nothing could report anything.
+            "fixed inset-0 z-[45] flex flex-col bg-[var(--cf-bg)]"
+          : "relative flex h-full min-h-0 flex-col"
+      }
+    >
+      {/* macOS keeps native window decorations (`titleBarStyle: Overlay`), so AppKit paints the
+          traffic lights straight over a zen canvas — and with the app's own title bar covered, the
+          window also loses every drag region. This strip gives both back: `h-11` matches the title
+          bar's height and 96px clears the lights, which start at x=20. In OS fullscreen AppKit
+          takes them away entirely, so the strip is not reserved. */}
+      {/* The way out, at the root and not in the canvas's corner cluster — that cluster lives inside
+          the branch that draws boxes, so on an empty schema (or before the 15 MB parser chunk has
+          landed) it is not rendered, and full screen had no visible exit at all. Top-right, clear
+          of the zoom controls in the opposite corner. */}
+      {zen && (
+        <button
+          type="button"
+          onClick={leaveZen}
+          title={t("dbml.zenExit")}
+          className={`absolute right-4 top-3 z-20 flex items-center gap-1 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 px-2 py-[5px] text-[10.5px] font-medium text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] backdrop-blur transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] ${CHROME_FADE}`}
+        >
+          <Minimize size={12} />
+          {t("dbml.zenExit")}
+        </button>
+      )}
+      {zen && platformIsMac() && !windowFullscreen && (
+        <div
+          aria-hidden
+          data-tauri-drag-region="deep"
+          className="absolute left-0 top-0 z-10 h-11 w-[96px]"
+        />
+      )}
+      {!zen && (
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5">
         {/* One segmented control rather than four loose buttons: these are four views of the same
             document, not four commands, and a group reads as "pick one". */}
@@ -673,6 +914,14 @@ export function DbmlWorkbench({
         <ToolbarButton onClick={tidy} title={t("dbml.format")}>
           <Wand2 size={12} />
         </ToolbarButton>
+        {/* Next to the formatter, because they are the same gesture on the two halves of the
+            document: one tidies the text, the other tidies the picture. It had only ever been a row
+            in a popover behind a button in the canvas's bottom-right corner that fades to a third
+            opacity when the pointer leaves — which is to say it existed and nobody could find it. */}
+        {/* No arrange and no line-style button here on purpose. Both change how the *picture* is
+            drawn rather than what the document says, and both already live where that decision
+            belongs: the canvas's own "Ver" menu, in the corner of the drawing they act on, and its
+            background context menu. This toolbar is for the document. */}
         <ToolbarButton onClick={onSaveAsTemplate} title={t("diagrams.saveAsTemplate")}>
           <Table2 size={12} />
         </ToolbarButton>
@@ -687,7 +936,20 @@ export function DbmlWorkbench({
         <ToolbarButton onClick={onAskAi} title={t("diagrams.ai.title")}>
           <Sparkles size={12} />
         </ToolbarButton>
+        {/* Full screen last, next to the sparkle: both are things you do *to the view* rather than
+            to the document. Disabled on the other three surfaces — there is no canvas to fill. */}
+        {/* Disabled while the AI panel is open rather than left to be undone a tick later by the
+            effect below: pressing it then closed the reference and history panels and re-fitted the
+            canvas on the way to doing nothing at all. */}
+        <ToolbarButton
+          onClick={enterZen}
+          title={t("dbml.zen")}
+          disabled={surface !== "diagram" || aiOpen}
+        >
+          <Expand size={12} />
+        </ToolbarButton>
       </div>
+      )}
 
       <div className="flex min-h-0 flex-1">
         {editorOpen && (
@@ -766,12 +1028,14 @@ export function DbmlWorkbench({
               control belongs against the thing it moves, and it is the edge your eye is already on
               when you decide the drawing needs more room. This one rides the seam because that is
               this container's left edge whether the editor is open or shut. */}
-          <EdgeTab
-            side="left"
-            open={editorOpen}
-            title={t(editorOpen ? "dbml.collapseEditor" : "dbml.expandEditor")}
-            onClick={() => setEditorOpen((open) => !open)}
-          />
+          {!zen && (
+            <EdgeTab
+              side="left"
+              open={editorOpen}
+              title={t(editorOpen ? "dbml.collapseEditor" : "dbml.expandEditor")}
+              onClick={() => setEditorOpen((open) => !open)}
+            />
+          )}
           {surface === "diagram" &&
             (!parser ? (
               <ViewSkeleton />
@@ -798,6 +1062,7 @@ export function DbmlWorkbench({
                       onSelect={selectFromCanvas}
                       onOpen={revealTable}
                       onMatchCount={setHits}
+                      onNodeCount={setNodeCount}
                       onZoom={(scale) =>
                         setZoom((current) =>
                           Math.round(scale * 100) === Math.round(current * 100) ? current : scale,
@@ -805,8 +1070,10 @@ export function DbmlWorkbench({
                       }
                       mode={mode}
                       density={density}
+                      routing={routing}
                       query={query}
                       marks={marks}
+                      focusRef={hoveredRef}
                       editing={{
                         blocked: editing.blocked,
                         // A drawn relationship is a foreign key until told otherwise, which is what
@@ -831,6 +1098,12 @@ export function DbmlWorkbench({
                         addTable: () => editing.addTable(edits.freeName(declared, t("dbml.newTable"))),
                         addEnum: () => editing.addEnum(edits.freeName(declared, t("dbml.newEnum"))),
                         setMark,
+                        autoArrange: rearrange,
+                        orthogonal: routing === "orthogonal",
+                        toggleRouting: () =>
+                          setRouting((current) =>
+                            current === "curved" ? "orthogonal" : "curved",
+                          ),
                         dropRef: editing.dropRef,
                         // The arrow the canvas offers is the one it does not already have. `>` and
                         // `<` are the same relationship read from the two ends, so "flip" is the
@@ -980,6 +1253,23 @@ export function DbmlWorkbench({
                             setDensity((current) => (current === "roomy" ? "compact" : "roomy")),
                         },
                         {
+                          // The label is the state it switches *to*, like the two rows above.
+                          // Disabled past the point where re-routing on every drag frame would cost
+                          // more than the drag has to spend — see `ROUTING_NODE_LIMIT`.
+                          label: t(
+                            routing === "curved" ? "dbml.routingOrthogonal" : "dbml.routingCurved",
+                          ),
+                          icon: Spline,
+                          // The layout's node count, not the schema's table count: the two can
+                          // differ, and gating on the smaller one leaves a switch that is enabled
+                          // and silently does nothing.
+                          disabled: nodeCount > ROUTING_NODE_LIMIT,
+                          onClick: () =>
+                            setRouting((current) =>
+                              current === "curved" ? "orthogonal" : "curved",
+                            ),
+                        },
+                        {
                           label: t("dbml.autoLayout"),
                           icon: LayoutGrid,
                           onClick: rearrange,
@@ -990,12 +1280,14 @@ export function DbmlWorkbench({
                     />
                   )}
 
-                  <EdgeTab
-                    side="right"
-                    open={inspector}
-                    title={t(inspector ? "dbml.collapseInspector" : "dbml.expandInspector")}
-                    onClick={() => setInspector((open) => !open)}
-                  />
+                  {!zen && (
+                    <EdgeTab
+                      side="right"
+                      open={inspector}
+                      title={t(inspector ? "dbml.collapseInspector" : "dbml.expandInspector")}
+                      onClick={() => setInspector((open) => !open)}
+                    />
+                  )}
                   </div>
 
                   {/* What the picture contains, in the strip along the bottom — the same place and
@@ -1049,6 +1341,7 @@ export function DbmlWorkbench({
                       setSelected(null);
                     }}
                     onOpen={revealTable}
+                    onHoverRef={setHoveredRef}
                     pinned={pinned}
                     onTogglePin={() => setPinned((held) => !held)}
                     mark={
@@ -1110,6 +1403,21 @@ export function DbmlWorkbench({
       )}
     </div>
   );
+
+  /**
+   * Full screen goes through a portal, and it has to.
+   *
+   * `.cf-ambient-bg` — the element `MainContent` renders inside — carries `isolation: isolate`, which
+   * makes it a stacking context. No `z-index` on a descendant can lift over the title bar, the app
+   * rail, the status bar or the terminal dock, because those are its *siblings* rather than its
+   * children: a `fixed inset-0 z-50` in here would cover the viewport geometrically and still paint
+   * underneath every bar. `ApiModal`, `FilePalette` and `CodeSnapModal` all document the same trap.
+   *
+   * The cost is one remount of the subtree per toggle, and it is a cost worth paying here: entering
+   * full screen folds the text pane away, which unmounts Monaco either way, and the canvas is
+   * re-fitted on the transition on purpose.
+   */
+  return zen ? createPortal(workbench, document.body) : workbench;
 }
 
 /**

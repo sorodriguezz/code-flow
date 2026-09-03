@@ -33,6 +33,9 @@ export interface DbmlBlock {
 const DECLARATION =
   /^(table|enum|tablegroup|tablepartial)\s+("[^"]*"|[\w.]+)(?:\s+as\s+("[^"]*"|[\w.]+))?/i;
 
+/** The relationship operator, as the only thing that tells a `Ref` statement it is finished. */
+const REF_ARROW = /<>|[<>-]/;
+
 function unquote(text: string): string {
   return text.startsWith('"') && text.endsWith('"') ? text.slice(1, -1) : text;
 }
@@ -91,22 +94,57 @@ export function blocksOf(source: string): DbmlBlock[] {
     }
 
     if (/^ref\b/i.test(trimmed)) {
-      // A `Ref` may be a one-liner (`Ref: a.b > c.d`) or a braced block. The brace decides.
+      /*
+       * A `Ref` ends one of two ways, and which one is not decided by the first line.
+       *
+       *     Ref: a.b > c.d          // the arrow ends it
+       *     Ref name { a.b > c.d }  // the closing brace ends it
+       *     Ref                     // …and the brace may not be on the first line at all
+       *     {
+       *       a.b > c.d
+       *     }
+       *
+       * So the brace is watched for the whole way down rather than tested once. Getting this wrong
+       * is not a cosmetic miss: a block that stops one line short of its own `}` still parses as a
+       * relationship here, so `dropRef` splices the half of it that it can see and leaves the brace
+       * behind — a document that no longer parses, produced by a button that looked like it worked.
+       *
+       * The `Ref:` shape whose endpoints sit on the next line is v2 grammar and the app parses v1
+       * (`parse.ts`), so it cannot arrive through the editor today. It is handled anyway because
+       * this splitter is also what `merge.ts` runs over text that came from a model, and because a
+       * splitter that is honest about the grammar is one fewer thing to remember.
+       */
       const from = at;
-      if (trimmed.includes("{")) {
-        let depth = 0;
-        let opened = false;
-        while (at < lines.length) {
-          depth += braceDelta(lines[at]);
-          if (depth > 0) opened = true;
-          at += 1;
-          if (opened && depth <= 0) break;
+      let depth = 0;
+      let opened = false;
+      let ended = false;
+      while (at < lines.length) {
+        const line = lines[at];
+        const text = line.trim();
+        // The guards apply only while no brace is open. Inside a braced body a blank line or a
+        // comment is just content, and stopping on one is what produces the orphan brace above.
+        if (!opened && at > from) {
+          if (!text || text.startsWith("//") || DECLARATION.test(text) || /^ref\b/i.test(text)) {
+            break;
+          }
         }
-        out.push({ kind: "ref", name: "", alias: null, from, to: at, closed: true });
-      } else {
+        depth += braceDelta(line);
+        if (depth > 0) opened = true;
         at += 1;
-        out.push({ kind: "ref", name: "", alias: null, from, to: at, closed: true });
+        if (opened) {
+          if (depth <= 0) {
+            ended = true;
+            break;
+          }
+          continue;
+        }
+        // No brace anywhere yet: the arrow is what finishes a `Ref:`.
+        if (REF_ARROW.test(text)) {
+          ended = true;
+          break;
+        }
       }
+      out.push({ kind: "ref", name: "", alias: null, from, to: at, closed: ended });
       continue;
     }
 

@@ -36,13 +36,19 @@ export function PromptModal() {
     return () => window.clearTimeout(timer);
   }, [request]);
 
+  // Above the early return, and it has to stay there. `useFocusTrap` is a hook, so calling it after
+  // `if (!request) return null` makes the render that *opens* the dialog run one more hook than the
+  // render before it — which React answers by throwing "Rendered more hooks than during the previous
+  // render" and unwinding to the nearest boundary. The nearest one here is the app's outermost, so
+  // the whole window is replaced by the fatal card: every rename, every "new folder", every prompt
+  // in the app. `ConfirmModal` has the same pair in the right order; keep them matching.
+  useFocusTrap(panelRef, request !== null);
+
   if (!request) return null;
 
   const trimmed = value.trim();
   const problem = trimmed ? (request.validate?.(trimmed) ?? null) : null;
   const ready = trimmed.length > 0 && !problem;
-
-  useFocusTrap(panelRef, request !== null);
 
   return (
     <div

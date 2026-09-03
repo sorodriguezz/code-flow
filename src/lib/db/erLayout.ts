@@ -34,8 +34,9 @@ const NODE_MAX_WIDTH = 320;
 /**
  * How much air the layout leaves between boxes.
  *
- * `roomy` is the reading layout: generous gaps, every layer a single column, the shape of the model
- * legible at a glance. `compact` is for the schema that doesn't fit — it is not just smaller gaps
+ * `roomy` is the reading layout: generous gaps, one column per layer until a layer is genuinely
+ * tall (see `ROOMY_MIN_STACK`), the shape of the model legible at a glance. `compact` is for the
+ * schema that doesn't fit — it is not just smaller gaps
  * (see `layoutDiagram`), and the two are a user-facing toggle rather than a constant because which
  * one is right depends on whether you are studying six tables or trying to see two hundred at once.
  */
@@ -57,6 +58,26 @@ const SPACING: Record<DiagramDensity, Spacing> = {
   roomy: { columnGap: 96, rowGap: 32, padding: 40, looseGap: 32 },
   compact: { columnGap: 40, rowGap: 12, padding: 16, looseGap: 16 },
 };
+
+/**
+ * How much taller than the `TARGET_RATIO` rectangle roomy is allowed to run before it wraps a layer.
+ *
+ * Not 1: roomy's whole character is one column per depth, and aiming it at the same rectangle as
+ * compact would fold layers that read perfectly well as a single strip. Not `Infinity` either,
+ * which is what it used to be — that is the ribbon.
+ */
+const ROOMY_HEIGHT_SLACK = 1.6;
+
+/**
+ * …and the floor under that ceiling, in boxes.
+ *
+ * The ratio alone folds far too eagerly: a hub with **five** spokes came out in two sub-columns,
+ * which is not a schema anyone would call enormous. Wrapping is not free either — a layer split into
+ * sub-columns is a layer the edge router then has to get *past*, and it is where every one of the
+ * remaining through-box lines measured in `lib/dbml/route.ts` comes from. So a layer only folds once
+ * it is genuinely tall, and "tall" is stated in boxes because that is the unit a reader counts in.
+ */
+const ROOMY_MIN_STACK = 9;
 
 /** The aspect ratio compact aims the whole canvas at — roughly the shape of the panel it has to fit
  * into, so "fit to window" lands near 1:1 instead of scaling a strip down to nothing. */
@@ -364,7 +385,14 @@ export function layoutDiagram(
     wired.add(link.from);
     wired.add(link.to);
   }
-  const loose = density === "compact" ? nodes.filter((node) => !wired.has(node.id)) : [];
+  // Both density modes take the unrelated tables out of the flow now, not just compact.
+  //
+  // Leaving them in was the single worst thing about roomy: they have no edge to place them by, so
+  // every one of them lands in layer 0, and every other layer is then centred against that column.
+  // Measured on 200 tables, roomy came out 1832 x 19974 — a ribbon eleven times taller than it is
+  // wide, which fits to the window at a scale nothing can be read at. The shelf packer already
+  // sizes itself from `gap`, so roomy simply gets roomier shelves.
+  const loose = nodes.filter((node) => !wired.has(node.id));
   const flowing = loose.length === 0 ? nodes : nodes.filter((node) => wired.has(node.id));
 
   const depths = assignDepths(flowing, links);
@@ -372,7 +400,10 @@ export function layoutDiagram(
   const flow = placeLayers(
     layers,
     gap,
-    density === "compact" ? compactHeight(flowing, gap) : Infinity,
+    // Roomy gets a ceiling too, just a much looser one — see `roomyHeight`. Without any, a layer
+    // that fans out (thirty tables all pointing at one lookup) is a strip taller than any window
+    // and there is nothing the viewport can do about it.
+    density === "compact" ? compactHeight(flowing, gap) : roomyHeight(flowing, gap),
     metrics.minWidth,
   );
 
@@ -417,8 +448,9 @@ export function layoutDiagram(
  *
  * A layer taller than `maxHeight` is split into sub-columns that sit at the same depth — the boxes
  * keep their order, they just carry on in the next stack rather than off the bottom of the world.
- * With `maxHeight` at `Infinity` (which is what `roomy` passes) nothing splits and this is the
- * one-column-per-layer placement it has always been.
+ * Both densities pass a finite ceiling now; roomy's is much looser (`roomyHeight`), so on anything
+ * short of a very tall layer this is still the one-column-per-layer placement it has always been.
+ * The split is not free downstream: a wrapped layer is one the edge router has to get past.
  */
 function placeLayers(
   layers: DiagramNode[][],
@@ -485,6 +517,17 @@ function compactHeight(nodes: DiagramNode[], gap: Spacing): number {
     Math.max(...nodes.map((node) => node.height)),
     Math.sqrt(area / TARGET_RATIO),
   );
+}
+
+/**
+ * The height roomy is willing to stack to: the `TARGET_RATIO` rectangle with slack, but never less
+ * than a column of `ROOMY_MIN_STACK` of these boxes. See `ROOMY_MIN_STACK`.
+ */
+function roomyHeight(nodes: DiagramNode[], gap: Spacing): number {
+  if (nodes.length === 0) return Infinity;
+  const tallest = [...nodes].sort((a, b) => b.height - a.height).slice(0, ROOMY_MIN_STACK);
+  const floor = tallest.reduce((total, node) => total + node.height + gap.rowGap, 0) - gap.rowGap;
+  return Math.max(compactHeight(nodes, gap) * ROOMY_HEIGHT_SLACK, floor);
 }
 
 /**
