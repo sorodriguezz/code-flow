@@ -157,7 +157,7 @@ export const useUiStore = create<UiState>((set) => ({
   activeView: "graph",
   storiesMode: "batches",
   settingsOpen: false,
-  settingsSection: "appearance",
+  settingsSection: "general",
   settingsHostingProvider: "azure",
   apiSettingsTab: undefined,
   apiWorkspace: "requests",

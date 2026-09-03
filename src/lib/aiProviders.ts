@@ -156,7 +156,7 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-opus-4-8", label: "Opus 4.8" },
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
-    { id: "claude-fable-5", label: "Fable 5" },
+    { id: "claude-fable-5-1", label: "Fable 5.1" },
   ],
   // Fallback only — shown when `agy models` can't be queried (agy not installed / not signed in).
   // When it can, the Settings picker is populated live from the CLI, so these need not stay current.
