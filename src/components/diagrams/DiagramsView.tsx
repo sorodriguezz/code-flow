@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { ArrowLeft, History as HistoryIcon, Sparkles, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, Sparkles, Undo2, Workflow } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ViewSkeleton } from "../common/ViewSkeleton";
@@ -18,7 +18,12 @@ const DbmlWorkbench = lazy(() =>
 import { DiagramAiPanel } from "./DiagramAiPanel";
 import { ExportImageModal } from "./ExportImageModal";
 import { VersionHistoryModal } from "../common/VersionHistoryModal";
-import { diagramsListVersions, diagramsVersionContent } from "../../lib/tauri/diagramsCommands";
+import {
+  diagramsClearVersions,
+  diagramsDeleteVersion,
+  diagramsListVersions,
+  diagramsVersionContent,
+} from "../../lib/tauri/diagramsCommands";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CARD, ICON_BUTTON } from "./diagramsChrome";
 import { relativeTime } from "../notes/notesChrome";
@@ -233,15 +238,12 @@ export function DiagramsView() {
               >
                 <ArrowLeft size={14} />
               </button>
-              <button
-                type="button"
-                className={ICON_BUTTON}
-                title={t("versions.open")}
-                aria-label={t("versions.open")}
-                onClick={() => setHistoryOpen(true)}
-              >
-                <HistoryIcon size={14} />
-              </button>
+              {/* No history button here any more, in either editor. It used to be this one, wedged
+                  between the back arrow and the title — the far end of the window from every other
+                  thing you can do to the document, and the only action of ours that was not in a
+                  toolbar. Both editors now carry it in their own: the schema workbench opens its
+                  change list, whose foot reaches the saved versions, and draw.io gets an injected
+                  button next to the sparkle (see `DrawioFrame`). */}
               {/* Only while undoing the generation is still what the user would mean by "undo".
                   It disappears on the next real edit — see `clearGenerationUndo`. draw.io's own
                   ⌘Z cannot do this: a `load` resets its undo stack. */}
@@ -315,6 +317,7 @@ export function DiagramsView() {
                   onSaveAsTemplate={saveAsTemplate}
                   onExport={openExportMenu}
                   onAskAi={() => setAiOpen(true)}
+                  onHistory={() => setHistoryOpen(true)}
                 />
               )}
               {/* Keyed on the diagram for the same reason the frame above it is, and told which
@@ -351,6 +354,8 @@ export function DiagramsView() {
           title={activeTitle}
           listVersions={() => diagramsListVersions(activeId)}
           readVersion={(versionId) => diagramsVersionContent(versionId)}
+          deleteVersion={(versionId) => diagramsDeleteVersion(versionId)}
+          clearVersions={() => diagramsClearVersions(activeId)}
           // Through `editDoc` and then `flush`, not a direct write: `editDoc` is what the draw.io
           // frame is reloaded from, and `flush` is what records the pre-restore drawing as a
           // version on the way past. See the same pair in `NoteEditor`.

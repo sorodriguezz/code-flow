@@ -100,6 +100,30 @@ pub fn notes_version_content(db: State<Db>, version_id: String) -> Result<Option
     version_queries::version_content(&conn, &version_id).map_err(|e| e.to_string())
 }
 
+/// Drops one of a note's versions.
+///
+/// Housekeeping rather than an undo: the list is capped at fifty and pruned on save, so nothing
+/// *needs* deleting — this is for the reader who wants a shorter list to read. Scoped to `note` by
+/// [`version_queries::delete_version`], so a diagram's version id sent here deletes nothing.
+#[tauri::command]
+pub fn notes_delete_version(db: State<Db>, version_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    version_queries::delete_version(&conn, "note", &version_id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Drops every version of one note, leaving the note itself alone.
+///
+/// The same statement [`notes_delete_note`] runs on its way out, reached deliberately instead of as
+/// a side effect — "clear the history and keep working" is a thing people want, and it must not be
+/// spelled "delete the note and undo it".
+#[tauri::command]
+pub fn notes_clear_versions(db: State<Db>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    version_queries::delete_versions(&conn, "note", &id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Refiles a note into another book. There is no "out of every book" — see [`notes_create_note`].
 #[tauri::command]
 pub fn notes_move_note(

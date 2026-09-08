@@ -89,6 +89,19 @@ export const diagramsListVersions = (id: string) =>
 export const diagramsVersionContent = (versionId: string) =>
   invoke<string | null>("diagrams_version_content", { versionId });
 
+/**
+ * Drops one saved version of a diagram.
+ *
+ * Housekeeping, not an undo. The list prunes itself at fifty, so nothing here is required — it is
+ * for the reader who wants the list to hold only the snapshots worth keeping. Deleting one leaves
+ * every other one readable: the table holds whole documents, not a chain of diffs.
+ */
+export const diagramsDeleteVersion = (versionId: string) =>
+  invoke<void>("diagrams_delete_version", { versionId });
+
+/** Drops every saved version of a diagram. The diagram itself is untouched. */
+export const diagramsClearVersions = (id: string) => invoke<void>("diagrams_clear_versions", { id });
+
 /** Rejects a blank title in Rust, so every path into a rename is held to the same rule. */
 export const diagramsRenameDiagram = (id: string, title: string) =>
   invoke<DiagramMetaRow | null>("diagrams_rename_diagram", { id, title });

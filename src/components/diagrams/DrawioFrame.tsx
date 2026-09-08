@@ -49,13 +49,18 @@ export function DrawioFrame({
   onSaveAsTemplate,
   onExport,
   onAskAi,
+  onHistory,
 }: {
   diagramId: string;
-  /** The three actions injected into the editor's own toolbar. `at` is where the click landed, in
+  /** The four actions injected into the editor's own toolbar. `at` is where the click landed, in
    *  window coordinates, so a menu opened from one appears under the pointer. */
   onSaveAsTemplate: () => void;
   onExport: (at: { x: number; y: number }) => void;
   onAskAi: () => void;
+  /** Opens the saved-version history. In the editor's toolbar beside the sparkle rather than in the
+   *  strip of app chrome above it: it is a thing you do to *this drawing*, and the one button up
+   *  there sat at the opposite end of the window from every other one. */
+  onHistory: () => void;
 }) {
   const doc = useDiagramsStore((s) => s.draft?.doc ?? null);
   const draftId = useDiagramsStore((s) => s.draft?.id ?? null);
@@ -73,8 +78,8 @@ export function DrawioFrame({
    * will still be calling in ten minutes. A ref is the indirection that lets a re-render change
    * where they point without re-injecting the buttons.
    */
-  const actions = useRef({ onSaveAsTemplate, onExport, onAskAi });
-  actions.current = { onSaveAsTemplate, onExport, onAskAi };
+  const actions = useRef({ onSaveAsTemplate, onExport, onAskAi, onHistory });
+  actions.current = { onSaveAsTemplate, onExport, onAskAi, onHistory };
   /** The editor has booted and will accept messages — it has been sent its document. */
   const [ready, setReady] = useState(false);
   /** Which boot of the editor — see `frameKey` — has a drawing on its canvas. */
@@ -154,11 +159,12 @@ export function DrawioFrame({
    */
   const painted = paintedFrame === frameKey;
 
-  const labels = useRef({ template: "", export: "", ai: "" });
+  const labels = useRef({ template: "", export: "", ai: "", history: "" });
   labels.current = {
     template: t("diagrams.saveAsTemplate"),
     export: t("diagrams.export"),
     ai: t("diagrams.ai.title"),
+    history: t("versions.open"),
   };
 
   /**
@@ -266,6 +272,16 @@ export function DrawioFrame({
                   icon: "sparkles",
                   title: labels.current.ai,
                   onClick: () => actions.current.onAskAi(),
+                },
+                // Next to the sparkle, at the end of the row. The two are the drawing's two
+                // conversations with something outside it — one asks for a change, the other goes
+                // back to one — and they are the pair a reader looks for together after a
+                // generation lands wrong.
+                {
+                  id: "history",
+                  icon: "history",
+                  title: labels.current.history,
+                  onClick: () => actions.current.onHistory(),
                 },
               ]);
             });

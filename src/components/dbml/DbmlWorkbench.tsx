@@ -1173,7 +1173,11 @@ export function DbmlWorkbench({
           }}
           title={t("dbml.history")}
           active={history}
-          disabled={revisions.length === 0}
+          // Never disabled, even with nothing recorded yet. The panel is not only this session's
+          // change list — the saved versions, which reach back past today, are reached from the
+          // foot of it — and a freshly opened schema is exactly the case with no revisions and a
+          // month of versions behind it. Greying it out there put the only way to those versions
+          // behind a button that looked broken.
         >
           <History size={12} />
         </ToolbarButton>

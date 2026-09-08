@@ -37,9 +37,6 @@ import { restoreSatellites } from "./lib/tauri/windows";
 import { onWindowMessage } from "./lib/windowBus";
 import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
-import { useApiStore } from "./state/apiStore";
-import { useDbStore } from "./state/dbStore";
-import { useRemoteStore } from "./state/remoteStore";
 import { usePreferencesStore } from "./state/preferencesStore";
 import { useAiProviderStore } from "./state/aiProviderStore";
 import { useLanguageStore } from "./state/languageStore";
@@ -474,7 +471,6 @@ export default function App() {
   const initTour = useTourStore((s) => s.init);
   const initRequirements = useRequirementsStore((s) => s.init);
   const project = useWorkspaceStore((s) => s.activeProject());
-  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
   const activeView = useUiStore((s) => s.activeView);
@@ -613,44 +609,19 @@ export default function App() {
     void useIconRulesStore.getState().setRepo(project?.local_path ?? null);
   }, [project?.local_path, setRepoPath]);
 
-  // The API client's collections, environments, history and cookies belong to the workspace, so
-  // a switch has to swap them the way the repo above swaps. Only the id is passed: the store
-  // owns the teardown of what the previous workspace left running (live WebSocket/MQTT
-  // connections, open request tabs), so there is nothing here to keep in step with it. Same for
-  // the database workspace — connections, saved consoles, query history, and the live sessions
-  // belonging to the connections it is about to drop — and for Remote, whose open sessions are
-  // `ssh` processes that have to be closed rather than left as children nothing on screen names.
+  // No workspace-switch effect for the API client, the database workspace, Notes, Diagrams or
+  // Remote. Every one of those keeps the rule — and the guard that keeps its first load lazy — in a
+  // `useWorkspaceStore.subscribe` at the bottom of its own store, the way `docsStore` and
+  // `chainStore` always did.
   //
-  // But a *switch* is the only thing this effect is for now. It used to fire on the very first
-  // workspace too, which meant every launch paid for three full tree loads and about seventeen
-  // IPC round trips in front of the first frame — for three views `MainContent` does not even
-  // mount unless the user goes to them. Each of those views hydrates itself on mount already
-  // (`ensureApiStoreLoaded`, `ensureDbStoreLoaded`, `ensureRemoteStoreLoaded`), so the first load
-  // is simply left to whichever of them the user opens, if any.
-  //
-  // The guard is what keeps the teardown honest: a store that has never loaded has nothing to
-  // tear down and no stale workspace to show, so calling `setWorkspace` on it would only be
-  // re-introducing the eager load through the back door. `workspaceId !== null` is the store's own
-  // record of having been hydrated (every `init` sets it before its first await); `loading` covers
-  // the sliver where a first load is in flight but has not written it yet.
-  useEffect(() => {
-    if (!workspaceId) return;
-    if (useApiStore.getState().workspaceId !== null || useApiStore.getState().loading) {
-      void useApiStore.getState().setWorkspace(workspaceId);
-    }
-    if (useDbStore.getState().workspaceId !== null || useDbStore.getState().loading) {
-      void useDbStore.getState().setWorkspace(workspaceId);
-    }
-    if (useRemoteStore.getState().workspaceId !== null || useRemoteStore.getState().loading) {
-      void useRemoteStore.getState().setWorkspace(workspaceId);
-    }
-    // Notes and Diagrams are not here, and that is the fix rather than an omission: each keeps this
-    // same guard in a `useWorkspaceStore.subscribe` at the bottom of its own store, the way
-    // `docsStore` and `chainStore` already did. Diagrams is why. It was added after this effect was
-    // written, never got its line here, and so kept showing — and filing — its drawings under the
-    // workspace it was first opened in. A store's own file is the only place that rule cannot be
-    // forgotten from.
-  }, [workspaceId]);
+  // Two bugs pushed the last three out of here, and they are the same bug seen twice. `diagramsStore`
+  // was added after this effect was written, never got its line, and filed every drawing made after a
+  // switch under the workspace it was first opened in — a rule kept in `App` is a rule the next store
+  // is shipped without. Then the three that *were* here turned out to be main-window-only for exactly
+  // the reason an effect in this file is: a satellite holds its own workspace and picks it from its own
+  // title bar, so a detached database, API or Remote window changed workspace and went on showing the
+  // previous one's tree with nothing on screen saying why. A subscription lives in whichever webview
+  // loaded the store, so it is right in both windows at once.
 
   // Keeps track of which registered repositories are still on disk. A folder moved or deleted from
   // outside CodeFlow used to leave a row that still looked openable and, opened, pointed the git

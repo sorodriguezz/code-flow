@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Archive, ChevronDown, RotateCcw, X } from "lucide-react";
+import { Archive, ChevronDown, ChevronRight, RotateCcw, X } from "lucide-react";
 import { changedLines, HISTORY_PAGE, type Revision } from "../../lib/dbml/history";
 import { readLayout } from "../../lib/dbml/layout";
 import { ICON_BUTTON } from "../diagrams/diagramsChrome";
@@ -117,17 +117,23 @@ export function DbmlHistory({
             `doc_versions` keeps snapshots of the saved document from before that, including from
             previous days — which is where "I need what it looked like on Tuesday" actually lives.
             Always offered, including when the session list is empty, because that is exactly the
-            state a freshly opened diagram is in. */}
+            state a freshly opened diagram is in.
+
+            In the document's own colour and wearing a chevron, not muted like a footnote: this is
+            the *only* way into the saved versions from the schema editor — the diagram header's
+            second button for them is gone, see `DiagramsView` — so it has to read as a door rather
+            than as a caption under the list. */}
         <button
           type="button"
           onClick={() => {
             onOlder();
             onClose();
           }}
-          className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-[7px] text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-accent-soft)] hover:text-[var(--cf-accent)]"
+          className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-[7px] text-[11px] text-[var(--cf-text)] transition-colors hover:bg-[var(--cf-accent-soft)] hover:text-[var(--cf-accent)]"
         >
-          <Archive size={11} />
-          {t("dbml.history.older")}
+          <Archive size={11} className="shrink-0" />
+          <span className="min-w-0 flex-1 truncate text-left">{t("dbml.history.older")}</span>
+          <ChevronRight size={11} className="shrink-0 opacity-60" />
         </button>
       </aside>
     </>

@@ -130,6 +130,22 @@ pub fn diagrams_version_content(db: State<Db>, version_id: String) -> Result<Opt
     version_queries::version_content(&conn, &version_id).map_err(|e| e.to_string())
 }
 
+/// Drops one of a diagram's versions. See [`notes_delete_version`] — same table, same reasoning.
+#[tauri::command]
+pub fn diagrams_delete_version(db: State<Db>, version_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    version_queries::delete_version(&conn, "diagram", &version_id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Drops every version of one diagram, leaving the diagram itself alone.
+#[tauri::command]
+pub fn diagrams_clear_versions(db: State<Db>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    version_queries::delete_versions(&conn, "diagram", &id).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Rejects a blank title here rather than in the tree, so that every path into a rename — the
 /// explorer, the gallery, a future shortcut — is held to the same rule by one check.
 #[tauri::command]

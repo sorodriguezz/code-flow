@@ -13,10 +13,17 @@
  *
  * Restoring writes a *new* version rather than rewinding to an old one — the current text is
  * snapshotted on the way past, because "I restored the wrong one" is the next thing that happens.
+ *
+ * **Versions can be deleted from here**, one at a time or the lot. The table already prunes itself
+ * at fifty per document, so this is not about disk — it is about the list being *readable*. Fifty
+ * snapshots of one afternoon's typing, dated four minutes apart, is a list nobody scans; the two
+ * that are worth keeping are invisible inside it. Pruning is how a reader turns the pile back into
+ * a shortlist, so the single-row delete is deliberately one click with no dialog in the way. The
+ * dialog is on "empty it", which is the button that can actually cost something.
  */
 
 import { useEffect, useState } from "react";
-import { History, RotateCcw } from "lucide-react";
+import { History, RotateCcw, Trash2 } from "lucide-react";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { EmptyState } from "./EmptyState";
 import { Skeleton } from "./Skeleton";
@@ -36,6 +43,8 @@ export function VersionHistoryModal({
   listVersions,
   readVersion,
   onRestore,
+  deleteVersion,
+  clearVersions,
   onClose,
 }: {
   /** The document's current name, for the dialog's subtitle. */
@@ -44,6 +53,11 @@ export function VersionHistoryModal({
   readVersion: (versionId: string) => Promise<string | null>;
   /** Puts the text back. The caller owns the write, because a note and a diagram save differently. */
   onRestore: (content: string, version: DocVersion) => Promise<void>;
+  /** Drops one version. Owned by the caller for the same reason `listVersions` is: the command is
+   *  per kind. */
+  deleteVersion: (versionId: string) => Promise<void>;
+  /** Drops every version of this document. The document itself is untouched. */
+  clearVersions: () => Promise<void>;
   onClose: () => void;
 }) {
   const t = useT();
@@ -108,6 +122,48 @@ export function VersionHistoryModal({
     }
   };
 
+  /**
+   * Drops one version, without a dialog in the way.
+   *
+   * No confirmation on purpose. Pruning a fifty-row list into the three snapshots worth keeping is
+   * forty-seven decisions, and a modal on each turns the one feature people asked for into a chore
+   * they abandon halfway. The row it acts on is the row under the pointer, the list redraws
+   * immediately, and every *other* version is untouched — the table holds whole documents, so there
+   * is no chain to break. The dialog is on "empty it" below, where one click really does take
+   * everything.
+   */
+  const removeOne = async (version: DocVersion) => {
+    // Optimistic, and the reload on failure is what makes that safe: a delete that did not happen
+    // must not leave a row missing from a list people are about to trust.
+    setVersions((rows) => (rows ?? []).filter((row) => row.id !== version.id));
+    if (selected?.id === version.id) {
+      // Onto its neighbour rather than onto nothing: an emptied preview pane reads as "the delete
+      // took more than one row with it". The one below, or the one above when it was the last.
+      const rows = versions ?? [];
+      const at = rows.findIndex((row) => row.id === version.id);
+      setSelected(rows[at + 1] ?? rows[at - 1] ?? null);
+    }
+    try {
+      await deleteVersion(version.id);
+    } catch (e) {
+      pushErrorToast(String(e));
+      await listVersions()
+        .then(setVersions)
+        .catch(() => undefined);
+    }
+  };
+
+  const clearAll = async () => {
+    if (!(await confirmAction(t("versions.clearConfirm"), true, t("versions.clear")))) return;
+    try {
+      await clearVersions();
+      setVersions([]);
+      setSelected(null);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
   return (
     <ApiModal
       icon={History}
@@ -119,9 +175,28 @@ export function VersionHistoryModal({
       footer={
         <div className="flex items-center justify-between gap-3">
           <span className="min-w-0 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+            {/* What the list weighs, before the hint about restoring. It is here because "am I
+                hoarding these?" is the question that sends people looking for the delete button in
+                the first place, and a list you have to count yourself never answers it. */}
+            {versions !== null && versions.length > 0 && (
+              <span className="mr-1 text-[var(--cf-text)]">
+                {t("versions.count", { n: versions.length })} ·{" "}
+                {sizeLabel(
+                  versions.reduce((total, version) => total + version.size, 0),
+                  t,
+                )}
+                {" · "}
+              </span>
+            )}
             {t("versions.footerHint")}
           </span>
           <div className="flex shrink-0 items-center gap-2">
+            {versions !== null && versions.length > 0 && (
+              <GhostButton onClick={() => void clearAll()} title={t("versions.clearHint")}>
+                <Trash2 size={12} />
+                {t("versions.clear")}
+              </GhostButton>
+            )}
             <GhostButton onClick={onClose}>{t("common.close")}</GhostButton>
             <PrimaryButton onClick={() => void restore()} disabled={!selected || content === null || restoring}>
               <RotateCcw size={12} className="mr-1 inline" />
@@ -150,11 +225,14 @@ export function VersionHistoryModal({
               {versions.map((version) => {
                 const active = selected?.id === version.id;
                 return (
-                  <li key={version.id}>
+                  // `group` and `relative` for the delete button below, which is positioned over
+                  // the row rather than laid out beside it: a flex sibling would take width from
+                  // the date, and the date is the whole reason a reader can tell two rows apart.
+                  <li key={version.id} className="group relative">
                     <button
                       type="button"
                       onClick={() => setSelected(version)}
-                      className={`w-full rounded-md px-2 py-1.5 text-left transition-colors ${
+                      className={`w-full rounded-md py-1.5 pl-2 pr-7 text-left transition-colors ${
                         active
                           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
                           : "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
@@ -173,6 +251,18 @@ export function VersionHistoryModal({
                       <span className="mt-0.5 block break-words text-[10.5px] leading-snug opacity-70">
                         {version.title || t("versions.untitled")} · {sizeLabel(version.size, t)}
                       </span>
+                    </button>
+                    {/* A sibling and not a child: a button inside a button is invalid, and the row
+                        is already the "look at this one" target. Revealed on hover, and on keyboard
+                        focus so it is not mouse-only. */}
+                    <button
+                      type="button"
+                      onClick={() => void removeOne(version)}
+                      title={t("versions.delete")}
+                      aria-label={t("versions.delete")}
+                      className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
+                    >
+                      <Trash2 size={11} />
                     </button>
                   </li>
                 );

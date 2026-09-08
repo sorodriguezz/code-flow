@@ -31,7 +31,12 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { NoteToolbar } from "./NoteToolbar";
 import { NoteBacklinks } from "./NoteBacklinks";
 import { VersionHistoryModal } from "../common/VersionHistoryModal";
-import { notesListVersions, notesVersionContent } from "../../lib/tauri/notesCommands";
+import {
+  notesClearVersions,
+  notesDeleteVersion,
+  notesListVersions,
+  notesVersionContent,
+} from "../../lib/tauri/notesCommands";
 import { NoteOutline } from "./NoteOutline";
 import { NoteTagBar } from "./NoteTagBar";
 import { SaveTemplateModal } from "./SaveTemplateModal";
@@ -588,6 +593,8 @@ export function NoteEditor() {
           title={note.title || t("notes.untitled")}
           listVersions={() => notesListVersions(note.id)}
           readVersion={(versionId) => notesVersionContent(versionId)}
+          deleteVersion={(versionId) => notesDeleteVersion(versionId)}
+          clearVersions={() => notesClearVersions(note.id)}
           // Through the store's own save, not a direct command: the store is what keeps the open
           // buffer, the excerpt and the tree row in step, and writing behind it would leave the
           // editor showing the old text over the restored one.

@@ -1440,3 +1440,41 @@ export function hostIsHolding(
     (hold?.screen ?? false)
   );
 }
+
+/**
+ * Hosts, groups and command history belong to the workspace, so a switch swaps them — and closes
+ * the open sessions, which are `ssh` processes that have to be ended rather than left as children
+ * nothing on screen names.
+ *
+ * # Why this is in the store and not in `App`
+ *
+ * It *was* in `App`, in one effect that switched `apiStore`, `dbStore` and this store together — and an effect in `App` runs
+ * in the **main window only**. A satellite holds its own workspace and picks it from its own title
+ * bar (see `SatelliteApp`), so a detached Remote window changed workspace and then went on
+ * showing — and writing to — the one it was opened in. Nothing announced that: the tree simply did
+ * not change, which reads as "the hosts are global" rather than as a bug.
+ *
+ * `notesStore` and `diagramsStore` had already moved their copy of this rule into their own files
+ * for the neighbouring reason — a rule kept in `App` is a rule the next store gets shipped without —
+ * and the same move fixes both problems at once, because a subscription lives in whichever webview
+ * loaded the store rather than in the one window that renders `App`.
+ *
+ * # The guard
+ *
+ * The one `App` carried, and it earns its place: a store that has never hydrated has nothing to show
+ * from the wrong workspace and nothing to tear down, so switching it here would re-introduce the
+ * eager load the lazy view exists to avoid — three full tree loads and about seventeen IPC round
+ * trips in front of the first frame, for views the user may never open at all. `workspaceId` is the
+ * store's own record of having hydrated (every `init` sets it before its first await); `loading`
+ * covers the sliver where a first load is in flight but has not written it yet.
+ *
+ * A null workspace is skipped rather than switched to, exactly as `App` skipped it: `setWorkspace`
+ * takes an id, and there is no tree to load without one.
+ */
+useWorkspaceStore.subscribe((state, previous) => {
+  if (state.activeWorkspaceId === previous.activeWorkspaceId) return;
+  if (state.activeWorkspaceId === null) return;
+  const { workspaceId, loading } = useRemoteStore.getState();
+  if (workspaceId === null && !loading) return;
+  void useRemoteStore.getState().setWorkspace(state.activeWorkspaceId);
+});

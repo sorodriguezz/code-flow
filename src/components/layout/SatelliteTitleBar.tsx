@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Check, ChevronDown, Copy, CornerUpLeft, Minus, Square, X } from "lucide-react";
+import { Check, ChevronDown, Copy, CornerUpLeft, GitBranch, Lock, Minus, Square, X } from "lucide-react";
 import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 import { broadcast } from "../../lib/windowBus";
 import { WINDOW } from "../../lib/windowIdentity";
+import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { RemoteActions } from "../git/RemoteActions";
 import { useT } from "../../state/languageStore";
 import { Tooltip } from "../common/Tooltip";
 import type { Workspace } from "../../types/domain";
@@ -32,6 +34,24 @@ const win = getCurrentWindow();
  * A **repository** window gets the readout instead. Its workspace is a fact about the repository it
  * holds rather than a choice, so a picker there would be offering to put the window somewhere its
  * own contents are not.
+ *
+ * # Why a repository window carries fetch, pull and push
+ *
+ * Because the window is otherwise a dead end for them. Those three live in the main window's status
+ * bar, which a satellite does not have, so a detached repository had four working tabs — graph,
+ * changes, editor, pipelines — and no way to reach its remote: you went back to the main window,
+ * selected that repository *there*, pressed fetch, and came back. That is precisely the round trip
+ * detaching the window was meant to remove.
+ *
+ * They are not a shell affordance in the way the switcher is. Every one of them acts on the
+ * repository this window already holds, through this window's own `repoStore` — nothing here can
+ * make the window show something else, which is the line the rest of this bar is drawn along. See
+ * `RemoteActions`, which is the same control the status bar renders.
+ *
+ * The branch comes with them, and is a readout rather than the main window's switcher: push and
+ * pull are about the current branch, and three buttons with no subject named anywhere on the window
+ * are three buttons you have to guess at. Switching branch is a repository *action* and lives in
+ * the tabs below, where the graph already offers it.
  */
 
 function WindowsControls() {
@@ -108,7 +128,11 @@ export function SatelliteTitleBar() {
       {isMac && <div aria-hidden className={fullscreen ? "w-1" : "w-[62px]"} />}
       {!isMac && <div aria-hidden className="w-2" />}
 
-      <span className="truncate font-medium text-[var(--cf-text)]">{name}</span>
+      {/* `min-w-0` so it actually gives when the bar runs out of room: as a flex item its
+          default `min-width: auto` makes `truncate` a no-op, which was invisible while this
+          bar held three things and is not now that a repository window also carries a branch
+          and three buttons. */}
+      <span className="min-w-0 truncate font-medium text-[var(--cf-text)]">{name}</span>
 
       {workspace &&
         (spec?.kind === "repo" ? (
@@ -122,6 +146,8 @@ export function SatelliteTitleBar() {
         ) : (
           <WorkspacePicker current={workspace} />
         ))}
+
+      {spec?.kind === "repo" && <RepoRemote />}
 
       <div className="flex-1" data-tauri-drag-region />
 
@@ -137,6 +163,47 @@ export function SatelliteTitleBar() {
 
       {!isMac && <WindowsControls />}
     </div>
+  );
+}
+
+/**
+ * The current branch and the three remote actions, for a repository window.
+ *
+ * Left of the drag region and right after the workspace chip, so the bar reads the way the main
+ * window's status bar does: repository, then branch, then what you can do to its remote.
+ *
+ * Nothing at all until the branches have loaded — `setRepoPath` refreshes them on mount, and a
+ * skeleton for a row of icons in a 36px bar would be more movement than the thing it stands in for.
+ */
+function RepoRemote() {
+  const branch = useRepoStore((s) => s.branches.find((entry) => entry.is_head) ?? null);
+  const detached = useRepoStore((s) => s.status?.is_detached ?? false);
+  const name = useRepoStore((s) => s.status?.current_branch ?? null);
+  const t = useT();
+
+  if (!name && !detached) return null;
+
+  return (
+    <>
+      <span
+        className="flex min-w-0 shrink items-center gap-1 text-[11px] text-[var(--cf-text-muted)]"
+        title={name ?? undefined}
+      >
+        <GitBranch size={11} className="shrink-0" />
+        <span className="min-w-0 truncate">{name ?? t("statusbar.detachedHead")}</span>
+        {/* The explanation for a greyed-out push, in the same glyph the status bar uses. Without it
+            the button is disabled with its reason only in a tooltip. */}
+        {branch?.is_locked && (
+          <span
+            className="shrink-0 text-[var(--cf-warning)]"
+            title={branch.locked_by_rule ? t("branch.lockedByRuleBadge") : t("branch.lockedBadge")}
+          >
+            <Lock size={10} />
+          </span>
+        )}
+      </span>
+      <RemoteActions />
+    </>
   );
 }
 

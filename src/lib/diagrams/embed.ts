@@ -530,6 +530,13 @@ const ICONS = {
   sparkles:
     '<path d="m12 3 2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z"/>' +
     '<path d="M19 3v3"/><path d="M20.5 4.5h-3"/>',
+  // A clock with the arrow going back round it: the same drawing every other history button in the
+  // app wears, transcribed here because the icon set this toolbar is in is this object rather than
+  // the component library the rest of the UI imports from.
+  history:
+    '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>' +
+    '<path d="M3 3v5h5"/>' +
+    '<path d="M12 7v5l4 2"/>',
 } as const;
 
 export type ToolbarIcon = keyof typeof ICONS;

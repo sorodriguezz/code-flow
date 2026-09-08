@@ -25,6 +25,7 @@ import { useAiProviderStore } from "./state/aiProviderStore";
 import { getProject } from "./lib/tauri/commands";
 import { WINDOW } from "./lib/windowIdentity";
 import { startWindowBoundsTracking } from "./lib/windowControls";
+import { useRemoteActionShortcuts } from "./lib/useGlobalShortcuts";
 
 /**
  * The whole of a satellite window.
@@ -195,6 +196,9 @@ function RepoWindow({ projectId }: { projectId: string }) {
   const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
   const [tab, setTab] = useState<MainView>("graph");
   const t = useT();
+  // Fetch, pull and push, and only those three — see `useRemoteActionShortcuts`. They are the
+  // chords the buttons in this window's title bar advertise, so they have to work in it.
+  useRemoteActionShortcuts();
 
   const project = projects?.find((p) => p.id === projectId) ?? null;
 

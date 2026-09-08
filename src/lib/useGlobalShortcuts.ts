@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useShortcutsStore, activeChords } from "../state/shortcutsStore";
+import { useShortcutsStore, activeChords, bindingFor } from "../state/shortcutsStore";
 import { useTourStore } from "../state/tourStore";
 import { useDataDirsStore } from "../state/dataDirsStore";
 import { SHORTCUT_BY_ID } from "./shortcuts";
@@ -63,4 +63,51 @@ export function useGlobalShortcuts(): void {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [overrides, recording, tourActive, dataDirsBlocked]);
+}
+
+/**
+ * The three remote actions' chords, for a repository satellite.
+ *
+ * Not `useGlobalShortcuts`: that binds *every* command, and most of them — switch view, open
+ * settings, the palette, the workspace switcher — are ways to make a window show something else,
+ * which is the one thing a satellite must not do. Binding the whole table there would give a
+ * one-repository window a keystroke for the app rail it does not have.
+ *
+ * These three are different in kind. They act on the repository the window already holds, through
+ * this window's own `repoStore`, and they are the exact chords the buttons beside them advertise in
+ * their tooltips — `useShortcutHint` reads the same bindings whichever window it renders in, so
+ * without this the satellite's fetch button promised ⌘⇧R and nothing happened.
+ *
+ * Rebinding still works: the chords are read from the same overrides the main window uses, so a
+ * user who moves fetch to F5 moves it in both windows at once.
+ */
+export function useRemoteActionShortcuts(): void {
+  const overrides = useShortcutsStore((s) => s.overrides);
+
+  useEffect(() => {
+    const chords = new Map<string, () => void>();
+    for (const id of ["git.fetch", "git.pull", "git.push"] as const) {
+      const chord = bindingFor(id, overrides);
+      const run = SHORTCUT_BY_ID.get(id)?.run;
+      if (chord && run) chords.set(chord, run);
+    }
+    if (chords.size === 0) return;
+
+    const handler = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.repeat) return;
+      const chord = eventToChord(e);
+      if (!chord) return;
+      const run = chords.get(chord);
+      if (!run) return;
+      // The same two guards the main handler applies, for the same reasons — see above. All three
+      // of these default to Mod chords, but they are rebindable, so a user who puts fetch on F5
+      // must not have it fire into a commit message.
+      if (!usesMod(chord) && !isFunctionKey(chord) && isTypingTarget(e.target)) return;
+      e.preventDefault();
+      run();
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [overrides]);
 }

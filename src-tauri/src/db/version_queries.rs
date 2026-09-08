@@ -135,6 +135,23 @@ pub fn record_version(
     Ok(true)
 }
 
+/// Drops one version, by id.
+///
+/// Scoped by `kind` as well as by id, even though the id is a UUID and unique on its own: `kind` is
+/// what makes a mis-wired caller — the notes command handed a diagram's version id — delete nothing
+/// instead of deleting somebody else's history.
+///
+/// **Nothing is pruned around it.** A version is not a link in a chain — the table holds whole
+/// snapshots precisely so that removing one leaves the rest readable — so this is the whole
+/// operation. Returns how many rows went, which is 0 when the id is already gone; the caller treats
+/// that as success, because "it is not there any more" is what was asked for either way.
+pub fn delete_version(conn: &Connection, kind: &str, id: &str) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM doc_versions WHERE kind = ?1 AND id = ?2",
+        params![kind, id],
+    )
+}
+
 /// Drops every version of one document — what a *permanent* delete of the document does.
 ///
 /// Not wired to a cascade on purpose: a version's whole job is to outlive a mistake, and deleting
@@ -227,6 +244,39 @@ mod tests {
             format!("v{}", MAX_VERSIONS + 9)
         );
         assert!(!rows.iter().any(|row| row.created_at == at(0)));
+    }
+
+    #[test]
+    fn one_version_can_be_dropped_without_touching_its_neighbours() {
+        let conn = db();
+        record_version(&conn, "note", "n1", "T", "one", &at(0)).unwrap();
+        record_version(&conn, "note", "n1", "T", "two", &at(5)).unwrap();
+        record_version(&conn, "note", "n1", "T", "three", &at(10)).unwrap();
+
+        let middle = list_versions(&conn, "note", "n1").unwrap()[1].id.clone();
+        assert_eq!(delete_version(&conn, "note", &middle).unwrap(), 1);
+
+        let rows = list_versions(&conn, "note", "n1").unwrap();
+        assert_eq!(rows.len(), 2);
+        // The snapshots either side are whole documents, so the gap costs the survivors nothing.
+        assert_eq!(version_content(&conn, &rows[0].id).unwrap().unwrap(), "three");
+        assert_eq!(version_content(&conn, &rows[1].id).unwrap().unwrap(), "one");
+    }
+
+    #[test]
+    fn dropping_a_version_of_the_wrong_kind_drops_nothing() {
+        let conn = db();
+        record_version(&conn, "diagram", "d1", "T", "a", &at(0)).unwrap();
+        let id = list_versions(&conn, "diagram", "d1").unwrap()[0].id.clone();
+
+        assert_eq!(delete_version(&conn, "note", &id).unwrap(), 0);
+        assert_eq!(list_versions(&conn, "diagram", "d1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dropping_a_version_that_is_already_gone_is_not_an_error() {
+        let conn = db();
+        assert_eq!(delete_version(&conn, "note", "no-such-id").unwrap(), 0);
     }
 
     #[test]

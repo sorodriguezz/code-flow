@@ -1,6 +1,7 @@
 import { useRepoStore } from "../state/repoStore";
 import { usePreferencesStore } from "../state/preferencesStore";
 import { useFetchTimerStore } from "../state/fetchTimerStore";
+import { isMainWindow } from "./windowIdentity";
 import type { BranchInfo, CommitInfo } from "../types/domain";
 
 /**
@@ -38,8 +39,16 @@ export function canPush(branch: BranchInfo | null | undefined): boolean {
  * remote was last asked N seconds ago", and letting it run down to zero after a fetch that already
  * happened would spend a second one answering a question nobody still has. A no-op when auto-fetch
  * is switched off, which is when there is no countdown to restart.
+ *
+ * **And a no-op outside the main window.** The clock this winds is main's alone — `App` owns the
+ * interval that both fires the automatic fetch and ticks the number down — and every window has its
+ * own copy of the store. So a satellite writing `30` into its copy would put a `30s` next to its
+ * fetch button that nothing ever decrements: a countdown frozen at half past, which is worse than
+ * no countdown at all. A satellite's fetch button simply shows no clock, which is the truth — that
+ * window is not on a timer.
  */
 export function restartAutoFetchCountdown(): void {
+  if (!isMainWindow()) return;
   const { autoFetchSeconds } = usePreferencesStore.getState();
   if (autoFetchSeconds) useFetchTimerStore.getState().setRemaining(autoFetchSeconds);
 }

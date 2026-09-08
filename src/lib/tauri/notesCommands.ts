@@ -164,6 +164,13 @@ export const notesListVersions = (id: string) => invoke<DocVersion[]>("notes_lis
 export const notesVersionContent = (versionId: string) =>
   invoke<string | null>("notes_version_content", { versionId });
 
+/** Drops one saved version of a note. See `diagramsDeleteVersion` — one table, one set of rules. */
+export const notesDeleteVersion = (versionId: string) =>
+  invoke<void>("notes_delete_version", { versionId });
+
+/** Drops every saved version of a note. The note itself is untouched. */
+export const notesClearVersions = (id: string) => invoke<void>("notes_clear_versions", { id });
+
 // ---------- writing with AI ----------
 
 /**
