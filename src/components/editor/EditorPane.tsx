@@ -20,6 +20,7 @@ import {
   Play,
   Save,
   SplitSquareHorizontal,
+  Workflow,
   X,
 } from "lucide-react";
 import { MarkdownPreview } from "./MarkdownPreview";
@@ -543,6 +544,7 @@ export function EditorPane({
   onChange,
   onViewMode,
   onSave,
+  onOpenInDiagrams,
   onCodeSnap,
   onOpenCommitDiff,
   registerCapture,
@@ -580,6 +582,15 @@ export function EditorPane({
   onChange: (path: string, value: string) => void;
   onViewMode: (path: string, mode: ViewMode) => void;
   onSave: () => void;
+  /**
+   * Hand this `.dbml` file to the Diagrams app, where it becomes a diagram that stays in step
+   * with the file — see `lib/dbmlBridge.ts`.
+   *
+   * `null` when there is nothing to hand over: any file that is not a schema, and a workspace that
+   * could not be resolved. The button is drawn only when this is a function, so "no bridge" is a
+   * missing button rather than a disabled one nobody can explain.
+   */
+  onOpenInDiagrams: (() => void) | null;
   onCodeSnap: (target: CodeSnapTarget) => void;
   /**
    * Clicking a blame annotation: show this file's change in that commit, side by side.
@@ -2350,6 +2361,26 @@ export function EditorPane({
                       </button>
                     ))}
                   </div>
+                )}
+                {/* A schema's one-way door into the Diagrams app — and only for a schema, which
+                    is what `onOpenInDiagrams` being null covers. Next to the preview toggles
+                    rather than beside Save, because it is a way of *looking* at this file: the
+                    difference from the preview button next to it is that the diagram it opens can
+                    be edited, and writes back here.
+
+                    Not disabled while the tab is dirty. Pressing it saves the file first — the
+                    diagram is a view of what is on disk, so handing it a stale one would be the
+                    surprise. The tooltip says so. */}
+                {onOpenInDiagrams && (
+                  <button
+                    onClick={onOpenInDiagrams}
+                    title={t("dbml.openInDiagrams")}
+                    aria-label={t("dbml.openInDiagrams")}
+                    data-tour="dbml-open-in-diagrams"
+                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                  >
+                    <Workflow size={12} />
+                  </button>
                 )}
                 {/* Only for a file that has something to compare. A toggle rather than a mode in
                     the group above it: the answer to "and back to what?" is always the code, so

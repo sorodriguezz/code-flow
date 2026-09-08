@@ -1209,6 +1209,10 @@ pub struct DiagramFolderRow {
     pub name: String,
     /// Empty for "no colour", which draws the folder in the muted default.
     pub color: String,
+    /// The repository this folder collects `.dbml` files for, or empty for an ordinary folder.
+    /// Identity, not decoration: it is how the next schema opened from that repository finds its
+    /// way here after the folder has been renamed or moved.
+    pub origin_project_id: String,
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -1236,6 +1240,15 @@ pub struct DiagramMeta {
     /// Vertices plus edges, derived from `doc` on every write. What a list wants from a document
     /// it is not allowed to have.
     pub shape_count: i64,
+    /// The project whose working tree holds [`Self::origin_path`], or empty.
+    pub origin_project_id: String,
+    /// The repo-relative file this diagram mirrors, or empty for a diagram made in the app.
+    ///
+    /// Non-empty is what makes the row a bridge: the document is re-read from that file on open
+    /// and written back on every save. It travels on the *metadata* rather than only on the full
+    /// row because the tree draws it — a linked diagram is marked in the explorer, and the
+    /// explorer never fetches documents.
+    pub origin_path: String,
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -1254,6 +1267,10 @@ pub struct DiagramRow {
     pub tags: String,
     pub pinned: bool,
     pub shape_count: i64,
+    /// See [`DiagramMeta::origin_project_id`].
+    pub origin_project_id: String,
+    /// See [`DiagramMeta::origin_path`].
+    pub origin_path: String,
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,

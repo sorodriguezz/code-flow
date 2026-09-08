@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { ArrowLeft, Sparkles, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, FileWarning, GitBranch, Sparkles, Undo2, Workflow } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ViewSkeleton } from "../common/ViewSkeleton";
@@ -34,6 +34,8 @@ import { useLayoutStore } from "../../state/layoutStore";
 import { promptAction } from "../../state/promptStore";
 import { useToastStore } from "../../state/toastStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { confirmAction } from "../../state/confirmStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 
 /**
  * The Diagrams workspace's shell: the explorer, and whichever surface the selection calls for.
@@ -81,6 +83,20 @@ export function DiagramsView() {
   const openTitle = useDiagramsStore(
     (s) => s.diagrams.find((d) => d.id === s.activeId)?.title ?? "",
   );
+  /**
+   * The file the open diagram mirrors, or `""` — see `lib/dbmlBridge.ts`.
+   *
+   * A string rather than the diagram, for the same reason every other selector in this component
+   * is a scalar: subscribing to the row would re-render the explorer beside the canvas every time
+   * a save folded new metadata into the list.
+   */
+  const originPath = useDiagramsStore(
+    (s) => s.diagrams.find((d) => d.id === s.activeId)?.origin_path ?? "",
+  );
+  const originProjectId = useDiagramsStore(
+    (s) => s.diagrams.find((d) => d.id === s.activeId)?.origin_project_id ?? "",
+  );
+  const fileError = useDiagramsStore((s) => s.fileError);
   /**
    * Which editor the open diagram calls for.
    *
@@ -283,6 +299,17 @@ export function DiagramsView() {
                   </span>
                 )}
               </span>
+              {/* Before the save status, and that order is the point: "where this document lives"
+                  is the fact the status is *about* for a linked diagram — saving it writes a file
+                  in somebody's working tree. A diagram made in the app has no chip at all. */}
+              {originPath && activeId && (
+                <LinkedFileChip
+                  diagramId={activeId}
+                  path={originPath}
+                  projectId={originProjectId}
+                  fileError={fileError}
+                />
+              )}
               {status && (
                 <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{status}</span>
               )}
@@ -368,5 +395,97 @@ export function DiagramsView() {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * Where a linked diagram's document actually lives, and the way to stop it living there.
+ *
+ * Drawn only for a diagram with an `origin_path`, which is only ever a schema opened from a
+ * repository. It exists because the bridge is otherwise invisible and its consequence is not:
+ * editing here writes a file in a working tree, and a user who does not know that is a user
+ * surprised by a dirty repository. So the chip is a statement of what saving does, and the tooltip
+ * spells it out.
+ *
+ * **Warning-coloured when the file could not be read** — which is not a failure and is usually a
+ * branch that does not have that schema. The diagram stays open on what it last read, and saying
+ * so is better than either a toast (about something the user did not do) or silence (which would
+ * let them believe the file they are looking at is on disk).
+ *
+ * Clicking it offers exactly one thing: cutting the link. Not "sync now", because there is nothing
+ * a button could do that opening the diagram does not already do; and not "open the file", because
+ * this window may be a satellite with no editor in it.
+ */
+function LinkedFileChip({
+  diagramId,
+  path,
+  projectId,
+  fileError,
+}: {
+  diagramId: string;
+  path: string;
+  projectId: string;
+  fileError: string;
+}) {
+  const t = useT();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /** The repository's name as the workspace knows it. Empty for a project that has since been
+   *  removed — the link is then dead, which the tooltip says by naming no repository. */
+  const repo = useWorkspaceStore(
+    (s) =>
+      (s.activeWorkspaceId ? s.projectsByWorkspace[s.activeWorkspaceId] : undefined)?.find(
+        (p) => p.id === projectId,
+      )?.name ?? "",
+  );
+  const broken = fileError !== "";
+
+  const unlink = async () => {
+    // `danger: false` — nothing is destroyed by this. The diagram keeps its document, its
+    // history and its place; only the syncing stops, and re-linking is the same button in
+    // the editor it came from.
+    const ok = await confirmAction(t("diagrams.unlinkConfirm", { path }), false);
+    if (!ok) return;
+    await useDiagramsStore.getState().unlinkFile(diagramId);
+    useToastStore.getState().pushToast(t("diagrams.unlinked"), "info");
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={(event) => setMenu({ x: event.clientX, y: event.clientY })}
+        title={
+          broken
+            ? `${fileError}\n${t("diagrams.linkedMissingHint")}`
+            : // Without a repository name — a project removed from the workspace since — the "in
+              // {repo}" half would read as a sentence with a hole in it. The path alone is still
+              // the true and useful half.
+              `${repo ? t("diagrams.linkedTo", { path, repo }) : path}\n${t("diagrams.linkedHint")}`
+        }
+        aria-label={t("diagrams.linked")}
+        className={`flex min-w-0 max-w-[280px] shrink items-center gap-1 rounded border px-1.5 py-0.5 text-[10.5px] transition-colors ${
+          broken
+            ? "border-[var(--cf-warning)] text-[var(--cf-warning)]"
+            : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-text)]"
+        }`}
+      >
+        {broken ? <FileWarning size={11} className="shrink-0" /> : <GitBranch size={11} className="shrink-0" />}
+        {/* The path from the right, which is where a `.dbml` file differs: `db/schema.dbml` and
+            `services/billing/db/schema.dbml` share every leading segment and none of the trailing
+            ones. `direction: rtl` elides at the *start*, and the isolate keeps the slashes from
+            being reordered with it. */}
+        <span className="min-w-0 truncate" style={{ direction: "rtl" }}>
+          <bdi>{path}</bdi>
+        </span>
+      </button>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={[{ label: t("diagrams.unlink"), danger: true, onClick: () => void unlink() }]}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </>
   );
 }

@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Copy,
   Folder,
+  GitBranch,
   LayoutGrid,
   List,
   Pencil,
@@ -26,6 +27,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { FORMAT_DBML } from "../../lib/diagrams/doc";
+import { isLinked } from "../../types/diagrams";
 import type { Diagram, DiagramFormat, DiagramSort } from "../../types/diagrams";
 
 /** The orderings offered, in the order the menu lists them. */
@@ -552,6 +554,14 @@ function Card({
           <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
             {diagram.title || <span className="italic text-[var(--cf-text-muted)]">{untitled}</span>}
           </span>
+          {/* A diagram that mirrors a file in a working tree — see `lib/dbmlBridge.ts`. On the
+              card as well as in the tree, because the gallery is where a diagram is *chosen*, and
+              "opening this one edits a repository" is worth knowing before the click. */}
+          {isLinked(diagram) && (
+            <span className="shrink-0 text-[var(--cf-text-muted)]" title={diagram.origin_path}>
+              <GitBranch size={10} />
+            </span>
+          )}
           {diagram.pinned && (
             <Pin size={10} className="shrink-0 text-[var(--cf-accent)]" fill="currentColor" />
           )}
@@ -593,6 +603,11 @@ function Row({ diagram, active, locale, untitled, shapesLabel, onSelect, onMenu 
       <span className="min-w-0 flex-1 truncate">
         {diagram.title || <span className="italic text-[var(--cf-text-muted)]">{untitled}</span>}
       </span>
+      {isLinked(diagram) && (
+        <span className="shrink-0 text-[var(--cf-text-muted)]" title={diagram.origin_path}>
+          <GitBranch size={10} />
+        </span>
+      )}
       {diagram.pinned && (
         <Pin size={10} className="shrink-0 text-[var(--cf-accent)]" fill="currentColor" />
       )}

@@ -35,6 +35,8 @@ import { useLocalAiStore } from "./state/localAiStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { restoreSatellites } from "./lib/tauri/windows";
 import { onWindowMessage } from "./lib/windowBus";
+import { showDiagramHere } from "./lib/dbmlBridge";
+import { WINDOW } from "./lib/windowIdentity";
 import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
 import { usePreferencesStore } from "./state/preferencesStore";
@@ -681,6 +683,19 @@ export default function App() {
             // A satellite is closing and handing its contents back. Coming forward is what makes
             // that read as "returned here" rather than "thrown away".
             void getCurrentWindow().setFocus();
+            break;
+          case "open-diagram":
+            // A schema opened from a repository, in a window that has no Diagrams app of its own.
+            // The shell has one, so it shows it — crossing workspace if the diagram is in another,
+            // because the user asked for *this* diagram. See `lib/dbmlBridge.ts`.
+            //
+            // Addressed, and the check is not a formality: with Diagrams detached this frame is for
+            // that window, and obeying it here would draw a second Diagrams view over the rail this
+            // window has already handed away.
+            if (message.to !== WINDOW.label) break;
+            void showDiagramHere(message.workspaceId, message.diagramId).catch((e: unknown) =>
+              pushErrorToast(String(e)),
+            );
             break;
         }
       }),

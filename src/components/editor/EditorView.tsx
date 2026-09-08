@@ -47,6 +47,7 @@ import {
 import { copyIntoRepo, readFileText, writeFileText } from "../../lib/tauri/commands";
 import { readDrafts, writeDrafts } from "../../lib/editorDrafts";
 import { onRepoFsChanged } from "../../lib/tauri/events";
+import { isDbmlPath, openDbmlInDiagrams } from "../../lib/dbmlBridge";
 import { findTheme } from "../../lib/codeThemes";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useThemeStore } from "../../state/themeStore";
@@ -561,6 +562,31 @@ export function EditorView() {
       }
     },
     [project],
+  );
+
+  /**
+   * Hands a `.dbml` file to the Diagrams app as a diagram that stays in step with it.
+   *
+   * **Saved first, deliberately.** The diagram is a view of the file on disk, so opening it over an
+   * unsaved buffer would show a schema the editor is not showing — and the first thing the diagram
+   * autosaved would then be the *older* text, back over the user's edits. `save` is a no-op on a
+   * clean tab, so the common press costs nothing. The button's tooltip says the file is saved.
+   *
+   * The workspace comes from the project rather than from whichever one the window is looking at:
+   * the diagram belongs beside its repository, and a repository lives in exactly one workspace.
+   */
+  const openInDiagrams = useCallback(
+    async (path: string) => {
+      const current = projectRef.current;
+      if (!current) return;
+      const workspaceId =
+        useWorkspaceStore.getState().workspaceOfProject(current.id) ??
+        useWorkspaceStore.getState().activeWorkspaceId;
+      if (!workspaceId) return;
+      await save(path);
+      await openDbmlInDiagrams({ workspaceId, projectId: current.id, relPath: path });
+    },
+    [save],
   );
 
   /**
@@ -1117,6 +1143,14 @@ export function EditorView() {
         patchTab(path, mode === "diff" ? { viewMode: mode } : { viewMode: mode, compare: null })
       }
       onSave={() => group.activePath && void save(group.activePath)}
+      // Only for a schema. Not a disabled button on every other file — there is nothing to explain
+      // about a bridge that does not apply, and a permanently greyed-out icon in a five-icon
+      // toolbar is worse than an absent one.
+      onOpenInDiagrams={
+        isDbmlPath(group.activePath)
+          ? () => group.activePath && void openInDiagrams(group.activePath)
+          : null
+      }
       onCodeSnap={setCodeSnap}
       // Lands in the pane that was clicked without being told which: the pane's capture-phase
       // `onMouseDown` made it the active group before Monaco's own mousedown ran, and `openDiffTab`

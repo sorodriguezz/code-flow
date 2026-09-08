@@ -1323,6 +1323,12 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             parent_id    TEXT REFERENCES diagram_folders(id) ON DELETE CASCADE,
             name         TEXT NOT NULL,
             color        TEXT NOT NULL DEFAULT '',
+            -- The repository whose `.dbml` files this folder collects, or '' for an ordinary
+            -- folder the user made. Set once, when the first schema is opened from that
+            -- repository, and never read as a name: the folder can be renamed, moved and
+            -- coloured like any other, and two repositories called `api` still get one folder
+            -- each. See `diagrams.origin_project_id`.
+            origin_project_id TEXT NOT NULL DEFAULT '',
             sort_order   INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL,
             updated_at   TEXT NOT NULL
@@ -1390,6 +1396,17 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             pinned       INTEGER NOT NULL DEFAULT 0,
             -- Vertices plus edges. Derived on every write of `doc`; see `diagram_queries::derive`.
             shape_count  INTEGER NOT NULL DEFAULT 0,
+            -- Where this diagram came from, when it came from a working tree rather than from the
+            -- gallery: the project it belongs to and the repo-relative file it mirrors. Both empty
+            -- for a diagram created in the app, which is every diagram that existed before this
+            -- pair, and the emptiness is what keeps them behaving exactly as they did.
+            --
+            -- A non-empty `origin_path` makes the row a *bridge*: `doc` is re-read from that file
+            -- whenever it is opened, and every save writes the file back. The project is named by
+            -- id rather than by path so moving the checkout does not break the link; a project that
+            -- has since been removed leaves the diagram readable and simply stops syncing.
+            origin_project_id TEXT NOT NULL DEFAULT '',
+            origin_path  TEXT NOT NULL DEFAULT '',
             sort_order   INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL,
             updated_at   TEXT NOT NULL
@@ -1397,6 +1414,13 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_diagrams_workspace
             ON diagrams (workspace_id, sort_order);
         CREATE INDEX IF NOT EXISTS idx_diagrams_folder ON diagrams (folder_id, sort_order);
+        -- `idx_diagrams_origin` is deliberately **not** here, and the reason is the one thing this
+        -- batch cannot do: on a database that already has `diagrams`, `CREATE TABLE IF NOT EXISTS`
+        -- is a no-op, so the origin columns above do not exist yet — they arrive from
+        -- `add_repo_origin_to_diagrams`, which runs after this batch. An index over them here takes
+        -- the launch down on every upgraded install, which is precisely the shape of the crash
+        -- `migrate_note_folders_to_books` exists to explain. The index is created there instead,
+        -- for fresh and upgraded databases alike.
 
         -- A diagram skeleton the user starts from.
         --
@@ -1693,6 +1717,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_group_name_to_db_connections(conn)?;
     add_scope_to_scoped_tables(conn)?;
     add_tab_to_workspace_terminals(conn)?;
+    add_repo_origin_to_diagrams(conn)?;
     align_project_ado_org_with_connections(conn)?;
     file_loose_notes_into_a_book(conn)?;
     move_ollama_settings_to_cline(conn)?;
@@ -2056,6 +2081,36 @@ fn add_scope_to_scoped_tables(conn: &Connection) -> rusqlite::Result<()> {
             ))?;
         }
     }
+    Ok(())
+}
+
+/// Diagrams gained a working tree to mirror, and folders gained the repository they collect.
+///
+/// Three columns, all defaulting to the empty string, and the default is the whole migration: every
+/// diagram that already exists was made in the app and stays that way. Only a row whose
+/// `origin_path` is non-empty is a bridge, and nothing writes one except `link_file`.
+///
+/// The columns are also in the `CREATE TABLE` above, so a fresh database gets them there and this
+/// is a no-op on it — the same belt-and-braces `add_scope_to_scoped_tables` uses, and for the same
+/// reason: the two statements must not be able to disagree about the default.
+fn add_repo_origin_to_diagrams(conn: &Connection) -> rusqlite::Result<()> {
+    for (table, column) in [
+        ("diagrams", "origin_project_id"),
+        ("diagrams", "origin_path"),
+        ("diagram_folders", "origin_project_id"),
+    ] {
+        if table_exists(conn, table)? && !has_column(conn, table, column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT '';"
+            ))?;
+        }
+    }
+    // After the columns, never before: on an upgraded database the index is created against a
+    // table that has only just gained the pair it is built on.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_diagrams_origin \
+         ON diagrams (origin_project_id, origin_path) WHERE origin_path <> '';",
+    )?;
     Ok(())
 }
 
@@ -3196,6 +3251,49 @@ mod tests {
         assert!(!table_exists(&conn, "api_collections_legacy").unwrap());
     }
 
+
+    /// A database from before the repository bridge gains the three columns and keeps its diagrams.
+    ///
+    /// The property that matters is the *default*: every diagram an upgraded database already holds
+    /// was made in the app, so all three must come up empty — a diagram that came back linked would
+    /// start writing a file nobody pointed it at.
+    #[test]
+    fn an_older_database_gains_the_origin_columns_unlinked() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE diagram_folders (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, \
+                 parent_id TEXT, name TEXT NOT NULL, color TEXT NOT NULL DEFAULT '', \
+                 sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, \
+                 updated_at TEXT NOT NULL);
+             CREATE TABLE diagrams (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, \
+                 folder_id TEXT, title TEXT NOT NULL DEFAULT '', doc TEXT NOT NULL DEFAULT '', \
+                 format TEXT NOT NULL DEFAULT 'mxgraph', thumbnail TEXT NOT NULL DEFAULT '', \
+                 tags TEXT NOT NULL DEFAULT '[]', pinned INTEGER NOT NULL DEFAULT 0, \
+                 shape_count INTEGER NOT NULL DEFAULT 0, sort_order INTEGER NOT NULL DEFAULT 0, \
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             INSERT INTO diagrams (id, workspace_id, title, doc, created_at, updated_at) \
+                 VALUES ('d1', 'w1', 'Arquitectura', '<mxfile/>', 't', 't');",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        assert!(has_column(&conn, "diagrams", "origin_project_id").unwrap());
+        assert!(has_column(&conn, "diagrams", "origin_path").unwrap());
+        assert!(has_column(&conn, "diagram_folders", "origin_project_id").unwrap());
+        let (title, project, path): (String, String, String) = conn
+            .query_row(
+                "SELECT title, origin_project_id, origin_path FROM diagrams WHERE id = 'd1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "Arquitectura", "the drawing survived");
+        assert_eq!((project.as_str(), path.as_str()), ("", ""), "and it is nobody's file");
+
+        // Idempotent: the next launch must not try to add them again.
+        run(&conn).unwrap();
+    }
 
     /// The crash a development database actually hit: `notes` already existed with `folder_id`, so
     /// the batch's `IF NOT EXISTS` skipped it and the `book_id` index took the launch down.

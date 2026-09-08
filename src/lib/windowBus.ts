@@ -72,7 +72,29 @@ export type WindowMessage =
   | { kind: "completion"; busy: boolean }
   /** A satellite asking the main window to bring itself forward — what "re-attach" does before the
    *  satellite closes, so the thing that was in it is on screen rather than merely somewhere. */
-  | { kind: "focus-main" };
+  | { kind: "focus-main" }
+  /**
+   * Put this diagram on screen, please.
+   *
+   * The one message that asks another window to *show* something, which is why it is worth being
+   * precise about what it is not: it is not a window following another one. It is a user pressing
+   * "open this schema in Diagrams" in the editor, where the Diagrams app happens to live in a
+   * different window — the detached one if there is one, the main window otherwise. Nobody sends
+   * this except in answer to that press. See `lib/dbmlBridge.ts`.
+   *
+   * The workspace travels with the id because a diagram id means nothing without one: the
+   * receiving window holds its own workspace (invariant 3), and being handed a diagram from
+   * another one has to move it rather than draw an empty gallery. That is a choice the user just
+   * made, not a window following, which is why the receiver records it.
+   *
+   * **`to` is required, and it is the only addressed message on this bus.** Every other frame here
+   * is an announcement — "a run started", "completion is thinking" — which every window is entitled
+   * to act on. This one is an instruction, and exactly one window may carry it out: with the
+   * Diagrams app detached, an unaddressed frame would be obeyed by the satellite *and* by the shell,
+   * which would then draw a second Diagrams view over the rail it had already handed away. The
+   * label is `MAIN_LABEL` or a satellite's; a window whose label does not match drops it.
+   */
+  | { kind: "open-diagram"; to: string; workspaceId: string; diagramId: string };
 
 interface Frame {
   from: string;

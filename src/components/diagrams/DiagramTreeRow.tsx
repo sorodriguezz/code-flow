@@ -4,11 +4,13 @@ import {
   ChevronRight,
   Folder,
   FolderOpen,
+  GitBranch,
   Pin,
   Table2,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
+import { isLinked } from "../../types/diagrams";
 import type { DiagramTreeRow as Row } from "../../types/diagrams";
 import { folderInk, ROW, ROW_ACTIVE, ROW_IDLE } from "./diagramsChrome";
 import { FORMAT_DBML } from "../../lib/diagrams/doc";
@@ -184,6 +186,16 @@ export const DiagramTreeRow = memo(
             <span className="italic text-[var(--cf-text-muted)]">{untitledLabel}</span>
           )}
         </span>
+
+        {/* A diagram that mirrors a file in a working tree — see `lib/dbmlBridge.ts`. Marked
+            because editing it writes that file: this is the one property of a row in this tree
+            that has consequences outside the app, and it should not have to be discovered by
+            opening the thing. Before the pin, so the two marks keep a fixed order. */}
+        {!isFolder && isLinked(row.diagram) && (
+          <span className="shrink-0 text-[var(--cf-text-muted)]" title={row.diagram.origin_path}>
+            <GitBranch size={10} />
+          </span>
+        )}
 
         {!isFolder && row.diagram.pinned && (
           <Pin size={10} className="shrink-0 text-[var(--cf-accent)]" fill="currentColor" />

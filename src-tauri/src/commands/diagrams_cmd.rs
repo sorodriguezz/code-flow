@@ -16,6 +16,7 @@ use crate::db::models::{
     DiagramFolderRow, DiagramMeta, DiagramRow, DiagramTemplateRow, DiagramThumbnail,
     DiagramsWorkspaceTree,
 };
+use crate::fsops;
 use crate::db::version_queries::{self, DocVersion};
 use crate::db::{diagram_queries, Db};
 
@@ -91,6 +92,15 @@ pub fn diagrams_create_diagram(
 }
 
 /// The autosave path. `None` means the diagram was deleted while it was open.
+///
+/// **A linked diagram is saved twice**: into the row, and out into the working tree it came from.
+/// Both here rather than one here and one in the caller, so no window and no code path can write
+/// half of it — the pair is what "the diagram and the file are the same thing" means, and a second
+/// writer is how they start to disagree.
+///
+/// The order is the row first, then the file, and the failure is reported rather than swallowed:
+/// the row is saved either way (so nothing the user drew is lost), and an `Err` leaves the draft
+/// dirty upstairs, so the next edit tries the file again. See `diagramsStore.flush`.
 #[tauri::command]
 pub fn diagrams_save_diagram(
     db: State<Db>,
@@ -99,21 +109,136 @@ pub fn diagrams_save_diagram(
     format: String,
     thumbnail: String,
 ) -> Result<Option<DiagramMeta>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    // Before the write, so the snapshot holds what the diagram *was* — see the same call in
-    // `notes_save_note`. The thumbnail is deliberately not versioned: it is derived from the doc,
-    // and storing fifty copies of an SVG to recover a drawing that regenerates it is waste.
-    if let Ok(Some(previous)) = diagram_queries::get_diagram(&conn, &id) {
-        let _ = version_queries::record_version(
-            &conn,
-            "diagram",
-            &id,
-            &previous.title,
-            &previous.doc,
-            &crate::db::queries::now(),
-        );
+    let (meta, target) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        // Before the write, so the snapshot holds what the diagram *was* — see the same call in
+        // `notes_save_note`. The thumbnail is deliberately not versioned: it is derived from the
+        // doc, and storing fifty copies of an SVG to recover a drawing that regenerates it is waste.
+        if let Ok(Some(previous)) = diagram_queries::get_diagram(&conn, &id) {
+            let _ = version_queries::record_version(
+                &conn,
+                "diagram",
+                &id,
+                &previous.title,
+                &previous.doc,
+                &crate::db::queries::now(),
+            );
+        }
+        let meta = diagram_queries::save_diagram(&conn, &id, &doc, &format, &thumbnail)
+            .map_err(|e| e.to_string())?;
+        // Resolved while the lock is held and used after it is dropped: a filesystem write is not
+        // something to hold the whole database's connection for.
+        let target = meta.as_ref().and_then(|m| origin_of(&conn, m));
+        (meta, target)
+    };
+
+    if let Some((repo_path, rel_path)) = target {
+        fsops::write_file_text(&repo_path, &rel_path, &doc)?;
     }
-    diagram_queries::save_diagram(&conn, &id, &doc, &format, &thumbnail).map_err(|e| e.to_string())
+    Ok(meta)
+}
+
+// ---------- the repository bridge ----------
+
+/// Where a linked diagram's file is, or `None` when it is an ordinary one.
+///
+/// `None` also for a link whose project has since been removed from the workspace. That is a
+/// diagram whose repository is gone, and the only thing worse than failing to sync it would be
+/// guessing at a checkout to sync it with.
+fn origin_of(conn: &rusqlite::Connection, meta: &DiagramMeta) -> Option<(String, String)> {
+    if meta.origin_path.is_empty() {
+        return None;
+    }
+    let project = crate::db::queries::get_project(conn, &meta.origin_project_id).ok()??;
+    Some((project.local_path, meta.origin_path.clone()))
+}
+
+/// The same, from a full row. Two callers, two shapes, one rule.
+fn origin_of_row(conn: &rusqlite::Connection, row: &DiagramRow) -> Option<(String, String)> {
+    if row.origin_path.is_empty() {
+        return None;
+    }
+    let project = crate::db::queries::get_project(conn, &row.origin_project_id).ok()??;
+    Some((project.local_path, row.origin_path.clone()))
+}
+
+/// A linked diagram and how its file is doing.
+///
+/// Two fields rather than a `Result`, because "the file could not be read" is not a failure of the
+/// call: the diagram opens either way, on the last document it had. A branch without that file
+/// checked out is the ordinary way to reach this, and refusing to open the diagram over it would
+/// make switching branches destroy the thing the user was looking at.
+#[derive(serde::Serialize)]
+pub struct DiagramSync {
+    /// `None` when the diagram itself is gone — deleted from another window.
+    pub row: Option<DiagramRow>,
+    /// Empty when the working tree was read. Otherwise the reason, already a sentence.
+    pub file_error: String,
+}
+
+/// Files a `.dbml` file from a working tree as a diagram, and answers with it.
+///
+/// Idempotent on `(workspace, project, path)`: the second call on the same file returns the same
+/// diagram with its document refreshed from disk, which is what makes the button in the editor safe
+/// to press twice. The folder it lands in is the repository's — found by project id, created on
+/// first use, and an ordinary folder from then on. See `diagram_queries::link_file`.
+#[tauri::command]
+pub fn diagrams_link_file(
+    db: State<Db>,
+    workspace_id: String,
+    project_id: String,
+    rel_path: String,
+    title: String,
+    format: String,
+) -> Result<DiagramRow, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let project = crate::db::queries::get_project(&conn, &project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no such repository: {project_id}"))?;
+    // Read before the row is touched: a file that cannot be read is not a diagram, and half a link
+    // — a row pointing at a path nothing could open — is worse than none.
+    let doc = fsops::read_file_text(&project.local_path, &rel_path)?;
+    diagram_queries::link_file(
+        &conn,
+        &workspace_id,
+        &project_id,
+        &project.name,
+        &rel_path,
+        &title,
+        &doc,
+        &format,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Re-reads a linked diagram's file into its row.
+///
+/// The read half of the bridge, called when the diagram is opened and when the working tree
+/// changes underneath it. An unlinked diagram is returned untouched, so callers do not have to
+/// check first — "sync this if it is a bridge" is one call, not a branch.
+#[tauri::command]
+pub fn diagrams_pull_file(db: State<Db>, id: String) -> Result<DiagramSync, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let Some(row) = diagram_queries::get_diagram(&conn, &id).map_err(|e| e.to_string())? else {
+        return Ok(DiagramSync { row: None, file_error: String::new() });
+    };
+    let Some((repo_path, rel_path)) = origin_of_row(&conn, &row) else {
+        return Ok(DiagramSync { row: Some(row), file_error: String::new() });
+    };
+    match fsops::read_file_text(&repo_path, &rel_path) {
+        Ok(doc) => {
+            let row = diagram_queries::pull_file(&conn, &id, &doc).map_err(|e| e.to_string())?;
+            Ok(DiagramSync { row, file_error: String::new() })
+        }
+        Err(message) => Ok(DiagramSync { row: Some(row), file_error: message }),
+    }
+}
+
+/// Cuts a diagram loose from its file, keeping the document. See `diagram_queries::unlink_file`.
+#[tauri::command]
+pub fn diagrams_unlink_file(db: State<Db>, id: String) -> Result<Option<DiagramMeta>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    diagram_queries::unlink_file(&conn, &id).map_err(|e| e.to_string())
 }
 
 // ---------- version history ----------

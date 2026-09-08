@@ -3,6 +3,7 @@ import type {
   DiagramFolderRow,
   DiagramMetaRow,
   DiagramRow,
+  DiagramSync,
   DiagramTemplateRow,
   DiagramThumbnailRow,
   DiagramsWorkspaceTree,
@@ -17,10 +18,13 @@ import type { DocVersion } from "../../types/notes";
  * calls that read or create — a diagram belongs to the workspace, not to whichever repository
  * happens to be selected. Anything addressed by its own id doesn't need one.
  *
- * **`diagramsGetDiagram` is the only call that returns a document.** Everything else — the tree,
- * every mutation's return value — deals in metadata. That is not an accident of the API: the whole
- * design rests on the tree never carrying megabytes of XML, so a second command returning `doc` in
- * bulk would quietly undo it. See `db/diagram_queries.rs`.
+ * **Documents come one at a time, and only from the two calls that say so.** `diagramsGetDiagram`
+ * and `diagramsPullFile` return `doc`; everything else — the tree, every mutation's return value —
+ * deals in metadata. That is not an accident of the API: the whole design rests on the tree never
+ * carrying megabytes of XML, so a command returning `doc` in *bulk* would quietly undo it. Two
+ * single-document calls do not. `diagramsPullFile` is the one the store opens with, because it also
+ * refreshes a linked diagram from its file; `diagramsGetDiagram` is the plain read underneath it.
+ * See `db/diagram_queries.rs`.
  *
  * **Calls answer with a value rather than an error where a failure would be ordinary.** Anything
  * returning `DiagramMetaRow | null` gives `null` when the diagram was deleted underneath the
@@ -34,7 +38,8 @@ import type { DocVersion } from "../../types/notes";
 export const diagramsLoadTree = (workspaceId: string) =>
   invoke<DiagramsWorkspaceTree>("diagrams_load_tree", { workspaceId });
 
-/** One diagram's document. `null` if it has been deleted. */
+/** One diagram's document, exactly as stored. `null` if it has been deleted. To *open* a diagram
+ *  use `diagramsPullFile`, which is this plus the working tree for a linked one. */
 export const diagramsGetDiagram = (id: string) =>
   invoke<DiagramRow | null>("diagrams_get_diagram", { id });
 
@@ -68,13 +73,54 @@ export const diagramsCreateDiagram = (
     tags,
   });
 
-/** The autosave path. `null` means the diagram was deleted while it was open. */
+/**
+ * The autosave path. `null` means the diagram was deleted while it was open.
+ *
+ * **For a linked diagram this also writes the file** — see `diagrams_cmd::diagrams_save_diagram`.
+ * A rejection therefore means "the row is saved, the working tree is not", which is why
+ * `diagramsStore.flush` leaves the draft dirty when it sees one: the next edit tries the file again.
+ */
 export const diagramsSaveDiagram = (
   id: string,
   doc: string,
   format: string,
   thumbnail: string,
 ) => invoke<DiagramMetaRow | null>("diagrams_save_diagram", { id, doc, format, thumbnail });
+
+// ---------- the repository bridge ----------
+
+/**
+ * Files a `.dbml` file from a working tree as a diagram in this workspace, and answers with it.
+ *
+ * Idempotent on `(workspace, project, path)` — the second call returns the same diagram with its
+ * document refreshed from disk, which is what makes the editor's button safe to press twice. The
+ * diagram lands in the repository's folder, created on first use and an ordinary folder from then
+ * on.
+ *
+ * `title` and `format` come from the caller for the reason every translated string does: Rust has
+ * no language, and "the schema's name" is a decision about presentation.
+ */
+export const diagramsLinkFile = (
+  workspaceId: string,
+  projectId: string,
+  relPath: string,
+  title: string,
+  format: string,
+) =>
+  invoke<DiagramRow>("diagrams_link_file", { workspaceId, projectId, relPath, title, format });
+
+/**
+ * Re-reads a linked diagram's file into its row — the read half of the bridge.
+ *
+ * Safe on an unlinked diagram, which comes back untouched: callers say "sync this if it is a
+ * bridge" rather than branching first. `file_error` is how a file that could not be read is
+ * reported, because that is not a failed call — see `DiagramSync`.
+ */
+export const diagramsPullFile = (id: string) => invoke<DiagramSync>("diagrams_pull_file", { id });
+
+/** Cuts a diagram loose from its file, keeping the document. It stops writing the working tree. */
+export const diagramsUnlinkFile = (id: string) =>
+  invoke<DiagramMetaRow | null>("diagrams_unlink_file", { id });
 
 
 /**

@@ -3752,6 +3752,17 @@ const en = {
   "diagrams.saving": "Saving…",
   "diagrams.unsaved": "Unsaved changes",
   "diagrams.savedAt": "Saved {when}",
+  // ---- The repository bridge: a diagram that mirrors a `.dbml` file in a working tree ----
+  // "Linked" throughout rather than "imported" or "copied", because it is neither: the file and
+  // the diagram are one document. See `lib/dbmlBridge.ts`.
+  "diagrams.linked": "Linked to a repository",
+  "diagrams.linkedTo": "Linked to {path} in {repo}",
+  "diagrams.linkedHint": "Saving here writes the file, and saving the file updates this diagram.",
+  "diagrams.linkedMissing": "That file could not be read right now",
+  "diagrams.linkedMissingHint": "The diagram still shows what it last read. Saving it writes the file back.",
+  "diagrams.unlink": "Unlink from the repository",
+  "diagrams.unlinkConfirm": "Stop syncing this diagram with {path}? The diagram keeps everything it has; only the link goes.",
+  "diagrams.unlinked": "No longer linked to the repository",
   "diagrams.templates": "Templates",
   "diagrams.newFromTemplate": "New from template",
   "diagrams.templatePickerTitle": "Start from a template",
@@ -3883,6 +3894,9 @@ const en = {
   "dbml.tab.import": "Import SQL",
   "dbml.tab.diff": "Compare",
   "dbml.editorPane": "DBML",
+  // The editor's handover button. "Open in", not "Send to": nothing leaves the editor —
+  // the file stays where it is and gains a second way of being edited.
+  "dbml.openInDiagrams": "Open in Diagrams · saves the file and keeps the two in step",
   "dbml.format": "Tidy up the DBML",
   "dbml.formatted": "Formatted",
   "dbml.autoLayout": "Arrange the boxes again",

@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Check, ChevronDown, Copy, CornerUpLeft, GitBranch, Lock, Minus, Square, X } from "lucide-react";
+import { useShortcutHint } from "../../lib/useShortcutHint";
 import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 import { broadcast } from "../../lib/windowBus";
 import { WINDOW } from "../../lib/windowIdentity";
 import { useRepoStore } from "../../state/repoStore";
+import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { RemoteActions } from "../git/RemoteActions";
 import { useT } from "../../state/languageStore";
@@ -13,6 +15,22 @@ import { Tooltip } from "../common/Tooltip";
 import type { Workspace } from "../../types/domain";
 
 const win = getCurrentWindow();
+
+/**
+ * The branch list, behind a `lazy` boundary.
+ *
+ * The same component the shell opens from its status bar, and deliberately the same one: switching
+ * branch, bringing a remote branch down, fetching and pulling one you are not standing on are four
+ * sets of rules about when each is possible, and a second list would be a second place for them to
+ * be *nearly* right. It imports only `repoStore`, `languageStore` and lucide — nothing of the shell
+ * — so it costs this bundle nothing that a satellite does not already carry.
+ *
+ * `lazy` because most windows never open it: the whole point of `window.html` is that a satellite
+ * starts small, and a dialog nobody has asked for should not be in the first paint.
+ */
+const BranchSwitcherModal = lazy(() =>
+  import("./BranchSwitcherModal").then((m) => ({ default: m.BranchSwitcherModal })),
+);
 
 /**
  * A satellite's title bar: what this window holds, which workspace that is, and the way back.
@@ -48,10 +66,20 @@ const win = getCurrentWindow();
  * make the window show something else, which is the line the rest of this bar is drawn along. See
  * `RemoteActions`, which is the same control the status bar renders.
  *
- * The branch comes with them, and is a readout rather than the main window's switcher: push and
- * pull are about the current branch, and three buttons with no subject named anywhere on the window
- * are three buttons you have to guess at. Switching branch is a repository *action* and lives in
- * the tabs below, where the graph already offers it.
+ * The branch comes with them, and it is a **control**, not the readout it started as. It began as a
+ * readout because push and pull are about the current branch and three buttons with no subject
+ * named anywhere on the window are three buttons you have to guess at — that reasoning still holds
+ * and is why the branch is here at all. What it got wrong was the next step: having been told which
+ * branch this window is on, the only way to be on another one was to go back to the main window,
+ * select this repository *there*, switch, and come back. That is the same round trip the three
+ * buttons beside it exist to remove, and the graph tab below does not close it either — it can
+ * check a branch out, but it cannot bring a remote one down as a local one, and it cannot fetch or
+ * pull a branch you are not standing on.
+ *
+ * So it opens `BranchSwitcherModal`, the shell's own list, which does all four. That does not make
+ * it a shell affordance: like fetch, pull and push, everything in it acts on the repository this
+ * window already holds, through this window's own `repoStore`. Nothing in it can make the window
+ * show a *different* repository, which is the line the rest of this bar is drawn along.
  */
 
 function WindowsControls() {
@@ -179,15 +207,32 @@ function RepoRemote() {
   const branch = useRepoStore((s) => s.branches.find((entry) => entry.is_head) ?? null);
   const detached = useRepoStore((s) => s.status?.is_detached ?? false);
   const name = useRepoStore((s) => s.status?.current_branch ?? null);
+  /**
+   * From `uiStore`, not local state, and the reason is the keyboard.
+   *
+   * `uiStore` is per webview, so this window's flag is its own — the shell's ⌘⇧B does not reach it
+   * and cannot open this. What sharing the *field* buys is that `branch.switcher`'s existing `run`
+   * works here untouched (see `useRemoteActionShortcuts`), so the chord this button's tooltip
+   * promises is the chord that opens it, in both windows, with one binding to rebind.
+   */
+  const switcherOpen = useUiStore((s) => s.branchSwitcherOpen);
+  const toggleSwitcher = useUiStore((s) => s.toggleBranchSwitcher);
+  const closeSwitcher = useUiStore((s) => s.closeBranchSwitcher);
   const t = useT();
+  const hint = useShortcutHint();
 
   if (!name && !detached) return null;
 
   return (
     <>
-      <span
-        className="flex min-w-0 shrink items-center gap-1 text-[11px] text-[var(--cf-text-muted)]"
-        title={name ?? undefined}
+      <button
+        type="button"
+        onClick={toggleSwitcher}
+        // The chord works in this window too — `useRemoteActionShortcuts` does not bind it, but the
+        // hint is what tells the user the switcher is the same one they know from the shell.
+        title={hint("branch.switcher", t("shortcuts.cmdBranchSwitcher"))}
+        aria-haspopup="dialog"
+        className="flex min-w-0 shrink items-center gap-1 rounded-md px-1 py-0.5 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
       >
         <GitBranch size={11} className="shrink-0" />
         <span className="min-w-0 truncate">{name ?? t("statusbar.detachedHead")}</span>
@@ -201,8 +246,16 @@ function RepoRemote() {
             <Lock size={10} />
           </span>
         )}
-      </span>
+        <ChevronDown size={10} className="shrink-0 opacity-70" />
+      </button>
       <RemoteActions />
+      {/* No fallback: the dialog is the whole of what this renders, and a skeleton of it flashing
+          over the window for the length of one chunk fetch is more movement than the wait. */}
+      {switcherOpen && (
+        <Suspense fallback={null}>
+          <BranchSwitcherModal onClose={closeSwitcher} />
+        </Suspense>
+      )}
     </>
   );
 }

@@ -66,17 +66,24 @@ export function useGlobalShortcuts(): void {
 }
 
 /**
- * The three remote actions' chords, for a repository satellite.
+ * A repository satellite's title-bar chords, and only those.
  *
  * Not `useGlobalShortcuts`: that binds *every* command, and most of them — switch view, open
  * settings, the palette, the workspace switcher — are ways to make a window show something else,
  * which is the one thing a satellite must not do. Binding the whole table there would give a
  * one-repository window a keystroke for the app rail it does not have.
  *
- * These three are different in kind. They act on the repository the window already holds, through
- * this window's own `repoStore`, and they are the exact chords the buttons beside them advertise in
- * their tooltips — `useShortcutHint` reads the same bindings whichever window it renders in, so
- * without this the satellite's fetch button promised ⌘⇧R and nothing happened.
+ * These are different in kind. Every one of them acts on the repository the window already holds,
+ * through this window's own `repoStore`, and they are the exact chords the controls beside them
+ * advertise in their tooltips — `useShortcutHint` reads the same bindings whichever window it
+ * renders in, so without this the satellite's fetch button promised ⌘⇧R and nothing happened.
+ *
+ * **`branch.switcher` is on the list even though it opens a dialog**, which looks at first like the
+ * navigation this hook exists to keep out. It is not: the list it opens is this repository's
+ * branches, every action in it is a git command against this working copy, and it can no more make
+ * the window show another repository than pull can. Its `run` toggles `uiStore`, and `uiStore` is
+ * per webview — so the flag it sets is this window's own, and `SatelliteTitleBar` is what draws the
+ * dialog from it. That is the test: does it act on the one thing this window holds?
  *
  * Rebinding still works: the chords are read from the same overrides the main window uses, so a
  * user who moves fetch to F5 moves it in both windows at once.
@@ -86,7 +93,7 @@ export function useRemoteActionShortcuts(): void {
 
   useEffect(() => {
     const chords = new Map<string, () => void>();
-    for (const id of ["git.fetch", "git.pull", "git.push"] as const) {
+    for (const id of ["git.fetch", "git.pull", "git.push", "branch.switcher"] as const) {
       const chord = bindingFor(id, overrides);
       const run = SHORTCUT_BY_ID.get(id)?.run;
       if (chord && run) chords.set(chord, run);

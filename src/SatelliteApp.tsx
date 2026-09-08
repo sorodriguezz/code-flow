@@ -26,6 +26,9 @@ import { getProject } from "./lib/tauri/commands";
 import { WINDOW } from "./lib/windowIdentity";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { useRemoteActionShortcuts } from "./lib/useGlobalShortcuts";
+import { onWindowMessage } from "./lib/windowBus";
+import { showDiagramHere } from "./lib/dbmlBridge";
+import { pushErrorToast } from "./state/toastStore";
 
 /**
  * The whole of a satellite window.
@@ -170,6 +173,24 @@ function AppWindow({ refId }: { refId: string }) {
       ...(entry.workspace ? { apiWorkspace: entry.workspace } : {}),
     });
   }, [entry]);
+
+  /**
+   * A schema opened from a repository in another window, when this is *the* Diagrams window.
+   *
+   * The reason it is here rather than in `SatelliteApp`: the message names a diagram, and only the
+   * window that holds the Diagrams app can show one. Every other satellite ignores it, which is
+   * what the `refId` guard says. See `lib/dbmlBridge.ts` for who sends it and why the workspace
+   * travels with the id.
+   */
+  useEffect(() => {
+    if (refId !== "diagrams") return;
+    return onWindowMessage((message) => {
+      if (message.kind !== "open-diagram" || message.to !== WINDOW.label) return;
+      void showDiagramHere(message.workspaceId, message.diagramId).catch((e: unknown) =>
+        pushErrorToast(String(e)),
+      );
+    });
+  }, [refId]);
 
   if (!entry) {
     return <EmptyState icon={Unlink} title={t("windows.unknownApp")} subtitle={refId} />;

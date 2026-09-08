@@ -30,11 +30,13 @@ use super::queries::now;
 
 /// Every column *except* `doc` **and `thumbnail`**. See the module comment for both exclusions.
 const DIAGRAM_META_COLUMNS: &str = "id, workspace_id, folder_id, title, format, tags, \
-                                    pinned, shape_count, sort_order, created_at, updated_at";
+                                    pinned, shape_count, origin_project_id, origin_path, \
+                                    sort_order, created_at, updated_at";
 const DIAGRAM_COLUMNS: &str = "id, workspace_id, folder_id, title, doc, format, thumbnail, tags, \
-                               pinned, shape_count, sort_order, created_at, updated_at";
-const FOLDER_COLUMNS: &str =
-    "id, workspace_id, parent_id, name, color, sort_order, created_at, updated_at";
+                               pinned, shape_count, origin_project_id, origin_path, \
+                               sort_order, created_at, updated_at";
+const FOLDER_COLUMNS: &str = "id, workspace_id, parent_id, name, color, origin_project_id, \
+                              sort_order, created_at, updated_at";
 const TEMPLATE_COLUMNS: &str = "id, workspace_id, name, description, icon, doc, format, tags, \
                                 sort_order, created_at, updated_at";
 
@@ -50,9 +52,10 @@ fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<DiagramFolderRow> {
         parent_id: row.get(2)?,
         name: row.get(3)?,
         color: row.get(4)?,
-        sort_order: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        origin_project_id: row.get(5)?,
+        sort_order: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -66,9 +69,11 @@ fn map_meta(row: &rusqlite::Row) -> rusqlite::Result<DiagramMeta> {
         tags: row.get(5)?,
         pinned: row.get(6)?,
         shape_count: row.get(7)?,
-        sort_order: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        origin_project_id: row.get(8)?,
+        origin_path: row.get(9)?,
+        sort_order: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -84,9 +89,11 @@ fn map_diagram(row: &rusqlite::Row) -> rusqlite::Result<DiagramRow> {
         tags: row.get(7)?,
         pinned: row.get(8)?,
         shape_count: row.get(9)?,
-        sort_order: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        origin_project_id: row.get(10)?,
+        origin_path: row.get(11)?,
+        sort_order: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
     })
 }
 
@@ -393,6 +400,12 @@ pub fn delete_diagram(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 ///
 /// `title` comes from the caller because "Copy of …" is translated and Rust has no language — the
 /// same reason `note_queries::duplicate_note` takes one.
+///
+/// **The copy is deliberately not linked.** It goes through [`create_diagram`], which never writes
+/// the origin columns, so a duplicate of a schema mirroring a working-tree file is an ordinary
+/// diagram. Carrying the origin across the way the thumbnail below is carried would give one file
+/// two autosaves, and they would take turns overwriting each other with whatever each last read.
+/// See [`link_file`], which is the only thing that may write those columns.
 pub fn duplicate_diagram(
     conn: &Connection,
     id: &str,
@@ -423,6 +436,160 @@ pub fn duplicate_diagram(
 }
 
 // ---------------------------------------------------------------------------
+// The repository bridge
+// ---------------------------------------------------------------------------
+
+/// The diagram already mirroring `rel_path` in `project_id`, if there is one.
+///
+/// Scoped to the workspace as well as to the project, because that is what the caller can act on: a
+/// diagram in another workspace exists but is not reachable from the tree the user is looking at,
+/// and answering with it would hand back a row that view can neither open nor draw.
+pub fn diagram_for_file(
+    conn: &Connection,
+    workspace_id: &str,
+    project_id: &str,
+    rel_path: &str,
+) -> rusqlite::Result<Option<DiagramRow>> {
+    conn.query_row(
+        &format!(
+            "SELECT {DIAGRAM_COLUMNS} FROM diagrams \
+             WHERE workspace_id = ?1 AND origin_project_id = ?2 AND origin_path = ?3"
+        ),
+        params![workspace_id, project_id, rel_path],
+        map_diagram,
+    )
+    .optional()
+}
+
+/// The folder this workspace collects `project_id`'s schemas in, creating it if it has none.
+///
+/// Found by `origin_project_id` and never by name, which is the whole reason the column exists: the
+/// folder is an ordinary one from the moment it is made — renameable, movable, colourable — and the
+/// second schema opened from the same repository still has to land in it. A folder the user deletes
+/// is simply made again, which is the right answer to "where does this go" for a container nobody
+/// wanted to keep.
+fn repo_folder(
+    conn: &Connection,
+    workspace_id: &str,
+    project_id: &str,
+    project_name: &str,
+) -> rusqlite::Result<String> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM diagram_folders WHERE workspace_id = ?1 AND origin_project_id = ?2 \
+             ORDER BY sort_order LIMIT 1",
+            params![workspace_id, project_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    Ok(create_folder_for(conn, workspace_id, None, project_name, "", project_id)?.id)
+}
+
+/// Files `rel_path` as a diagram in this workspace, and answers with it.
+///
+/// Idempotent on `(workspace, project, path)`: opening the same file twice reaches the same row,
+/// which is what makes this a bridge rather than an import. The second call refreshes the document
+/// from `doc` — the file as the caller has just read it — so the diagram is never opened on a
+/// version of the schema the working tree has moved past.
+///
+/// `doc` comes in rather than being read here because this layer does not touch the filesystem: the
+/// path guard lives in `fsops`, and one module that knows how to resolve a repo-relative path is
+/// the property worth keeping. See `diagrams_cmd::diagrams_link_file`.
+pub fn link_file(
+    conn: &Connection,
+    workspace_id: &str,
+    project_id: &str,
+    project_name: &str,
+    rel_path: &str,
+    title: &str,
+    doc: &str,
+    format: &str,
+) -> rusqlite::Result<DiagramRow> {
+    if let Some(existing) = diagram_for_file(conn, workspace_id, project_id, rel_path)? {
+        // Only when it differs: an identical write would still bump `updated_at` and reorder every
+        // list sorted by it, for opening a file nobody had changed.
+        if existing.doc != doc {
+            conn.execute(
+                "UPDATE diagrams SET doc = ?2, shape_count = ?3, updated_at = ?4 WHERE id = ?1",
+                params![existing.id, doc, derive(doc, &existing.format), now()],
+            )?;
+            return get_diagram(conn, &existing.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows);
+        }
+        return Ok(existing);
+    }
+
+    let folder_id = repo_folder(conn, workspace_id, project_id, project_name)?;
+    let id = Uuid::new_v4().to_string();
+    let stamp = now();
+    let sort_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM diagrams \
+         WHERE workspace_id = ?1 AND folder_id IS ?2",
+        params![workspace_id, &folder_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO diagrams \
+         (id, workspace_id, folder_id, title, doc, format, thumbnail, tags, pinned, shape_count, \
+          origin_project_id, origin_path, sort_order, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', '[]', 0, ?7, ?8, ?9, ?10, ?11, ?11)",
+        params![
+            id,
+            workspace_id,
+            folder_id,
+            title,
+            doc,
+            format,
+            derive(doc, format),
+            project_id,
+            rel_path,
+            sort_order,
+            stamp
+        ],
+    )?;
+    get_diagram(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+/// Writes what the working tree holds into a linked diagram, and answers with the row.
+///
+/// The read half of the bridge. `None` when the diagram is gone; `Ok` with the row untouched when
+/// the document already matches, so a watcher firing for some other file in the repository costs
+/// one comparison rather than a write and a redraw.
+///
+/// **No version is recorded here**, unlike [`save_diagram`]'s caller, and that is deliberate: the
+/// change being written arrived from a working tree, which is where its history already lives.
+/// Snapshotting it would fill the diagram's list with entries whose "undo" is `git checkout`.
+pub fn pull_file(conn: &Connection, id: &str, doc: &str) -> rusqlite::Result<Option<DiagramRow>> {
+    let Some(existing) = get_diagram(conn, id)? else {
+        return Ok(None);
+    };
+    if existing.doc == doc {
+        return Ok(Some(existing));
+    }
+    conn.execute(
+        "UPDATE diagrams SET doc = ?2, shape_count = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, doc, derive(doc, &existing.format), now()],
+    )?;
+    get_diagram(conn, id)
+}
+
+/// Cuts a diagram loose from its file. The document stays exactly as it is; only the link goes.
+///
+/// The way out that keeps the work: deleting the diagram would be the other way, and it throws away
+/// whatever was drawn in the app on top of what the file said. After this the row is an ordinary
+/// diagram — it stops writing the working tree and stops being overwritten by it.
+pub fn unlink_file(conn: &Connection, id: &str) -> rusqlite::Result<Option<DiagramMeta>> {
+    conn.execute(
+        "UPDATE diagrams SET origin_project_id = '', origin_path = '', updated_at = ?2 \
+         WHERE id = ?1",
+        params![id, now()],
+    )?;
+    meta_of(conn, id)
+}
+
+// ---------------------------------------------------------------------------
 // Folders
 // ---------------------------------------------------------------------------
 
@@ -432,6 +599,22 @@ pub fn create_folder(
     parent_id: Option<&str>,
     name: &str,
     color: &str,
+) -> rusqlite::Result<DiagramFolderRow> {
+    create_folder_for(conn, workspace_id, parent_id, name, color, "")
+}
+
+/// [`create_folder`], plus the repository the folder collects.
+///
+/// Separate rather than a sixth parameter on the public one, because every existing caller is a
+/// person making a folder and "" would be noise at each of them. The only caller that passes
+/// anything is [`link_file`].
+pub fn create_folder_for(
+    conn: &Connection,
+    workspace_id: &str,
+    parent_id: Option<&str>,
+    name: &str,
+    color: &str,
+    origin_project_id: &str,
 ) -> rusqlite::Result<DiagramFolderRow> {
     let id = Uuid::new_v4().to_string();
     let stamp = now();
@@ -444,9 +627,10 @@ pub fn create_folder(
 
     conn.execute(
         "INSERT INTO diagram_folders \
-         (id, workspace_id, parent_id, name, color, sort_order, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-        params![id, workspace_id, parent_id, name, color, sort_order, stamp],
+         (id, workspace_id, parent_id, name, color, origin_project_id, sort_order, created_at, \
+          updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        params![id, workspace_id, parent_id, name, color, origin_project_id, sort_order, stamp],
     )?;
 
     conn.query_row(
@@ -729,5 +913,139 @@ mod tests {
         let left = load_tree(&conn, "w2").unwrap();
         assert!(left.diagrams.is_empty() && left.folders.is_empty() && left.templates.is_empty());
         assert_eq!(load_tree(&conn, "w1").unwrap().diagrams.len(), 1, "and only its own went");
+    }
+    // -----------------------------------------------------------------------
+    // The repository bridge
+    // -----------------------------------------------------------------------
+
+    /// The property the whole bridge rests on: **one file is one diagram**.
+    ///
+    /// Pressing the editor's button twice — or opening the same schema from two windows — must
+    /// reach the same row. A second diagram would be a second autosave writing the same file, and
+    /// the two would then take turns overwriting each other with whatever each last saw.
+    #[test]
+    fn linking_the_same_file_twice_reaches_one_diagram() {
+        let conn = workspaces();
+
+        let first =
+            link_file(&conn, "w1", "p1", "api", "db/schema.dbml", "schema", "Table a {}", FORMAT_DBML)
+                .unwrap();
+        let second = link_file(
+            &conn,
+            "w1",
+            "p1",
+            "api",
+            "db/schema.dbml",
+            "schema",
+            "Table a {}\nTable b {}",
+            FORMAT_DBML,
+        )
+        .unwrap();
+
+        assert_eq!(first.id, second.id, "the same file is the same diagram");
+        assert_eq!(load_tree(&conn, "w1").unwrap().diagrams.len(), 1);
+        // And the second call brought the document up to date: the working tree wins on open.
+        assert_eq!(second.doc, "Table a {}\nTable b {}");
+        assert_eq!(second.shape_count, 2, "and everything derived from it followed");
+    }
+
+    /// One folder per repository, found by project and not by name.
+    ///
+    /// Two repositories can be called the same thing, and a folder the user has renamed is still
+    /// the folder the next schema from that repository belongs in. Both fail if the lookup is ever
+    /// "the folder called `api`".
+    #[test]
+    fn each_repository_gets_one_folder_it_keeps_through_a_rename() {
+        let conn = workspaces();
+
+        let a = link_file(&conn, "w1", "p1", "api", "one.dbml", "one", "", FORMAT_DBML).unwrap();
+        // A second repository that happens to share the name.
+        let b = link_file(&conn, "w1", "p2", "api", "two.dbml", "two", "", FORMAT_DBML).unwrap();
+        assert_ne!(a.folder_id, b.folder_id, "same name, different repository, different folder");
+
+        rename_folder(&conn, a.folder_id.as_deref().unwrap(), "Esquemas del API").unwrap();
+        let again = link_file(&conn, "w1", "p1", "api", "three.dbml", "three", "", FORMAT_DBML)
+            .unwrap();
+        assert_eq!(again.folder_id, a.folder_id, "a renamed folder is still the repository's");
+        assert_eq!(load_tree(&conn, "w1").unwrap().folders.len(), 2);
+    }
+
+    /// A copy of a linked diagram is **not** linked.
+    ///
+    /// This is a property of `create_diagram` never writing the origin columns, which is easy to
+    /// undo by "helpfully" carrying every column across the way the thumbnail is. Two rows pointing
+    /// at one file is the same corruption as two rows for one file above, reached from the other
+    /// side.
+    #[test]
+    fn a_duplicate_is_not_a_second_writer_of_the_file() {
+        let conn = workspaces();
+        let linked =
+            link_file(&conn, "w1", "p1", "api", "db/schema.dbml", "schema", "Table a {}", FORMAT_DBML)
+                .unwrap();
+
+        let copy = duplicate_diagram(&conn, &linked.id, "Copia de schema").unwrap().unwrap();
+
+        assert_eq!(copy.origin_path, "", "the copy writes nobody's working tree");
+        assert_eq!(copy.origin_project_id, "");
+        assert_eq!(
+            diagram_for_file(&conn, "w1", "p1", "db/schema.dbml").unwrap().map(|d| d.id),
+            Some(linked.id),
+            "and the file still resolves to exactly the original",
+        );
+    }
+
+    /// Unlinking keeps everything except the link. It is the way out that does not throw work away.
+    #[test]
+    fn unlinking_keeps_the_document() {
+        let conn = workspaces();
+        let linked =
+            link_file(&conn, "w1", "p1", "api", "db/schema.dbml", "schema", "Table a {}", FORMAT_DBML)
+                .unwrap();
+
+        unlink_file(&conn, &linked.id).unwrap().unwrap();
+
+        let after = get_diagram(&conn, &linked.id).unwrap().unwrap();
+        assert_eq!(after.doc, "Table a {}", "the schema is still there");
+        assert_eq!(after.title, "schema");
+        assert_eq!(after.origin_path, "", "and nothing writes the file any more");
+        assert!(
+            diagram_for_file(&conn, "w1", "p1", "db/schema.dbml").unwrap().is_none(),
+            "so the file is free to be linked again",
+        );
+    }
+
+    /// `pull_file` writes only when the file actually differs.
+    ///
+    /// It runs off a filesystem watcher that fires for *every* file in a repository, so the common
+    /// case is "nothing changed". A write there would bump `updated_at` on a schema nobody touched
+    /// — reordering every list sorted by it — and record a version snapshot of an identical
+    /// document each time somebody saved something else in the repo.
+    #[test]
+    fn pulling_an_unchanged_file_writes_nothing() {
+        let conn = workspaces();
+        let linked =
+            link_file(&conn, "w1", "p1", "api", "db/schema.dbml", "schema", "Table a {}", FORMAT_DBML)
+                .unwrap();
+
+        let same = pull_file(&conn, &linked.id, "Table a {}").unwrap().unwrap();
+        assert_eq!(same.updated_at, linked.updated_at, "untouched");
+
+        let moved = pull_file(&conn, &linked.id, "Table a {}\nTable b {}").unwrap().unwrap();
+        assert_eq!(moved.doc, "Table a {}\nTable b {}");
+        assert_eq!(moved.shape_count, 2);
+    }
+
+    /// A diagram made in the app carries no origin, which is what keeps every diagram that existed
+    /// before this feature behaving exactly as it did.
+    #[test]
+    fn an_app_made_diagram_has_no_origin() {
+        let conn = workspaces();
+        let made = create_diagram(&conn, "w1", None, "Dibujo", "<mxfile/>", FORMAT_MXGRAPH, "[]")
+            .unwrap();
+        assert_eq!(made.origin_path, "");
+        assert_eq!(made.origin_project_id, "");
+
+        let folder = create_folder(&conn, "w1", None, "Mio", "").unwrap();
+        assert_eq!(folder.origin_project_id, "", "and neither does a folder the user made");
     }
 }

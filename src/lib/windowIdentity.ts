@@ -24,6 +24,15 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 /** Mirrors `LABEL_PREFIX` in `src-tauri/src/windows.rs`. */
 const SATELLITE_PREFIX = "sat-";
 
+/**
+ * The shell window's label, as `tauri.conf.json` declares it and as Rust looks it up
+ * (`get_webview_window("main")`, in the tray, the watcher and the window-state saver).
+ *
+ * Named here rather than spelled out at each call site because it is now *addressable*: a bus
+ * message can be sent to one window, and "the shell" is a destination like any satellite.
+ */
+export const MAIN_LABEL = "main";
+
 /** What a satellite window holds. Mirrors `SatelliteKind` on the Rust side. */
 export type SatelliteKind = "app" | "repo";
 

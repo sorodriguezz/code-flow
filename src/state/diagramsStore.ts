@@ -7,9 +7,10 @@ import {
   diagramsDeleteDiagram,
   diagramsDeleteFolder,
   diagramsDuplicateDiagram,
-  diagramsGetDiagram,
+  diagramsLinkFile,
   diagramsLoadThumbnails,
   diagramsLoadTree,
+  diagramsPullFile,
   diagramsMoveDiagram,
   diagramsMoveFolder,
   diagramsRenameDiagram,
@@ -20,10 +21,12 @@ import {
   diagramsSetFolderColor,
   diagramsSetPinned,
   diagramsSetTags,
+  diagramsUnlinkFile,
   diagramsUpdateTemplate,
 } from "../lib/tauri/diagramsCommands";
+import { onRepoFsChanged } from "../lib/tauri/events";
 import { builtInTemplates, toTemplate } from "../lib/diagrams/builtinTemplates";
-import { DEFAULT_FORMAT, emptyDoc, FORMAT_MXGRAPH } from "../lib/diagrams/doc";
+import { DEFAULT_FORMAT, emptyDoc, FORMAT_DBML, FORMAT_MXGRAPH } from "../lib/diagrams/doc";
 // The schema dialect's half of `appendCells`. Light — `lib/dbml`'s index deliberately does not
 // reach the parser, so importing it here costs nothing at startup. See `lib/dbml/index.ts`.
 import { mergeDbml } from "../lib/dbml/merge";
@@ -46,6 +49,7 @@ import { useWorkspaceStore } from "./workspaceStore";
 // Type only, so the layout module stays out of this store's runtime graph: `aiByDiagram` keeps
 // what the panel produced, it does not produce it.
 import type { AiGraph } from "../lib/diagrams/aiLayout";
+import { isLinked } from "../types/diagrams";
 import type {
   Diagram,
   DiagramFolderRow,
@@ -210,6 +214,15 @@ interface DiagramsState {
   /** When the last write landed, for the status line. */
   savedAt: string | null;
   /**
+   * Why the open diagram's file could not be read, or `""`.
+   *
+   * Only ever set for a linked diagram, and it is *not* a failure of anything the user did: the
+   * ordinary way to reach it is checking out a branch on which that schema does not exist. So the
+   * diagram stays open on the document it already had and the workbench says the bridge is cold,
+   * rather than a toast appearing over a diagram that is still perfectly readable.
+   */
+  fileError: string;
+  /**
    * Pictures, by diagram id, for the cards currently drawn.
    *
    * A cache rather than part of `diagrams`: thumbnails are fetched for what is on screen, and
@@ -315,6 +328,28 @@ interface DiagramsState {
 
   /** Fetches the document and opens the editor on it. */
   openDiagram: (id: string) => Promise<void>;
+  /**
+   * Files a `.dbml` file from a working tree as a diagram here, and answers with its id.
+   *
+   * The bridge's front door. Idempotent on the file, so pressing the editor's button twice reaches
+   * the same diagram rather than making a second one — see `diagramsLinkFile`.
+   */
+  linkFile: (
+    projectId: string,
+    relPath: string,
+    title: string,
+  ) => Promise<string | null>;
+  /**
+   * Re-reads the open diagram's file, when it is a linked one.
+   *
+   * Called on open, when the working tree changes, and when the window comes back. A **clean**
+   * draft only: a document with unsaved edits in it is the user's, and the file is what *they* are
+   * about to overwrite — reloading over it would delete what they just drew because somebody
+   * touched an unrelated file in the same repository.
+   */
+  syncFromDisk: (id: string) => Promise<void>;
+  /** Cuts the diagram loose from its file. The document stays; only the syncing stops. */
+  unlinkFile: (id: string) => Promise<void>;
   /** Writes anything unsaved and goes back to the gallery, unmounting the editor. */
   closeDiagram: () => Promise<void>;
   /** One edit from the editor. Debounced into a write; see `SAVE_DEBOUNCE_MS`. */
@@ -503,6 +538,7 @@ function clearedWorkspaceState(): Partial<DiagramsState> {
     draft: null,
     openingId: null,
     savedAt: null,
+    fileError: "",
     thumbnails: {},
     pendingLoad: null,
     undoGeneration: null,
@@ -544,6 +580,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   openingId: null,
   saving: false,
   savedAt: null,
+  fileError: "",
   thumbnails: {},
   pendingLoad: null,
   undoGeneration: null,
@@ -730,11 +767,28 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     // whatever `draft` is current, so carrying it across would let the undo button on diagram B
     // replace B's drawing with A's. The button is drawn from this field, so leaving it set also
     // offers an undo for something the user never did here.
-    set({ activeId: id, openingId: id, draft: null, savedAt: null, undoGeneration: null });
+    set({
+      activeId: id,
+      openingId: id,
+      draft: null,
+      savedAt: null,
+      undoGeneration: null,
+      // Belongs to the diagram being left, exactly like `undoGeneration` above it: a stale
+      // "this file is missing" banner over a diagram that has no file at all is a claim about
+      // the wrong document.
+      fileError: "",
+    });
     try {
-      const row = await diagramsGetDiagram(id);
+      // **The working tree wins on open.** A linked diagram is a view of a file, so the file is
+      // read before the row is, and the row is brought up to date with it — otherwise a `git pull`
+      // or an edit made in another editor would be invisible here until something else happened to
+      // write the row. `diagramsPullFile` is safe on an unlinked diagram, which is why there is no
+      // branch: the metadata that would decide it is one round trip away either way.
+      const sync = await diagramsPullFile(id);
+      const row = sync.row;
       // The user may have clicked elsewhere while the document was in flight.
       if (get().openingId !== id) return;
+      if (sync.file_error) set({ fileError: sync.file_error });
       if (!row) {
         // Deleted from another window between the click and the fetch.
         set((state) => ({
@@ -753,6 +807,10 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
           dirty: false,
         },
         openingId: null,
+        // The pull above can have rewritten the row — a linked diagram whose file had moved on —
+        // so the list is folded forward with it. Without this the explorer would go on showing the
+        // shape count and timestamp the schema had before the branch was switched.
+        diagrams: state.diagrams.map((d) => (d.id === row.id ? toDiagram(row) : d)),
         // Seeded from the row so the gallery behind the editor is already right on the way back.
         thumbnails: row.thumbnail
           ? { ...state.thumbnails, [row.id]: row.thumbnail }
@@ -766,7 +824,66 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
 
   closeDiagram: async () => {
     await get().flush();
-    set({ activeId: null, draft: null, openingId: null, savedAt: null });
+    set({ activeId: null, draft: null, openingId: null, savedAt: null, fileError: "" });
+  },
+
+  linkFile: async (projectId, relPath, title) => {
+    const workspaceId = get().workspaceId;
+    if (!workspaceId) return null;
+    try {
+      const row = await diagramsLinkFile(workspaceId, projectId, relPath, title, FORMAT_DBML);
+      // The tree, not just the row: linking can have *created* the repository's folder, and a
+      // diagram filed into a folder this window has never heard of draws at the root.
+      await get().refresh();
+      return row.id;
+    } catch (error) {
+      pushErrorToast(String(error));
+      return null;
+    }
+  },
+
+  syncFromDisk: async (id) => {
+    const { draft, activeId } = get();
+    // Only the open diagram, and only while it is clean — see the action's comment. A dirty draft
+    // is the user's unsaved work, and the next flush is what will settle the two.
+    if (activeId !== id || !draft || draft.id !== id || draft.dirty) return;
+    const diagram = get().diagrams.find((d) => d.id === id);
+    if (!isLinked(diagram)) return;
+    try {
+      const sync = await diagramsPullFile(id);
+      // Re-checked after the round trip: the user can have started typing, or moved on, while it
+      // was in flight. Writing here would then be a reload over an edit — the one thing this must
+      // never do.
+      const current = get();
+      const open = current.draft;
+      if (current.activeId !== id || !open || open.id !== id || open.dirty) return;
+      set({ fileError: sync.file_error });
+      const row = sync.row;
+      if (!row || row.doc === open.doc) return;
+      set((state) => ({
+        draft: { ...open, doc: row.doc, dirty: false },
+        diagrams: state.diagrams.map((d) => (d.id === row.id ? toDiagram(row) : d)),
+        // The schema workbench reads `draft.doc`; the drawing editor has to be *told*, because
+        // draw.io holds its own copy of the model. Same channel a generation uses.
+        pendingLoad: row.format === FORMAT_MXGRAPH ? row.doc : null,
+      }));
+    } catch {
+      // Silent. This runs off a filesystem watcher that fires for every file in the repository,
+      // and a toast per unrelated save is noise about something the user did not ask for.
+    }
+  },
+
+  unlinkFile: async (id) => {
+    try {
+      const row = await diagramsUnlinkFile(id);
+      if (!row) return;
+      set((state) => ({
+        diagrams: state.diagrams.map((d) => (d.id === row.id ? toDiagram(row) : d)),
+        fileError: state.activeId === row.id ? "" : state.fileError,
+      }));
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
   },
 
   editDoc: (doc) => {
@@ -826,6 +943,11 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
           savedAt: new Date().toISOString(),
         }));
       } catch (error) {
+        // For a **linked** diagram this is very often the file half failing, not the row —
+        // `diagrams_save_diagram` writes the working tree after the row and reports the write. The
+        // draft is deliberately left dirty either way, so the next edit (or the next `flush`) tries
+        // again rather than the app quietly deciding a schema had been saved into a repository it
+        // never reached.
         pushErrorToast(String(error));
       } finally {
         set({ saving: false });
@@ -1481,6 +1603,27 @@ useWorkspaceStore.subscribe((state, previous) => {
   if (workspaceId === null && !loading) return;
   void useDiagramsStore.getState().setWorkspace(state.activeWorkspaceId);
 });
+
+/**
+ * The other half of the bridge: a linked diagram follows the file it mirrors.
+ *
+ * Here rather than in `DiagramsView`, and for the same reason the workspace subscription above it
+ * is: the store is what holds the open document, this window may be showing the Diagrams app or
+ * not, and a rule that lives in a component is a rule that stops applying the moment somebody
+ * unmounts it. `repo:fs-changed` is repository-wide and fires for any file in it, so `syncFromDisk`
+ * does the deciding — it returns immediately unless the open diagram is linked *and* clean.
+ *
+ * The event is emitted by the backend to **every** window, so a Diagrams window detached onto its
+ * own desk still hears a save made in the main window's editor. What it does not do is start a
+ * watcher: watching a repository is the shell's business (`App.tsx`), and this is a reader.
+ */
+// `catch` because this is module scope: outside Tauri — the unit tests, the mobile bundle —
+// `listen` rejects, and an unhandled rejection at import time would take down whatever imported
+// this store rather than merely leaving it without a watcher it has no use for there.
+void onRepoFsChanged(() => {
+  const { activeId } = useDiagramsStore.getState();
+  if (activeId) void useDiagramsStore.getState().syncFromDisk(activeId);
+}).catch(() => {});
 
 /**
  * The diagrams the list should show, filtered and ordered.
