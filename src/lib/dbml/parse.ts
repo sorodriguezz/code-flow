@@ -267,7 +267,7 @@ function parseWithCore(source: string): DbmlSchema | null {
   // it would stretch the group over empty canvas.
   for (const group of groups) group.tables = group.tables.filter((id: string) => known.has(id));
 
-  return { tables, enums, refs, groups, error: null };
+  return { tables, enums, refs, groups, error: null, errorAt: null };
 }
 
 /**
@@ -341,10 +341,26 @@ export function formatParseError(error: unknown): string {
 
 /** The line a parse error points at, 1-based, or `null`. What the editor needs to put a marker on it. */
 export function errorLine(error: unknown): number | null {
+  return errorPosition(error)?.line ?? null;
+}
+
+/**
+ * Where the first diagnostic starts, 1-based, or `null`.
+ *
+ * The column is what turns "somewhere on line 12" into a caret. `@dbml/core` reports it for every
+ * syntax error and both compilers agree on the shape, but a hand-rolled `Error` reaching here has
+ * neither — so the column falls back to 1 rather than to nothing, because a marker on the whole
+ * line is still an answer and no marker at all is the state we are trying to leave.
+ */
+export function errorPosition(error: unknown): { line: number; column: number } | null {
   if (error && typeof error === "object" && "diags" in error) {
     const diags = (error as { diags: Diagnostic[] }).diags;
-    const line = Array.isArray(diags) ? diags[0]?.location?.start?.line : undefined;
-    if (typeof line === "number" && line > 0) return line;
+    const start = Array.isArray(diags) ? diags[0]?.location?.start : undefined;
+    const line = start?.line;
+    if (typeof line === "number" && line > 0) {
+      const column = typeof start?.column === "number" && start.column > 0 ? start.column : 1;
+      return { line, column };
+    }
   }
   return null;
 }
@@ -502,7 +518,7 @@ function parseWithRegex(source: string): DbmlSchema {
   // drawn around, so it cannot contribute to the boundary.
   const declared = new Set(tables.map((table) => table.id));
   for (const group of groups) group.tables = group.tables.filter((id) => declared.has(id));
-  return { tables, enums, refs: unique, groups, error: null };
+  return { tables, enums, refs: unique, groups, error: null, errorAt: null };
 }
 
 /** `core.users` → `["core", "users"]`; `users` → `["public", "users"]`. */
@@ -533,7 +549,7 @@ export function parseDbml(doc: string): DbmlSchema {
     // tables are what keeps the canvas drawn, and the message is the only thing that says why the
     // one being typed is missing from it.
     const recovered = parseWithRegex(source);
-    return { ...recovered, error: formatParseError(error) };
+    return { ...recovered, error: formatParseError(error), errorAt: errorPosition(error) };
   }
 }
 

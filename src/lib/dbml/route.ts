@@ -100,6 +100,15 @@ export interface RoutedEdge extends EdgeEnds {
   /** Which face the line actually left and arrived on, so the `1`/`N` markers can follow it. */
   fromRight: boolean;
   toRight: boolean;
+  /**
+   * Halfway *along the drawn line*, where the cardinality badge sits.
+   *
+   * Reported from here for the same reason the endpoints are: the badge has to land on the line,
+   * and the only place that knows where the line went is the function that decided. The midpoint of
+   * the two ends is not that point — a tier-2 detour goes over three boxes, and the middle of the
+   * chord it spans is a badge floating in the gap between two tables it does not belong to.
+   */
+  mid: { x: number; y: number };
 }
 
 interface Rect {
@@ -160,15 +169,25 @@ export function routeEdges(
         d: `M ${ends.x1} ${ends.y1} C ${ends.c1} ${ends.y1}, ${ends.c2} ${ends.y2}, ${ends.x2} ${ends.y2}`,
         fromRight,
         toRight: !fromRight,
+        // The cubic at t=½, evaluated rather than approximated: both control points share their
+        // endpoint's `y`, so the Bernstein sum collapses to the mean there and only `x` has to be
+        // worked out. A self-loop's bulge is exactly where this puts the badge, which is the one
+        // place on that curve that is not inside the box it leaves.
+        mid: {
+          x: (ends.x1 + 3 * ends.c1 + 3 * ends.c2 + ends.x2) / 8,
+          y: (ends.y1 + ends.y2) / 2,
+        },
       });
       continue;
     }
 
+    const legs = elbow(ends, from, to, fromRight, obstacles, lanes, room);
     out.set(link.id, {
       ...ends,
-      d: elbow(ends, from, to, fromRight, obstacles, lanes, room),
+      d: path(legs),
       fromRight,
       toRight: !fromRight,
+      mid: midOf(legs),
     });
   }
 
@@ -190,13 +209,16 @@ function elbow(
   obstacles: Rect[],
   lanes: Map<number, number>,
   room: Clearances,
-): string {
+): Point[] {
   const { x1, y1, x2, y2 } = ends;
 
   // Tier 0 — the rows line up and nothing is between them. One straight segment, and by far the
   // most readable thing this function can produce.
   if (Math.abs(y1 - y2) < 1 && clearH(obstacles, x1, x2, y1, from.id, to.id)) {
-    return `M ${x1} ${y1} L ${x2} ${y2}`;
+    return [
+      [x1, y1],
+      [x2, y2],
+    ];
   }
 
   // Tier 1 — a Z: out, across, in. The vertical run goes in a lane inside the gap between the two
@@ -227,12 +249,12 @@ function elbow(
         clearH(obstacles, at, x2, y2, from.id, to.id)
       ) {
         lanes.set(key, taken + 1);
-        return path([
+        return [
           [x1, y1],
           [at, y1],
           [at, y2],
           [x2, y2],
-        ]);
+        ];
       }
     }
   }
@@ -259,7 +281,7 @@ function elbow(
     const first = hi - above > below - lo ? below : above;
     const second = first === above ? below : above;
     for (const lane of [first, second]) {
-      const legs: [number, number][] = [
+      const legs: Point[] = [
         [x1, y1],
         [outX, y1],
         [outX, lane],
@@ -271,18 +293,45 @@ function elbow(
         clearV(obstacles, outX, y1, lane, from.id, to.id) &&
         clearH(obstacles, outX, inX, lane, from.id, to.id) &&
         clearV(obstacles, inX, lane, y2, from.id, to.id);
-      if (ok || lane === second) return path(legs);
+      if (ok || lane === second) return legs;
     }
   }
 
   // Nothing in the way after all — a plain Z through the middle.
   const mid = (x1 + x2) / 2;
-  return path([
+  return [
     [x1, y1],
     [mid, y1],
     [mid, y2],
     [x2, y2],
-  ]);
+  ];
+}
+
+/**
+ * The point half the drawn length along a polyline.
+ *
+ * Measured along the route rather than between its ends: on a Z the two are the same point, and on
+ * a detour they are nowhere near each other. `dist` is Manhattan, which is exact here — every
+ * segment an elbow produces is axis-aligned — and the corner rounding shifts this by a pixel at
+ * most, which is less than the badge's own radius.
+ */
+function midOf(points: Point[]): { x: number; y: number } {
+  const total = points
+    .slice(1)
+    .reduce((sum, point, at) => sum + dist(points[at][0], points[at][1], point[0], point[1]), 0);
+  let walked = 0;
+  for (let at = 1; at < points.length; at += 1) {
+    const [px, py] = points[at - 1];
+    const [cx, cy] = points[at];
+    const step = dist(px, py, cx, cy);
+    if (walked + step >= total / 2) {
+      const along = step === 0 ? 0 : (total / 2 - walked) / step;
+      return { x: px + (cx - px) * along, y: py + (cy - py) * along };
+    }
+    walked += step;
+  }
+  const [x, y] = points[points.length - 1];
+  return { x, y };
 }
 
 /** Lane positions to try, from the middle of the gap outwards. */
@@ -354,8 +403,11 @@ function isEndpoint(rect: Rect, fromId: string, toId: string): boolean {
   return rect.owner === fromId || rect.owner === toId;
 }
 
+/** A corner of a route. */
+type Point = [number, number];
+
 /** An orthogonal polyline with its corners rounded. */
-function path(points: [number, number][]): string {
+function path(points: Point[]): string {
   if (points.length < 2) return "";
   let d = `M ${round(points[0][0])} ${round(points[0][1])}`;
   for (let at = 1; at < points.length - 1; at += 1) {

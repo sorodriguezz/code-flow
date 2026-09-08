@@ -7,7 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
-import Editor, { type OnMount } from "@monaco-editor/react";
+import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import {
   AlertTriangle,
@@ -132,10 +132,14 @@ export function DbmlWorkbench({
   diagramId,
   onSaveAsTemplate,
   onAskAi,
+  onOlderVersions,
 }: {
   diagramId: string;
   onSaveAsTemplate: () => void;
   onAskAi: () => void;
+  /** Opens the saved-version history. Owned by `DiagramsView` — it is the same modal the draw.io
+   *  editor and the gallery use, and it belongs to the diagram rather than to this editor. */
+  onOlderVersions: () => void;
 }) {
   const t = useT();
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
@@ -193,6 +197,9 @@ export function DbmlWorkbench({
    */
   const [zenFrom, setZenFrom] = useState<{ editor: boolean; inspector: boolean } | null>(null);
   const zen = zenFrom !== null;
+  /** Which panes the user opened or closed *by hand* since entering full screen. A ref and not
+   *  state: nothing draws it, and it is only ever read at the moment zen ends. */
+  const zenTouched = useRef({ editor: false, inspector: false });
   const [revisions, setRevisions] = useState<Revision[]>([]);
   const [density, setDensity] = useState<DiagramDensity>("roomy");
   const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
@@ -229,6 +236,9 @@ export function DbmlWorkbench({
   const cause = useRef<RevisionCause>("edited");
   const nextRevision = useRef(1);
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
+  /** The Monaco namespace, kept from the mount. Markers are set on the *model*, not on the editor,
+   *  so they need the module rather than the instance. */
+  const monacoRef = useRef<Monaco | null>(null);
   /** A declaration to jump to as soon as the text pane has an editor again. See `revealTable`. */
   const pendingReveal = useRef<string | null>(null);
 
@@ -268,8 +278,10 @@ export function DbmlWorkbench({
       const parsed = parser.parseDbml(source);
       setSchema((current) =>
         // A failed parse that recovered nothing keeps the previous tables and takes the new error.
+        // `errorAt` travels with `error` — they are one fact, and a stale caret pointing at a line
+        // that no longer holds the problem is worse than no caret.
         parsed.tables.length === 0 && parsed.enums.length === 0 && parsed.error
-          ? { ...current, error: parsed.error }
+          ? { ...current, error: parsed.error, errorAt: parsed.errorAt }
           : parsed,
       );
     }, PARSE_DEBOUNCE_MS);
@@ -507,6 +519,7 @@ export function DbmlWorkbench({
    */
   const enterZen = () => {
     setZenFrom({ editor: editorOpen, inspector });
+    zenTouched.current = { editor: false, inspector: false };
     setEditorOpen(false);
     setInspector(false);
     // Anything floating over the canvas goes with them, or it is left hanging over a black screen
@@ -520,11 +533,26 @@ export function DbmlWorkbench({
   const leaveZen = useCallback(() => {
     setZenFrom((from) => {
       if (!from) return null;
-      setEditorOpen(from.editor);
-      setInspector(from.inspector);
+      // Per pane, and that is the whole subtlety. The snapshot exists so leaving full screen does
+      // not cost the layout you had before entering it — but the panes can now be opened *inside*
+      // zen, and a pane the user deliberately opened there being slammed shut on the way out is the
+      // snapshot overruling a newer decision. So it only answers for the panes nobody touched.
+      if (!zenTouched.current.editor) setEditorOpen(from.editor);
+      if (!zenTouched.current.inspector) setInspector(from.inspector);
+      zenTouched.current = { editor: false, inspector: false };
       return null;
     });
   }, []);
+
+  /** Toggles a pane, and remembers that it was done by hand while in zen — see `leaveZen`. */
+  const toggleEditorPane = () => {
+    if (zen) zenTouched.current.editor = true;
+    setEditorOpen((open) => !open);
+  };
+  const toggleInspectorPane = () => {
+    if (zen) zenTouched.current.inspector = true;
+    setInspector((open) => !open);
+  };
 
   const tidy = () => {
     const formatted = formatDbml(source);
@@ -553,6 +581,79 @@ export function DbmlWorkbench({
     // The marks are about the model, not about where its boxes sit — a re-layout keeps them.
     editDoc(writeLayout(source, {}, marks));
     useToastStore.getState().pushToast(t("dbml.layoutReset"), "success");
+  };
+
+  /**
+   * The parse error, drawn on the line it is about.
+   *
+   * A banner under the editor says *what* is wrong; this is what says *where*. Monaco owns the
+   * squiggle, the gutter mark, the overview-ruler tick and the hover — setting a marker gets all
+   * four for the price of one call, and they track the text as it is edited rather than pointing at
+   * a line number that has since moved.
+   *
+   * The span is from the reported column to the end of that line. `@dbml/core` reports a start and
+   * no end (its diagnostics are points, not ranges), and a zero-width marker draws nothing at all —
+   * so "from here to the end of the line" is the smallest honest range that is also visible.
+   *
+   * Runs on `source` too, not only on the error: the model's content changes under the marker as
+   * the user types, and a marker left on a line that has since been fixed is a lie that survives
+   * until the next failure.
+   */
+  useEffect(() => {
+    const monaco = monacoRef.current;
+    const model = editorRef.current?.getModel();
+    if (!monaco || !model) return;
+    const OWNER = "cf-dbml-parse";
+    if (!schema.error || !schema.errorAt) {
+      monaco.editor.setModelMarkers(model, OWNER, []);
+      return;
+    }
+    const line = Math.min(Math.max(1, schema.errorAt.line), model.getLineCount());
+    const column = Math.max(1, schema.errorAt.column);
+    monaco.editor.setModelMarkers(model, OWNER, [
+      {
+        severity: monaco.MarkerSeverity.Error,
+        message: schema.error,
+        startLineNumber: line,
+        startColumn: column,
+        endLineNumber: line,
+        endColumn: Math.max(column + 1, model.getLineMaxColumn(line)),
+      },
+    ]);
+  }, [schema.error, schema.errorAt, source, editorOpen]);
+
+  /**
+   * Puts the caret on the error.
+   *
+   * Opens the text pane first when it is folded away: the banner is reachable from a canvas-only
+   * layout, and "go to the error" that silently does nothing because the editor is not on screen is
+   * the same dead control this feature exists to replace. The reveal is deferred a frame in that
+   * case, because the editor does not exist until the pane has rendered.
+   */
+  const goToError = () => {
+    const at = schema.errorAt;
+    if (!at) return;
+    const focus = (editor: MonacoEditorNS.IStandaloneCodeEditor) => {
+      const model = editor.getModel();
+      if (!model) return;
+      const line = Math.min(Math.max(1, at.line), model.getLineCount());
+      const column = Math.max(1, at.column);
+      editor.revealLineInCenter(line);
+      editor.setPosition({ lineNumber: line, column });
+      editor.focus();
+    };
+    if (editorOpen && editorRef.current) {
+      focus(editorRef.current);
+      return;
+    }
+    setEditorOpen(true);
+    // One frame for the pane, then the editor is there. `requestAnimationFrame` rather than a
+    // timeout: this is waiting on a render, which is exactly what it measures.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (editorRef.current) focus(editorRef.current);
+      });
+    });
   };
 
   /** Puts the document back to how it was before one recorded change. */
@@ -786,14 +887,24 @@ export function DbmlWorkbench({
     () => platformIsMac() && getWindowStatus().fullscreen,
   );
 
+  /**
+   * Whether AppKit is painting the traffic lights over the workbench itself.
+   *
+   * They are real buttons above the webview, so nothing in the DOM can cover them and nothing the
+   * pane draws in that corner can be clicked. Outside full screen the app's own title bar keeps the
+   * row for them; in full screen it is buried, so the row has to be reserved here instead.
+   */
+  const lightsOverWorkbench = zen && platformIsMac() && !windowFullscreen;
+
   const exportItems: MenuItem[] = [
     { label: t("diagrams.exportAs.png"), onClick: () => void exportAs("png") },
     { label: t("diagrams.exportAs.svg"), onClick: () => void exportAs("svg") },
     { label: t("diagrams.exportAs.dbml"), onClick: () => void exportAs("dbml") },
   ];
 
-  const onEditorMount: OnMount = (editor) => {
+  const onEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
+    monacoRef.current = monaco;
     // A disposed editor answers `getModel()` with `null` rather than throwing, and this ref is
     // otherwise never cleared — so without this, folding the text pane away leaves a live-looking
     // editor here forever and everything that checks it silently does nothing.
@@ -822,15 +933,19 @@ export function DbmlWorkbench({
             // so full screen covers the app and a "name already taken" message still reaches the
             // person who is in it. At `z-[55]` the toast was painted behind an opaque background
             // and full screen became a mode where nothing could report anything.
-            "fixed inset-0 z-[45] flex flex-col bg-[var(--cf-bg)]"
+            `fixed inset-0 z-[45] flex flex-col bg-[var(--cf-bg)] ${
+              lightsOverWorkbench ? "pt-11" : ""
+            }`
           : "relative flex h-full min-h-0 flex-col"
       }
     >
       {/* macOS keeps native window decorations (`titleBarStyle: Overlay`), so AppKit paints the
           traffic lights straight over a zen canvas — and with the app's own title bar covered, the
-          window also loses every drag region. This strip gives both back: `h-11` matches the title
-          bar's height and 96px clears the lights, which start at x=20. In OS fullscreen AppKit
-          takes them away entirely, so the strip is not reserved. */}
+          window also loses every drag region. The `pt-11` above and this strip give both back:
+          `h-11` matches the title bar's height, so the search box and the first lines of the code
+          pane start *below* the lights rather than underneath them, and 96px of it drags the window
+          — that is where the lights sit, starting at x=20. In OS fullscreen AppKit takes them away
+          entirely, so neither the row nor the strip is reserved. */}
       {/* The way out, at the root and not in the canvas's corner cluster — that cluster lives inside
           the branch that draws boxes, so on an empty schema (or before the 15 MB parser chunk has
           landed) it is not rendered, and full screen had no visible exit at all. Top-right, clear
@@ -846,7 +961,7 @@ export function DbmlWorkbench({
           {t("dbml.zenExit")}
         </button>
       )}
-      {zen && platformIsMac() && !windowFullscreen && (
+      {lightsOverWorkbench && (
         <div
           aria-hidden
           data-tauri-drag-region="deep"
@@ -982,6 +1097,22 @@ export function DbmlWorkbench({
                 <AlertTriangle size={12} className="mt-[1px] shrink-0" />
                 <span className="whitespace-pre-wrap">{schema.error}</span>
               </p>
+              {/* The coordinate, as a control. The message above already ends in `(12:5)`, but a
+                  number in a sentence is something to go and find by hand — this is the same fact
+                  with the trip attached, and it is the only thing in the banner that is clickable
+                  so there is no question about what it does. */}
+              {schema.errorAt && (
+                <button
+                  type="button"
+                  onClick={goToError}
+                  className="mt-1 ml-[18px] rounded border border-[var(--cf-danger)]/40 px-1.5 py-[1px] font-mono text-[10px] tabular-nums text-[var(--cf-danger)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-danger)_12%,transparent)]"
+                >
+                  {t("dbml.goToError", {
+                    line: String(schema.errorAt.line),
+                    column: String(schema.errorAt.column),
+                  })}
+                </button>
+              )}
               {hint && (
                 <div className="mt-1.5 pl-[18px]">
                   <p className="text-[9.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
@@ -1028,14 +1159,17 @@ export function DbmlWorkbench({
               control belongs against the thing it moves, and it is the edge your eye is already on
               when you decide the drawing needs more room. This one rides the seam because that is
               this container's left edge whether the editor is open or shut. */}
-          {!zen && (
-            <EdgeTab
-              side="left"
-              open={editorOpen}
-              title={t(editorOpen ? "dbml.collapseEditor" : "dbml.expandEditor")}
-              onClick={() => setEditorOpen((open) => !open)}
-            />
-          )}
+          {/* Drawn in full screen too. Zen *starts* with both panes folded — that is what makes it
+              full screen — but it is a view state, not a mode with fewer tools: needing the code or
+              the inspector while working large used to mean leaving zen, doing the edit at normal
+              size and going back in. The tabs are the same control in both states, in the same
+              place, so there is nothing new to learn. */}
+          <EdgeTab
+            side="left"
+            open={editorOpen}
+            title={t(editorOpen ? "dbml.collapseEditor" : "dbml.expandEditor")}
+            onClick={toggleEditorPane}
+          />
           {surface === "diagram" &&
             (!parser ? (
               <ViewSkeleton />
@@ -1280,14 +1414,13 @@ export function DbmlWorkbench({
                     />
                   )}
 
-                  {!zen && (
-                    <EdgeTab
-                      side="right"
-                      open={inspector}
-                      title={t(inspector ? "dbml.collapseInspector" : "dbml.expandInspector")}
-                      onClick={() => setInspector((open) => !open)}
-                    />
-                  )}
+                  {/* Its counterpart on the other edge — see the note on the left one. */}
+                  <EdgeTab
+                    side="right"
+                    open={inspector}
+                    title={t(inspector ? "dbml.collapseInspector" : "dbml.expandInspector")}
+                    onClick={toggleInspectorPane}
+                  />
                   </div>
 
                   {/* What the picture contains, in the strip along the bottom — the same place and
@@ -1389,6 +1522,13 @@ export function DbmlWorkbench({
         <DbmlHistory
           revisions={revisions}
           onRevert={revert}
+          onOlder={() => {
+            // Full screen has to go with it: the modal is mounted by `DiagramsView`, which is
+            // *under* this portalled overlay, so opening it from zen would put it behind a black
+            // canvas with no way to reach it.
+            if (zen) leaveZen();
+            onOlderVersions();
+          }}
           onClose={() => setHistory(false)}
         />
       )}

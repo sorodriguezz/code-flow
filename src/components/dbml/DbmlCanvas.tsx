@@ -11,7 +11,16 @@ import {
 } from "react";
 import { clip } from "../../lib/diagramSvg";
 import { routeEdges, type EdgeRouting } from "../../lib/dbml/route";
-import { layoutDbml, type DbmlLayout, type DbmlMarkKind, type DbmlMarks } from "../../lib/dbml/layout";
+import {
+  BADGE_GAP,
+  badgeStripWidth,
+  columnBadges,
+  layoutDbml,
+  type DbmlBadge,
+  type DbmlLayout,
+  type DbmlMarkKind,
+  type DbmlMarks,
+} from "../../lib/dbml/layout";
 import { highlightFor, type DbmlSchema } from "../../lib/dbml/types";
 import {
   ArrowLeftRight,
@@ -72,7 +81,7 @@ const READABLE_ZOOM = 0.85;
 export const DBML_CANVAS_ID = "cf-dbml-canvas";
 
 /**
- * The badge legend: three fixed hues that are not the accent.
+ * The badge legend: five fixed hues that are not the accent.
  *
  * Everything else on this canvas follows `--cf-accent` — headers, lines, glow, selection — and that
  * is the point. The badges cannot, and the reason is that they sit *next to each other on one row*,
@@ -83,10 +92,25 @@ export const DBML_CANVAS_ID = "cf-dbml-canvas";
  *
  * Each is a token with a light and a dark value (see `index.css`), so a hue that has to read as text
  * on a pale card is not the same hue that has to read as text on a dark one.
+ *
+ * `PK` `NN` `AI` `U` `FK` is also the order they are drawn in, and it is the order the settings are
+ * written in DBML: what a column *is*, then what it is *constrained to*, then what it *points at*.
  */
 const KEY_COLOUR = "var(--cf-warning)";
 const LINK_COLOUR = "var(--cf-blue)";
 const ENUM_COLOUR = "var(--cf-violet)";
+const NOT_NULL_COLOUR = "var(--cf-success)";
+const AUTO_COLOUR = "var(--cf-teal)";
+
+/** The legend, applied. Which badges a column earns and how wide they are is `columnBadges`, in the
+ *  module that measures the boxes; this is the half of it that is a drawing decision. */
+const BADGE_COLOUR: Record<DbmlBadge["label"], string> = {
+  PK: KEY_COLOUR,
+  NN: NOT_NULL_COLOUR,
+  AI: AUTO_COLOUR,
+  U: ENUM_COLOUR,
+  FK: LINK_COLOUR,
+};
 
 /**
  * The review marks: a fourth colour family, and the only one that means a *decision* rather than a
@@ -118,8 +142,16 @@ const MONO_ADVANCE = 0.6;
 
 /** Row furniture, in the same units `DBML_METRICS` measured the boxes with. */
 const PAD_X = 11;
+/**
+ * The glyph column at the head of every row — a key, a link, or the dot that means neither.
+ *
+ * Reserved whether or not this particular row has something to put in it. Indenting only the rows
+ * that do is what the box used to do, and it left the column of names down a table ragged: `id`
+ * pushed 13px right of `email` because one of them is a key. `DBML_METRICS.rowPadding` charges
+ * every row for this, so the two cannot drift apart.
+ */
+const GUTTER = 13;
 const BADGE_H = 13;
-const BADGE_GAP = 3;
 const HEADER_H = 34;
 const ROW_H = 22;
 
@@ -324,6 +356,11 @@ export const DbmlCanvas = forwardRef<
   const nodeById = useMemo(
     () => new Map(layout.nodes.map((node) => [node.id, node])),
     [layout.nodes],
+  );
+  /** Every reference by its id, so a line can read its own cardinality without scanning the list. */
+  const refById = useMemo(
+    () => new Map(schema.refs.map((ref) => [ref.id, ref])),
+    [schema.refs],
   );
   /**
    * Every line's geometry, computed once for the set rather than per edge.
@@ -917,6 +954,23 @@ export const DbmlCanvas = forwardRef<
             // alone is a few pixels of hue on a hairline and the dash is what carries.
             const mark = marks[link.constraint];
             const stroke = mark ? MARK_COLOUR[mark] : "var(--cf-accent)";
+            // Which end stands for many rows. A ref the canvas is drawing always has an entry here;
+            // the fallback is what a mid-keystroke re-parse looks like for one frame, and `1:1` is
+            // the reading that claims the least about a relationship nobody has finished typing.
+            const relation = refById.get(link.constraint);
+            const fromMany = relation?.from.relation === "*";
+            const toMany = relation?.to.relation === "*";
+            // A self-reference leaves and arrives on the same face, and the router's `toRight` —
+            // which is `!fromRight` by construction — says the opposite for the second end. Left
+            // alone, the foot on a `manager_id → employees` loop is drawn inside its own table.
+            const loop = link.from === link.to;
+            const toOutward = loop || route.toRight ? 1 : -1;
+            // Left to right as drawn, not as written: `route.fromRight` means the `from` box is the
+            // one on the left, so that is the half of the label that goes first.
+            const ends = [fromMany ? "N" : "1", toMany ? "N" : "1"] as const;
+            const label = route.fromRight
+              ? `${ends[0]}:${ends[1]}`
+              : `${ends[1]}:${ends[0]}`;
             return (
               <g key={link.id}>
                 {/* The part you can actually hit. A 1.4px curve is not a pointer target at any
@@ -960,6 +1014,14 @@ export const DbmlCanvas = forwardRef<
                   <title>{`${link.from}.${link.fromColumn} → ${link.to}.${link.toColumn}`}</title>
                 </path>
                 <g opacity={opacity} pointerEvents="none">
+                  {/* Dashed, and every line is.
+
+                      A reference is a rule about the data rather than a thing the data contains,
+                      and a dashed line is how a schema drawing has always said so — it also lets a
+                      line cross a neighbour without the two reading as one continuous stroke. The
+                      removal mark keeps a pattern of its own on the far side of that: a *dot* is
+                      still unmistakably not the dash everything else is drawn with, where a
+                      slightly shorter dash would have quietly stopped meaning anything. */}
                   <path
                     d={d}
                     fill="none"
@@ -969,45 +1031,42 @@ export const DbmlCanvas = forwardRef<
                     // A right angle at 1.4px shows its mitre without this, which reads as a nick in
                     // the line rather than as a corner.
                     strokeLinejoin="round"
-                    strokeDasharray={mark === "remove" ? "5 4" : undefined}
+                    strokeDasharray={mark === "remove" ? "1.5 4" : "6 4"}
                   />
-                  {/* Dots rather than an arrowhead: the direction is already in the badges and the
-                      cardinality, and a head large enough to see at 40% zoom is a blob at 200%. */}
-                  <circle cx={route.x1} cy={route.y1} r={lit ? 3.4 : 2.6} fill={stroke} />
-                  <circle cx={route.x2} cy={route.y2} r={lit ? 3.4 : 2.6} fill={stroke} />
+                  {/* The dot pins the line to the row it belongs to; the foot beside it says how
+                      many rows that end stands for. Neither is an arrowhead: direction is not what
+                      a reader is asking a relationship line, and a head large enough to see at 40%
+                      zoom is a blob at 200%. */}
+                  <circle cx={route.x1} cy={route.y1} r={lit ? 3.2 : 2.4} fill={stroke} />
+                  <circle cx={route.x2} cy={route.y2} r={lit ? 3.2 : 2.4} fill={stroke} />
+                  <Foot
+                    x={route.x1}
+                    y={route.y1}
+                    outward={route.fromRight ? 1 : -1}
+                    many={fromMany}
+                    colour={stroke}
+                    lit={lit}
+                  />
+                  <Foot
+                    x={route.x2}
+                    y={route.y2}
+                    outward={toOutward}
+                    many={toMany}
+                    colour={stroke}
+                    lit={lit}
+                  />
+                  <CardinalityBadge
+                    x={route.mid.x}
+                    y={route.mid.y}
+                    label={label}
+                    colour={stroke}
+                  />
                 </g>
               </g>
             );
           })}
 
-          {/* The cardinalities, drawn after the lines so they sit on top of them, and only for the
-              lit ones: a `1` and an `N` at both ends of every line in a forty-table schema is
-              noise, while on the three lines you just selected it is the answer. */}
-          {highlight !== null &&
-            layout.links.map((link) => {
-              if (!highlight.refs.has(link.constraint)) return null;
-              const from = nodeById.get(link.from);
-              const to = nodeById.get(link.to);
-              const ref = schema.refs.find((entry) => entry.id === link.constraint);
-              const route = routes.get(link.id);
-              if (!from || !to || !ref || !route) return null;
-              return (
-                <g key={`card-${link.id}`} pointerEvents="none">
-                  <Cardinality
-                    node={from}
-                    column={link.fromColumn}
-                    leavesRight={route.fromRight}
-                    label={ref.from.relation === "*" ? "N" : "1"}
-                  />
-                  <Cardinality
-                    node={to}
-                    column={link.toColumn}
-                    leavesRight={route.toRight}
-                    label={ref.to.relation === "*" ? "N" : "1"}
-                  />
-                </g>
-              );
-            })}
+
 
           {painted.map((node) => (
             <SchemaBox
@@ -1287,48 +1346,98 @@ function menuItems(
 }
 
 /**
- * The `1` or `N` at one end of a lit line, sat just off the box it belongs to.
+ * How many rows this end of a line stands for, drawn as the line's own shape.
  *
- * Placed on the side the line actually leaves from, which the router reports rather than this
- * recomputing it: reading it off the wrong edge puts the marker on the far side of the table from
- * its own line, which is worse than not drawing it at all.
+ * Crow's-foot notation, the same one every ER diagram since 1976 has used: three prongs opening
+ * onto the box for a `*` end, one perpendicular tick for a `1`. It replaces the pair of `1`/`N`
+ * chips that used to appear beside a *lit* line only, and the reason it can be on every line at
+ * every zoom is that it is geometry rather than text — it costs no reading, it never overlaps a
+ * neighbouring box's name, and at 30% zoom it is still the difference between a fork and a bar.
+ *
+ * `outward` is `+1` when the line leaves the box's right face, and it comes from the router rather
+ * than from comparing coordinates here: the foot has to open onto the face its own line actually
+ * left, and two copies of that decision are two chances to disagree.
  */
-function Cardinality({
-  node,
-  column,
-  leavesRight,
-  label,
+function Foot({
+  x,
+  y,
+  outward,
+  many,
+  colour,
+  lit,
 }: {
-  node: DiagramNode;
-  column: string;
-  /** Taken from the route rather than recomputed: the marker has to sit on the face its own line
-   *  actually leaves from, and two copies of that decision are two chances to disagree. */
-  leavesRight: boolean;
-  label: string;
+  x: number;
+  y: number;
+  outward: 1 | -1;
+  many: boolean;
+  colour: string;
+  lit: boolean;
 }) {
-  const y = node.y + (node.rowY[column] ?? node.height / 2);
-  const x = leavesRight ? node.x + node.width + 17 : node.x - 17;
+  const weight = lit ? 1.8 : 1.3;
+  if (!many) {
+    // The bar sits a little off the face rather than on it, so it reads as a mark *on the line*
+    // instead of as a tick welded to the edge of the table.
+    const at = x + outward * 9;
+    return (
+      <line
+        x1={at}
+        y1={y - 4.4}
+        x2={at}
+        y2={y + 4.4}
+        stroke={colour}
+        strokeWidth={weight}
+        strokeLinecap="round"
+      />
+    );
+  }
+  const apex = x + outward * 11;
+  return (
+    <path
+      d={`M${apex} ${y} L${x} ${y - 4.8} M${apex} ${y} L${x} ${y} M${apex} ${y} L${x} ${y + 4.8}`}
+      fill="none"
+      stroke={colour}
+      strokeWidth={weight}
+      strokeLinecap="round"
+    />
+  );
+}
+
+/**
+ * The relationship in words, on the middle of its own line: `1:N`.
+ *
+ * Read left to right *as drawn* rather than from the `Ref:` line's own end order — the left half is
+ * whichever table is on the left of the screen. A badge that says `N:1` over a line whose many-end
+ * is on the right is a badge you have to translate before you can use it, and the whole point of
+ * putting it on the line is that you do not have to look anywhere else.
+ *
+ * Filled with the surface colour so it cuts the line rather than sitting on top of it, which is
+ * what keeps it legible where a line crosses another.
+ */
+function CardinalityBadge({
+  x,
+  y,
+  label,
+  colour,
+}: {
+  x: number;
+  y: number;
+  label: string;
+  colour: string;
+}) {
   return (
     <>
       <rect
-        x={x - 8}
-        y={y - 7}
-        width={16}
-        height={14}
-        rx={4}
+        x={x - 13}
+        y={y - 7.5}
+        width={26}
+        height={15}
+        rx={7.5}
         fill="var(--cf-surface)"
-        stroke="var(--cf-accent)"
-        strokeOpacity={0.6}
-        strokeWidth={1.1}
+        stroke={colour}
+        strokeOpacity={0.5}
+        strokeWidth={1}
       />
-      <text
-        x={x}
-        y={y + 3.4}
-        fontSize={9}
-        fontWeight={700}
-        textAnchor="middle"
-        fill="var(--cf-accent)"
-      >
+      <text x={x} y={y + 3.2} fontSize={8.5} fontWeight={700} textAnchor="middle" fill={colour}>
         {label}
       </text>
     </>
@@ -1390,6 +1499,30 @@ const SchemaBox = memo(function SchemaBox({
     node.width - 56,
     12 * MONO_ADVANCE,
   );
+  /**
+   * The `schema.` half of the title, drawn muted so the table's own name is the word you read.
+   *
+   * `core.orders` and `shop.orders` are two tables and the qualifier is the only thing that says
+   * so, which is why it is drawn rather than dropped — but it is the same qualifier on every box in
+   * a schema, so at full strength it is a prefix your eye has to step over forty times. Empty when
+   * the clip cut into it, in which case the whole truncated string is one run of text: a half-faded
+   * `analytics.subscript…` reads as two broken words instead of one clipped name. */
+  const prefix = node.schema && title.startsWith(`${node.schema}.`) ? `${node.schema}.` : "";
+  const nameX = PAD_X + 11;
+  /**
+   * Where the type column ends, for every row in this box.
+   *
+   * Set by the widest badge strip in the table rather than by each row's own, which is the whole
+   * difference between a column of types and a ragged edge that steps left on every row that
+   * happens to carry one more badge. It is the same number `DBML_METRICS` measured the box with —
+   * `badgeStripWidth` is shared for exactly that reason — so the room reserved and the room used
+   * are one calculation, not two that agree until somebody edits one of them.
+   */
+  const strip = node.visible.reduce(
+    (widest, column) => Math.max(widest, badgeStripWidth(column)),
+    0,
+  );
+  const typeRight = node.width - PAD_X - (strip > 0 ? strip + 6 : 0);
   // The band brightens with the selection, so a lit table is legible as lit from its header alone —
   // which is the part still visible when the boxes are packed tight enough to overlap their glows.
   //
@@ -1495,18 +1628,15 @@ const SchemaBox = memo(function SchemaBox({
         />
       )}
 
-      {/* The glyph: a table for a table, three stacked bars for an enum. Small enough to read as
-          punctuation on the name rather than as an icon competing with it. */}
-      {isEnum ? (
-        <g stroke={accent} strokeWidth={1.1} strokeLinecap="round" opacity={0.75}>
-          <path d={`M${PAD_X} 13 H${PAD_X + 9} M${PAD_X} 17 H${PAD_X + 9} M${PAD_X} 21 H${PAD_X + 6}`} />
-        </g>
-      ) : (
-        <g stroke={accent} strokeWidth={1.1} fill="none" opacity={0.75}>
-          <rect x={PAD_X} y={12.5} width={9} height={9} rx={1.8} />
-          <path d={`M${PAD_X} 15.7 H${PAD_X + 9} M${PAD_X + 4.5} 15.7 V${21.5}`} />
-        </g>
-      )}
+      {/* What kind of box this is, as a bar rather than as a picture of one.
+
+          It replaced a nine-pixel line drawing of a table — which at the zoom where a schema fits on
+          screen was four grey pixels that could have been anything, and at 200% was a second icon
+          competing with the name beside it. The bar carries the same fact in the only channel that
+          survives both: an enum is violet and a table is the accent, and `ENUM_COLOUR` is the one
+          hue on this canvas the accent can never become. It is also the mark the eye uses to pick a
+          header out of a wall of rows, which is the job the glyph was never quite doing. */}
+      <rect x={PAD_X} y={(HEADER_H - 15) / 2} width={3} height={15} rx={1.5} fill={accent} />
 
       {/* The name, in the text colour rather than in the accent.
           The accent is chrome — the band, the border, the lines, the glyph — and the name is
@@ -1519,15 +1649,30 @@ const SchemaBox = memo(function SchemaBox({
           Not `color-mix` toward the accent, which would keep a trace of the hue: the export
           resolver in `diagramSvg` substitutes `var(--…)` and nothing else, so a mixed colour would
           survive on screen and reach the PNG as a function the `<img>` renderer cannot evaluate. */}
+      {prefix && (
+        <text
+          x={nameX}
+          y={21.5}
+          fontSize={12}
+          fontFamily={MONO}
+          fontWeight={600}
+          fill="var(--cf-text-muted)"
+        >
+          {prefix}
+        </text>
+      )}
       <text
-        x={PAD_X + 14}
+        // Monospace is what makes this safe to do in two `<text>` elements: the second one starts
+        // exactly `prefix.length` advances along, and no engine has to be asked how wide the first
+        // one came out.
+        x={nameX + prefix.length * 12 * MONO_ADVANCE}
         y={21.5}
         fontSize={12}
         fontFamily={MONO}
         fontWeight={600}
         fill="var(--cf-text)"
       >
-        {title}
+        {title.slice(prefix.length)}
       </text>
 
       {/* Struck through when it is going. The one mark that needs no legend: everybody already
@@ -1535,9 +1680,9 @@ const SchemaBox = memo(function SchemaBox({
           somebody who has never opened this app. */}
       {mark === "remove" && (
         <line
-          x1={PAD_X + 13}
+          x1={nameX - 1}
           y1={17.5}
-          x2={PAD_X + 15 + title.length * 12 * MONO_ADVANCE}
+          x2={nameX + 1 + title.length * 12 * MONO_ADVANCE}
           y2={17.5}
           stroke={MARK_COLOUR.remove}
           strokeWidth={1.4}
@@ -1570,6 +1715,7 @@ const SchemaBox = memo(function SchemaBox({
           column={column}
           y={HEADER_H + index * ROW_H}
           width={node.width}
+          typeRight={typeRight}
           first={index === 0}
           isEnum={isEnum}
           connect={
@@ -1607,16 +1753,18 @@ const SchemaBox = memo(function SchemaBox({
 });
 
 /**
- * One column: its name, its type in a pill, and the badges it earned.
+ * One column: a glyph, its name, its type, and the badges it earned.
  *
  * The badges are laid out from the right edge inwards, because that is the only edge every row
  * shares — packing them from the left would make a table's gutter ragged, which is exactly the
- * thing that stops a column of types being scannable.
+ * thing that stops a column of types being scannable. The glyph column at the other end is fixed
+ * for the same reason, from the other side: see `GUTTER`.
  */
 function Row({
   column,
   y,
   width,
+  typeRight,
   first,
   isEnum,
   joined,
@@ -1625,6 +1773,8 @@ function Row({
   column: DbDiagramColumn;
   y: number;
   width: number;
+  /** Where the type ends — one x for every row in the box, so the types read as a column. */
+  typeRight: number;
   first: boolean;
   isEnum: boolean;
   joined: boolean;
@@ -1638,27 +1788,26 @@ function Row({
   };
 }) {
   const badgeY = y + (ROW_H - BADGE_H) / 2;
-  const marks: { label: string; colour: string; width: number }[] = [];
-  if (column.primary_key) marks.push({ label: "PK", colour: KEY_COLOUR, width: 20 });
-  if (column.foreign_key) marks.push({ label: "FK", colour: LINK_COLOUR, width: 20 });
-  if (column.unique) marks.push({ label: "U", colour: ENUM_COLOUR, width: 14 });
-
-  // Right to left: the badges first, then whatever is left over is the type pill's.
-  let right = width - PAD_X;
-  const placed = marks
+  // Which badges this row carries, and how wide, comes from `columnBadges` — the same function the
+  // box was measured with. What is decided here is only where they land and what colour they are.
+  //
+  // Right to left from the box's edge, so the strips end flush with each other down the table. Not
+  // one fixed slot per badge kind: that would reserve a `PK` column's worth of white space on every
+  // row of a table where one column is the key, and the block a row of chips makes is what carries
+  // the alignment, not the chips lining up individually.
+  const placed = columnBadges(column)
     .slice()
     .reverse()
-    .map((mark) => {
-      right -= mark.width;
-      const x = right;
-      right -= BADGE_GAP;
-      return { ...mark, x };
-    });
+    .reduce<{ label: string; colour: string; width: number; x: number }[]>((out, badge) => {
+      const previous = out[out.length - 1];
+      const x = (previous ? previous.x - BADGE_GAP : width - PAD_X) - badge.width;
+      out.push({ label: badge.label, colour: BADGE_COLOUR[badge.label], width: badge.width, x });
+      return out;
+    }, []);
 
   const typeText = column.data_type ? clip(column.data_type, 108, 9 * MONO_ADVANCE) : "";
-  const typeWidth = typeText ? typeText.length * 9 * MONO_ADVANCE + 11 : 0;
-  const typeX = right - typeWidth;
-  const nameX = PAD_X + (column.primary_key ? 13 : 0);
+  const typeWidth = typeText.length * 9 * MONO_ADVANCE;
+  const nameX = PAD_X + GUTTER;
 
   return (
     <g
@@ -1708,7 +1857,13 @@ function Row({
         </g>
       )}
 
-      {column.primary_key && (
+      {/* What this column is to the schema, in the gutter: a key, a link, or the dot that says it
+          is neither. The dot is not decoration — it is what makes the gutter a *column*, so a table
+          with two keys and six plain columns reads as one list rather than as two indents. The two
+          real glyphs carry the badge's own hue, so the mark in the gutter and the mark at the far
+          end of the row are visibly the same statement said twice, at the two places the eye lands
+          when it scans down a table and when it scans across a row. */}
+      {column.primary_key ? (
         <g
           transform={`translate(${PAD_X} ${y + ROW_H / 2 - 4})`}
           fill="none"
@@ -1720,6 +1875,27 @@ function Row({
           <circle cx={2.6} cy={3} r={2.2} />
           <path d="M4.7 3.6 L9.2 3.6 M7.4 3.6 L7.4 5.6 M9 3.6 L9 5.2" />
         </g>
+      ) : column.foreign_key ? (
+        <g
+          transform={`translate(${PAD_X} ${y + ROW_H / 2 - 5})`}
+          fill="none"
+          stroke={LINK_COLOUR}
+          strokeOpacity={0.85}
+          strokeWidth={1.15}
+          strokeLinecap="round"
+        >
+          <path d="M4.4 2.6 H2.6 a2.4 2.4 0 0 0 0 4.8 H4.4 M7.6 2.6 H9.4 a2.4 2.4 0 0 1 0 4.8 H7.6 M4.2 5 H7.8" />
+        </g>
+      ) : (
+        !isEnum && (
+          <circle
+            cx={PAD_X + 2.6}
+            cy={y + ROW_H / 2}
+            r={1.5}
+            fill="var(--cf-text-muted)"
+            fillOpacity={0.5}
+          />
+        )
       )}
 
       <text
@@ -1729,33 +1905,29 @@ function Row({
         fontFamily={MONO}
         fill="var(--cf-text)"
         fontWeight={joined ? 600 : 400}
-        fontStyle={!isEnum && column.nullable ? "italic" : undefined}
       >
-        {clip(column.name, Math.max(24, typeX - nameX - 8), 11 * MONO_ADVANCE)}
+        {clip(column.name, Math.max(24, typeRight - typeWidth - nameX - 8), 11 * MONO_ADVANCE)}
       </text>
 
+      {/* Text, not a pill.
+
+          The pill this used to be was a chip on every single row, and a badge that is on everything
+          is not a badge — it was three sides of furniture drawn around a word that was already
+          quiet enough. Set plain and right-aligned, the types stack into a column of their own that
+          you can read straight down, which is the shape that makes them useful. It is also exactly
+          what the inspector does with the same field, and one column described two ways is a
+          reader wondering whether the two mean different things. */}
       {typeText && (
-        <>
-          <rect
-            x={typeX}
-            y={badgeY}
-            width={typeWidth}
-            height={BADGE_H}
-            rx={3.5}
-            fill="var(--cf-text-muted)"
-            fillOpacity={0.13}
-          />
-          <text
-            x={typeX + typeWidth / 2}
-            y={badgeY + 9.4}
-            fontSize={9}
-            fontFamily={MONO}
-            textAnchor="middle"
-            fill="var(--cf-text-muted)"
-          >
-            {typeText}
-          </text>
-        </>
+        <text
+          x={typeRight}
+          y={badgeY + 9.4}
+          fontSize={9}
+          fontFamily={MONO}
+          textAnchor="end"
+          fill="var(--cf-text-muted)"
+        >
+          {typeText}
+        </text>
       )}
 
       {placed.map((mark) => (

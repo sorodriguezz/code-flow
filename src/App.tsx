@@ -711,9 +711,6 @@ export default function App() {
             // that read as "returned here" rather than "thrown away".
             void getCurrentWindow().setFocus();
             break;
-          case "workspace":
-            // Only the main window sends these, and it never hears its own.
-            break;
         }
       }),
     [],

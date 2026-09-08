@@ -305,6 +305,7 @@ export function DiagramsView() {
                     diagramId={activeId}
                     onSaveAsTemplate={saveAsTemplate}
                     onAskAi={() => setAiOpen(true)}
+                    onOlderVersions={() => setHistoryOpen(true)}
                   />
                 </Suspense>
               ) : (

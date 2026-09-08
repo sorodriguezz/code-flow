@@ -31,6 +31,8 @@
  * `after` from the last. What lands in the list is what a person would call a change.
  */
 
+import { readLayout } from "./layout";
+
 /** What made a change happen. The list shows this, so it is the vocabulary the reader gets. */
 export type RevisionCause =
   | "edited"
@@ -52,9 +54,23 @@ export interface Revision {
   after: string;
 }
 
-/** How many are kept. Ten is what the user asked for and about what a popover can list without
- *  becoming a screen of its own. */
-export const HISTORY_LIMIT = 10;
+/** How many rows the panel shows before you ask for more. What a popover can list without becoming
+ *  a screen of its own. */
+export const HISTORY_PAGE = 10;
+
+/**
+ * How many are kept in memory.
+ *
+ * Deliberately far above what is shown. The panel is a page over this list, not the list itself:
+ * "the last ten changes" is the right amount to *look* at and the wrong amount to be able to
+ * *reach*, because the change you want to undo is often the one before the five you made while
+ * working out that it was wrong. Fifty schema documents twice over is a few megabytes at the very
+ * worst and typically a hundred kilobytes.
+ *
+ * Older than this lives in `doc_versions` on the Rust side — snapshots of the saved document rather
+ * than of every change — which the panel links out to.
+ */
+export const HISTORY_LIMIT = 50;
 
 /** Two changes of the same cause closer together than this are one change. */
 const COALESCE_MS = 4000;
@@ -66,9 +82,21 @@ const COALESCE_MS = 4000;
  * unconditionally without causing a render.
  */
 export function pushRevision(list: Revision[], next: Revision): Revision[] {
-  // A change that changed nothing is not a change. Reachable whenever a write round-trips to the
-  // same text — reformatting an already-formatted document, dragging a box back where it was.
-  if (next.before === next.after) return list;
+  /**
+   * **Only the schema counts.** A stored document is the DBML plus trailing `// codeflow:` comments
+   * holding box positions and review marks, and dragging a box or marking a table rewrites nothing
+   * but those. Recording them made the recovery list mostly furniture: five drags between two edits
+   * pushed the edit off the end, so the list you reach for after breaking a table is full of the
+   * arrangement you did on the way there.
+   *
+   * So the guard is on the DBML halves rather than on the whole documents. Movements and marks
+   * still happen, still autosave, still travel — they are simply not *versions to recover*, because
+   * there is nothing about the model to recover from them.
+   *
+   * The revision itself still carries the whole document on both sides: reverting has to put the
+   * positions back too, or undoing a rename would silently scatter the boxes.
+   */
+  if (readLayout(next.before).source === readLayout(next.after).source) return list;
 
   const head = list[0];
   if (head && head.cause === next.cause && next.at - head.at <= COALESCE_MS) {

@@ -262,6 +262,79 @@ pub fn guard_head_unlocked_at(path: &str) -> Result<(), String> {
     guard_head_unlocked(&open(path)?)
 }
 
+/// The same gate, aimed at a **named** branch rather than at HEAD.
+///
+/// `guard_head_unlocked_at` is right for `git push` because that publishes whatever is checked out.
+/// Publishing one branch by name does not go anywhere near HEAD, so asking about HEAD would both
+/// refuse the wrong thing (standing on a locked `main` while publishing `feature/x`) and let the
+/// wrong thing through (publishing a locked `release/1.0` from an unlocked branch).
+pub fn guard_branch_unlocked_at(path: &str, name: &str) -> Result<(), String> {
+    let repo = open(path)?;
+    let config = repo.config().map_err(|e| e.message().to_string())?;
+    if resolve_lock(&config, name).0 {
+        return Err(format!("{BRANCH_LOCKED_PREFIX}{name}"));
+    }
+    Ok(())
+}
+
+/// Marks the one refusal a per-branch fetch/pull can hit that isn't git failing: the branch
+/// tracks nothing, so there is no remote ref to bring down. Same contract as the two prefixes
+/// above — the frontend turns it into "this branch has no upstream" instead of surfacing a
+/// refspec the user never wrote.
+pub const NO_UPSTREAM_PREFIX: &str = "NO_UPSTREAM: ";
+
+/// The remote a local branch tracks and the ref it merges from, as `("origin",
+/// "refs/heads/feature/x")`.
+///
+/// Read out of `branch.<name>.remote` / `.merge` rather than off `Branch::upstream`, because the
+/// pair is spliced straight into a refspec and `merge` is already the *remote-side* name. The
+/// upstream branch's shorthand is `origin/feature/x`, and recovering the remote-side name from
+/// that means guessing where the remote's name ends — which is exactly wrong for a remote called
+/// `origin` that also has a branch called `origin/thing`.
+pub fn upstream_of(path: &str, name: &str) -> Result<(String, String), String> {
+    let repo = open(path)?;
+    // Refuse an unknown name here rather than letting git answer with a refspec error: this is
+    // reached from a row in a list, so the branch existing is the caller's claim to check.
+    repo.find_branch(name, BranchType::Local)
+        .map_err(|e| e.message().to_string())?;
+    let config = repo.config().map_err(|e| e.message().to_string())?;
+    let remote = config
+        .get_string(&format!("branch.{name}.remote"))
+        .map_err(|_| format!("{NO_UPSTREAM_PREFIX}{name}"))?;
+    let merge = config
+        .get_string(&format!("branch.{name}.merge"))
+        .map_err(|_| format!("{NO_UPSTREAM_PREFIX}{name}"))?;
+    // `remote = .` is git's way of saying the branch tracks another *local* branch (`git branch
+    // --track a b`). There is nothing to ask a remote for, and the tracking refspec built from it
+    // would name `refs/remotes/./…`, which is not a legal ref — so it is the same answer as
+    // tracking nothing at all.
+    if merge.is_empty() || remote == "." {
+        return Err(format!("{NO_UPSTREAM_PREFIX}{name}"));
+    }
+    // A hand-written config may hold the short name. Everything this is spliced in beside is
+    // fully qualified, so normalise instead of emitting `main:refs/heads/main`.
+    let merge = if merge.starts_with("refs/") { merge } else { format!("refs/heads/{merge}") };
+    Ok((remote, merge))
+}
+
+/// Whether a local branch of this name exists. The claim a caller holding a name off a list makes,
+/// checked before it is spliced into a git command.
+pub fn local_branch_exists(path: &str, name: &str) -> Result<bool, String> {
+    let repo = open(path)?;
+    // Bound rather than returned inline: the `Branch` borrows `repo`, and as the tail expression
+    // its temporary would outlive the `repo` it points into.
+    let found = repo.find_branch(name, BranchType::Local).is_ok();
+    Ok(found)
+}
+
+/// Whether `name` is the branch checked out right now. False on a detached HEAD and on an unborn
+/// one — neither is "standing on `name`", which is the only thing callers ask this to decide.
+pub fn is_head_branch(path: &str, name: &str) -> Result<bool, String> {
+    let repo = open(path)?;
+    let Ok(head) = repo.head() else { return Ok(false) };
+    Ok(head.is_branch() && head.shorthand() == Some(name))
+}
+
 pub fn create_branch(path: &str, name: &str, start_point: Option<String>) -> Result<(), String> {
     let repo = open(path)?;
     let target = match start_point {
@@ -329,38 +402,45 @@ pub fn checkout_detached(path: &str, refname: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// "Connect" to a remote branch like VS Code does: creates a local branch tracking it
-/// (or reuses one that already exists) and switches to it. Returns the local branch name.
-pub fn checkout_remote_tracking(path: &str, remote_branch: &str) -> Result<String, String> {
+/// Gives a remote branch a local one that tracks it, without switching to it — the "bring it
+/// down" half of [`checkout_remote_tracking`]. Returns the local branch's name.
+///
+/// Split out because the two halves are wanted separately: the branch list offers "bring this to
+/// local" on a remote row so the branch joins the local list and can be fetched, pulled and
+/// merged from where you already are, which is a different intent from leaving the branch you are
+/// on. Reuses a local branch of that name rather than failing, so the button is idempotent.
+pub fn track_remote_branch(path: &str, remote_branch: &str) -> Result<String, String> {
     let (_remote_name, short_name) = remote_branch
         .split_once('/')
         .ok_or("expected a name like 'origin/feature-x'")?;
 
-    let already_local = {
-        let repo = open(path)?;
-        let found = repo.find_branch(short_name, BranchType::Local).is_ok();
-        found
-    };
-
-    if !already_local {
-        let repo = open(path)?;
-        let remote_ref = repo
-            .find_branch(remote_branch, BranchType::Remote)
-            .map_err(|e| e.message().to_string())?;
-        let commit = remote_ref
-            .get()
-            .peel_to_commit()
-            .map_err(|e| e.message().to_string())?;
-        let mut local_branch = repo
-            .branch(short_name, &commit, false)
-            .map_err(|e| e.message().to_string())?;
-        local_branch
-            .set_upstream(Some(remote_branch))
-            .map_err(|e| e.message().to_string())?;
+    let repo = open(path)?;
+    if repo.find_branch(short_name, BranchType::Local).is_ok() {
+        return Ok(short_name.to_string());
     }
 
-    checkout_local_branch(path, short_name)?;
+    let remote_ref = repo
+        .find_branch(remote_branch, BranchType::Remote)
+        .map_err(|e| e.message().to_string())?;
+    let commit = remote_ref
+        .get()
+        .peel_to_commit()
+        .map_err(|e| e.message().to_string())?;
+    let mut local_branch = repo
+        .branch(short_name, &commit, false)
+        .map_err(|e| e.message().to_string())?;
+    local_branch
+        .set_upstream(Some(remote_branch))
+        .map_err(|e| e.message().to_string())?;
     Ok(short_name.to_string())
+}
+
+/// "Connect" to a remote branch like VS Code does: creates a local branch tracking it
+/// (or reuses one that already exists) and switches to it. Returns the local branch name.
+pub fn checkout_remote_tracking(path: &str, remote_branch: &str) -> Result<String, String> {
+    let short_name = track_remote_branch(path, remote_branch)?;
+    checkout_local_branch(path, &short_name)?;
+    Ok(short_name)
 }
 
 #[cfg(test)]
@@ -625,6 +705,74 @@ mod tests {
         // And it agrees with what the status bar is told, which is the whole point.
         let status = super::super::repo::get_status(path).unwrap();
         assert_eq!(status.current_branch.as_deref(), Some("master"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What the per-branch fetch and pull are built out of. The pair has to come back as the
+    /// *remote-side* ref (`refs/heads/feature`, not `origin/feature`), because it is spliced into
+    /// a refspec — and a branch that tracks nothing has to be refused with the tagged error rather
+    /// than by letting git fail on a refspec the user never wrote.
+    #[test]
+    fn upstream_of_reads_the_remote_side_ref_and_names_a_branch_that_tracks_nothing() {
+        let (dir, base) = fixture();
+        let path = dir.to_str().unwrap();
+
+        let err = upstream_of(path, "feature").unwrap_err();
+        assert!(err.starts_with(NO_UPSTREAM_PREFIX), "unexpected error: {err}");
+
+        {
+            let repo = git2::Repository::open(path).unwrap();
+            let mut config = repo.config().unwrap();
+            config.set_str("branch.feature.remote", "origin").unwrap();
+            // Deliberately the short form: a hand-written config is allowed to hold one, and the
+            // refspec built from it must still be fully qualified.
+            config.set_str("branch.feature.merge", "feature").unwrap();
+        }
+
+        assert_eq!(
+            upstream_of(path, "feature").unwrap(),
+            ("origin".to_string(), "refs/heads/feature".to_string())
+        );
+
+        // The routing decision `pull_branch` makes: `git fetch` cannot write the ref of the branch
+        // that is checked out, so only that one goes through `git pull`.
+        assert!(is_head_branch(path, &base).unwrap());
+        assert!(!is_head_branch(path, "feature").unwrap());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// "Bring it to local" is the half of a remote checkout that does not move you: the local
+    /// branch exists and tracks the remote one, and HEAD has not budged. Pressing it twice is the
+    /// same as pressing it once.
+    #[test]
+    fn tracking_a_remote_branch_leaves_head_where_it_was() {
+        let (dir, base) = fixture();
+        let path = dir.to_str().unwrap();
+
+        // A remote-tracking ref with no local branch of its own — what the remote group in the
+        // branch list is made of after a fetch.
+        {
+            let repo = git2::Repository::open(path).unwrap();
+            // `set_upstream` writes `branch.other.remote = origin`, and libgit2 refuses to name a
+            // remote the repository does not have — so the remote is part of the fixture, not
+            // decoration.
+            repo.remote("origin", "https://example.invalid/repo.git").unwrap();
+            let commit = repo.find_branch("feature", BranchType::Local).unwrap().get().peel_to_commit().unwrap();
+            repo.reference("refs/remotes/origin/other", commit.id(), false, "test").unwrap();
+            repo.find_branch("feature", BranchType::Local).unwrap().delete().unwrap();
+        }
+
+        assert_eq!(track_remote_branch(path, "origin/other").unwrap(), "other");
+        // Idempotent: the row stays pressable and the second press is not an error.
+        assert_eq!(track_remote_branch(path, "origin/other").unwrap(), "other");
+
+        let listed = list_branches(path).unwrap();
+        let local = listed.iter().find(|b| b.name == "other" && !b.is_remote).expect("local branch created");
+        assert_eq!(local.upstream.as_deref(), Some("origin/other"));
+        assert!(!local.is_head, "bringing a branch down must not switch to it");
+        assert!(listed.iter().any(|b| b.name == base && b.is_head), "still on {base}");
 
         fs::remove_dir_all(&dir).ok();
     }

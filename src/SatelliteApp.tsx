@@ -22,7 +22,7 @@ import { useWindowStore } from "./state/windowStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useShortcutsStore } from "./state/shortcutsStore";
 import { useAiProviderStore } from "./state/aiProviderStore";
-import { onWindowMessage } from "./lib/windowBus";
+import { getProject } from "./lib/tauri/commands";
 import { WINDOW } from "./lib/windowIdentity";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 
@@ -121,10 +121,9 @@ function useSatelliteBoot(): boolean {
         // rectangle tracking the main window's does.
         startWindowBoundsTracking(),
         useWindowStore.getState().init(),
-        // Lands on whatever workspace the main window last wrote down, which is the workspace it is
-        // showing right now — see `workspaceStore`'s `LAST_WORKSPACE_KEY`. No request to the main
-        // window and no waiting for one: a satellite opened while main sits on "Tienda" opens on
-        // "Tienda", and the bus keeps it there afterwards.
+        // Lands on this window's own last workspace, falling back to the main window's on a first
+        // boot — see `workspaceStore`'s `windowKey`. So a window detached while main sits on
+        // "Tienda" opens on "Tienda", and from then on it holds whatever *it* was pointed at.
         useWorkspaceStore.getState().loadWorkspaces(),
       ]);
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
@@ -132,17 +131,24 @@ function useSatelliteBoot(): boolean {
     })();
   }, []);
 
-  // Follows the main window from here on. Not a subscription to a store — the store is per-window —
-  // but to the one channel that crosses the boundary.
-  useEffect(
-    () =>
-      onWindowMessage((message) => {
-        if (message.kind === "workspace") {
-          void useWorkspaceStore.getState().followWorkspace(message.workspaceId);
-        }
-      }),
-    [],
-  );
+  /**
+   * **This window does not follow the main one.**
+   *
+   * It used to: a `workspace` message on the bus moved every satellite. That made a detached window
+   * a view onto whatever the shell happened to be showing, which is the opposite of what a second
+   * window is for — you detach Notes precisely so you can keep it on one workspace while you go and
+   * look at another. Each window now holds its own, chosen from its title bar and recorded under
+   * its own key.
+   *
+   * A *fresh* satellite still opens where the app is, but through the stored setting rather than
+   * through the bus: `loadWorkspaces` reads this window's own key and falls back to the main
+   * window's. That happens once, at boot, and is why the `workspace` bus message has no listener
+   * left at all.
+   *
+   * The one thing that must still cross the boundary is a workspace that has stopped existing: a
+   * window left pointing at a deleted one would list rows nothing owns. `state:invalidate` already
+   * carries the deletion, so nothing is needed here beyond not listening.
+   */
 
   return ready;
 }
@@ -201,9 +207,34 @@ function RepoWindow({ projectId }: { projectId: string }) {
     void setRepoPath(project.local_path);
   }, [project, setActiveProject, setRepoPath]);
 
-  // The main window has moved to a workspace this repository is not in. Nothing to show, and
-  // showing the previous workspace's repository anyway is the one thing this design refuses. It
-  // waits rather than closing: a trip to another workspace and back should not cost the window.
+  /**
+   * A repository window's workspace is **its repository's**, not a choice.
+   *
+   * This window opens on whatever workspace was last recorded for it, which on a first boot is the
+   * main window's — and that is routinely not the one holding this repository. So when the project
+   * is not in the loaded list, ask the backend which workspace owns it and go there. `followWorkspace`
+   * rather than `setActiveWorkspace`: the answer was derived, not picked, and recording it would
+   * mean re-detaching this window silently rewrote where it opens.
+   *
+   * This is also why a repository window has no workspace picker: the picker would be offering to
+   * put the window somewhere its own contents are not.
+   */
+  useEffect(() => {
+    if (project || !workspaceId || !projects) return;
+    let cancelled = false;
+    void getProject(projectId)
+      .then((row) => {
+        if (cancelled || !row || row.workspace_id === workspaceId) return;
+        void useWorkspaceStore.getState().followWorkspace(row.workspace_id);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [project, projectId, projects, workspaceId]);
+
+  // The repository is not in this workspace and the backend does not know it either — it has been
+  // removed. Waiting rather than closing: the window is cheap and the row may come back.
   if (workspaceId && projects && !project) {
     return (
       <EmptyState

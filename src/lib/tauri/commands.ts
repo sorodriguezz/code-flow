@@ -430,6 +430,11 @@ export const checkoutDetached = (repoPath: string, refname: string) =>
 export const checkoutRemoteTracking = (repoPath: string, remoteBranch: string) =>
   invoke<string>("checkout_remote_tracking", { repoPath, remoteBranch });
 
+/** The same local tracking branch `checkoutRemoteTracking` would make, without switching to it.
+ * Returns the local branch's name; a name that is already taken locally is reused, not an error. */
+export const trackRemoteBranch = (repoPath: string, remoteBranch: string) =>
+  invoke<string>("track_remote_branch", { repoPath, remoteBranch });
+
 export const resetToCommit = (repoPath: string, oid: string, mode: "soft" | "mixed" | "hard") =>
   invoke<void>("reset_to_commit", { repoPath, oid, mode });
 
@@ -627,8 +632,22 @@ export const gitFetch = (repoPath: string, remoteName?: string) =>
 
 export const gitPull = (repoPath: string) => invoke<void>("git_pull", { repoPath });
 
+/** One branch's remote-tracking ref, and nothing else — no working tree touched. */
+export const gitFetchBranch = (repoPath: string, branch: string) =>
+  invoke<void>("git_fetch_branch", { repoPath, branch });
+
+/** Updates a branch from its upstream whether or not it is the one checked out: an ordinary pull
+ * for the current branch, a fast-forward-only update in place for any other. */
+export const gitPullBranch = (repoPath: string, branch: string) =>
+  invoke<void>("git_pull_branch", { repoPath, branch });
+
 export const gitPush = (repoPath: string, setUpstream: boolean) =>
   invoke<void>("git_push", { repoPath, setUpstream });
+
+/** Publishes one branch by name — `push -u origin <branch>` — checked out or not. `gitPush` sends
+ * HEAD, which is the wrong shape wherever the branch is picked from a list rather than stood on. */
+export const gitPushBranch = (repoPath: string, branch: string) =>
+  invoke<void>("git_push_branch", { repoPath, branch });
 
 // ---------- settings ----------
 

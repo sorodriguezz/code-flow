@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { WorkItemPicker } from "./WorkItemPicker";
 import type { WorkItem } from "../../types/domain";
-import { GitPullRequest, Loader2, Sparkles, X } from "lucide-react";
-import { listBranches, generatePrDescription } from "../../lib/tauri/commands";
+import { CloudUpload, GitPullRequest, Loader2, Sparkles, X } from "lucide-react";
+import { listBranches, generatePrDescription, gitPushBranch } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { usePrStore } from "../../state/prStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -42,8 +42,29 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
   const isAzure = Boolean(project.ado_org);
   const [generating, setGenerating] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [publishing, setPublishing] = useState(false);
 
   const localBranches = useMemo(() => (branches ?? []).filter((b) => !b.is_remote), [branches]);
+
+  /**
+   * The source branch exists only here, so the host has nothing to open a pull request *from*.
+   *
+   * Read off `upstream` rather than off `ahead`: a branch that tracks a remote it has not been
+   * pushed to yet is a different problem (the PR opens, it is just empty), while one that tracks
+   * nothing cannot be named in an API call at all. `null` while the list is still loading, so the
+   * warning cannot flash on before we know.
+   */
+  const sourceInfo = useMemo(
+    () => (source ? (localBranches.find((b) => b.name === source) ?? null) : null),
+    [localBranches, source],
+  );
+  const sourceIsLocalOnly = sourceInfo !== null && sourceInfo.upstream === null;
+
+  /** Re-reads the branch list so a publish is reflected without closing the form. */
+  const reloadBranches = async () => {
+    const list = await listBranches(project.local_path).catch(() => null);
+    if (list) setBranches(list);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -73,8 +94,34 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
   }, [project.local_path]);
 
   const sameBranch = source !== "" && source === target;
-  const canSubmit = !creating && !generating && title.trim() !== "" && source !== "" && target !== "" && !sameBranch;
-  const busy = creating || generating;
+  const canSubmit =
+    !creating &&
+    !generating &&
+    !publishing &&
+    title.trim() !== "" &&
+    source !== "" &&
+    target !== "" &&
+    !sameBranch &&
+    // Creating the PR would fail on the host with a message about an unknown ref, several seconds
+    // later and in the host's words. Refusing here, next to the button that fixes it, is the same
+    // refusal said where it can be acted on.
+    !sourceIsLocalOnly;
+  const busy = creating || generating || publishing;
+
+  /** Publishes the source branch so the host can see it, without leaving the form — every field
+   *  typed so far, and any description an AI run spent a minute drafting, stays put. */
+  const publish = async () => {
+    if (!source || publishing) return;
+    setPublishing(true);
+    try {
+      await gitPushBranch(project.local_path, source);
+      await reloadBranches();
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setPublishing(false);
+    }
+  };
 
   const generate = async () => {
     if (!source || !target || sameBranch) return;
@@ -133,10 +180,14 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-16" onClick={busy ? undefined : onClose}>
+    // No dismiss on the backdrop. This form holds typing the user cannot get back — a description
+    // an AI run spent a minute drafting, most of all — and a click that lands beside a Select's
+    // popover is indistinguishable from one aimed at it. The X and Cancel are the way out.
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
       <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-[520px] max-w-[92vw] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        role="dialog"
+        aria-modal="true"
+        className="max-h-full w-[520px] max-w-[92vw] overflow-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
       >
         <div className="mb-3 flex items-center justify-between">
           <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
@@ -182,6 +233,26 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
               </div>
             </div>
             {sameBranch && <p className="-mt-2 mb-2 text-[11px] text-[var(--cf-danger)]">{t("createPr.sameBranch")}</p>}
+
+            {/* The one blocker this form can clear itself. Drawn as a row with its own action
+                rather than as an error above the submit button: the submit button is disabled, so
+                a message there would say what is wrong and leave the user to go and fix it in
+                another view — losing the description, which is the expensive thing on this form. */}
+            {!sameBranch && sourceIsLocalOnly && (
+              <div className="-mt-1 mb-3 flex items-center gap-2 rounded-md border border-[var(--cf-warning)]/40 bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-2">
+                <p className="min-w-0 flex-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                  {t("createPr.branchLocalOnly", { branch: source })}
+                </p>
+                <button
+                  onClick={() => void publish()}
+                  disabled={busy}
+                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-warning)] px-2 py-1 text-[11px] font-medium text-[var(--cf-warning)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-warning)_14%,transparent)] disabled:opacity-40"
+                >
+                  {publishing ? <Loader2 size={11} className="animate-spin" /> : <CloudUpload size={11} />}
+                  {publishing ? t("createPr.publishing") : t("createPr.publish")}
+                </button>
+              </div>
+            )}
 
             <div className="mb-1 flex items-center justify-between">
               <label className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("createPr.titleField")}</label>

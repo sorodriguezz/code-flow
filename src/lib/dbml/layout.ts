@@ -44,16 +44,37 @@ export function toSchemaDiagram(schema: DbmlSchema, mode: DiagramColumnMode): Db
   }
 
   const tables = schema.tables.map((table) => {
-    const columns: DbDiagramColumn[] = table.fields.map((field) => ({
-      name: field.name,
-      data_type: field.type,
-      nullable: !field.notNull && !field.pk,
-      primary_key: field.pk,
-      foreign_key: linked.has(`${table.id}|${field.name}`),
-      // Carried through so the box can badge it. A primary key is unique by definition and badging
-      // it twice says nothing, so only a column that had to declare it gets the mark.
-      unique: field.unique && !field.pk,
-    }));
+    /**
+     * The columns of a *composite* primary key.
+     *
+     * `[pk]` on two fields is one key over both of them, and `@dbml/core` reports it that way: as a
+     * table-level index with `pk: true`, leaving `field.pk` **false** on every column in it. Read
+     * off the fields alone, the two-column key every junction table has is drawn as no key at all —
+     * no glyph, no badge, and nothing to say why those two rows are the ones the lines arrive at.
+     */
+    const keyed = new Set(
+      table.indexes.filter((index) => index.pk).flatMap((index) => index.columns),
+    );
+    const columns: DbDiagramColumn[] = table.fields.map((field) => {
+      const primary = field.pk || keyed.has(field.name);
+      return {
+        name: field.name,
+        data_type: field.type,
+        // A key is not nullable, whichever of the two ways it was declared. The parser fills
+        // `notNull` in for a single-field `[pk]` and does not for a composite one, so this reads
+        // the resolved flag rather than the field's own.
+        nullable: !field.notNull && !primary,
+        primary_key: primary,
+        foreign_key: linked.has(`${table.id}|${field.name}`),
+        // Carried through so the box can badge it. A primary key is unique by definition and
+        // badging it twice says nothing, so only a column that had to declare it gets the mark.
+        unique: field.unique && !primary,
+        // `increment` is implied by nothing else — a key is not automatically generated and a
+        // generated column is not automatically a key — so unlike `unique` it is passed through as
+        // declared, with no interaction with the other flags.
+        auto_increment: field.increment,
+      };
+    });
     return {
       schema: table.schema === "public" ? null : table.schema,
       name: table.name,
@@ -146,14 +167,60 @@ export interface DbmlGroupBox {
  */
 const GROUP_PAD: Record<DiagramDensity, number> = { roomy: 20, compact: 6 };
 
+/** The gap between two badges, and between the badge block and the type column that precedes it. */
+export const BADGE_GAP = 3;
+
+/** One of the five marks a column can earn, in the order they are drawn. */
+export interface DbmlBadge {
+  label: "PK" | "NN" | "AI" | "U" | "FK";
+  width: number;
+}
+
+/**
+ * Which badges a column earns, and how wide each is.
+ *
+ * Here rather than in the canvas that draws them, because it is *also* the answer to how wide the
+ * box has to be — `DBML_METRICS` below and `Row` in `DbmlCanvas` are the same question asked at
+ * measuring time and at drawing time, and when the two drifted the widest row's badges went over
+ * the edge of a box that had been measured for one fewer. The canvas supplies the colours; this
+ * supplies the set and the geometry.
+ *
+ * `NN` is asked of columns only. An enum's rows are values rather than columns, and a value is not
+ * nullable or not — an empty `data_type` is what tells the two apart, since the enum boxes are laid
+ * out by the same engine.
+ */
+export function columnBadges(column: DbDiagramColumn): DbmlBadge[] {
+  const badges: DbmlBadge[] = [];
+  if (column.primary_key) badges.push({ label: "PK", width: 20 });
+  if (!column.nullable && column.data_type) badges.push({ label: "NN", width: 20 });
+  if (column.auto_increment) badges.push({ label: "AI", width: 20 });
+  if (column.unique) badges.push({ label: "U", width: 14 });
+  if (column.foreign_key) badges.push({ label: "FK", width: 20 });
+  return badges;
+}
+
+/** How wide the strip of them is, drawn end to end with `BADGE_GAP` between. */
+export function badgeStripWidth(column: DbDiagramColumn): number {
+  const badges = columnBadges(column);
+  if (badges.length === 0) return 0;
+  return (
+    badges.reduce((sum, badge) => sum + badge.width, 0) + (badges.length - 1) * BADGE_GAP
+  );
+}
+
 /**
  * The size of a box on *this* canvas.
  *
  * Bigger than the Database workspace's, and for one reason: a row here is not a line of text. It is
- * a name, a type in a pill, and up to three badges — so it needs the height to put them on a
- * baseline together and the width to hold whichever of them this particular column earns. The
- * padding is therefore per column rather than a constant: charging every row for a PK badge would
- * pad two hundred tables to fit a mark most of their columns never carry.
+ * a glyph, a name, a type and up to five badges — so it needs the height to put them on a baseline
+ * together and the width to hold whichever of them this particular column earns. The padding is
+ * therefore per column rather than a constant: charging every row for a PK badge would pad two
+ * hundred tables to fit a mark most of their columns never carry.
+ *
+ * The one thing every row *is* charged for is the 13px key gutter. It is reserved whether or not
+ * the column has a glyph to put in it, because the alternative — indenting only the rows that do —
+ * leaves the column of names down a table ragged, and a ragged column is what stops forty
+ * identifiers being scannable.
  */
 export const DBML_METRICS: NodeMetrics = {
   header: 34,
@@ -171,11 +238,11 @@ export const DBML_METRICS: NodeMetrics = {
   nameAdvance: 12 * 0.6,
   // And it is drawn schema-qualified, so `shop.` is part of what has to fit.
   qualifiedName: true,
-  rowPadding: (column) =>
-    46 +
-    (column.primary_key ? 36 : 0) +
-    (column.foreign_key ? 23 : 0) +
-    (column.unique ? 17 : 0),
+  // 22 for the two side pads, 13 for the key gutter, 8 for the gap a name keeps from the type and
+  // 6 for the one the type keeps from the badges. Everything that varies per column is in
+  // `badgeWidth`, because the table is charged the widest row's rather than each row its own.
+  rowPadding: () => 49,
+  badgeWidth: badgeStripWidth,
 };
 
 export function layoutDbml(

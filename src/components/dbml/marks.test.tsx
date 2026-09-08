@@ -40,6 +40,7 @@ const SCHEMA: DbmlSchema = {
   enums: [],
   groups: [],
   error: null,
+  errorAt: null,
   refs: [
     {
       id: "r1",
@@ -63,11 +64,24 @@ function draw(marks: DbmlMarks) {
   );
 }
 
+/**
+ * The colour of every mark spine in a render, in document order.
+ *
+ * The spine — the bar down a box's left edge — is the one shape on this canvas that nothing but a
+ * mark draws, which is what makes it the thing to assert on. The mark *colours* stopped being a
+ * proxy for "something is marked" when the rows grew their own legend: `--cf-success` is the `NN`
+ * badge's as well now, so a table with a primary key draws it whether or not anybody has reviewed
+ * that table.
+ */
+const spines = (html: string) =>
+  [...html.matchAll(/<rect x="1\.5" y="10" width="3\.5"[^>]*fill="([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+
 describe("marks on the canvas", () => {
   it("draws nothing extra when nothing is marked", () => {
     const html = draw({});
-    expect(html).not.toContain("var(--cf-danger)");
-    expect(html).not.toContain("var(--cf-success)");
+    expect(spines(html)).toEqual([]);
     // The tables are still all there — a mark is the only thing that changes.
     expect(html).toContain(">users<");
     expect(html).toContain(">posts<");
@@ -78,7 +92,7 @@ describe("marks on the canvas", () => {
     ["review", "var(--cf-warning)"],
     ["keep", "var(--cf-success)"],
   ] as const)("draws a %s mark in its own colour", (kind, colour) => {
-    expect(draw({ users: kind })).toContain(colour);
+    expect(spines(draw({ users: kind }))).toEqual([colour]);
   });
 
   // The mark must never remove anything: that is the whole feature.
@@ -88,19 +102,25 @@ describe("marks on the canvas", () => {
     expect(html).toContain(">posts<");
   });
 
-  it("dashes a relationship marked for removal", () => {
-    expect(draw({ r1: "remove" })).toContain('stroke-dasharray="5 4"');
-    expect(draw({ r1: "keep" })).not.toContain('stroke-dasharray="5 4"');
+  // Every line is dashed now, so the removal mark needs a pattern of its own on the far side of
+  // that rather than a slightly shorter dash nobody could tell apart from the default.
+  it("dots a relationship marked for removal, where every other line is dashed", () => {
+    expect(draw({ r1: "remove" })).toContain('stroke-dasharray="1.5 4"');
+    const kept = draw({ r1: "keep" });
+    expect(kept).not.toContain('stroke-dasharray="1.5 4"');
+    expect(kept).toContain('stroke-dasharray="6 4"');
   });
 
   it("colours a marked relationship rather than the accent", () => {
-    expect(draw({ r1: "keep" })).toContain("var(--cf-success)");
+    // The stroke of the line itself: the badges on the rows are drawn in these hues too.
+    expect(draw({ r1: "keep" })).toContain('stroke="var(--cf-success)" stroke-width="1.4"');
   });
 
   // A mark on an id that matches nothing — a table renamed outside the app, say — is inert.
   it("ignores a mark whose id is not in the schema", () => {
     const html = draw({ gone: "remove" });
-    expect(html).not.toContain("var(--cf-danger)");
+    expect(spines(html)).toEqual([]);
+    expect(html).not.toContain('stroke="var(--cf-danger)"');
     expect(html).toContain(">users<");
   });
 });

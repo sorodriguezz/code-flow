@@ -118,6 +118,16 @@ export interface DbmlSchema {
   groups: DbmlGroup[];
   /** `null` when the document parsed. Multi-line when the parser reported several diagnostics. */
   error: string | null;
+  /**
+   * Where the first diagnostic points, 1-based, or `null` when the parser did not say.
+   *
+   * Kept apart from `error` rather than left inside its text. The message already carries a
+   * `(line:column)` suffix for a reader, but a *caret* needs numbers: the editor puts a marker on
+   * that span and the banner offers to jump to it, and both of those parsing the position back out
+   * of a human sentence would break the first time the sentence changed. `error` is prose;
+   * this is the coordinate.
+   */
+  errorAt: { line: number; column: number } | null;
 }
 
 /** An empty schema. One literal, so "nothing parsed yet" and "parsed to nothing" are the same shape. */
@@ -127,6 +137,7 @@ export const EMPTY_SCHEMA: DbmlSchema = {
   refs: [],
   groups: [],
   error: null,
+  errorAt: null,
 };
 
 /**

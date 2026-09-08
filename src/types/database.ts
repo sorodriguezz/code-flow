@@ -202,6 +202,15 @@ export interface DbDiagramColumn {
    * sets it, and everything reading it treats `undefined` as "not stated".
    */
   unique?: boolean;
+  /**
+   * Declared auto-increment — the `AI` badge on the DBML canvas.
+   *
+   * Optional for the same reason `unique` is: no catalog query fills it in. A live database spells
+   * it five different ways (`serial`, `IDENTITY`, `AUTO_INCREMENT`, a sequence default, a rowid),
+   * and the diagram endpoint carries none of them, so only the DBML translator sets it and every
+   * reader treats `undefined` as "not stated" rather than as "no".
+   */
+  auto_increment?: boolean;
 }
 
 export interface DbDiagramTable {

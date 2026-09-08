@@ -101,6 +101,15 @@ interface RepoState {
   /** Which of fetch/pull/push is currently running, if any — the three are mutually
    * exclusive so the status bar can show a single loader and block the other two. */
   remoteOp: "fetch" | "pull" | "push" | null;
+  /**
+   * The branch `remoteOp` was aimed at, when it was aimed at one in particular — `null` for the
+   * status bar's three buttons, which always mean "here".
+   *
+   * Only the branch list needs it, and it needs it for a reason the global flag cannot cover: the
+   * rows are all disabled together while any remote op runs, so without a name the spinner would
+   * have to go on every row or on none of them.
+   */
+  remoteOpBranch: string | null;
   merging: boolean;
   conflicts: ConflictFile[];
   commitsLoading: boolean;
@@ -157,6 +166,9 @@ interface RepoState {
   /** `alreadyConfirmed` is for the one caller that asks its own, more contextual question first
    * (the AI finding card, jumping to a PR's branch) — everywhere else confirms here. */
   checkoutRemoteBranch: (remoteBranch: string, alreadyConfirmed?: boolean) => Promise<void>;
+  /** Creates the local tracking branch for a remote one without switching to it, and refreshes
+   * the list so the branch appears among the local ones. */
+  trackRemoteBranch: (remoteBranch: string) => Promise<void>;
   createBranch: (name: string, startPoint?: string) => Promise<void>;
   deleteBranch: (name: string, isRemote: boolean) => Promise<void>;
   setBranchLocked: (name: string, locked: boolean) => Promise<void>;
@@ -178,6 +190,15 @@ interface RepoState {
    */
   fetchSilently: () => Promise<void>;
   pull: () => Promise<void>;
+  /**
+   * Fetch and pull aimed at a named branch rather than at HEAD — what the branch list's per-row
+   * buttons run, so a branch can be brought up to date without leaving the one you are on.
+   *
+   * Through the same `remoteOp` mutex as the three above: two `git` processes on one working copy
+   * contend for the same ref lockfiles whichever branch each was aimed at.
+   */
+  fetchBranch: (name: string) => Promise<void>;
+  pullBranch: (name: string) => Promise<void>;
   push: (setUpstream?: boolean) => Promise<void>;
 }
 
@@ -256,6 +277,18 @@ async function guarded(
 function notificationDetail(state: Pick<RepoState, "repoPath" | "status">): string {
   const repo = state.repoPath?.split(/[/\\]/).filter(Boolean).pop() ?? "";
   const branch = state.status?.current_branch ?? "";
+  return [repo, branch].filter(Boolean).join(" · ");
+}
+
+/**
+ * The same line for an operation aimed at a branch that need not be the one checked out.
+ *
+ * The branch list can now fetch and pull a branch you are not standing on, and a notification
+ * built from [`notificationDetail`] would name HEAD — the one branch the operation did *not*
+ * touch.
+ */
+function branchNotificationDetail(state: Pick<RepoState, "repoPath">, branch: string): string {
+  const repo = state.repoPath?.split(/[/\\]/).filter(Boolean).pop() ?? "";
   return [repo, branch].filter(Boolean).join(" · ");
 }
 
@@ -354,6 +387,10 @@ const CHECKOUT_CONFLICT_PREFIX = "CHECKOUT_CONFLICT: ";
  * `BRANCH_LOCKED_PREFIX` in `src-tauri/src/git/branch.rs`. */
 const BRANCH_LOCKED_PREFIX = "BRANCH_LOCKED: ";
 
+/** Set by the Rust side when a per-branch fetch or pull was aimed at a branch that tracks nothing
+ * — see `NO_UPSTREAM_PREFIX` in `src-tauri/src/git/branch.rs`. */
+const NO_UPSTREAM_PREFIX = "NO_UPSTREAM: ";
+
 /**
  * The three refusals a per-hunk action can come back with — see `src-tauri/src/git/hunk.rs`.
  *
@@ -377,6 +414,10 @@ function describeError(e: unknown): string {
   const locked = raw.indexOf(BRANCH_LOCKED_PREFIX);
   if (locked !== -1) {
     return translate("branch.lockedBlocked", { name: raw.slice(locked + BRANCH_LOCKED_PREFIX.length).trim() });
+  }
+  const noUpstream = raw.indexOf(NO_UPSTREAM_PREFIX);
+  if (noUpstream !== -1) {
+    return translate("branch.noUpstream", { name: raw.slice(noUpstream + NO_UPSTREAM_PREFIX.length).trim() });
   }
   // The tail of these two is a path or a libgit2 message, and neither adds anything to the sentence:
   // the peek is already sitting on the file in question, and "corrupt patch at line 4" is a fact
@@ -508,6 +549,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   error: null,
   checkingOutBranch: null,
   remoteOp: null,
+  remoteOpBranch: null,
   merging: false,
   conflicts: [],
   commitsLoading: false,
@@ -962,6 +1004,18 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     });
   },
 
+  trackRemoteBranch: async (remoteBranch) => {
+    const { repoPath } = get();
+    if (!repoPath) return;
+    await guarded(set, async () => {
+      const local = await api.trackRemoteBranch(repoPath, remoteBranch);
+      await get().refreshBranches();
+      // Nothing on screen moves except one new row in a list the user may not be looking at —
+      // this modal's local group can be scrolled past — so the toast is what says it worked.
+      useToastStore.getState().pushToast(translate("branchModal.broughtLocal", { name: local }), "success");
+    });
+  },
+
   createBranch: async (name, startPoint) => {
     const { repoPath } = get();
     if (!repoPath) return;
@@ -1178,6 +1232,55 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       });
     } finally {
       set({ remoteOp: null });
+    }
+  },
+
+  fetchBranch: async (name) => {
+    const { repoPath, remoteOp } = get();
+    if (!repoPath || remoteOp) return;
+    set({ remoteOp: "fetch", remoteOpBranch: name });
+    const detail = branchNotificationDetail(get(), name);
+    const workspaceId = repoWorkspaceId(get());
+    try {
+      await api.gitFetchBranch(repoPath, name);
+      await get().refreshBranches();
+      notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail, workspaceId });
+    } catch (e) {
+      const message = describeError(e);
+      set({ error: message });
+      pushErrorToast(message);
+      notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail, workspaceId });
+    } finally {
+      set({ remoteOp: null, remoteOpBranch: null });
+    }
+  },
+
+  pullBranch: async (name) => {
+    const { repoPath, remoteOp } = get();
+    if (!repoPath || remoteOp) return;
+    // Read before the work, because the answer decides how much has to be reloaded afterwards and
+    // the pull itself can change it.
+    const isHead = get().branches.some((b) => b.name === name && b.is_head);
+    set({ remoteOp: "pull", remoteOpBranch: name });
+    const detail = branchNotificationDetail(get(), name);
+    const workspaceId = repoWorkspaceId(get());
+    try {
+      const ok = await guarded(set, async () => {
+        await api.gitPullBranch(repoPath, name);
+        // Pulling the branch you are standing on rewrites the working tree, so everything the
+        // screen shows is stale. Any other branch only moved a ref: the list is the whole change.
+        if (isHead) await get().refreshAll();
+        else await get().refreshBranches();
+      });
+      notify({
+        source: "git",
+        titleKey: ok ? "notifications.gitPulled" : "notifications.gitPullFailed",
+        status: ok ? "success" : "error",
+        detail,
+        workspaceId,
+      });
+    } finally {
+      set({ remoteOp: null, remoteOpBranch: null });
     }
   },
 

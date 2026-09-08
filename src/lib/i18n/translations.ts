@@ -67,7 +67,8 @@ const en = {
     "{limit} windows are already open. Close one, or raise the limit in Settings → General.",
   "windows.reattach": "Bring it back here",
   "windows.reattachHint": "Closes this window and returns what is in it to the main one. Nothing is lost.",
-  "windows.followsMain": "Follows the main window's workspace.",
+  "windows.switchWorkspace": "Switch this window's workspace",
+  "windows.workspaceOfRepo": "The workspace this repository belongs to.",
   "windows.unknownApp": "This window holds something this version does not know about",
   "windows.repoElsewhereShort": "Not in this workspace",
   "windows.repoElsewhereTitle": "This repository is in another workspace",
@@ -253,6 +254,9 @@ const en = {
   "createPr.created": "Pull request created",
   "createPr.sameBranch": "Choose two different branches.",
   "createPr.needTwoBranches": "You need at least two local branches to create a pull request.",
+  "createPr.branchLocalOnly": "{branch} only exists on this machine. Publish it so the pull request can point at it.",
+  "createPr.publish": "Publish branch",
+  "createPr.publishing": "Publishing…",
   "sidebar.unlinkRepo": "Disconnect from {provider}",
   "sidebar.unlinkConfirm":
     "Disconnect this project from {provider}? You can reconnect it (auto-detected or picked manually) right after.",
@@ -293,6 +297,17 @@ const en = {
   "branchModal.local": "Local",
   "branchModal.remote": "Remote",
   "branchModal.noMatches": "No matching branches",
+  "branchModal.close": "Close",
+  "branchModal.expandRemote": "Show remote branches",
+  "branchModal.collapseRemote": "Hide remote branches",
+  "branchModal.fetch": "Fetch this branch from {remote}",
+  "branchModal.pull": "Pull this branch from {remote}",
+  "branchModal.pullHead": "Pull — this is the branch you are on",
+  "branchModal.noUpstreamAction": "Nothing to fetch or pull: this branch tracks no remote one",
+  "branchModal.bringLocal": 'Create the local branch "{name}" from this one, without switching to it',
+  "branchModal.alreadyLocal": 'Already here as the local branch "{name}"',
+  "branchModal.broughtLocal": '"{name}" is now a local branch',
+  "branchModal.behind": "{n} to pull",
 
   "tabbar.graph": "Graph",
   "tabbar.changes": "Changes",
@@ -3592,6 +3607,8 @@ const en = {
   "branch.lockedCannotPush": '"{name}" is locked — unlock it to push it',
   "branch.lockedBlocked":
     '"{name}" is locked: merging and pushing stay blocked. Lift it with the branch\'s padlock, or in Settings → Git behavior.',
+  "branch.noUpstream":
+    '"{name}" tracks no remote branch, so there is nothing to fetch or pull into it. Push it first to publish it.',
 
   // ---------------- Row scope (one workspace, or every one of them) ----------------
   // Shared by the notes shelf, the API collection tree and the database connection tree, so the
@@ -3895,7 +3912,9 @@ const en = {
   "dbml.history": "Change history",
   "dbml.history.close": "Close the history",
   "dbml.history.empty": "Nothing has changed in this document yet.",
-  "dbml.history.hint": "The last {count} changes to this document, since you opened it. Reverting is itself a change, so it can be undone too.",
+  "dbml.history.hint": "Changes to the tables and relationships of this document, since you opened it. Moving boxes around is not a change to the model, so it is not listed. Reverting is itself a change, so it can be undone too.",
+  "dbml.history.showMore": "Show {count} older",
+  "dbml.history.older": "Saved versions, further back…",
   "dbml.history.revert": "Put the document back to before this change",
   "dbml.history.done": "Reverted",
   "dbml.history.more": "{count} more changed lines",
@@ -3909,6 +3928,7 @@ const en = {
   "dbml.history.merged": "Schema added to",
   "dbml.history.reverted": "Reverted",
   "dbml.hints": "Things to check",
+  "dbml.goToError": "Go to line {line}, column {column}",
   "dbml.emptyTitle": "Nothing declared yet",
   "dbml.emptySubtitle": "Write a table on the left and it appears here.",
   "dbml.selectHint": "Click a table to light up what it is joined to.",

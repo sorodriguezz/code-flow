@@ -111,6 +111,67 @@ pub async fn pull(app: AppHandle, repo_path: String) -> Result<(), String> {
     run_streamed(&app, "pull", Some(&repo_path), &["pull"]).await
 }
 
+/// Brings one branch's remote-tracking ref up to date and nothing else — no working tree touched,
+/// no local branch moved.
+///
+/// Narrow on purpose. The whole point of the per-row button in the branch list is to ask about
+/// *that* branch from wherever you happen to be standing, rather than waiting on every ref the
+/// remote has just to find out whether one of them moved.
+pub async fn fetch_branch(app: AppHandle, repo_path: String, branch: String) -> Result<(), String> {
+    let (remote, merge_ref) = crate::git::branch::upstream_of(&repo_path, &branch)?;
+    let short = merge_ref.strip_prefix("refs/heads/").unwrap_or(&merge_ref);
+    let refspec = format!("+{merge_ref}:refs/remotes/{remote}/{short}");
+    run_streamed(&app, "fetch", Some(&repo_path), &["fetch", &remote, &refspec]).await
+}
+
+/// Updates a branch from its upstream, checked out or not.
+///
+/// Two different commands behind one button, because git has no way to pull into a branch you are
+/// not standing on. The checked-out branch takes the ordinary `git pull`, so it keeps whatever
+/// merge-or-rebase the user's own config says; any other branch is fast-forwarded in place by
+/// fetching straight into its ref.
+///
+/// No `+` on that refspec, and that is the safety of the whole feature: without force git refuses
+/// anything that isn't a fast-forward, so a branch nobody is looking at is never rewritten behind
+/// their back — it either moves forward or the pull fails and says why.
+pub async fn pull_branch(app: AppHandle, repo_path: String, branch: String) -> Result<(), String> {
+    // `git fetch` flatly refuses to write the ref of a branch that is checked out, so this is not
+    // an optimisation — it is the only route for the current branch.
+    if crate::git::branch::is_head_branch(&repo_path, &branch)? {
+        return pull(app, repo_path).await;
+    }
+    let (remote, merge_ref) = crate::git::branch::upstream_of(&repo_path, &branch)?;
+    let short = merge_ref.strip_prefix("refs/heads/").unwrap_or(&merge_ref);
+    let into_branch = format!("{merge_ref}:refs/heads/{branch}");
+    // The tracking ref moves alongside the branch. git does update it opportunistically for an
+    // explicit refspec, but only where the remote's own refspec covers it — and a list that still
+    // says "3 behind" after a pull that worked is worse than one extra refspec here.
+    let into_tracking = format!("+{merge_ref}:refs/remotes/{remote}/{short}");
+    // Reported as "pull" rather than "fetch": the op name is what the progress lines and the
+    // failure message are labelled with, and the user asked for a pull.
+    run_streamed(&app, "pull", Some(&repo_path), &["fetch", &remote, &into_branch, &into_tracking]).await
+}
+
+/// Publishes one branch by name, whether or not it is the one checked out.
+///
+/// `push` publishes HEAD, which is the right shape for the status bar's button and the wrong one
+/// everywhere a branch is *named* — the pull-request form most of all, where the branch you are
+/// opening a PR from is picked from a list and is routinely not the one you are standing on.
+///
+/// Always `-u`. The only caller is "this branch has no upstream, publish it", so the tracking link
+/// is the point rather than an option: a push that left the branch untracked would put the commits
+/// on the remote and leave the form still saying the branch is local-only.
+pub async fn push_branch(app: AppHandle, repo_path: String, branch: String) -> Result<(), String> {
+    // Against the named branch, not HEAD — see `guard_branch_unlocked_at`.
+    crate::git::branch::guard_branch_unlocked_at(&repo_path, &branch)?;
+    // Refuse a name that is not a local branch here rather than letting git answer with a refspec
+    // error: this is reached from a picker, so the branch existing is the caller's claim to check.
+    if !crate::git::branch::local_branch_exists(&repo_path, &branch)? {
+        return Err(format!("no local branch named {branch}"));
+    }
+    run_streamed(&app, "push", Some(&repo_path), &["push", "-u", "origin", &branch]).await
+}
+
 pub async fn push(app: AppHandle, repo_path: String, set_upstream: bool) -> Result<(), String> {
     // `git push` publishes whatever branch is checked out, so the lock is checked against HEAD.
     crate::git::branch::guard_head_unlocked_at(&repo_path)?;

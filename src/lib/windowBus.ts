@@ -14,17 +14,21 @@ import type { AiRunAbout } from "../state/aiRunStore";
  * being what carries those changes — the reload goes through the loader the view already uses, so
  * no emitter has to know the shape of any store.
  *
- * What it cannot carry is the state that was never written down. Which workspace the user is
- * looking at is a fact about the main window, not a row in a table; which model is running right
- * now is a fact about this process, not about SQLite. Those are what this is for, and the list is
+ * What it cannot carry is the state that was never written down. Which model is running right now
+ * is a fact about this process, not about SQLite. That is what this is for, and the list is
  * deliberately short — anything that *could* be a row should be a row.
+ *
+ * **The workspace used to be on here and is not any more.** Every window now holds its own, chosen
+ * in its own title bar and recorded under its own settings key (`workspaceStore`'s `windowKey`), so
+ * there is nothing to tell anybody: a satellite no longer follows the main window, and a fresh one
+ * picks up its opening position from the stored setting rather than from a message.
  *
  * # Every window hears its own emit
  *
  * Tauri's `emit` goes to every window including the sender. Handing a window back its own message
- * is how "workspace changed" would become an infinite round trip, so every frame carries the label
- * it came from and [`onWindowMessage`] drops the ones this window sent. Nothing downstream has to
- * remember to check.
+ * is how a broadcast would become an infinite round trip, so every frame carries the label it came
+ * from and [`onWindowMessage`] drops the ones this window sent. Nothing downstream has to remember
+ * to check.
  */
 
 /** The one event name. One channel with a `kind` inside beats one Tauri listener per message type:
@@ -33,9 +37,6 @@ const CHANNEL = "windows:bus";
 
 /** What the windows say to each other. Adding a case here is a deliberate act — see the note. */
 export type WindowMessage =
-  /** The main window moved to another workspace. Satellites follow it: an app window showing the
-   *  collections of a workspace the user has left is the one thing this design refuses to do. */
-  | { kind: "workspace"; workspaceId: string | null }
   /**
    * A model started or stopped somewhere.
    *

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
-import { broadcast } from "../lib/windowBus";
+import { WINDOW } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
 import type { NewProject, Project, Workspace } from "../types/domain";
 
@@ -10,6 +10,21 @@ const LAST_WORKSPACE_KEY = "last_active_workspace_id";
 /// database has no workspaces at all — an existing install keeps whatever it already has.
 const DEFAULT_WORKSPACE_NAME = "Flow";
 const LAST_PROJECT_KEY = "last_active_project_id";
+
+/**
+ * Where this window records what it is looking at.
+ *
+ * **One row per window, not one row per app.** Every window now chooses its own workspace, so a
+ * single `last_active_workspace_id` would be three windows writing over each other — the last one
+ * to switch decides where all of them open next time, which is the opposite of independent.
+ *
+ * The main window keeps the unsuffixed key. That is not only for compatibility with what is already
+ * stored: it is also the fallback a satellite reads on its very first boot, so a window detached
+ * while the main one sits on "Tienda" opens on "Tienda" and only diverges once the user says so.
+ */
+function windowKey(base: string): string {
+  return WINDOW.main ? base : `${base}:${WINDOW.label}`;
+}
 
 interface WorkspaceState {
   workspaces: Workspace[];
@@ -54,15 +69,16 @@ interface WorkspaceState {
   reorderWorkspace: (id: string, toIndex: number) => Promise<void>;
   setActiveWorkspace: (id: string) => void;
   /**
-   * Adopts the workspace the **main window** moved to, without writing it back.
+   * Points this window at a workspace **without recording it as a choice**.
    *
    * The difference from `setActiveWorkspace` is the whole reason this exists: that one persists
-   * `last_active_workspace_id`, and a satellite persisting it would have two windows writing the
-   * same row — so a satellite that happened to settle last would decide where the *next* launch
-   * opens. One writer, and it is the window with the switcher in it.
+   * "this is where this window opens next time", which is only true when a person picked it. This
+   * one is for a workspace that was *derived* — a repository window resolving the workspace its own
+   * project belongs to. Writing that down would mean re-attaching and re-detaching a repo window
+   * silently rewrote where it opens.
    *
-   * `null` is a real argument: the main window can be between workspaces (one was just deleted),
-   * and a satellite left pointing at the previous one would be showing rows that are gone.
+   * `null` is a real argument: a workspace can be deleted out from under a window, and one left
+   * pointing at it would be showing rows that are gone.
    */
   followWorkspace: (id: string | null) => Promise<void>;
   setActiveProject: (id: string) => void;
@@ -99,7 +115,11 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
       set({ workspaces });
       if (!get().activeWorkspaceId && workspaces.length > 0) {
-        const lastId = await api.getSetting(LAST_WORKSPACE_KEY).catch(() => null);
+        // This window's own choice first; the main window's as the fallback, so a satellite that
+        // has never been pointed anywhere opens where the app is — see `windowKey`.
+        const own = await api.getSetting(windowKey(LAST_WORKSPACE_KEY)).catch(() => null);
+        const lastId =
+          own ?? (WINDOW.main ? null : await api.getSetting(LAST_WORKSPACE_KEY).catch(() => null));
         const restored = lastId ? workspaces.find((w) => w.id === lastId) : undefined;
         const target = restored ?? workspaces[0];
         set({ activeWorkspaceId: target.id });
@@ -114,7 +134,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const projects = await api.listProjects(workspaceId);
     set((s) => ({ projectsByWorkspace: { ...s.projectsByWorkspace, [workspaceId]: projects } }));
     if (!get().activeProjectId && projects.length > 0) {
-      const lastId = await api.getSetting(LAST_PROJECT_KEY).catch(() => null);
+      const lastId = await api.getSetting(windowKey(LAST_PROJECT_KEY)).catch(() => null);
       const restored = lastId ? projects.find((p) => p.id === lastId) : undefined;
       set({ activeProjectId: (restored ?? projects[0]).id });
     }
@@ -167,7 +187,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       },
       activeProjectId: project.id,
     }));
-    void api.setSetting(LAST_PROJECT_KEY, project.id);
+    void api.setSetting(windowKey(LAST_PROJECT_KEY), project.id);
     return project;
   },
 
@@ -283,17 +303,17 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   setActiveWorkspace: (id) => {
     set({ activeWorkspaceId: id, activeProjectId: null });
-    void api.setSetting(LAST_WORKSPACE_KEY, id);
+    void api.setSetting(windowKey(LAST_WORKSPACE_KEY), id);
     void get().loadProjects(id);
-    // Every satellite follows this window. Broadcast after the local switch, not before: if the
-    // emit were first, a satellite could load its projects for the new workspace while this window
-    // is still on the old one, and the two would be describing different things for a frame.
-    broadcast({ kind: "workspace", workspaceId: id });
+    // Nothing is announced. **Windows no longer follow each other** — each holds the workspace its
+    // user pointed it at, which is the whole reason the key above is per window. A freshly detached
+    // window still opens where the app is, but by reading the setting this line just wrote, not by
+    // being told; see `windowKey` and `SatelliteApp`.
   },
 
   setActiveProject: (id) => {
     set({ activeProjectId: id });
-    void api.setSetting(LAST_PROJECT_KEY, id);
+    void api.setSetting(windowKey(LAST_PROJECT_KEY), id);
   },
 
   followWorkspace: async (id) => {
@@ -307,7 +327,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       // Same effect as setActiveWorkspace, except the projects load is awaited rather than
       // fired and forgotten — the caller's next step depends on this workspace's list.
       set({ activeWorkspaceId: workspaceId, activeProjectId: null });
-      void api.setSetting(LAST_WORKSPACE_KEY, workspaceId);
+      void api.setSetting(windowKey(LAST_WORKSPACE_KEY), workspaceId);
       await get().loadProjects(workspaceId);
     } else if (!get().projectsByWorkspace[workspaceId]) {
       await get().loadProjects(workspaceId);

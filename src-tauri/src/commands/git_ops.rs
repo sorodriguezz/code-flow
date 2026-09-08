@@ -81,6 +81,11 @@ pub fn checkout_remote_tracking(repo_path: String, remote_branch: String) -> Res
     branch::checkout_remote_tracking(&repo_path, &remote_branch)
 }
 
+#[tauri::command]
+pub fn track_remote_branch(repo_path: String, remote_branch: String) -> Result<String, String> {
+    branch::track_remote_branch(&repo_path, &remote_branch)
+}
+
 #[tauri::command(async)]
 pub fn list_stashes(repo_path: String) -> Result<Vec<stash::StashInfo>, String> {
     stash::list_stashes(&repo_path)
@@ -428,6 +433,21 @@ pub async fn git_pull(app: AppHandle, repo_path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn git_fetch_branch(app: AppHandle, repo_path: String, branch: String) -> Result<(), String> {
+    remote::fetch_branch(app, repo_path, branch).await
+}
+
+#[tauri::command]
+pub async fn git_pull_branch(app: AppHandle, repo_path: String, branch: String) -> Result<(), String> {
+    remote::pull_branch(app, repo_path, branch).await
+}
+
+#[tauri::command]
 pub async fn git_push(app: AppHandle, repo_path: String, set_upstream: bool) -> Result<(), String> {
     remote::push(app, repo_path, set_upstream).await
+}
+
+#[tauri::command]
+pub async fn git_push_branch(app: AppHandle, repo_path: String, branch: String) -> Result<(), String> {
+    remote::push_branch(app, repo_path, branch).await
 }

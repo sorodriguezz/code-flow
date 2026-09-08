@@ -1,6 +1,6 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Copy, CornerUpLeft, Minus, Square, X } from "lucide-react";
+import { Check, ChevronDown, Copy, CornerUpLeft, Minus, Square, X } from "lucide-react";
 import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 import { broadcast } from "../../lib/windowBus";
@@ -8,6 +8,7 @@ import { WINDOW } from "../../lib/windowIdentity";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import { Tooltip } from "../common/Tooltip";
+import type { Workspace } from "../../types/domain";
 
 const win = getCurrentWindow();
 
@@ -22,11 +23,15 @@ const win = getCurrentWindow();
  * would leave the shell's imports in this window's bundle, which is the cost `window.html` exists
  * to avoid.
  *
- * # The workspace chip is a readout, not a control
+ * # The workspace chip is a control, for an app window
  *
- * It says which workspace this window's contents belong to and cannot change it: the workspace
- * follows the main window, always. Showing it is what makes that rule visible rather than merely
- * true — the alternative is a window whose contents change and nothing on screen saying why.
+ * This window holds its own workspace and does not follow the main one — see `SatelliteApp` — so
+ * the chip that says which workspace it is on is also how you change it. That is the whole point of
+ * a second window: keep Notes on one workspace while the shell goes somewhere else.
+ *
+ * A **repository** window gets the readout instead. Its workspace is a fact about the repository it
+ * holds rather than a choice, so a picker there would be offering to put the window somewhere its
+ * own contents are not.
  */
 
 function WindowsControls() {
@@ -105,15 +110,18 @@ export function SatelliteTitleBar() {
 
       <span className="truncate font-medium text-[var(--cf-text)]">{name}</span>
 
-      {workspace && (
-        <span
-          className="flex shrink-0 items-center gap-1.5 rounded border border-[var(--cf-border)] px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)]"
-          title={t("windows.followsMain")}
-        >
-          <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: workspace.color }} />
-          {workspace.name}
-        </span>
-      )}
+      {workspace &&
+        (spec?.kind === "repo" ? (
+          <span
+            className="flex shrink-0 items-center gap-1.5 rounded border border-[var(--cf-border)] px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)]"
+            title={t("windows.workspaceOfRepo")}
+          >
+            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: workspace.color }} />
+            {workspace.name}
+          </span>
+        ) : (
+          <WorkspacePicker current={workspace} />
+        ))}
 
       <div className="flex-1" data-tauri-drag-region />
 
@@ -128,6 +136,87 @@ export function SatelliteTitleBar() {
       </Tooltip>
 
       {!isMac && <WindowsControls />}
+    </div>
+  );
+}
+
+/**
+ * This window's workspace, and the way to change it.
+ *
+ * Built here rather than reusing the shell's switcher for the reason in the module note: the shell
+ * must not be reachable from this bundle. It is a plain popover over `workspaces` — a satellite has
+ * no drag-to-reorder, no rename, no colour picker, none of which belong in a window holding one
+ * thing.
+ *
+ * `setActiveWorkspace` and not `followWorkspace`: this *is* a choice, so it is recorded under this
+ * window's own key and the window opens here next time.
+ */
+function WorkspacePicker({ current }: { current: Workspace }) {
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const setActiveWorkspace = useWorkspaceStore((s) => s.setActiveWorkspace);
+  const [open, setOpen] = useState(false);
+  const t = useT();
+
+  // Close on anything that is not this control. `pointerdown` rather than `click` so a press that
+  // starts on the window's drag region does not leave the menu hanging while the window moves.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Node)) return;
+      if (!menuRef.current?.contains(event.target)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  return (
+    <div ref={menuRef} className="relative shrink-0">
+      <button
+        onClick={() => setOpen((value) => !value)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={t("windows.switchWorkspace")}
+        className="flex items-center gap-1.5 rounded border border-[var(--cf-border)] px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-text)]"
+      >
+        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: current.color }} />
+        {current.name}
+        <ChevronDown size={11} />
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          className="absolute left-0 top-[calc(100%+4px)] z-50 max-h-[320px] min-w-[180px] overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-1 shadow-[var(--cf-shadow)]"
+        >
+          {workspaces.map((entry) => (
+            <button
+              key={entry.id}
+              role="menuitemradio"
+              aria-checked={entry.id === current.id}
+              onClick={() => {
+                setOpen(false);
+                if (entry.id !== current.id) setActiveWorkspace(entry.id);
+              }}
+              className={`flex w-full items-center gap-2 px-2.5 py-1 text-left text-[12px] transition-colors hover:bg-[var(--cf-accent-soft)] ${
+                entry.id === current.id ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
+              }`}
+            >
+              <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: entry.color }} />
+              <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+              {entry.id === current.id && <Check size={12} className="shrink-0" />}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

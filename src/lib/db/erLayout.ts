@@ -109,8 +109,19 @@ export interface NodeMetrics {
   overflow: number;
   minWidth: number;
   maxWidth: number;
-  /** Pixels a row needs on top of its own text: padding, the key glyph, whatever badges follow. */
+  /** Pixels a row needs on top of its own text: padding, the key glyph, the gaps between them. */
   rowPadding: (column: DbDiagramColumn) => number;
+  /**
+   * The width this column's badges need — and it is the **widest row's** that every row is charged.
+   *
+   * Separate from `rowPadding` because it is the one part of a row that is not a property of that
+   * row. The badges are drawn as a block against the box's right edge and the type column ends at a
+   * single x for the whole table, which is what makes the types read as a column instead of as a
+   * ragged edge that steps left every time a row happens to carry another badge. That x is set by
+   * the busiest row, so every row has to be measured against it or the longest name in the table
+   * runs into a badge strip that was reserved for somebody else.
+   */
+  badgeWidth?: (column: DbDiagramColumn) => number;
   /** And the same for the header, which holds the name and whatever sits beside it. */
   namePadding: number;
   /** The width of one character of the face the *title* is set in. */
@@ -646,9 +657,15 @@ function measure(
   const title =
     metrics.qualifiedName && node.schema ? `${node.schema}.${node.name}` : node.name;
   const nameWidth = title.length * metrics.nameAdvance + metrics.namePadding;
+  const badges = metrics.badgeWidth;
+  const strip = badges
+    ? node.visible.reduce((widest, column) => Math.max(widest, badges(column)), 0)
+    : 0;
   const rowWidth = node.visible.reduce((widest, column) => {
     const width =
-      (column.name.length + column.data_type.length) * CHAR_WIDTH + metrics.rowPadding(column);
+      (column.name.length + column.data_type.length) * CHAR_WIDTH +
+      metrics.rowPadding(column) +
+      strip;
     return Math.max(widest, width);
   }, 0);
   const width = Math.min(

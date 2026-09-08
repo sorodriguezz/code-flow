@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { RotateCcw, X } from "lucide-react";
-import { changedLines, HISTORY_LIMIT, type Revision } from "../../lib/dbml/history";
+import { Archive, ChevronDown, RotateCcw, X } from "lucide-react";
+import { changedLines, HISTORY_PAGE, type Revision } from "../../lib/dbml/history";
 import { readLayout } from "../../lib/dbml/layout";
 import { ICON_BUTTON } from "../diagrams/diagramsChrome";
 import { useT } from "../../state/languageStore";
@@ -32,15 +32,23 @@ const CAUSE_LABEL: Record<Revision["cause"], TranslationKey> = {
 export function DbmlHistory({
   revisions,
   onRevert,
+  onOlder,
   onClose,
 }: {
   revisions: Revision[];
   /** Handed the document as it was before that change. */
   onRevert: (doc: string) => void;
+  /** Opens the saved-version history, which reaches further back than this session does. */
+  onOlder: () => void;
   onClose: () => void;
 }) {
   const t = useT();
   const [open, setOpen] = useState<number | null>(revisions[0]?.id ?? null);
+  /** How many rows are on screen. Grows a page at a time and never shrinks — a list that collapsed
+   *  back under you while you were reading it would lose your place. */
+  const [shown, setShown] = useState(HISTORY_PAGE);
+  const visible = revisions.slice(0, shown);
+  const remaining = revisions.length - visible.length;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -76,9 +84,9 @@ export function DbmlHistory({
         ) : (
           <div className="min-h-0 flex-1 overflow-auto py-1">
             <p className="px-2.5 pb-1 text-[10px] leading-snug text-[var(--cf-text-muted)]">
-              {t("dbml.history.hint", { count: String(HISTORY_LIMIT) })}
+              {t("dbml.history.hint")}
             </p>
-            {revisions.map((revision) => (
+            {visible.map((revision) => (
               <Row
                 key={revision.id}
                 revision={revision}
@@ -90,8 +98,37 @@ export function DbmlHistory({
                 }}
               />
             ))}
+            {remaining > 0 && (
+              <button
+                type="button"
+                onClick={() => setShown((count) => count + HISTORY_PAGE)}
+                className="flex w-full items-center justify-center gap-1 border-t border-[var(--cf-border)] px-2.5 py-[6px] text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-accent-soft)] hover:text-[var(--cf-accent)]"
+              >
+                <ChevronDown size={11} />
+                {t("dbml.history.showMore", {
+                  count: String(Math.min(remaining, HISTORY_PAGE)),
+                })}
+              </button>
+            )}
           </div>
         )}
+
+        {/* Older than this session. The list above is what changed while the diagram has been open;
+            `doc_versions` keeps snapshots of the saved document from before that, including from
+            previous days — which is where "I need what it looked like on Tuesday" actually lives.
+            Always offered, including when the session list is empty, because that is exactly the
+            state a freshly opened diagram is in. */}
+        <button
+          type="button"
+          onClick={() => {
+            onOlder();
+            onClose();
+          }}
+          className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-[7px] text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-accent-soft)] hover:text-[var(--cf-accent)]"
+        >
+          <Archive size={11} />
+          {t("dbml.history.older")}
+        </button>
       </aside>
     </>
   );

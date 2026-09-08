@@ -40,6 +40,12 @@
      selection — the badges are a legend, and a legend has fixed colours. */
   --cf-violet: #9333ea;
   --cf-blue: #2563eb;
+  /* The teal an auto-increment column is badged in, and the fifth and last hue of that legend. Its
+     own token for the reason the four above are: `AI` is read side by side with `PK`, `NN`, `U` and
+     `FK` on one row, so the only property it must have is being none of them. Teal is the gap left
+     in that set — amber, green, violet, blue — and it is the one hue on this canvas no accent can
+     collide with, since the accent picker offers none. */
+  --cf-teal: #0d9488;
   /* BSON value colours for the document list. Their own tokens rather than borrowed semantics:
      `--cf-danger` happens to be the right red for an ObjectId today, and the day someone retunes
      what "danger" means, every id in every document would move with it. Chosen to sit at similar
@@ -86,6 +92,7 @@
   --cf-warning: #fbbf24;
   --cf-violet: #c084fc;
   --cf-blue: #60a5fa;
+  --cf-teal: #2dd4bf;
   /* Same five, lifted for a dark background — see the light theme's note. */
   --cf-bson-string: #6ee7a8;
   --cf-bson-number: #93b4fd;
@@ -123,6 +130,7 @@
     --cf-warning: #fbbf24;
     --cf-violet: #c084fc;
     --cf-blue: #60a5fa;
+    --cf-teal: #2dd4bf;
     /* Same as the explicit dark theme above. */
     --cf-bson-string: #6ee7a8;
     --cf-bson-number: #93b4fd;
