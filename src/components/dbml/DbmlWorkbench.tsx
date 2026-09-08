@@ -1038,6 +1038,19 @@ export function DbmlWorkbench({
 
   const hint = schema.error ? hintFor(schema.error) : null;
   const lineCount = source === "" ? 0 : source.split("\n").length;
+  /**
+   * Whether the inspector is *on screen*, which is not the same as `inspector` being true.
+   *
+   * The panel is rendered inside the branch that draws boxes, so it is absent on the Datos surface,
+   * before the parser chunk has landed, and on a schema with nothing in it — in all three of which
+   * the flag can still be set from a previous document. Anything that gets out of the panel's way
+   * has to read this rather than the flag, or it steps aside for a panel that is not there.
+   */
+  const inspectorShowing =
+    inspector &&
+    surface === "diagram" &&
+    parser !== null &&
+    (schema.tables.length > 0 || schema.enums.length > 0);
 
   const workbench = (
     <div
@@ -1064,13 +1077,25 @@ export function DbmlWorkbench({
       {/* The way out, at the root and not in the canvas's corner cluster — that cluster lives inside
           the branch that draws boxes, so on an empty schema (or before the 15 MB parser chunk has
           landed) it is not rendered, and full screen had no visible exit at all. Top-right, clear
-          of the zoom controls in the opposite corner. */}
+          of the zoom controls in the opposite corner.
+
+          **But it moves off the inspector.** Being at the root means being pinned to the *window's*
+          right edge, and the inspector opens against that same edge — so opening it in full screen
+          slid a panel over the only way out of full screen. The offset is the panel's width plus its
+          one-pixel seam, which puts this where every other floating control here already sits: at
+          the canvas's own edge. That is what the search box does when the code pane opens, and it
+          gets it for free by living inside the canvas column; this one cannot, for the reason above,
+          so it does the same arithmetic by hand.
+
+          Deliberately not transitioned. The panel appears in one frame and the resize handle drags
+          `inspectorWidth` continuously, so an animated `right` would trail behind both. */}
       {zen && (
         <button
           type="button"
           onClick={leaveZen}
           title={t("dbml.zenExit")}
-          className={`absolute right-4 top-3 z-20 flex items-center gap-1 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 px-2 py-[5px] text-[10.5px] font-medium text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] backdrop-blur transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] ${CHROME_FADE}`}
+          style={{ right: inspectorShowing ? inspectorWidth + 1 + 16 : 16 }}
+          className={`absolute top-3 z-20 flex items-center gap-1 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 px-2 py-[5px] text-[10.5px] font-medium text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] backdrop-blur transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] ${CHROME_FADE}`}
         >
           <Minimize size={12} />
           {t("dbml.zenExit")}
