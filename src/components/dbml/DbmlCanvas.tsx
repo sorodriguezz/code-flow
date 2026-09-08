@@ -175,6 +175,16 @@ export const DbmlCanvas = forwardRef<
     schema: DbmlSchema;
     /** Boxes the user has dragged, by table id. */
     positions: Record<string, { x: number; y: number }>;
+    /**
+     * Rows per table in the scratch database, drawn as `~N` in each header.
+     *
+     * It rides *inside* the 34px header band, so it adds no height and moves nothing the router or
+     * `route.test.ts` measures. And its `fill` is a literal `var(--cf-text-muted)` rather than a
+     * `color-mix()`: the export resolver in `diagramSvg` substitutes `var(--…)` and nothing else,
+     * so a mixed colour survives on screen and reaches the exported PNG as a function the `<img>`
+     * renderer cannot evaluate.
+     */
+    rowCounts?: Record<string, number>;
     /** Omit for a read-only canvas — the boxes then sit wherever the layout engine puts them. */
     onMoveTable?: (id: string, x: number, y: number) => void;
     /** The table whose neighbourhood is lit up, or `null`. Controlled: the inspector reads it too. */
@@ -260,6 +270,7 @@ export const DbmlCanvas = forwardRef<
   {
     schema,
     positions,
+    rowCounts,
     onMoveTable,
     selected,
     onSelect,
@@ -350,8 +361,8 @@ export const DbmlCanvas = forwardRef<
   const matchAt = useRef(0);
 
   const layout = useMemo(
-    () => layoutDbml(schema, { mode, density, pinned: positions }),
-    [schema, mode, density, positions],
+    () => layoutDbml(schema, { mode, density, pinned: positions, counts: rowCounts }),
+    [schema, mode, density, positions, rowCounts],
   );
   const nodeById = useMemo(
     () => new Map(layout.nodes.map((node) => [node.id, node])),
@@ -1510,6 +1521,26 @@ const SchemaBox = memo(function SchemaBox({
   const prefix = node.schema && title.startsWith(`${node.schema}.`) ? `${node.schema}.` : "";
   const nameX = PAD_X + 11;
   /**
+   * `~N` rows, when a scratch database has been built and there is room for it.
+   *
+   * Room, and not always: `DBML_METRICS.namePadding` reserves 62px past the name, which is what the
+   * glyph bar and the column count already spend. Widening that would widen every box, and box
+   * widths are what the edge router places lines around — the measured expectations in
+   * `route.test.ts` are downstream of them. So the count is *dropped* on a box too narrow to hold
+   * it rather than being allowed to push geometry around, and the number stays available in the
+   * rail either way.
+   */
+  const rowsLabel =
+    node.rowEstimate === null || node.rowEstimate === undefined ? "" : `~${node.rowEstimate}`;
+  // The label plus its separator, at this font's advance. Only used to decide whether it fits and
+  // to move the mark dot out of its way — nothing is positioned by it.
+  const rowsWidth = rowsLabel ? rowsLabel.length * 5.9 + 9 : 0;
+  const nameEnd = nameX + title.length * 12 * MONO_ADVANCE;
+  const countWidth = String(node.visible.length + node.hidden).length * 5.9;
+  const showRows =
+    rowsLabel !== "" &&
+    nameEnd + 10 + rowsWidth + countWidth + (mark ? 22 : 0) < node.width - PAD_X;
+  /**
    * Where the type column ends, for every row in this box.
    *
    * Set by the widest badge strip in the table rather than by each row's own, which is the whole
@@ -1693,11 +1724,15 @@ const SchemaBox = memo(function SchemaBox({
           marked from across the diagram; this says *which* mark at the zoom where you are reading
           the columns, without spending a word on it. */}
       {mark && (
-        <circle cx={node.width - PAD_X - 17} cy={17} r={3.5} fill={MARK_COLOUR[mark]}>
+        <circle cx={node.width - PAD_X - 17 - (showRows ? rowsWidth : 0)} cy={17} r={3.5} fill={MARK_COLOUR[mark]}>
           <title>{mark}</title>
         </circle>
       )}
 
+      {/* Rows in the scratch database, then columns in the model — right-anchored as one string, so
+          neither number has to be measured to place the other. `fill` is a literal `var(--…)`: the
+          export resolver substitutes those and nothing else, and a `color-mix()` here would survive
+          on screen and vanish from the PNG. */}
       <text
         x={node.width - PAD_X}
         y={21.5}
@@ -1706,6 +1741,7 @@ const SchemaBox = memo(function SchemaBox({
         textAnchor="end"
         fill="var(--cf-text-muted)"
       >
+        {showRows ? `${rowsLabel} · ` : ""}
         {node.visible.length + node.hidden}
       </text>
 

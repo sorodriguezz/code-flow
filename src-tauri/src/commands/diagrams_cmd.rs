@@ -182,7 +182,16 @@ pub fn diagrams_set_pinned(db: State<Db>, id: String, pinned: bool) -> Result<()
 }
 
 #[tauri::command]
-pub fn diagrams_delete_diagram(db: State<Db>, id: String) -> Result<(), String> {
+pub fn diagrams_delete_diagram(
+    db: State<Db>,
+    sandbox: State<crate::sandbox::SandboxRegistry>,
+    id: String,
+) -> Result<(), String> {
+    // The scratch database goes **before** the row, and that order is the whole reason this is
+    // here rather than in a cleanup pass. `sandbox_sweep` deletes files with no diagram, so a
+    // failure between the two leaves an orphan the next launch reclaims; doing it the other way
+    // round would leave a diagram whose sandbox was deleted out from under it.
+    let _ = crate::sandbox::wipe(&sandbox, &id);
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     diagram_queries::delete_diagram(&conn, &id).map_err(|e| e.to_string())?;
     // Same reasoning as `notes_delete_note`: the document is gone, so its snapshots have nothing
@@ -192,6 +201,11 @@ pub fn diagrams_delete_diagram(db: State<Db>, id: String) -> Result<(), String> 
 }
 
 /// `title` is passed in because "Copy of …" is translated and Rust has no language.
+///
+/// **The copy gets no test data.** `sandbox_dir()` is not touched, so the new diagram opens with a
+/// clean Build button. Duplicating to compare two variants means writing the fixtures again — the
+/// one point in the lifecycle where that happens, and preferable to a copy that silently carries
+/// rows written against the schema you are about to change.
 #[tauri::command]
 pub fn diagrams_duplicate_diagram(
     db: State<Db>,

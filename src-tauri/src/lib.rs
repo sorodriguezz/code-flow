@@ -38,6 +38,7 @@ mod power;
 mod pr_link;
 mod proc;
 mod remote;
+mod sandbox;
 /// Driving this install from a phone on the same network. Off unless the user turns it on.
 mod remotectl;
 mod remotes;
@@ -302,6 +303,11 @@ pub fn run() {
         // from the platform's window list because the label is a lossy derivation of the id it
         // holds — see `windows::label_for`.
         .manage(windows::SatelliteRegistry::default())
+        // One open SQLite connection per DBML diagram whose scratch database has been built.
+        // Held rather than reopened per call because the attach limit and the progress handler
+        // are properties of a *connection* — reopening per statement would mean re-establishing
+        // both, and the first time that was forgotten the limit would be silently gone.
+        .manage(sandbox::SandboxRegistry::default())
         .setup(|app| {
             // First, and before anything that can fail out of this closure: the window is created
             // hidden (`"visible": false` in `tauri.conf.json`) so that being resized and maximized
@@ -312,6 +318,28 @@ pub fn run() {
             // reopening them at launch turned out to be the wrong idea twice over. See
             // `windows::SatelliteRegistry::parked`.
             windows::forget_persisted_desk(app.handle());
+            // Delete every DBML scratch database whose diagram is gone. Covers the three ways a
+            // file can outlive its owner: a workspace deleted while the app was shut, a backup
+            // restored over the database, and a crash between removing the file and removing the
+            // row. Failing is not worth a startup error — the files are reclaimed next launch.
+            {
+                let known: std::collections::HashSet<String> = app
+                    .state::<db::Db>()
+                    .0
+                    .lock()
+                    .ok()
+                    .and_then(|conn| {
+                        let mut stmt = conn.prepare("SELECT id FROM diagrams").ok()?;
+                        let rows = stmt.query_map([], |row| row.get::<_, String>(0)).ok()?;
+                        Some(rows.flatten().collect())
+                    })
+                    .unwrap_or_default();
+                // Only when the table could be read. An empty set from a failed read would mean
+                // "no diagrams exist", and the sweep would delete every sandbox the user has.
+                if !known.is_empty() {
+                    sandbox::sweep(&known);
+                }
+            }
             tray::setup(&app.handle())?;
             // The usage meter's way to the database. Set here because `setup` is the only place
             // with an `AppHandle`, and the recording point is deep inside `ai::run`, where threading
@@ -467,6 +495,18 @@ pub fn run() {
             windows::list_satellites,
             windows::satellite_spec,
             windows::restore_satellites,
+            commands::sandbox_cmd::sandbox_open,
+            commands::sandbox_cmd::sandbox_status,
+            commands::sandbox_cmd::sandbox_counts,
+            commands::sandbox_cmd::sandbox_page,
+            commands::sandbox_cmd::sandbox_execute,
+            commands::sandbox_cmd::sandbox_migrate,
+            commands::sandbox_cmd::sandbox_export_sql,
+            commands::sandbox_cmd::sandbox_export_file,
+            commands::sandbox_cmd::sandbox_cancel,
+            commands::sandbox_cmd::sandbox_wipe,
+            commands::sandbox_cmd::sandbox_close,
+            commands::sandbox_cmd::sandbox_sweep,
             commands::services_cmd::list_services,
             commands::services_cmd::list_service_groups,
             commands::services_cmd::create_service,

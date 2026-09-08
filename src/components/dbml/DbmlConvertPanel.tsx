@@ -2,13 +2,27 @@ import { useMemo, useState } from "react";
 import Editor from "@monaco-editor/react";
 import { Download } from "lucide-react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
-import { convert, CONVERSION_TARGETS, type ConversionTarget } from "../../lib/dbml";
+import {
+  convert,
+  CONVERSION_KINDS,
+  CONVERSION_TARGETS,
+  type ConversionTarget,
+} from "../../lib/dbml";
 import type { DbmlSchema } from "../../lib/dbml/types";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { safeFileName } from "../../lib/diagrams/exportFile";
 import { useThemeStore } from "../../state/themeStore";
 import { useToastStore } from "../../state/toastStore";
 import { CopyButton } from "./CopyButton";
+import {
+  SEG_GROUP_LABEL,
+  SEG_TRACK,
+  TOOL_BAR,
+  TOOL_BTN,
+  TOOL_BTN_PRIMARY,
+  ToolClose,
+  segItem,
+} from "./toolChrome";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -23,7 +37,16 @@ import { useT } from "../../state/languageStore";
  * language per target comes from `CONVERSION_TARGETS`, which is also where the extension the save
  * dialog offers comes from.
  */
-export function DbmlConvertPanel({ schema, title }: { schema: DbmlSchema; title: string }) {
+export function DbmlConvertPanel({
+  schema,
+  title,
+  onClose,
+}: {
+  schema: DbmlSchema;
+  title: string;
+  /** Closes the tool. Rendered here rather than in a strip above the panel — see `ToolClose`. */
+  onClose: () => void;
+}) {
   const t = useT();
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
   const [target, setTarget] = useState<ConversionTarget>("postgresql");
@@ -39,32 +62,53 @@ export function DbmlConvertPanel({ schema, title }: { schema: DbmlSchema; title:
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1.5">
-        {CONVERSION_TARGETS.map((candidate) => (
+      <div className={TOOL_BAR}>
+        {/* Ten targets as three named choices. Flat, they were a row of ten words you had to read
+            left to right to find Prisma in; grouped, the kind you want is the first thing you pick
+            and the list under it is short. The group names are the acronyms themselves — see
+            `ConversionKind`. */}
+        {CONVERSION_KINDS.map((kind) => {
+          const group = CONVERSION_TARGETS.filter((candidate) => candidate.kind === kind);
+          if (group.length === 0) return null;
+          return (
+            <div key={kind} className="flex items-center gap-1.5">
+              <span className={SEG_GROUP_LABEL}>{kind}</span>
+              <div className={SEG_TRACK} role="group" aria-label={kind}>
+                {group.map((candidate) => (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    onClick={() => setTarget(candidate.id)}
+                    aria-pressed={candidate.id === target}
+                    className={segItem(candidate.id === target)}
+                  >
+                    {candidate.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Pushed to the end of the bar and kept together: these two act on whatever is showing,
+            where everything to their left changes what that is. */}
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          <CopyButton text={code} className={TOOL_BTN} />
+          {/* The extension is the useful half — it is what tells you the save is going to be a
+              `.prisma` and not a `.sql` — so it stays on the button, beside a verb instead of
+              standing in for one. */}
           <button
-            key={candidate.id}
             type="button"
-            onClick={() => setTarget(candidate.id)}
-            className={`rounded-md px-2 py-[3px] text-[11px] transition-colors ${
-              candidate.id === target
-                ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            }`}
+            onClick={() => void save()}
+            title={t("dbml.convert.save")}
+            className={TOOL_BTN_PRIMARY}
           >
-            {candidate.label}
+            <Download size={12} />
+            {t("dbml.convert.saveShort")}
+            <span className="font-mono opacity-70">.{entry.extension}</span>
           </button>
-        ))}
-        <span className="flex-1" />
-        <CopyButton text={code} />
-        <button
-          type="button"
-          onClick={() => void save()}
-          title={t("dbml.convert.save")}
-          className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-1.5 py-[2px] text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
-        >
-          <Download size={11} />
-          {entry.extension}
-        </button>
+          <ToolClose onClose={onClose} />
+        </div>
       </div>
 
       <div className="min-h-0 flex-1">

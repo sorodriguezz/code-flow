@@ -350,6 +350,25 @@ pub fn chain_memory_dir(chain_id: &str) -> PathBuf {
     state_dir().join("chain-memory").join(chain_id)
 }
 
+/// One throwaway SQLite database per DBML diagram — the scratch data you type into the Datos
+/// surface to find out whether the model you are drawing actually holds rows.
+///
+/// **State and not cache**, and the cache contract is what settles it: "regenerable; deleting it
+/// with the app closed must be a no-op the user cannot notice" (see the roots above). Fixtures
+/// typed by hand are neither. They are not backed up and not versioned either — a schema version
+/// resurrecting rows written against a different schema is a data-loss bug wearing a recovery
+/// button — so this sits under the state root and outside every sync path, and `wipe_plan` reaches
+/// it for free because it removes every entry under `state_dir()`.
+pub fn sandbox_dir() -> PathBuf {
+    state_dir().join("dbml-sandbox")
+}
+
+/// One diagram's scratch database. Named by `diagrams.id`, which is what makes the sweep possible:
+/// a file whose stem is not a row in `diagrams` has no owner and is deleted at launch.
+pub fn sandbox_path(diagram_id: &str) -> PathBuf {
+    sandbox_dir().join(format!("{diagram_id}.sqlite"))
+}
+
 /// A "please wipe everything" request has to be handled on the *next* launch, before the
 /// database is opened — deleting `codeflow.db` out from under this process's own open SQLite
 /// connection would fail on Windows (can't remove a file that's still locked open). Requesting

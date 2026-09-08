@@ -88,7 +88,12 @@ tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 git2 = "0.19"
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Three of these four exist for the DBML sandbox. `limits` is not optional: `SQLITE_LIMIT_ATTACHED
+# = 0` is the only thing that stops an `ATTACH` typed into that console from reaching the app's
+# own database. `hooks` backs its Stop button — a progress handler is the only way to interrupt a
+# statement already running. `column_decltype` is what lets the grid show a column's declared
+# type, which is how a cell knows whether it is editing a number or a string.
+rusqlite = { version = "0.32", features = ["bundled", "limits", "hooks", "column_decltype"] }
 keyring = "3"
 # Battery level for the status bar. Pure Rust across macOS/Windows/Linux (IOKit / Win32 /
 # `/sys/class/power_supply`), so reading it costs no subprocess — which matters on Windows, where

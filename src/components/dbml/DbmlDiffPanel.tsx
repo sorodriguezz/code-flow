@@ -3,6 +3,7 @@ import { ArrowLeftRight, Minus, Pencil, Plus } from "lucide-react";
 import { INPUT } from "../db/dbChrome";
 import { diffSchemas, type DiffStatus, type SchemaDiff } from "../../lib/dbml/diff";
 import type { DbmlSchema } from "../../lib/dbml/types";
+import { TOOL_BTN, ToolClose } from "./toolChrome";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -20,10 +21,14 @@ import { useT } from "../../state/languageStore";
 export function DbmlDiffPanel({
   schema,
   parse,
+  onClose,
 }: {
   schema: DbmlSchema;
   /** The parser, handed down so the heavy chunk stays owned by the workbench. */
   parse: (source: string) => DbmlSchema;
+  /** Closes the tool. This panel has no row of actions of its own, so it sits in the corner the
+   *  other two put it in — top right, over the list rather than beside a verb. */
+  onClose: () => void;
 }) {
   const t = useT();
   const [other, setOther] = useState("");
@@ -46,9 +51,9 @@ export function DbmlDiffPanel({
             onClick={() => setSwapped((current) => !current)}
             title={t("dbml.diff.swap")}
             aria-label={t("dbml.diff.swap")}
-            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-1.5 py-[3px] text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
+            className={TOOL_BTN}
           >
-            <ArrowLeftRight size={11} />
+            <ArrowLeftRight size={12} />
           </button>
         </div>
         <textarea
@@ -60,7 +65,10 @@ export function DbmlDiffPanel({
         />
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto p-2">
+      <div className="relative min-h-0 flex-1 overflow-auto p-2 pr-10">
+        <div className="absolute right-2 top-2 z-10">
+          <ToolClose onClose={onClose} />
+        </div>
         {diff === null ? (
           <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("dbml.diff.empty")}</p>
         ) : !diff.changed ? (

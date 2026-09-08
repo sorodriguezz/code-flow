@@ -5,6 +5,7 @@ import { INPUT } from "../db/dbChrome";
 import type { SqlImportDialect } from "../../lib/dbml/parse";
 import { apiReadTextFile } from "../../lib/tauri/apiCommands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { TOOL_BAR, TOOL_BTN, TOOL_BTN_PRIMARY, ToolClose } from "./toolChrome";
 import { useT } from "../../state/languageStore";
 
 /** The dialects the importer knows, in the order a paste is most likely to be one of them. */
@@ -31,11 +32,14 @@ export function DbmlImportPanel({
   convert,
   onReplace,
   onAppend,
+  onClose,
 }: {
   /** `sqlToDbmlWithCore`, handed down so the 15 MB parser stays owned by one component. */
   convert: (sql: string, dialect: SqlImportDialect) => string;
   onReplace: (dbml: string) => void;
   onAppend: (dbml: string) => void;
+  /** Closes the tool. Last in the bar's cluster — see `ToolClose`. */
+  onClose: () => void;
 }) {
   const t = useT();
   const [sql, setSql] = useState("");
@@ -69,33 +73,41 @@ export function DbmlImportPanel({
   const tables = result ? (result.match(/^\s*table\s/gim) ?? []).length : 0;
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2 p-2">
-      <div className="flex shrink-0 items-center gap-1.5">
-        <span className="text-[11px] font-medium">{t("dbml.import.paste")}</span>
-        <span className="flex-1" />
-        <Select
-          value={dialect}
-          onChange={(value) => setDialect(value as SqlImportDialect)}
-          options={DIALECTS.map((entry) => ({ value: entry.id, label: entry.label }))}
-          ariaLabel={t("dbml.import.dialect")}
-        />
-        <button
-          type="button"
-          onClick={() => void openFile()}
-          className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-1.5 py-[3px] text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
-        >
-          <FileUp size={11} />
-          {t("dbml.import.openFile")}
-        </button>
-        <button
-          type="button"
-          onClick={run}
-          disabled={!sql.trim()}
-          className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-[3px] text-[10.5px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-        >
-          <Wand2 size={11} />
-          {t("dbml.import.convert")}
-        </button>
+    <div className="flex h-full min-h-0 flex-col gap-2 p-2 pt-0">
+      <div className={`${TOOL_BAR} -mx-2 px-2`}>
+        <span className="text-[11px] font-medium text-[var(--cf-text)]">
+          {t("dbml.import.paste")}
+        </span>
+
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          {/* Boxed at a fixed width: the trigger is `w-full`, so in a flex row it grew to whatever
+              was left over — half the bar on a wide drawer — and pushed the two buttons beside it
+              into wrapping, which is what made them read as leftovers. */}
+          <div className="w-[132px] shrink-0">
+            <Select
+              value={dialect}
+              onChange={(value) => setDialect(value as SqlImportDialect)}
+              options={DIALECTS.map((entry) => ({ value: entry.id, label: entry.label }))}
+              ariaLabel={t("dbml.import.dialect")}
+              size="compact"
+              className="h-[26px]"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => void openFile()}
+            title={t("dbml.import.openFileHint")}
+            className={TOOL_BTN}
+          >
+            <FileUp size={12} />
+            {t("dbml.import.openFile")}
+          </button>
+          <button type="button" onClick={run} disabled={!sql.trim()} className={TOOL_BTN_PRIMARY}>
+            <Wand2 size={12} />
+            {t("dbml.import.convert")}
+          </button>
+          <ToolClose onClose={onClose} />
+        </div>
       </div>
 
       <textarea
@@ -108,25 +120,18 @@ export function DbmlImportPanel({
 
       {result !== null && (
         <div className="flex min-h-0 flex-[1.2] flex-col gap-1.5">
-          <div className="flex shrink-0 items-center gap-1.5">
-            <span className="text-[10.5px] text-[var(--cf-text-muted)]">
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-[var(--cf-text-muted)]">
               {t("dbml.import.result", { count: String(tables) })}
             </span>
-            <span className="flex-1" />
-            <button
-              type="button"
-              onClick={() => onAppend(result)}
-              className="rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
-            >
-              {t("dbml.import.append")}
-            </button>
-            <button
-              type="button"
-              onClick={() => onReplace(result)}
-              className="rounded-md bg-[var(--cf-accent)] px-2 py-[3px] text-[10.5px] font-medium text-white transition-opacity hover:opacity-90"
-            >
-              {t("dbml.import.replace")}
-            </button>
+            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+              <button type="button" onClick={() => onAppend(result)} className={TOOL_BTN}>
+                {t("dbml.import.append")}
+              </button>
+              <button type="button" onClick={() => onReplace(result)} className={TOOL_BTN_PRIMARY}>
+                {t("dbml.import.replace")}
+              </button>
+            </div>
           </div>
           <pre className="min-h-0 flex-1 overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] p-2 font-mono text-[11px] leading-relaxed">
             {result}

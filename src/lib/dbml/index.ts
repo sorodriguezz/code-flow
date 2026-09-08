@@ -20,7 +20,9 @@ export { sqlToDbml } from "./sqlToDbml";
 export { schemaToDbml } from "./fromSchema";
 export {
   convert,
+  CONVERSION_KINDS,
   CONVERSION_TARGETS,
+  type ConversionKind,
   type ConversionTarget,
   type SqlDialect,
 } from "./converters";

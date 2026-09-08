@@ -34,7 +34,11 @@ const ENUM_KIND = "collection" as const;
  * emptying the enum cards — an enum has no primary key, and a column filter that ran over it would
  * leave a header with nothing under it.
  */
-export function toSchemaDiagram(schema: DbmlSchema, mode: DiagramColumnMode): DbSchemaDiagram {
+export function toSchemaDiagram(
+  schema: DbmlSchema,
+  mode: DiagramColumnMode,
+  counts?: Record<string, number>,
+): DbSchemaDiagram {
   // Which columns are an end of some reference. `foreign_key` drives the little link glyph in the
   // box and — through `erLayout`'s own filter — which columns survive "keys only".
   const linked = new Set<string>();
@@ -83,7 +87,7 @@ export function toSchemaDiagram(schema: DbmlSchema, mode: DiagramColumnMode): Db
         mode === "all"
           ? columns
           : columns.filter((column) => column.primary_key || column.foreign_key),
-      row_estimate: null,
+      row_estimate: counts?.[table.id] ?? null,
     };
   });
 
@@ -252,9 +256,18 @@ export function layoutDbml(
     density: DiagramDensity;
     /** The boxes the user has dragged, by table id. Everything else is placed by the engine. */
     pinned: Record<string, { x: number; y: number }>;
+    /**
+     * Rows per table in the scratch database, when one has been built.
+     *
+     * `DiagramNode.rowEstimate` has been wired end to end since the Database workspace's ER view;
+     * the DBML translation set it to `null` by hand because a document has no rows. Now it can, so
+     * it is filled — and the number rides in the header band, which is why nothing about geometry
+     * moves: not `rowY`, not `rowAt`, not the router's obstacles, not `route.test.ts`.
+     */
+    counts?: Record<string, number>;
   },
 ): DbmlLayout {
-  const diagram = toSchemaDiagram(schema, options.mode);
+  const diagram = toSchemaDiagram(schema, options.mode, options.counts);
   const groupBy = new Map<string, string>();
   for (const group of schema.groups) {
     for (const id of group.tables) groupBy.set(id, group.id);

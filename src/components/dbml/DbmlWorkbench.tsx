@@ -12,11 +12,15 @@ import type { editor as MonacoEditorNS } from "monaco-editor";
 import {
   AlertTriangle,
   BookOpen,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Columns3,
   Download,
   Expand,
+  FileCode2,
+  FileUp,
+  GitCompare,
   History,
   LayoutGrid,
   Maximize2,
@@ -29,6 +33,7 @@ import {
   Sparkles,
   Table2,
   Wand2,
+  Wrench,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -41,6 +46,7 @@ import { DbmlReference } from "./DbmlReference";
 import { DbmlConvertPanel } from "./DbmlConvertPanel";
 import { DbmlDiffPanel } from "./DbmlDiffPanel";
 import { DbmlImportPanel } from "./DbmlImportPanel";
+import { DbmlDataPanel } from "./DbmlDataPanel";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -53,6 +59,7 @@ import { mergeDbml } from "../../lib/dbml/merge";
 import { pushRevision, type Revision, type RevisionCause } from "../../lib/dbml/history";
 import { readLayout, writeLayout, type DbmlMarkKind, type DbmlMarks } from "../../lib/dbml/layout";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
+import { sandboxOf, useSandboxStore } from "../../state/sandboxStore";
 import type { SqlImportDialect } from "../../lib/dbml/parse";
 import { rasterize, standaloneSvg } from "../../lib/diagramSvg";
 // The one ceiling on a stored picture, imported rather than restated: it is a property of what the
@@ -121,7 +128,56 @@ const THUMBNAIL_DEBOUNCE_MS = 1400;
  *  revision is still there when you reach for it. */
 const REVISION_DEBOUNCE_MS = 900;
 
-type Surface = "diagram" | "convert" | "import" | "diff";
+/**
+ * The two things you alternate between mid-thought.
+ *
+ * It used to be four, and the segmented control's own comment already argued why they belonged in
+ * one group — "four views of the same document, not four commands". With two that argument gets
+ * stronger rather than weaker: Diagrama and Datos are the only pair you switch between while
+ * holding a question in your head. Generate code, Import SQL and Compare are whole, occasional
+ * things you go and do, which is what a drawer is for — see `Tool`.
+ */
+type Surface = "diagram" | "data";
+
+/**
+ * The three tools, as a drawer over the canvas rather than as surfaces.
+ *
+ * Three reasons, in the order they matter. **A surface unmounts the canvas and loses your place**:
+ * `DbmlCanvas` holds pan and zoom in local state, so going to Compare and back used to throw away
+ * your framing; with a drawer, Escape and you are where you were. **The precedent is already here**
+ * — `DbmlHistory` and `DbmlReference` are whole, occasional things that are already toggled panels.
+ * And **Import gains something from the move**: it is the only one that writes back, so as a drawer
+ * it closes itself on apply and leaves you on the diagram it just changed.
+ */
+type Tool = "convert" | "import" | "diff";
+
+/**
+ * The three, in order, each with the glyph it is marked by.
+ *
+ * One list rather than three literals: the drawer's tabs, the toolbar menu and the button's label
+ * all have to name the same three things in the same order, and they used to do it from three
+ * separate `["convert", "import", "diff"]` arrays.
+ */
+const TOOLS: { id: Tool; Icon: typeof FileCode2 }[] = [
+  { id: "convert", Icon: FileCode2 },
+  { id: "import", Icon: FileUp },
+  { id: "diff", Icon: GitCompare },
+];
+
+/**
+ * One position of the view control — Diagrama, Datos, or the tool.
+ *
+ * The selected one is filled in the accent and the others are muted, and that is the whole contract
+ * the control has to keep: exactly one of the three is what you are looking at.
+ */
+function viewPill(selected: boolean): string {
+  return (
+    "flex items-center gap-1 rounded-md px-2.5 py-[3px] text-[11px] font-medium transition-colors " +
+    (selected
+      ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+      : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]")
+  );
+}
 
 interface Parser {
   parseDbml: (doc: string) => DbmlSchema;
@@ -156,6 +212,24 @@ export function DbmlWorkbench({
   const commitSize = useLayoutStore((s) => s.commitSize);
 
   const [surface, setSurface] = useState<Surface>("diagram");
+  /** Which tool drawer is open, or `null`. One at a time — they are alternatives, not panes. */
+  const [tool, setTool] = useState<Tool | null>(null);
+  const [toolsAt, setToolsAt] = useState<DOMRect | null>(null);
+  /**
+   * What the Datos pill says, read straight from the sandbox store.
+   *
+   * Subscribed here rather than lifted out of the panel because the panel is *unmounted* while you
+   * are on the diagram, and "your data is stale" is exactly the thing you want to learn without
+   * having to go and look.
+   */
+  const sandbox = useSandboxStore(sandboxOf(diagramId));
+  const sandboxRows = useMemo(
+    () =>
+      Object.values(sandbox.status?.counts ?? {}).reduce((total, count) => total + count, 0),
+    [sandbox.status],
+  );
+  const sandboxDrifted = sandbox.drift !== null && !sandbox.driftIgnored;
+
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   /** Only so the canvas's chip can print it. Updated when the rounded percentage actually moves,
@@ -249,6 +323,23 @@ export function DbmlWorkbench({
 
   const [parser, setParser] = useState<Parser | null>(null);
   const [schema, setSchema] = useState<DbmlSchema>(EMPTY_SCHEMA);
+  /** The latest parse, for effects that want it without wanting to re-run on every keystroke. */
+  const schemaRef = useRef(schema);
+  schemaRef.current = schema;
+
+  /**
+   * Read the sandbox's status once when the workbench opens, without waiting for Datos to be
+   * visited.
+   *
+   * The counts on the canvas and the state on the Datos pill both exist so you learn about your
+   * data *without* going to look at it — which they could not do if they only appeared after you
+   * had. Keyed on the diagram and not on `schema`, through the ref above: this is the "is there
+   * one, and how big" read. Whether the model has moved under it is re-derived by the panel, on
+   * every parse, while you are actually there.
+   */
+  useEffect(() => {
+    void useSandboxStore.getState().refresh(diagramId, schemaRef.current);
+  }, [diagramId]);
   useEffect(() => {
     let cancelled = false;
     void import("../../lib/dbml/parse")
@@ -528,6 +619,8 @@ export function DbmlWorkbench({
     setHistory(false);
     setViewAt(null);
     setExportAt(null);
+    setTool(null);
+    setToolsAt(null);
   };
 
   const leaveZen = useCallback(() => {
@@ -835,14 +928,17 @@ export function DbmlWorkbench({
   /**
    * Escape leaves full screen — but only when nothing nearer wants the press.
    *
-   * Four things in this workbench already answer Escape and each of them must win it: the history
-   * and reference panels close themselves, the View and export menus dismiss, and every text field
-   * on screen (the search box, the canvas's rename input, the inspector's editors) treats it as
-   * "abandon what I am typing". Hence the guards on the subscription rather than inside the
-   * handler: while any of those is open this listener is not bound at all.
+   * Five things in this workbench already answer Escape and each of them must win it: the history
+   * and reference panels close themselves, the tools drawer closes, the View and export menus
+   * dismiss, and every text field on screen (the search box, the canvas's rename input, the
+   * inspector's editors) treats it as "abandon what I am typing". Hence the guards on the
+   * subscription rather than inside the handler: while any of those is open this listener is not
+   * bound at all.
    */
   useEffect(() => {
-    if (!zen || history || reference || viewAt !== null || exportAt !== null) return;
+    if (!zen || history || reference || viewAt !== null || exportAt !== null || tool !== null) {
+      return;
+    }
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       if (isTypingTarget(event.target)) return;
@@ -850,7 +946,26 @@ export function DbmlWorkbench({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [zen, history, reference, viewAt, exportAt, leaveZen]);
+  }, [zen, history, reference, viewAt, exportAt, tool, leaveZen]);
+
+  /**
+   * Escape closes the tools drawer.
+   *
+   * Its own listener rather than a branch in the one above, because the two must never both answer
+   * a press: the full-screen listener is guarded off while `tool` is set, so exactly one of them is
+   * bound at any moment. The same typing guard applies — the import panel is a textarea, and
+   * Escape in it means "abandon what I am typing", not "close the panel I am typing into".
+   */
+  useEffect(() => {
+    if (tool === null) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (isTypingTarget(event.target)) return;
+      setTool(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [tool]);
 
   /**
    * Re-fit on the way into and out of full screen.
@@ -970,23 +1085,69 @@ export function DbmlWorkbench({
       )}
       {!zen && (
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5">
-        {/* One segmented control rather than four loose buttons: these are four views of the same
-            document, not four commands, and a group reads as "pick one". */}
+        {/* One segmented control with *three* positions, because there are three things that can be
+            in front of you and only ever one of them is.
+
+            The tools button used to sit outside this group, bordered, on the theory that it was a
+            menu rather than a view. It isn't: what it opens covers the surface whole. Outside the
+            group it left Diagrama filled in the accent while Comparar was what you were reading —
+            the control claiming the canvas was showing while a panel covered it. Inside, the rule
+            is simple and visible: whichever one is filled is what you are looking at, and pressing
+            another replaces it. */}
         <div className="flex items-center gap-[2px] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-field)] p-[2px]">
-          {(["diagram", "convert", "import", "diff"] as const).map((entry) => (
+          {(["diagram", "data"] as const).map((entry) => (
             <button
               key={entry}
               type="button"
-              onClick={() => setSurface(entry)}
-              className={`rounded-md px-2.5 py-[3px] text-[11px] font-medium transition-colors ${
-                surface === entry
-                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-              }`}
+              onClick={() => {
+                setSurface(entry);
+                // Diagrama and Datos *are* the view. A tool left open over the surface you just
+                // chose would mean pressing Datos and still looking at generated Prisma.
+                setTool(null);
+              }}
+              // Only when no tool is covering it — see the note above.
+              aria-pressed={tool === null && surface === entry}
+              className={viewPill(tool === null && surface === entry)}
             >
               {t(`dbml.tab.${entry}` as "dbml.tab.diagram")}
+              {/* The Datos pill carries state, so the diagram can tell you your data is stale
+                  without your going to look. The count is what there is; the amber dot is that the
+                  model has moved under it. */}
+              {entry === "data" && sandboxRows > 0 && (
+                <span className="font-mono text-[9.5px] tabular-nums opacity-70">
+                  {sandboxRows}
+                </span>
+              )}
+              {entry === "data" && sandboxDrifted && (
+                <span
+                  aria-hidden
+                  className="h-[5px] w-[5px] rounded-full bg-[var(--cf-warning)]"
+                />
+              )}
             </button>
           ))}
+
+          {/* The third position. It is one button and not three because the three tools are
+              alternatives to *this slot*, not to each other — so the chevron: press it and pick
+              which one goes here. Once one is open the pill wears that tool's name and glyph, which
+              is what makes the group readable at a glance: Diagrama, Datos, Comparar. */}
+          {(() => {
+            const open = TOOLS.find((entry) => entry.id === tool);
+            const Icon = open ? open.Icon : Wrench;
+            return (
+              <button
+                type="button"
+                onClick={(event) => setToolsAt(event.currentTarget.getBoundingClientRect())}
+                aria-pressed={tool !== null}
+                aria-haspopup="menu"
+                className={viewPill(tool !== null)}
+              >
+                <Icon size={11} />
+                {open ? t(`dbml.tab.${open.id}` as "dbml.tab.convert") : t("dbml.tools")}
+                <ChevronDown size={11} className="opacity-70" />
+              </button>
+            );
+          })()}
         </div>
 
         <span className="flex-1" />
@@ -1052,14 +1213,14 @@ export function DbmlWorkbench({
           <Sparkles size={12} />
         </ToolbarButton>
         {/* Full screen last, next to the sparkle: both are things you do *to the view* rather than
-            to the document. Disabled on the other three surfaces — there is no canvas to fill. */}
-        {/* Disabled while the AI panel is open rather than left to be undone a tick later by the
-            effect below: pressing it then closed the reference and history panels and re-fitted the
-            canvas on the way to doing nothing at all. */}
+            to the document. Disabled on the Datos surface — there is no canvas to fill. */}
+        {/* Disabled while the AI panel or a tool drawer is open rather than left to be undone a tick
+            later by the effect below: pressing it then closed the reference and history panels and
+            re-fitted the canvas on the way to doing nothing at all. */}
         <ToolbarButton
           onClick={enterZen}
           title={t("dbml.zen")}
-          disabled={surface !== "diagram" || aiOpen}
+          disabled={surface !== "diagram" || aiOpen || tool !== null}
         >
           <Expand size={12} />
         </ToolbarButton>
@@ -1167,6 +1328,11 @@ export function DbmlWorkbench({
           <EdgeTab
             side="left"
             open={editorOpen}
+            // Kept above the tools drawer, and it is the only control that is. The drawer covers
+            // this container whole, and the pane this handle folds is *outside* it — so folding the
+            // text away is how a tool gets the width of the window, and burying the handle under
+            // the panel would mean closing the tool to make room for it.
+            above
             title={t(editorOpen ? "dbml.collapseEditor" : "dbml.expandEditor")}
             onClick={toggleEditorPane}
           />
@@ -1191,6 +1357,7 @@ export function DbmlWorkbench({
                       ref={canvas}
                       schema={schema}
                       positions={positions}
+                      rowCounts={sandbox.status?.counts}
                       onMoveTable={moveTable}
                       selected={selected}
                       onSelect={selectFromCanvas}
@@ -1488,31 +1655,70 @@ export function DbmlWorkbench({
               </div>
             ))}
 
-          {surface === "convert" && <DbmlConvertPanel schema={schema} title={title} />}
+          {surface === "data" && (
+            <DbmlDataPanel diagramId={diagramId} schema={schema} onFocusTable={revealTable} />
+          )}
 
-          {surface === "import" &&
-            (parser ? (
-              <DbmlImportPanel
-                convert={parser.sqlToDbmlWithCore}
-                onReplace={(dbml) => {
-                  cause.current = "imported";
-                  writeSource(dbml);
-                }}
-                onAppend={(dbml) => {
-                  cause.current = "merged";
-                  editDoc(mergeDbml(doc, dbml));
-                }}
-              />
-            ) : (
-              <ViewSkeleton />
-            ))}
+          {/* The tools, as a drawer over whatever surface is showing — over the *whole* of it.
+              It used to leave a 420px strip of canvas uncovered, on the theory that Generate code is
+              read while you type. It isn't: the DBML editor is its own pane, to the left of this
+              container and never covered either way, so all the strip bought was a sliver of diagram
+              too narrow to read and three panels squeezed into two thirds of the room they wanted —
+              ten code targets and a two-column diff, wrapping. Full width, and the thing you came
+              here to read is the thing you can see.
 
-          {surface === "diff" &&
-            (parser ? (
-              <DbmlDiffPanel schema={schema} parse={parser.parseDbml} />
-            ) : (
-              <ViewSkeleton />
-            ))}
+              **No close-on-click-outside**, and that is a detail deliberately not copied from the
+              precedent. `DbmlHistory`'s backdrop is `onMouseDown={onClose}`, and
+              `DbmlImportPanel` keeps its pasted SQL in local `useState`. Copy that here and a
+              stray click eats a SQL dump somebody just pasted. Escape and the X are the ways out,
+              and both are deliberate.
+          */}
+          {tool !== null && (
+            <div className="absolute inset-0 z-30 flex flex-col border-l border-[var(--cf-border)] bg-[var(--cf-surface)]">
+              {/* No bar of its own, and that is the point: the panel *is* the drawer. A title bar
+                  here would be the third row of chrome above the same code — the toolbar already
+                  names the open tool and offers the other two, and each panel already has a row of
+                  its own actions. So the way out lives in that row, last in the cluster, instead of
+                  in a strip that exists to hold one X. */}
+              {/* All three stay mounted and are hidden rather than swapped out. `DbmlImportPanel`
+                  holds its pasted SQL in `useState`, so unmounting it to show another tool would
+                  eat a dump somebody had just pasted in. */}
+              <div className="min-h-0 flex-1" hidden={tool !== "convert"}>
+                <DbmlConvertPanel schema={schema} title={title} onClose={() => setTool(null)} />
+              </div>
+              <div className="min-h-0 flex-1" hidden={tool !== "import"}>
+                {parser ? (
+                  <DbmlImportPanel
+                    onClose={() => setTool(null)}
+                    convert={parser.sqlToDbmlWithCore}
+                    onReplace={(dbml) => {
+                      cause.current = "imported";
+                      writeSource(dbml);
+                      setTool(null);
+                    }}
+                    onAppend={(dbml) => {
+                      cause.current = "merged";
+                      editDoc(mergeDbml(doc, dbml));
+                      setTool(null);
+                    }}
+                  />
+                ) : (
+                  <ViewSkeleton />
+                )}
+              </div>
+              <div className="min-h-0 flex-1" hidden={tool !== "diff"}>
+                {parser ? (
+                  <DbmlDiffPanel
+                    schema={schema}
+                    parse={parser.parseDbml}
+                    onClose={() => setTool(null)}
+                  />
+                ) : (
+                  <ViewSkeleton />
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1539,6 +1745,38 @@ export function DbmlWorkbench({
           y={exportAt.y}
           items={exportItems}
           onClose={() => setExportAt(null)}
+        />
+      )}
+
+      {toolsAt && (
+        <ContextMenu
+          x={toolsAt.left}
+          y={toolsAt.bottom}
+          anchor={{
+            top: toolsAt.top,
+            bottom: toolsAt.bottom,
+            left: toolsAt.left,
+            right: toolsAt.right,
+            align: "start",
+          }}
+          onClose={() => setToolsAt(null)}
+          items={TOOLS.map(({ id: entry, Icon }) => ({
+            label: t(`dbml.tab.${entry}` as "dbml.tab.convert"),
+            icon: Icon,
+            // The open one, in the accent. `leading` wins over `icon`, so this is the same glyph
+            // in a different colour rather than a tick that would replace it.
+            leading:
+              entry === tool ? (
+                <Icon size={13} className="mt-[2px] shrink-0 text-[var(--cf-accent)]" />
+              ) : undefined,
+            onClick: () => {
+              // Opening a tool leaves full screen, for the same reason the history modal does: the
+              // drawer would otherwise sit over a black canvas with the control that opened it off
+              // the screen.
+              if (zen) leaveZen();
+              setTool(entry);
+            },
+          }))}
         />
       )}
     </div>
@@ -1572,11 +1810,14 @@ function EdgeTab({
   open,
   title,
   onClick,
+  above = false,
 }: {
   side: "left" | "right";
   open: boolean;
   title: string;
   onClick: () => void;
+  /** Draw over the tools drawer instead of under it — see the left tab's note. */
+  above?: boolean;
 }) {
   // Pointing away from the canvas closes; pointing into it opens.
   const pointsLeft = side === "left" ? open : !open;
@@ -1588,7 +1829,7 @@ function EdgeTab({
       title={title}
       aria-label={title}
       aria-expanded={open}
-      className={`absolute top-1/2 z-20 flex h-11 w-[13px] -translate-y-1/2 items-center justify-center border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 text-[var(--cf-text-muted)] backdrop-blur transition-colors hover:text-[var(--cf-accent)] ${
+      className={`absolute top-1/2 ${above ? "z-40" : "z-20"} flex h-11 w-[13px] -translate-y-1/2 items-center justify-center border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 text-[var(--cf-text-muted)] backdrop-blur transition-colors hover:text-[var(--cf-accent)] ${
         side === "left" ? "left-0 rounded-r-md border-l-0" : "right-0 rounded-l-md border-r-0"
       }`}
     >

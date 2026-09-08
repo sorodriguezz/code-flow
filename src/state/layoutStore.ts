@@ -41,6 +41,7 @@ export type LayoutKey =
   | "vaultSidebarWidth"
   | "dbmlEditorWidth"
   | "dbmlInspectorWidth"
+  | "dbmlConsoleHeight"
   | "pipelinesListWidth"
   | "pipelinesGraphHeight"
   | "servicesListWidth";
@@ -85,6 +86,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   vaultSidebarWidth: "layout_vault_sidebar_width",
   dbmlEditorWidth: "layout_dbml_editor_width",
   dbmlInspectorWidth: "layout_dbml_inspector_width",
+  dbmlConsoleHeight: "layout_dbml_console_height",
   pipelinesListWidth: "layout_pipelines_list_width",
   pipelinesGraphHeight: "layout_pipelines_graph_height",
   servicesListWidth: "layout_services_list_width",
@@ -164,6 +166,10 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // than this and the badges drift away from the names they mark; the seam is there for the schema
   // that has a `varchar` long enough to need it.
   dbmlInspectorWidth: 236,
+  // The SQL console under the grid. Tall enough on a 13" screen to hold a four-line query *and*
+  // the first rows of what it returned without dragging anything: a console you have to resize
+  // before you can read your own result is one people stop opening.
+  dbmlConsoleHeight: 300,
   // Wider than a plain list needs, because each row carries three things a CI list is read for:
   // the workflow's name, the branch, and the strip showing how many jobs ran at once.
   pipelinesListWidth: 292,

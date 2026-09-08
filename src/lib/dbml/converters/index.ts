@@ -30,28 +30,42 @@ export type ConversionTarget =
   | "laravel";
 
 /**
- * What each target is called, what its file is called, and which editor language colours it.
+ * What kind of thing a target is: a database's own DDL, an ORM's model file, or an ODM's schema.
  *
- * One table rather than three switch statements, because these three facts are always wanted
- * together: the tab shows the label, the download uses the extension, and the viewer needs the
+ * Here rather than in the panel because it is a fact about the target, not about how it is drawn —
+ * and because ten flat buttons is a list you read, while three short ones is a choice you make. The
+ * ids are the labels: SQL, ORM and ODM are the same three words in every language this app speaks.
+ */
+export type ConversionKind = "sql" | "orm" | "odm";
+
+/** The groups, in the order the panel offers them. */
+export const CONVERSION_KINDS: ConversionKind[] = ["sql", "orm", "odm"];
+
+/**
+ * What each target is called, what kind of thing it is, what its file is called, and which editor
+ * language colours it.
+ *
+ * One table rather than four switch statements, because these facts are always wanted together: the
+ * tab shows the label under its kind, the download uses the extension, and the viewer needs the
  * language. `label` is not translated — these are product names.
  */
 export const CONVERSION_TARGETS: {
   id: ConversionTarget;
   label: string;
+  kind: ConversionKind;
   extension: string;
   language: string;
 }[] = [
-  { id: "postgresql", label: "PostgreSQL", extension: "sql", language: "sql" },
-  { id: "sqlserver", label: "SQL Server", extension: "sql", language: "sql" },
-  { id: "mongodb", label: "Mongoose", extension: "js", language: "javascript" },
-  { id: "typeorm", label: "TypeORM", extension: "ts", language: "typescript" },
-  { id: "prisma", label: "Prisma", extension: "prisma", language: "prisma" },
-  { id: "drizzle", label: "Drizzle", extension: "ts", language: "typescript" },
-  { id: "sequelize", label: "Sequelize", extension: "ts", language: "typescript" },
-  { id: "jpa", label: "JPA", extension: "java", language: "java" },
-  { id: "gorm", label: "GORM", extension: "go", language: "go" },
-  { id: "laravel", label: "Laravel", extension: "php", language: "php" },
+  { id: "postgresql", label: "PostgreSQL", kind: "sql", extension: "sql", language: "sql" },
+  { id: "sqlserver", label: "SQL Server", kind: "sql", extension: "sql", language: "sql" },
+  { id: "mongodb", label: "Mongoose", kind: "odm", extension: "js", language: "javascript" },
+  { id: "typeorm", label: "TypeORM", kind: "orm", extension: "ts", language: "typescript" },
+  { id: "prisma", label: "Prisma", kind: "orm", extension: "prisma", language: "prisma" },
+  { id: "drizzle", label: "Drizzle", kind: "orm", extension: "ts", language: "typescript" },
+  { id: "sequelize", label: "Sequelize", kind: "orm", extension: "ts", language: "typescript" },
+  { id: "jpa", label: "JPA", kind: "orm", extension: "java", language: "java" },
+  { id: "gorm", label: "GORM", kind: "orm", extension: "go", language: "go" },
+  { id: "laravel", label: "Laravel", kind: "orm", extension: "php", language: "php" },
 ];
 
 /** Generates `target`'s code for `schema`. Pure, and cheap enough to run on every keystroke. */
