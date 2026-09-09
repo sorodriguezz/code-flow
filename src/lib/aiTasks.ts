@@ -55,6 +55,11 @@ export const AI_TASKS: AiTaskDef[] = [
   // Its own row rather than sharing the notes one, because the two produce different things and a
   // team routinely wants the cheaper engine for one of them.
   { key: "diagram", labelKey: "task.diagram", hintKey: "task.diagramHint", area: "data" },
+  // Its own row rather than riding on `diagram`, which is its closest relative: drawing a schema is
+  // one short answer and filling it is fifteen tables of data, so this is the long, cheap,
+  // repetitive one — exactly the job a team points at a different engine. Text-only: the reply is
+  // JSON that CodeFlow validates against the schema and inserts itself, so it routes anywhere.
+  { key: "sample_rows", labelKey: "task.sampleRows", hintKey: "task.sampleRowsHint", area: "data" },
   { key: "stories", labelKey: "task.stories", hintKey: "task.storiesHint", area: "stories" },
   // Reads the repository to answer, so it needs an engine with tools — a text-only local model
   // would answer from the criteria alone, which is the confident-and-wrong verdict this whole

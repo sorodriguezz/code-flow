@@ -503,6 +503,53 @@ pub async fn diagrams_draw_with_ai(
     .await
 }
 
+/// Asks an engine for sample rows for a DBML schema, as JSON.
+///
+/// Sibling of [`diagrams_draw_with_ai`] and routed through the same config and run log, but the
+/// answer is *data for a database* rather than a picture — so nothing it says reaches SQLite
+/// unchecked: `lib/dbml/aiFill.ts` validates every value against the schema and builds the
+/// `INSERT`s itself. See [`ai::fill_rows`].
+#[tauri::command]
+pub async fn diagrams_fill_rows_with_ai(
+    app: AppHandle,
+    db: State<'_, Db>,
+    schema: String,
+    instruction: String,
+    // How many rows per table to ask for. Advice to the model, not a limit — the cap that protects
+    // the sandbox is `AI_FILL_MAX_ROWS` in the frontend, where the rows are actually counted.
+    rows: Option<u32>,
+    // The tables this pass is for, or empty for all of them. A big schema is filled in several
+    // passes because one answer covering fifteen tables is an answer the engine truncates.
+    only: Option<Vec<String>>,
+    // `tabla.columna: v1, v2, …` for the keys already in the sandbox, so a later pass can point
+    // its foreign keys at rows that exist rather than guessing ids.
+    keys: Option<String>,
+    run_id: Option<String>,
+) -> Result<String, String> {
+    let (config, template) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        (
+            load_ai_config(&conn, AiTask::SampleRows)?,
+            crate::commands::claude_cmd::shared_template(&conn, "sample_rows_template", "")?,
+        )
+    };
+    ai_runs::scoped(app, run_id, async {
+        ai::fill_rows(
+            &*config.engine,
+            &config.binary,
+            &config.model,
+            &template,
+            &schema,
+            &instruction,
+            rows.unwrap_or(20),
+            &only.unwrap_or_default(),
+            keys.as_deref().unwrap_or(""),
+        )
+        .await
+    })
+    .await
+}
+
 // ---------- import ----------
 
 /// Reads a `.drawio` file the user just picked in a dialog.

@@ -93,6 +93,32 @@ export function clip(text: string, width: number, advance = 5.9): string {
 }
 
 /**
+ * The rectangle the whole export is framed on, in the diagram's own coordinates.
+ *
+ * Three things have to agree on it — the file's `width`/`height`, its `viewBox` and the opaque
+ * ground drawn behind everything — so it is computed once and read three times. It used to be
+ * computed inline at each of them, which is exactly how the ground ended up anchored at `0 0` while
+ * the viewBox was anchored on the layout's origin.
+ *
+ * Anchored on that origin, not on `0 0`. They are the same until a box is dragged above or to the
+ * left of where the engine put it, and from that moment a `0 0` viewBox is a pair of scissors:
+ * everything at a negative coordinate is simply absent from the file.
+ */
+export function exportFrame(layout: DiagramLayout): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  return {
+    x: Math.floor(layout.minX),
+    y: Math.floor(layout.minY),
+    width: Math.ceil(layout.width),
+    height: Math.ceil(layout.height),
+  };
+}
+
+/**
  * The rendered diagram as a file that opens anywhere.
  *
  * The screen's SVG is themed with CSS custom properties, which mean nothing outside this window —
@@ -129,22 +155,26 @@ export function standaloneSvg(
   // for, so names that fit here would overrun there. Named explicitly, and the raster export goes
   // through the same string, so the PNG matches the SVG.
   clone.setAttribute("font-family", getComputedStyle(source).fontFamily || "system-ui, sans-serif");
-  clone.setAttribute("width", String(Math.ceil(layout.width)));
-  clone.setAttribute("height", String(Math.ceil(layout.height)));
-  // Anchored on the layout's own origin, not on `0 0`. They are the same until a box is dragged
-  // above or to the left of where the engine put it, and from that moment a `0 0` viewBox is a pair
-  // of scissors: everything at a negative coordinate is simply absent from the file.
-  clone.setAttribute(
-    "viewBox",
-    `${Math.floor(layout.minX)} ${Math.floor(layout.minY)} ${Math.ceil(layout.width)} ${Math.ceil(layout.height)}`,
-  );
+
+  const frame = exportFrame(layout);
+  clone.setAttribute("width", String(frame.width));
+  clone.setAttribute("height", String(frame.height));
+  clone.setAttribute("viewBox", `${frame.x} ${frame.y} ${frame.width} ${frame.height}`);
   clone.removeAttribute("class");
 
   // An opaque background, prepended so it sits behind everything: an SVG with a transparent ground
   // opens as dark-on-dark in any viewer whose own page is dark.
+  //
+  // Given the frame's own coordinates rather than `0 0` and `100%`. A percentage is resolved
+  // against the viewport's *size*, so `0 0 100% 100%` is the right rectangle in the wrong place the
+  // moment the frame's origin is negative — which is what dragging a box above or to the left of
+  // where the engine put it does. The ground then covered only the part of the diagram at positive
+  // coordinates, and a PNG came out as a block of colour in one corner with the rest transparent.
   const background = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-  background.setAttribute("width", "100%");
-  background.setAttribute("height", "100%");
+  background.setAttribute("x", String(frame.x));
+  background.setAttribute("y", String(frame.y));
+  background.setAttribute("width", String(frame.width));
+  background.setAttribute("height", String(frame.height));
   background.setAttribute("fill", resolve("var(--cf-bg)"));
   clone.insertBefore(background, clone.firstChild);
 

@@ -29,6 +29,8 @@ import {
   LayoutGrid,
   ListOrdered,
   Pencil,
+  Pin,
+  PinOff,
   Plus,
   Table2,
   Trash2,
@@ -153,6 +155,26 @@ const PAD_X = 11;
 const GUTTER = 13;
 const BADGE_H = 13;
 const HEADER_H = 34;
+/**
+ * What the pin glyph costs the header: the 11px drawing plus the clearance either side of it.
+ *
+ * It is subtracted from what the *name* may occupy, so the two can never meet — worked through for
+ * the tightest case, a table both marked and pinned: the glyph then sits 13px left of the mark dot,
+ * its left edge at `width - 49`, and a name clipped against this reserve cannot reach past
+ * `width - 50`.
+ */
+const PIN_SLOT = 16;
+/**
+ * The pin, as the same drawing the inspector's button uses.
+ *
+ * Lucide's `Pin` path, inlined rather than rendered as a component. Two reasons, both about the
+ * export: a lucide icon is an `<svg>` of its own, which would have to be placed by `x`/`y` inside
+ * this one, and it paints itself in `currentColor` — which resolves against a cascade the exported
+ * file does not have, so the glyph that reads as the accent on screen would arrive in the PNG as
+ * black. `standaloneSvg` substitutes `var(--…)` and nothing else, so the colour is written as one.
+ */
+const PIN_PATH =
+  "M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z";
 const ROW_H = 22;
 
 export interface DbmlCanvasHandle {
@@ -215,6 +237,17 @@ export const DbmlCanvas = forwardRef<
     /** Review marks, by table id and by ref id. Drawn whether or not the canvas is editable. */
     marks?: DbmlMarks;
     /**
+     * The table the inspector is held on, if any.
+     *
+     * One id and not a flag, because the pin *is* a table: the workbench holds a boolean beside the
+     * selection, and what the canvas needs is which box that pair adds up to. It is drawn on the
+     * box rather than only in the panel because the panel is what the pin protects — the state it
+     * describes ("clicking another table will not change what you are reading") is about the
+     * canvas, so the canvas is where it has to be visible. Without it, pinning and then clicking
+     * around looks like a panel that stopped responding.
+     */
+    pinnedId?: string | null;
+    /**
      * One relationship to light, from outside the canvas — the inspector's relation rows.
      *
      * It **outranks the selection**, which is the whole point: the inspector only lists relations
@@ -236,12 +269,26 @@ export const DbmlCanvas = forwardRef<
       /**
        * Sets or clears a review mark. `null` clears.
        *
-       * Deliberately *not* gated on `blocked`: every other operation here rewrites DBML and so
-       * cannot run against a schema that no longer describes the text, but a mark is written to the
-       * sidecar comment and touches no DBML at all. Reviewing a model is exactly the activity you
-       * are doing when the document is half-typed, so this is the one control that stays live.
+       * Deliberately *not* gated on `blocked`: every other operation here rewrites DBML from the
+       * parsed schema and so cannot run against a schema that no longer describes the text, while a
+       * mark is written to the sidecar comment, which needs nothing parsed. Reviewing a model is
+       * exactly the activity you are doing when the document is half-typed, so this is the one
+       * control that stays live.
+       *
+       * The workbench *also* writes the mark into the DBML as the comment above the table's
+       * declaration when the document parses — see `setMark` there. That half is best-effort by
+       * design: it needs a table to find, so on a broken document it is skipped and the mark still
+       * lands.
        */
       setMark: (id: string, mark: DbmlMarkKind | null) => void;
+      /**
+       * Holds the inspector on this table, or lets it go. Absent on a caller with no inspector.
+       *
+       * Not gated on `blocked` either, and for the same reason as `setMark`: it writes no DBML at
+       * all — it moves a selection and sets a flag — and "keep this one in front of me while I fix
+       * the syntax error" is a thing you want most while the document is broken.
+       */
+      togglePin?: (id: string) => void;
       /**
        * Throws the hand-arrangement away and lets the layout engine place every box.
        *
@@ -283,6 +330,7 @@ export const DbmlCanvas = forwardRef<
     onMatchCount,
     onNodeCount,
     marks = {},
+    pinnedId = null,
     focusRef = null,
     editing,
     className,
@@ -319,7 +367,14 @@ export const DbmlCanvas = forwardRef<
         y: number;
         // `isEnum` because enum boxes are painted by the same component and get the same menu, and
         // "Delete this table" over an enum is a label that describes the wrong thing.
-        on: { kind: "table"; id: string; name: string; isEnum: boolean; mark?: DbmlMarkKind };
+        on: {
+          kind: "table";
+          id: string;
+          name: string;
+          isEnum: boolean;
+          mark?: DbmlMarkKind;
+          pinned: boolean;
+        };
       }
     | {
         x: number;
@@ -1085,6 +1140,7 @@ export const DbmlCanvas = forwardRef<
               node={node}
               isEnum={layout.enumIds.has(node.id)}
               mark={marks[node.id]}
+              pinned={pinnedId === node.id}
               selected={selected === node.id}
               connect={
                 editing && !editing.blocked
@@ -1111,6 +1167,10 @@ export const DbmlCanvas = forwardRef<
                           name: node.name,
                           isEnum: layout.enumIds.has(node.id),
                           mark: marks[node.id],
+                          // Read from the prop and not from `selected`: right-clicking a table
+                          // while another one is held does not move the selection (`onSelect` is
+                          // refused while pinned), so the two are not the same question.
+                          pinned: pinnedId === node.id,
                         },
                       });
                     }
@@ -1260,7 +1320,14 @@ function markItems(
 
 function menuItems(
   on:
-    | { kind: "table"; id: string; name: string; isEnum: boolean; mark?: DbmlMarkKind }
+    | {
+        kind: "table";
+        id: string;
+        name: string;
+        isEnum: boolean;
+        mark?: DbmlMarkKind;
+        pinned: boolean;
+      }
     | { kind: "ref"; id: string; from: RefEnd; to: RefEnd; mark?: DbmlMarkKind }
     | { kind: "canvas" },
   editing: NonNullable<React.ComponentProps<typeof DbmlCanvas>["editing"]>,
@@ -1273,16 +1340,32 @@ function menuItems(
   if (on.kind === "table") {
     return [
       ...markItems(on.id, on.mark, editing, t),
-      // Navigation, between the marks and the edits, and — like the marks — **not** gated on
-      // `blocked`. Everything below rewrites DBML and so cannot run against a schema that no longer
-      // describes the text; this one searches the text itself and moves a cursor. The worst a stale
-      // name can do here is fail to find a line.
+      // Holding the panel and jumping to the text: one group, between the marks and the edits, and
+      // — like the marks — **not** gated on `blocked`. Everything below rewrites DBML and so cannot
+      // run against a schema that no longer describes the text. These two do not: one moves a
+      // selection, the other searches the text itself and moves a cursor, and the worst a stale
+      // name can do there is fail to find a line.
+      //
+      // The pin is here as well as on the inspector's header because this is where you *are* when
+      // you decide to hold a table — right-clicking the box beats travelling to the panel to press
+      // a 12px button, and it is the only way to reach it at all while the panel is closed.
+      ...(editing.togglePin
+        ? [
+            {
+              // The action, not the state — every other row in this menu reads that way.
+              label: t(on.pinned ? "dbml.unpinTable" : "dbml.pinTable"),
+              icon: on.pinned ? PinOff : Pin,
+              separated: true,
+              onClick: () => editing.togglePin?.(on.id),
+            } satisfies MenuItem,
+          ]
+        : []),
       ...(onOpen
         ? [
             {
               label: t("dbml.goToDefinition"),
               icon: Code2,
-              separated: true,
+              separated: !editing.togglePin,
               onClick: () => onOpen(on.id),
             } satisfies MenuItem,
           ]
@@ -1465,6 +1548,7 @@ const SchemaBox = memo(function SchemaBox({
   node,
   isEnum,
   mark,
+  pinned,
   selected,
   related,
   dimmed,
@@ -1482,6 +1566,8 @@ const SchemaBox = memo(function SchemaBox({
   isEnum: boolean;
   /** The review mark on this table, if it has one. */
   mark?: DbmlMarkKind;
+  /** The inspector is held on this table. */
+  pinned: boolean;
   selected: boolean;
   related: boolean;
   dimmed: boolean;
@@ -1507,7 +1593,11 @@ const SchemaBox = memo(function SchemaBox({
   /** Held rather than inlined: the strikethrough has to be exactly as wide as the drawn name. */
   const title = clip(
     node.schema ? `${node.schema}.${node.name}` : node.name,
-    node.width - 56,
+    // The pin is charged to the *name* rather than allowed to overlap it. The box's width is fixed
+    // by the layout engine and must not change when a table is held — box widths are what the edge
+    // router places lines around — so the one thing that can give is the name, which loses a
+    // character while pinned and gets it back the moment it is let go.
+    node.width - 56 - (pinned ? PIN_SLOT : 0),
     12 * MONO_ADVANCE,
   );
   /**
@@ -1539,7 +1629,8 @@ const SchemaBox = memo(function SchemaBox({
   const countWidth = String(node.visible.length + node.hidden).length * 5.9;
   const showRows =
     rowsLabel !== "" &&
-    nameEnd + 10 + rowsWidth + countWidth + (mark ? 22 : 0) < node.width - PAD_X;
+    nameEnd + 10 + rowsWidth + countWidth + (mark ? 22 : 0) + (pinned ? PIN_SLOT : 0) <
+      node.width - PAD_X;
   /**
    * Where the type column ends, for every row in this box.
    *
@@ -1727,6 +1818,26 @@ const SchemaBox = memo(function SchemaBox({
         <circle cx={node.width - PAD_X - 17 - (showRows ? rowsWidth : 0)} cy={17} r={3.5} fill={MARK_COLOUR[mark]}>
           <title>{mark}</title>
         </circle>
+      )}
+
+      {/* Held. Right-to-left from the same edge as everything else in this header, so it lands
+          left of the mark dot when there is one and takes the dot's place when there is not —
+          `title` was already clipped to leave the room, so it can never land on the name.
+
+          Scaled from lucide's 24-unit box to 11px, with the stroke widened to match: at `scale`
+          alone a 2-unit stroke comes out at 0.9px and reads as a smudge next to the 1.15 the key
+          and link glyphs are drawn at. */}
+      {pinned && (
+        <g
+          transform={`translate(${node.width - PAD_X - 25 - (showRows ? rowsWidth : 0) - (mark ? 13 : 0)} 11.5) scale(${11 / 24})`}
+          fill="none"
+          stroke="var(--cf-accent)"
+          strokeWidth={2.4}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d={PIN_PATH} />
+        </g>
       )}
 
       {/* Rows in the scratch database, then columns in the model — right-anchored as one string, so

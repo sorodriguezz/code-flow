@@ -34,7 +34,7 @@ import {
 /** Throws with the offending document attached, which is the only useful failure message here. */
 function expectParses(source: string, what: string) {
   try {
-    Parser.parse(source, "dbml");
+    Parser.parse(source, "dbmlv2");
   } catch (error) {
     const detail =
       typeof error === "object" && error !== null && "message" in error
@@ -272,7 +272,7 @@ it("survives a session's worth of edits in sequence", () => {
   }
 
   // And the thing all of it was for: the schema still says what the edits asked for.
-  const parsed = Parser.parse(doc, "dbml") as {
+  const parsed = Parser.parse(doc, "dbmlv2") as {
     schemas?: { tables?: { name: string; note?: string }[] }[];
   };
   const tables = parsed.schemas?.[0]?.tables ?? [];
@@ -397,7 +397,7 @@ describe("relationships written as column settings", () => {
 /**
  * The shapes a relationship can take that the rewriting engine used to be blind to.
  *
- * Each of these is legal in the dialect this app parses with (`Parser.parse(source, "dbml")`, see
+ * Each of these is legal in the dialect this app parses with (`Parser.parse(source, "dbmlv2")`, see
  * `parse.ts`) and each one used to make `refEndsOf` answer `null`, so `mapRefs` and `filterRefs`
  * skipped the block entirely and `renameTable`/`dropTable` left an endpoint naming something that
  * no longer existed. That does not produce an untidy schema — `@dbml/core` rejects it outright — so
@@ -405,10 +405,11 @@ describe("relationships written as column settings", () => {
  * parsing every visual control went inert behind `editing.blocked`. String assertions cannot catch
  * any of this, which is the whole reason this suite exists.
  *
- * Watch the dialect when adding a fixture here. `TableGroup` settings and a group `Note:` are v2
- * only and are rejected by the v1 parser this app uses, as is a `Ref:` whose endpoints sit on the
- * next line — `edit.ts` handles all three defensively, but they cannot be asserted through
- * `expectParses`.
+ * The dialect is no longer a constraint on the fixtures here. `TableGroup` settings, a group
+ * `Note:` and a `Ref:` whose endpoints sit on the next line used to be rejected by the v1 grammar
+ * this app parsed with, so `edit.ts` handled all three defensively without being able to assert
+ * them through `expectParses`; `parse.ts` now calls the v2 compiler, which accepts all three. See
+ * `parse.test.ts` for what the switch buys and what it changed.
  */
 const BRACED = `Table usuarios {
   id integer [pk]

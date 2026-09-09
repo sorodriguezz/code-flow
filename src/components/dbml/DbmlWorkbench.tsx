@@ -406,6 +406,32 @@ export function DbmlWorkbench({
   );
 
   /**
+   * Holds the inspector on one table, or lets it go — from the canvas rather than from the panel.
+   *
+   * Three cases and one expression. Held on *this* table, it is released. Held on another, the hold
+   * moves here rather than being refused, which is what "pin this one" means when something else is
+   * already pinned. Not held at all, it takes hold. `setSelected` is called directly and not through
+   * `selectFromCanvas`, which refuses while pinned — that guard exists to stop a *click* moving the
+   * panel, and this is the one gesture whose whole purpose is to move it.
+   *
+   * Pinning opens the panel. A pin with nothing to hold is a state with no effect, and the pin is
+   * reachable from the canvas precisely so it can be used without going to the panel first — so
+   * arriving there by this route has to bring the panel with it. In full screen that counts as
+   * opening it by hand, or leaving zen would slam shut a panel the user just asked for.
+   */
+  const togglePinFromCanvas = useCallback(
+    (id: string) => {
+      const release = pinned && selected === id;
+      setPinned(!release);
+      setSelected(id);
+      if (release) return;
+      if (zen) zenTouched.current.inspector = true;
+      setInspector(true);
+    },
+    [pinned, selected, zen],
+  );
+
+  /**
    * The sidecar as it stands, in a ref.
    *
    * `writeSource` is called by Monaco's own `onChange`, which fires *during* the edit that changed
@@ -499,23 +525,58 @@ export function DbmlWorkbench({
   );
 
   /**
-   * Sets or clears a review mark.
+   * Sets or clears a review mark, in both of the places a mark is written.
    *
-   * Writes the sidecar only, so unlike everything in `editing` below it stays available while the
-   * document does not parse — see the note on `setMark` in `DbmlCanvas`. It also goes straight to
-   * `editDoc` rather than through `applyEdit`: `applyEdit` routes through Monaco's `executeEdits`
-   * so that ⌘Z takes back a structural change, and a mark changes no character the editor is
-   * showing, so there would be nothing for Monaco to undo.
+   * The `// codeflow:marks` sidecar is the source of truth — it is what the canvas colours itself
+   * from, what survives a rename, and what can be written while the document does not parse. On top
+   * of it, a table's mark is also written into the DBML as the comment above its declaration
+   * (`edits.setMarkComment`), so the decision is legible in a diff, in a review and in any editor
+   * that opens the file. Only *tables* get the comment: a relationship's mark has no one line of
+   * its own to sit above, and a mark on a schema that is not currently parsing has no table to find.
+   *
+   * # Still not gated on `schema.error`
+   *
+   * Unlike everything in `editing` below, this stays available while the document is broken — see
+   * the note on `setMark` in `DbmlCanvas`. What changes when it is broken is only how much gets
+   * written: `schema.tables` is empty or stale, so no table matches, so the sidecar is written
+   * alone. The mark is never lost, it just has no comment until the text parses again.
+   *
+   * # Through Monaco when there is a comment to write
+   *
+   * A mark used to change no character the editor was showing, so it went straight to `editDoc`
+   * with nothing for Monaco to undo. Now it usually does change one, and that change belongs on the
+   * same undo stack as every other visual edit — hence the `executeEdits` branch, which is
+   * `applyEdit`'s, and the sidecar mutation *before* it, because the write comes back out through
+   * Monaco's `onChange` → `writeSource`, which reads the marks from `sidecar.current`.
    */
   const setMark = useCallback(
     (id: string, mark: DbmlMarkKind | null) => {
-      const next: DbmlMarks = { ...marks };
+      const next: DbmlMarks = { ...sidecar.current.marks };
       if (mark) next[id] = mark;
       else delete next[id];
       cause.current = "marked";
-      editDoc(writeLayout(source, positions, next));
+      sidecar.current = { positions: sidecar.current.positions, marks: next };
+
+      // Asked of the parsed schema rather than left to `findBlock`, so a ref id can never be
+      // mistaken for a table: `refId` is `a.b->c.d`, whose bare tail (`d`) would match a table
+      // called `d` and put somebody's mark on the wrong declaration.
+      const onTable = schema.tables.some((table) => table.id === id);
+      const nextSource = onTable ? edits.setMarkComment(source, id, mark) : source;
+
+      if (nextSource !== source) {
+        const editor = editorRef.current;
+        const model = editor?.getModel();
+        if (editor && model) {
+          editor.executeEdits("cf-dbml-mark", [
+            { range: model.getFullModelRange(), text: nextSource },
+          ]);
+          editor.pushUndoStop();
+          return;
+        }
+      }
+      editDoc(writeLayout(nextSource, sidecar.current.positions, next));
     },
-    [editDoc, source, positions, marks],
+    [editDoc, source, schema.tables],
   );
 
   /** How the review is going, for the strip along the bottom. */
@@ -1094,7 +1155,23 @@ export function DbmlWorkbench({
           type="button"
           onClick={leaveZen}
           title={t("dbml.zenExit")}
-          style={{ right: inspectorShowing ? inspectorWidth + 1 + 16 : 16 }}
+          /* Its own pointer handlers, because it is the one overlay that is not *inside* the canvas
+             column — see the note above on why it hangs off the root. `chromeHot` is set by that
+             column's enter/leave, and this button is stacked over it rather than within it, so
+             moving onto it counts as leaving the canvas: without these, pointing at the control
+             would be what faded it, and it would take the search box and the zoom cluster down with
+             it. Focus is handled too, so arriving here with the keyboard lights it the same way.
+
+             Setting the shared flag rather than a second one of its own is the honest model: chrome
+             lying over the drawing *is* the drawing as far as "are the tools wanted" goes. */
+          onPointerEnter={() => setChromeHot(true)}
+          onPointerLeave={() => setChromeHot(false)}
+          onFocus={() => setChromeHot(true)}
+          onBlur={() => setChromeHot(false)}
+          style={{
+            right: inspectorShowing ? inspectorWidth + 1 + 16 : 16,
+            opacity: chromeHot ? 1 : DIMMED,
+          }}
           className={`absolute top-3 z-20 flex items-center gap-1 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 px-2 py-[5px] text-[10.5px] font-medium text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] backdrop-blur transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] ${CHROME_FADE}`}
         >
           <Minimize size={12} />
@@ -1403,6 +1480,7 @@ export function DbmlWorkbench({
                       routing={routing}
                       query={query}
                       marks={marks}
+                      pinnedId={pinned ? selected : null}
                       focusRef={hoveredRef}
                       editing={{
                         blocked: editing.blocked,
@@ -1428,6 +1506,7 @@ export function DbmlWorkbench({
                         addTable: () => editing.addTable(edits.freeName(declared, t("dbml.newTable"))),
                         addEnum: () => editing.addEnum(edits.freeName(declared, t("dbml.newEnum"))),
                         setMark,
+                        togglePin: togglePinFromCanvas,
                         autoArrange: rearrange,
                         orthogonal: routing === "orthogonal",
                         toggleRouting: () =>

@@ -6,6 +6,7 @@ import type { CellFailure, ConstraintNote, SqliteWarning } from "../lib/dbml/sql
 import { readFailure, toSqliteDdl } from "../lib/dbml/sqlite";
 import { deleteSql, insertSql, parentProbeSql, updateSql } from "../lib/dbml/rows";
 import { fillPlan } from "../lib/dbml/fill";
+import { planAiFill, type AiFillPlan, type AiRowsAnswer } from "../lib/dbml/aiFill";
 import type { DbmlSchema } from "../lib/dbml/types";
 import { pushErrorToast } from "./toastStore";
 
@@ -126,6 +127,22 @@ interface SandboxStore {
   ignoreDrift: (diagramId: string) => void;
   /** Twenty rows per table, parents first. Returns the tables it could not reach. */
   fill: (diagramId: string, schema: DbmlSchema) => Promise<string[]>;
+  /**
+   * The other fill: rows an engine wrote, checked against the schema before any of them is run.
+   *
+   * Takes the *answer* rather than the instruction, so this store never talks to a model — the
+   * panel does the asking and hands the result here, which is what keeps the AI plumbing out of the
+   * store and this testable without one. Returns the plan so the caller can say what was written
+   * and what the schema refused; see `lib/dbml/aiFill.ts`.
+   */
+  fillWithAi: (
+    diagramId: string,
+    schema: DbmlSchema,
+    answer: AiRowsAnswer,
+  ) => Promise<AiFillPlan>;
+  /** What each column already holds, per `table|column`. The AI fill reads it *before* asking, so
+   *  the engine can be told which keys exist rather than left to guess them. */
+  availableKeys: (diagramId: string, schema: DbmlSchema) => Promise<Map<string, string[]>>;
   exportSql: (diagramId: string) => Promise<string>;
   exportFile: (diagramId: string) => Promise<string>;
   close: (diagramId: string) => void;
@@ -384,30 +401,28 @@ export const useSandboxStore = create<SandboxStore>((set, get) => {
     },
 
     async fill(diagramId, schema) {
-      // Foreign keys are drawn from rows that already exist, so a fill on top of rows you typed by
-      // hand points at yours. One page per parent column is enough — the plan writes twenty.
-      const existing = new Map<string, string[]>();
-      const { status } = slice(diagramId);
-      for (const table of schema.tables) {
-        if (!status?.counts[table.id]) continue;
-        try {
-          const page = await api.sandboxPage(diagramId, table.id, 0, 50);
-          page.columns.forEach((column, index) => {
-            existing.set(
-              `${table.id}|${column.name}`,
-              page.rows.map((row) => row[index]).filter((value): value is string => value !== null),
-            );
-          });
-        } catch {
-          // A table that cannot be read contributes no keys, which is the same as an empty one.
-        }
-      }
+      const existing = await existingKeys(diagramId, schema, slice(diagramId).status);
       const { statements, skipped } = fillPlan(schema, existing);
       if (statements.length > 0) {
         // One batch, so twenty rows across four tables is one round trip rather than eighty.
         await get().run(diagramId, statements.join("\n"));
       }
       return skipped;
+    },
+
+    availableKeys: (diagramId, schema) =>
+      existingKeys(diagramId, schema, slice(diagramId).status),
+
+    async fillWithAi(diagramId, schema, answer) {
+      // The same keys the generated fill reads, and for the same reason: a foreign key the model
+      // wrote may name a row you typed by hand, and refusing it because this answer did not also
+      // write that row would throw away the rows that are most likely to be the ones you wanted.
+      const existing = await existingKeys(diagramId, schema, slice(diagramId).status);
+      const plan = planAiFill(schema, answer, existing);
+      if (plan.statements.length > 0) {
+        await get().run(diagramId, plan.statements.join("\n"));
+      }
+      return plan;
     },
 
     exportSql: (diagramId) => api.sandboxExportSql(diagramId),
@@ -418,6 +433,39 @@ export const useSandboxStore = create<SandboxStore>((set, get) => {
     },
   };
 });
+
+/**
+ * The values each column already holds, per `table|column`, as a fill's foreign keys may point at.
+ *
+ * One page per table is enough and the cap is deliberate: this exists to answer "is there a
+ * customer with id 7", not to mirror the database into memory. A table that cannot be read
+ * contributes nothing, which is the same as an empty one.
+ *
+ * Shared by both fills — the generated one and the AI one — because "what is already in there" is
+ * the same question whoever is about to write.
+ */
+async function existingKeys(
+  diagramId: string,
+  schema: DbmlSchema,
+  status: SandboxStatus | null,
+): Promise<Map<string, string[]>> {
+  const existing = new Map<string, string[]>();
+  for (const table of schema.tables) {
+    if (!status?.counts[table.id]) continue;
+    try {
+      const page = await api.sandboxPage(diagramId, table.id, 0, 50);
+      page.columns.forEach((column, index) => {
+        existing.set(
+          `${table.id}|${column.name}`,
+          page.rows.map((row) => row[index]).filter((value): value is string => value !== null),
+        );
+      });
+    } catch {
+      // Unreadable is the same as empty here.
+    }
+  }
+  return existing;
+}
 
 /** One diagram's slice, for a component that only cares about its own. */
 export const sandboxOf = (diagramId: string) => (state: SandboxStore) =>

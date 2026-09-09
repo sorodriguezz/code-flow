@@ -20,6 +20,7 @@ import type { DbmlSchema } from "../../lib/dbml/types";
 import { apiSaveBinaryFile, apiSaveFile } from "../../lib/tauri/apiCommands";
 import { useToastStore } from "../../state/toastStore";
 import { FILL_ROWS } from "../../lib/dbml/fill";
+import { SandboxAiFill } from "./SandboxAiFill";
 import { SandboxConsole } from "./SandboxConsole";
 import { SandboxGrid, columnsFor } from "./SandboxGrid";
 
@@ -319,6 +320,12 @@ export function DbmlDataPanel({
               {t("dbml.sandbox.fillShort")}
               <span className="font-mono tabular-nums opacity-60">{FILL_ROWS}</span>
             </button>
+
+            {/* And the other one. A sparkle here *is* honest — this one does ask a model — which is
+                the whole reason the button next to it does not have one. The two sit together
+                because they answer the same need at two different prices: types-only rows are
+                instant, free and meaningless; written rows cost a call and mean something. */}
+            <SandboxAiFill diagramId={diagramId} schema={schema} disabled={state.building} />
 
             <span className="flex-1" />
 

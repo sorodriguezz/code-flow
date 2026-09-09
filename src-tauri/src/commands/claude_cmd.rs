@@ -111,6 +111,13 @@ pub(crate) enum AiTask {
     /// handed a log and has to go looking. A team that runs the cheap engine over its working copy
     /// routinely wants the expensive one for a build that has been red for an hour.
     Pipeline,
+    /// Inventing sample rows for the DBML sandbox. Text-only — the engine answers with JSON that
+    /// CodeFlow validates against the schema and turns into `INSERT`s itself (see `ai::fill_rows`),
+    /// so it never reaches the database and routes anywhere. Deliberately *not* sharing
+    /// [`AiTask::Diagram`]'s route, which is its closest relative: drawing a schema is one short
+    /// answer, and filling it is fifteen tables of data — a long, cheap, repetitive job that a team
+    /// routinely wants pointed somewhere other than the one that has to get a model right.
+    SampleRows,
 }
 
 impl AiTask {
@@ -120,7 +127,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 16] = [
+    pub(crate) const ALL: [AiTask; 17] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -137,6 +144,7 @@ impl AiTask {
         AiTask::Notes,
         AiTask::Diagram,
         AiTask::Pipeline,
+        AiTask::SampleRows,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -160,6 +168,7 @@ impl AiTask {
             AiTask::Notes => "notes",
             AiTask::Diagram => "diagram",
             AiTask::Pipeline => "pipeline",
+            AiTask::SampleRows => "sample_rows",
         }
     }
 }
@@ -452,6 +461,16 @@ pub fn default_resolve_conflict_template() -> String {
 #[tauri::command]
 pub fn default_pipeline_template() -> String {
     ai::DEFAULT_PIPELINE_TEMPLATE.to_string()
+}
+
+/// The built-in prompt behind "Rellenar con IA" when `sample_rows_template` is blank.
+///
+/// Worth having editable rather than fixed: this is the one prompt in the app whose *output* is
+/// data about a domain, so "los nombres son chilenos", "los importes van en pesos" and "las fechas
+/// son de 2024" are standing preferences rather than something to retype into the box every time.
+#[tauri::command]
+pub fn default_sample_rows_template() -> String {
+    ai::DEFAULT_ROWS_PROMPT.to_string()
 }
 
 /// Scans whatever's currently sitting in the working directory (the "Changes" list —

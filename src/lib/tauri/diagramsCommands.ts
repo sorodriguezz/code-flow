@@ -259,6 +259,35 @@ export const diagramsDrawWithAi = (args: {
   runId?: string;
 }) => invoke<string>("diagrams_draw_with_ai", args);
 
+/**
+ * Asks an engine for sample rows for a schema, as JSON.
+ *
+ * The reply is *probably* JSON and is checked before anything is written: `parseAiRows` refuses a
+ * shape it does not recognise whole, and `planAiFill` drops every value the schema will not hold.
+ * Nothing here builds SQL — see `lib/dbml/aiFill.ts` for why the engine is never asked for any.
+ */
+export const diagramsFillRowsWithAi = (args: {
+  /** The DBML itself, without the layout comment. */
+  schema: string;
+  /** What the user typed: "una tienda de bicicletas en Chile". May be empty. */
+  instruction: string;
+  /** Rows per table to ask for. Advice to the model; the cap is `AI_FILL_MAX_ROWS`. */
+  rows?: number;
+  /**
+   * The tables this pass is for. Empty means all of them.
+   *
+   * A schema of any size is filled in several passes, because one answer covering fifteen tables is
+   * an answer the engine truncates — it comes back having written eight and stopped. The whole
+   * schema still travels as context every time, or a pass could not tell a foreign key from an
+   * integer; this only says which of it to write.
+   */
+  only?: string[];
+  /** `tabla.columna: v1, v2, …` for what the sandbox already holds, so a later pass points its
+   *  foreign keys at rows that exist instead of guessing ids. */
+  keys?: string;
+  runId?: string;
+}) => invoke<string>("diagrams_fill_rows_with_ai", args);
+
 // ---------- import ----------
 
 /** Reads a `.drawio` file the user picked in a dialog. Capped and text-only in Rust. */

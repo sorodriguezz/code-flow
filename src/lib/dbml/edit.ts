@@ -1,4 +1,5 @@
 import { blocksOf, braceDelta, findBlock, type DbmlBlock } from "./blocks";
+import type { DbmlMarkKind } from "./layout";
 
 /**
  * Changing a DBML document without rewriting it.
@@ -305,7 +306,11 @@ export function dropTable(source: string, name: string): string {
   const after = blocksOf(withoutRefs);
   const target = findBlock(after, name, block.kind);
   if (!target) return withoutRefs;
-  return trimBlank(splice(withoutRefs, target.from, target.to, []));
+  // The review marker goes with the table. It is written directly above the declaration, so a
+  // splice that started at the declaration left `// ELIMINAR` hanging over whatever block happened
+  // to follow — the mark of a table that no longer exists, attached to one that does.
+  const from = markCommentFrom(withoutRefs.split("\n"), target.from);
+  return trimBlank(splice(withoutRefs, from, target.to, []));
 }
 
 /** Sets, replaces or clears a table's `note`. */
@@ -357,15 +362,92 @@ export function setTableNote(source: string, name: string, note: string): string
 
   // A *new* note goes at the end of the block, never at the start.
   //
-  // This is not a matter of taste. `@dbml/core` accepts `note:` inside a table only once every
-  // column has been declared — measured against the bundled parser: note-last parses, note-first and
+  // This is not a matter of taste. The v1 DBML grammar accepts `note:` inside a table only once
+  // every column has been declared — measured: note-last parses, note-first and
   // note-between-two-columns both fail with `Expected " " but ":" found`, because the parser reads
   // `note` as a column name and then wants a type. Inserting at `start` (which is what this did)
   // produced a document that would not parse from a button whose whole job is to be safe to press.
   //
+  // The v2 compiler this app now parses with accepts note-first too, so the rule is kept for
+  // *portability* rather than for us: a `.dbml` exported from here opens in dbdiagram.io and in
+  // every tool built on the v1 grammar, and a note the button put at the top would close that door.
+  //
   // After `indexes { … }` is fine too — both orders parse — so the end of the block is the one
   // position that is always legal without having to find where the columns stop.
   return splice(source, end, end, written);
+}
+
+// ---- review marks ----------------------------------------------------------
+
+/**
+ * What each mark is written as, on the line above the table it is about.
+ *
+ * Fixed strings, not translated ones. This goes into the *document*, which is exported, committed
+ * and read by people who are not this window: a marker that changed with the UI language would mean
+ * the same schema carries `// ELIMINAR` for one reviewer and `// DELETE` for the next, and the
+ * matcher below would have to know every language the app has ever shipped in order to replace one.
+ */
+const MARK_COMMENT: Record<DbmlMarkKind, string> = {
+  remove: "// ELIMINAR",
+  review: "// REVISAR",
+  keep: "// RESUELTA",
+};
+
+/**
+ * A line that is one of those markers, however it was spaced or cased.
+ *
+ * Deliberately looser than what `MARK_COMMENT` writes: the line is in a text file people edit by
+ * hand, and `//REVISAR` typed without the space is plainly the same annotation. What matters is
+ * that changing a mark *replaces* the previous marker instead of stacking a second one on top.
+ */
+const MARK_COMMENT_LINE = /^\s*\/\/\s*(ELIMINAR|REVISAR|RESUELTA)\s*$/i;
+
+/** How far above `line` the run of marker lines belonging to it starts. Itself, when there is none. */
+function markCommentFrom(lines: string[], line: number): number {
+  let from = line;
+  while (from > 0 && MARK_COMMENT_LINE.test(lines[from - 1])) from -= 1;
+  return from;
+}
+
+/**
+ * Writes a table's review mark into the document, as a comment on the line above its declaration.
+ *
+ * # Why the mark is written twice
+ *
+ * The mark itself lives in the `// codeflow:marks` sidecar and still does — that is what the canvas
+ * colours itself from, what survives a rename, and what can be set while the document does not
+ * parse. This is the *readable* half of the same fact: a reviewer's decision is worth nothing if it
+ * is only visible in an app, and `// ELIMINAR` above `Table sessions {` is what makes it visible in
+ * a diff, in a pull request and in whatever editor the next person opens the `.dbml` in.
+ *
+ * The sidecar stays the source of truth precisely because it is the one that cannot be broken by
+ * hand: this comment is a plain DBML comment, so the parser ignores it, `formatDbml` keeps it where
+ * it is, and deleting it costs the annotation and nothing else.
+ *
+ * `name` is the table's **id** — the qualified name — like every other operation here; `findBlock`
+ * matches `core.users` whole and `users` on its bare half. A name that is not in the document (an
+ * enum, a relationship, a table that has since been renamed) leaves the source untouched, which is
+ * what keeps marking usable on a document that does not currently parse.
+ */
+export function setMarkComment(
+  source: string,
+  name: string,
+  mark: DbmlMarkKind | null,
+): string {
+  const block = findBlock(blocksOf(source), name, "table");
+  if (!block) return source;
+
+  const lines = source.split("\n");
+  const declaration = lines[block.from];
+  const indent = /^[ \t]*/.exec(declaration)?.[0] ?? "";
+  const from = markCommentFrom(lines, block.from);
+  const written = mark ? [`${indent}${MARK_COMMENT[mark]}`] : [];
+
+  // Nothing there and nothing to write: return the same string rather than a rebuilt copy, so a
+  // "clear" on an unmarked table is the no-op the caller can compare against.
+  if (from === block.from && written.length === 0) return source;
+  if (written.length === 1 && from === block.from - 1 && lines[from] === written[0]) return source;
+  return splice(source, from, block.from, written);
 }
 
 // ---- columns ---------------------------------------------------------------

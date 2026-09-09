@@ -37,7 +37,14 @@ import { readLayout } from "./layout";
 export type RevisionCause =
   | "edited"
   | "moved"
-  /** A review mark set or cleared. Its own cause because it changes no DBML — only the sidecar. */
+  /**
+   * A review mark set or cleared.
+   *
+   * Its own cause because it is its own activity: triage is what you are doing when you press it,
+   * not modelling. It does now touch the DBML — a table's mark is written as the `// ELIMINAR`
+   * comment above its declaration as well as into the sidecar — so unlike `moved` it is a change
+   * `pushRevision` records.
+   */
   | "marked"
   | "formatted"
   | "rearranged"
@@ -84,14 +91,16 @@ const COALESCE_MS = 4000;
 export function pushRevision(list: Revision[], next: Revision): Revision[] {
   /**
    * **Only the schema counts.** A stored document is the DBML plus trailing `// codeflow:` comments
-   * holding box positions and review marks, and dragging a box or marking a table rewrites nothing
-   * but those. Recording them made the recovery list mostly furniture: five drags between two edits
-   * pushed the edit off the end, so the list you reach for after breaking a table is full of the
-   * arrangement you did on the way there.
+   * holding box positions and review marks, and dragging a box rewrites nothing but those.
+   * Recording them made the recovery list mostly furniture: five drags between two edits pushed the
+   * edit off the end, so the list you reach for after breaking a table is full of the arrangement
+   * you did on the way there.
    *
-   * So the guard is on the DBML halves rather than on the whole documents. Movements and marks
-   * still happen, still autosave, still travel — they are simply not *versions to recover*, because
-   * there is nothing about the model to recover from them.
+   * So the guard is on the DBML halves rather than on the whole documents. Movements still happen,
+   * still autosave, still travel — they are simply not *versions to recover*, because there is
+   * nothing about the model to recover from them. Marking a table now falls on the other side of
+   * this line, because it writes a comment into the schema itself; a run of marks made in one go
+   * folds into one revision through the coalescing above rather than through this guard.
    *
    * The revision itself still carries the whole document on both sides: reverting has to put the
    * positions back too, or undoing a rename would silently scatter the boxes.

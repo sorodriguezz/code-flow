@@ -10,6 +10,7 @@ import {
   freeName,
   renameTable,
   setRefCardinality,
+  setMarkComment,
   setTableNote,
   updateField,
 } from "./edit";
@@ -276,6 +277,70 @@ describe("relationships", () => {
       { table: "authors", column: "id" },
     );
     expect(got).not.toBe(DOC);
+  });
+});
+
+describe("review marks", () => {
+  it("writes the state above the declaration", () => {
+    const got = setMarkComment(DOC, "posts", "remove");
+    expect(got).toContain("// ELIMINAR\nTable posts {");
+    expectPreserved(got);
+  });
+
+  it("uses one word per mark", () => {
+    expect(setMarkComment(DOC, "posts", "review")).toContain("// REVISAR\nTable posts {");
+    expect(setMarkComment(DOC, "posts", "keep")).toContain("// RESUELTA\nTable posts {");
+  });
+
+  /* Changing your mind is the common move, and it must replace rather than stack. */
+  it("replaces the previous mark instead of adding a second one", () => {
+    const once = setMarkComment(DOC, "posts", "remove");
+    const twice = setMarkComment(once, "posts", "review");
+    expect(twice).toContain("// REVISAR\nTable posts {");
+    expect(twice).not.toContain("ELIMINAR");
+    expect(twice.split("\n").length).toBe(once.split("\n").length);
+  });
+
+  it("takes the comment away when the mark is cleared", () => {
+    const marked = setMarkComment(DOC, "posts", "remove");
+    expect(setMarkComment(marked, "posts", null)).toBe(DOC);
+  });
+
+  /* The block comment above `posts` is somebody's prose. Only the marker line is ours to move. */
+  it("leaves the author's own comments where they are", () => {
+    const got = setMarkComment(DOC, "posts", "remove");
+    expect(got).toContain("/* a block comment */\n// ELIMINAR\nTable posts {");
+    expect(setMarkComment(got, "posts", null)).toBe(DOC);
+  });
+
+  it("is a no-op for a name the document does not declare", () => {
+    expect(setMarkComment(DOC, "sessions", "remove")).toBe(DOC);
+    // A relationship id, which is what a mark on a ref is keyed by. It must not find a table.
+    expect(setMarkComment(DOC, "posts.author_id->authors.id", "remove")).toBe(DOC);
+  });
+
+  it("matches a quoted name and its alias", () => {
+    expect(setMarkComment(DOC, "order items", "keep")).toContain(
+      '// RESUELTA\nTable "order items" as oi {',
+    );
+    expect(setMarkComment(DOC, "oi", "keep")).toContain('// RESUELTA\nTable "order items" as oi {');
+  });
+
+  /* Marking a table and then deleting it is the whole workflow. The marker must not outlive it. */
+  it("goes with the table when it is dropped", () => {
+    const marked = setMarkComment(DOC, "posts", "remove");
+    const got = dropTable(marked, "posts");
+    expect(got).not.toContain("ELIMINAR");
+    expect(got).not.toContain("Table posts {");
+    expect(got).toContain("/* a block comment */");
+  });
+
+  it("is invisible to the sidecar split", () => {
+    const marked = setMarkComment(DOC, "posts", "remove");
+    const stored = writeLayout(marked, {}, { posts: "remove" });
+    const read = readLayout(stored);
+    expect(read.source).toBe(marked);
+    expect(read.marks).toEqual({ posts: "remove" });
   });
 });
 

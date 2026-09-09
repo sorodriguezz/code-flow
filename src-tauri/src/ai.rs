@@ -531,6 +531,8 @@ pub mod task {
     /// they are routed separately, so counting them together would hide which engine is being paid
     /// for.
     pub const DIAGRAM_DRAW: &str = "diagram-draw";
+    /// Sample rows invented for the DBML sandbox — see [`super::fill_rows`].
+    pub const DIAGRAM_ROWS: &str = "diagram-rows";
     /// Explaining a failed CI job. Its own label rather than [`ANALYZE`]'s: both are "read
     /// something and tell me what is wrong with it", and counting them together would hide which
     /// of the two is actually spending the budget — a pipeline analysis reads the repository with
@@ -2086,6 +2088,21 @@ pub async fn write_note(
 /// is the labels, and `diagram_outline` extracts those before this cap ever applies.
 pub const MAX_DIAGRAM_CONTEXT_CHARS: usize = 8_000;
 
+/// The same cap for [`fill_rows`], and three times the size on purpose.
+///
+/// The two are not the same job. A drawing's context is the *labels* of what is on the canvas —
+/// prose the engine reads for a sense of what is being drawn, and losing the tail of it costs
+/// nothing. A fill's context is the schema it has to write valid rows for, and a table that falls
+/// past the cap is one the engine is then asked about having never seen: it writes nothing for it,
+/// and the fill stops at whichever table the cut landed on. That is exactly what happened at 8 000
+/// with a fifteen-table schema.
+///
+/// The frontend sends `schemaOutline` rather than the document, which for the schema that exposed
+/// this is about a fifth the size — so this is the second guard and not the first. Both, because
+/// the outline is small for a schema of ordinary width and there is no width at which silently
+/// dropping half the tables is the right answer.
+pub const MAX_ROWS_CONTEXT_CHARS: usize = 24_000;
+
 /// The system prompt behind "Draw with AI".
 ///
 /// **This list and `src/lib/diagrams/shapes.ts` are one thing in two files**, and
@@ -2299,6 +2316,135 @@ pub async fn draw_diagram(
     if schema_dialect {
         return Ok(text.trim().to_string());
     }
+    Ok(json_answer(&text).map(|json| json.into_owned()).unwrap_or(text).trim().to_string())
+}
+
+/// The system prompt behind "Rellenar con IA" in the DBML sandbox.
+///
+/// **Values, never SQL.** The answer is JSON that `lib/dbml/aiFill.ts` validates against the schema
+/// and turns into `INSERT`s itself. Asking for SQL instead would make every statement a model can
+/// write reachable from a prompt, in a database whose whole point is that you run things against it
+/// without thinking about it.
+///
+/// The rules that matter are the ones whose absence produces rows the schema throws away. Two of
+/// them earn their length: a foreign key naming a parent row the answer never wrote is by a wide
+/// margin the most common failure, and an enum value invented on the spot is the second. Both are
+/// caught in the frontend either way — the prompt is what stops half the answer being wasted.
+pub const DEFAULT_ROWS_PROMPT: &str = concat!(
+    "Inventas datos de ejemplo para un esquema de base de datos. Devuelves EXCLUSIVAMENTE JSON: ni \
+     saludo, ni explicación, ni ```json alrededor.\n\n\
+     FORMA DE LA RESPUESTA\n\
+     {\"tables\":[{\"table\":\"nombre_tabla\",\"columns\":[\"col1\",\"col2\"],\
+     \"rows\":[[valor1,valor2]]}]}\n\n\
+     REGLAS\n\
+     - Una entrada por tabla del esquema. Usa los nombres de tabla y de columna EXACTAMENTE como \
+     aparecen en el DBML.\n\
+     - `rows` es una lista de listas. Cada fila lleva tantos valores como columnas hay en \
+     `columns`, en el mismo orden.\n\
+     - Los valores son escalares JSON: número, cadena, true/false o null. Nunca objetos ni listas.\n\
+     - Escribe las tablas padre ANTES que las tablas que las referencian.\n\
+     - Las claves primarias las escribes tú: enteros correlativos desde 1, sin repetir dentro de \
+     una misma tabla.\n\
+     - Una clave foránea SOLO puede valer una clave primaria que ya hayas escrito en la tabla \
+     referenciada. Es la regla que más se incumple: si escribes `pedidos.cliente_id` = 7, en tu \
+     respuesta tiene que haber un cliente con `id` 7.\n\
+     - Una columna `not null` lleva valor en todas las filas.\n\
+     - Una columna cuyo tipo es un enum SOLO admite uno de los valores declarados en ese enum, \
+     escrito igual.\n\
+     - Fechas y marcas de tiempo como cadena: `2026-03-14` o `2026-03-14 09:30:00`.\n\
+     - Los datos han de ser COHERENTES entre tablas y verosímiles para la instrucción: nombres, \
+     correos, importes y fechas que podrían ser reales. No `texto-1` ni `nombre-2`.\n\
+     - Nombres, direcciones y textos en el MISMO IDIOMA que la instrucción.\n\
+     - Todo inventado. Nunca personas, empresas, correos ni teléfonos reales; los dominios de \
+     correo terminan en `.test`.\n\
+     - Respeta el número de filas por tabla que se te pide. Una tabla de catálogo pequeña puede \
+     llevar menos.\n\
+     - Escribe una entrada para CADA UNA de las tablas que se te piden, sin omitir ninguna. Si son \
+     muchas, acorta los textos antes que dejar tablas fuera.\n\n\
+     EJEMPLO\n\
+     {\"tables\":[\
+     {\"table\":\"clientes\",\"columns\":[\"id\",\"nombre\",\"email\"],\
+     \"rows\":[[1,\"Ana Soto\",\"ana.soto@ejemplo.test\"],\
+     [2,\"Luis Vera\",\"luis.vera@ejemplo.test\"]]},\
+     {\"table\":\"pedidos\",\"columns\":[\"id\",\"cliente_id\",\"estado\",\"total\"],\
+     \"rows\":[[1,1,\"pagado\",24990],[2,2,\"pendiente\",8990]]}]}"
+);
+
+/// Asks an engine for sample rows, as JSON for the frontend to check against the schema.
+///
+/// **The engine never writes to the database.** Same split as [`draw_diagram`], for a sharper
+/// reason: there the worst a bad answer produces is an ugly picture, and here it would be a
+/// statement running against a live SQLite file. So the answer is data, and `planAiFill` in the
+/// frontend decides which of it the schema will actually hold.
+///
+/// `schema` is the DBML itself — already nothing but names and types, so unlike a drawing there is
+/// no geometry to strip out before sending it. `instruction` is what the user typed, and it is the
+/// whole difference between this and the generated fill next to it: without it a model has only the
+/// column names to go on, which is roughly what the deterministic filler already does for free.
+pub async fn fill_rows(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    template: &str,
+    schema: &str,
+    instruction: &str,
+    rows: u32,
+    only: &[String],
+    keys: &str,
+) -> Result<String, String> {
+    if schema.trim().is_empty() {
+        return Err("No hay esquema que rellenar".to_string());
+    }
+    let context: String = schema.chars().take(MAX_ROWS_CONTEXT_CHARS).collect();
+    let asked = instruction.trim();
+    let ask = if asked.is_empty() {
+        "\n\n=== INSTRUCCIÓN ===\n(Sin contexto. Deduce de qué trata el esquema por los nombres.)"
+            .to_string()
+    } else {
+        format!("\n\n=== INSTRUCCIÓN ===\n{asked}")
+    };
+    // **The whole schema is always sent, and only some of it is asked for.** A pass that saw only
+    // its own tables could not know that `pedidos.cliente_id` is a foreign key, so it would invent
+    // customer ids and every row of it would be dropped. So the context is the model entire and
+    // this line is the assignment — which is what lets a fifteen-table schema be filled in three
+    // passes instead of in one answer the engine truncates at eight.
+    let wanted = if only.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nESCRIBE FILAS SÓLO PARA ESTAS {} TABLAS, TODAS ELLAS: {}\n\
+             Las demás tablas del esquema quedan fuera de esta tanda: no escribas sus filas.",
+            only.len(),
+            only.join(", ")
+        )
+    };
+    // The keys that already exist, so a later pass points its foreign keys at real rows instead of
+    // guessing ids. Without this, batching trades one failure for another: the tables all get
+    // written and half their references name customers that were never created.
+    let available = if keys.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n=== CLAVES QUE YA EXISTEN ===\n\
+             Una clave foránea hacia una de estas columnas SÓLO puede valer uno de sus valores.\n{}",
+            keys.trim()
+        )
+    };
+    let stdin_payload = format!(
+        "FILAS POR TABLA: {rows}{wanted}\n\n=== ESQUEMA (DBML) ===\n{context}{available}{ask}"
+    );
+
+    let mut inv = AiInvocation::new("Inventa filas de ejemplo para este esquema.", &stdin_payload);
+    // The user's own text when they have edited it, the built-in otherwise — the same fallback
+    // every other editable prompt in the app uses.
+    inv.system_prompt = Some(if template.trim().is_empty() { DEFAULT_ROWS_PROMPT } else { template });
+    inv.model = model;
+    inv.task = task::DIAGRAM_ROWS;
+    let run = run(engine, binary, inv).await?;
+    // Dug out of whatever the reply wrapped it in, the same way every other JSON-expecting stage
+    // here does it — a perfectly good object with a sentence in front of it is the common shape.
+    // What comes back is still only *probably* JSON: `parseAiRows` refuses it whole if it is not.
+    let text = strip_code_fence(&run.text);
     Ok(json_answer(&text).map(|json| json.into_owned()).unwrap_or(text).trim().to_string())
 }
 

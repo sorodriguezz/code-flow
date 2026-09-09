@@ -431,9 +431,16 @@ const LAYOUT_MARKER = "// codeflow:layout ";
  *
  * A mark is a note about the *review*, not about the database — "this table is probably going" is
  * not a fact about the model, it is a fact about the person reading it. Writing it into the DBML
- * (as a `note`, say) would mean exporting the schema exports somebody's working notes, and would
- * change the parsed model on every click. As a comment it is invisible to `@dbml/core`, invisible
- * to every generator, and travels with the document exactly like the dragged box positions do.
+ * *as schema* (as a `note`, say) would mean exporting the schema exports somebody's working notes,
+ * and would change the parsed model on every click. As a comment it is invisible to `@dbml/core`,
+ * invisible to every generator, and travels with the document exactly like the dragged box
+ * positions do.
+ *
+ * A table's mark is *additionally* written as a readable `// ELIMINAR` comment above its
+ * declaration — `edit.ts`'s `setMarkComment`, whose header carries that argument. This line stays
+ * the source of truth: it is the one that is keyed by id (so it survives a rename), the one that
+ * can be written while the document does not parse, and the only one that can hold a mark on a
+ * relationship, which has no declaration of its own to sit above.
  *
  * # Why a second marker and not a field in the first
  *

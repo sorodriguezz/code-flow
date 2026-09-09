@@ -1264,6 +1264,7 @@ export const defaultResolveConflictTemplate = () => invoke<string>("default_reso
  *  `defaultPrDescriptionTemplate` beside these three: the PR description prompt is per workspace,
  *  so its default comes from `defaultWorkspacePrompt("pr_description")` like every other kind. */
 export const defaultPipelineTemplate = () => invoke<string>("default_pipeline_template");
+export const defaultSampleRowsTemplate = () => invoke<string>("default_sample_rows_template");
 
 export const analyzeWorkingChanges = (projectId: string, jobId: string, agent?: ChatAgentOverride | null) =>
   invoke<string>("analyze_working_changes", {

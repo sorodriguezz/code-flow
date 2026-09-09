@@ -37,6 +37,7 @@ import {
   Network,
   Route,
   ScanSearch,
+  Rows3,
   ShieldCheck,
   Split,
   SquarePen,
@@ -48,6 +49,7 @@ import {
   defaultAnalyzeTemplate,
   defaultCommitTemplate,
   defaultPipelineTemplate,
+  defaultSampleRowsTemplate,
   defaultResolveConflictTemplate,
   defaultWorkspacePrompt,
   getSetting,
@@ -132,6 +134,27 @@ export const AI_PROMPTS: PromptDef[] = [
     scope: "global",
     key: "resolve_conflict_template",
     legacyKey: "claude_resolve_conflict_template",
+  },
+  /**
+   * The one prompt in the app whose *output* is data about a domain.
+   *
+   * Which is why it earns a row here rather than staying a constant: "los nombres son chilenos",
+   * "los importes van en pesos", "las fechas son de 2024" are standing preferences, and retyping
+   * them into the instruction box on every fill is the thing this page exists to stop.
+   *
+   * Its answer is parsed, so the shape is a contract — the editor warns if `tables` stops being
+   * mentioned, because a prompt that no longer asks for that key produces an answer `parseAiRows`
+   * refuses whole.
+   */
+  {
+    id: "sample_rows_template",
+    task: "sample_rows",
+    labelKey: "prompts.sampleRows",
+    hintKey: "settings.sampleRowsTemplateHint",
+    icon: Rows3,
+    scope: "global",
+    key: "sample_rows_template",
+    contract: { test: /tables/i, warningKey: "prompts.contractRows" },
   },
   // Read by the CI failure analyser since it shipped, and until now editable from nowhere at all.
   {
@@ -353,6 +376,8 @@ export async function loadPromptDefault(prompt: PromptDef): Promise<string> {
       return defaultResolveConflictTemplate().catch(() => "");
     case "pipeline_template":
       return defaultPipelineTemplate().catch(() => "");
+    case "sample_rows_template":
+      return defaultSampleRowsTemplate().catch(() => "");
     default:
       return "";
   }

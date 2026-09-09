@@ -109,10 +109,11 @@ export function blocksOf(source: string): DbmlBlock[] {
        * relationship here, so `dropRef` splices the half of it that it can see and leaves the brace
        * behind — a document that no longer parses, produced by a button that looked like it worked.
        *
-       * The `Ref:` shape whose endpoints sit on the next line is v2 grammar and the app parses v1
-       * (`parse.ts`), so it cannot arrive through the editor today. It is handled anyway because
-       * this splitter is also what `merge.ts` runs over text that came from a model, and because a
-       * splitter that is honest about the grammar is one fewer thing to remember.
+       * The `Ref:` shape whose endpoints sit on the next line was v2-only grammar, and was handled
+       * here before the app parsed v2 — because this splitter is also what `merge.ts` runs over text
+       * that came from a model, and because a splitter that is honest about the grammar is one fewer
+       * thing to remember. Since `parse.ts` moved to the v2 compiler it can arrive through the
+       * editor as well.
        */
       const from = at;
       let depth = 0;

@@ -31,6 +31,23 @@ import {
  * every keystroke is unusable. So a rejected document goes to a forgiving regex reader that
  * recovers whatever tables it can, and the diagram keeps drawing while the error is reported. The
  * error is always the real parser's: it is the one that knows what was wrong and where.
+ *
+ * **The dialect is `"dbmlv2"`, and it was `"dbml"`.** The v1 grammar rejects several shapes that are
+ * ordinary DBML — a `TableGroup` note or settings block, a `Ref:` whose endpoints sit on the next
+ * line, `TablePartial`, a standalone `Note`, `Records` — and rejects the *whole document* over any
+ * of them, so writing one meant the canvas froze behind a permanent error. Measured against v1 on a
+ * fixture carrying an alias, a fenced note, a composite unique index, an inline ref, a braced
+ * `Ref { }`, a `TableGroup`, enums and defaults: v2 accepts everything v1 accepts, and the model it
+ * returns is the same in everything read below with two exceptions, both handled — it keeps the
+ * newline before a fenced note's closing delimiter (see `note`), and it resolves a ref written
+ * against a table's **alias** to the real table, where v1 handed the alias back as the table name
+ * and left `resolveEndpoint` pointing at a table nothing declares. That second one was a live bug:
+ * the relationship was simply missing from the diagram. `parse.test.ts` holds both down.
+ *
+ * v2's messages are semantic rather than PEG — "A Table must have at least one column" instead of
+ * "Expected comment, valid name, or whitespace but…" — and both compilers throw the same
+ * `{ diags: [{ message, location }] }` shape, so `formatParseError` and `errorPosition` are
+ * unchanged.
  */
 
 // ---------------------------------------------------------------------------
@@ -109,6 +126,20 @@ function text(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
+/**
+ * A note as the model should carry it: without the newline the compiler leaves on a fenced one.
+ *
+ * The v2 compiler hands back a note written between `'''` delimiters with the newline that precedes
+ * the closing one still attached — `primera\nsegunda\n` for a note written over two lines. Nothing
+ * downstream wants it: `setTableNote` writes `note.trim()`, the inspector's editor would show a
+ * phantom blank last line, and the SQL and ORM emitters would carry it into a `COMMENT`. Normalised
+ * once here, at the boundary, rather than in each of the ten places a note is read — the same rule
+ * the default value's requoting follows.
+ */
+function note(value: unknown): string {
+  return text(value).replace(/\n+$/, "");
+}
+
 /** The type as it was written — `varchar(100)`, `decimal(10,2)` — which is what re-emitting needs. */
 function typeName(type: CoreType | string | undefined): string {
   if (typeof type === "string") return type;
@@ -149,7 +180,7 @@ function fieldOf(field: CoreField): DbmlField {
     unique: field.unique === true || pk,
     increment: field.increment === true,
     default: defaultValue(field.dbdefault),
-    note: text(field.note),
+    note: note(field.note),
   };
 }
 
@@ -171,7 +202,7 @@ function cardinality(relation: unknown): DbmlCardinality {
 }
 
 function parseWithCore(source: string): DbmlSchema | null {
-  const database = Parser.parse(source, "dbml") as { schemas?: CoreSchema[] };
+  const database = Parser.parse(source, "dbmlv2") as { schemas?: CoreSchema[] };
   const tables: DbmlTable[] = [];
   const enums: DbmlEnum[] = [];
   const refs: DbmlRef[] = [];
@@ -197,7 +228,7 @@ function parseWithCore(source: string): DbmlSchema | null {
         name: text(entry.name),
         values: (entry.values ?? []).map((value) => ({
           name: text(value.name),
-          note: text(value.note),
+          note: note(value.note),
         })),
       });
     }
@@ -208,7 +239,7 @@ function parseWithCore(source: string): DbmlSchema | null {
         schema: owner,
         name: text(table.name),
         alias: typeof table.alias === "string" && table.alias ? table.alias : null,
-        note: text(table.note),
+        note: note(table.note),
         fields: (table.fields ?? []).map(fieldOf),
         indexes: (table.indexes ?? []).map(indexOf),
       });
@@ -229,7 +260,7 @@ function parseWithCore(source: string): DbmlSchema | null {
         id: qualify(owner || scope, name),
         schema: owner || scope,
         name,
-        note: text(group.note),
+        note: note(group.note),
         tables: [
           ...new Set(
             (group.tables ?? []).map((member) =>
