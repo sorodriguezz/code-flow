@@ -8,13 +8,17 @@ import {
   dropRef,
   dropTable,
   freeName,
+  marksFromComments,
   renameTable,
+  stripMarkComments,
   setRefCardinality,
+  setFieldMarkComment,
   setMarkComment,
   setTableNote,
   updateField,
 } from "./edit";
-import { readLayout, writeLayout } from "./layout";
+import { formatDbml } from "./format";
+import { fieldMarkKey, readLayout, splitFieldMarkKey, writeLayout } from "./layout";
 
 /**
  * The property every operation in `edit.ts` exists to have.
@@ -341,6 +345,316 @@ describe("review marks", () => {
     const read = readLayout(stored);
     expect(read.source).toBe(marked);
     expect(read.marks).toEqual({ posts: "remove" });
+  });
+});
+
+/**
+ * The same feature one row down, where the mark is about a *column*.
+ *
+ * The thing being held is the placement decision: a table's mark gets a line of its own above the
+ * declaration and a column's rides at the end of the column's own line — because a line per marked
+ * column doubles the height of the table you are trying to read across. Everything below follows
+ * from that, and the last two are what make the choice safe: the mark has to survive the formatter
+ * (which re-lays every field line) and it has to survive an edit to the column it is on (which
+ * rewrites that line wholesale).
+ */
+describe("review marks on a column", () => {
+  it("writes the state at the end of the column's line", () => {
+    const got = setFieldMarkComment(DOC, "posts", "title", "remove");
+    expect(got).toContain("  title     varchar(200) [not null]  // ELIMINAR");
+    expectPreserved(got);
+  });
+
+  it("uses the same word per mark that a table's does", () => {
+    expect(setFieldMarkComment(DOC, "posts", "title", "review")).toContain("[not null]  // REVISAR");
+    expect(setFieldMarkComment(DOC, "posts", "title", "keep")).toContain("[not null]  // RESUELTA");
+  });
+
+  /* The table's own mark is a *different* mark, on a different line, and must not be disturbed. */
+  it("leaves the table's own mark where it is", () => {
+    const both = setFieldMarkComment(setMarkComment(DOC, "posts", "review"), "posts", "title", "remove");
+    expect(both).toContain("// REVISAR\nTable posts {");
+    expect(both).toContain("[not null]  // ELIMINAR");
+  });
+
+  it("replaces the previous mark instead of adding a second one", () => {
+    const once = setFieldMarkComment(DOC, "posts", "title", "remove");
+    const twice = setFieldMarkComment(once, "posts", "title", "review");
+    expect(twice).toContain("[not null]  // REVISAR");
+    expect(twice).not.toContain("ELIMINAR");
+    expect(twice.split("\n").length).toBe(DOC.split("\n").length);
+  });
+
+  it("takes the comment away when the mark is cleared", () => {
+    const marked = setFieldMarkComment(DOC, "posts", "title", "remove");
+    expect(setFieldMarkComment(marked, "posts", "title", null)).toBe(DOC);
+  });
+
+  /* Somebody's own trailing note is theirs. The marker is appended after it and taken away from
+     after it, and clearing must give the line back exactly as it was found. */
+  it("leaves a comment the author wrote on the column alone", () => {
+    const annotated = DOC.replace("  title     varchar(200) [not null]", "  title     varchar(200) [not null] // ask the CMS team");
+    const marked = setFieldMarkComment(annotated, "posts", "title", "remove");
+    expect(marked).toContain("// ask the CMS team  // ELIMINAR");
+    expect(setFieldMarkComment(marked, "posts", "title", null)).toBe(annotated);
+  });
+
+  it("is a no-op for a table or a column the document does not declare", () => {
+    expect(setFieldMarkComment(DOC, "sessions", "id", "remove")).toBe(DOC);
+    expect(setFieldMarkComment(DOC, "posts", "slug", "remove")).toBe(DOC);
+    // `note` and `indexes` open blocks of their own; neither is a column.
+    expect(setFieldMarkComment(DOC, "authors", "note", "remove")).toBe(DOC);
+  });
+
+  /* Marking a column and then deleting it is the whole workflow. The marker goes with the line. */
+  it("goes with the column when it is dropped", () => {
+    const marked = setFieldMarkComment(DOC, "posts", "title", "remove");
+    const got = dropField(marked, "posts", "title");
+    expect(got).not.toContain("ELIMINAR");
+    expect(got).not.toContain("varchar(200)");
+    expectPreserved(got);
+  });
+
+  /* `updateField` rewrites the whole line, so without the carry the mark would be deleted by an
+     edit that never mentioned it — and the sidecar, which keeps it, would then be alone. */
+  it("survives an edit to the column it is on", () => {
+    const marked = setFieldMarkComment(DOC, "posts", "title", "review");
+    const got = updateField(marked, "posts", "title", { name: "title", type: "text" });
+    expect(got).toContain("  title text  // REVISAR");
+  });
+
+  it("survives the column being renamed", () => {
+    const marked = setFieldMarkComment(DOC, "posts", "title", "review");
+    const got = updateField(marked, "posts", "title", { name: "headline", type: "text" });
+    expect(got).toContain("  headline text  // REVISAR");
+  });
+
+  /* The placement is only worth having if Format keeps it: the formatter re-lays every field line
+     in the block, and it is the one thing in this app that touches lines nobody edited. */
+  it("survives being formatted, and is aligned rather than moved", () => {
+    const marked = setFieldMarkComment(DOC, "posts", "title", "remove");
+    const tidy = formatDbml(marked);
+    expect(tidy).toMatch(/ {2}title {5}varchar\(200\) \[not null] {2}\/\/ ELIMINAR/);
+    // And formatting is idempotent over it, so opening a marked file does not produce a diff.
+    expect(formatDbml(tidy)).toBe(tidy);
+  });
+});
+
+/**
+ * Reading the marks back out of the document.
+ *
+ * The half that makes a mark removable. Until the comments could be read back, a `// REVISAR` the
+ * `// codeflow:marks` sidecar had forgotten was invisible to the app — undrawn, so unoffered in any
+ * menu, so never passed to `setMarkComment` — and the only way to take it out of the document was
+ * to delete the line by hand.
+ */
+describe("marks recovered from the document", () => {
+  it("finds nothing in a document nobody has marked", () => {
+    expect(marksFromComments(DOC)).toEqual({});
+  });
+
+  it("reads back exactly what the two writers wrote", () => {
+    const marked = setFieldMarkComment(setMarkComment(DOC, "posts", "remove"), "posts", "title", "keep");
+    expect(marksFromComments(marked)).toEqual({
+      posts: "remove",
+      [fieldMarkKey("posts", "title")]: "keep",
+    });
+  });
+
+  it("reads a mark somebody typed by hand, spaced and cased however they liked", () => {
+    const byHand = DOC.replace("Table posts {", "//revisar\nTable posts {");
+    expect(marksFromComments(byHand)).toEqual({ posts: "review" });
+  });
+
+  /* The clearing path is the whole point: what is read back has to be what `setMarkComment` and
+     `setFieldMarkComment` can then take away again. */
+  it("hands back a key those writers can clear with", () => {
+    const marked = setFieldMarkComment(setMarkComment(DOC, "posts", "review"), "posts", "title", "remove");
+    const cleared = setFieldMarkComment(setMarkComment(marked, "posts", null), "posts", "title", null);
+    expect(cleared).toBe(DOC);
+    expect(marksFromComments(cleared)).toEqual({});
+  });
+
+  it("survives the document being formatted", () => {
+    const marked = setFieldMarkComment(setMarkComment(DOC, "posts", "review"), "posts", "title", "remove");
+    expect(marksFromComments(formatDbml(marked))).toEqual({
+      posts: "review",
+      [fieldMarkKey("posts", "title")]: "remove",
+    });
+  });
+
+  /* A quoted name and an alias are two different strings and only one of them is the id. */
+  it("keys a table by its declared name and not by its alias", () => {
+    const marked = setMarkComment(DOC, "oi", "keep");
+    expect(marksFromComments(marked)).toEqual({ "order items": "keep" });
+  });
+
+  /* Neither `note:` nor `indexes` is a column, and a trailing marker on one is not a column's. */
+  it("does not mistake a note or an index for a column", () => {
+    const marked = DOC.replace("    (email) [unique]", "    (email) [unique]  // REVISAR");
+    expect(marksFromComments(marked)).toEqual({});
+  });
+
+  /* The sidecar is keyed by id, so the comments have to be too — and `public` is not part of one. */
+  it("drops the default schema from a qualified declaration", () => {
+    expect(marksFromComments("// REVISAR\nTable public.users {\n  id int\n}\n")).toEqual({
+      users: "review",
+    });
+    expect(marksFromComments("// REVISAR\nTable core.users {\n  id int\n}\n")).toEqual({
+      "core.users": "review",
+    });
+  });
+});
+
+/**
+ * The half of marking that was reported broken: taking one off and having the document follow.
+ *
+ * Every failure here has the same shape from the outside — the mark leaves the canvas and the
+ * `// REVISAR` stays in the text, with nothing left in the app that admits the comment is there.
+ */
+describe("taking a mark off again", () => {
+  it("removes a marker that has drifted off its declaration", () => {
+    // A blank line above the table is all it takes: somebody pressed Enter, a merge left a gap, a
+    // paste landed between the two. The marker is still plainly that table's, and a clear that only
+    // looked at the line immediately above used to walk away from it.
+    const drifted = DOC.replace("Table posts {", "// REVISAR\n\nTable posts {");
+    const cleared = setMarkComment(drifted, "posts", null);
+    expect(cleared).not.toContain("REVISAR");
+    // The blank line is the author's and stays: only the marker line is taken out.
+    expect(cleared).toContain("\n\nTable posts {");
+  });
+
+  it("shows a drifted marker as a mark, so there is something to press", () => {
+    const drifted = DOC.replace("Table posts {", "// REVISAR\n\nTable posts {");
+    expect(marksFromComments(drifted)).toEqual({ posts: "review" });
+  });
+
+  /* The walk upwards must not reach past the table above into its marker. */
+  it("does not take the previous table's marker with it", () => {
+    const both = setMarkComment(setMarkComment(DOC, "authors", "remove"), "posts", "review");
+    const cleared = setMarkComment(both, "posts", null);
+    expect(cleared).toContain("// ELIMINAR\nTable authors {");
+    expect(cleared).not.toContain("REVISAR");
+  });
+
+  it("is the same string back when there was nothing to clear", () => {
+    expect(setMarkComment(DOC, "posts", null)).toBe(DOC);
+  });
+});
+
+/**
+ * A column's mark that somebody has moved onto a line of its own.
+ *
+ * The reported bug, from a real schema. A column's mark is written at the *end* of its line, which
+ * on a column already carrying a sentence of the author's own buries it a hundred characters into
+ * the prose — so people push it down onto its own line, which is the obvious thing to do and used
+ * to make it vanish from the app entirely: nothing read it, so no dot was drawn, so no menu offered
+ * to clear it, so the one function that could have removed it was never asked to.
+ */
+describe("a column's mark on a line of its own", () => {
+  const MOVED = `Table servicio {
+  id uuid [pk]
+  nombre text [not null] // Nombre del servicio, ej: Consulta de Medicina Interna.
+  // REVISAR
+
+  codigo text [not null]
+
+  // duracion o tipo_cita
+  duracion int [not null]
+
+  note: '''
+  Ejemplo: Resonancia Magnética (Rodilla).
+  REVISAR
+  '''
+}
+`;
+
+  it("belongs to the column above it", () => {
+    expect(marksFromComments(MOVED)).toEqual({ [fieldMarkKey("servicio", "nombre")]: "review" });
+  });
+
+  it("comes off when that column's mark is cleared", () => {
+    const cleared = setFieldMarkComment(MOVED, "servicio", "nombre", null);
+    expect(cleared).not.toContain("// REVISAR");
+    expect(marksFromComments(cleared)).toEqual({});
+  });
+
+  /* Only the marker goes. A comment of the author's next door is not one of these. */
+  it("leaves the author's own comments where they are", () => {
+    const cleared = setFieldMarkComment(MOVED, "servicio", "nombre", null);
+    expect(cleared).toContain("  // duracion o tipo_cita");
+    expect(cleared).toContain("  nombre text [not null] // Nombre del servicio");
+  });
+
+  /* Prose inside a `'''` note is prose, however much a line of it looks like a marker. */
+  it("does not reach inside a multi-line note", () => {
+    expect(setFieldMarkComment(MOVED, "servicio", "nombre", null)).toContain("\n  REVISAR\n");
+  });
+
+  /* Setting a new one has to fold the stray back in, or the column wears two marks at once. */
+  it("is folded back onto the line when the column is marked again", () => {
+    const set = setFieldMarkComment(MOVED, "servicio", "nombre", "remove");
+    expect(set).toContain("Medicina Interna.  // ELIMINAR");
+    expect(set).not.toContain("// REVISAR");
+    expect(marksFromComments(set)).toEqual({ [fieldMarkKey("servicio", "nombre")]: "remove" });
+  });
+
+  /* A marker before the first column has nothing above it, so it reads downwards instead. */
+  it("reads downwards when there is no column above it", () => {
+    const first = "Table a {\n  // ELIMINAR\n  id int\n}\n";
+    expect(marksFromComments(first)).toEqual({ [fieldMarkKey("a", "id")]: "remove" });
+    expect(setFieldMarkComment(first, "a", "id", null)).toBe("Table a {\n  id int\n}\n");
+  });
+});
+
+/**
+ * The sweep, which is the one clear that cannot fail.
+ *
+ * It finds nothing and locates nothing: it reads lines. That is the point — it is what the
+ * "clear every mark" control runs, and the way out of any disagreement the targeted clears above
+ * cannot reconcile.
+ */
+describe("stripMarkComments", () => {
+  it("takes every marker out, on tables and on columns alike", () => {
+    const marked = setFieldMarkComment(setMarkComment(DOC, "posts", "remove"), "posts", "title", "review");
+    const swept = stripMarkComments(marked);
+    expect(swept).toBe(DOC);
+    expect(marksFromComments(swept)).toEqual({});
+  });
+
+  it("reaches markers the targeted clears cannot", () => {
+    // Detached from any declaration at all, which is as far as a marker can drift.
+    const stray = "// REVISAR\n\n\n" + DOC;
+    expect(stripMarkComments(stray)).not.toContain("REVISAR");
+  });
+
+  it("keeps a comment of the author's that merely ends in one of the words", () => {
+    const prose = "Table a {\n  id int // no hay nada que revisar aqui\n}\n";
+    expect(stripMarkComments(prose)).toBe(prose);
+  });
+
+  it("is the same string back on a document nobody has marked", () => {
+    expect(stripMarkComments(DOC)).toBe(DOC);
+  });
+});
+
+/**
+ * How a column's mark is filed in the sidecar the canvas reads.
+ *
+ * One map holds tables, relationships and columns, so the only thing that keeps the three apart is
+ * the shape of the key — and a column's is the only one with a pipe in it.
+ */
+describe("the key a column's mark is filed under", () => {
+  it("round-trips a table id and a column name", () => {
+    expect(splitFieldMarkKey(fieldMarkKey("core.users", "id"))).toEqual({
+      table: "core.users",
+      column: "id",
+    });
+  });
+
+  it("is not a table id and is not a relationship id", () => {
+    expect(splitFieldMarkKey("core.users")).toBeNull();
+    expect(splitFieldMarkKey("posts.author_id->authors.id")).toBeNull();
   });
 });
 

@@ -15,6 +15,7 @@ import {
   BADGE_GAP,
   badgeStripWidth,
   columnBadges,
+  fieldMarkKey,
   layoutDbml,
   type DbmlBadge,
   type DbmlLayout,
@@ -25,7 +26,6 @@ import { highlightFor, type DbmlSchema } from "../../lib/dbml/types";
 import {
   ArrowLeftRight,
   Code2,
-  Eraser,
   LayoutGrid,
   ListOrdered,
   Pencil,
@@ -38,6 +38,10 @@ import {
 } from "lucide-react";
 import type { RefEnd } from "../../lib/dbml/edit";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+// The mark colours and the four menu rows, shared with the inspector — see `markChrome`. They are
+// a fourth colour family beside the badge legend above, and the reason they may reuse the semantic
+// tokens the badges could not is written out there.
+import { MARK_COLOUR, markMenuItems, markNamesOf } from "./markChrome";
 import { useT } from "../../state/languageStore";
 import type { DbDiagramColumn } from "../../types/database";
 import type { DiagramColumnMode, DiagramDensity, DiagramNode } from "../../lib/db/erLayout";
@@ -115,22 +119,6 @@ const BADGE_COLOUR: Record<DbmlBadge["label"], string> = {
 };
 
 /**
- * The review marks: a fourth colour family, and the only one that means a *decision* rather than a
- * property of the schema.
- *
- * It reuses `--cf-warning`, which is also the PK badge's. That is allowed here and is not a repeat
- * of the mistake the legend note above describes: the rule there is that the badges must be
- * distinct **from each other**, because they sit side by side on one row. A mark never appears on a
- * column row — it is a spine down the box's left edge and a dot in its header — so it is never read
- * against a PK badge, and the three semantic colours are the ones a reader already knows.
- */
-const MARK_COLOUR: Record<DbmlMarkKind, string> = {
-  remove: "var(--cf-danger)",
-  review: "var(--cf-warning)",
-  keep: "var(--cf-success)",
-};
-
-/**
  * The face the cards are set in.
  *
  * Monospace, like the document they are drawn from: a column list is a list of identifiers, and the
@@ -153,6 +141,23 @@ const PAD_X = 11;
  * every row for this, so the two cannot drift apart.
  */
 const GUTTER = 13;
+/**
+ * The rail a marked column is drawn with, in the card's left padding.
+ *
+ * It lives in the 6px of clearance between the *table's* mark spine (`x` 1.5 to 5) and the key
+ * gutter (`x` 11 onwards), so a table marked for review and a column inside it marked for removal
+ * are two bars side by side rather than one painted over the other. Narrower than the table's and
+ * broken per row, which is the difference it has to carry: the table's spine is one decision about
+ * the whole box, and these are one decision each.
+ *
+ * Placed by a constant rather than by arithmetic on `PAD_X` because it is a gap, not an offset —
+ * it is defined by the two things either side of it, and changing either is what should force this
+ * to be looked at again.
+ */
+const MARK_RAIL_X = 7;
+const MARK_RAIL_W = 2.5;
+/** How far a row's wash is taken. Below the accent's, which has a lit row to compete with. */
+const MARK_WASH = 0.1;
 const BADGE_H = 13;
 const HEADER_H = 34;
 /**
@@ -282,6 +287,17 @@ export const DbmlCanvas = forwardRef<
        */
       setMark: (id: string, mark: DbmlMarkKind | null) => void;
       /**
+       * The same for one *column*, which is the unit a schema is actually reviewed in.
+       *
+       * Two arguments rather than one composed key, so nothing outside `lib/dbml/layout` has to
+       * know how a column's mark is filed. Not gated on `blocked` either, and for the same reason
+       * as `setMark`: a mark is written to the sidecar, which needs nothing parsed, and half-typed
+       * is exactly the state a document is in while somebody is going down it deciding things.
+       */
+      setFieldMark: (table: string, column: string, mark: DbmlMarkKind | null) => void;
+      /** Removes a column, and any relationship drawn to it. The table's **id**, as everywhere. */
+      dropField: (table: string, column: string) => void;
+      /**
        * Holds the inspector on this table, or lets it go. Absent on a caller with no inspector.
        *
        * Not gated on `blocked` either, and for the same reason as `setMark`: it writes no DBML at
@@ -338,6 +354,15 @@ export const DbmlCanvas = forwardRef<
   ref,
 ) {
   const t = useT();
+  /**
+   * What each mark is *called*, as opposed to what setting it is called.
+   *
+   * The menu rows say the action ("Mark for removal"); a tooltip on something already marked has to
+   * say the state ("Marked for removal"), or it reads as an offer to do again what has been done.
+   * Resolved once here and handed down, because `SchemaBox` and `Row` draw into SVG and a `<title>`
+   * is the only text on this canvas that is read rather than drawn.
+   */
+  const markNames = useMemo(() => markNamesOf(t), [t]);
   const frameRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const canvasRef = useRef<SVGGElement>(null);
@@ -380,6 +405,14 @@ export const DbmlCanvas = forwardRef<
         x: number;
         y: number;
         on: { kind: "ref"; id: string; from: RefEnd; to: RefEnd; mark?: DbmlMarkKind };
+      }
+    // A right-click that landed on one row of a box rather than on the box. `table` is the id the
+    // sidecar is keyed by and `name` is what the menu's heading says, which are not the same string
+    // on a qualified schema.
+    | {
+        x: number;
+        y: number;
+        on: { kind: "field"; table: string; name: string; column: string; mark?: DbmlMarkKind };
       }
     | { x: number; y: number; on: { kind: "canvas" } }
     | null
@@ -1140,6 +1173,8 @@ export const DbmlCanvas = forwardRef<
               node={node}
               isEnum={layout.enumIds.has(node.id)}
               mark={marks[node.id]}
+              marks={marks}
+              markNames={markNames}
               pinned={pinnedId === node.id}
               selected={selected === node.id}
               connect={
@@ -1171,6 +1206,36 @@ export const DbmlCanvas = forwardRef<
                           // while another one is held does not move the selection (`onSelect` is
                           // refused while pinned), so the two are not the same question.
                           pinned: pinnedId === node.id,
+                        },
+                      });
+                    }
+                  : undefined
+              }
+              onFieldContextMenu={
+                // Not `editing && !editing.blocked`: the four rows this opens are the marks and a
+                // delete, and only the delete is refused while the document does not parse — the
+                // menu itself disables that one. Gating the whole menu would take reviewing away at
+                // exactly the moment a half-typed schema is what you are reviewing.
+                //
+                // Enums are excluded because their rows are values, not columns: there is no field
+                // line for `setFieldMarkComment` to write against and nothing for a delete to
+                // remove.
+                editing && !layout.enumIds.has(node.id)
+                  ? (column, event) => {
+                      event.preventDefault();
+                      // The box's own handler would otherwise run too and replace this menu with
+                      // the table's — the row is inside the card, so both are on the path.
+                      event.stopPropagation();
+                      onSelect(node.id);
+                      setMenu({
+                        x: event.clientX,
+                        y: event.clientY,
+                        on: {
+                          kind: "field",
+                          table: node.id,
+                          name: node.name,
+                          column,
+                          mark: marks[fieldMarkKey(node.id, column)],
                         },
                       });
                     }
@@ -1269,6 +1334,12 @@ export const DbmlCanvas = forwardRef<
         <ContextMenu
           x={menu.x}
           y={menu.y}
+          // Only a column's menu is titled, and only because it is the one that could be mistaken
+          // for another: every row of a box looks like every other row at the moment the menu
+          // covers them, so the heading is what says which column the four entries are about. A
+          // menu on a table or a relationship needs none — you right-clicked the thing and it is
+          // still on screen beside the menu.
+          heading={menu.on.kind === "field" ? `${menu.on.name}.${menu.on.column}` : undefined}
           onClose={() => setMenu(null)}
           items={menuItems(menu.on, editing, t, beginRename, onOpen)}
         />
@@ -1287,36 +1358,6 @@ export const DbmlCanvas = forwardRef<
  * `applyEdit` in the workbench for why editing stops there — so the menu is the same shape whether
  * or not the schema is currently valid.
  */
-/**
- * The three marks plus a way out, as menu rows.
- *
- * First in the menu, above the edits, because on a model being reviewed this is the thing you press
- * thirty times and "delete this table" is the thing you press once at the end. The mark already on
- * the thing is offered as "clear" rather than repeated as a no-op row.
- */
-function markItems(
-  id: string,
-  current: DbmlMarkKind | undefined,
-  editing: NonNullable<React.ComponentProps<typeof DbmlCanvas>["editing"]>,
-  t: (key: Parameters<ReturnType<typeof useT>>[0]) => string,
-): MenuItem[] {
-  const rows: MenuItem[] = (["remove", "review", "keep"] as const)
-    .filter((kind) => kind !== current)
-    .map((kind) => ({
-      label: t(`dbml.mark.${kind}` as "dbml.mark.remove"),
-      leading: (
-        <span
-          className="h-2 w-2 shrink-0 rounded-full"
-          style={{ background: MARK_COLOUR[kind] }}
-        />
-      ),
-      onClick: () => editing.setMark(id, kind),
-    }));
-  if (current) {
-    rows.push({ label: t("dbml.mark.clear"), icon: Eraser, onClick: () => editing.setMark(id, null) });
-  }
-  return rows;
-}
 
 function menuItems(
   on:
@@ -1329,6 +1370,7 @@ function menuItems(
         pinned: boolean;
       }
     | { kind: "ref"; id: string; from: RefEnd; to: RefEnd; mark?: DbmlMarkKind }
+    | { kind: "field"; table: string; name: string; column: string; mark?: DbmlMarkKind }
     | { kind: "canvas" },
   editing: NonNullable<React.ComponentProps<typeof DbmlCanvas>["editing"]>,
   t: (key: Parameters<ReturnType<typeof useT>>[0]) => string,
@@ -1337,9 +1379,26 @@ function menuItems(
   onOpen?: (id: string) => void,
 ): MenuItem[] {
   const off = editing.blocked;
+  // A column, which is what a right-click on one of a box's rows lands on. Its own menu rather than
+  // the table's, for the reason every file manager gives a file a different menu from its folder:
+  // what you pointed at is what you meant. The table's own menu is a right-click away on the header
+  // band, or anywhere in the box that is not a row.
+  if (on.kind === "field") {
+    return [
+      ...markMenuItems(on.mark, (mark) => editing.setFieldMark(on.table, on.column, mark), t),
+      {
+        label: t("dbml.inspector.dropField"),
+        icon: Trash2,
+        danger: true,
+        separated: true,
+        disabled: off,
+        onClick: () => editing.dropField(on.table, on.column),
+      },
+    ];
+  }
   if (on.kind === "table") {
     return [
-      ...markItems(on.id, on.mark, editing, t),
+      ...markMenuItems(on.mark, (mark) => editing.setMark(on.id, mark), t),
       // Holding the panel and jumping to the text: one group, between the marks and the edits, and
       // — like the marks — **not** gated on `blocked`. Everything below rewrites DBML and so cannot
       // run against a schema that no longer describes the text. These two do not: one moves a
@@ -1400,7 +1459,7 @@ function menuItems(
   }
   if (on.kind === "ref") {
     return [
-      ...markItems(on.id, on.mark, editing, t),
+      ...markMenuItems(on.mark, (mark) => editing.setMark(on.id, mark), t),
       {
         label: t("dbml.flipRelation"),
         icon: ArrowLeftRight,
@@ -1548,6 +1607,8 @@ const SchemaBox = memo(function SchemaBox({
   node,
   isEnum,
   mark,
+  marks,
+  markNames,
   pinned,
   selected,
   related,
@@ -1556,6 +1617,7 @@ const SchemaBox = memo(function SchemaBox({
   draggable,
   connect,
   onContextMenu,
+  onFieldContextMenu,
   onRename,
   onPointerDown,
   onPointerEnter,
@@ -1566,6 +1628,16 @@ const SchemaBox = memo(function SchemaBox({
   isEnum: boolean;
   /** The review mark on this table, if it has one. */
   mark?: DbmlMarkKind;
+  /**
+   * Every mark in the document, so each row can find its own under `fieldMarkKey`.
+   *
+   * The whole map rather than this box's slice, because a slice would be a fresh object on every
+   * render and the memo above exists to stop two hundred boxes re-rendering for a pan that moved
+   * none of them. The map's identity only changes when the document does.
+   */
+  marks: DbmlMarks;
+  /** What each mark is *called*, for the tooltips. Translated by the caller: this is SVG. */
+  markNames: Record<DbmlMarkKind, string>;
   /** The inspector is held on this table. */
   pinned: boolean;
   selected: boolean;
@@ -1581,6 +1653,9 @@ const SchemaBox = memo(function SchemaBox({
     onStart: (column: string, cy: number, event: React.PointerEvent) => void;
   };
   onContextMenu?: (event: React.MouseEvent) => void;
+  /** Right-click on one of the rows. Absent on a read-only canvas and on an enum, whose rows are
+   *  values rather than columns and have nothing a mark could be written against. */
+  onFieldContextMenu?: (column: string, event: React.MouseEvent) => void;
   /** Double-click on the header band. Distinct from `onOpen`, which is the body's. */
   onRename?: () => void;
   onPointerDown: (event: React.PointerEvent) => void;
@@ -1816,7 +1891,7 @@ const SchemaBox = memo(function SchemaBox({
           the columns, without spending a word on it. */}
       {mark && (
         <circle cx={node.width - PAD_X - 17 - (showRows ? rowsWidth : 0)} cy={17} r={3.5} fill={MARK_COLOUR[mark]}>
-          <title>{mark}</title>
+          <title>{markNames[mark]}</title>
         </circle>
       )}
 
@@ -1880,6 +1955,11 @@ const SchemaBox = memo(function SchemaBox({
           // The column the selected relationship is actually made of, on both sides of it. Without
           // this a highlighted pair of tables still leaves you counting rows to find the join.
           joined={joinedColumns?.has(`${node.id}|${column.name}`) ?? false}
+          mark={isEnum ? undefined : marks[fieldMarkKey(node.id, column.name)]}
+          markNames={markNames}
+          onContextMenu={
+            onFieldContextMenu ? (event) => onFieldContextMenu(column.name, event) : undefined
+          }
         />
       ))}
 
@@ -1915,7 +1995,10 @@ function Row({
   first,
   isEnum,
   joined,
+  mark,
+  markNames,
   connect,
+  onContextMenu,
 }: {
   column: DbDiagramColumn;
   y: number;
@@ -1925,6 +2008,19 @@ function Row({
   first: boolean;
   isEnum: boolean;
   joined: boolean;
+  /**
+   * What has been decided about this column, if anything.
+   *
+   * Drawn three ways at three scales, which is the whole of the design here: a **wash** behind the
+   * row, which is what you see when you are looking at the table; a **rail** in the card's left
+   * padding, which is the only one still legible at the zoom where thirty tables fit on screen; and
+   * a **line through the name** when the column is going, which is the one that needs no legend.
+   * Nothing is added to the right of the name — the type column and the badge strip are what make a
+   * table scannable, and a fourth thing competing for that edge would cost more than the mark is
+   * worth.
+   */
+  mark?: DbmlMarkKind;
+  markNames: Record<DbmlMarkKind, string>;
   /** Present when a relationship can be dragged out of this row. */
   connect?: {
     lit: boolean;
@@ -1933,6 +2029,7 @@ function Row({
     onLeave: () => void;
     onStart: (event: React.PointerEvent) => void;
   };
+  onContextMenu?: (event: React.MouseEvent) => void;
 }) {
   const badgeY = y + (ROW_H - BADGE_H) / 2;
   // Which badges this row carries, and how wide, comes from `columnBadges` — the same function the
@@ -1955,12 +2052,29 @@ function Row({
   const typeText = column.data_type ? clip(column.data_type, 108, 9 * MONO_ADVANCE) : "";
   const typeWidth = typeText.length * 9 * MONO_ADVANCE;
   const nameX = PAD_X + GUTTER;
+  /** Held rather than inlined: the strikethrough has to be exactly as wide as the drawn name. */
+  const label = clip(
+    column.name,
+    Math.max(24, typeRight - typeWidth - nameX - 8),
+    11 * MONO_ADVANCE,
+  );
+  const marked = mark ? MARK_COLOUR[mark] : null;
 
   return (
     <g
       onPointerEnter={connect?.onEnter}
       onPointerLeave={connect?.onLeave}
+      onContextMenu={onContextMenu}
     >
+      {/* The mark, as a wash behind the whole row — *under* the two accent washes and weaker than
+          either. A marked column that is also an end of the relationship you selected has to keep
+          reading as the join, because that is the question you just asked the canvas; the rail
+          below carries the mark in that case, and nothing else on this canvas draws a rail. */}
+      {marked && (
+        <rect y={y} width={width} height={ROW_H} fill={marked} fillOpacity={MARK_WASH}>
+          {mark && <title>{markNames[mark]}</title>}
+        </rect>
+      )}
       {joined && (
         <rect y={y} width={width} height={ROW_H} fill="var(--cf-accent)" fillOpacity={0.1} />
       )}
@@ -1971,6 +2085,19 @@ function Row({
       )}
       {!first && (
         <line y1={y} x2={width} y2={y} stroke="var(--cf-border)" strokeOpacity={0.9} />
+      )}
+
+      {/* The rail. Inset short of the row's full height so a run of marked columns reads as a
+          column of separate decisions rather than as one bar, which is what they are. */}
+      {marked && (
+        <rect
+          x={MARK_RAIL_X}
+          y={y + 4}
+          width={MARK_RAIL_W}
+          height={ROW_H - 8}
+          rx={MARK_RAIL_W / 2}
+          fill={marked}
+        />
       )}
 
       {/* The grab handle for a new relationship, on the right edge where the lines already leave.
@@ -2051,10 +2178,29 @@ function Row({
         fontSize={11}
         fontFamily={MONO}
         fill="var(--cf-text)"
+        // Receding, not vanishing — the same amount and the same argument as a table marked for
+        // removal. The column is still part of the model; it is on its way out of it.
+        fillOpacity={mark === "remove" ? 0.62 : 1}
         fontWeight={joined ? 600 : 400}
       >
-        {clip(column.name, Math.max(24, typeRight - typeWidth - nameX - 8), 11 * MONO_ADVANCE)}
+        {label}
       </text>
+
+      {/* Struck through when it is going. The one mark that needs no legend, drawn here for the
+          same reason it is drawn on a table's name: everybody already knows what a line through a
+          name means, and it survives being read in a screenshot by somebody who has never opened
+          this app. */}
+      {mark === "remove" && (
+        <line
+          x1={nameX - 1}
+          y1={y + ROW_H / 2 + 0.1}
+          x2={nameX + 1 + label.length * 11 * MONO_ADVANCE}
+          y2={y + ROW_H / 2 + 0.1}
+          stroke={MARK_COLOUR.remove}
+          strokeWidth={1.1}
+          strokeLinecap="round"
+        />
+      )}
 
       {/* Text, not a pill.
 

@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { DbmlCanvas } from "./DbmlCanvas";
 import type { DbmlMarks } from "../../lib/dbml/layout";
 import type { DbmlSchema } from "../../lib/dbml/types";
+import type { Translate } from "../../state/languageStore";
+import { markMenuItems } from "./markChrome";
 
 /**
  * What a review mark looks like on the canvas.
@@ -126,6 +128,102 @@ describe("marks on the canvas", () => {
 });
 
 /**
+ * The rail a marked *column* is drawn with, in document order.
+ *
+ * The row wash is in the mark's colour and so are two of the five badges, and the strikethrough
+ * only ever appears on one of the three marks — so the rail, which nothing else on this canvas
+ * draws, is the shape worth asserting on. Same reasoning as `spines` above, one row down.
+ */
+const rails = (html: string) =>
+  [...html.matchAll(/<rect x="7" y="\d+(?:\.\d+)?" width="2\.5"[^>]*fill="([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+
+/**
+ * A decision about one column of a table, which is the unit a schema is actually reviewed in.
+ *
+ * The table-level tests above hold down that a mark reaches the drawing and changes nothing about
+ * the schema. These hold the two things that are only true one row down: that a column's mark is
+ * drawn *on its row* rather than on its box, and that the two kinds never stand in for each other.
+ */
+describe("marks on a column", () => {
+  it("draws nothing extra when no column is marked", () => {
+    expect(rails(draw({}))).toEqual([]);
+  });
+
+  it.each([
+    ["remove", "var(--cf-danger)"],
+    ["review", "var(--cf-warning)"],
+    ["keep", "var(--cf-success)"],
+  ] as const)("draws a %s mark in its own colour", (kind, colour) => {
+    expect(rails(draw({ "users|id": kind }))).toEqual([colour]);
+  });
+
+  /* The row is washed as well as railed — the rail is what survives the zoom at which a schema
+     fits on screen, and the wash is what you see when you are reading the table. */
+  it("washes the row it is on", () => {
+    expect(draw({ "users|id": "remove" })).toContain(
+      'width="212" height="22" fill="var(--cf-danger)" fill-opacity="0.1"',
+    );
+  });
+
+  /* The one mark that needs no legend, on the column's name — exactly as on a table's. */
+  it("strikes through a column marked for removal, and no other", () => {
+    expect(draw({ "posts|user_id": "remove" })).toContain(
+      'stroke="var(--cf-danger)" stroke-width="1.1"',
+    );
+    expect(draw({ "posts|user_id": "review" })).not.toContain('stroke-width="1.1"');
+  });
+
+  /* The two kinds of mark live in one map, so the thing that must hold is that neither is ever
+     read as the other: `users` marks the box, `users|id` marks one row of it. */
+  it("does not mark the table the column belongs to", () => {
+    const html = draw({ "users|id": "remove" });
+    expect(rails(html)).toEqual(["var(--cf-danger)"]);
+    expect(spines(html)).toEqual([]);
+  });
+
+  it("does not mark the columns of a table that is marked", () => {
+    const html = draw({ users: "remove" });
+    expect(spines(html)).toEqual(["var(--cf-danger)"]);
+    expect(rails(html)).toEqual([]);
+  });
+
+  /* A column renamed or deleted outside this window, or a key from a hand-edited sidecar. */
+  it("ignores a mark whose column is not in the schema", () => {
+    expect(rails(draw({ "users|gone": "remove", "gone|id": "remove" }))).toEqual([]);
+  });
+
+  /* An enum's rows are values, not columns: there is no field line to write `// ELIMINAR` against,
+     so drawing one would be a mark the document could never carry. */
+  it("draws nothing on an enum's values", () => {
+    const withEnum = renderToStaticMarkup(
+      <DbmlCanvas
+        schema={{
+          ...SCHEMA,
+          enums: [
+            {
+              id: "state",
+              schema: "public",
+              name: "state",
+              values: [{ name: "draft", note: "" }],
+            },
+          ],
+        }}
+        positions={{}}
+        selected={null}
+        onSelect={() => {}}
+        mode="all"
+        density="roomy"
+        marks={{ "state|draft": "remove" }}
+      />,
+    );
+    expect(rails(withEnum)).toEqual([]);
+    expect(withEnum).toContain(">draft<");
+  });
+});
+
+/**
  * What covers what.
  *
  * SVG has no `z-index`, so both of these are properties of the emitted markup rather than of any
@@ -190,5 +288,40 @@ describe("overlapping boxes", () => {
     for (const match of html.matchAll(/<g opacity="0\.45"[^>]*>(.*?)<\/g>/g)) {
       expect(match[1]).not.toContain('fill="var(--cf-surface)"');
     }
+  });
+});
+
+/**
+ * The three mark rows, as they sit in a menu next to the rows that are not marks.
+ *
+ * `ContextMenu` lays its rows out `items-start` so a label long enough to wrap keeps its glyph
+ * beside the *first* line rather than floating in the middle of two — which means every glyph has
+ * to carry its own optical centring. A Lucide icon does: 13px square, nudged 2px down. A bare 8px
+ * dot did not, and sat visibly above the words it was labelling, in the canvas's row menu and in
+ * the inspector's column menu alike. It also left the three coloured rows' labels four pixels to
+ * the left of "Clear mark" below them, which is an eraser glyph.
+ */
+describe("the mark rows in a menu", () => {
+  const rows = markMenuItems("review", () => {}, ((key: string) => key) as Translate);
+
+  it("puts the dot in the same box a glyph would occupy", () => {
+    for (const row of rows.filter((entry) => entry.leading)) {
+      const slot = renderToStaticMarkup(<>{row.leading}</>);
+      expect(slot).toContain("h-[13px]");
+      expect(slot).toContain("w-[13px]");
+      expect(slot).toContain("mt-[2px]");
+    }
+  });
+
+  it("offers the way out once something is marked, and the other two marks", () => {
+    expect(rows.map((row) => row.label)).toEqual([
+      "dbml.mark.remove",
+      "dbml.mark.keep",
+      "dbml.mark.clear",
+    ]);
+    // The eraser is an icon rather than a `leading`, which is the row the three above have to line
+    // up with.
+    expect(rows[2].leading).toBeUndefined();
+    expect(rows[2].icon).toBeDefined();
   });
 });

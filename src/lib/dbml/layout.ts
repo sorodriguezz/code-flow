@@ -462,8 +462,32 @@ export type DbmlMarkKind = "remove" | "review" | "keep";
 
 const MARK_KINDS = new Set<string>(["remove", "review", "keep"]);
 
-/** Keyed by table id (which is its qualified name) or by ref id. */
+/** Keyed by table id (which is its qualified name), by ref id, or by `fieldMarkKey`. */
 export type DbmlMarks = Record<string, DbmlMarkKind>;
+
+/**
+ * The key a *column's* mark is filed under: its table's id, a pipe, and the column's name.
+ *
+ * One map for three kinds of thing — tables, relationships and columns — rather than a third
+ * sidecar line, because everything that already carries marks around then carries columns for
+ * free: the reader and writer below, the rename migration in the workbench, the counts in the
+ * status strip, and the validation that drops a value a hand-edit invented.
+ *
+ * `|` is the separator, and it is the one the rest of the app already uses for exactly this pair —
+ * `joinedColumns` and `hoveredRow` in `DbmlCanvas` are both `"<tableId>|<column>"`. It cannot be
+ * confused with either of the other two kinds of key: a table id is a qualified name and a ref id
+ * is `a.b->c.d`, and a pipe appears in neither. The one way to collide is a *quoted* table name
+ * that contains a pipe and reads as some other table's name plus one of its columns.
+ */
+export function fieldMarkKey(table: string, column: string): string {
+  return `${table}|${column}`;
+}
+
+/** The table id and column name back out of one, or `null` when the key is not a column's. */
+export function splitFieldMarkKey(key: string): { table: string; column: string } | null {
+  const at = key.indexOf("|");
+  return at === -1 ? null : { table: key.slice(0, at), column: key.slice(at + 1) };
+}
 
 export interface DbmlDocument {
   /** The DBML itself, with the marker lines removed. This is what the parser and the editor see. */

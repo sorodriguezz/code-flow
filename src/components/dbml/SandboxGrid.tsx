@@ -520,8 +520,26 @@ export function SandboxGrid({
                       <td
                         key={column.name}
                         style={{ width: widthOf(column) }}
-                        onDoubleClick={() => setEditing({ rowid, column: column.name })}
-                        className="overflow-hidden truncate border-b border-r border-[var(--cf-border)] px-2 align-middle"
+                        // One click, not two. A cell you can change and a cell you cannot look
+                        // identical, so the only thing that said an existing row was editable at
+                        // all was a double-click nobody had been told about — which is
+                        // indistinguishable from a grid that only takes new rows. The caret cursor
+                        // and the tooltip are the other half of saying so; the hover tint is what
+                        // makes the target visible before it is pressed.
+                        onClick={() => {
+                          if (!isEditing) setEditing({ rowid, column: column.name });
+                        }}
+                        title={isEditing ? undefined : t("dbml.sandbox.editCell")}
+                        // The clip goes while the cell is open, and it has to: a foreign key's
+                        // picker hangs *below* the cell it belongs to, and `overflow-hidden` —
+                        // which is what truncates the value the rest of the time — cuts it off at
+                        // the row. Truncation is a property of a cell being read, not of one being
+                        // written into.
+                        className={`border-b border-r border-[var(--cf-border)] px-2 align-middle ${
+                          isEditing
+                            ? ""
+                            : "cursor-text overflow-hidden truncate hover:bg-[color-mix(in_oklab,var(--cf-accent)_7%,transparent)]"
+                        }`}
                       >
                         {isEditing ? (
                           <CellInput
@@ -536,6 +554,14 @@ export function SandboxGrid({
                               // Cleared on success, not left standing: the banner is the only thing
                               // on the surface that says whether the last write landed.
                               setRowError(failure ? messageFor(t, failure) : null);
+                            }}
+                            // Tab walks the row, the way it walks the draft. Every column counts
+                            // here and not just the `typed` ones: `auto` means "the engine will
+                            // fill this if you do not", which is a statement about an *insert* —
+                            // a key that already has a value is as editable as anything else.
+                            onTabOut={() => {
+                              const next = columns[columns.indexOf(column) + 1];
+                              setEditing(next ? { rowid, column: next.name } : null);
                             }}
                             onCancel={() => setEditing(null)}
                           />
@@ -731,6 +757,11 @@ function CellInput({
       return;
     }
     if (event.key === "Tab" && !event.shiftKey) {
+      // On an existing row only one cell is an input at a time, so the next one does not exist
+      // until `onTabOut` has opened it — and the browser's own tab, taken first, would leave the
+      // focus on whatever happened to be next in the document. The draft row is the opposite case:
+      // every one of its cells is mounted, and that tab order *is* the route through them.
+      if (!inline) event.preventDefault();
       onCommit((event.target as HTMLInputElement).value || null);
       onTabOut?.();
     }

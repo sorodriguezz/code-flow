@@ -57,7 +57,14 @@ import { formatDbml } from "../../lib/dbml/format";
 import { hintFor } from "../../lib/dbml/errors";
 import { mergeDbml } from "../../lib/dbml/merge";
 import { pushRevision, type Revision, type RevisionCause } from "../../lib/dbml/history";
-import { readLayout, writeLayout, type DbmlMarkKind, type DbmlMarks } from "../../lib/dbml/layout";
+import {
+  fieldMarkKey,
+  readLayout,
+  splitFieldMarkKey,
+  writeLayout,
+  type DbmlMarkKind,
+  type DbmlMarks,
+} from "../../lib/dbml/layout";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
 import { sandboxOf, useSandboxStore } from "../../state/sandboxStore";
 import type { SqlImportDialect } from "../../lib/dbml/parse";
@@ -317,7 +324,25 @@ export function DbmlWorkbench({
   const pendingReveal = useRef<string | null>(null);
 
   /** The document, split. Recomputed on every keystroke, which is a string scan and nothing more. */
-  const { source, positions, marks } = useMemo(() => readLayout(doc ?? ""), [doc]);
+  const { source, positions, marks: stored } = useMemo(() => readLayout(doc ?? ""), [doc]);
+
+  /**
+   * The marks, from both of the places one is written.
+   *
+   * The `// codeflow:marks` sidecar wins, because it is the half that survives a rename and can be
+   * written while the text does not parse. On top of it come the marks the *document* states in its
+   * own comments — see `marksFromComments`, whose header carries the argument.
+   *
+   * Without the second half a `// REVISAR` the sidecar has forgotten is a mark nothing in the app
+   * will admit to: it is not drawn, so no menu offers to clear it, so `setMarkComment` is never
+   * asked to take it out — and the comment stays in the document with no way to remove it short of
+   * deleting the line by hand. Reading them back makes what the file says and what the canvas shows
+   * the same fact, which is the only way "clear this mark" can be relied on to clear both.
+   */
+  const marks = useMemo(
+    () => ({ ...edits.marksFromComments(source), ...stored }),
+    [source, stored],
+  );
 
   // ---- the parser, and what it produced -----------------------------------
 
@@ -473,14 +498,41 @@ export function DbmlWorkbench({
     const nextAt = { ...at };
     const nextMark = { ...mark };
     const place = nextAt[from];
-    const flag = nextMark[from];
     delete nextAt[from];
-    delete nextMark[from];
-    if (to !== null) {
-      if (place) nextAt[to] = place;
-      if (flag) nextMark[to] = flag;
+    if (to !== null && place) nextAt[to] = place;
+
+    // The table's own mark, and every one of its columns' — a column's key is `<tableId>|<column>`,
+    // so a renamed table leaves forty of them behind pointing at a table that no longer exists and
+    // takes forty decisions with it. Rebuilt rather than mutated in place, because the keys being
+    // moved and the keys being kept are interleaved in the same object.
+    for (const [key, value] of Object.entries(mark)) {
+      const field = splitFieldMarkKey(key);
+      const owner = field ? field.table : key;
+      if (owner !== from) continue;
+      delete nextMark[key];
+      if (to === null) continue;
+      nextMark[field ? fieldMarkKey(to, field.column) : to] = value;
     }
     sidecar.current = { positions: nextAt, marks: nextMark };
+  };
+
+  /**
+   * The same, one column down: a renamed column keeps its mark and a deleted one takes it with it.
+   *
+   * Separate from `moveSidecarKey` because the two are keyed by different things — that one takes
+   * table ids and this takes a table id plus a column name — and because only a table has a dragged
+   * position to carry. Called from inside `applyEdit`'s callback for the same reason: a refused
+   * edit must not move the sidecar.
+   */
+  const moveFieldKey = (table: string, from: string, to: string | null) => {
+    const { positions: at, marks: mark } = sidecar.current;
+    const key = fieldMarkKey(table, from);
+    const flag = mark[key];
+    if (!flag) return;
+    const next = { ...mark };
+    delete next[key];
+    if (to !== null) next[fieldMarkKey(table, to)] = flag;
+    sidecar.current = { positions: at, marks: next };
   };
 
   /**
@@ -525,59 +577,137 @@ export function DbmlWorkbench({
   );
 
   /**
-   * Sets or clears a review mark, in both of the places a mark is written.
+   * Sets or clears one review mark, in both of the places a mark is written.
    *
-   * The `// codeflow:marks` sidecar is the source of truth — it is what the canvas colours itself
-   * from, what survives a rename, and what can be written while the document does not parse. On top
-   * of it, a table's mark is also written into the DBML as the comment above its declaration
-   * (`edits.setMarkComment`), so the decision is legible in a diff, in a review and in any editor
-   * that opens the file. Only *tables* get the comment: a relationship's mark has no one line of
-   * its own to sit above, and a mark on a schema that is not currently parsing has no table to find.
+   * The `// codeflow:marks` sidecar wins where the two halves disagree — it is what survives a
+   * rename and what can be written while the document does not parse. On top of it the mark is
+   * written into the DBML as a comment, so the decision is legible in a diff, in
+   * a review and in any editor that opens the file: above the declaration for a table, at the end
+   * of the line for a column. A *relationship* gets no comment — it has no one line of its own to
+   * sit on — which is why the comment is passed in as a function rather than decided here: `setMark`
+   * and `setFieldMark` below are the two that know which document edit, if any, their key wants.
    *
    * # Still not gated on `schema.error`
    *
    * Unlike everything in `editing` below, this stays available while the document is broken — see
    * the note on `setMark` in `DbmlCanvas`. What changes when it is broken is only how much gets
-   * written: `schema.tables` is empty or stale, so no table matches, so the sidecar is written
-   * alone. The mark is never lost, it just has no comment until the text parses again.
+   * written: with nothing to find in the text, the `comment` callback returns it unchanged and the
+   * sidecar is written alone. The mark is never lost, it just has no comment until the text parses
+   * again.
    *
    * # Through Monaco when there is a comment to write
    *
    * A mark used to change no character the editor was showing, so it went straight to `editDoc`
    * with nothing for Monaco to undo. Now it usually does change one, and that change belongs on the
-   * same undo stack as every other visual edit — hence the `executeEdits` branch, which is
-   * `applyEdit`'s, and the sidecar mutation *before* it, because the write comes back out through
-   * Monaco's `onChange` → `writeSource`, which reads the marks from `sidecar.current`.
+   * same undo stack as every other visual edit — hence `executeEdits`, and the sidecar mutation
+   * before it, because the write comes back out through Monaco's `onChange` → `writeSource`, which
+   * reads the marks from `sidecar.current`.
+   *
+   * # The store is written first, and unconditionally
+   *
+   * `executeEdits` used to be an early `return`: the document reached the store only by coming back
+   * round through Monaco's change event. That made one editor's behaviour load-bearing for whether
+   * a mark was saved at all — and every way that event can fail to arrive (a model disposed between
+   * the render and the click, an edit the editor declines, a value it considers unchanged) is a
+   * *silent* one, where the sidecar, the comment and the canvas all stay as they were and the
+   * button simply did nothing.
+   *
+   * So the store write happens here, first, and Monaco is told afterwards purely so ⌘Z can take the
+   * change back. Writing twice costs nothing: `editDoc` returns early on a document identical to the
+   * one it holds, which is what `writeSource` then hands it.
    */
-  const setMark = useCallback(
-    (id: string, mark: DbmlMarkKind | null) => {
+  const writeMark = useCallback(
+    (key: string, mark: DbmlMarkKind | null, comment: (current: string) => string) => {
       const next: DbmlMarks = { ...sidecar.current.marks };
-      if (mark) next[id] = mark;
-      else delete next[id];
+      if (mark) next[key] = mark;
+      else delete next[key];
       cause.current = "marked";
       sidecar.current = { positions: sidecar.current.positions, marks: next };
 
-      // Asked of the parsed schema rather than left to `findBlock`, so a ref id can never be
-      // mistaken for a table: `refId` is `a.b->c.d`, whose bare tail (`d`) would match a table
-      // called `d` and put somebody's mark on the wrong declaration.
-      const onTable = schema.tables.some((table) => table.id === id);
-      const nextSource = onTable ? edits.setMarkComment(source, id, mark) : source;
-
-      if (nextSource !== source) {
-        const editor = editorRef.current;
-        const model = editor?.getModel();
-        if (editor && model) {
-          editor.executeEdits("cf-dbml-mark", [
-            { range: model.getFullModelRange(), text: nextSource },
-          ]);
-          editor.pushUndoStop();
-          return;
-        }
-      }
+      const nextSource = comment(source);
       editDoc(writeLayout(nextSource, sidecar.current.positions, next));
+      if (nextSource === source) return;
+
+      const editor = editorRef.current;
+      const model = editor?.getModel();
+      if (!editor || !model) return;
+      editor.executeEdits("cf-dbml-mark", [
+        { range: model.getFullModelRange(), text: nextSource },
+      ]);
+      editor.pushUndoStop();
     },
-    [editDoc, source, schema.tables],
+    [editDoc, source],
   );
+
+  /**
+   * A table's or a relationship's mark. See `writeMark` for everything the two setters share.
+   *
+   * A relationship is told apart from a table by the shape of its id and **not** by asking the
+   * parsed schema. The hazard being avoided is the same one either way — `refId` is `a.b->c.d`,
+   * whose bare tail (`d`) `findBlock` would happily match against a table called `d` and put
+   * somebody's mark on the wrong declaration — and `->` is what says which kind of id this is
+   * without leaving the answer to a parse.
+   *
+   * That mattered: `schema` is *debounced* and keeps its last good tables through a failed parse, so
+   * a table the current parse did not recover is a table this used to decline to write a comment
+   * for. On a set that is a mark with no comment, which is merely incomplete; on a **clear** it is
+   * the comment left behind in the document with the mark gone from everywhere else — the exact
+   * mismatch `marksFromComments` now exists to be able to recover from. Clearing is a text edit and
+   * `blocksOf` reads text, half-typed or not, so there is nothing here for a parse to decide.
+   */
+  const setMark = useCallback(
+    (id: string, mark: DbmlMarkKind | null) =>
+      writeMark(id, mark, (current) =>
+        id.includes("->") ? current : edits.setMarkComment(current, id, mark),
+      ),
+    [writeMark],
+  );
+
+  /**
+   * One column's mark.
+   *
+   * No guard of `setMark`'s kind is needed here and none would help: the table and the column
+   * arrive as two arguments rather than as one id, so there is nothing to disambiguate, and
+   * `setFieldMarkComment` returns the document untouched when either half names nothing — which is
+   * exactly what should happen while the text is mid-edit.
+   */
+  const setFieldMark = useCallback(
+    (table: string, column: string, mark: DbmlMarkKind | null) =>
+      writeMark(fieldMarkKey(table, column), mark, (current) =>
+        edits.setFieldMarkComment(current, table, column, mark),
+      ),
+    [writeMark],
+  );
+
+  /**
+   * Every mark in the document, gone — the sidecar's and the comments' alike.
+   *
+   * The way out that does not depend on finding anything. Each of the setters above has to locate
+   * what it is clearing: a table by its id, a column inside it, a marker on the line it is expected
+   * to be on. A document where one of those lookups comes up empty is a document where a mark can
+   * be taken off the canvas and its `// REVISAR` stays in the text, with nothing left in the app
+   * that will admit the comment is there — and the user's only recourse is to delete the line by
+   * hand. `stripMarkComments` looks at lines and nothing else, so there is no document it can fail
+   * on, and this pairs it with emptying the sidecar in the same write.
+   *
+   * Offered only while something is marked, beside the counts that say so.
+   */
+  const clearAllMarks = useCallback(() => {
+    cause.current = "marked";
+    sidecar.current = { positions: sidecar.current.positions, marks: {} };
+
+    const nextSource = edits.stripMarkComments(source);
+    editDoc(writeLayout(nextSource, sidecar.current.positions, {}));
+    if (nextSource === source) return;
+
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (!editor || !model) return;
+    editor.executeEdits("cf-dbml-mark", [
+      { range: model.getFullModelRange(), text: nextSource },
+    ]);
+    editor.pushUndoStop();
+  }, [editDoc, source]);
 
   /** How the review is going, for the strip along the bottom. */
   const marked = useMemo(() => {
@@ -599,6 +729,18 @@ export function DbmlWorkbench({
    * writing the document by different routes — every one of these is `applyEdit(edits.something)`,
    * and `applyEdit` is the only thing in this component that knows how a change reaches Monaco.
    */
+  /**
+   * A table's id from whatever a caller had to hand.
+   *
+   * The column operations below are given a table *name* — that is what the inspector and the
+   * canvas menu have always passed, and what `findBlock` resolves — while the sidecar a column's
+   * mark lives in is keyed by the table's **id**. One is not the other the moment a schema is
+   * qualified: `users` is the name and `core.users` is the id. Accepts either, so a caller that
+   * already has the id (the canvas, which reads it off the node) is not made to convert it back.
+   */
+  const tableIdOf = (name: string) =>
+    schema.tables.find((entry) => entry.id === name || entry.name === name)?.id ?? name;
+
   const editing = useMemo(
     () => ({
       blocked: Boolean(schema.error),
@@ -606,9 +748,21 @@ export function DbmlWorkbench({
       addField: (table: string, field: edits.FieldEdit) =>
         applyEdit((current) => edits.addField(current, table, field)),
       updateField: (table: string, name: string, field: edits.FieldEdit) =>
-        applyEdit((current) => edits.updateField(current, table, name, field)),
+        applyEdit((current) => {
+          const next = edits.updateField(current, table, name, field);
+          // A renamed column is a new key for its mark. `edit.ts` carries the comment across; this
+          // is the sidecar half, and without it the decision is lost on a typo correction.
+          if (next !== current && name !== field.name) {
+            moveFieldKey(tableIdOf(table), name, field.name);
+          }
+          return next;
+        }),
       dropField: (table: string, name: string) =>
-        applyEdit((current) => edits.dropField(current, table, name)),
+        applyEdit((current) => {
+          const next = edits.dropField(current, table, name);
+          if (next !== current) moveFieldKey(tableIdOf(table), name, null);
+          return next;
+        }),
       addTable: (name: string) => applyEdit((current) => edits.addTable(current, name)),
       addEnum: (name: string) => applyEdit((current) => edits.addEnum(current, name)),
       // `from` and `name` are **ids**, not bare names — see `moveSidecarKey`. `edit.ts` finds the
@@ -649,8 +803,8 @@ export function DbmlWorkbench({
     }),
     // `source` for the name check in `renameTable`. It does not widen anything in practice —
     // `applyEdit` already closes over the same string, so this memo was rebuilding per keystroke
-    // regardless.
-    [applyEdit, schema.error, source, t],
+    // regardless. `schema.tables` for `tableIdOf`, for the same reason.
+    [applyEdit, schema.error, schema.tables, source, t],
   );
 
   /** One box moved. Only the layout comment changes, so Monaco's value does not — see the header. */
@@ -1506,6 +1660,11 @@ export function DbmlWorkbench({
                         addTable: () => editing.addTable(edits.freeName(declared, t("dbml.newTable"))),
                         addEnum: () => editing.addEnum(edits.freeName(declared, t("dbml.newEnum"))),
                         setMark,
+                        setFieldMark,
+                        // The table's **id**, which is what the canvas menu passes and what the
+                        // sidecar key a column's mark lives under is built from. `editing` resolves
+                        // it back to a block either way — see `tableIdOf`.
+                        dropField: editing.dropField,
                         togglePin: togglePinFromCanvas,
                         autoArrange: rearrange,
                         orthogonal: routing === "orthogonal",
@@ -1719,6 +1878,21 @@ export function DbmlWorkbench({
                         {t("dbml.mark.countReview", { count: String(marked.review) })}
                       </span>
                     )}
+                    {/* The end of a review, and the way out of one that has gone wrong. It sits
+                        with the counts because that is the only place on screen that says a review
+                        is in progress at all, and it appears and disappears with them — a diagram
+                        nobody has marked is not offered a way to unmark it. Counted off `marked`
+                        rather than `marks` so it follows exactly what the strip beside it shows. */}
+                    {marked.remove + marked.review + marked.keep > 0 && (
+                      <button
+                        type="button"
+                        onClick={clearAllMarks}
+                        title={t("dbml.mark.clearAllHow")}
+                        className="rounded px-1 text-[9.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+                      >
+                        {t("dbml.mark.clearAll")}
+                      </button>
+                    )}
                     <span className="flex-1" />
                     {query && <span>{t("dbml.searchHits", { count: String(hits ?? 0) })}</span>}
                   </div>
@@ -1755,6 +1929,17 @@ export function DbmlWorkbench({
                     mark={
                       selected
                         ? { current: marks[selected], set: (next) => setMark(selected, next) }
+                        : undefined
+                    }
+                    // A lookup and a setter rather than the map itself, so the panel never has to
+                    // know how a column's mark is keyed — and so it cannot accidentally read a
+                    // mark belonging to a column of the table that *was* selected.
+                    fieldMark={
+                      selected
+                        ? {
+                            of: (column) => marks[fieldMarkKey(selected, column)],
+                            set: (column, next) => setFieldMark(selected, column, next),
+                          }
                         : undefined
                     }
                     edit={editing}

@@ -3927,7 +3927,21 @@ const en = {
   "dbml.mark.review": "Mark to review",
   "dbml.mark.keep": "Mark as settled",
   "dbml.mark.clear": "Clear the mark",
+  "dbml.mark.clearAll": "Clear every mark",
+  "dbml.mark.clearAllHow": "Takes every review mark off the diagram and every ELIMINAR, REVISAR and RESUELTA comment out of the document.",
   "dbml.mark.title": "Review",
+  /**
+   * What a mark is *called* once it is on something, as opposed to what setting it is called.
+   *
+   * The three above are the menu's verbs and belong on a control you are about to press. These are
+   * for the tooltip on a table, a relationship or a column that is already marked, where the verb
+   * would read as an offer to do again what has been done.
+   */
+  "dbml.mark.stateRemove": "Marked for removal",
+  "dbml.mark.stateReview": "Marked to review",
+  "dbml.mark.stateKeep": "Settled",
+  /** The empty dot beside an unmarked column in the inspector — an offer, so a verb. */
+  "dbml.mark.field": "Review this column",
   "dbml.mark.countRemove": "{count} to remove",
   "dbml.mark.countReview": "{count} to review",
   "dbml.searchHits": "{count} matched",
@@ -3982,6 +3996,7 @@ const en = {
   "dbml.sandbox.rowCount": "{count} rows",
   "dbml.sandbox.totalRows": "{count} rows",
   "dbml.sandbox.auto": "auto",
+  "dbml.sandbox.editCell": "Click to edit · ↵ saves, ⇥ next column, Esc cancels",
   "dbml.sandbox.console": "SQL",
   "dbml.sandbox.consoleToggle": "SQL console — write queries and read what they return",
   "dbml.sandbox.consoleRunHint": "⌘↵ runs the selection, or all of it",

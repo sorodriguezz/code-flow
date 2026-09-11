@@ -10,6 +10,8 @@ import {
 import type { Cardinality, FieldEdit, RefEnd } from "../../lib/dbml/edit";
 import { typeSuggestions } from "../../lib/dbml/dataTypes";
 import type { DbmlMarkKind } from "../../lib/dbml/layout";
+import { ContextMenu } from "../common/ContextMenu";
+import { MARK_COLOUR, MARK_KINDS, markMenuItems, markNamesOf } from "./markChrome";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { Select } from "../common/Select";
 import { ICON_BUTTON } from "../diagrams/diagramsChrome";
@@ -68,6 +70,7 @@ export function DbmlInspector({
   onTogglePin,
   width,
   mark,
+  fieldMark,
   edit,
 }: {
   schema: DbmlSchema;
@@ -105,6 +108,17 @@ export function DbmlInspector({
   mark?: {
     current?: DbmlMarkKind;
     set: (mark: DbmlMarkKind | null) => void;
+  };
+  /**
+   * The same, one row down: the review mark on each of the selected table's columns.
+   *
+   * A lookup and a setter rather than a map, so the panel never has to know how a column's mark is
+   * keyed — and cannot read one belonging to a column of the table that *was* selected. Independent
+   * of `edit` for the same reason `mark` is: a mark goes to the sidecar, which needs nothing parsed.
+   */
+  fieldMark?: {
+    of: (column: string) => DbmlMarkKind | undefined;
+    set: (column: string, mark: DbmlMarkKind | null) => void;
   };
   edit?: {
     blocked: boolean;
@@ -250,7 +264,7 @@ export function DbmlInspector({
                 <span className="mr-0.5 text-[9px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
                   {t("dbml.mark.title")}
                 </span>
-                {(["remove", "review", "keep"] as const).map((kind) => (
+                {MARK_KINDS.map((kind) => (
                   <MarkSwatch
                     key={kind}
                     kind={kind}
@@ -325,6 +339,14 @@ export function DbmlInspector({
                     key={field.name}
                     field={field}
                     types={typeOptions}
+                    mark={
+                      fieldMark
+                        ? {
+                            current: fieldMark.of(field.name),
+                            set: (next) => fieldMark.set(field.name, next),
+                          }
+                        : undefined
+                    }
                     edit={
                       edit
                         ? {
@@ -540,13 +562,6 @@ function Section({
   );
 }
 
-/** The colours the canvas draws marks in, restated so the panel and the diagram agree. */
-const MARK_COLOUR: Record<DbmlMarkKind, string> = {
-  remove: "var(--cf-danger)",
-  review: "var(--cf-warning)",
-  keep: "var(--cf-success)",
-};
-
 /**
  * One of the three marks, as a swatch.
  *
@@ -580,6 +595,79 @@ function MarkSwatch({
     >
       {on && <Check size={9} className="text-[var(--cf-surface)]" strokeWidth={3.5} />}
     </button>
+  );
+}
+
+/**
+ * A column's review mark: the state and the control, as one dot.
+ *
+ * # Why one dot and not three swatches
+ *
+ * The table above gets three swatches because it has one mark and a permanent place in a header
+ * that never scrolls. A column has forty siblings in a 236px column, and three swatches on each of
+ * them is 120 coloured circles in a panel whose whole design note is about how little of it should
+ * be on screen at once. So the three are folded behind the one thing worth drawing per row —
+ * *whether this column has been decided about, and which way* — and the menu is where the three
+ * live. That also makes the indicator and the control the same 8px target at the same x, which is
+ * what lets the column of them be both read and used without the eye leaving the left edge.
+ *
+ * Unmarked, it is invisible until the pointer is on the row (or the keyboard is on the button, or
+ * its menu is open). Marked, it is always there — a decision that only shows itself on hover is a
+ * decision you have to go looking for.
+ */
+function FieldMark({
+  name,
+  current,
+  set,
+}: {
+  name: string;
+  current?: DbmlMarkKind;
+  set: (mark: DbmlMarkKind | null) => void;
+}) {
+  const t = useT();
+  const [at, setAt] = useState<DOMRect | null>(null);
+  // The state when there is one, the offer when there is not: a tooltip on something already marked
+  // that reads "Mark for removal" is an offer to do again what has been done.
+  const label = current ? markNamesOf(t)[current] : t("dbml.mark.field");
+
+  return (
+    <>
+      <button
+        type="button"
+        title={label}
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={at !== null}
+        onClick={(event) =>
+          setAt(at ? null : event.currentTarget.getBoundingClientRect())
+        }
+        className={`flex h-3.5 w-2.5 shrink-0 items-center justify-center transition-opacity ${
+          current || at ? "" : "opacity-0 focus-visible:opacity-100 group-hover:opacity-100"
+        }`}
+      >
+        {/* Filled when it is set and a ring when it is not — the same pair `MarkSwatch` uses, so
+            the two controls read as one idea, and so the state survives a reader who cannot tell
+            the red from the amber. */}
+        <span
+          className="h-2 w-2 rounded-full border"
+          style={{
+            borderColor: current ? MARK_COLOUR[current] : "var(--cf-text-muted)",
+            background: current ? MARK_COLOUR[current] : "transparent",
+          }}
+        />
+      </button>
+      {at && (
+        <ContextMenu
+          x={at.left}
+          y={at.bottom}
+          anchor={{ top: at.top, bottom: at.bottom, left: at.left, right: at.right }}
+          // Which column, because by the time the menu is open it is covering the row it came from.
+          heading={name}
+          onClose={() => setAt(null)}
+          items={markMenuItems(current, set, t)}
+        />
+      )}
+    </>
   );
 }
 
@@ -993,6 +1081,7 @@ function Direction({ label, children }: { label: string; children: React.ReactNo
 function FieldRow({
   field,
   types,
+  mark,
   edit,
 }: {
   field: {
@@ -1006,6 +1095,11 @@ function FieldRow({
     default: string | null;
   };
   types: string[];
+  /** This column's review mark and how to change it. Absent on the read-only callers. */
+  mark?: {
+    current?: DbmlMarkKind;
+    set: (mark: DbmlMarkKind | null) => void;
+  };
   edit?: {
     blocked: boolean;
     blockedReason: string;
@@ -1057,12 +1151,27 @@ function FieldRow({
   return (
     <div className="group py-[3px]">
       <div className="flex items-center gap-1.5">
+        {/* The review mark, as one 8px circle in a slot every row reserves.
+            Held *before* the name, and it is the only thing in this panel that is: a column of dots
+            down the left edge is the shape you can read forty rows of at a glance, which is the
+            entire question this feature answers ("which of these still need looking at"). Anywhere
+            else on the row it would land at a different x on every line, because the type column
+            that precedes it is as wide as each type happens to be.
+            The slot is reserved whether or not this column is marked — 10px is cheaper than a list
+            of names that jogs sideways as marks are set — and on an unmarked row it is empty until
+            the pointer is on the row. */}
+        {mark && <FieldMark name={field.name} current={mark.current} set={mark.set} />}
         <span
           className="min-w-0 flex-1 truncate font-mono text-[11px]"
           style={{
             color: field.pk ? "var(--cf-warning)" : undefined,
             fontStyle: field.notNull || field.pk ? undefined : "italic",
-            opacity: field.notNull || field.pk ? 1 : 0.7,
+            // Struck through when it is going, which is the one mark that needs no legend — the
+            // same treatment the canvas gives the same column, and the table's name above it.
+            textDecoration: mark?.current === "remove" ? "line-through" : undefined,
+            textDecorationColor: mark?.current === "remove" ? MARK_COLOUR.remove : undefined,
+            opacity:
+              mark?.current === "remove" ? 0.55 : field.notNull || field.pk ? 1 : 0.7,
           }}
         >
           {field.name}

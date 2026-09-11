@@ -42,8 +42,8 @@ export type RevisionCause =
    *
    * Its own cause because it is its own activity: triage is what you are doing when you press it,
    * not modelling. It does now touch the DBML — a table's mark is written as the `// ELIMINAR`
-   * comment above its declaration as well as into the sidecar — so unlike `moved` it is a change
-   * `pushRevision` records.
+   * comment above its declaration and a column's at the end of its own line, as well as into the
+   * sidecar — so unlike `moved` it is a change `pushRevision` records.
    */
   | "marked"
   | "formatted"
@@ -99,8 +99,10 @@ export function pushRevision(list: Revision[], next: Revision): Revision[] {
    * So the guard is on the DBML halves rather than on the whole documents. Movements still happen,
    * still autosave, still travel — they are simply not *versions to recover*, because there is
    * nothing about the model to recover from them. Marking a table now falls on the other side of
-   * this line, because it writes a comment into the schema itself; a run of marks made in one go
-   * folds into one revision through the coalescing above rather than through this guard.
+   * this line, whether it is on a table or on one of its columns, because it writes a comment into
+   * the schema itself; a run of marks made in one go — which is what going down a table deciding
+   * about each column is — folds into one revision through the coalescing above rather than through
+   * this guard.
    *
    * The revision itself still carries the whole document on both sides: reverting has to put the
    * positions back too, or undoing a rename would silently scatter the boxes.

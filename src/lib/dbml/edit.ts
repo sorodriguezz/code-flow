@@ -1,5 +1,5 @@
 import { blocksOf, braceDelta, findBlock, type DbmlBlock } from "./blocks";
-import type { DbmlMarkKind } from "./layout";
+import { fieldMarkKey, type DbmlMarkKind, type DbmlMarks } from "./layout";
 
 /**
  * Changing a DBML document without rewriting it.
@@ -211,29 +211,105 @@ function indentOf(source: string, block: DbmlBlock): string {
 }
 
 /**
- * The line inside `block` that declares column `name`, or `-1`.
+ * One line of a block's body that something else here cares about: a column, or a review marker
+ * sitting on a line of its own.
+ */
+interface BodyLine {
+  at: number;
+  /** The column declared here, as written. Absent on a marker line. */
+  column?: string;
+  /** The mark this line *is*, when the whole line is a marker. Absent on a column. */
+  mark?: DbmlMarkKind;
+}
+
+/**
+ * The columns `block` declares and the loose review markers between them, in document order.
  *
  * Depth-aware: a name that also appears inside the block's `indexes { … }` is not that column's
- * declaration, and matching it would rewrite an index when asked to rewrite a field.
+ * declaration, and matching it would rewrite an index when asked to rewrite a field. The inside of
+ * a `'''` note is skipped for the stronger version of the same reason — it is prose, and a line of
+ * prose beginning with a word is not a column however much it looks like one.
+ *
+ * **Marker lines are collected, not skipped**, and that is the bug this shape exists to fix. A
+ * column's mark is written at the *end* of its line, which on a column that already carries a
+ * sentence of the author's own buries it a hundred characters into the prose — so people move it
+ * onto a line of its own, which is the obvious thing to do and which used to make it disappear:
+ * nothing read it, so no dot was drawn, so no menu offered to clear it, so the one function that
+ * could have taken it out was never asked to. It stayed in the document with no way to remove it.
  */
-function fieldLineIn(source: string, block: DbmlBlock, name: string): number {
+function bodyLinesIn(source: string, block: DbmlBlock): BodyLine[] {
   const lines = source.split("\n");
   const { start, end } = bodyRange(source, block);
-  const wanted = name.toLowerCase();
+  const out: BodyLine[] = [];
   let depth = 0;
+  /** The unclosed triple-quote delimiter, or `null`. `format.ts` tracks the same thing the same way. */
+  let note: string | null = null;
+
   for (let at = start; at < end; at += 1) {
     const text = lines[at].trim();
+    if (note !== null) {
+      if (text.includes(note)) note = null;
+      continue;
+    }
+    const quotes = /'''|"""/.exec(text);
+    if (quotes && (text.split(quotes[0]).length - 1) % 2 === 1) {
+      note = quotes[0];
+      continue;
+    }
+
     const here = depth;
     depth += braceDelta(lines[at]);
-    if (here !== 0 || !text || text.startsWith("//")) continue;
+    if (here !== 0 || !text) continue;
+
+    const lone = MARK_COMMENT_LINE.exec(lines[at]);
+    if (lone) {
+      out.push({ at, mark: MARK_OF_WORD[lone[1].toLowerCase()] });
+      continue;
+    }
+    if (text.startsWith("//")) continue;
+
     const declared = /^("[^"]*"|[\w]+)/.exec(text);
     if (!declared) continue;
-    const found = declared[1].replace(/^"|"$/g, "").toLowerCase();
+    const found = declared[1].replace(/^"|"$/g, "");
     // `note:` and `indexes` open blocks of their own and are not columns.
-    if (found === "note" || found === "indexes") continue;
-    if (found === wanted) return at;
+    if (found.toLowerCase() === "note" || found.toLowerCase() === "indexes") continue;
+    out.push({ at, column: found });
   }
-  return -1;
+  return out;
+}
+
+/**
+ * Which column each loose marker line belongs to: column line → the marker lines that are its.
+ *
+ * **The column above it**, stepping over anything in between, because that is where it came from:
+ * the mark is written at the end of a column's line, and a marker on a line of its own is one
+ * somebody pushed down off the end of it. Only when there is no column above — a marker sitting
+ * before the first one — does it look down instead, which is the reading anybody would give it.
+ */
+function loneMarksOf(body: BodyLine[]): Map<number, number[]> {
+  const owned = new Map<number, number[]>();
+  const columnNear = (from: number, step: number) => {
+    for (let at = from; at >= 0 && at < body.length; at += step) {
+      if (body[at].column !== undefined) return body[at].at;
+    }
+    return undefined;
+  };
+
+  body.forEach((entry, index) => {
+    if (entry.mark === undefined) return;
+    const owner = columnNear(index - 1, -1) ?? columnNear(index + 1, 1);
+    if (owner === undefined) return;
+    owned.set(owner, [...(owned.get(owner) ?? []), entry.at]);
+  });
+  return owned;
+}
+
+/** The line inside `block` that declares column `name`, or `-1`. */
+function fieldLineIn(source: string, block: DbmlBlock, name: string): number {
+  const wanted = name.toLowerCase();
+  return (
+    bodyLinesIn(source, block).find((entry) => entry.column?.toLowerCase() === wanted)?.at ?? -1
+  );
 }
 
 /** Appends a top-level block, separated by one blank line, with the trailing newline preserved. */
@@ -402,11 +478,101 @@ const MARK_COMMENT: Record<DbmlMarkKind, string> = {
  */
 const MARK_COMMENT_LINE = /^\s*\/\/\s*(ELIMINAR|REVISAR|RESUELTA)\s*$/i;
 
+/**
+ * The same marker at the *end* of a line, which is where a column's mark lives.
+ *
+ * A table is a block and a column is a line, and that difference is what decides where each mark
+ * can go. A table's sits on a line of its own above the declaration; a column's cannot, because a
+ * line of its own above every marked column doubles the height of the very table it is annotating —
+ * and seeing the columns next to each other is the whole of what triaging a schema is. So a
+ * column's mark rides at the end of the column's own line, which is where `formatDbml` already
+ * expects a comment to be (`splitField` reads one out and `alignBlock` pads them into a column of
+ * their own) and where a diff shows it beside the thing it is about.
+ *
+ * End-anchored, so it can only ever take away a marker this wrote. A column whose author left their
+ * own `// check with the backend` keeps it: the mark is appended after that and stripped from after
+ * it, and the prose is never part of the match.
+ */
+const MARK_COMMENT_TRAILING = /\s*\/\/\s*(ELIMINAR|REVISAR|RESUELTA)\s*$/i;
+
+/** The three markers back to the kind they stand for — `marksFromComments` reads with this. */
+const MARK_OF_WORD: Record<string, DbmlMarkKind> = {
+  eliminar: "remove",
+  revisar: "review",
+  resuelta: "keep",
+};
+
+/** Whether the document mentions a marker at all, so the scan below can be skipped outright. */
+const MARK_ANYWHERE = /\/\/\s*(?:ELIMINAR|REVISAR|RESUELTA)\s*$/im;
+
 /** How far above `line` the run of marker lines belonging to it starts. Itself, when there is none. */
 function markCommentFrom(lines: string[], line: number): number {
   let from = line;
   while (from > 0 && MARK_COMMENT_LINE.test(lines[from - 1])) from -= 1;
   return from;
+}
+
+/**
+ * The marker lines above `declaration`, by index — the ones a *clear* has to take away.
+ *
+ * Looser than `markCommentFrom` on purpose, and the looseness is the bug fix. That one finds the
+ * run that is flush against the declaration, which is right for *writing*: a new marker goes on the
+ * line immediately above, and a blank line between it and its table would be a gap this put there.
+ * Removing one is the opposite problem. A marker can have drifted off the declaration — somebody
+ * pressed Enter above the table, a merge left a blank line, a paste landed between the two — and a
+ * clear that only looks at the line directly above then finds nothing, changes nothing, and leaves
+ * a `// REVISAR` in the document with the mark gone from everywhere else. That is exactly the
+ * mismatch this whole file's marks are supposed to make impossible.
+ *
+ * So this steps over blank lines and collects every marker it passes, and it cannot run away: the
+ * previous block's `}`, another declaration, or any ordinary comment ends the walk, and between two
+ * tables there is always one of those. Blank lines are *kept* — only the marker lines are removed,
+ * so clearing a mark never closes up a gap the author put in.
+ */
+function markCommentsAbove(lines: string[], declaration: number): number[] {
+  const found: number[] = [];
+  for (let at = declaration - 1; at >= 0; at -= 1) {
+    if (MARK_COMMENT_LINE.test(lines[at])) {
+      found.push(at);
+      continue;
+    }
+    if (lines[at].trim() === "") continue;
+    break;
+  }
+  return found;
+}
+
+/** `source` with the given lines taken out, given in any order. */
+function dropLines(source: string, at: number[]): string {
+  if (at.length === 0) return source;
+  const gone = new Set(at);
+  return source
+    .split("\n")
+    .filter((_, index) => !gone.has(index))
+    .join("\n");
+}
+
+/**
+ * Every review marker in the document, gone — lines and trailing comments alike.
+ *
+ * The one operation on this page that cannot fail, and that is its whole reason for existing. Every
+ * other clear has to *find* something first: a table by its id, a column inside it, a marker on the
+ * line it is expected to be on. Each of those lookups is a place where a document that is unusual
+ * in some way — a name the block splitter reads differently, a marker that has drifted, a table
+ * renamed outside the app — leaves a marker behind that nothing in the app will then admit to.
+ *
+ * This looks at lines and at nothing else, so there is no document it can decline to clean. It is
+ * what the "clear every mark" control runs, and it is the way out of any disagreement between the
+ * two halves of a mark that the targeted paths cannot reconcile.
+ */
+export function stripMarkComments(source: string): string {
+  if (!MARK_ANYWHERE.test(source)) return source;
+  const kept: string[] = [];
+  for (const line of source.split("\n")) {
+    if (MARK_COMMENT_LINE.test(line)) continue;
+    kept.push(line.replace(MARK_COMMENT_TRAILING, ""));
+  }
+  return kept.join("\n");
 }
 
 /**
@@ -438,16 +604,121 @@ export function setMarkComment(
   if (!block) return source;
 
   const lines = source.split("\n");
+
+  // Clearing takes away every marker above the declaration, blank lines notwithstanding — see
+  // `markCommentsAbove` for why that is looser than what writing one uses.
+  if (!mark) return dropLines(source, markCommentsAbove(lines, block.from));
+
   const declaration = lines[block.from];
   const indent = /^[ \t]*/.exec(declaration)?.[0] ?? "";
   const from = markCommentFrom(lines, block.from);
-  const written = mark ? [`${indent}${MARK_COMMENT[mark]}`] : [];
+  const written = [`${indent}${MARK_COMMENT[mark]}`];
 
-  // Nothing there and nothing to write: return the same string rather than a rebuilt copy, so a
-  // "clear" on an unmarked table is the no-op the caller can compare against.
-  if (from === block.from && written.length === 0) return source;
-  if (written.length === 1 && from === block.from - 1 && lines[from] === written[0]) return source;
+  // The same mark already on the same line: return the same string rather than a rebuilt copy, so
+  // a caller comparing the two can tell that nothing happened.
+  if (from === block.from - 1 && lines[from] === written[0]) return source;
   return splice(source, from, block.from, written);
+}
+
+/**
+ * Writes a column's review mark into the document, as a comment at the end of its line.
+ *
+ * The readable half of a column's mark, exactly as `setMarkComment` is a table's: the
+ * `// codeflow:marks` sidecar stays the source of truth — it is keyed by id so it survives a
+ * rename, it can be written while the document does not parse, and it is what the canvas colours
+ * itself from — and this is what makes the decision legible in a diff, in a pull request and in
+ * whatever editor the next person opens the `.dbml` in.
+ *
+ * `table` is the table's **id** (its qualified name), like every other operation here. A table or a
+ * column the document does not declare leaves the source untouched, which is what keeps marking
+ * usable on a document that is mid-edit.
+ */
+export function setFieldMarkComment(
+  source: string,
+  table: string,
+  column: string,
+  mark: DbmlMarkKind | null,
+): string {
+  const block = findBlock(blocksOf(source), table, "table");
+  if (!block) return source;
+  const wanted = column.toLowerCase();
+  const body = bodyLinesIn(source, block);
+  const at = body.find((entry) => entry.column?.toLowerCase() === wanted)?.at;
+  if (at === undefined) return source;
+
+  const lines = source.split("\n");
+  const bare = lines[at].replace(MARK_COMMENT_TRAILING, "");
+  // Two spaces, which is the gap `formatDbml` re-attaches a comment with — so marking a column in a
+  // tidy document leaves it tidy, and pressing Format afterwards moves nothing.
+  const written = mark ? `${bare}  ${MARK_COMMENT[mark]}` : bare;
+
+  // And the loose markers this column has picked up go either way — cleared with it, and folded
+  // back onto the line when a new mark is set, so a column never ends up wearing two of them.
+  // Their indices survive the splice above, which replaces one line with one line.
+  const lone = loneMarksOf(body).get(at) ?? [];
+  if (written === lines[at] && lone.length === 0) return source;
+  return dropLines(splice(source, at, at + 1, [written]), lone);
+}
+
+/**
+ * The marks the *document* carries, read back out of the comments the two writers above put there.
+ *
+ * # Why the readable half has to be readable *back*
+ *
+ * Until this existed the `// codeflow:marks` sidecar was the only thing anybody could clear: the
+ * canvas coloured itself from it, the menus offered "clear this mark" only when it held one, and
+ * `setMarkComment` was called only for a mark it already knew about. So the moment the two halves
+ * disagreed — a `.dbml` opened from a repository with the comments but no sidecar, a mark whose
+ * comment could not be written because the document did not parse at the time, a comment somebody
+ * typed by hand — the document was left carrying a `// REVISAR` with **no way to take it off**.
+ * Nothing in the app would admit the mark existed, so nothing in the app would remove it.
+ *
+ * Reading them back closes that: what the document says is a mark *is* a mark, it is drawn like one
+ * and it is cleared like one, and clearing it takes the comment with it. The sidecar still wins
+ * where the two disagree — it is the half that survives a rename and can be written while the text
+ * is broken — so this only ever *adds* what the text plainly says and the sidecar has forgotten.
+ *
+ * Keyed exactly as the sidecar is: a table by its id, a column by `fieldMarkKey`. A `public.`
+ * prefix is dropped for the same reason `qualify` drops it — the default schema is not part of an
+ * id anywhere else, and a key carrying one would name a table the canvas does not draw.
+ */
+export function marksFromComments(source: string): DbmlMarks {
+  const found: DbmlMarks = {};
+  // The scan is a parse of every block in the document and it runs on a keystroke, so a document
+  // nobody has marked pays one regex for it and stops.
+  if (!MARK_ANYWHERE.test(source)) return found;
+
+  const lines = source.split("\n");
+  for (const block of blocksOf(source)) {
+    if (block.kind !== "table") continue;
+    const id = block.name.replace(/^public\./i, "");
+
+    // The same walk the clear uses, so what is read back is exactly what can be taken away again —
+    // a mark this drew from a marker `setMarkComment` could not then find would be one the user is
+    // shown and cannot remove. The nearest marker is the effective one, as it is when writing.
+    const above = markCommentsAbove(lines, block.from)[0];
+    if (above !== undefined) {
+      found[id] = MARK_OF_WORD[MARK_COMMENT_LINE.exec(lines[above])![1].toLowerCase()];
+    }
+
+    // A column's mark, in either of the two places it can be found: at the end of its line, which
+    // is where this writes one, or on a line of its own, which is where somebody moves one that was
+    // buried at the end of a sentence. The end of the line wins if both are there.
+    const body = bodyLinesIn(source, block);
+    const lone = loneMarksOf(body);
+    for (const entry of body) {
+      if (entry.column === undefined) continue;
+      const trailing = MARK_COMMENT_TRAILING.exec(lines[entry.at]);
+      const moved = lone.get(entry.at)?.[0];
+      const kind = trailing
+        ? MARK_OF_WORD[trailing[1].toLowerCase()]
+        : moved === undefined
+          ? undefined
+          : MARK_OF_WORD[MARK_COMMENT_LINE.exec(lines[moved])![1].toLowerCase()];
+      if (kind) found[fieldMarkKey(id, entry.column)] = kind;
+    }
+  }
+  return found;
 }
 
 // ---- columns ---------------------------------------------------------------
@@ -469,6 +740,11 @@ export function addField(source: string, table: string, field: FieldEdit): strin
  * settings back out of the line to preserve the ones the form does not model, and the form models
  * all of them. What it does not preserve is a trailing `//` comment on that column, which is the
  * one loss here and is why this rewrites a *column* rather than a table.
+ *
+ * The **review mark** is the one exception, and it has to be. The mark itself lives in the sidecar
+ * and would survive this regardless, so dropping its comment would leave the two halves disagreeing
+ * — a column drawn as marked on the canvas with nothing in the document saying so — and it would
+ * happen on an edit that never mentioned the mark.
  */
 export function updateField(
   source: string,
@@ -484,7 +760,10 @@ export function updateField(
 
   const lines = source.split("\n");
   const indent = /^[ \t]*/.exec(lines[at])?.[0] ?? INDENT;
-  const next = splice(source, at, at + 1, [fieldLine(field, indent)]);
+  const mark = MARK_COMMENT_TRAILING.exec(lines[at])?.[0].trim() ?? "";
+  const next = splice(source, at, at + 1, [
+    fieldLine(field, indent) + (mark ? `  ${mark}` : ""),
+  ]);
   // A renamed column is named by any ref that points at it.
   return name === field.name ? next : rewriteRefColumns(next, block.name, name, field.name);
 }

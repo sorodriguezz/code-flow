@@ -158,6 +158,21 @@ describe("the controls the grid puts on screen", () => {
     expect(remove?.[0]).toContain('disabled=""');
   });
 
+  /**
+   * The grid took edits to existing rows before this, on a double-click nobody had been told about
+   * and a cell that looked exactly like a read-only one. From the outside that is a grid where
+   * "the data already there cannot be edited" — which is how it was reported.
+   */
+  it("says on every cell of an existing row that it can be edited", () => {
+    const existing = html.slice(0, html.lastIndexOf('<tr style="height:26px"'));
+    expect([...existing.matchAll(/Click to edit/g)]).toHaveLength(
+      PAGE.rows.length * COLUMNS.length,
+    );
+    // The caret is the other half of saying so: a cell that takes a click has to look like one
+    // before it is pressed, not after.
+    expect(existing).toContain("cursor-text");
+  });
+
   it("keeps the draft's own cells typeable and its self-filling ones marked", () => {
     // The last `<tr>` is the draft. `id` and `creado` fill themselves, so they say `auto` and take
     // no input at all; `email` is a text box and `rol`, being an enum, is a list of its values.
