@@ -552,13 +552,17 @@ pub async fn diagrams_fill_rows_with_ai(
 
 // ---------- import ----------
 
-/// Reads a `.drawio` file the user just picked in a dialog.
+/// Reads a diagram file the user just picked in a dialog — a `.drawio` drawing or a `.dbml` schema.
 ///
 /// **Narrow on purpose.** This could have been a general "read any file" command, and a general one
 /// is a much larger thing to have added to the app: the frontend could then read anything the
 /// process can. This reads one file, checks it is text, and caps the size.
+///
+/// It does not care *which* of the two dialects it is holding, and should not: both are text, the
+/// format is decided from the extension by the caller that opened the dialog, and a validator here
+/// would be a second, worse parser in front of the editor that is about to open the document.
 #[tauri::command]
-pub fn diagrams_read_drawio(path: String) -> Result<String, String> {
+pub fn diagrams_read_import(path: String) -> Result<String, String> {
     let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
     if !meta.is_file() {
         return Err(format!("{path} is not a file"));
@@ -569,7 +573,8 @@ pub fn diagrams_read_drawio(path: String) -> Result<String, String> {
             meta.len() / (1024 * 1024)
         ));
     }
-    // `read_to_string` rather than reading bytes and converting: a `.drawio` is XML, so a file that
-    // is not valid UTF-8 is not one, and saying so beats importing mojibake.
+    // `read_to_string` rather than reading bytes and converting: both dialects are text — XML and
+    // DBML — so a file that is not valid UTF-8 is not one of them, and saying so beats importing
+    // mojibake.
     std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
 }

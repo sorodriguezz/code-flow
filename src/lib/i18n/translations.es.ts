@@ -3804,7 +3804,7 @@ export const es = {
   "diagrams.exportOptions.onlyVector": "Sólo en SVG y PDF",
   "diagrams.exportOptions.confirm": "Exportar",
   "diagrams.exportOptions.reset": "Restaurar valores",
-  "diagrams.import": "Abrir un archivo .drawio",
+  "diagrams.import": "Abrir un archivo .drawio o .dbml",
   "diagrams.imported": "Importado {name}",
   "diagrams.undoGeneration": "Deshacer lo generado",
   "color.none": "Sin color",

@@ -77,12 +77,18 @@ export function toSchemaDiagram(
         // generated column is not automatically a key — so unlike `unique` it is passed through as
         // declared, with no interaction with the other flags.
         auto_increment: field.increment,
+        // The column's `[note: '…']`, carried through so the box can mark it — and so the box can
+        // be *measured* for the mark, which is `DBML_METRICS.rowPadding` below.
+        note: field.note,
       };
     });
     return {
       schema: table.schema === "public" ? null : table.schema,
       name: table.name,
       kind: "table" as const,
+      // The table's own `Note: '…'`. Marked in the header band the way a column's is marked on its
+      // row, and measured into the header the same way — `DBML_METRICS.namePadding`.
+      note: table.note,
       columns:
         mode === "all"
           ? columns
@@ -104,6 +110,10 @@ export function toSchemaDiagram(
       nullable: false,
       primary_key: false,
       foreign_key: false,
+      // A value's own note. `Enum status { active [note: 'still billing'] }` is legal DBML and is
+      // exactly the kind of thing a reader of the diagram is missing, so it is marked like a
+      // column's — the enum boxes are drawn by the same row renderer.
+      note: value.note,
     })),
     row_estimate: null,
   }));
@@ -203,6 +213,26 @@ export function columnBadges(column: DbDiagramColumn): DbmlBadge[] {
   return badges;
 }
 
+/**
+ * The room a column's comment bubble takes on its row: the 10px drawing plus the clearance.
+ *
+ * Here and not in the canvas that draws it, for the same reason `columnBadges` is here — it is also
+ * the answer to how wide the box has to be, and the day the two numbers drifted the badges on the
+ * widest row went over the edge of a box measured for one fewer.
+ */
+export const NOTE_SLOT = 13;
+
+/**
+ * Whether a column — or a whole table — carries a comment worth marking. A blank note is not one.
+ *
+ * One predicate for both levels, read at measuring time and at drawing time. `note` is optional on
+ * both shapes (nothing in a live catalog fills it in), so "has one" is a question with three
+ * answers and this is where they are collapsed to two.
+ */
+export function isCommented(subject: { note?: string }): boolean {
+  return Boolean(subject.note?.trim());
+}
+
 /** How wide the strip of them is, drawn end to end with `BADGE_GAP` between. */
 export function badgeStripWidth(column: DbDiagramColumn): number {
   const badges = columnBadges(column);
@@ -235,17 +265,26 @@ export const DBML_METRICS: NodeMetrics = {
   // `analytics.subscription_events` is 29 characters, and at the header's own advance that alone is
   // 209px before the glyph and the count are allowed for.
   maxWidth: 470,
-  namePadding: 62,
   // The header is drawn in the same monospace as the rows, at 12px. Measuring it against the
   // engine's sans estimate lost a third of a pixel per character, which is invisible on a short
   // name and clips the last letter off a long one.
   nameAdvance: 12 * 0.6,
   // And it is drawn schema-qualified, so `shop.` is part of what has to fit.
   qualifiedName: true,
+  // 62 for the glyph bar, the column count and the clearance they keep from the name — plus the
+  // bubble's slot on a table that carries a note, for the same reason `rowPadding` charges one on a
+  // commented row. A documented table is a shade wider; its name is not a character shorter.
+  namePadding: (node) => 62 + (isCommented(node) ? NOTE_SLOT : 0),
   // 22 for the two side pads, 13 for the key gutter, 8 for the gap a name keeps from the type and
-  // 6 for the one the type keeps from the badges. Everything that varies per column is in
-  // `badgeWidth`, because the table is charged the widest row's rather than each row its own.
-  rowPadding: () => 49,
+  // 6 for the one the type keeps from the badges — plus the comment bubble's slot on a row that has
+  // one, which is charged here rather than taken out of the name.
+  //
+  // Measured rather than absorbed, and that is a real choice: the pin on a header is absorbed by
+  // the *title*, because being held is a passing state of the UI and box widths are what the edge
+  // router places lines around. A note is not a passing state — it is in the document, like the
+  // badges, and the badges are measured. So a table with a commented column is a shade wider, once,
+  // and no name is quietly cut short to make room for a mark about it.
+  rowPadding: (column) => 49 + (isCommented(column) ? NOTE_SLOT : 0),
   badgeWidth: badgeStripWidth,
 };
 

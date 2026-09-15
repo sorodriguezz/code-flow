@@ -1,8 +1,10 @@
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeFileBytes } from "../tauri/commands";
+import { FORMAT_DBML, FORMAT_MXGRAPH } from "./doc";
+import type { DiagramFormat } from "../../types/diagrams";
 
 /**
- * Getting a diagram out of the app, and a `.drawio` file into it.
+ * Getting a diagram out of the app, and a `.drawio` or `.dbml` file into it.
  *
  * **Everything here goes through a file dialog the user drives.** A desktop app writing where it
  * likes is a desktop app people stop trusting, and the dialog is also what supplies the extension —
@@ -74,19 +76,47 @@ export async function saveBytes(
 }
 
 /**
- * Opens a `.drawio` file and returns its text, or `null` if the dialog was dismissed.
+ * The one filter the import dialog offers: both dialects, in one entry.
  *
- * The read goes through `diagrams_read_drawio` rather than a general "read any file" command,
+ * One entry rather than two, because a picker with a *format dropdown* is a question the user
+ * should not have to answer — they have a file, and which of the two editors opens it is a fact
+ * about the file rather than a choice. The extension decides it; see `formatOf`.
+ */
+const IMPORT_FILTER = { name: "Diagram", extensions: ["drawio", "xml", "dbml"] };
+
+/**
+ * Which editor a picked file belongs to, from its extension.
+ *
+ * Extension and not content sniffing. The two dialects are not ambiguous in practice, and a guess
+ * that reads the first line would be wrong in exactly the case that matters — an empty file, or a
+ * DBML document that happens to open with a comment — while being invisible when it went wrong.
+ */
+function formatOf(path: string): DiagramFormat {
+  return /\.dbml$/i.test(path) ? FORMAT_DBML : FORMAT_MXGRAPH;
+}
+
+/**
+ * Opens a `.drawio` or `.dbml` file and returns its text, or `null` if the dialog was dismissed.
+ *
+ * The read goes through `diagrams_read_import` rather than a general "read any file" command,
  * deliberately: a narrow command that only reads what a file dialog just handed back is a much
  * smaller capability to have added to the app than a general one.
+ *
+ * The document comes back **uninspected**, which is the same rule the store keeps on the way in: a
+ * validator at the door would be a second, worse parser in front of the editor that is about to
+ * open the file, and the editors' own failure modes — draw.io's broken-document notice, the
+ * workbench's error banner with a caret on the offending line — are visible and recoverable, which
+ * a rejection at the door would not be.
  */
-export async function openDrawioFile(): Promise<{ name: string; xml: string } | null> {
-  const picked = await open({ multiple: false, filters: [FILTERS.drawio] });
+export async function openDiagramFile(): Promise<
+  { name: string; doc: string; format: DiagramFormat } | null
+> {
+  const picked = await open({ multiple: false, filters: [IMPORT_FILTER] });
   if (typeof picked !== "string") return null;
-  const { diagramsReadDrawio } = await import("../tauri/diagramsCommands");
-  const xml = await diagramsReadDrawio(picked);
+  const { diagramsReadImport } = await import("../tauri/diagramsCommands");
+  const doc = await diagramsReadImport(picked);
   const name = picked.split(/[\\/]/).pop() ?? "diagram";
-  return { name: name.replace(/\.(drawio|xml)$/i, ""), xml };
+  return { name: name.replace(/\.(drawio|xml|dbml)$/i, ""), doc, format: formatOf(picked) };
 }
 
 /**

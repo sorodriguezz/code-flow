@@ -1028,7 +1028,7 @@ pub fn run() {
             commands::diagrams_cmd::diagrams_delete_template,
             commands::diagrams_cmd::diagrams_draw_with_ai,
             commands::diagrams_cmd::diagrams_fill_rows_with_ai,
-            commands::diagrams_cmd::diagrams_read_drawio,
+            commands::diagrams_cmd::diagrams_read_import,
             commands::debug_cmd::debug_start,
             commands::debug_cmd::debug_start_adapter,
             commands::debug_cmd::debug_stop,

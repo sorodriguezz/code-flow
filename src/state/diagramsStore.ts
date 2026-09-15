@@ -410,10 +410,10 @@ interface DiagramsState {
   /** Remembers what the export dialog was told, and writes it through to settings. */
   setExportOptions: (options: ImageExportOptions) => void;
   /**
-   * Opens a `.drawio` file from disk as a new diagram, and opens it. Returns its title, or `null`
-   * when the dialog was dismissed or the read failed.
+   * Opens a `.drawio` drawing or a `.dbml` schema from disk as a new diagram, and opens it. Returns
+   * its title, or `null` when the dialog was dismissed or the read failed.
    */
-  importDrawio: (folderId: string | null) => Promise<string | null>;
+  importDiagram: (folderId: string | null) => Promise<string | null>;
   /** Called by the frame once it has posted the export request. */
   clearPendingExport: () => void;
 
@@ -1075,29 +1075,30 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
 
   clearPendingExport: () => set({ pendingExport: null }),
 
-  importDrawio: async (folderId) => {
+  importDiagram: async (folderId) => {
     const workspaceId = get().workspaceId;
     if (!workspaceId) return null;
     try {
-      const { openDrawioFile } = await import("../lib/diagrams/exportFile");
-      const file = await openDrawioFile();
+      const { openDiagramFile } = await import("../lib/diagrams/exportFile");
+      const file = await openDiagramFile();
       if (!file) return null;
-      // Stored as `mxgraph` without inspecting it. A `.drawio` file *is* the dialect the editor
-      // reads, and a validator here would be a second, worse XML parser in front of the one that
-      // is about to open it — the editor's own failure mode for a bad document is visible and
+      // Stored in the format the extension named, without inspecting the document. A `.drawio` file
+      // *is* the dialect the drawing editor reads and a `.dbml` file *is* the one the workbench
+      // reads; a validator here would be a second, worse parser in front of the one that is about
+      // to open it — and each editor's own failure mode for a bad document is visible and
       // recoverable, which a rejection at the door would not be.
       const row = await diagramsCreateDiagram(
         workspaceId,
         folderId,
         file.name,
-        file.xml,
-        DEFAULT_FORMAT,
+        file.doc,
+        file.format,
         serializeTags([]),
       );
       set((state) => ({
         diagrams: [...state.diagrams, toDiagram(row)],
         activeId: row.id,
-        draft: { id: row.id, doc: file.xml, format: DEFAULT_FORMAT, thumbnail: "", dirty: false },
+        draft: { id: row.id, doc: file.doc, format: file.format, thumbnail: "", dirty: false },
         openingId: null,
         savedAt: null,
       }));

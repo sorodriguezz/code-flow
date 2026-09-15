@@ -290,6 +290,6 @@ export const diagramsFillRowsWithAi = (args: {
 
 // ---------- import ----------
 
-/** Reads a `.drawio` file the user picked in a dialog. Capped and text-only in Rust. */
-export const diagramsReadDrawio = (path: string) =>
-  invoke<string>("diagrams_read_drawio", { path });
+/** Reads a `.drawio` or `.dbml` file the user picked in a dialog. Capped and text-only in Rust. */
+export const diagramsReadImport = (path: string) =>
+  invoke<string>("diagrams_read_import", { path });

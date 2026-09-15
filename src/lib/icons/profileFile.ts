@@ -136,7 +136,7 @@ export async function importProfileFile(
   existing: IconProfile[],
 ): Promise<IconProfileImport | null> {
   const picked = await open({ multiple: false, filters: [FILTER] });
-  // The same guard `openDrawioFile` uses: `open` is typed as possibly answering an array, and a
+  // The same guard `openDiagramFile` uses: `open` is typed as possibly answering an array, and a
   // dismissed dialog answers `null`. Both are "nothing to do".
   if (typeof picked !== "string") return null;
   // Left to propagate, like the write above: a file that is not UTF-8, or that the process cannot

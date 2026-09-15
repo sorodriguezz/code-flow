@@ -16,7 +16,9 @@ import {
   badgeStripWidth,
   columnBadges,
   fieldMarkKey,
+  isCommented,
   layoutDbml,
+  NOTE_SLOT,
   type DbmlBadge,
   type DbmlLayout,
   type DbmlMarkKind,
@@ -180,6 +182,23 @@ const PIN_SLOT = 16;
  */
 const PIN_PATH =
   "M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z";
+/**
+ * The comment bubble, for a column carrying a `[note: '…']`.
+ *
+ * Lucide's `MessageSquare`, inlined for the same two reasons `PIN_PATH` is: an icon component is an
+ * `<svg>` of its own that would have to be placed by `x`/`y` inside this one, and it paints in
+ * `currentColor` — which the export has no cascade to resolve, so the glyph that reads as muted
+ * text on screen would arrive in the PNG as black.
+ *
+ * A bubble rather than a page or an asterisk. The mark has to say "somebody wrote something about
+ * this column" to a reader who has never opened the app and is looking at an exported PNG, and a
+ * speech bubble is the one shape that says it without a legend.
+ */
+const NOTE_PATH = "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z";
+/** The widest the hover card is allowed to be, which is what keeps it inside the frame. */
+const NOTE_CARD_W = 260;
+/** Roughly what a card of a few lines occupies. Only decides which side of the pointer it opens on. */
+const NOTE_CARD_H = 120;
 const ROW_H = 22;
 
 export interface DbmlCanvasHandle {
@@ -383,6 +402,26 @@ export const DbmlCanvas = forwardRef<
   const [hoveredLink, setHoveredLink] = useState<string | null>(null);
   /** The row under the pointer, `"<tableId>|<column>"`, so its connect handle can appear. */
   const [hoveredRow, setHoveredRow] = useState<string | null>(null);
+  /**
+   * The comment under the pointer — a column's or a table's — already placed in the frame's pixels.
+   *
+   * Placed from the **cursor** rather than from the thing it belongs to, which is the one decision
+   * here worth writing down. The card is HTML over a group that is panned and zoomed, so anchoring
+   * it to the glyph would mean re-deriving its position on every frame of a pan — and a pan is
+   * exactly when it should not be on screen at all. It is therefore computed once, on entry, and
+   * dismissed by anything that moves the diagram underneath it.
+   */
+  const [noteTip, setNoteTip] = useState<{
+    left: number;
+    /** Exactly one of the two is set: the card flips above the pointer near the bottom edge. */
+    top?: number;
+    bottom?: number;
+    /** The column's name, or the table's — schema-qualified, and never the clipped form. */
+    name: string;
+    /** A column's data type. Empty for a table, which has none, and then nothing is drawn. */
+    type: string;
+    note: string;
+  } | null>(null);
   /** The live end of a relationship being dragged out, in diagram space. */
   const [wire, setWire] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   /** Where a right-click landed and what it landed on. */
@@ -485,6 +524,41 @@ export const DbmlCanvas = forwardRef<
       y: (clientY - (box?.top ?? 0) - view.y) / view.k,
     };
   }, []);
+
+  /**
+   * Opens a comment beside the pointer — a column's, or the table's own.
+   *
+   * One handler for both, taking what to *say* rather than what it is about: the two callers know
+   * which of the two they are, and the card does not have to.
+   *
+   * Stable across renders — `SchemaBox` is memoised, and a fresh handler per render would re-render
+   * every box on the canvas for a pan that moved none of them.
+   */
+  const showNote = useCallback((
+    subject: { name: string; type: string; note: string },
+    event: React.PointerEvent,
+  ) => {
+    // Never mid-gesture. A drag crosses half the boxes on the diagram, and a card following the
+    // pointer through them is a flicker rather than an answer.
+    if (dragRef.current) return;
+    const box = frameRef.current?.getBoundingClientRect();
+    if (!box) return;
+    const x = event.clientX - box.left;
+    const y = event.clientY - box.top;
+    // Below the pointer unless the bottom of the frame is too close, in which case above it. The
+    // card is measured by its content and this is an estimate, so it is only ever asked which
+    // *side* to open on — never where the edge of the card lands.
+    const below = y + NOTE_CARD_H < box.height;
+    setNoteTip({
+      // Kept inside the frame: a commented column on a table near the right edge would otherwise
+      // open a card the pane's own overflow cuts in half.
+      left: Math.max(8, Math.min(x + 14, box.width - NOTE_CARD_W - 8)),
+      top: below ? y + 16 : undefined,
+      bottom: below ? undefined : box.height - y + 16,
+      ...subject,
+    });
+  }, []);
+  const hideNote = useCallback(() => setNoteTip(null), []);
 
   /**
    * The column row at a diagram point, or `null`.
@@ -667,6 +741,8 @@ export const DbmlCanvas = forwardRef<
     if (!frame) return;
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
+      // The card was placed against a diagram that is about to move under it. See `showNote`.
+      setNoteTip(null);
       if (event.shiftKey) {
         const current = viewRef.current;
         applyView({ ...current, x: current.x - (event.deltaY || event.deltaX), y: current.y });
@@ -684,6 +760,8 @@ export const DbmlCanvas = forwardRef<
   }, [applyView, scheduleCommit, zoomBy]);
 
   const onPointerDown = (event: React.PointerEvent, node?: DiagramNode) => {
+    // Before the button check, so a right-click that opens a menu takes the card down with it.
+    setNoteTip(null);
     if (event.button !== 0) return;
     event.stopPropagation();
     // Stops the press from starting a native text selection over the labels. See the frame's style.
@@ -923,6 +1001,7 @@ export const DbmlCanvas = forwardRef<
         setHovered(null);
         setHoveredLink(null);
         setHoveredRow(null);
+        setNoteTip(null);
       }}
       // `select-none` on the class *and* the property here, and a `preventDefault` on the press
       // below. Any one of the three left out and dragging a box runs the browser's own text
@@ -1256,6 +1335,8 @@ export const DbmlCanvas = forwardRef<
               onPointerDown={(event) => onPointerDown(event, node)}
               onPointerEnter={() => setHovered(node.id)}
               onPointerLeave={() => setHovered((current) => (current === node.id ? null : current))}
+              onNoteEnter={showNote}
+              onNoteLeave={hideNote}
               onOpen={() => onOpen?.(node.id)}
             />
           ))}
@@ -1328,6 +1409,44 @@ export const DbmlCanvas = forwardRef<
           }}
           className="absolute z-20 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-1.5 py-[3px] font-mono text-[12px] font-semibold text-[var(--cf-text)] shadow-[var(--cf-shadow)] outline-none"
         />
+      )}
+
+      {/* A column's comment, read where the column is.
+
+          HTML over the frame for the same reason the rename field is: inside the SVG it would ride
+          the panned group's transform, so the one thing the card exists to do — be legible — would
+          hold only at 100%. Up here it is the size a paragraph should be at any zoom.
+
+          `pointer-events-none` on purpose. The card is an answer, not a surface: it opens beside
+          the pointer, and one that could be hovered would sit between the pointer and the next row
+          you were about to reach for. */}
+      {noteTip && (
+        <div
+          className="pointer-events-none absolute z-30 max-w-[260px] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-2 shadow-[var(--cf-shadow)]"
+          style={{ left: noteTip.left, top: noteTip.top, bottom: noteTip.bottom }}
+        >
+          <div className="flex items-baseline gap-1.5">
+            <span className="font-mono text-[11px] font-semibold text-[var(--cf-text)]">
+              {noteTip.name}
+            </span>
+            {noteTip.type && (
+              <span className="font-mono text-[10px] text-[var(--cf-text-muted)]">
+                {noteTip.type}
+              </span>
+            )}
+          </div>
+          {/* Labelled, because a sentence on its own under a column name could be read as the
+              column's *description in the model* — a `comment` the database itself carries. It is
+              not; it is the note the author wrote in the document, which is what the word says. */}
+          <div className="mt-1.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            {t("dbml.inspector.note")}
+          </div>
+          {/* `whitespace-pre-wrap`: a fenced DBML note keeps the line breaks the author typed, and
+              a note written as three lines is usually three lines on purpose. */}
+          <p className="mt-0.5 whitespace-pre-wrap text-[11px] leading-snug text-[var(--cf-text)]">
+            {noteTip.note}
+          </p>
+        </div>
       )}
 
       {menu && editing && (
@@ -1622,6 +1741,8 @@ const SchemaBox = memo(function SchemaBox({
   onPointerDown,
   onPointerEnter,
   onPointerLeave,
+  onNoteEnter,
+  onNoteLeave,
   onOpen,
 }: {
   node: DiagramNode;
@@ -1661,10 +1782,32 @@ const SchemaBox = memo(function SchemaBox({
   onPointerDown: (event: React.PointerEvent) => void;
   onPointerEnter: () => void;
   onPointerLeave: () => void;
+  /**
+   * Pointer on a comment bubble — this table's, or one of its columns'. The card itself is drawn by
+   * the canvas, in HTML over the frame: a `foreignObject` here would inherit the panned group's
+   * transform and be four pixels tall at 15%, which is the same reason the rename field lives up
+   * there.
+   *
+   * Two callbacks rather than one object, because this component is memoised and an object built
+   * inline would be a new prop on every render.
+   */
+  onNoteEnter?: (
+    subject: { name: string; type: string; note: string },
+    event: React.PointerEvent,
+  ) => void;
+  onNoteLeave?: () => void;
   onOpen: () => void;
 }) {
   const accent = isEnum ? ENUM_COLOUR : "var(--cf-accent)";
   const lit = selected || related;
+  /**
+   * The table carries a `Note: '…'` of its own.
+   *
+   * Marked in the header exactly as a commented column is marked on its row, because it is the same
+   * statement about a bigger thing — and a schema where the *tables* are documented and the mark
+   * only ever appears on columns is a schema that looks undocumented from the one place you read it.
+   */
+  const noted = isCommented(node);
   /** Held rather than inlined: the strikethrough has to be exactly as wide as the drawn name. */
   const title = clip(
     node.schema ? `${node.schema}.${node.name}` : node.name,
@@ -1672,7 +1815,12 @@ const SchemaBox = memo(function SchemaBox({
     // by the layout engine and must not change when a table is held — box widths are what the edge
     // router places lines around — so the one thing that can give is the name, which loses a
     // character while pinned and gets it back the moment it is let go.
-    node.width - 56 - (pinned ? PIN_SLOT : 0),
+    //
+    // The bubble's slot is subtracted too, and it is *not* the same bargain: it was added to the
+    // box's own width in `DBML_METRICS.namePadding`, so the room is there and this only keeps the
+    // name out of it. The subtraction still has to happen for the box that hit `maxWidth` and was
+    // not given everything it asked for.
+    node.width - 56 - (pinned ? PIN_SLOT : 0) - (noted ? NOTE_SLOT : 0),
     12 * MONO_ADVANCE,
   );
   /**
@@ -1704,7 +1852,15 @@ const SchemaBox = memo(function SchemaBox({
   const countWidth = String(node.visible.length + node.hidden).length * 5.9;
   const showRows =
     rowsLabel !== "" &&
-    nameEnd + 10 + rowsWidth + countWidth + (mark ? 22 : 0) + (pinned ? PIN_SLOT : 0) <
+    nameEnd +
+      10 +
+      rowsWidth +
+      countWidth +
+      (mark ? 22 : 0) +
+      (pinned ? PIN_SLOT : 0) +
+      // The bubble sits between the name and this, so it is one more thing the count has to fit
+      // around — and the count is the one piece of header furniture that may stand down.
+      (noted ? NOTE_SLOT : 0) <
       node.width - PAD_X;
   /**
    * Where the type column ends, for every row in this box.
@@ -1886,6 +2042,55 @@ const SchemaBox = memo(function SchemaBox({
           strokeLinecap="round"
         />
       )}
+
+      {/* The table's own comment, after its name.
+
+          The same bubble a commented column gets, a pixel larger because the header is set a
+          pixel larger — one mark, drawn at two scales, rather than two marks to learn. It is on the
+          *left*, with the name, and not over on the right with the count, the mark dot and the pin:
+          those three are things the app knows about this table, and this one is something the
+          author said about it. The card is the same card. */}
+      {noted && (
+        <g>
+          <g
+            transform={`translate(${nameX + title.length * 12 * MONO_ADVANCE + 4} 11.5) scale(${11 / 24})`}
+            fill="none"
+            stroke="var(--cf-text-muted)"
+            strokeOpacity={0.85}
+            strokeWidth={2.5}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d={NOTE_PATH} />
+          </g>
+          <rect
+            x={nameX + title.length * 12 * MONO_ADVANCE}
+            y={8}
+            width={NOTE_SLOT + 4}
+            height={18}
+            fill="transparent"
+            pointerEvents="all"
+            onPointerEnter={
+              onNoteEnter
+                ? (event) =>
+                    onNoteEnter(
+                      // The *unclipped* name, and no type: a table has none, and the card drops
+                      // the line when it is empty. Reading the full name off the card is worth
+                      // something of its own on a box whose header ran out of room for it.
+                      {
+                        name: node.schema ? `${node.schema}.${node.name}` : node.name,
+                        type: "",
+                        note: node.note ?? "",
+                      },
+                      event,
+                    )
+                : undefined
+            }
+            onPointerLeave={onNoteLeave}
+            style={onNoteEnter ? { cursor: "help" } : undefined}
+          />
+        </g>
+      )}
       {/* The same mark again, as a dot beside the column count. The spine says *that* the table is
           marked from across the diagram; this says *which* mark at the zoom where you are reading
           the columns, without spending a word on it. */}
@@ -1957,6 +2162,18 @@ const SchemaBox = memo(function SchemaBox({
           joined={joinedColumns?.has(`${node.id}|${column.name}`) ?? false}
           mark={isEnum ? undefined : marks[fieldMarkKey(node.id, column.name)]}
           markNames={markNames}
+          note={
+            onNoteEnter && onNoteLeave
+              ? {
+                  onEnter: (event) =>
+                    onNoteEnter(
+                      { name: column.name, type: column.data_type, note: column.note ?? "" },
+                      event,
+                    ),
+                  onLeave: onNoteLeave,
+                }
+              : undefined
+          }
           onContextMenu={
             onFieldContextMenu ? (event) => onFieldContextMenu(column.name, event) : undefined
           }
@@ -1997,6 +2214,7 @@ function Row({
   joined,
   mark,
   markNames,
+  note,
   connect,
   onContextMenu,
 }: {
@@ -2021,6 +2239,14 @@ function Row({
    */
   mark?: DbmlMarkKind;
   markNames: Record<DbmlMarkKind, string>;
+  /**
+   * How to raise this column's comment, when the canvas is drawing hover cards.
+   *
+   * The **bubble is drawn either way** — it is part of the picture, and an exported PNG that
+   * silently dropped it would be a diagram claiming a documented column is undocumented. Only the
+   * card needs a live pointer, so only the card is conditional.
+   */
+  note?: { onEnter: (event: React.PointerEvent) => void; onLeave: () => void };
   /** Present when a relationship can be dragged out of this row. */
   connect?: {
     lit: boolean;
@@ -2052,10 +2278,16 @@ function Row({
   const typeText = column.data_type ? clip(column.data_type, 108, 9 * MONO_ADVANCE) : "";
   const typeWidth = typeText.length * 9 * MONO_ADVANCE;
   const nameX = PAD_X + GUTTER;
+  /** Whether this column carries a `[note: '…']`. Blank ones are not comments. */
+  const commented = isCommented(column);
   /** Held rather than inlined: the strikethrough has to be exactly as wide as the drawn name. */
   const label = clip(
     column.name,
-    Math.max(24, typeRight - typeWidth - nameX - 8),
+    // The bubble's slot, taken out of the name's room here and *added to the box's* in
+    // `DBML_METRICS.rowPadding` — the same number at both ends, so the mark lands in room that was
+    // measured for it. Subtracted anyway rather than trusted: a box that hit `maxWidth` was not
+    // given everything it asked for, and a name has to stay off the type column in that case too.
+    Math.max(24, typeRight - typeWidth - nameX - 8 - (commented ? NOTE_SLOT : 0)),
     11 * MONO_ADVANCE,
   );
   const marked = mark ? MARK_COLOUR[mark] : null;
@@ -2200,6 +2432,46 @@ function Row({
           strokeWidth={1.1}
           strokeLinecap="round"
         />
+      )}
+
+      {/* The column carries a comment.
+
+          Immediately after the name and nowhere else: a mark at the far end of the row would be
+          read against the type and the badges, which are facts about what the column *is*, and this
+          one is a fact about what somebody *said*. Muted rather than given a hue of its own — the
+          five badge colours are a legend and a sixth entry in it would have to mean a sixth kind of
+          constraint, which a comment is not.
+
+          The text itself is not drawn here. A note is prose and a row is 22 pixels; it opens as a
+          card over the canvas instead — see `noteTip`. */}
+      {commented && (
+        <g>
+          <g
+            transform={`translate(${nameX + label.length * 11 * MONO_ADVANCE + 3} ${y + ROW_H / 2 - 5}) scale(${10 / 24})`}
+            fill="none"
+            stroke="var(--cf-text-muted)"
+            strokeOpacity={0.85}
+            strokeWidth={2.6}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d={NOTE_PATH} />
+          </g>
+          {/* The target, laid over the drawing rather than being it: ten pixels of hairline is not
+              something anybody lands on at 60% zoom. `transparent` and not `none` — `none` takes
+              the fill out of hit-testing along with the paint, which is the opposite of the job. */}
+          <rect
+            x={nameX + label.length * 11 * MONO_ADVANCE}
+            y={y + 2}
+            width={NOTE_SLOT + 3}
+            height={ROW_H - 4}
+            fill="transparent"
+            pointerEvents="all"
+            onPointerEnter={note?.onEnter}
+            onPointerLeave={note?.onLeave}
+            style={note ? { cursor: "help" } : undefined}
+          />
+        </g>
       )}
 
       {/* Text, not a pill.

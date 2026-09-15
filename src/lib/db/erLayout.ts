@@ -122,8 +122,15 @@ export interface NodeMetrics {
    * runs into a badge strip that was reserved for somebody else.
    */
   badgeWidth?: (column: DbDiagramColumn) => number;
-  /** And the same for the header, which holds the name and whatever sits beside it. */
-  namePadding: number;
+  /**
+   * And the same for the header, which holds the name and whatever sits beside it.
+   *
+   * A function of the node, like `rowPadding` is of the column, because one of the things that sits
+   * beside the name is a mark the *document* asks for: a table carrying a comment is drawn with a
+   * bubble after its name, and a constant here would have had to be paid by every table that has
+   * none — or, worse, taken back out of the one name it belongs to.
+   */
+  namePadding: (node: { note?: string }) => number;
   /** The width of one character of the face the *title* is set in. */
   nameAdvance: number;
   /**
@@ -145,7 +152,7 @@ export const DEFAULT_METRICS: NodeMetrics = {
   minWidth: NODE_MIN_WIDTH,
   maxWidth: NODE_MAX_WIDTH,
   rowPadding: () => 44,
-  namePadding: 34,
+  namePadding: () => 34,
   nameAdvance: NAME_CHAR_WIDTH,
   qualifiedName: false,
 };
@@ -168,6 +175,8 @@ export interface DiagramNode {
    * diagram claim the column points at nothing.
    */
   external: boolean;
+  /** The table's own comment, when it has one. See `DbDiagramTable.note`. */
+  note?: string;
   columns: DbDiagramColumn[];
   /** The columns actually drawn, after the column mode and the row cap. */
   visible: DbDiagramColumn[];
@@ -610,6 +619,7 @@ function buildNodes(
       name: table.name,
       kind: table.kind,
       external: false,
+      note: table.note,
       columns: table.columns,
       visible: kept.slice(0, MAX_ROWS),
       hidden: table.columns.length - Math.min(kept.length, MAX_ROWS),
@@ -656,7 +666,7 @@ function measure(
 ): DiagramNode {
   const title =
     metrics.qualifiedName && node.schema ? `${node.schema}.${node.name}` : node.name;
-  const nameWidth = title.length * metrics.nameAdvance + metrics.namePadding;
+  const nameWidth = title.length * metrics.nameAdvance + metrics.namePadding(node);
   const badges = metrics.badgeWidth;
   const strip = badges
     ? node.visible.reduce((widest, column) => Math.max(widest, badges(column)), 0)

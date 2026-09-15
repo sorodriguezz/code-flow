@@ -3870,7 +3870,7 @@ const en = {
   "diagrams.exportOptions.onlyVector": "SVG and PDF only",
   "diagrams.exportOptions.confirm": "Export",
   "diagrams.exportOptions.reset": "Restore defaults",
-  "diagrams.import": "Open a .drawio file",
+  "diagrams.import": "Open a .drawio or .dbml file",
   "diagrams.imported": "Imported {name}",
   "diagrams.undoGeneration": "Undo the generated shapes",
   "color.none": "No colour",

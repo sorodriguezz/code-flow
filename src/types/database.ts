@@ -211,6 +211,18 @@ export interface DbDiagramColumn {
    * reader treats `undefined` as "not stated" rather than as "no".
    */
   auto_increment?: boolean;
+  /**
+   * What the author wrote *about* this column — DBML's `[note: '…']`.
+   *
+   * Structural by the standard the rest of this shape is held to, even though it constrains
+   * nothing: a comment is the only place a schema says why a column exists, and a diagram that
+   * drops it is a diagram somebody has to leave to go and read the source. The canvas draws a
+   * glyph for it and shows the text on hover — see `Row` in `DbmlCanvas`.
+   *
+   * Optional, like `unique` and `auto_increment` above, and for the same reason: no catalog query
+   * fills it in. Only the DBML translator sets it, and an empty string means the same as absent.
+   */
+  note?: string;
 }
 
 export interface DbDiagramTable {
@@ -218,6 +230,14 @@ export interface DbDiagramTable {
   name: string;
   /** `table`, `view` or `collection`. A view holds no rows and declares no keys. */
   kind: DbNodeKind;
+  /**
+   * What the author wrote about the table itself — DBML's `Note: '…'` inside the block.
+   *
+   * The same field as `DbDiagramColumn.note`, one level up, marked the same way: a bubble after the
+   * name in the header band, and the text on hover. Optional for the same reason — no catalog query
+   * fills it in, so only the DBML translator sets it.
+   */
+  note?: string;
   columns: DbDiagramColumn[];
   /** The server's own estimate where it keeps one — never a `COUNT(*)`. `null` on IRIS, which
    * keeps no such figure. */

@@ -72,7 +72,7 @@ export function DiagramExplorer() {
   const toggleFolder = useDiagramsStore((s) => s.toggleFolder);
   const setFolderFilter = useDiagramsStore((s) => s.setFolderFilter);
   const folderFilter = useDiagramsStore((s) => s.folderFilter);
-  const importDrawio = useDiagramsStore((s) => s.importDrawio);
+  const importDiagram = useDiagramsStore((s) => s.importDiagram);
   const openDiagram = useDiagramsStore((s) => s.openDiagram);
   const createDiagram = useDiagramsStore((s) => s.createDiagram);
   const createFolder = useDiagramsStore((s) => s.createFolder);
@@ -604,7 +604,7 @@ export function DiagramExplorer() {
             title={t("diagrams.import")}
             aria-label={t("diagrams.import")}
             onClick={() => {
-              void importDrawio(folderFilter).then((name) => {
+              void importDiagram(folderFilter).then((name) => {
                 if (name) {
                   useToastStore.getState().pushToast(t("diagrams.imported", { name }), "success");
                 }
