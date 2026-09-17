@@ -231,7 +231,7 @@ export function useOpenPrimary() {
  *
  * Every entry is now a plain `kind`, which it did not use to be: a screen used to be an SSH row
  * with `screen.protocol` set, so this menu had to hand-build a spec that the Type select could not
- * name. The kind *is* the protocol now (see `types/remote`), so the menu offers exactly the six
+ * name. The kind *is* the protocol now (see `types/remote`), so the menu offers exactly the seven
  * things that select offers, and a row created here reads back as what it was created as.
  */
 export interface NewConnection {
@@ -300,6 +300,16 @@ export const NEW_CONNECTIONS: NewConnection[] = [
     suffix: "FTPS",
     tab: "connection",
     spec: () => ({ ...defaultHostSpec(), kind: "ftps" }),
+  },
+  // Same family as the two above — a file protocol on a socket of its own — and last of the three
+  // because it is the only one whose root is a list of shares rather than a directory.
+  {
+    id: "smb",
+    labelKey: "remote.newSmb",
+    icon: kindIcon("smb"),
+    suffix: "SMB",
+    tab: "connection",
+    spec: () => ({ ...defaultHostSpec(), kind: "smb" }),
   },
   // The fourth family: an account in somebody's cloud rather than a machine. Separated from the
   // file protocols above because what you fill in is not an address and a password — it is an

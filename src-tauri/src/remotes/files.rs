@@ -121,11 +121,11 @@ pub struct TransferProgress {
 ///
 /// Every chunk would be thousands of events for a large file — each one an IPC hop and a React
 /// render — for a bar that cannot move by a visible amount that often.
-const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+pub(super) const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// The size of one read/write. Large enough that the syscall overhead disappears, small enough that
 /// progress still moves smoothly on a slow link.
-const CHUNK: usize = 64 * 1024;
+pub(super) const CHUNK: usize = 64 * 1024;
 
 /// One file's worth of a transfer, resolved before any byte moves.
 pub(super) struct Planned {
@@ -150,6 +150,9 @@ enum Transport {
     Sftp,
     /// A socket of its own — [`RemoteKind::Ftp`] and [`RemoteKind::Ftps`].
     Ftp,
+    /// SMB2/3 on a socket of its own — [`RemoteKind::Smb`]. The one transport whose root is not a
+    /// directory: a server offers shares, and [`super::smb`] makes the first path segment one.
+    Smb,
     /// Signed HTTPS against a bucket — [`RemoteKind::S3`].
     S3,
     /// Signed HTTPS against an Azure Storage account — every Azure kind.
@@ -166,6 +169,7 @@ fn transport(spec: &RemoteHostSpec) -> Result<Transport, String> {
     match spec.kind {
         RemoteKind::Ssh | RemoteKind::Sftp => Ok(Transport::Sftp),
         RemoteKind::Ftp | RemoteKind::Ftps => Ok(Transport::Ftp),
+        RemoteKind::Smb => Ok(Transport::Smb),
         RemoteKind::S3 => Ok(Transport::S3),
         RemoteKind::Azure
         | RemoteKind::AzureBlob
@@ -192,6 +196,7 @@ pub async fn list(
         // that differs, and on a directory that already came over the wire the cost is nothing.
         Transport::Sftp => filtered(super::sftp::list(host_id, spec, path).await?, page),
         Transport::Ftp => filtered(super::ftp::list(host_id, spec, path).await?, page),
+        Transport::Smb => filtered(super::smb::list(host_id, spec, path).await?, page),
         Transport::S3 => super::cloud::s3::list(host_id, spec, path, page).await,
         Transport::Azure => super::cloud::account::list(host_id, spec, path, page).await,
     }
@@ -219,6 +224,7 @@ pub async fn download(
     match transport(spec)? {
         Transport::Sftp => super::sftp::download(app, id, host_id, spec, remote_path, local_path).await,
         Transport::Ftp => super::ftp::download(app, id, host_id, spec, remote_path, local_path).await,
+        Transport::Smb => super::smb::download(app, id, host_id, spec, remote_path, local_path).await,
         Transport::S3 => super::cloud::s3::download(app, id, host_id, spec, remote_path, local_path).await,
         Transport::Azure => super::cloud::account::download(app, id, host_id, spec, remote_path, local_path).await,
     }
@@ -236,6 +242,7 @@ pub async fn upload(
     match transport(spec)? {
         Transport::Sftp => super::sftp::upload(app, id, host_id, spec, local_path, remote_path).await,
         Transport::Ftp => super::ftp::upload(app, id, host_id, spec, local_path, remote_path).await,
+        Transport::Smb => super::smb::upload(app, id, host_id, spec, local_path, remote_path).await,
         Transport::S3 => super::cloud::s3::upload(app, id, host_id, spec, local_path, remote_path).await,
         Transport::Azure => super::cloud::account::upload(app, id, host_id, spec, local_path, remote_path).await,
     }
@@ -245,6 +252,7 @@ pub async fn make_dir(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Resul
     match transport(spec)? {
         Transport::Sftp => super::sftp::make_dir(host_id, spec, path).await,
         Transport::Ftp => super::ftp::make_dir(host_id, spec, path).await,
+        Transport::Smb => super::smb::make_dir(host_id, spec, path).await,
         Transport::S3 => super::cloud::s3::make_dir(host_id, spec, path).await,
         Transport::Azure => super::cloud::account::make_dir(host_id, spec, path).await,
     }
@@ -264,6 +272,7 @@ pub async fn remove(
     match transport(spec)? {
         Transport::Sftp => super::sftp::remove(host_id, spec, path, is_dir).await,
         Transport::Ftp => super::ftp::remove(host_id, spec, path, is_dir).await,
+        Transport::Smb => super::smb::remove(host_id, spec, path, is_dir).await,
         Transport::S3 => super::cloud::s3::remove(host_id, spec, path, is_dir).await,
         Transport::Azure => super::cloud::account::remove(host_id, spec, path, is_dir).await,
     }
@@ -278,6 +287,7 @@ pub async fn rename(
     match transport(spec)? {
         Transport::Sftp => super::sftp::rename(host_id, spec, from, to).await,
         Transport::Ftp => super::ftp::rename(host_id, spec, from, to).await,
+        Transport::Smb => super::smb::rename(host_id, spec, from, to).await,
         Transport::S3 => super::cloud::s3::rename(host_id, spec, from, to).await,
         Transport::Azure => super::cloud::account::rename(host_id, spec, from, to).await,
     }
@@ -291,6 +301,7 @@ pub async fn rename(
 pub async fn close(host_id: &str) {
     super::sftp::close(host_id).await;
     super::ftp::close(host_id).await;
+    super::smb::close(host_id).await;
     // The cloud transports hold nothing, so these are no-ops — called anyway, so that adding state
     // to one of them later is a change in that module rather than a bug here.
     super::cloud::s3::close(host_id).await;
@@ -301,11 +312,12 @@ pub async fn close(host_id: &str) {
 /// Every host holding a file session, whichever transport it is on.
 ///
 /// Deduped, because a host edited from SFTP to FTP and browsed on both sides of the change can be in
-/// both maps, and the answer this feeds is "does this row have something to disconnect" — which is
-/// one yes.
+/// more than one map, and the answer this feeds is "does this row have something to disconnect" —
+/// which is one yes.
 pub async fn open_hosts() -> Vec<String> {
     let mut hosts = super::sftp::open_hosts().await;
-    for host in super::ftp::open_hosts().await {
+    let others = super::ftp::open_hosts().await.into_iter().chain(super::smb::open_hosts().await);
+    for host in others {
         if !hosts.contains(&host) {
             hosts.push(host);
         }
@@ -322,6 +334,7 @@ pub async fn open_hosts() -> Vec<String> {
 pub async fn close_all() {
     super::sftp::close_all().await;
     super::ftp::close_all().await;
+    super::smb::close_all().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +389,6 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    use tauri::Emitter;
     let mut buffer = vec![0u8; CHUNK];
     let mut last = std::time::Instant::now();
     loop {
@@ -391,33 +403,42 @@ where
         *done += read as u64;
         if last.elapsed() >= PROGRESS_INTERVAL {
             last = std::time::Instant::now();
-            let _ = app.emit(
-                "remote:transfer",
-                TransferProgress {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    done: *done,
-                    total,
-                    file_index,
-                    files,
-                },
-            );
+            progress(app, id, name, *done, total, file_index, files);
         }
     }
     // A final event on every file, so the bar reaches the end rather than stopping wherever the
     // last tick happened to land.
+    progress(app, id, name, *done, total, file_index + 1, files);
+    Ok(())
+}
+
+/// One progress event, for whoever is moving the bytes.
+///
+/// Its own function because [`super::smb`] does not go through [`pump`] and cannot: a download
+/// there is the crate's sliding window of overlapping reads, and an `AsyncRead` facade over it
+/// would serialize exactly what makes it fast. A second copy of this would be a second progress
+/// bar with its own idea of when to tick, which is [`pump`]'s own argument for existing.
+pub(super) fn progress(
+    app: &tauri::AppHandle,
+    id: &str,
+    name: &str,
+    done: u64,
+    total: u64,
+    file_index: u64,
+    files: u64,
+) {
+    use tauri::Emitter;
     let _ = app.emit(
         "remote:transfer",
         TransferProgress {
             id: id.to_string(),
             name: name.to_string(),
-            done: *done,
+            done,
             total,
-            file_index: file_index + 1,
+            file_index,
             files,
         },
     );
-    Ok(())
 }
 
 /// Walks *this* side, collecting every file under `local_path` and where each one lands.

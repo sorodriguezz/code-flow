@@ -35,6 +35,7 @@ export type RemoteKind =
   | "sftp"
   | "ftp"
   | "ftps"
+  | "smb"
   | "vnc"
   | "rdp"
   | "s3"
@@ -55,6 +56,7 @@ export const REMOTE_KINDS: RemoteKind[] = [
   "sftp",
   "ftp",
   "ftps",
+  "smb",
   "vnc",
   "rdp",
   "s3",
@@ -78,6 +80,7 @@ export const SELECTABLE_KINDS: RemoteKind[] = [
   "sftp",
   "ftp",
   "ftps",
+  "smb",
   "vnc",
   "rdp",
   "s3",
@@ -139,6 +142,9 @@ export const DEFAULT_FTP_PORT = 21;
 export const DEFAULT_FTPS_IMPLICIT_PORT = 990;
 export const DEFAULT_VNC_PORT = 5900;
 export const DEFAULT_RDP_PORT = 3389;
+// SMB over TCP. 139 was NetBIOS's and is not offered: SMB2 is what this speaks, and no server that
+// answers SMB2 needs 139 to do it.
+export const DEFAULT_SMB_PORT = 445;
 
 /**
  * What each kind can do. The single source of truth for which buttons, tabs and menu items exist.
@@ -156,6 +162,9 @@ export const KIND_CAPABILITIES: Record<
   sftp: { shell: false, files: true, forwards: false, screen: false },
   ftp: { shell: false, files: true, forwards: false, screen: false },
   ftps: { shell: false, files: true, forwards: false, screen: false },
+  // Files and nothing else, like FTP — but with a root that is not a directory: a server offers
+  // shares, so `/` lists them and the first path segment is one. See `remotes::smb`.
+  smb: { shell: false, files: true, forwards: false, screen: false },
   // `forwards: false` is about the forwards *list* — the one the user raises and manages by hand.
   // A screen host still tunnels; that forward is the app's, lives and dies with the screen, and
   // never appears in that list. Same split as `RemoteKind::has_forwards` in Rust.
@@ -192,6 +201,7 @@ export const KIND_LABEL: Record<RemoteKind, string> = {
   sftp: "SFTP",
   ftp: "FTP",
   ftps: "FTPS",
+  smb: "SMB",
   vnc: "VNC",
   rdp: "RDP",
   s3: "S3",
@@ -679,6 +689,8 @@ export function defaultPortFor(spec: RemoteHostSpec): number {
     case "ftps":
       // Explicit FTPS upgrades the control connection in place, so it stays on 21.
       return spec.ftp.implicit_tls ? DEFAULT_FTPS_IMPLICIT_PORT : DEFAULT_FTP_PORT;
+    case "smb":
+      return DEFAULT_SMB_PORT;
     case "vnc":
       return DEFAULT_VNC_PORT;
     case "rdp":

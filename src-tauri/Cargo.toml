@@ -339,6 +339,18 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 # driver would have used if it could read the system config. See `datasource/srv.rs` for why it
 # often can't.
 hickory-resolver = "0.26"
+# SMB2/3, for a host whose files are on a Windows share, a NAS, or a Mac with File Sharing on —
+# `remotes::smb`. Pure Rust and no C library, which is not a preference here but the constraint that
+# picked it: the macOS arm64 leg of the release cross-compiles, and every FFI option (`pavao`,
+# `remotefs-smb`) wants `libsmbclient`, which would mean shipping Samba to link against.
+#
+# The better-known pure-Rust crate, `smb` (smb-rs), cannot be installed in this tree at all. Its
+# auth stack pins `sspi =0.18.7`, which pins `sha2 =0.11.0-rc.2`, and `tokio-postgres-rustls`
+# already resolves `sha2 0.11.0` *final* here. A requirement with no pre-release tag does not match
+# a release candidate, so there is no version of `sha2` that satisfies both and cargo refuses the
+# lockfile outright — `cargo add smb` fails before it writes anything. This one's crypto is all on
+# released RustCrypto, so it unifies with what is already here.
+smb2 = "0.22"
 
 # Sending a signal to a *process group*, which is what stopping an AI run needs: `child.kill()`
 # reaches the CLI and nothing it started, and every one of these CLIs is a Node process that spawns

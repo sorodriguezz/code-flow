@@ -733,6 +733,9 @@ function ConnectionTab({
   // and a credential, and everything from Host downwards is replaced rather than hidden.
   const isSsh = spec.kind === "ssh" || spec.kind === "sftp";
   const isFtp = spec.kind === "ftp" || spec.kind === "ftps";
+  // SMB has exactly one scheme — an account name and a password — so it gets no authentication
+  // block for the same reason FTP doesn't, and its password field below is unconditional.
+  const isSmb = spec.kind === "smb";
   const isScreen = capabilities(spec).screen;
   const isCloud = isCloudKind(spec.kind);
   // The one exception to "a screen carries no credential this app can hold": drawn in-app, CodeFlow
@@ -746,6 +749,7 @@ function ConnectionTab({
     sftp: t("remote.kindSftpHint"),
     ftp: t("remote.kindFtpHint"),
     ftps: t("remote.kindFtpsHint"),
+    smb: t("remote.kindSmbHint"),
     vnc: t("remote.kindVncHint"),
     rdp: t("remote.kindRdpHint"),
     s3: t("remote.kindS3Hint"),
@@ -875,6 +879,7 @@ function ConnectionTab({
           login password. So the field appears exactly where something reads it. */}
       {((isSsh && spec.auth === "password") ||
         (isFtp && !spec.ftp.anonymous) ||
+        isSmb ||
         isEmbeddedScreen) && (
         <Row
           label={t("remote.fieldPassword")}

@@ -382,6 +382,24 @@ jobs:
           # (`src/build.ts` collects them unconditionally), and `updater-json` below assembles that
           # file once, from both.
           includeUpdaterJson: false
+          # Without this the action uploads each asset exactly once, and v1.19.13 is what that
+          # costs: the macOS leg built and bundled for 7m38s, and then `Uploading
+          # CodeFlow_1.19.13_aarch64.dmg...` came back GitHub's own 500 — the "Unicorn!" HTML page,
+          # in place of the JSON the API owed it — and the job died with the `.dmg` sitting finished
+          # on the runner's disk. Nothing was wrong with the build, the token or the release.
+          #
+          # The action has always had the answer and it defaults to off: `action.yml` gives
+          # `retryAttempts` no default, so `retry(fn, 0)` runs the upload once. At v0 the input
+          # covers both halves — "re-try building the app if the initial build fails or uploading
+          # assets if the upload fails" — and `retry` sleeps a random 1–10s between tries and
+          # retries on any error at all.
+          #
+          # 2, so a transient 5xx costs seconds instead of a release. The cost of the same number on
+          # the other half is a genuinely broken build being attempted three times, which is minutes
+          # of runner time on a compile error that was never going to pass — worth it against losing
+          # a finished bundle to somebody else's bad minute, and the other thing this covers is
+          # `bundle_dmg.sh`, whose `hdiutil` is flaky in a way no amount of correctness here fixes.
+          retryAttempts: 2
           args: ${{ matrix.args }}
 
       # The one thing no unit test can check: that the Java runtime actually made it *inside* what

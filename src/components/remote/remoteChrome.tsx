@@ -10,6 +10,7 @@ import {
   Loader2,
   Monitor,
   MonitorSmartphone,
+  Network,
   Server,
   ShieldCheck,
   Terminal,
@@ -48,6 +49,9 @@ export function kindIcon(kind: RemoteKind): LucideIcon {
       return Globe;
     case "ftps":
       return ShieldCheck;
+    // The glyph Explorer and Finder both put on a shared folder.
+    case "smb":
+      return Network;
     case "vnc":
       return Monitor;
     case "rdp":

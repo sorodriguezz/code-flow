@@ -46,6 +46,7 @@ pub mod ping;
 pub mod screen;
 pub mod session;
 pub mod sftp;
+pub mod smb;
 pub mod wsbridge;
 pub mod sshconfig;
 
@@ -63,6 +64,9 @@ pub const DEFAULT_FTPS_IMPLICIT_PORT: u16 = 990;
 pub const DEFAULT_VNC_PORT: u16 = 5900;
 /// RDP, which unlike VNC really is one port.
 pub const DEFAULT_RDP_PORT: u16 = 3389;
+/// SMB over TCP. 139 was NetBIOS's and is not offered: SMB2 is what this speaks, and no server
+/// that answers SMB2 needs 139 to do it.
+pub const DEFAULT_SMB_PORT: u16 = 445;
 
 /// What a host actually speaks — and therefore what it can be asked to do.
 ///
@@ -103,6 +107,12 @@ pub enum RemoteKind {
     /// Files only, over FTP with TLS — explicit `AUTH TLS` by default, implicit when
     /// [`FtpSpec::implicit_tls`] is set.
     Ftps,
+    /// Files only, over SMB2/3 — a Windows share, a NAS, or a Mac with File Sharing on.
+    ///
+    /// The one kind whose root is not a directory: a server offers *shares*, so `/` lists them and
+    /// the first path segment is one. See [`smb`] for why that shape, and for why the protocol is
+    /// spoken in-process rather than by mounting the share on this machine.
+    Smb,
     /// A screen over RFB. The only kind that can be drawn inside the app rather than handed to a
     /// viewer — see [`ScreenSpec::embedded`].
     Vnc,
@@ -185,6 +195,7 @@ impl RemoteKind {
             Self::Ftp => DEFAULT_FTP_PORT,
             Self::Ftps if implicit_tls => DEFAULT_FTPS_IMPLICIT_PORT,
             Self::Ftps => DEFAULT_FTP_PORT,
+            Self::Smb => DEFAULT_SMB_PORT,
             Self::Vnc => DEFAULT_VNC_PORT,
             Self::Rdp => DEFAULT_RDP_PORT,
             // A cloud endpoint is a URL, and its port is whatever the scheme says. Naming 443 here
@@ -221,6 +232,7 @@ impl RemoteKind {
             Self::Sftp => "SFTP",
             Self::Ftp => "FTP",
             Self::Ftps => "FTPS",
+            Self::Smb => "SMB",
             Self::Vnc => "VNC",
             Self::Rdp => "RDP",
             Self::S3 => "S3",
