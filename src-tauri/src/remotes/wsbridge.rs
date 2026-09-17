@@ -20,15 +20,44 @@
 //!   no way to ask the bridge to connect somewhere of the caller's choosing — which is the failure
 //!   mode that turns a helper like this into an open proxy.
 //! - Tokens are removed when the screen closes, so a stale URL connects to nothing.
+//!
+//! **A target that cannot be reached is reported, not dropped.** The webview has no way to see a
+//! TCP error, and a bridge that just hangs up leaves noVNC with a code-1006 close carrying nothing
+//! — which is how "the VNC server is off" and macOS's Local Network gate answering `EPERM` became
+//! the same sentence on screen, while `nc` in a terminal reached the very same port. So the connect
+//! error is classified here and handed over as the `reason` of a close frame. See [`diagnose`].
 
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
+
+/// The close code that marks a close frame as the bridge's own diagnosis.
+///
+/// 4000-4999 is the range the WebSocket spec reserves for the application, so nothing else can mint
+/// it: a 1000 or a 1006 arriving at the webview is a real network close and still means what it
+/// always did. `src/lib/remote/vncBridge.ts` reads the same number.
+const DIAGNOSIS_CLOSE_CODE: u16 = 4000;
+
+/// How long the target may take to accept before the bridge calls it a timeout.
+///
+/// Shorter than the canvas's own handshake timer (`HANDSHAKE_TIMEOUT_MS`, 20s) on purpose. macOS
+/// sits on an unanswered SYN for around 75 seconds; left to the OS, the canvas would always give up
+/// first and report a server that "stopped answering" — the one wording that is wrong here, because
+/// nothing ever answered. Ten seconds is still ample for a real connect over a slow tunnel.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long to wait for the peer to acknowledge a close frame before dropping the socket.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Where a token points, and how many times it may be used.
 struct Route {
@@ -98,6 +127,63 @@ async fn ensure_listening() -> Result<u16, String> {
     Ok(*port().get().unwrap_or(&bound))
 }
 
+/// What the webview is told about a target that could not be reached, as a stable token.
+///
+/// A token rather than the OS's own text, for two reasons. A close frame's reason is capped at 123
+/// bytes — and, the real one, every sentence a user reads in this app is translated in
+/// `src/lib/i18n`; an errno string from a Rust process is neither translated nor phrased for
+/// someone who wants to know what to *do* about it. `VncCanvas` maps each token to that sentence.
+///
+/// `blocked` is the token this whole path exists for. macOS 15 puts a connection to a local network
+/// address behind a permission, and a connect the app has not been granted fails with `EPERM` —
+/// which from in here is indistinguishable from a host that is simply switched off, while `nc` in a
+/// terminal that *does* hold the permission reaches the same port happily.
+fn diagnose(error: &std::io::Error) -> String {
+    match error.kind() {
+        ErrorKind::ConnectionRefused => "refused".to_string(),
+        ErrorKind::TimedOut => "timeout".to_string(),
+        ErrorKind::HostUnreachable | ErrorKind::NetworkUnreachable => "unreachable".to_string(),
+        ErrorKind::PermissionDenied => "blocked".to_string(),
+        // Unrecognised is not the same as unknown: the OS's text rides along after the token, and a
+        // sentence with the real error in it beats a shrug.
+        _ => clip(format!("failed:{error}")),
+    }
+}
+
+/// Trims a reason to what a close frame can carry.
+///
+/// A control frame's payload is 125 bytes and two of them are the code, so 123 are left. Cut on a
+/// char boundary: the reason is a UTF-8 field, and half a character is a protocol error rather than
+/// a truncated word.
+fn clip(mut reason: String) -> String {
+    const LIMIT: usize = 123;
+    if reason.len() > LIMIT {
+        let mut end = LIMIT;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+    }
+    reason
+}
+
+/// Hangs up with the reason attached, rather than dropping the socket and leaving nothing behind.
+async fn refuse(mut ws: WebSocketStream<TcpStream>, reason: String) -> Result<(), String> {
+    let frame =
+        CloseFrame { code: CloseCode::from(DIAGNOSIS_CLOSE_CODE), reason: reason.clone().into() };
+    if ws.send(Message::Close(Some(frame))).await.is_ok() {
+        // Then read until the peer echoes the close. The frame is already flushed, but dropping a
+        // socket whose receive buffer still holds the reply is what turns a clean close into an RST
+        // — and a reset reaches the webview as precisely the code 1006 with no reason that this
+        // function exists to avoid. Bounded, so a peer that never answers cannot park the task.
+        let drain = async { while ws.next().await.is_some() {} };
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, drain).await;
+    }
+    // Returned for the caller's sake, which today is a `let _` — the socket has already carried the
+    // only copy that matters.
+    Err(reason)
+}
+
 async fn serve(stream: TcpStream) -> Result<(), String> {
     // Nagle off on *this* socket too, not only on the one to the far host below.
     //
@@ -128,7 +214,13 @@ async fn serve(stream: TcpStream) -> Result<(), String> {
         return Err("unknown token".into());
     };
 
-    let tcp = TcpStream::connect(target).await.map_err(|e| e.to_string())?;
+    let tcp = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target)).await {
+        Ok(Ok(tcp)) => tcp,
+        Ok(Err(e)) => return refuse(ws, diagnose(&e)).await,
+        // Our own deadline, so there is no `io::Error` to classify — but to the person waiting it
+        // means exactly what the OS's own `ETIMEDOUT` would have.
+        Err(_) => return refuse(ws, "timeout".to_string()).await,
+    };
     // Nagle off: RFB is a latency-sensitive interactive protocol, and coalescing a mouse move with
     // whatever comes next is exactly the wrong trade.
     let _ = tcp.set_nodelay(true);
@@ -238,5 +330,58 @@ mod tests {
                 "a revoked token must not carry data"
             );
         }
+
+        // --- a target nothing is listening on says *why* ----------------------------------
+        //
+        // The point of the whole close-frame path: the webview cannot see a TCP error, so the only
+        // thing it can report is what crosses this wire. Without the reason, a refused connection
+        // and a dead tunnel and a denied Local Network permission are one message.
+        let dead = {
+            let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = probe.local_addr().unwrap();
+            drop(probe); // ...and now nothing is listening there.
+            address
+        };
+        let (dead_url, _) = publish(dead).await.unwrap();
+        let (mut socket, _) = tokio_tungstenite::connect_async(&dead_url).await.unwrap();
+        let farewell = socket.next().await.unwrap().unwrap();
+        let Message::Close(Some(frame)) = farewell else {
+            panic!("an unreachable target must close with a reason, got {farewell:?}");
+        };
+        assert_eq!(u16::from(frame.code), DIAGNOSIS_CLOSE_CODE);
+        assert_eq!(frame.reason.as_str(), "refused");
+    }
+
+    /// The errno-to-token mapping, which is the contract `vncBridge.ts` reads.
+    ///
+    /// Held down by name because the tokens are a wire format: renaming one here without renaming
+    /// it there doesn't fail to compile, it silently drops the panel back to the generic sentence.
+    #[test]
+    fn every_reachability_failure_gets_its_own_token() {
+        let token = |kind| diagnose(&std::io::Error::from(kind));
+
+        assert_eq!(token(ErrorKind::ConnectionRefused), "refused");
+        assert_eq!(token(ErrorKind::TimedOut), "timeout");
+        assert_eq!(token(ErrorKind::HostUnreachable), "unreachable");
+        assert_eq!(token(ErrorKind::NetworkUnreachable), "unreachable");
+        // The one the panel exists for: macOS's Local Network gate denies the connect outright.
+        assert_eq!(token(ErrorKind::PermissionDenied), "blocked");
+
+        // Anything else still carries its text, rather than arriving as a bare shrug.
+        let other = diagnose(&std::io::Error::other("the wheels came off"));
+        assert_eq!(other, "failed:the wheels came off");
+    }
+
+    /// A close frame's reason is 123 bytes, and an OS message is not obliged to fit.
+    #[test]
+    fn a_long_reason_is_cut_to_fit_a_close_frame() {
+        // Multi-byte on purpose: cutting at byte 123 mid-character would make the frame invalid
+        // UTF-8, and the browser would drop the whole close rather than show a shortened reason.
+        let long = clip(format!("failed:{}", "é".repeat(200)));
+        assert!(long.len() <= 123, "{} bytes is more than a close frame carries", long.len());
+        assert!(std::str::from_utf8(long.as_bytes()).is_ok(), "the cut must land on a character");
+
+        // ...and something that already fits is left exactly as it was.
+        assert_eq!(clip("refused".to_string()), "refused");
     }
 }

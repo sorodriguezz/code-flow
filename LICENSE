@@ -1,0 +1,201 @@
+CodeFlow License
+Version 1.0
+
+Copyright (c) 2026 [TU NOMBRE LEGAL]. All rights reserved.
+
+CodeFlow is SOURCE-AVAILABLE software. It is NOT open source and NOT free
+software. The source code is published so that you can read it, audit it and
+propose improvements to it -- not so that you can copy it, modify it for your
+own use, or redistribute it.
+
+Read sections 1, 2 and 4: they tell you what you are allowed to do.
+
+
+0. DEFINITIONS
+
+   "Software" means CodeFlow: the source code, assets, documentation,
+   configuration and builds published in the Official Repository, in every
+   version, past and future.
+
+   "Licensor" means the copyright holder named above.
+
+   "Official Repository" means https://github.com/sorodriguezz/code-flow, or
+   any location the Licensor later designates as its replacement.
+
+   "Official Build" means an installer or executable published by the Licensor
+   on the Official Repository's Releases page, or delivered to you by the
+   Software's own built-in updater.
+
+   "You" means the individual or legal entity exercising the permissions
+   granted below.
+
+   "Contribution" means any work you deliberately submit to the Licensor for
+   inclusion in the Software, including code, assets, documentation and
+   translations.
+
+
+1. PERMISSION TO USE THE OFFICIAL BUILDS
+
+   The Licensor grants You a worldwide, royalty-free, non-exclusive,
+   non-transferable and revocable licence to:
+
+   (a) download, install and run the Official Builds, for any purpose,
+       personal or commercial, on any number of devices You own or control;
+   (b) receive and install updates through the Software's built-in updater;
+   (c) use the Software to work on Your own projects, and keep full ownership
+       of everything You produce with it. The Licensor claims no rights over
+       Your code, Your data or Your output.
+
+   No fee is required. This permission covers the Official Builds only.
+
+
+2. PERMISSION TO READ THE SOURCE CODE
+
+   You may view, read and study the source code of the Software, and keep a
+   local copy obtained directly from the Official Repository, for these
+   purposes only:
+
+   (a) understanding how the Software works;
+   (b) auditing it for security, privacy or correctness;
+   (c) preparing a Contribution under section 4.
+
+   No other use of the source code is permitted.
+
+
+3. RESTRICTIONS
+
+   Except as expressly permitted by sections 1, 2 and 4, You may NOT, in whole
+   or in part, directly or through a third party:
+
+   (a) copy, publish, distribute, transmit, sublicense, sell, rent, lend or
+       otherwise make the Software available to any third party, whether in
+       source or in binary form, whether modified or not, and whether for a
+       fee or free of charge;
+   (b) modify, adapt, translate, port or create derivative works of the
+       Software, including forks published or maintained outside the Official
+       Repository, rebranded versions, and products that reuse its source code
+       in another codebase;
+   (c) use the source code of the Software to design, develop, build, train,
+       fine-tune, evaluate or improve any other product, service, model or
+       dataset, including machine-learning and artificial-intelligence
+       systems;
+   (d) make the Software available to third parties as a hosted, managed or
+       multi-tenant service, or as part of one;
+   (e) reverse engineer, decompile or disassemble an Official Build, except
+       and only to the extent that applicable law expressly grants You that
+       right despite this restriction;
+   (f) remove, obscure or alter any copyright, trademark, authorship or
+       licence notice contained in the Software;
+   (g) use the name "CodeFlow", its logos or its visual identity to identify
+       any other product, or in any way that suggests the Licensor endorses,
+       sponsors or is affiliated with You or Your work.
+
+
+4. CONTRIBUTIONS
+
+   Contributions are welcome, and may be submitted exclusively as issues and
+   pull requests in the Official Repository. For that purpose, and for that
+   purpose alone, You may clone the Official Repository and modify Your local
+   copy in order to prepare and test Your Contribution.
+
+   By submitting a Contribution, You represent and agree that:
+
+   (a) the Contribution is Your original work, or You otherwise hold the
+       rights necessary to submit it, and it does not infringe the rights of
+       any third party;
+   (b) You grant the Licensor a perpetual, worldwide, non-exclusive,
+       irrevocable and royalty-free licence, with the right to sublicense and
+       to relicense, to use, reproduce, modify, adapt, merge, publish,
+       distribute and commercially exploit the Contribution, as part of the
+       Software or otherwise, under any terms the Licensor chooses, including
+       proprietary and paid terms;
+   (c) You grant the Licensor the same licence over any patent claims You own
+       or control that are necessarily infringed by Your Contribution or by
+       its combination with the Software;
+   (d) You keep the copyright in Your Contribution and remain free to use it
+       elsewhere; the licence in (b) is non-exclusive and is not an
+       assignment;
+   (e) the Licensor is under no obligation to review, accept or merge any
+       Contribution, and owes You no compensation, and no attribution beyond
+       the repository's own history;
+   (f) once a Contribution is merged, it becomes part of the Software and is
+       governed by this Licence like the rest of it, including for You.
+
+
+5. PUBLIC HOSTING AND FORKS
+
+   While the Official Repository is publicly hosted on GitHub, GitHub's Terms
+   of Service grant GitHub users a limited right to view and fork it within
+   GitHub. Nothing in this Licence purports to override those Terms.
+
+   However, creating a fork grants You no rights beyond sections 1, 2 and 4.
+   In particular, You may not use a fork for any purpose other than preparing
+   a Contribution, and You may not publish, distribute, operate or make
+   available any build, service or product derived from a fork.
+
+
+6. THIRD-PARTY COMPONENTS
+
+   The Software includes third-party components distributed under their own
+   licences, such as MIT, Apache-2.0 and MPL-2.0. Those licences govern those
+   components, and nothing in this Licence limits or modifies any right
+   granted to You under them.
+
+
+7. TERM AND TERMINATION
+
+   This Licence applies for as long as You comply with it, and terminates
+   automatically and without notice if You breach any of its terms. On
+   termination You must stop using the Software and delete every copy in Your
+   possession.
+
+   The grants You made in section 4 and the provisions of sections 3, 8, 9, 10
+   and 11 survive termination.
+
+
+8. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, TITLE AND NON-INFRINGEMENT. THE LICENSOR
+   DOES NOT WARRANT THAT THE SOFTWARE WILL BE UNINTERRUPTED, ERROR-FREE OR
+   FREE OF HARMFUL COMPONENTS, AND IS UNDER NO OBLIGATION TO PROVIDE SUPPORT,
+   UPDATES OR NEW VERSIONS.
+
+
+9. LIMITATION OF LIABILITY
+
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+   LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+   CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+   SOFTWARE OR ITS USE, INCLUDING WITHOUT LIMITATION ANY LOSS OF DATA, LOSS OF
+   PROFITS, BUSINESS INTERRUPTION OR DAMAGE TO A CODE REPOSITORY.
+
+   Nothing in this Licence excludes liability that cannot be excluded under
+   applicable law.
+
+
+10. RESERVATION OF RIGHTS
+
+   All rights not expressly granted in this Licence are reserved by the
+   Licensor. This Licence grants no rights in the Licensor's trademarks,
+   service marks or trade names.
+
+   The Licensor may publish future versions of the Software under different
+   terms. Doing so does not retroactively change the terms that applied to a
+   version You already received.
+
+
+11. GOVERNING LAW
+
+   This Licence is governed by the laws of the country in which the Licensor
+   has their habitual residence, without regard to its conflict-of-law rules,
+   and the courts of that place have exclusive jurisdiction, except where
+   mandatory consumer-protection law grants You a different forum.
+
+
+12. CONTACT
+
+   For permissions beyond the scope of this Licence -- redistribution, an
+   OEM or white-label arrangement, or any commercial licence -- open an issue
+   in the Official Repository.

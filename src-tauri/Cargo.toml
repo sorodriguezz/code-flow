@@ -2,8 +2,11 @@
 name = "codeflow"
 version = "0.1.0"
 description = "CodeFlow — visual git client + AI PR reviewer"
-authors = ["you"]
+authors = ["[TU NOMBRE LEGAL]"]
 edition = "2021"
+license-file = "../LICENSE"
+repository = "https://github.com/sorodriguezz/code-flow"
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -12,7 +12,7 @@ una sola app nativa y rápida. Después prueba el endpoint que acabas de cambiar
 datos que hay detrás y entra por SSH a la máquina donde corre, sin salir de la ventana. **Tú decides
 qué modelo hace qué.**
 
-![versión](https://img.shields.io/badge/versión-1.19.15-6C5CE7)
+![versión](https://img.shields.io/badge/versión-1.19.16-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-EN%20%7C%20ES-0984E3)
@@ -541,6 +541,20 @@ sigan vivas aunque cierres la ventana.
 ## 🌐 Idiomas
 
 Español e inglés, intercambiables en cualquier momento desde **Ajustes › General**.
+
+## 📜 Licencia
+
+CodeFlow es software de **código visible, no de código abierto** — mira [`LICENSE`](LICENSE) (con
+[traducción informativa al español](LICENSE.es.md)).
+
+- **Úsala, gratis.** Descárgala desde [Releases](../../releases) y úsala para lo que quieras,
+  personal o en el trabajo, en tantas máquinas como quieras. Lo que construyas con ella es tuyo: la
+  licencia no reclama nada sobre tu código, tus datos ni tus resultados.
+- **Lee el código y manda pull requests** — mira [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Lo que no puedes hacer:** redistribuirla, modificarla, bifurcarla hacia tu propio producto,
+  venderla, ofrecerla como servicio alojado, ni usar su código para entrenar un modelo.
+
+Copyright © 2026 [TU NOMBRE LEGAL]. Todos los derechos reservados.
 
 ---
 

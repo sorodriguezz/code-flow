@@ -11,7 +11,7 @@ a backlog, and let AI write your commits, find your bugs and resolve your confli
 native app. Then test the endpoint you just changed, query the database behind it and SSH into the
 box it runs on without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-1.19.15-6C5CE7)
+![version](https://img.shields.io/badge/version-1.19.16-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -525,6 +525,19 @@ you close the window.
 ## 🌐 Languages
 
 English and Spanish, switchable at any time from **Settings › General**.
+
+## 📜 License
+
+CodeFlow is **source-available, not open source** — see [`LICENSE`](LICENSE).
+
+- **Use it, free.** Download it from [Releases](../../releases) and use it for anything, personal or
+  at work, on as many machines as you like. Whatever you build with it is yours: the licence claims
+  nothing over your code, your data or your output.
+- **Read the source, and send pull requests** — see [CONTRIBUTING.md](CONTRIBUTING.md).
+- **What you may not do:** redistribute it, modify it, fork it into your own product, sell it, offer
+  it as a hosted service, or use its code to train a model.
+
+Copyright © 2026 [TU NOMBRE LEGAL]. All rights reserved.
 
 ---
 

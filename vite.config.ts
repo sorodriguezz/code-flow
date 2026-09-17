@@ -1,4 +1,7 @@
-import { defineConfig, type Plugin } from "vite";
+import type { Plugin } from "vite";
+// `vitest/config` re-exports vite's own `defineConfig` — the only thing it adds is the `test`
+// key below and the defaults that key has to be spread onto.
+import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
@@ -224,5 +227,19 @@ export default defineConfig(async () => ({
     // which needs Safari 16.2+ anyway, so there is no older WebKit this could be built for.
     // `cssCodeSplit` is likewise left alone: it is on by default, and turning it off is the
     // opposite of what splitting the views was for.
+  },
+
+  test: {
+    // Every Claude Code session opens a git worktree under `.claude/worktrees/`, and each one is
+    // a full copy of `src` — test files included. Vitest's defaults cover `node_modules` and
+    // `.git` and nothing else, so a run from the repo root collected every session's copy of the
+    // suite on top of the checkout's own: with ten worktrees open, `vitest run src/lib/remote/`
+    // reported 5 files and 46 tests where the checkout has 2 and 19. The multiplier grows with
+    // each new session, and a worktree sitting on a half-written test fails the root run for a
+    // reason that has nothing to do with the branch being tested.
+    //
+    // The spread is not decoration: `exclude` replaces vitest's defaults rather than extending
+    // them, so writing the pattern on its own would quietly put `node_modules` back in the scan.
+    exclude: [...configDefaults.exclude, "**/.claude/**"],
   },
 }));

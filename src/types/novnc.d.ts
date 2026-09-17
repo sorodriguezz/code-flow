@@ -23,7 +23,13 @@ declare module "@novnc/novnc" {
    * instance holds a WebSocket and document-level input listeners.
    */
   export default class RFB extends EventTarget {
-    constructor(target: Element, url: string, options?: RFBOptions);
+    /**
+     * `urlOrChannel` is noVNC's own name for it: given a string it opens its own WebSocket, given
+     * an open one it attaches to it (`rfb.js`: `typeof urlOrChannel === "string"`). `VncCanvas`
+     * passes the socket, because the close code and reason are the only place a bridge failure is
+     * legible and noVNC's `disconnect` event does not carry them.
+     */
+    constructor(target: Element, urlOrChannel: string | WebSocket, options?: RFBOptions);
 
     /** Scale the framebuffer to the container instead of scrolling it. */
     scaleViewport: boolean;

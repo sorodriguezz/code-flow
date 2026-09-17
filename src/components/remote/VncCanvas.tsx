@@ -3,6 +3,7 @@ import { AlertTriangle, Loader2, MonitorOff } from "lucide-react";
 import RFB from "@novnc/novnc";
 import { useT } from "../../state/languageStore";
 import { vncCredentials, vncMissingCredential } from "../../lib/remote/vncAuth";
+import { vncBridgeFailure } from "../../lib/remote/vncBridge";
 
 /**
  * The far machine's screen, drawn in a tab.
@@ -69,11 +70,57 @@ export function VncCanvas({
     setState("connecting");
     setDetail("");
 
+    /**
+     * Whether a reason has already been reported.
+     *
+     * The handlers below end the connection, and ending it makes noVNC fire `disconnect` — marked
+     * *clean*, because we asked for it. Without this flag that event overwrites the reason with the
+     * state meant for a connection nobody diagnosed, and a screen that asked for a password ends up
+     * looking exactly like a screen still trying to connect. Which is what it did.
+     *
+     * First writer wins, which is also what makes the socket's own close handler work: it and
+     * noVNC's `disconnect` both fire for the same failure, and the specific reason gets there
+     * first only because its listener was registered first.
+     */
+    let settled = false;
+    let stall: ReturnType<typeof setTimeout> | undefined;
+    const settle = (next: "failed" | "ended", reason: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(stall);
+      setState(next);
+      setDetail(reason);
+    };
+
     const credentials = vncCredentials(
       credentialsRef.current.username,
       credentialsRef.current.password,
     );
-    const rfb = new RFB(container, url, { credentials });
+
+    // The socket is opened here rather than left to noVNC, and that is the whole point of the
+    // detour. Handed a URL, noVNC opens its own — and then `rfb.js` reads the close code and reason
+    // in `_socketClose`, logs them, and fires `disconnect` carrying `{ clean }` and nothing else. So
+    // the bridge's diagnosis of *why* the far side was unreachable is visible only to whoever holds
+    // the socket. RFB takes an open channel in place of a URL for exactly this, and its `attach`
+    // assigns `onclose` as a property — so this listener is not the one it overwrites, and being
+    // registered first, it also runs first.
+    const socket = new WebSocket(url);
+    socket.addEventListener("close", (event) => {
+      const why = vncBridgeFailure(event, t);
+      // Null for an ordinary close, which is most of them: a session that ended, a drop mid-stream,
+      // this effect tearing down. Those are noVNC's to describe, and it does it below.
+      if (why) settle("failed", why);
+    });
+
+    let rfb: RFB;
+    try {
+      rfb = new RFB(container, socket, { credentials });
+    } catch (error) {
+      // The socket now outlives a failed constructor — noVNC builds its `Display` in one and says
+      // so — and nothing else would ever close it.
+      socket.close();
+      throw error;
+    }
     // The canvas scales to the pane instead of the pane scrolling a full-size framebuffer, which
     // is what makes a 1920×1080 desktop usable in a tab beside a terminal.
     rfb.scaleViewport = true;
@@ -89,24 +136,6 @@ export function VncCanvas({
     // I-beam still comes through the moment the far side sends one.
     rfb.showDotCursor = true;
     rfbRef.current = rfb;
-
-    /**
-     * Whether a reason has already been reported.
-     *
-     * The handlers below end the connection, and ending it makes noVNC fire `disconnect` — marked
-     * *clean*, because we asked for it. Without this flag that event overwrites the reason with the
-     * state meant for a connection nobody diagnosed, and a screen that asked for a password ends up
-     * looking exactly like a screen still trying to connect. Which is what it did.
-     */
-    let settled = false;
-    let stall: ReturnType<typeof setTimeout> | undefined;
-    const settle = (next: "failed" | "ended", reason: string) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(stall);
-      setState(next);
-      setDetail(reason);
-    };
 
     stall = setTimeout(() => {
       settle("failed", t("remote.vncStalled"));

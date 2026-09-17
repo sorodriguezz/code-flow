@@ -19,10 +19,24 @@
   sits in the *middle* of the top edge, and CodeFlow's title bar puts its controls at the two ends —
   window buttons and navigation on the left, AI actions on the right — with nothing between them.
   Only the bar's own gradient passes under the housing.
+
+  NSLocalNetworkUsageDescription
+  ------------------------------
+  The sentence macOS shows in the "allow local network access" prompt. Since macOS 15, the first
+  time this app opens a socket to a LAN address — an SSH host at 192.168.x.x, a VNC screen, an SMB
+  share — the system asks, and every such connection fails until the user says yes. Without this key
+  the prompt is an unexplained demand from an app the user cannot see a reason for, and a dismissed
+  prompt reads afterwards exactly like a broken client: connections that time out while the same
+  address answers `nc` from a terminal.
+
+  Windows has no equivalent, which is why a host that works from the Windows build can be
+  unreachable from this one on the same network.
 -->
 <plist version="1.0">
   <dict>
     <key>NSPrefersDisplaySafeAreaLayoutGuide</key>
     <false/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>CodeFlow needs this to reach the machines on your network — SSH hosts, screens and file shares you connect to by local address.</string>
   </dict>
 </plist>
