@@ -448,13 +448,51 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh api --paginate "/repos/$REPO/releases/$RELEASE_ID/assets" \
-            --jq '.[] | [.id, .name] | @tsv' > assets.tsv
+          # Every GitHub call in this job goes through this, and the reason is measured rather than
+          # theoretical. v1.19.13 lost a finished macOS build to GitHub's own 500 — the "Unicorn!"
+          # HTML page where the upload API owed it JSON — and v1.19.14 died *here*, on the manifest
+          # upload below: `gh: Error creating asset temp dir (HTTP 500)`, request id
+          # 0C30:22CF01:1266:2063:6AAC4BEC, with both platforms already built, signed and uploaded.
+          # Nothing was wrong with either release. The `PATCH` at the end of this step is what makes
+          # a release visible at all, so a single dropped call between here and there costs the
+          # whole thing — twenty minutes of builds left sitting in a draft nobody can install.
+          #
+          # It retries any failure rather than parsing for a 5xx: `gh` reports the status inside its
+          # message and not in its exit code, and everything wrapped here is either a read or an
+          # idempotent write, so retrying a client error costs seconds and risks nothing. Linear
+          # backoff — 5s, 10s, 15s, 20s — because what it waits out is a bad minute on GitHub's
+          # side, not congestion of our own making.
+          #
+          # Each wrapped call that writes a file does its own redirect *inside* a function. A
+          # redirect on `retry` itself would be opened once for every attempt together, so a failed
+          # attempt's partial bytes would still be there when the next one started appending.
+          retry() {
+            local attempt=1 max=5
+            until "$@"; do
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::\`$*\` failed $max times — see the attempts above"
+                return 1
+              fi
+              echo "attempt $attempt of $max failed; retrying in $((attempt * 5))s"
+              sleep $((attempt * 5))
+              attempt=$((attempt + 1))
+            done
+          }
+
+          list_assets() {
+            gh api --paginate "/repos/$REPO/releases/$RELEASE_ID/assets" \
+              --jq '.[] | [.id, .name] | @tsv' > assets.tsv
+          }
+          fetch_sig() {
+            gh api -H "Accept: application/octet-stream" \
+              "/repos/$REPO/releases/assets/$1" > "sigs/$2"
+          }
+
+          retry list_assets
           mkdir -p sigs
           while IFS=$'\t' read -r id name; do
             case "$name" in
-              *.sig) gh api -H "Accept: application/octet-stream" \
-                       "/repos/$REPO/releases/assets/$id" > "sigs/$name" ;;
+              *.sig) retry fetch_sig "$id" "$name" ;;
             esac
           done < assets.tsv
           ls -la sigs || true
@@ -508,18 +546,30 @@ jobs:
           jq 'del(.platforms[].signature)' latest.json
 
           # Replace, never merge — there is exactly one writer, so there is nothing to merge with.
-          old=$(gh api --paginate "/repos/$REPO/releases/$RELEASE_ID/assets" \
-                  --jq '.[] | select(.name=="latest.json") | .id' | awk 'NR==1')
-          [ -z "$old" ] || gh api -X DELETE "/repos/$REPO/releases/assets/$old"
-          gh api --method POST -H "Content-Type: application/json" \
-            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=latest.json" \
-            --input latest.json
+          #
+          # The delete is inside the retried function rather than before it, and that is what makes
+          # a retry safe: an upload that reached GitHub and lost its response on the way back leaves
+          # the asset behind, and a second POST of a name that already exists is a 422, not a
+          # replacement. Re-reading the id and clearing it on every attempt means each attempt
+          # starts from the same state as the first.
+          publish_manifest() {
+            local old
+            old=$(gh api --paginate "/repos/$REPO/releases/$RELEASE_ID/assets" \
+                    --jq '.[] | select(.name=="latest.json") | .id' | awk 'NR==1')
+            [ -z "$old" ] || gh api -X DELETE "/repos/$REPO/releases/assets/$old"
+            gh api --method POST -H "Content-Type: application/json" \
+              "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=latest.json" \
+              --input latest.json
+          }
+          retry publish_manifest
 
           # Only now does the release exist for users, and it exists complete: every bundle, both
           # signatures, and a manifest already proven to name both platforms. This is where the old
           # `releaseDraft: false` comment's requirement is met — `releases/latest/download` does not
           # serve drafts, so nothing may stay one, and nothing does past this line.
-          gh api -X PATCH "/repos/$REPO/releases/$RELEASE_ID" -F draft=false -f make_latest=true
+          # Retried like the rest, and this is the one that would hurt most to lose: everything the
+          # release needs exists by now, and all that is left is the flag that makes it visible.
+          retry gh api -X PATCH "/repos/$REPO/releases/$RELEASE_ID" -F draft=false -f make_latest=true
 
   # Keeps the repository under GitHub's 10 GB Actions cache quota.
   #
