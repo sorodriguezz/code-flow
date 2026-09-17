@@ -35,10 +35,6 @@
   },
   "bundle": {
     "active": true,
-    "copyright": "Copyright (c) 2026 [TU NOMBRE LEGAL]. All rights reserved.",
-    "license": "LicenseRef-CodeFlow-1.0",
-    "publisher": "[TU NOMBRE LEGAL]",
-    "homepage": "https://github.com/sorodriguezz/code-flow",
     "targets": "all",
     "createUpdaterArtifacts": true,
     "resources": {

@@ -2,7 +2,7 @@
 name = "codeflow"
 version = "0.1.0"
 description = "CodeFlow — visual git client + AI PR reviewer"
-authors = ["[TU NOMBRE LEGAL]"]
+authors = ["you"]
 edition = "2021"
 license-file = "../LICENSE"
 repository = "https://github.com/sorodriguezz/code-flow"
