@@ -735,6 +735,10 @@ function ConnectionTab({
   const isFtp = spec.kind === "ftp" || spec.kind === "ftps";
   const isScreen = capabilities(spec).screen;
   const isCloud = isCloudKind(spec.kind);
+  // The one exception to "a screen carries no credential this app can hold": drawn in-app, CodeFlow
+  // *is* the client doing the authenticating, and there is no viewer window left to ask. See the
+  // password row below.
+  const isEmbeddedScreen = spec.kind === "vnc" && spec.screen.embedded;
 
   /** One line under the type selector saying what picking it means — the set reads as one. */
   const KIND_HINT: Record<RemoteKind, string> = {
@@ -863,12 +867,20 @@ function ConnectionTab({
 
       {isSsh && spec.auth === "key" && <KeyPicker spec={spec} onPatch={onPatch} />}
 
-      {/* A screen has no password field, and that is not an omission: nothing here would use it.
-          The viewer asks for the VNC password or the Windows credentials itself, in its own window,
-          and a field that quietly stored one in the keychain for nobody to read would be worse than
-          no field at all. */}
-      {((isSsh && spec.auth === "password") || (isFtp && !spec.ftp.anonymous)) && (
-        <Row label={t("remote.fieldPassword")} hint={t("remote.fieldPasswordHint")} wide>
+      {/* A screen hands the password question to whoever asks it, which is why this field follows
+          the route rather than the kind. With a viewer of its own that is the viewer, in its own
+          window, and a field here would be storing a secret for nobody to read. Drawn in-app there
+          is no such window — `VncCanvas` is the RFB client — and a Mac cannot be reached without
+          one: Screen Sharing authenticates the account named in User, so it wants that account's
+          login password. So the field appears exactly where something reads it. */}
+      {((isSsh && spec.auth === "password") ||
+        (isFtp && !spec.ftp.anonymous) ||
+        isEmbeddedScreen) && (
+        <Row
+          label={t("remote.fieldPassword")}
+          hint={isEmbeddedScreen ? t("remote.fieldPasswordScreenHint") : t("remote.fieldPasswordHint")}
+          wide
+        >
           <div className="flex w-full items-center gap-1">
             <Field
               type={showPassword ? "text" : "password"}

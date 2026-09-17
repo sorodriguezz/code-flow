@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ExternalLink, Loader2, Monitor, RefreshCw, ShieldCheck } from "lucide-react";
 import { Pill } from "./remoteChrome";
 import { VncCanvas } from "./VncCanvas";
 import { useRemoteStore, type RemoteScreenTab } from "../../state/remoteStore";
 import { remoteGetPassword } from "../../lib/tauri/remoteCommands";
 import { useT } from "../../state/languageStore";
+import { parseHostSpec } from "../../types/remote";
 
 /**
  * A launched screen.
@@ -21,18 +22,30 @@ import { useT } from "../../state/languageStore";
  */
 export function ScreenPanel({ tab }: { tab: RemoteScreenTab }) {
   const openScreen = useRemoteStore((s) => s.openScreen);
+  const host = useRemoteStore((s) => s.hosts.find((entry) => entry.id === tab.hostId) ?? null);
   const [viewOnly, setViewOnly] = useState(false);
   const [screenPassword, setScreenPassword] = useState("");
+  const [passwordRead, setPasswordRead] = useState(false);
   const t = useT();
+
+  const spec = useMemo(() => (host ? parseHostSpec(host) : null), [host]);
 
   // The VNC password is the host's stored credential — a different secret from the SSH one in
   // principle, but this app keeps one per host, and a server that wants a password is the case
   // where that one is what you saved.
+  //
+  // `passwordRead` is tracked separately from the value because the embedded canvas hands its
+  // credentials to noVNC once, at construction, and never again: mounting it while this call is
+  // still in flight would start a handshake with a blank password and then report a missing one.
+  // Settled either way — a keychain that refuses is an answer too, and waiting on it forever would
+  // leave a spinner where the server's own complaint belongs.
   useEffect(() => {
     let cancelled = false;
+    setPasswordRead(false);
     void remoteGetPassword(tab.hostId)
       .then((value) => !cancelled && setScreenPassword(value ?? ""))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => !cancelled && setPasswordRead(true));
     return () => {
       cancelled = true;
     };
@@ -102,15 +115,24 @@ export function ScreenPanel({ tab }: { tab: RemoteScreenTab }) {
           </button>
         </div>
         <div className="min-h-0 flex-1">
-          <VncCanvas
-            // Keyed on the URL: a reconnect mints a new bridge token, and the canvas must be torn
-            // down and rebuilt rather than pointed at a route that no longer exists.
-            key={launch.ws_url}
-            url={launch.ws_url}
-            password={screenPassword}
-            viewOnly={viewOnly}
-            onDisconnect={() => {}}
-          />
+          {passwordRead ? (
+            <VncCanvas
+              // Keyed on the URL: a reconnect mints a new bridge token, and the canvas must be torn
+              // down and rebuilt rather than pointed at a route that no longer exists.
+              key={launch.ws_url}
+              url={launch.ws_url}
+              // The host's own user: on a screen row that is who logs into the screen, and macOS
+              // Screen Sharing authenticates that account rather than a screen-only password.
+              username={spec?.user ?? ""}
+              password={screenPassword}
+              viewOnly={viewOnly}
+              onDisconnect={() => {}}
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center bg-black">
+              <Loader2 size={20} className="animate-spin text-[var(--cf-text-muted)]" />
+            </div>
+          )}
         </div>
       </div>
     );

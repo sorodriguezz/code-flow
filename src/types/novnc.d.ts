@@ -32,6 +32,10 @@ declare module "@novnc/novnc" {
     resizeSession: boolean;
     /** Stop sending input while still drawing. */
     viewOnly: boolean;
+    /** Draw a dot where the pointer is when the server's own cursor is absent or fully
+     *  transparent. Off in noVNC, which leaves the canvas with `cursor: none` and nothing in its
+     *  place — see `VncCanvas`. */
+    showDotCursor: boolean;
 
     disconnect(): void;
     /** Supplies credentials after a `credentialsrequired` event. */

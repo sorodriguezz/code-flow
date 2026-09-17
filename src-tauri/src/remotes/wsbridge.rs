@@ -99,6 +99,16 @@ async fn ensure_listening() -> Result<u16, String> {
 }
 
 async fn serve(stream: TcpStream) -> Result<(), String> {
+    // Nagle off on *this* socket too, not only on the one to the far host below.
+    //
+    // This is the half the webview reads, and it carries the same interactive traffic: a burst of
+    // framebuffer chunks whose last one is a few hundred bytes, then silence until the client asks
+    // for the next update. That tail is precisely what Nagle holds back, waiting for an ACK that
+    // the peer's delayed-ACK timer will not send for tens of milliseconds — so every frame ends
+    // late and the screen feels sluggish however fast the link is. Loopback does not save it:
+    // Nagle lives in the sender, and the sender here is us.
+    let _ = stream.set_nodelay(true);
+
     // The token is the request path, captured during the handshake — this is the only place the
     // HTTP side of the upgrade is inspected at all.
     let mut token = String::new();
@@ -145,7 +155,13 @@ async fn serve(stream: TcpStream) -> Result<(), String> {
 
     // Host → webview.
     let to_webview = async move {
-        let mut buffer = vec![0u8; 32 * 1024];
+        // 256 KB rather than 32, and it costs nothing to wait for: `read` returns the moment one
+        // byte is there, so a bigger buffer never delays anything — it only takes more per call
+        // when more has already arrived. Which is the normal case here. A full repaint of a Retina
+        // desktop is megabytes, and at 32 KB that was hundreds of round trips through a write
+        // syscall, a WebSocket frame header and a `message` event the webview allocates for and
+        // hands to noVNC one at a time. Eight times fewer of each, for the same pixels.
+        let mut buffer = vec![0u8; 256 * 1024];
         loop {
             match tcp_read.read(&mut buffer).await {
                 Ok(0) | Err(_) => break,
