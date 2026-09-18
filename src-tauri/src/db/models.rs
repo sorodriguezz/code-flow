@@ -1462,3 +1462,131 @@ pub struct ServiceGroup {
     pub created_at: String,
     pub updated_at: String,
 }
+
+// ---------------------------------------------------------------------------
+// The chat workspace
+// ---------------------------------------------------------------------------
+//
+// The three structs below are the only ones in this file that carry
+// `#[serde(rename_all = "camelCase")]`, and that is deliberate rather than an inconsistency worth
+// correcting. Every older model here predates the convention and is read by frontend code that
+// already spells its fields `workspace_id`; renaming them now would be a rename across hundreds of
+// call sites for no behavioural gain. The chat surface is new, has no such callers, and its
+// TypeScript mirror in `src/lib/tauri/chatCommands.ts` is written camelCase like the rest of the
+// frontend — so the boundary is drawn here, at the newest feature, instead of nowhere.
+
+/// One thread in the chat sidebar.
+///
+/// `project_name` is not a column: it is joined from `projects` so a row can label itself without
+/// the frontend holding the project list, and it is `None` both for a conversation that was never
+/// bound to a repository (the normal case) and for one whose project has since been deleted. Those
+/// two states render identically on purpose — an orphaned thread is exactly a repo-less thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatConversation {
+    pub id: String,
+    /// Stamped, never filtered on. See the `chat_conversations` table comment.
+    pub workspace_id: String,
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    pub title: String,
+    pub provider: String,
+    pub model: String,
+    pub system_prompt: String,
+    /// One of `ai::effort`'s four levels, or empty for "leave the CLI's default alone". Empty is a
+    /// real state and not a missing value — see the column comment in `migrations`.
+    #[serde(default)]
+    pub effort: String,
+    /// The folder this thread is filed under, or `None` for the ungrouped list. Deleting a group
+    /// sets this back to `None` rather than removing the conversation — see the column comment.
+    #[serde(default)]
+    pub group_id: Option<String>,
+    /// An answer landed here that has not been looked at. Cleared when the conversation is opened.
+    #[serde(default)]
+    pub unread: bool,
+    /// Whether the most recent turn failed. Derived by the listing query from the last message
+    /// rather than stored: a flag would be a second answer to a question the messages already
+    /// settle, and the two would eventually disagree.
+    #[serde(default)]
+    pub last_failed: bool,
+    pub engine_session_id: Option<String>,
+    pub pinned_at: Option<String>,
+    pub archived_at: Option<String>,
+    pub parent_conversation_id: Option<String>,
+    pub branched_at_turn: Option<i64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A folder in the chat sidebar.
+///
+/// Global, like the conversation list it organises: a chat is filed by what it is about, not by
+/// which workspace was open when it started. `collapsed` is stored rather than kept in frontend
+/// state so the shape of the sidebar survives a restart and is the same in a detached window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatGroup {
+    pub id: String,
+    pub name: String,
+    /// Empty means "no colour" — the row renders with the default dot rather than a chosen one.
+    pub color: String,
+    pub sort_order: i64,
+    pub collapsed: bool,
+    /// Standing instructions for every conversation in this project. Empty is the ordinary state.
+    #[serde(default)]
+    pub instructions: String,
+    pub created_at: String,
+    /// How many conversations are filed here, counted by the listing query. Not a column: it would
+    /// be a denormalised number four writers would have to remember to keep in step.
+    #[serde(default)]
+    pub conversation_count: i64,
+}
+
+/// One message — a user's or a model's, never both. See the `chat_messages` table comment for why
+/// this is not the (question, answer) pair `activity_log` stores.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageRow {
+    pub id: String,
+    pub conversation_id: String,
+    pub turn: i64,
+    /// `"user"` | `"assistant"`.
+    pub role: String,
+    pub content: String,
+    /// Stamped per message, not read off the conversation: a thread whose provider changed mid-way
+    /// must not relabel the answers written before the change.
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub engine_version: Option<String>,
+    pub response_time_ms: Option<i64>,
+    pub is_error: bool,
+    pub is_cancelled: bool,
+    /// The run's captured output, as the **raw JSON string** it is stored as — a serialised array
+    /// of `{stream, line}`, left opaque here exactly as `Service::env` and `notes::tags` are.
+    ///
+    /// Opaque because the frontend does not want it verbatim: `chatStore::parseTrace` runs every
+    /// line through `formatAgentLogLine`, which drops the ones that render as nothing, and a
+    /// reopened turn has to read identically to a live one. Parsing it into a typed array here
+    /// would mean re-implementing that filter in Rust and keeping the two in step forever.
+    ///
+    /// `None` means *either* "this message has no trace" *or* "you asked for the list without
+    /// traces" — see [`super::chat_queries::list_messages`]. The distinction never matters to a
+    /// reader, because the only consumer of a trace re-fetches the conversation with `with_trace`
+    /// on before it can show one.
+    pub trace: Option<String>,
+    pub created_at: String,
+}
+
+/// A conversation whose title or whose message bodies matched a search, with the stretch that hit.
+///
+/// One hit per *conversation*, not per message: the sidebar's result list navigates to threads, and
+/// five rows for one thread that says "deploy" five times is a worse answer than one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSearchHit {
+    pub conversation_id: String,
+    pub title: String,
+    /// A window of whatever matched — the title itself, or the body around the first match in it.
+    pub snippet: String,
+}

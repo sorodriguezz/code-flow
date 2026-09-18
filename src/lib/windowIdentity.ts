@@ -33,8 +33,28 @@ const SATELLITE_PREFIX = "sat-";
  */
 export const MAIN_LABEL = "main";
 
-/** What a satellite window holds. Mirrors `SatelliteKind` on the Rust side. */
-export type SatelliteKind = "app" | "repo";
+/**
+ * What a satellite window holds. Mirrors `SatelliteKind` in `src-tauri/src/windows.rs`, which has
+ * three variants — the enum is serialized `rename_all = "lowercase"`, so these strings are the wire
+ * values verbatim.
+ *
+ * `quick` is the global-hotkey ask box, and it is a satellite only mechanically: it is built by that
+ * module, it carries the `sat-` prefix so `capabilities/default.json` covers it, and the registry
+ * counts it. It scopes to nothing — no workspace, no repository — which is why [`close_all`] leaves
+ * it alone when the main window hides to the tray.
+ */
+export type SatelliteKind = "app" | "repo" | "quick";
+
+/**
+ * The kinds a window can be *detached into*, which is not all of them.
+ *
+ * Detaching moves a rail app or a repository out of the shell, and `open_satellite` is the command
+ * that does it. The quick window is not reachable that way and must not become reachable: it has
+ * its own command (`quick_ask_open`) because it is built differently — small, undecorated, placed
+ * over whatever the user was looking at, and exempt from the close cascade. Routing it through the
+ * generic builder would produce a window that looks like the ask box and behaves like a satellite.
+ */
+export type DetachableKind = Exclude<SatelliteKind, "quick">;
 
 export interface WindowIdentity {
   /** The platform's own window label — `"main"`, or `sat-app-notes`. */
@@ -70,7 +90,12 @@ export function parseIdentity(label: string, search: string): WindowIdentity {
     // A satellite whose query string says nothing readable is still a satellite — it must not
     // fall back to being the main window, which is the one mistake with real consequences. It
     // renders "this window holds something this version does not know about" instead.
-    satellite: (kind === "app" || kind === "repo") && refId ? { kind, refId } : null,
+    //
+    // Every kind `windows.rs` can write has to appear in this guard, `quick` included. A kind that
+    // Rust builds and this list omits is the same silent failure as an unreadable query string,
+    // except that it happens on a window that is working perfectly: the webview loads, the label is
+    // right, and `SatelliteApp` is handed `satellite: null` and paints a skeleton forever.
+    satellite: (kind === "app" || kind === "repo" || kind === "quick") && refId ? { kind, refId } : null,
   };
 }
 

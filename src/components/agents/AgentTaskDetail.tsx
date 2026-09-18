@@ -1,9 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Bot,
-  Check,
   CircleCheck,
-  Copy,
   GitCompare,
   Link2,
   MoreHorizontal,
@@ -18,8 +16,8 @@ import { AgentModelMenu } from "./AgentModelMenu";
 import { ChainStrip } from "./ChainStrip";
 import { ContinueWithModal } from "./ContinueWithModal";
 import { useChainStore } from "../../state/chainStore";
-import { AiErrorBanner } from "../ai/AiErrorBanner";
 import { AiRunLog } from "../ai/AiRunLog";
+import { ChatMessageBubble } from "../chat/ChatMessageBubble";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { Select } from "../common/Select";
@@ -28,11 +26,7 @@ import { useAiRunStore } from "../../state/aiRunStore";
 import { useUiStore } from "../../state/uiStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
-import { useLanguageStore, useT } from "../../state/languageStore";
-import { parseClaudeError } from "../../lib/claudeError";
-import { renderMarkdown } from "../../lib/markdown";
-import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
-import type { ChatMessage } from "../../state/chatStore";
+import { useT } from "../../state/languageStore";
 
 /**
  * One task, open: who is doing it, where, what has been said so far, and the box to say the next
@@ -201,7 +195,11 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
           </p>
         )}
         {messages.map((message, i) => (
-          <AgentMessage key={i} message={message} />
+          // The panel's own bubble, lifted into `components/chat` and shared by all three
+          // transcripts. `stamp="compact"` is what this thread has always drawn: the header above
+          // already names the agent, the repository and the model, and repeating the duration and
+          // the CLI version under every turn was noise here in a way it is not in the AI panel.
+          <ChatMessageBubble key={i} message={message} stamp="compact" />
         ))}
         {sending && live?.runId && (
           <AiRunLog
@@ -321,133 +319,6 @@ function AgentComposer({ taskId }: { taskId: string }) {
           </button>
         )}
       </div>
-    </div>
-  );
-}
-
-/** One turn. Same treatment as the AI panel's transcript — a failure is a banner in the thread, a
- * stopped turn a muted note, and every answer keeps the process log that produced it. */
-function AgentMessage({ message }: { message: ChatMessage }) {
-  const t = useT();
-  const locale = useLanguageStore((s) => (s.language === "es" ? "es-ES" : "en-US"));
-  const [traceOpen, setTraceOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  const trace = message.trace;
-  const traceLog = trace && trace.length > 0 && (
-    <div className="mr-auto max-w-[95%] pt-1">
-      <AiRunLog
-        lines={trace}
-        running={false}
-        label={t("ai.traceSteps", { n: trace.length })}
-        expanded={traceOpen}
-        onToggle={() => setTraceOpen((v) => !v)}
-      />
-    </div>
-  );
-
-  const html = useMemo(
-    () => (message.role === "assistant" && !message.isError ? renderMarkdown(message.content) : null),
-    [message.role, message.content, message.isError],
-  );
-  // Parsed at render rather than stored, so a reopened task gets the same billing link and retry
-  // advice as the moment it failed.
-  const parsedError = useMemo(
-    () => (message.isError ? parseClaudeError(message.content) : null),
-    [message.isError, message.content],
-  );
-
-  const stamp = <MessageStamp message={message} locale={locale} />;
-
-  if (parsedError) {
-    return (
-      <div className="mr-auto max-w-[95%] space-y-1">
-        <AiErrorBanner error={parsedError} compact />
-        {traceLog}
-        {stamp}
-      </div>
-    );
-  }
-
-  if (message.isCancelled) {
-    return (
-      <div className="mr-auto max-w-[85%] space-y-1">
-        <div className="flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-1 text-[11px] text-[var(--cf-text-muted)]">
-          <Square size={9} className="fill-current" />
-          {t("ai.runStopped")}
-        </div>
-        {traceLog}
-        {stamp}
-      </div>
-    );
-  }
-
-  const copy = () => {
-    void navigator.clipboard.writeText(message.content).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    });
-  };
-
-  return (
-    <div className="space-y-1">
-      <div
-        // Same reason as the AI panel's bubble: a message that isn't markdown-rendered would
-        // otherwise be the only one you couldn't select part of.
-        className={`group relative select-text rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
-          message.role === "user"
-            ? "ml-auto max-w-[85%] whitespace-pre-wrap border border-[color-mix(in_oklab,var(--cf-accent)_30%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_14%,var(--cf-surface))] text-[var(--cf-text)]"
-            : "mr-auto max-w-[85%] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] text-[var(--cf-text)]"
-        }`}
-      >
-        {html !== null ? (
-          <div className="cf-markdown-preview cf-markdown-chat" dangerouslySetInnerHTML={{ __html: html }} />
-        ) : (
-          message.content
-        )}
-        <button
-          type="button"
-          onClick={copy}
-          title={t("chat.copyMessage")}
-          className={`absolute -top-2 flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] opacity-0 shadow-sm group-hover:opacity-100 ${
-            message.role === "user" ? "-left-2" : "-right-2"
-          }`}
-        >
-          {copied ? (
-            <Check size={11} className="text-[var(--cf-success)]" />
-          ) : (
-            <Copy size={11} className="text-[var(--cf-text-muted)]" />
-          )}
-        </button>
-      </div>
-      {traceLog}
-      {stamp}
-    </div>
-  );
-}
-
-/** One muted line under a turn: when, and — for an answer — what produced it. */
-function MessageStamp({ message, locale }: { message: ChatMessage; locale: string }) {
-  const t = useT();
-  const when = message.createdAt ? new Date(message.createdAt) : null;
-  const valid = when && !Number.isNaN(when.getTime()) ? when : null;
-
-  const parts: string[] = [];
-  if (message.role === "assistant") {
-    if (message.provider) parts.push(providerDisplayLabel(message.provider, t));
-    if (message.model) parts.push(modelDisplayLabel(message.provider ?? "", message.model, t));
-  }
-  if (valid) parts.push(valid.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }));
-  if (parts.length === 0) return null;
-
-  return (
-    <div
-      title={valid?.toLocaleString(locale)}
-      className={`px-0.5 text-[10px] leading-tight text-[var(--cf-text-muted)] ${
-        message.role === "user" ? "text-right" : ""
-      }`}
-    >
-      {parts.join(" · ")}
     </div>
   );
 }

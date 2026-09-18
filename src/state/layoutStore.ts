@@ -39,6 +39,7 @@ export type LayoutKey =
   | "notesOutlineWidth"
   | "diagramsSidebarWidth"
   | "vaultSidebarWidth"
+  | "chatSidebarWidth"
   | "dbmlEditorWidth"
   | "dbmlInspectorWidth"
   | "dbmlConsoleHeight"
@@ -84,6 +85,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   notesOutlineWidth: "layout_notes_outline_width",
   diagramsSidebarWidth: "layout_diagrams_sidebar_width",
   vaultSidebarWidth: "layout_vault_sidebar_width",
+  chatSidebarWidth: "layout_chat_sidebar_width",
   dbmlEditorWidth: "layout_dbml_editor_width",
   dbmlInspectorWidth: "layout_dbml_inspector_width",
   dbmlConsoleHeight: "layout_dbml_console_height",
@@ -159,6 +161,11 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // misaligned rather than distinct.
   diagramsSidebarWidth: 288,
   vaultSidebarWidth: 300,
+  // The conversation list, and narrow on purpose. A row here is a title and a timestamp, and the
+  // titles are auto-generated from the first message truncated at 60 characters — so past roughly
+  // this width the column stops showing more title and starts showing more whitespace, taken from
+  // the reading column, which is the thing the screen exists for.
+  chatSidebarWidth: 280,
   // Wide enough for a column line with its settings — `id integer [pk, increment]` — without
   // wrapping, which is what the schema editor is read in.
   dbmlEditorWidth: 380,

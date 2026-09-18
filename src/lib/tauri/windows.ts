@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { SatelliteKind } from "../windowIdentity";
+import type { DetachableKind, SatelliteKind } from "../windowIdentity";
 
 /** One open satellite, as `windows.rs` reports it. Snake case because it crosses the IPC boundary
  *  as a serde struct and renaming on one side only is how those drift. */
@@ -19,7 +19,7 @@ export interface SatelliteInfo {
  * here: an app's name is a translated string and a repository's is user data, and neither belongs
  * on the Rust side.
  */
-export const openSatellite = (kind: SatelliteKind, refId: string, title: string) =>
+export const openSatellite = (kind: DetachableKind, refId: string, title: string) =>
   invoke<string>("open_satellite", { kind, refId, title });
 
 export const focusSatellite = (label: string) => invoke<void>("focus_satellite", { label });

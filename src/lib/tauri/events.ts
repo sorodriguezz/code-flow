@@ -197,6 +197,47 @@ export interface AiOutputBatchEvent {
 export const onAiOutputBatch = (handler: (event: AiOutputBatchEvent) => void) =>
   listen<AiOutputBatchEvent>("ai:output-batch", (e) => handler(e.payload));
 
+export interface AiChatDeltaEvent {
+  runId: string;
+  conversationId: string;
+  /** The row the backend is going to persist this answer as. It is emitted from the first chunk
+   *  onward, long before `chat_send` resolves and hands the same id back, which is precisely what
+   *  lets a transcript know that the text it has been growing *is* the answer that just landed. */
+  messageId: string;
+  /** `thinking` is the model's reasoning, which belongs in the collapsible block and never in the
+   *  answer bubble. Two streams rather than one tagged string because they interleave. */
+  kind: "text" | "thinking";
+  text: string;
+}
+
+/**
+ * One fragment of a reply as it is being written.
+ *
+ * Three deliberate differences from `onAiOutputBatch`, all of which are the point of having a
+ * second channel rather than a flag on the first one.
+ *
+ * It is **not batched**. The batching next door exists because an agentic turn prints 20-60 whole
+ * log lines a second and rendering each one is wasted work nobody can read; here the fragments *are*
+ * the reading experience, and a 100 ms coalescing window is exactly the stutter that makes a
+ * typewriter look broken. The volume is comparable, but the cost is paid against something the user
+ * is looking at letter by letter.
+ *
+ * It **bypasses the trace ring buffer** on the Rust side (`ai_runs::emit_delta`, not `emit_line`).
+ * That buffer keeps the last 300 lines of a run and is what gets persisted with the message; routing
+ * word fragments through it would leave every stored trace as the tail of the final sentence with
+ * every tool call evicted.
+ *
+ * It is **not forwarded to paired phones**. `remotectl/bridge.rs` already dropped `ai:output` from
+ * its forward list because per-line traffic over a phone's wifi costs more than it delivers, and
+ * token granularity is strictly worse again.
+ *
+ * Only an engine that can actually emit intra-message deltas produces these — today that is Claude
+ * alone, out of six. See `providerCapabilities` in `lib/aiProviders.ts`: for the other five the
+ * transcript reveals the finished answer instead, through the same code path.
+ */
+export const onAiChatDelta = (handler: (event: AiChatDeltaEvent) => void) =>
+  listen<AiChatDeltaEvent>("ai:chat-delta", (e) => handler(e.payload));
+
 export interface AiEngineEvent {
   run_id: string;
   /** Stable provider id — `"claude"`, `"gemini"`, `"codex"`… What `ProviderGlyph` keys its brand

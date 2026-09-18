@@ -109,6 +109,13 @@ impl AiEngine for GrokEngine {
         if inv.auto_approve_edits {
             cmd.arg("--always-approve");
         }
+        // The allow-list, which this engine used to ignore entirely. `--tools` is comma-separated
+        // and, per grok's own docs, is applied *after* the agent profile injects its optional
+        // tools — so naming a read-only set here is what actually takes `write_file` and `bash`
+        // away from a conversation that was promised it could not write.
+        if !inv.allowed_tools.is_empty() {
+            cmd.arg("--tools").arg(inv.allowed_tools.join(","));
+        }
         // Resume by id. Not `--session-id`: that names a **new** conversation and errors if the id
         // already exists, so using it to resume would fail on the second turn of every chat.
         if let Some(session) = inv.resume_session_id {
@@ -120,6 +127,32 @@ impl AiEngine for GrokEngine {
             cmd.current_dir(dir);
         }
         cmd
+    }
+
+    /// `grok --reasoning-effort <EFFORT>` (aliased `--effort`). The CLI's help does not enumerate
+    /// the accepted values, so the neutral level is passed through unchanged and `max` is sent as
+    /// `high` — the highest level every reasoning vocabulary in circulation agrees on. If a future
+    /// build documents its own top step, this is the one line that changes.
+    /// grok's own names, taken from its shipped docs (`~/.grok/docs/user-guide/`): it calls the
+    /// file reader `read_file` and the directory lister `list_dir`, so Claude's vocabulary would be
+    /// silently rejected here.
+    ///
+    /// That this engine can be limited at all was a late discovery. `--tools` and
+    /// `--disallowed-tools` have been there the whole time, and both this module and
+    /// `commands::chat_cmd` used to state that Claude Code was the only engine with an allow-list.
+    /// It was not, and a read-only conversation on grok was running with the full agent profile —
+    /// `write_file` and `bash` included — on the strength of a comment nobody had re-checked.
+    fn read_only_tools(&self) -> Vec<String> {
+        ["read_file", "grep", "list_dir", "glob", "web_search", "web_fetch"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        let level = if effort == crate::ai::effort::MAX { "high" } else { effort };
+        vec!["--reasoning-effort".into(), level.into()]
     }
 
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {

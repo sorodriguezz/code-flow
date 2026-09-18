@@ -21,6 +21,11 @@ export type NotificationSource =
   | "changes"
   | "docs"
   | "chat"
+  /** The chat workspace, which is a different thing from the assistant panel above and is muted
+   *  separately. They used to share `chat`, so turning off the panel's notifications also turned
+   *  off the ones from a full-window conversation the user may have left running on purpose —
+   *  which is the opposite of what someone reaching for that switch is asking for. */
+  | "chatApp"
   | "editor"
   | "notes"
   | "diagrams"
@@ -51,6 +56,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   changes: "tabbar.changes",
   docs: "stories.wiki",
   chat: "notifications.sourceChat",
+  chatApp: "tabbar.chat",
   editor: "tabbar.editor",
   notes: "tabbar.notes",
   diagrams: "tabbar.diagrams",
@@ -101,6 +107,10 @@ export interface NotificationTarget {
       | "diagram"
       | "reviewSession"
       | "chatConversation"
+      /** A conversation in the chat workspace. Its own kind rather than reusing the one above:
+       *  that one addresses the assistant panel's chat, which is keyed by project and lives in a
+       *  different store. A conversation here usually has no project at all. */
+      | "chatAppConversation"
       | "job"
       /** `${projectId}:${provider}:${runId}` — a run number alone is ambiguous across
        *  repositories exactly as a PR number is. See `runKey` in `ciStore`. */
@@ -506,6 +516,11 @@ export async function followTarget(
     usePrStore.getState().closeLinkPr();
     useAnalyzeUiStore.getState().hide();
     await useChatStore.getState().switchTo(target.projectId, id);
+  } else if (kind === "chatAppConversation") {
+    // No project needed, and that is the whole difference from the branch above: a conversation in
+    // this workspace addresses itself by its own id and usually belongs to no repository at all.
+    const { useConversationStore } = await import("./conversationStore");
+    await useConversationStore.getState().open(id);
   } else if (kind === "job") {
     await showJobInAiPanel(id);
   } else if (kind === "pipelineRun") {

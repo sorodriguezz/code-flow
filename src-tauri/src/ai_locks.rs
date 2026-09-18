@@ -67,6 +67,55 @@ pub fn acquire(local_path: &str) -> Option<RepoLease> {
     Some(RepoLease { key })
 }
 
+/// The namespace every key handed to [`acquire_key`] is taken under.
+///
+/// A path and an opaque id share one registry (see [`acquire_key`]), and the prefix is what keeps
+/// them from ever meaning the same thing. It is not decoration: [`key_for`] normalises a path but
+/// does not anchor it, so a relative path is stored verbatim, and a caller leasing a conversation
+/// whose id happened to read like one would otherwise be able to collide with a working copy — a
+/// chat refusing to run because somebody is reviewing a repository, with nothing on screen to
+/// explain it. The `::` cannot appear in a normalised path on any platform this ships to.
+const KEY_NAMESPACE: &str = "key::";
+
+/// Takes an arbitrary named lease, or `None` if one is already held under that name.
+///
+/// # Why this exists
+///
+/// Everything above keys on a *filesystem path*, because until now every AI run was about a working
+/// copy and the thing being protected was that directory. The chat workspace breaks that premise:
+/// a conversation bound to no repository has no path, and the two obvious ways to give it one are
+/// both wrong. Keying on [`crate::paths::chat_scratch_dir`] — which is one directory shared by
+/// every repo-less conversation — would serialise the whole workspace, so asking a second question
+/// while the first is still thinking would be refused as "busy" with no repository in sight to
+/// explain the word. Not leasing at all would let one conversation start a second turn over the
+/// first, and the two would race on `chat_conversations.engine_session_id`: whichever finished last
+/// would win, and the loser's turn would have been appended to a session the thread no longer
+/// points at.
+///
+/// So the unit is the **conversation**: N conversations run concurrently, one conversation runs one
+/// turn at a time. That is also exactly what the composer already draws — Send becomes Stop for
+/// *this* thread and no other.
+///
+/// # Why it reuses this module rather than adding a second registry
+///
+/// One `HashSet` and one [`RepoLease`], namespaced, is a smaller change than a parallel map with
+/// its own mutex, its own guard type and its own `Drop` — and it keeps the property the whole
+/// module is built on: releasing is something that happens on the way out of a scope, by every
+/// route, with no explicit call anywhere to forget. A repo-bound conversation takes the *path*
+/// lease as before (it is editing a real checkout, and that is the constraint that matters there),
+/// so the two never both apply to one turn.
+///
+/// The guard type keeps its name. `RepoLease` is now slightly wrong for one of its two uses, and
+/// renaming it would touch every call site in the app for a word — this doc is the cheaper fix.
+pub fn acquire_key(key: &str) -> Option<RepoLease> {
+    let key = format!("{KEY_NAMESPACE}{}", key.trim());
+    let mut held = leases().lock().ok()?;
+    if !held.insert(key.clone()) {
+        return None;
+    }
+    Some(RepoLease { key })
+}
+
 /// Takes several repositories at once, or gives back the first that was already busy.
 ///
 /// Exists because one run can legitimately span more than one working copy — reviewing a story
@@ -128,6 +177,29 @@ mod tests {
         let held = acquire(r"C:\Repos\CfLeaseCase").expect("free");
         assert!(acquire("c:/repos/cfleasecase").is_none(), "Windows paths are case-insensitive");
         drop(held);
+    }
+
+    /// The chat workspace's unit of exclusion: one conversation, one turn at a time — and two
+    /// conversations are not each other's business.
+    #[test]
+    fn a_conversation_runs_one_turn_at_a_time() {
+        let first = acquire_key("conv-aaa").expect("free");
+        assert!(acquire_key("conv-aaa").is_none(), "a second turn on one thread is refused");
+        assert!(acquire_key("conv-bbb").is_some(), "another thread is not blocked by it");
+        drop(first);
+        assert!(acquire_key("conv-aaa").is_some(), "and the turn ending releases it");
+    }
+
+    /// The namespace, which is the whole reason the prefix is there: an id that reads like a path
+    /// must not be able to lock a repository, or to be locked out by one.
+    #[test]
+    fn a_named_lease_cannot_collide_with_a_working_copy() {
+        let repo = acquire("/tmp/cf-lease-ns").expect("free");
+        assert!(
+            acquire_key("/tmp/cf-lease-ns").is_some(),
+            "a name that looks like a path is still a name"
+        );
+        drop(repo);
     }
 
     #[test]

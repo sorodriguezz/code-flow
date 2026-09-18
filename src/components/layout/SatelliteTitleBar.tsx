@@ -343,6 +343,11 @@ function WorkspacePicker({ current }: { current: Workspace }) {
 
 /** The rail's own label key for an app id. Kept beside the bar rather than imported from `AppRail`,
  *  which is shell and must not be reachable from a satellite's bundle. */
+// One more list of the rail's apps, and the twelfth place a new one has to be registered. It is the
+// easiest to miss because forgetting it breaks nothing visible *inside* the window: the view renders
+// from `SatelliteApp`'s own map, so a detached chat drew the whole chat correctly under a title bar
+// announcing that this version did not know what the window held. If you are adding an app, the
+// symptom to look for is exactly that mismatch.
 function appTitleKey(refId: string) {
   switch (refId) {
     case "api:requests":
@@ -361,6 +366,8 @@ function appTitleKey(refId: string) {
       return "tabbar.diagrams" as const;
     case "vault":
       return "tabbar.vault" as const;
+    case "chat":
+      return "tabbar.chat" as const;
     default:
       return "windows.unknownApp" as const;
   }

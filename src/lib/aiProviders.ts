@@ -27,6 +27,41 @@ export interface AiProviderOption {
    * governed by a permission/sandbox mode the app sets per operation — so offering the field there
    * would be a control that does nothing. */
   usesToolAllowlist?: boolean;
+  /**
+   * The CLI emits intra-message text deltas in headless mode, so the transcript can type.
+   *
+   * `false` on five of the six engines here is a **fact about those binaries**, not a feature
+   * nobody got round to. Their headless modes print structured progress — tool calls, steps, a
+   * final result object — and nothing at all between the question and the completed answer. There
+   * is no flag to turn on, so the chat reveals their finished reply at reading speed instead (see
+   * `conversationStore`); the live activity strip under the pending bubble is what makes the wait
+   * legible in the meantime.
+   */
+  streamsTokens?: boolean;
+  /** The CLI can resume a specific past session by id, so a conversation reopens where it was.
+   *  Where this is false every turn re-sends the whole transcript, which is quadratic in the length
+   *  of the chat and costs real money on a long one. */
+  resumesSessions?: boolean;
+  /**
+   * Resuming is by "the last conversation", not by id — two open chats will cross contexts.
+   *
+   * The sharp one, and the reason this flag exists separately from `resumesSessions` rather than
+   * being folded into it. `agy` answers a headless run with a fixed `agy-last` sentinel instead of a
+   * real conversation id and resumes with `--continue`, so "resume session X" means "resume
+   * whichever one this binary touched most recently". With one chat rail over a repository that was
+   * latent; with a ChatGPT-style sidebar where two Gemini conversations can plainly be open at once
+   * it becomes a daily occurrence, and the second one silently inherits the first one's context.
+   * The UI keys its warning off this until `--conversation <ID>` can be wired.
+   */
+  resumeIsAmbiguous?: boolean;
+  /** Slash commands expand in headless (`-p`) mode. Where this is false the `/` menu must not offer
+   *  pass-through commands at all — they would be sent as literal text and answered as a question
+   *  about a string beginning with a slash. */
+  headlessSlashCommands?: boolean;
+  /** An image can reach the model (in practice: written to a temp file it is asked to read — no CLI
+   *  here takes one on stdin). Where this is false the paste target is visibly disabled, because the
+   *  only other option is accepting an image and quietly dropping it. */
+  acceptsImages?: boolean;
   /** Where to go to get this provider working. Shown in its Settings row, and surfaced up front
    * when the provider isn't detected — so "Not found" always comes with a way out. */
   setup?: {
@@ -49,6 +84,14 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     available: true,
     defaultBinary: "claude",
     usesToolAllowlist: true,
+    // The only engine here that can type. `--include-partial-messages` on a `-p` run with
+    // `--output-format stream-json --verbose` emits `content_block_delta` events carrying both
+    // `text_delta` and `thinking_delta`, which is what the transcript and the reasoning block are
+    // fed from respectively.
+    streamsTokens: true,
+    resumesSessions: true,
+    headlessSlashCommands: true,
+    acceptsImages: true,
     setup: {
       url: "https://docs.claude.com/en/docs/claude-code/setup",
       command: "npm install -g @anthropic-ai/claude-code",
@@ -62,6 +105,15 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     icon: Gem,
     available: true,
     defaultBinary: "agy",
+    streamsTokens: false,
+    // Resumes, but not the one you asked for: `agy` hands a headless caller the fixed `agy-last`
+    // sentinel and continues from whatever it ran last. See `resumeIsAmbiguous`.
+    resumesSessions: true,
+    resumeIsAmbiguous: true,
+    // `agy` ships `--disable-slash-commands`, which only makes sense if expansion is on by default
+    // in `-p` mode.
+    headlessSlashCommands: true,
+    acceptsImages: false,
     setup: { url: "https://antigravity.google" },
   },
   // OpenAI's CLI, logged in with a **ChatGPT subscription** (`codex login`) rather than metered
@@ -73,6 +125,10 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     icon: Cpu,
     available: true,
     defaultBinary: "codex",
+    streamsTokens: false,
+    resumesSessions: true,
+    headlessSlashCommands: false,
+    acceptsImages: true,
     setup: {
       url: "https://developers.openai.com/codex/",
       command: "winget install OpenAI.Codex",
@@ -89,6 +145,12 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     icon: Zap,
     available: true,
     defaultBinary: "grok",
+    streamsTokens: false,
+    // The one engine that gives a headless caller a real conversation id back, so a reopened Grok
+    // chat resumes the exact conversation rather than "the last one" — the opposite of Gemini.
+    resumesSessions: true,
+    headlessSlashCommands: false,
+    acceptsImages: false,
     setup: {
       url: "https://x.ai/cli",
       command: "curl -fsSL https://x.ai/cli/install.sh | bash",
@@ -106,6 +168,10 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     icon: SquareTerminal,
     available: true,
     defaultBinary: "opencode",
+    streamsTokens: false,
+    resumesSessions: true,
+    headlessSlashCommands: false,
+    acceptsImages: false,
     setup: { url: "https://opencode.ai/docs/" },
   },
   // Cline is the local-model slot, and it replaced talking to Ollama directly. The reason is
@@ -119,6 +185,13 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     icon: HardDrive,
     available: true,
     defaultBinary: "cline",
+    streamsTokens: false,
+    // The only engine here with no resume at all, which is not a missing nicety: every turn has to
+    // re-send the whole transcript, so the cost of a Cline conversation grows with the square of its
+    // length. A long one earns a cost hint in the UI.
+    resumesSessions: false,
+    headlessSlashCommands: false,
+    acceptsImages: false,
     setup: {
       url: "https://cline.bot",
       command: "npm install -g cline",
@@ -134,6 +207,52 @@ export const DEFAULT_AI_PROVIDER = "claude";
  * endpoint) gates off. */
 export function isAgenticProvider(providerId: string): boolean {
   return AI_PROVIDERS.find((p) => p.id === providerId)?.agentic !== false;
+}
+
+/** The five capability flags, with every one of them answered. */
+export type AiProviderCapabilities = Required<
+  Pick<
+    AiProviderOption,
+    "streamsTokens" | "resumesSessions" | "resumeIsAmbiguous" | "headlessSlashCommands" | "acceptsImages"
+  >
+>;
+
+/**
+ * Nothing is claimed for an engine this build has never heard of.
+ *
+ * Which is the shape a stored provider id from a newer version has, and the one case where the
+ * defaults matter: every flag here *enables* something — a typewriter, a resume, a paste target, a
+ * pass-through slash command — so the safe answer is the one that offers nothing and lets the plain
+ * path handle it. `resumeIsAmbiguous` is false alongside `resumesSessions` false for the same
+ * reason: warning about a cross-context resume on an engine that does not resume at all would be
+ * noise, not caution.
+ */
+const NO_CAPABILITIES: AiProviderCapabilities = {
+  streamsTokens: false,
+  resumesSessions: false,
+  resumeIsAmbiguous: false,
+  headlessSlashCommands: false,
+  acceptsImages: false,
+};
+
+/**
+ * What a provider can actually do, with no `undefined` for a caller to interpret.
+ *
+ * This gates the UI rather than decorating it. Four of the six engines never emit a token before
+ * their answer is finished, two of six take an image, one resumes the wrong conversation — and a
+ * control that silently no-ops for most of the list is worse than one that is plainly absent. Read
+ * this before offering the thing, not after it fails.
+ */
+export function providerCapabilities(providerId: string): AiProviderCapabilities {
+  const provider = AI_PROVIDERS.find((p) => p.id === providerId);
+  if (!provider) return NO_CAPABILITIES;
+  return {
+    streamsTokens: provider.streamsTokens ?? false,
+    resumesSessions: provider.resumesSessions ?? false,
+    resumeIsAmbiguous: provider.resumeIsAmbiguous ?? false,
+    headlessSlashCommands: provider.headlessSlashCommands ?? false,
+    acceptsImages: provider.acceptsImages ?? false,
+  };
 }
 
 export interface AiModelOption {

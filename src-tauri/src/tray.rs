@@ -67,6 +67,7 @@ pub fn show_main_window(app: &AppHandle) {
 /// update on restart is the better side of that.
 struct TrayLabels {
     show: &'static str,
+    quick_ask: &'static str,
     restart: &'static str,
     quit: &'static str,
 }
@@ -82,12 +83,14 @@ fn labels(app: &AppHandle) -> TrayLabels {
     if spanish {
         TrayLabels {
             show: "Mostrar CodeFlow",
+            quick_ask: "Nueva consulta rápida",
             restart: "Reiniciar CodeFlow",
             quit: "Salir de CodeFlow",
         }
     } else {
         TrayLabels {
             show: "Show CodeFlow",
+            quick_ask: "New quick ask",
             restart: "Restart CodeFlow",
             quit: "Quit CodeFlow",
         }
@@ -97,12 +100,21 @@ fn labels(app: &AppHandle) -> TrayLabels {
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let labels = labels(app);
     let show_item = MenuItem::with_id(app, "show", labels.show, true, None::<&str>)?;
+    // Directly under "show", because it is the *other* way into the app and the cheaper one: the
+    // ask box needs no workspace, no repository and no window to already be open.
+    //
+    // It exists in this menu as well as on the global chord for a reason that is not redundancy.
+    // The chord can fail to bind — another application owns it, or the user typed an accelerator
+    // that does not parse — and when it does, `register_quick_ask_shortcut` returns the error to a
+    // settings field the user may not be looking at. This row is what keeps the feature reachable
+    // in the meantime, and it is also how somebody discovers the feature exists at all.
+    let quick_ask_item = MenuItem::with_id(app, "quick-ask", labels.quick_ask, true, None::<&str>)?;
     // Between "show" and "quit" on purpose: it is the thing to try when "show" produced a window
     // that is there but wrong — a wedged webview, a view that stopped repainting — and the only
     // alternative left is quitting and finding the app again.
     let restart_item = MenuItem::with_id(app, "restart", labels.restart, true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", labels.quit, true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &restart_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&show_item, &quick_ask_item, &restart_item, &quit_item])?;
 
     TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().cloned().expect("app icon must be bundled"))
@@ -111,6 +123,10 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("CodeFlow")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
+            // Deliberately does NOT raise the main window first. The whole proposition of the ask
+            // box is that it costs nothing to reach — putting the desk back on screen in order to
+            // ask one question is the thing it exists to avoid.
+            "quick-ask" => crate::windows::toggle_quick_ask(app),
             // Re-execs the binary: the whole process goes, backend included, which is the point —
             // a reload of the webview alone would leave a wedged Rust side exactly as wedged.
             //

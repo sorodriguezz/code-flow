@@ -290,6 +290,17 @@ redis = { version = "1.6", default-features = false, features = [
 ] }
 tauri-plugin-single-instance = "2.4.3"
 
+# The quick-ask hotkey. A system-wide accelerator is the only way the ask box can be what it is
+# meant to be — reachable from inside another application, without going to find CodeFlow first —
+# and there is no way to register one from the webview: it is an OS-level claim, made once per
+# process, that this binary receives that chord before the focused app does.
+tauri-plugin-global-shortcut = "2"
+# Launch at login. The companion to the hotkey rather than a separate feature: a global chord that
+# only works once you have remembered to start the app is a chord nobody builds a habit around, and
+# this app is already designed to live in the tray with no window. Registered so the setting has
+# somewhere to land; see `lib.rs` for what is and is not wired to it today.
+tauri-plugin-autostart = "2"
+
 # ---------------- Remote control (phone / tablet on the same network) ----------------
 # The first *server* in this binary. Everything else that binds a port here is an ephemeral
 # localhost socket serving one client for one exchange — the OAuth callback (`oauth.rs`), the DAP

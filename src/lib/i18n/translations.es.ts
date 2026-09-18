@@ -2445,13 +2445,58 @@ export const es = {
   "ai.billingHint": "Recarga tu cuenta (o cambia esta tarea a otro proveedor en Ajustes) y vuelve a intentarlo.",
   "ai.openBilling": "Abrir página de facturación",
   "ai.openLink": "Más información",
+  "ai.setupSignedOut": "Este proveedor no tiene la sesión iniciada. Inicia sesión y vuelve a enviar el mensaje:",
+  "chat.attachRemove": "Quitar adjunto",
+  "chat.attachNeedsConversation": "Envía un primer mensaje: el adjunto se guarda con la conversación.",
+  "chat.attachImageBlind": "Guardado, pero {provider} no puede mirar una imagen: leerá el archivo en vez de verlo.",
+  "chat.attachTextOnly": "Adjuntar archivos. {provider} los lee como archivos: no puede mirar una imagen.",
+  "chat.groupComposerPlaceholder": "Chat nuevo en {name}…",
+  "chat.groupStart": "Empezar",
+  "chat.groupNoChats": "Todavía no hay conversaciones en este proyecto.",
+  "chat.groupInstructions": "Instrucciones",
+  "chat.groupInstructionsPlaceholder": "p. ej. Responde siempre en español. Este proyecto trata de un crédito hipotecario a 25 años.",
+  "chat.groupContext": "Contexto",
+  "chat.groupContextAdd": "Añadir un documento",
+  "chat.groupContextEmpty": "Añade PDF o documentos para consultar desde cualquier chat de este proyecto.",
+  "chat.groupOpen": "Abrir proyecto",
+  "chat.groupExpand": "Desplegar carpeta",
+  "chat.groupCollapse": "Plegar carpeta",
+  "chat.statusUnread": "Respuesta sin leer",
+  "chat.statusRunning": "Trabajando…",
+  "chat.statusFailed": "El último turno falló",
+  "chat.endpointUnreachable": "Este CLI no puede llegar a {url}. Ahí no responde nada y va a seguir reintentando: revisa el endpoint configurado para este proveedor.",
+  "chat.endpointUnreachableKnown": "Este CLI no puede llegar a {url} — esa es la dirección de {service}, y no está corriendo. Seguirá reintentando hasta que lo detengas.",
+  "chat.groupsTitle": "Carpetas",
+  "chat.groupNew": "Nueva carpeta",
+  "chat.groupNamePlaceholder": "Nombre de la carpeta",
+  "chat.groupRename": "Renombrar carpeta",
+  "chat.groupDelete": "Eliminar carpeta",
+  "chat.groupDeleteHint": "Las conversaciones que contiene se conservan: vuelven a la lista sin carpeta.",
+  "chat.groupMoveTo": "Mover a una carpeta",
+  "chat.groupNone": "Sin carpeta",
+  "chat.groupUngrouped": "Sin carpeta",
+  "chat.groupEmpty": "Vacía",
+  "chat.effortTitle": "Esfuerzo de razonamiento",
+  "chat.effortDefault": "Lo que tenga configurado el CLI",
+  "chat.effortLow": "Bajo",
+  "chat.effortMedium": "Medio",
+  "chat.effortHigh": "Alto",
+  "chat.effortMax": "M\u00e1ximo",
+  "chat.effortHint": "Los niveles altos razonan m\u00e1s y cuestan m\u00e1s. Cada CLI tiene su propia escala, as\u00ed que esto se traduce al paso m\u00e1s cercano que acepte.",
+  "ai.setupCopyCommand": "Copiar el comando",
+  "ai.setupRunInTerminal": "Ejecutar en el terminal",
+  "ai.setupTerminalTitle": "Inicio de sesión del proveedor",
+  "ai.setupModelSuggest": "Ese modelo ya no existe en este proveedor. Estos son los que propuso:",
+  "ai.setupModelGone": "El modelo configurado no existe en este proveedor. Elige otro en el compositor.",
+  "ai.setupBinaryMissing": "{binary} no está instalado, o no está en el PATH que ve esta aplicación.",
+  "ai.setupOpenDocs": "Instrucciones de instalación",
+  "ai.setupUntrustedDir": "El CLI se negó a ejecutarse en este directorio. Actualizarlo suele arreglarlo: la aplicación ya le pasa el flag que pide.",
   "chat.changeModelTitle": "Cambiar el modelo que usa este chat",
   "chat.modelForChat": "Modelo para el chat",
   "chat.loadingModels": "Cargando versiones…",
   "chat.noModels": "Este proveedor no informó modelos. Configura uno en Ajustes.",
   "chat.configureModels": "Configurar proveedores y tareas",
-  "chat.providerLocked":
-    "Cada proveedor guarda sus propias sesiones, así que un chat abierto no puede pasar de uno a otro. Inicia un chat nuevo para cambiar de proveedor — aquí solo puedes cambiar la versión del proveedor actual.",
+  "chat.providerLocked": "Inicia un chat nuevo para cambiar de proveedor",
   "settings.templateCustom": "Personalizada",
   "settings.templateDefault": "Por defecto",
   "settings.templateReset": "Restaurar la original",
@@ -3193,6 +3238,7 @@ export const es = {
   "shortcuts.cmdViewGraph": "Ir a Historial",
   "shortcuts.cmdViewChanges": "Ir a Cambios",
   "shortcuts.cmdViewEditor": "Ir a Editor",
+  "shortcuts.cmdFocusChatComposer": "Enfocar el cuadro de escritura del chat",
   "shortcuts.cmdViewNext": "Pestaña superior siguiente",
   "shortcuts.cmdViewPrev": "Pestaña superior anterior",
   "shortcuts.cmdProjectSwitcher": "Cambiar de repositorio…",
@@ -3414,6 +3460,113 @@ export const es = {
   "chat.viewOnGitlab": "Ver en GitLab",
   "chat.confirmPostGitlab": "¿Publicar {n} comentario(s) en el merge request !{id} en GitLab?",
   "chat.postedGitlab": "Publicado en GitLab",
+
+  /* The chat workspace. Everything above this point belongs to the AI panel's repository chat and
+     stays where it is; the keys below are the full-window one reached from the rail. */
+  "chat.workspaceTitle": "Chat",
+  "chat.newChat": "Nuevo chat",
+  "chat.searchPlaceholder": "Buscar en las conversaciones",
+  "chat.searchNoMatches": "Ninguna conversación coincide.",
+  /* The second section of the search results: conversations whose *title* did not match but whose
+     message bodies did. It is labelled and kept apart rather than merged into the list, because a
+     row that shows a title with none of the query's words in it reads as a bug until you are told
+     why it is there. */
+  "chat.foundInMessages": "Encontrado en los mensajes",
+  "chat.pinnedGroup": "Fijadas",
+  "chat.recentGroup": "Recientes",
+  "chat.archivedGroup": "Archivadas",
+  "chat.untitled": "Conversación nueva",
+  "chat.rename": "Renombrar",
+  "chat.renamePrompt": "Nuevo nombre de la conversación",
+  "chat.pin": "Fijar",
+  "chat.unpin": "Dejar de fijar",
+  "chat.archive": "Archivar",
+  "chat.unarchive": "Restaurar",
+  "chat.branch": "Bifurcar desde aquí",
+  "chat.delete": "Eliminar",
+  "chat.deleteConfirm": "¿Eliminar «{title}»? La conversación y sus mensajes se van con ella.",
+  "chat.showArchived": "Ver las archivadas",
+  "chat.hideArchived": "Ocultar las archivadas",
+  "chat.sidebarEmpty": "Todavía no hay conversaciones. Empieza una: no hace falta un repositorio.",
+  "chat.emptyTitle": "Pregunta lo que quieras",
+  "chat.emptyBody": "Una conversación aquí no necesita ningún repositorio abierto. Adjunta uno cuando la pregunta sea sobre código y el modelo podrá leerlo.",
+  "chat.jumpToLatest": "Ir a lo último",
+  /* The empty transcript of a conversation that exists but has no turns yet — distinct from
+     `chat.emptyTitle`, which is the no-conversation-selected state of the whole workspace. */
+  "chat.emptyTurnTitle": "Aún no has preguntado nada",
+  "chat.emptyTurnSubtitle": "Escribe abajo para empezar. Sin un repositorio adjunto el modelo puede leer y buscar, pero no escribirá nada.",
+  /* Under the pending bubble, for the four CLIs that emit nothing until the message is finished.
+     Saying so beats a progress bar that is lying about what it knows — see the capability matrix. */
+  "chat.noStreamingNotice": "Este CLI envía la respuesta de una sola vez: aparecerá cuando esté lista.",
+  /* The escape hatch on the typewriter reveal used for the providers that do not stream. By the
+     time the text is being uncovered at reading speed it is already whole on disk, so the wait
+     belongs to us and not to the model, and an uninterruptible one is the exact failure of every
+     "realistic typing" effect. */
+  "chat.skipReveal": "Mostrarlo todo",
+  "chat.thinkingLabel": "Razonamiento",
+  /* Two strings, not one with a tense: the block is open while the model is still emitting
+     `thinking_delta` and stays on screen after it stops, and "Reasoning…" left on a finished turn
+     reads as a reply that never arrived. */
+  "chat.thinkingLive": "Razonando…",
+  "chat.thinkingDone": "Ha razonado",
+  "chat.thinkingShow": "Ver el razonamiento",
+  "chat.thinkingHide": "Ocultar el razonamiento",
+  "chat.stopped": "Detenido",
+  "chat.failed": "Este turno ha fallado",
+  "chat.regenerate": "Volver a generar",
+  "chat.editMessage": "Editar y reenviar",
+  /* The banner above the composer while an earlier turn is being asked again. "Edit" is the wrong
+     word for what a CLI session can actually do: nothing is rewritten, the old turn and its answer
+     stay in the transcript and in the engine's context, and what this sends is a new turn. Without
+     the banner the user believes they corrected a question they in fact only asked twice. */
+  "chat.reAskingTurn": "Preguntando otra vez el turno {n}: el original sigue en la conversación",
+  "chat.copyCode": "Copiar el código",
+  "chat.copied": "Copiado",
+  /* On the regenerate / edit / branch buttons. None of the six CLIs can rewind a session, so each
+     of these is a fresh session replaying the prefix — cheap to store, paid for again in tokens. */
+  "chat.replayCost": "Reenvía como contexto toda la conversación anterior",
+  "chat.branchHere": "Bifurcar desde este mensaje",
+  "chat.composerPlaceholder": "Pregunta lo que quieras…",
+  "chat.send": "Enviar",
+  "chat.stop": "Detener",
+  "chat.attach": "Adjuntar una imagen",
+  "chat.attachUnsupported": "{provider} no puede leer imágenes",
+  /* Two different refusals for a pasted image, and never a silent drop. An image that simply
+     vanishes looks like the app lost it, and the next thing the user does is describe the
+     screenshot in words to a model that never received it. */
+  "chat.pasteImageNeedsFile": "Al pegar no viaja la imagen: ningún CLI la lee por stdin. Usa el botón de adjuntar para darle al modelo una ruta que pueda abrir.",
+  "chat.pasteImageUnsupported": "{provider} no puede leer imágenes, así que esto que has pegado no llegaría a ninguna parte.",
+  /* The line the attach button appends to the draft. Phrased as an instruction because that is
+     literally the mechanism: the CLI is an agent holding a file tool, and the only honest way to
+     "attach" an image to it is to tell it where the image is. */
+  "chat.attachedImageLine": "Mira la imagen que está en {path}",
+  "chat.attachRepo": "Adjuntar un repositorio",
+  "chat.detachRepo": "Quitar el repositorio",
+  "chat.noRepoBadge": "Sin repositorio · solo lectura",
+  "chat.noRepoHint": "Sin repositorio adjunto esta conversación no puede escribir archivos. Adjunta uno para que el modelo pueda editar.",
+  "chat.repoBadge": "Repositorio · {name}",
+  "chat.commandsApp": "CodeFlow",
+  "chat.commandsProvider": "Comandos de {provider}",
+  "chat.commandsNone": "{provider} no declara ningún comando de barra en modo headless.",
+  "chat.openInTerminal": "Abrir {provider} en una terminal",
+  "chat.sourceCliReported": "declarado por el CLI",
+  "chat.sourceDocumented": "documentado",
+  "chat.sourceApp": "CodeFlow",
+  "chat.cmdNew": "Empezar una conversación nueva",
+  "chat.cmdModel": "Cambiar de modelo",
+  "chat.cmdProvider": "Cambiar de proveedor",
+  "chat.cmdClear": "Vaciar la conversación",
+  "chat.cmdExport": "Exportar como Markdown",
+  "chat.cmdBranch": "Bifurcar desde el último turno",
+  /* The honest strip under the picker. See the capability matrix in `lib/aiProviders`: a control
+     that silently does nothing for four of six CLIs is worse than one that isn't offered. */
+  "chat.ambiguousResumeWarning": "{provider} retoma la última conversación que se ejecutó, no esta. Con dos abiertas a la vez se cruzan los contextos.",
+  "chat.warnProviderSwitch": "Cambiar a {provider} es un trasplante, no una continuación: el historial hasta aquí se reenvía como contexto en el siguiente turno.",
+  "chat.noQuota": "{provider} no publica ningún límite de uso",
+  "chat.quickAskTitle": "Pregunta rápida",
+  "chat.quickAskPlaceholder": "Escribe y pulsa Enter…",
+  "chat.quickAskOpenFull": "Abrir en CodeFlow",
+  "chat.quickAskClose": "Cerrar",
   "pr.openComments": "Comentarios abiertos ({n})",
   "pr.loadingComments": "Cargando comentarios…",
   "pr.noComments": "Aún no hay comentarios",
@@ -3645,6 +3798,8 @@ export const es = {
   "tabbar.notesDescription": "Notas en Markdown, libros, etiquetas y plantillas \u2014 lo que se escribe alrededor del c\u00f3digo de este espacio de trabajo",
   "tabbar.diagrams": "Diagramas",
   "tabbar.diagramsDescription": "Diagramas de flujo, arquitectura y ER en carpetas \u2014 lo que se dibuja alrededor del c\u00f3digo de este espacio de trabajo",
+  "tabbar.chat": "Chat",
+  "tabbar.chatDescription": "Conversaciones con tus CLI de IA — una sola lista, con o sin repositorio detrás",
   "tabbar.reorderHint": "Mant\u00e9n presionado para arrastrarlo a otra posici\u00f3n",
 
   "diagrams.title": "Diagramas",

@@ -130,6 +130,15 @@ pub const TABLES: &[&str] = &[
     "ai_usage",
     "workspace_activity",
     "conversation_titles",
+    // The chat workspace. Conversations before messages: a message points at the thread it is in.
+    //
+    // Beside `activity_log` rather than with the authored content above, because these rows are the
+    // same *kind* of thing the `conversations` switch already covers — a transcript the app
+    // recorded, not a document somebody wrote — and the switch that turns one off has to turn the
+    // other off too. See the `conversations` group.
+    "chat_groups",
+    "chat_conversations",
+    "chat_messages",
     "review_runs",
     "agent_tasks",
     "agent_chains",
@@ -273,6 +282,20 @@ pub const GROUPS: &[Group] = &[
         tables: &[
             "activity_log",
             "conversation_titles",
+            // The chat workspace's threads and their messages. Here rather than in a switch of
+            // their own for the reason the group's name argues: to the person reading the settings
+            // panel, "conversations" is one thing, and somebody who chose not to carry the AI
+            // panel's history has not asked to carry the full-window chat's instead.
+            //
+            // Worth knowing before trimming this one: `chat_messages.trace` is the largest column
+            // in the schema (~600 KB on a turn with real tool use), so this group is now the one
+            // most able to dominate a backup file.
+            // The folders travel with the conversations they organise. Restoring the threads
+            // without them would land every chat in the ungrouped list — not lost, but the filing
+            // the user did by hand would be, and that is work.
+            "chat_groups",
+            "chat_conversations",
+            "chat_messages",
             "workspace_activity",
             "job_history",
             "ai_usage",

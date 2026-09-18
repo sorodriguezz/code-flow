@@ -123,6 +123,23 @@ struct AiDoneEvent {
     run_id: String,
 }
 
+/// One chunk of a reply as it is being written, on its way to the bubble that is painting it.
+///
+/// Serialized in camelCase because this is the one event here whose consumer is a *component*
+/// rather than the run store: `conversationStore` routes a chunk straight into the message it
+/// belongs to, and every other field it handles is camelCase. The rest of this module's events
+/// predate that and are read by code that already spells them the other way.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiChatDeltaEvent {
+    run_id: String,
+    conversation_id: String,
+    message_id: String,
+    /// `"text"` or `"thinking"` — see [`crate::ai::AiDeltaKind`], which is what produces it.
+    kind: String,
+    text: String,
+}
+
 type Registry = Mutex<HashMap<String, watch::Sender<bool>>>;
 
 fn registry() -> &'static Registry {
@@ -341,6 +358,42 @@ pub fn emit_line(ctx: &RunCtx, stream: &'static str, line: &str) {
     if full {
         flush_batch(ctx);
     }
+}
+
+/// One chunk of a reply as it is being written. **Deliberately not routed through
+/// [`emit_line`]**, and this is the single most important thing about this function.
+///
+/// `emit_line` records into a 300-entry ring ([`MAX_TRACE_LINES`], `trace.pop_front()`) that is
+/// persisted as the turn's trace: what the agent read, which tools it called, how it got to the
+/// answer. A turn run with `--include-partial-messages` emits one frame *per token*, so sending
+/// deltas through that path would leave every stored trace holding the last three hundred word
+/// fragments of the reply and nothing else — every tool call evicted by the text of the answer the
+/// trace sits next to. The reply is already stored, in full, as the message itself.
+///
+/// It also skips the 100ms batch. The batch exists because the run log is a list nobody reads at
+/// sixty renders a second; a chunk here is a character appearing in a sentence somebody is
+/// watching, and holding it back for a tenth of a second is exactly the stutter the batch was
+/// built to remove from the other stream. The volume is the same either way — this is what the
+/// process is already producing — but the destination is a single `useState` write, not a list.
+///
+/// Fire-and-forget like everything else here: a chunk that fails to emit costs this reply its
+/// typing, not its answer, which still arrives whole when the run returns.
+///
+/// **Not forwarded to a paired phone.** `remotectl::bridge` documents why `ai:output` was dropped
+/// in favour of the batch — per-line traffic over a phone's wifi is worse than on the desktop —
+/// and token granularity is that argument again, an order of magnitude further along. It is not in
+/// `FORWARDED` and must not be added to it.
+pub fn emit_delta(ctx: &RunCtx, conversation_id: &str, message_id: &str, kind: &str, text: &str) {
+    let _ = ctx.app.emit(
+        "ai:chat-delta",
+        AiChatDeltaEvent {
+            run_id: ctx.run_id.clone(),
+            conversation_id: conversation_id.to_string(),
+            message_id: message_id.to_string(),
+            kind: kind.to_string(),
+            text: text.to_string(),
+        },
+    );
 }
 
 /// Stops a run's process **and everything it started**.

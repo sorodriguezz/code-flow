@@ -65,6 +65,10 @@ const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => 
 const DiagramsView = lazy(() =>
   import("./components/diagrams/DiagramsView").then((m) => ({ default: m.DiagramsView })),
 );
+const ChatView = lazy(() => import("./components/chat/ChatView").then((m) => ({ default: m.ChatView })));
+const QuickAskWindow = lazy(() =>
+  import("./components/chat/QuickAskWindow").then((m) => ({ default: m.QuickAskWindow })),
+);
 const GraphView = lazy(() => import("./components/git/GraphView").then((m) => ({ default: m.GraphView })));
 const ChangesPanel = lazy(() => import("./components/git/ChangesPanel").then((m) => ({ default: m.ChangesPanel })));
 const EditorView = lazy(() => import("./components/editor/EditorView").then((m) => ({ default: m.EditorView })));
@@ -93,6 +97,7 @@ const APP_VIEWS: Record<string, { view: MainView; workspace?: ApiWorkspace; rend
   notes: { view: "notes", render: () => <NotesView /> },
   diagrams: { view: "diagrams", render: () => <DiagramsView /> },
   vault: { view: "vault", render: () => <VaultView /> },
+  chat: { view: "chat", render: () => <ChatView /> },
 };
 
 /** The four tabs a repository window carries — the same set, and the same order, as the main
@@ -325,9 +330,60 @@ function RepoTabs({ tab }: { tab: MainView }) {
   );
 }
 
+/**
+ * The quick-ask window: one composer, one answer, and nothing else at all.
+ *
+ * It is a satellite by construction — a second webview with none of the shell — but it is not a
+ * satellite in the sense the other two are, which is why it does not go through `AppWindow`. The
+ * others hold *a screen of the app*, so they carry the title bar, write their identity into
+ * `uiStore`, and refuse to render until a workspace is known. This one holds a question. It is
+ * summoned by a global hotkey on top of whatever the user was doing, is expected to be gone a few
+ * seconds later, and a chrome bar above it would be most of its height.
+ *
+ * It does dispatch its own turn, and that is not a violation of the `isMainWindow()` rule — it is
+ * what the rule actually says. Those guards exist around the things that *run in a webview and
+ * outlive the call*: the chain executor, the service pollers, the git watchers. One `chat_send` is
+ * none of those. The turn runs in the Rust process either way, so routing it through the main
+ * window would move the `invoke` and nothing else, at the cost of a window-bus round trip on the
+ * one surface whose whole promise is that it answers immediately. `AgentsView` in a satellite
+ * already works this way.
+ *
+ * What keeps the main window authoritative is `aiRunStore.start`, which broadcasts `run-started`
+ * before it does any local bookkeeping. The status bar is the only place in the app that claims to
+ * list everything running, and it hears about a turn asked here exactly as it hears about one asked
+ * anywhere else — so a run started from the ask box is visible, and stoppable, from the main window.
+ */
+function QuickWindow({ refId }: { refId: string }) {
+  return (
+    <ErrorBoundary resetKey={refId}>
+      <Suspense fallback={<ViewSkeleton />}>
+        <QuickAskWindow />
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+
 export default function SatelliteApp() {
   const ready = useSatelliteBoot();
   const spec = WINDOW.satellite;
+
+  /**
+   * The narrowed union, which is the point: `SatelliteKind` in `lib/windowIdentity` admits all three
+   * kinds `windows.rs` can build, so a fourth one added on the Rust side and forgotten here is a
+   * compile error at the branches below rather than a window that paints a skeleton forever. That is
+   * not hypothetical — `quick` was exactly that failure until `parseIdentity` learned to admit it.
+   */
+  const kind = spec?.kind ?? null;
+
+  // No title bar, no toasts, no modals: see `QuickWindow`. Everything below it belongs to a window
+  // that is holding a screen, and this one is holding a question.
+  if (ready && spec && kind === "quick") {
+    return (
+      <div className="flex h-screen flex-col overflow-hidden">
+        <QuickWindow refId={spec.refId} />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen flex-col overflow-hidden">
@@ -335,7 +391,7 @@ export default function SatelliteApp() {
       <div className="min-h-0 flex-1 overflow-hidden">
         {!ready || !spec ? (
           <ViewSkeleton />
-        ) : spec.kind === "app" ? (
+        ) : kind === "app" ? (
           <AppWindow refId={spec.refId} />
         ) : (
           <RepoWindow projectId={spec.refId} />

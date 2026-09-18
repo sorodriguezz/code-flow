@@ -1676,6 +1676,171 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_services_workspace
             ON services (workspace_id, sort_order);
+
+        -- ── Chat ────────────────────────────────────────────────────────────────────────────
+        --
+        -- The `chat` workspace: a full-window conversation surface, one flat list of threads,
+        -- deliberately unlike the AI panel's per-repository chat that `activity_log` backs.
+        --
+        -- Two decisions separate these two tables from `activity_log` + `conversation_titles`,
+        -- and both are the reason a new pair of tables exists rather than more columns on the
+        -- old one.
+        --
+        -- **A conversation is a row.** In the old model a "conversation" was a `GROUP BY
+        -- session_id` over turns, which is why a title needed a whole second table keyed by a
+        -- string the engine handed us. Anything a conversation *has* — a provider, a model, a
+        -- pin, an archive flag, the parent it was branched from — had nowhere to live. Here the
+        -- thread is the row and the engine's session id is one nullable column on it, which is
+        -- also the honest shape: not every CLI resumes by id, and one of them (cline) cannot
+        -- resume at all, so the session id is a cache and never the identity.
+        --
+        -- **A message is a row.** `activity_log` stores a (question, answer) pair per row, which
+        -- is fine for a transcript nobody edits and impossible for one where a user may edit
+        -- their own message, regenerate an answer, or branch from a point in the middle. All
+        -- three need to address one message by id, and a pair row has no id for half of itself.
+        -- Folders for the chat sidebar. Global, like the conversation list itself: a chat is
+        -- filed by what it is about, not by which workspace happened to be open when it started,
+        -- and a group that vanished on a workspace switch would be a folder nobody trusts.
+        --
+        -- Deliberately NOT a workspace-scoped table, and deliberately with no `scope` column —
+        -- there is no second answer to give. See the `chat_conversations` block below.
+        CREATE TABLE IF NOT EXISTS chat_groups (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            color       TEXT NOT NULL DEFAULT '',
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            collapsed   INTEGER NOT NULL DEFAULT 0,
+            -- Standing instructions for every conversation filed here — what a "project" means in
+            -- this app. Appended to the base system prompt rather than replacing it: the base one
+            -- is what tells a repo-less engine it has no repository and must not write files, and a
+            -- user writing "answer in English" has not asked to have that lifted.
+            --
+            -- Resolved at send time from this row, never copied onto the conversation. Editing a
+            -- project's instructions therefore changes what its existing chats are told on their
+            -- next turn, which is the behaviour the word "instructions" implies; a snapshot taken
+            -- at creation would leave every older chat running on a version the user can see on
+            -- screen and cannot affect.
+            instructions TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS chat_conversations (
+            id            TEXT PRIMARY KEY,
+            -- The conversation is *stamped* with a workspace and not filtered by one. The sidebar
+            -- is flat and global on purpose (ChatGPT's shape, and the point of the feature is a
+            -- chat about nothing in particular), so this column exists for the two things that do
+            -- need it: the backup grouping in `backup::snapshot`, and the run-isolation stamp
+            -- every AI run in this app carries.
+            workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- NULLABLE, and `ON DELETE SET NULL` rather than CASCADE. Both halves are load-bearing
+            -- and neither matches `activity_log`, where the project is mandatory and takes the
+            -- turns with it.
+            --
+            -- Nullable because a chat bound to no repository is now the *default* case: the
+            -- feature exists so that "how do I phrase this migration note" does not require
+            -- opening a checkout first. A repo-bound conversation keeps today's behaviour (a
+            -- lease on the working copy, edits allowed); an unbound one runs read-only in a
+            -- scratch directory the app owns.
+            --
+            -- SET NULL because deleting a project must *orphan* its chats, not shred them.
+            -- Removing a repository from the sidebar is housekeeping — the folder may not even be
+            -- gone from disk — and a user who does it has not asked to lose the reasoning that
+            -- happened around it. The orphaned thread keeps every message and simply stops being
+            -- able to run against a working copy, which is a state the UI already has to render
+            -- (it is what every repo-less conversation looks like).
+            project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            -- Empty until the first user message names it. See
+            -- `chat_queries::autotitle_from_first_message`: naming the thread up front would mean
+            -- either a modal before the first word or a permanent "New chat" in the sidebar.
+            title         TEXT NOT NULL DEFAULT '',
+            provider      TEXT NOT NULL,
+            model         TEXT NOT NULL DEFAULT '',
+            system_prompt TEXT NOT NULL DEFAULT '',
+            -- How hard the model is asked to think, on `ai::effort`'s four-step scale, or empty
+            -- for "leave the CLI's own default alone". Empty is not the same as 'medium': a user
+            -- who set `model_reasoning_effort = "max"` in ~/.codex/config.toml has already said
+            -- what they want, and sending a level on every turn would silently overrule them.
+            effort        TEXT NOT NULL DEFAULT '',
+            -- Which folder this thread is filed under, or NULL for the ungrouped list at the top.
+            --
+            -- ON DELETE SET NULL, and that is the whole design of deleting a group: removing a
+            -- folder must never remove what is in it. The same mistake one level up — a CASCADE on
+            -- `workspace_id` — silently shredded conversations when a workspace was tidied away,
+            -- and it is not a mistake worth making twice on a column the user reaches far more
+            -- often. Deleting a group returns its chats to the ungrouped list, where they are still
+            -- there to be found.
+            group_id      TEXT REFERENCES chat_groups(id) ON DELETE SET NULL,
+            -- Whether an answer landed here that the user has not looked at yet.
+            --
+            -- A stored flag and not something derived from `updated_at`, because the two questions
+            -- are different: renaming a thread, pinning it or filing it all bump `updated_at`, and
+            -- none of them is an unread reply. Set when an assistant turn is persisted, cleared
+            -- when the conversation is opened.
+            unread        INTEGER NOT NULL DEFAULT 0,
+            -- Whatever this engine calls the session these turns can be continued under — a Claude
+            -- session uuid, an `agy-last` sentinel, nothing at all for an engine that cannot
+            -- resume. A cache for the next `--resume`, never an identity: see the block comment.
+            engine_session_id TEXT,
+            -- Timestamps rather than booleans, for the reason `vault_items.deleted_at` is one:
+            -- "not pinned" then has exactly one spelling (NULL) instead of two that can disagree,
+            -- and the moment is recorded for free in case the sidebar ever wants to sort by it.
+            -- It does not today — see `chat_queries::list_conversations`, which keeps one order
+            -- inside both groups.
+            pinned_at     TEXT,
+            archived_at   TEXT,
+            -- Where this thread was forked from, and at which turn. SET NULL because the parent
+            -- being deleted must not take the fork with it — the fork is a conversation in its own
+            -- right the moment it has a turn of its own, and the link is provenance, not ownership.
+            --
+            -- Branching cannot rewind a CLI session; a fork is "fresh session, replay the prefix",
+            -- which is why the turn number matters here at all — it is the length of the prefix.
+            parent_conversation_id TEXT REFERENCES chat_conversations(id) ON DELETE SET NULL,
+            branched_at_turn INTEGER,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+
+        -- One message. See the block comment above for why this is not a (question, answer) pair.
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id            TEXT PRIMARY KEY,
+            -- CASCADE here and only here: a message outside a conversation has no surface to be
+            -- read from, so orphaning one is only a way to grow the file forever.
+            conversation_id TEXT NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+            -- Monotonic within the conversation, and the user message and the assistant reply of
+            -- one exchange share a number. That is what makes "branch at turn N" expressible
+            -- without a second ordering column, and what `chat_queries::next_turn` computes.
+            turn          INTEGER NOT NULL,
+            -- 'user' | 'assistant'.
+            role          TEXT NOT NULL,
+            content       TEXT NOT NULL,
+            -- Stamped per message rather than read off the conversation, because a conversation
+            -- can change provider or model mid-thread and a transcript that relabels its own past
+            -- answers is lying about which model wrote them.
+            provider      TEXT,
+            model         TEXT,
+            engine_version TEXT,
+            response_time_ms INTEGER,
+            is_error      INTEGER NOT NULL DEFAULT 0,
+            is_cancelled  INTEGER NOT NULL DEFAULT 0,
+            -- The run's captured output lines, as a JSON array of `{stream, line}`. Kept because
+            -- "what did it actually do" is the question a finished agent turn most often raises,
+            -- and it is unanswerable after a restart without this.
+            --
+            -- It is also, by a wide margin, the largest column in this schema — roughly 600 KB for
+            -- a turn with real tool use. `chat_queries::list_messages` therefore takes a
+            -- `with_trace` flag and selects a literal NULL in its place when false, rather than
+            -- reading the column and dropping it: a thirty-turn conversation would otherwise push
+            -- ~18 MB across the IPC boundary to render a transcript that shows none of it.
+            trace         TEXT,
+            created_at    TEXT NOT NULL
+        );
+
+        -- The sidebar's order, for the one query it runs.
+        CREATE INDEX IF NOT EXISTS idx_chat_conversations_updated
+            ON chat_conversations(updated_at DESC);
+        -- The transcript's order, and the covering index for `next_turn`'s MAX.
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation
+            ON chat_messages(conversation_id, turn);
         "#,
     )?;
 
@@ -1718,6 +1883,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_scope_to_scoped_tables(conn)?;
     add_tab_to_workspace_terminals(conn)?;
     add_repo_origin_to_diagrams(conn)?;
+    add_effort_to_chat_conversations(conn)?;
+    add_groups_to_chat_conversations(conn)?;
+    add_instructions_to_chat_groups(conn)?;
+    add_unread_to_chat_conversations(conn)?;
     align_project_ado_org_with_connections(conn)?;
     file_loose_notes_into_a_book(conn)?;
     move_ollama_settings_to_cline(conn)?;
@@ -2089,6 +2258,58 @@ fn add_scope_to_scoped_tables(conn: &Connection) -> rusqlite::Result<()> {
 /// Three columns, all defaulting to the empty string, and the default is the whole migration: every
 /// diagram that already exists was made in the app and stays that way. Only a row whose
 /// `origin_path` is non-empty is a bridge, and nothing writes one except `link_file`.
+/// Gives an already-created `chat_conversations` its `unread` column.
+fn add_unread_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "chat_conversations")? && !has_column(conn, "chat_conversations", "unread")? {
+        conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN unread INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    Ok(())
+}
+
+/// Gives an already-created `chat_groups` its `instructions` column.
+///
+/// Folders shipped before they became projects. Same belt-and-braces as the two migrations beside
+/// it: the column is in the `CREATE TABLE` above too, so this is a no-op on a fresh database.
+fn add_instructions_to_chat_groups(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "chat_groups")? && !has_column(conn, "chat_groups", "instructions")? {
+        conn.execute_batch("ALTER TABLE chat_groups ADD COLUMN instructions TEXT NOT NULL DEFAULT '';")?;
+    }
+    Ok(())
+}
+
+/// Gives an already-created `chat_conversations` its `group_id` column.
+///
+/// Same belt-and-braces as the `effort` migration beside it, and needed for the same reason: the
+/// chat workspace shipped before folders did, so there are databases with conversations in them and
+/// nowhere to record which folder each belongs to.
+fn add_groups_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "chat_conversations")? && !has_column(conn, "chat_conversations", "group_id")? {
+        // No `REFERENCES` clause on the ALTER: SQLite cannot add a column with a foreign key to an
+        // existing table, and re-creating the table to gain one would mean copying every row and
+        // every conversation's messages behind it. The constraint therefore holds on databases
+        // created from the schema above, and on upgraded ones the same rule is enforced by
+        // `delete_group`, which clears the column before removing the row. That asymmetry is worth
+        // stating rather than discovering: the cascade rule lives in two places here.
+        conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN group_id TEXT;")?;
+    }
+    Ok(())
+}
+
+/// Gives an already-created `chat_conversations` its `effort` column.
+///
+/// The column is in the `CREATE TABLE` above too, so a fresh database gets it there and this is a
+/// no-op — the same belt-and-braces the other additive migrations in this file use, and for the
+/// same reason: the two statements must not be able to disagree about the default.
+///
+/// It needs to exist at all because the chat workspace shipped before the reasoning control did,
+/// so there are databases in the wild with conversations in them and no column to hold a level.
+fn add_effort_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "chat_conversations")? && !has_column(conn, "chat_conversations", "effort")? {
+        conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN effort TEXT NOT NULL DEFAULT '';")?;
+    }
+    Ok(())
+}
+
 ///
 /// The columns are also in the `CREATE TABLE` above, so a fresh database gets them there and this
 /// is a no-op on it — the same belt-and-braces `add_scope_to_scoped_tables` uses, and for the same
