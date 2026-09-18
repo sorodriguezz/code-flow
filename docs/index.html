@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CodeFlow — Tu cliente Git de escritorio, con la IA que tú eliges</title>
+<meta name="description" content="Git, pull requests, pipelines, API client, bases de datos, SSH y agentes de IA en una sola app nativa para Windows y macOS. Tú decides qué modelo hace cada tarea.">
+<meta name="theme-color" content="#05070C">
+<meta name="color-scheme" content="dark">
+<link rel="canonical" href="https://sorodriguezz.github.io/code-flow/">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="CodeFlow">
+<meta property="og:title" content="CodeFlow — Tu cliente Git de escritorio, con la IA que tú eliges">
+<meta property="og:description" content="Git, pull requests, pipelines, API client, bases de datos, SSH y agentes de IA en una sola app nativa. Windows y macOS.">
+<meta property="og:image" content="https://sorodriguezz.github.io/code-flow/screenshots/windows.png">
+<meta property="og:url" content="https://sorodriguezz.github.io/code-flow/">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon-256.png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,300..800&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="assets/styles.css">
+<script type="application/ld+json" id="ld">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "CodeFlow",
+  "applicationCategory": "DeveloperApplication",
+  "applicationSubCategory": "Version Control / Git client",
+  "operatingSystem": "Windows 10, Windows 11, macOS 11+ (Apple Silicon)",
+  "softwareVersion": "1.20.1",
+  "description": "Cliente Git de escritorio con revisión de pull requests por IA, pipelines, API client, bases de datos, SSH y agentes. Windows y macOS.",
+  "url": "https://sorodriguezz.github.io/code-flow/",
+  "downloadUrl": "https://github.com/sorodriguezz/code-flow/releases/latest",
+  "installUrl": "https://github.com/sorodriguezz/code-flow/releases/latest",
+  "screenshot": "https://sorodriguezz.github.io/code-flow/screenshots/windows.png",
+  "inLanguage": ["es", "en"],
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "author": { "@type": "Person", "name": "Sebastián Rodríguez Zapata", "url": "https://github.com/sorodriguezz" },
+  "featureList": [
+    "Grafo de commits, diffs y stashes",
+    "Revisión de pull requests con IA en GitHub, GitLab y Azure DevOps",
+    "Pipelines de CI con logs en la app",
+    "Editor Monaco con LSP y autocompletado local sin red",
+    "API client REST, GraphQL, WebSocket, gRPC y MQTT",
+    "Bases de datos PostgreSQL, SQL Server, IRIS, MongoDB y Redis",
+    "SSH, SFTP, port forwarding y almacenamiento en la nube",
+    "Gestor de contraseñas cifrado con Argon2id y AES-256-GCM"
+  ]
+}
+</script>
+</head>
+<body>
+
+<a class="skip" href="#main" data-i18n="a11y.skip">Saltar al contenido</a>
+<div class="progress" id="progress" aria-hidden="true"></div>
+
+<!-- ===================== icon sprite ===================== -->
+<svg width="0" height="0" aria-hidden="true" style="position:absolute">
+  <defs>
+    <g id="s" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></g>
+    <linearGradient id="pipeGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FFC131"/><stop offset="100%" stop-color="#24C8DB"/>
+    </linearGradient>
+  </defs>
+  <symbol id="i-git" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="6" cy="5.5" r="2.5"/><circle cx="6" cy="18.5" r="2.5"/><circle cx="18" cy="9" r="2.5"/>
+    <path d="M6 8v8M18 11.5c0 3.5-3 4-6 4.5"/>
+  </symbol>
+  <symbol id="i-pr" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="6" cy="18.5" r="2.5"/><circle cx="18" cy="18.5" r="2.5"/><circle cx="6" cy="5.5" r="2.5"/>
+    <path d="M6 8v8M18 16V10a3.5 3.5 0 0 0-3.5-3.5H11M13 3.5 10 6.5l3 3"/>
+  </symbol>
+  <symbol id="i-pipe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+    <rect x="3" y="4.6" width="9" height="3.6" rx="1.2"/><rect x="7" y="10.2" width="11" height="3.6" rx="1.2"/><rect x="11" y="15.8" width="8" height="3.6" rx="1.2"/>
+  </symbol>
+  <symbol id="i-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 6.5 3.5 12 9 17.5M15 6.5 20.5 12 15 17.5"/>
+  </symbol>
+  <symbol id="i-term" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="4.5" width="18" height="15" rx="2.2"/><path d="M7.5 10 10 12.3l-2.5 2.3M13 14.8h4"/>
+  </symbol>
+  <symbol id="i-agent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3.5" y="8" width="17" height="11.5" rx="3.2"/><path d="M12 3.6V8M9 13.2h.01M15 13.2h.01M9.6 16.4h4.8"/><circle cx="12" cy="2.8" r="1.2"/>
+  </symbol>
+  <symbol id="i-api" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="8.6"/><path d="M3.4 12h17.2M12 3.4c2.6 2.7 2.6 14.5 0 17.2M12 3.4c-2.6 2.7-2.6 14.5 0 17.2"/>
+  </symbol>
+  <symbol id="i-db" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="12" cy="5.8" rx="7.6" ry="3"/><path d="M4.4 5.8v12.4c0 1.7 3.4 3 7.6 3s7.6-1.3 7.6-3V5.8M4.4 12c0 1.7 3.4 3 7.6 3s7.6-1.3 7.6-3"/>
+  </symbol>
+  <symbol id="i-diagram" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+    <rect x="2.6" y="3" width="7.2" height="5.6" rx="1.6"/><rect x="14.2" y="3" width="7.2" height="5.6" rx="1.6"/><rect x="8.4" y="15.4" width="7.2" height="5.6" rx="1.6"/>
+    <path d="M6.2 8.6v3.2h11.6V8.6M12 11.8v3.6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-remote" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3.8" width="18" height="7" rx="2.2"/><rect x="3" y="13.2" width="18" height="7" rx="2.2"/><path d="M7 7.3h.01M7 16.7h.01"/>
+  </symbol>
+  <symbol id="i-note" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 2.8h7.5L19 8.4v12.8H6z"/><path d="M13.5 2.8v5.6H19M9 13h7M9 16.8h4.5"/>
+  </symbol>
+  <symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="7.6" cy="12" r="4.2"/><path d="M11.8 12h9.4M18.6 12v3.4M15.4 12v2.6"/>
+  </symbol>
+  <symbol id="i-story" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9.5 5.2H21M9.5 12H21M9.5 18.8H21M3 5.2l1.4 1.4 2.4-2.6M3 12l1.4 1.4 2.4-2.6M3 18.8l1.4 1.4 2.4-2.6"/>
+  </symbol>
+  <symbol id="i-wiki" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 5.6A2.6 2.6 0 0 1 6.6 3H20v14.2H6.6A2.6 2.6 0 0 0 4 19.8z"/><path d="M4 19.8A2.6 2.6 0 0 1 6.6 17.2H20V21H6.6"/>
+  </symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 2.8 19.4 5.8v6.1c0 4.7-3.1 8.4-7.4 9.7-4.3-1.3-7.4-5-7.4-9.7V5.8z"/><path d="M9 12.2 11.2 14.4 15.4 9.8"/>
+  </symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="6.4" y="2.4" width="11.2" height="19.2" rx="2.8"/><path d="M10.4 5.2h3.2M11 18.6h2"/>
+  </symbol>
+  <symbol id="i-windows-app" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+    <rect x="2.4" y="4.4" width="13" height="11" rx="2"/><rect x="8.6" y="8.6" width="13" height="11" rx="2"/>
+  </symbol>
+  <symbol id="i-backup" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20.6 12a8.6 8.6 0 1 1-2.6-6.2"/><path d="M20.6 3.2V9h-5.6M12 7.4V12l3.2 1.9"/>
+  </symbol>
+  <symbol id="i-sparkle" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 2.4 13.9 8.1 19.6 10 13.9 11.9 12 17.6 10.1 11.9 4.4 10 10.1 8.1z"/><path d="M18.6 15.2l.85 2.35 2.35.85-2.35.85-.85 2.35-.85-2.35-2.35-.85 2.35-.85z"/>
+  </symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="9" stroke-width="1.4" opacity=".35"/><path d="M8 12.3l2.7 2.7L16.2 9.4"/>
+  </symbol>
+  <symbol id="i-dl" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3.4v11.2M7.4 10.2 12 14.8l4.6-4.6M4.4 19.6h15.2"/>
+  </symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4.6 12h14.8M13.4 6l6 6-6 6"/>
+  </symbol>
+  <symbol id="i-ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 4.4h5.6V10M19.6 4.4 11 13M17 14v4.6a1 1 0 0 1-1 1H5.4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1H10"/>
+  </symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.3 19.4 12 7 19.7z"/></symbol>
+  <symbol id="i-film" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+    <rect x="2.6" y="5" width="18.8" height="14" rx="2"/><path d="M7.4 5v14M16.6 5v14M2.6 12h18.8"/>
+  </symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+  <symbol id="i-apple" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M16.37 1.43c0 1.14-.47 2.22-1.23 3.02-.82.87-2.16 1.54-3.27 1.45-.13-1.1.42-2.26 1.16-3.03.83-.87 2.27-1.5 3.34-1.44Zm4.53 6.93c-.19.12-2.9 1.66-2.87 4.94.03 3.93 3.45 5.24 3.49 5.26-.03.09-.55 1.87-1.8 3.71-1.08 1.6-2.2 3.19-3.98 3.22-1.74.03-2.3-1.03-4.29-1.03-1.99 0-2.61 1-4.26 1.06-1.71.06-3.01-1.73-4.1-3.32-2.23-3.24-3.94-9.16-1.65-13.15 1.14-1.98 3.17-3.24 5.38-3.27 1.68-.03 3.26 1.13 4.29 1.13 1.02 0 2.94-1.4 4.96-1.19.84.03 3.2.34 4.72 2.56Z"/>
+  </symbol>
+  <symbol id="i-win" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M2.6 5.6 10.2 4.5v7.1H2.6zM11.3 4.35 21.4 3v8.6H11.3zM2.6 12.9h7.6v7.1L2.6 18.9zM11.3 12.9h10.1V21l-10.1-1.35z"/>
+  </symbol>
+  <symbol id="i-github" viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.05-.02-2.06-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.63-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.22.7.83.58C20.57 22.29 24 17.8 24 12.5 24 5.87 18.63.5 12 .5Z"/>
+  </symbol>
+</svg>
+
+<!-- ===================== atmosphere ===================== -->
+<div class="backdrop" aria-hidden="true">
+  <div class="backdrop__grid"></div>
+  <div class="orb orb--am"></div>
+  <div class="orb orb--cy"></div>
+  <div class="spotlight" id="spotlight"></div>
+  <div class="backdrop__grain"></div>
+</div>
+
+<!-- ===================== nav ===================== -->
+<header class="nav" id="nav">
+  <div class="nav__in">
+    <a class="brand" href="#top" aria-label="CodeFlow — inicio">
+      <span class="brand__mark" aria-hidden="true">
+        <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+          <g fill="#FFC131"><path d="M 287.1088 306.3596 A 304.5458 304.5458 0 1 1 638.6394 695.1124 A 204.1753 204.1753 0 0 0 648.2765 599.2187 A 214.4050 214.4050 0 1 0 403.7621 271.6684 A 358.1623 358.1623 0 0 0 287.1088 306.3596 Z"/><circle cx="577.9549" cy="396.6739" r="79.7190"/></g>
+          <g fill="#24C8DB"><path d="M 736.8912 717.6404 A 304.5458 304.5458 0 1 1 385.3606 328.8876 A 204.1753 204.1753 0 0 0 375.7235 424.7813 A 214.4050 214.4050 0 1 0 620.2379 752.3316 A 358.1623 358.1623 0 0 0 736.8912 717.6404 Z"/><circle cx="446.0451" cy="627.3261" r="79.7190"/></g>
+        </svg>
+      </span>
+      CodeFlow
+    </a>
+
+    <nav class="nav__links" aria-label="Principal">
+      <a class="nav__link" href="#workspace" data-i18n="nav.workspace">Workspace</a>
+      <a class="nav__link" href="#ia" data-i18n="nav.ai">IA</a>
+      <a class="nav__link" href="#review" data-i18n="nav.review">Review</a>
+      <a class="nav__link" href="#herramientas" data-i18n="nav.tools">Herramientas</a>
+      <a class="nav__link" href="#privacidad" data-i18n="nav.privacy">Privacidad</a>
+    </nav>
+
+    <div class="nav__side">
+      <div class="lang" role="group" aria-label="Idioma / Language">
+        <button type="button" data-lang="es" aria-pressed="true">ES</button>
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+      </div>
+      <a class="icon-btn" href="https://github.com/sorodriguezz/code-flow" target="_blank" rel="noopener" aria-label="Repositorio en GitHub">
+        <svg aria-hidden="true"><use href="#i-github"/></svg>
+      </a>
+      <a class="btn btn--primary btn--sm" href="#descargar">
+        <svg class="btn__ico" aria-hidden="true"><use href="#i-dl"/></svg>
+        <span data-i18n="nav.download">Descargar</span>
+      </a>
+      <button class="icon-btn nav__burger" id="burger" type="button" aria-expanded="false" aria-controls="sheet" aria-label="Abrir menú">
+        <svg aria-hidden="true"><use href="#i-menu"/></svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<nav class="nav__sheet" id="sheet" aria-label="Menú móvil">
+  <a href="#workspace" data-i18n="nav.workspace">Workspace</a>
+  <a href="#ia" data-i18n="nav.ai">IA</a>
+  <a href="#review" data-i18n="nav.review">Review</a>
+  <a href="#herramientas" data-i18n="nav.tools">Herramientas</a>
+  <a href="#privacidad" data-i18n="nav.privacy">Privacidad</a>
+  <a href="#descargar" data-i18n="nav.download">Descargar</a>
+</nav>
+
+<main id="main">
+<span id="top"></span>
+
+<!-- ===================== hero ===================== -->
+<section class="hero">
+  <div class="wrap hero__in">
+    <span class="pill" data-reveal>
+      <span class="pill__dot" aria-hidden="true"></span>
+      <span data-i18n="hero.pill">v<span class="num" data-version>1.20.1</span> · Windows y macOS · Gratis</span>
+    </span>
+
+    <h1 class="h-hero hero__title" data-reveal style="--d:60ms" data-i18n-html="hero.title">
+      Tu cliente Git,<br>con la IA que <em class="ser">tú</em> eliges
+    </h1>
+
+    <p class="lede hero__lede" data-reveal style="--d:120ms" data-i18n="hero.lede">
+      Lee tu historial, revisa el pull request, mira el build que viene detrás y deja que la IA
+      escriba tus commits, encuentre tus bugs y resuelva tus conflictos. Después prueba el endpoint
+      que acabas de tocar, consulta la base de datos que hay debajo y entra por SSH a la máquina
+      donde corre — sin salir de la ventana.
+    </p>
+
+    <div class="hero__cta" data-reveal style="--d:180ms">
+      <a class="dl" id="dl-win" href="https://github.com/sorodriguezz/code-flow/releases/latest" data-os="win">
+        <span class="dl__badge" data-i18n="hero.yours">Tu sistema</span>
+        <svg class="dl__os" aria-hidden="true"><use href="#i-win"/></svg>
+        <span>
+          <span class="dl__t" data-i18n="hero.win">Descargar para Windows</span>
+          <span class="dl__s" data-dl-meta>.exe · x64 · 73 MB</span>
+        </span>
+        <svg class="dl__arrow" aria-hidden="true"><use href="#i-dl"/></svg>
+      </a>
+      <a class="dl" id="dl-mac" href="https://github.com/sorodriguezz/code-flow/releases/latest" data-os="mac">
+        <span class="dl__badge" data-i18n="hero.yours">Tu sistema</span>
+        <svg class="dl__os" aria-hidden="true"><use href="#i-apple"/></svg>
+        <span>
+          <span class="dl__t" data-i18n="hero.mac">Descargar para macOS</span>
+          <span class="dl__s" data-dl-meta>.dmg · Apple Silicon · 80 MB</span>
+        </span>
+        <svg class="dl__arrow" aria-hidden="true"><use href="#i-dl"/></svg>
+      </a>
+    </div>
+
+    <p class="hero__fine" data-reveal style="--d:240ms">
+      <span data-i18n="hero.fine1">Se actualiza solo</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <span data-i18n="hero.fine2">Sin cuenta ni telemetría</span>
+      <span class="sep" aria-hidden="true">·</span>
+      <a href="https://github.com/sorodriguezz/code-flow/releases" target="_blank" rel="noopener" data-i18n="hero.fine3">Ver todas las descargas</a>
+    </p>
+  </div>
+
+  <div class="wrap wrap--wide stage" data-reveal style="--d:300ms">
+    <div class="stage__glow" aria-hidden="true"></div>
+    <div class="window" id="heroWindow">
+      <img src="screenshots/windows.png" width="1500" height="1198"
+           alt="CodeFlow con el repositorio en la ventana principal y el API client desprendido en una ventana aparte"
+           fetchpriority="high" decoding="async">
+    </div>
+    <p class="stage__caption" data-i18n="hero.caption">El repositorio en la ventana principal. El API client, desprendido en la suya.</p>
+
+    <div class="scroll-cue" aria-hidden="true">
+      <span class="scroll-cue__line"></span>
+      <span data-i18n="hero.scroll">Desliza</span>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== marquee ===================== -->
+<div class="marquee" aria-hidden="true">
+  <div class="marquee__track" id="marquee">
+    <span class="marquee__item">GitHub</span><span class="marquee__item">GitLab</span>
+    <span class="marquee__item">Azure DevOps</span><span class="marquee__item">Claude Code</span>
+    <span class="marquee__item">Codex</span><span class="marquee__item">Gemini</span>
+    <span class="marquee__item">Grok</span><span class="marquee__item">Open Code</span>
+    <span class="marquee__item">Cline</span><span class="marquee__item">Ollama</span>
+    <span class="marquee__item">PostgreSQL</span><span class="marquee__item">SQL Server</span>
+    <span class="marquee__item">MongoDB</span><span class="marquee__item">Redis</span>
+    <span class="marquee__item">InterSystems IRIS</span><span class="marquee__item">Supabase</span>
+    <span class="marquee__item">GraphQL</span><span class="marquee__item">gRPC</span>
+    <span class="marquee__item">MQTT</span><span class="marquee__item">WebSocket</span>
+    <span class="marquee__item">Socket.IO</span><span class="marquee__item">Postman</span>
+    <span class="marquee__item">OpenAPI</span><span class="marquee__item">Jira</span>
+    <span class="marquee__item">monday.com</span><span class="marquee__item">Azure Boards</span>
+    <span class="marquee__item">Amazon S3</span><span class="marquee__item">Azure Blob</span>
+    <span class="marquee__item">draw.io</span><span class="marquee__item">DBML</span>
+  </div>
+</div>
+
+<!-- ===================== stats ===================== -->
+<section class="band band--tight">
+  <div class="wrap">
+    <div class="stats" data-reveal>
+      <div class="stat">
+        <span class="stat__n" data-count="15">15</span>
+        <span class="stat__l" data-i18n="stats.1">herramientas en una sola ventana</span>
+      </div>
+      <div class="stat">
+        <span class="stat__n" data-count="7">7</span>
+        <span class="stat__l" data-i18n="stats.2">motores de IA, uno por tarea</span>
+      </div>
+      <div class="stat">
+        <span class="stat__n" data-count="6">6</span>
+        <span class="stat__l" data-i18n="stats.3">protocolos en el API client</span>
+      </div>
+      <div class="stat">
+        <span class="stat__n" data-count="3">3</span>
+        <span class="stat__l" data-i18n="stats.4">plataformas Git a la vez</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== ACT I — one window, many apps ===================== -->
+<section class="band act" id="workspace">
+  <div class="wrap">
+    <div class="head">
+      <div class="head__top">
+        <span class="eyebrow" data-i18n="a1.eyebrow">El workspace</span>
+        <span class="sec-ix">01 / 06</span>
+      </div>
+      <h2 class="h-1" data-i18n-html="a1.title">Una ventana.<br><em class="ser">Quince</em> aplicaciones.</h2>
+      <p class="lede" data-i18n="a1.lede">
+        Cada icono del riel es una app completa, no un panel. Todas comparten el mismo workspace:
+        cambiar de cliente cambia a la vez los repositorios, las colecciones, las conexiones, las
+        notas y las credenciales. Y ninguna se filtra a la ventana del siguiente cliente.
+      </p>
+    </div>
+
+    <div class="act__grid">
+      <div class="act__steps" id="act1-steps">
+        <article class="step is-active" data-step="0">
+          <span class="step__k" data-i18n="a1.s1k">Git</span>
+          <h3 class="step__h" data-i18n="a1.s1h">El historial, legible de un vistazo</h3>
+          <p class="step__p" data-i18n="a1.s1p">Grafo de commits con sus ramas, diff unificado o en paralelo, stashes, remotos y un <b>deshacer commit</b> para cuando te equivocas. El fetch en segundo plano te dice siempre cuántos commits llevas de adelanto o de retraso.</p>
+        </article>
+        <article class="step" data-step="1">
+          <span class="step__k" data-i18n="a1.s2k">Editor</span>
+          <h3 class="step__h" data-i18n="a1.s2h">El mismo Monaco, cableado al repositorio</h3>
+          <p class="step__p" data-i18n="a1.s2p">Ir a definición, hover y diagnósticos vía LSP. <b>Blame en línea</b> sobre la línea del cursor. Editores divididos, borradores que sobreviven a un reinicio, y run &amp; debug por DAP con breakpoints.</p>
+        </article>
+        <article class="step" data-step="2">
+          <span class="step__k" data-i18n="a1.s3k">Pipelines</span>
+          <h3 class="step__h" data-i18n="a1.s3h">Una ejecución no es una lista: es una cascada</h3>
+          <p class="step__p" data-i18n="a1.s3p">El grafo muestra qué corrió en paralelo y qué estuvo esperando — que es donde se fueron los minutos de verdad. Logs con ANSI intacto dentro de la app, y el cronómetro sigue contando mientras el build sigue vivo.</p>
+        </article>
+        <article class="step" data-step="3">
+          <span class="step__k" data-i18n="a1.s4k">API client</span>
+          <h3 class="step__h" data-i18n="a1.s4h">Prueba el endpoint que acabas de tocar</h3>
+          <p class="step__p" data-i18n="a1.s4p">Seis protocolos, colecciones, entornos y variables que se resuelven en URL, headers, body y auth. Importa desde Postman, OpenAPI, Insomnia, HAR o un cURL pegado.</p>
+        </article>
+        <article class="step" data-step="4">
+          <span class="step__k" data-i18n="a1.s5k">Diagramas</span>
+          <h3 class="step__h" data-i18n="a1.s5h">El esquema se dibuja mientras lo escribes</h3>
+          <p class="step__p" data-i18n="a1.s5p">DBML como texto, dibujado en vivo — y el dibujo no es de solo lectura: cada gesto se aplica como una edición de texto, así que ⌘Z lo deshace como una pulsación. Al lado, draw.io completo y offline.</p>
+        </article>
+      </div>
+
+      <div class="act__viz">
+        <div class="railbox">
+          <!-- the app rail, rebuilt in HTML -->
+          <div class="rail" role="tablist" aria-label="Aplicaciones del riel">
+            <span class="rail__pip" id="railPip" aria-hidden="true"></span>
+            <span class="rail__i is-active" data-rail="0" title="Git"><svg aria-hidden="true"><use href="#i-git"/></svg></span>
+            <span class="rail__i" data-rail="1" title="Editor"><svg aria-hidden="true"><use href="#i-code"/></svg></span>
+            <span class="rail__i" data-rail="2" title="Pipelines"><svg aria-hidden="true"><use href="#i-pipe"/></svg></span>
+            <span class="rail__i" data-rail="3" title="API client"><svg aria-hidden="true"><use href="#i-api"/></svg></span>
+            <span class="rail__i" data-rail="4" title="Diagramas"><svg aria-hidden="true"><use href="#i-diagram"/></svg></span>
+            <span class="rail__i" data-rail="-1" title="Bases de datos"><svg aria-hidden="true"><use href="#i-db"/></svg></span>
+            <span class="rail__i" data-rail="-1" title="Remote"><svg aria-hidden="true"><use href="#i-remote"/></svg></span>
+            <span class="rail__i" data-rail="-1" title="Agentes"><svg aria-hidden="true"><use href="#i-agent"/></svg></span>
+            <span class="rail__i" data-rail="-1" title="Notas"><svg aria-hidden="true"><use href="#i-note"/></svg></span>
+            <span class="rail__i" data-rail="-1" title="Llavero"><svg aria-hidden="true"><use href="#i-key"/></svg></span>
+          </div>
+
+          <!-- the swapping screenshot deck -->
+          <div>
+            <div class="deck" id="act1-deck">
+              <div class="deck__item is-active" data-deck="0">
+                <figure class="shot" data-video="media/git-graph">
+                  <img src="screenshots/graph.png" width="1500" height="942" loading="lazy" decoding="async"
+                       alt="Grafo de commits de CodeFlow con ramas, autor, fecha y etiquetas de versión">
+                  <span class="shot__slot"><svg aria-hidden="true"><use href="#i-film"/></svg> media/git-graph</span>
+                </figure>
+              </div>
+              <div class="deck__item" data-deck="1">
+                <figure class="shot" data-video="media/editor">
+                  <img src="screenshots/editor.png" width="1500" height="942" loading="lazy" decoding="async"
+                       alt="El editor Monaco integrado en CodeFlow, con el árbol de archivos y el panel de terminal">
+                  <span class="shot__slot"><svg aria-hidden="true"><use href="#i-film"/></svg> media/editor</span>
+                </figure>
+              </div>
+              <div class="deck__item" data-deck="2">
+                <figure class="shot" data-video="media/pipelines">
+                  <img src="screenshots/pipelines.png" width="1500" height="942" loading="lazy" decoding="async"
+                       alt="Pipelines de CI en CodeFlow mostrando la ejecución como una cascada de jobs">
+                  <span class="shot__slot"><svg aria-hidden="true"><use href="#i-film"/></svg> media/pipelines</span>
+                </figure>
+              </div>
+              <div class="deck__item" data-deck="3">
+                <figure class="shot" data-video="media/api-client">
+                  <img src="screenshots/api-client.png" width="1500" height="942" loading="lazy" decoding="async"
+                       alt="El API client de CodeFlow con una petición GET, sus parámetros y la respuesta JSON">
+                  <span class="shot__slot"><svg aria-hidden="true"><use href="#i-film"/></svg> media/api-client</span>
+                </figure>
+              </div>
+              <div class="deck__item" data-deck="4">
+                <figure class="shot" data-video="media/dbml">
+                  <img src="screenshots/diagrams.png" width="1500" height="942" loading="lazy" decoding="async"
+                       alt="Editor de esquemas DBML de CodeFlow con el diagrama de tablas y sus relaciones">
+                  <span class="shot__slot"><svg aria-hidden="true"><use href="#i-film"/></svg> media/dbml</span>
+                </figure>
+              </div>
+            </div>
+            <p class="stage__caption" id="act1-cap">Grafo de commits — ramas, refs y el diff a un clic.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== horizontal tool rail ===================== -->
+<section class="hs" id="herramientas">
+  <div class="hs__pin">
+    <div class="hs__head">
+      <div class="head" style="margin-bottom:0">
+        <div class="head__top">
+          <span class="eyebrow eyebrow--am" data-i18n="tools.eyebrow">El riel completo</span>
+          <span class="sec-ix">02 / 06</span>
+        </div>
+        <h2 class="h-1" data-i18n-html="tools.title">Quince apps que comparten <em class="ser">un</em> workspace</h2>
+      </div>
+    </div>
+
+    <div class="hs__track" id="hsTrack">
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-git"/></svg></span><h3 class="tool__n" data-i18n="t.git.n">Git</h3><p class="tool__d" data-i18n="t.git.d">Grafo, diffs, ramas, stashes, deshacer commit y escaneo de secretos antes de cada commit.</p><span class="tool__meta">graph · diff · stash</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-pr"/></svg></span><h3 class="tool__n" data-i18n="t.pr.n">Pull requests</h3><p class="tool__d" data-i18n="t.pr.d">Lista, revisa, comenta, aprueba y cierra. Varias cuentas por host, y revisión pegando solo el enlace.</p><span class="tool__meta">github · gitlab · azure</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-pipe"/></svg></span><h3 class="tool__n" data-i18n="t.ci.n">Pipelines</h3><p class="tool__d" data-i18n="t.ci.d">La ejecución como cascada, con logs ANSI dentro de la app y refresco en vivo mientras corre.</p><span class="tool__meta">actions · gitlab ci · azure</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-code"/></svg></span><h3 class="tool__n" data-i18n="t.ed.n">Editor</h3><p class="tool__d" data-i18n="t.ed.d">Monaco con LSP, blame en línea, editores divididos, previsualización Markdown y debug por DAP.</p><span class="tool__meta">monaco · lsp · dap</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-term"/></svg></span><h3 class="tool__n" data-i18n="t.term.n">Terminal y servicios</h3><p class="tool__d" data-i18n="t.term.d">Los servicios arrancan en orden de dependencias y cada uno espera una puerta real: un puerto, un probe HTTP, una línea en el log.</p><span class="tool__meta">deps · health gates</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-agent"/></svg></span><h3 class="tool__n" data-i18n="t.ag.n">Agentes</h3><p class="tool__d" data-i18n="t.ag.d">Un rol con su propio modelo e instrucciones. Tareas y cadenas con una compuerta humana donde tú digas.</p><span class="tool__meta">tareas · cadenas · gates</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-api"/></svg></span><h3 class="tool__n" data-i18n="t.api.n">API client</h3><p class="tool__d" data-i18n="t.api.d">Seis protocolos, colecciones, entornos, scripts de pre-request y tests en JavaScript.</p><span class="tool__meta">rest · graphql · grpc · mqtt</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-db"/></svg></span><h3 class="tool__n" data-i18n="t.db.n">Bases de datos</h3><p class="tool__d" data-i18n="t.db.d">Árbol completo, consola SQL con EXPLAIN, edición de filas en grilla y túnel SSH cuando hay bastión.</p><span class="tool__meta">postgres · mssql · mongo · redis</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-diagram"/></svg></span><h3 class="tool__n" data-i18n="t.dia.n">Diagramas</h3><p class="tool__d" data-i18n="t.dia.d">DBML dibujado mientras escribes, editable desde el lienzo — y el draw.io completo, offline.</p><span class="tool__meta">dbml · draw.io · sql</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-remote"/></svg></span><h3 class="tool__n" data-i18n="t.rem.n">Remote</h3><p class="tool__d" data-i18n="t.rem.d">Sesiones SSH con tus llaves, SFTP y FTP en ambos sentidos, port forwarding y almacenamiento en la nube.</p><span class="tool__meta">ssh · sftp · s3 · azure</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-note"/></svg></span><h3 class="tool__n" data-i18n="t.note.n">Notas</h3><p class="tool__d" data-i18n="t.note.d">Cuadernos Markdown para la decisión, el runbook y el postmortem, con panel de IA y plantillas.</p><span class="tool__meta">markdown · plantillas</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-key"/></svg></span><h3 class="tool__n" data-i18n="t.key.n">Llavero</h3><p class="tool__d" data-i18n="t.key.d">Bóveda con una contraseña maestra estirada con Argon2id y cada elemento sellado con AES-256-GCM.</p><span class="tool__meta">argon2id · aes-256-gcm</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-story"/></svg></span><h3 class="tool__n" data-i18n="t.story.n">Historias</h3><p class="tool__d" data-i18n="t.story.d">De un documento a un backlog: criterios en Gherkin, verificados contra tu código y publicados en tu tablero.</p><span class="tool__meta">gherkin · jira · monday</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-wiki"/></svg></span><h3 class="tool__n" data-i18n="t.wiki.n">Wiki</h3><p class="tool__d" data-i18n="t.wiki.d">Lee el código y escribe la documentación técnica: por repositorio y por workspace, como sistema.</p><span class="tool__meta">markdown · publicable</span></article>
+      <article class="tool"><span class="tool__ico"><svg aria-hidden="true"><use href="#i-backup"/></svg></span><h3 class="tool__n" data-i18n="t.bk.n">Backups</h3><p class="tool__d" data-i18n="t.bk.d">Cifrados con tu frase, programados y restaurables. En una carpeta, en Google Drive o en OneDrive.</p><span class="tool__meta">cifrado · programado</span></article>
+    </div>
+
+    <div class="hs__hint">
+      <span data-i18n="tools.hint">Sigue bajando</span>
+      <span class="hs__bar"><i id="hsBar"></i></span>
+      <span class="num" id="hsCount">01 / 15</span>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== ACT II — one engine per task ===================== -->
+<section class="band act act--flip" id="ia">
+  <div class="wrap">
+    <div class="head">
+      <div class="head__top">
+        <span class="eyebrow" data-i18n="a2.eyebrow">Inteligencia artificial</span>
+        <span class="sec-ix">03 / 06</span>
+      </div>
+      <h2 class="h-1" data-i18n-html="a2.title">No eliges una IA.<br>Eliges <em class="ser">quién</em> hace qué.</h2>
+      <p class="lede" data-i18n="a2.lede">
+        Seis motores que enchufas más un séptimo que viene dentro del instalador. CodeFlow detecta
+        cuáles tienes instalados y te dice lo que falta, en vez de dejarte adivinando por qué algo
+        no funciona. Una fila por acción: qué motor la ejecuta y qué se le dice.
+      </p>
+    </div>
+
+    <div class="act__grid">
+      <div class="act__steps" id="act2-steps">
+        <article class="step is-active" data-step="0">
+          <span class="step__k" data-i18n="a2.s1k">Modelo por tarea</span>
+          <h3 class="step__h" data-i18n="a2.s1h">Un mensaje de commit no necesita tu mejor modelo</h3>
+          <p class="step__p" data-i18n="a2.s1p">El commit lo escribe un modelo local: instantáneo, gratis y sin salir de tu máquina. Lo que quede en <b>«heredar»</b> usa tu proveedor por defecto, así que puedes ignorar la tabla entera si con un modelo te basta.</p>
+        </article>
+        <article class="step" data-step="1">
+          <span class="step__k" data-i18n="a2.s2k">Donde sí paga</span>
+          <h3 class="step__h" data-i18n="a2.s2h">El review del PR se lleva el más capaz que tengas</h3>
+          <p class="step__p" data-i18n="a2.s2p">Y el arreglo de hallazgos, uno con acceso a herramientas, para que edite los archivos de verdad. Cambiar de modelo son <b>dos clics</b> desde el propio chat, sin pasar por Ajustes.</p>
+        </article>
+        <article class="step" data-step="2">
+          <span class="step__k" data-i18n="a2.s3k">Offline</span>
+          <h3 class="step__h" data-i18n="a2.s3h">¿Código que no puede salir de la empresa?</h3>
+          <p class="step__p" data-i18n="a2.s3p">Pon Cline sobre un modelo local con Ollama y todo lo de arriba corre en tu máquina, sin coste por token — arreglar hallazgos incluido, porque Cline conduce el modelo en vez de solo completar texto.</p>
+        </article>
+        <article class="step" data-step="3">
+          <span class="step__k" data-i18n="a2.s4k">En segundo plano</span>
+          <h3 class="step__h" data-i18n="a2.s4h">Nada se pierde por mirar a otro lado</h3>
+          <p class="step__p" data-i18n="a2.s4p">Varias conversaciones a la vez, sin tope. Cambiar de chat, abrir un PR o cerrar el panel <b>no cancela nada</b>: la respuesta aterriza en la conversación que la pidió, la estés mirando o no.</p>
+        </article>
+      </div>
+
+      <div class="act__viz">
+        <div class="engine" id="engineCard">
+          <div class="engine__hd">
+            <h3 data-i18n="a2.card">Modelo por tarea</h3>
+            <span class="tag">Ajustes › IA</span>
+          </div>
+          <div class="engine__rows">
+            <div class="erow is-on" data-row="0">
+              <span class="erow__task"><span class="erow__t" data-i18n="a2.r1t">Mensaje de commit</span><span class="erow__d" data-i18n="a2.r1d">Instantáneo, gratis, nunca sale del equipo</span></span>
+              <span class="erow__engine"><i class="erow__chip" style="background:#35D6A4"></i> Local · 0.5B</span>
+            </div>
+            <div class="erow" data-row="1">
+              <span class="erow__task"><span class="erow__t" data-i18n="a2.r2t">Análisis pre-commit</span><span class="erow__d" data-i18n="a2.r2d">Algo rápido: corre en cada cambio</span></span>
+              <span class="erow__engine"><i class="erow__chip" style="background:#9AA6BC"></i> Codex</span>
+            </div>
+            <div class="erow" data-row="2">
+              <span class="erow__task"><span class="erow__t" data-i18n="a2.r3t">Review de pull request</span><span class="erow__d" data-i18n="a2.r3d">El más capaz que tengas: aquí es donde paga</span></span>
+              <span class="erow__engine"><i class="erow__chip" style="background:#FFC131"></i> Claude Code</span>
+            </div>
+            <div class="erow" data-row="3">
+              <span class="erow__task"><span class="erow__t" data-i18n="a2.r4t">Descripción del PR</span><span class="erow__d" data-i18n="a2.r4d">El que mejor escriba</span></span>
+              <span class="erow__engine"><i class="erow__chip" style="background:#6C5CE7"></i> Gemini</span>
+            </div>
+            <div class="erow" data-row="4">
+              <span class="erow__task"><span class="erow__t" data-i18n="a2.r5t">Arreglar hallazgos</span><span class="erow__d" data-i18n="a2.r5d">Con herramientas, para que edite los archivos</span></span>
+              <span class="erow__engine"><i class="erow__chip" style="background:#24C8DB"></i> Cline · Ollama</span>
+            </div>
+            <div class="erow" data-row="5">
+              <span class="erow__task"><span class="erow__t" data-i18n="a2.r6t">Resolver conflictos</span><span class="erow__d" data-i18n="a2.r6d">El que prefieras, local incluido</span></span>
+              <span class="erow__engine"><i class="erow__chip" style="background:#FF8C6B"></i> Open Code</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== feature — providers ===================== -->
+<section class="band band--tight">
+  <div class="wrap">
+    <div class="feat feat--flip">
+      <div class="feat__body" data-reveal>
+        <span class="eyebrow eyebrow--am" data-i18n="fa.eyebrow">Proveedores</span>
+        <h2 class="h-2" data-i18n-html="fa.title">Siete motores. La app te dice <em class="ser">cuáles</em> tienes.</h2>
+        <p class="body-c" data-i18n="fa.p">
+          Claude Code, Codex, Gemini, Grok, Open Code y Cline se enchufan con su propia sesión — sin
+          claves de API guardadas en ninguna parte. El séptimo no se instala: viene en el instalador.
+        </p>
+        <ul class="feat__list">
+          <li class="feat__li"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="fa.l1"><b>Autocompletado local</b> — un <code>llama-server</code> recortado (22 MB en macOS, 38 MB en Windows) escribe texto fantasma mientras tecleas.</span></li>
+          <li class="feat__li"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="fa.l2"><b>Perezoso a propósito</b> — el motor arranca con la primera sugerencia y para cuando dejas de escribir. Nada corre de fondo por haberlo instalado.</span></li>
+          <li class="feat__li"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="fa.l3"><b>Gasto y cuota, separados</b> — un medidor distingue lo facturado por tokens de lo que se ha comido tu suscripción. El que no publica límite lo dice, en vez de inventarse un número.</span></li>
+          <li class="feat__li"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="fa.l4"><b>Cline es la puerta</b> a cualquier endpoint compatible con OpenAI — y llega ahí <i>con herramientas</i>.</span></li>
+        </ul>
+      </div>
+      <div class="feat__media" data-reveal style="--d:120ms">
+        <figure class="shot" data-video="media/ai-providers">
+          <div class="shot__bar" aria-hidden="true">
+            <span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span>
+            <span class="shot__name">Ajustes › Asistente de IA › Proveedores</span>
+          </div>
+          <img src="screenshots/ai-settings.png" width="1500" height="942" loading="lazy" decoding="async"
+               alt="Pantalla de ajustes de CodeFlow mostrando los motores de IA detectados con su estado disponible o no encontrado">
+          <span class="shot__slot"><svg aria-hidden="true"><use href="#i-film"/></svg> media/ai-providers</span>
+        </figure>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== ACT III — the review engine ===================== -->
+<section class="band" id="review">
+  <div class="wrap">
+    <div class="head head--center">
+      <div class="head__top" style="justify-content:center">
+        <span class="eyebrow" data-i18n="a3.eyebrow">El motor de review</span>
+      </div>
+      <h2 class="h-1" data-i18n-html="a3.title">El review se <em class="ser">planifica</em> antes de gastar nada</h2>
+      <p class="lede" style="text-align:center" data-i18n="a3.lede">
+        CodeFlow recorta cada archivo a los símbolos que el PR tocó — el método entero, numerado, con
+        <code>&gt;</code> marcando lo que cambió — reparte el trabajo entre varios revisores en paralelo
+        y cierra con una pasada cruzada buscando lo que ningún revisor de un solo archivo puede ver.
+      </p>
+    </div>
+
+    <div class="pipe" id="pipe" data-reveal>
+      <svg class="pipe__svg" viewBox="0 0 680 180" role="img"
+           aria-label="Diagrama del motor de review: planificación, tres revisores en paralelo, pasada cruzada y resumen final">
+        <g class="pipe__paths">
+          <path class="pipe__path" d="M108 90 H152 Q172 90 172 62 V36 Q172 36 196 36"/>
+          <path class="pipe__path" d="M108 90 H196"/>
+          <path class="pipe__path" d="M108 90 H152 Q172 90 172 118 V144 Q172 144 196 144"/>
+          <path class="pipe__path" d="M324 36 H348 Q368 36 368 64 V90 H412"/>
+          <path class="pipe__path" d="M324 90 H412"/>
+          <path class="pipe__path" d="M324 144 H348 Q368 144 368 116 V90 H412"/>
+          <path class="pipe__path" d="M540 90 H568"/>
+        </g>
+        <g class="pipe__flows">
+          <path class="pipe__flow" d="M108 90 H152 Q172 90 172 62 V36 Q172 36 196 36"/>
+          <path class="pipe__flow" d="M108 90 H196"/>
+          <path class="pipe__flow" d="M108 90 H152 Q172 90 172 118 V144 Q172 144 196 144"/>
+          <path class="pipe__flow" d="M324 36 H348 Q368 36 368 64 V90 H412"/>
+          <path class="pipe__flow" d="M324 90 H412"/>
+          <path class="pipe__flow" d="M324 144 H348 Q368 144 368 116 V90 H412"/>
+          <path class="pipe__flow" d="M540 90 H568"/>
+        </g>
+        <g class="pipe__node is-on" data-node="0"><rect x="4" y="72" width="104" height="36" rx="9"/><text x="56" y="94" text-anchor="middle">PLAN</text></g>
+        <g class="pipe__node" data-node="1"><rect x="196" y="18" width="128" height="36" rx="9"/><text x="260" y="40" text-anchor="middle">REVISOR 1</text></g>
+        <g class="pipe__node" data-node="1"><rect x="196" y="72" width="128" height="36" rx="9"/><text x="260" y="94" text-anchor="middle">REVISOR 2</text></g>
+        <g class="pipe__node" data-node="1"><rect x="196" y="126" width="128" height="36" rx="9"/><text x="260" y="148" text-anchor="middle">REVISOR 3</text></g>
+        <g class="pipe__node" data-node="2"><rect x="412" y="72" width="128" height="36" rx="9"/><text x="476" y="94" text-anchor="middle">CRUZADA</text></g>
+        <g class="pipe__node" data-node="3"><rect x="568" y="72" width="108" height="36" rx="9"/><text x="622" y="94" text-anchor="middle">RESUMEN</text></g>
+      </svg>
+
+      <div class="findings" id="findings" aria-live="polite">
+        <div class="finding" data-f="0"><span class="finding__sev sev-hi">ALTA</span><span class="finding__t" data-i18n="a3.f1">El token se escribe en el log de error</span><span class="finding__f">auth.ts:142</span></div>
+        <div class="finding" data-f="1"><span class="finding__sev sev-md">MEDIA</span><span class="finding__t" data-i18n="a3.f2">La firma cambió y dejó atrás a tres llamadores</span><span class="finding__f">client.ts:88</span></div>
+        <div class="finding" data-f="2"><span class="finding__sev sev-md">MEDIA</span><span class="finding__t" data-i18n="a3.f3">El esquema y el DTO se separaron</span><span class="finding__f">user.dto.ts:24</span></div>
+        <div class="finding" data-f="3"><span class="finding__sev sev-lo">BAJA</span><span class="finding__t" data-i18n="a3.f4">Falta el índice sobre la clave foránea</span><span class="finding__f">schema.sql:61</span></div>
+      </div>
+    </div>
+
+    <div class="vow__grid" style="margin-top:clamp(32px,4vw,56px)">
+      <div class="vow__i" data-reveal>
+        <span class="vow__k">01</span>
+        <h3 class="vow__h" data-i18n="a3.c1h">Tres niveles con contrato real</h3>
+        <p class="vow__p" data-i18n="a3.c1p">Básico, completo y ultra. Umbral de confianza, severidades, lentes activas y paralelismo se editan en Ajustes, se aplican en código y quedan congelados en cada review guardado.</p>
+      </div>
+      <div class="vow__i" data-reveal style="--d:80ms">
+        <span class="vow__k">02</span>
+        <h3 class="vow__h" data-i18n="a3.c2h">Memoria que se consulta</h3>
+        <p class="vow__p" data-i18n="a3.c2p">Lo que ya se descartó sobre esos mismos archivos en otros PRs vuelve como contexto, y quien más referencia los símbolos que tocas llega como pista para cambios de contrato.</p>
+      </div>
+      <div class="vow__i" data-reveal style="--d:160ms">
+        <span class="vow__k">03</span>
+        <h3 class="vow__h" data-i18n="a3.c3h">Sin clonar, si hace falta</h3>
+        <p class="vow__p" data-i18n="a3.c3p">¿El repo no está en tu máquina? El diff se lee desde la API del host. Es un review más superficial y se te dice — y lo clonas en un clic para el completo.</p>
+      </div>
+      <div class="vow__i" data-reveal style="--d:240ms">
+        <span class="vow__k">04</span>
+        <h3 class="vow__h" data-i18n="a3.c4h">Pega el enlace y ya</h3>
+        <p class="vow__p" data-i18n="a3.c4p">⇧⌘L con la URL del PR: CodeFlow deduce a cuál de tus repos pertenece — aunque esté en otro workspace — y arranca la revisión.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== feature — git ===================== -->
+<section class="band band--tight">
+  <div class="wrap">
+    <div class="feat">
+      <div class="feat__body" data-reveal>
+        <span class="eyebrow" data-i18n="fb.eyebrow">Git</span>
+        <h2 class="h-2" data-i18n-html="fb.title">Preparar, commitear y <em class="ser">deshacer</em></h2>
+        <p class="body-c" data-i18n="fb.p">
+          Diff unificado o en paralelo, seleccionable para copiar. Ramas, remotos y stashes al alcance.
+          Y un escaneo de secretos antes de cada commit que te para a tiempo — reglas deterministas,
+          sin enviar nada a ninguna parte.
+        </p>
+        <ul class="feat__list">
+          <li class="feat__li"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="fb.l1"><b>Fetch automático en segundo plano</b>: siempre sabes cuántos commits llevas de adelanto o de retraso.</span></li>
+          <li class="feat__li"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="fb.l2"><b>Esconde el ruido</b>: clic derecho en el árbol para ocultar algo de <i>tu</i> vista — un filtro por repositorio que nunca toca el disco ni llega a un commit.</span></li>
+          <li class="feat__li"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="fb.l3"><b>Workspaces</b>: abre varios proyectos y agrúpalos. Cambiar de workspace cambia todo lo demás con él.</span></li>
+        </ul>
+      </div>
+      <div class="feat__media" data-reveal style="--d:120ms">
+        <figure class="shot" data-video="media/git-changes">
+          <img src="screenshots/changes.png" width="1500" height="942" loading="lazy" decoding="async"
+               alt="Vista de cambios de CodeFlow con los archivos modificados a la izquierda y el diff a la derecha">
+          <span class="shot__slot"><svg aria-hidden="true"><use href="#i-film"/></svg> media/git-changes</span>
+        </figure>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== bento ===================== -->
+<section class="band">
+  <div class="wrap">
+    <div class="head">
+      <div class="head__top">
+        <span class="eyebrow eyebrow--am" data-i18n="bento.eyebrow">Y además</span>
+        <span class="sec-ix">05 / 06</span>
+      </div>
+      <h2 class="h-1" data-i18n-html="bento.title">Todo lo que normalmente<br>está en <em class="ser">otra</em> app</h2>
+    </div>
+
+    <div class="bento">
+      <article class="cell cell--w3" data-reveal>
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-db"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.db.h">Tus bases de datos, en la misma ventana</h3>
+        <p class="cell__p" data-i18n="b.db.p">La consulta que necesitas comprobar está a una pestaña de la migración que acabas de escribir. Árbol completo, consola SQL con historial y <code>EXPLAIN</code>, y edición de filas que se prepara localmente: ves las sentencias exactas antes de que corra nada.</p>
+        <div class="cell__tags">
+          <span class="tag">PostgreSQL</span><span class="tag">Supabase</span><span class="tag">SQL Server</span>
+          <span class="tag">IRIS</span><span class="tag">MongoDB</span><span class="tag">Redis</span>
+          <span class="tag" data-i18n="b.db.t1">solo lectura</span><span class="tag" data-i18n="b.db.t2">túnel SSH</span>
+        </div>
+      </article>
+
+      <article class="cell cell--w3 cell--am" data-reveal style="--d:80ms">
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-remote"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.rem.h">Las máquinas donde corre tu código</h3>
+        <p class="cell__p" data-i18n="b.rem.p">Sesiones SSH con tus llaves y los hosts importados de tu <code>~/.ssh/config</code> en vez de tecleados otra vez. Archivos en ambos sentidos por SFTP y FTP, port forwarding para la base de datos detrás del bastión, y el almacenamiento en la nube en el mismo árbol.</p>
+        <div class="cell__tags">
+          <span class="tag">SSH</span><span class="tag">SFTP</span><span class="tag">FTP</span>
+          <span class="tag">Amazon S3</span><span class="tag">Azure Blob</span><span class="tag">Queue · Table · Files</span>
+        </div>
+      </article>
+
+      <article class="cell cell--w6" data-reveal>
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-diagram"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.dbml.h">Esquemas que escribes, dibujas y pruebas</h3>
+        <p class="cell__p" data-i18n="b.dbml.p">Un esquema en DBML se dibuja mientras lo escribes — y el dibujo no es de solo lectura. Renombra una tabla, añade una columna o traza una relación desde el lienzo: cada gesto se aplica como una <b>edición de texto</b>, así que tus comentarios, líneas en blanco y formato sobreviven intactos. La superficie <b>Datos</b> levanta un SQLite efímero desde el diagrama para llenarlo a mano y consultarlo sin red de seguridad, porque aquí <code>DELETE FROM users</code> es algo que escribes todos los días.</p>
+        <div class="cell__media">
+          <figure class="shot shot--plain" style="border:0;border-radius:0;box-shadow:none" data-video="media/dbml-edit">
+            <img src="screenshots/dbml.png" width="1500" height="339" loading="lazy" decoding="async"
+                 alt="Diagrama de esquema DBML en CodeFlow con varias tablas y sus relaciones trazadas">
+            <span class="shot__slot"><svg aria-hidden="true"><use href="#i-film"/></svg> media/dbml-edit</span>
+          </figure>
+        </div>
+      </article>
+
+      <article class="cell" data-reveal>
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-note"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.note.h">Notas junto al código</h3>
+        <p class="cell__p" data-i18n="b.note.p">Cuadernos Markdown para la decisión, el runbook y el postmortem, con plantillas y un panel de IA que redacta sin salir de la página. Por workspace, para que las notas de un cliente no aparezcan en la ventana de otro.</p>
+      </article>
+
+      <article class="cell cell--am" data-reveal style="--d:70ms">
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-key"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.key.h">Llavero</h3>
+        <p class="cell__p" data-i18n="b.key.p">Una contraseña maestra estirada con Argon2id que desenvuelve la clave que sella cada elemento con AES-256-GCM. <b>Sin verificador guardado</b>: una contraseña errónea no desenvuelve la clave, y eso <i>es</i> la comprobación.</p>
+      </article>
+
+      <article class="cell" data-reveal style="--d:140ms">
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-backup"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.bk.h">Backups que sí restauran</h3>
+        <p class="cell__p" data-i18n="b.bk.p">Cifrados con la frase que elijas y todo en un archivo. Programados y al salir, guardando las copias que pidas, donde digas: una carpeta, Google Drive u OneDrive.</p>
+      </article>
+
+      <article class="cell cell--w3" data-reveal>
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-agent"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.ag.h">Agentes que siguen trabajando cuando tú no</h3>
+        <p class="cell__p" data-i18n="b.ag.p">Un agente es un rol con su propio motor: nombre, modelo e instrucciones, escritas una vez. Dale un objetivo y un repositorio y vete: sigue corriendo mientras cambias de vista, y espera en <b>«Te toca»</b> cuando necesita una respuesta tuya. Si un paso falla, la cadena <b>se detiene</b>: reintentar, saltar o abortar. Nunca reintenta sola.</p>
+        <div class="cell__media">
+          <img src="screenshots/ai-tasks.png" width="1500" height="1198" loading="lazy" decoding="async"
+               alt="Panel de CodeFlow donde se asigna un motor de IA distinto a cada acción">
+        </div>
+      </article>
+
+      <article class="cell cell--w3" data-reveal style="--d:80ms">
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-story"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.story.h">De un documento a un backlog — y al código</h3>
+        <p class="cell__p" data-i18n="b.story.p">Apunta a una página de wiki, una carpeta de Markdown o texto pegado y recibe historias de usuario con criterios en <b>Gherkin</b> listos para Cucumber. Cada historia se puntúa <b>localmente, sin modelo de por medio</b> — es una comprobación que vale la pena precisamente porque es la misma siempre.</p>
+        <ul class="feat__list" style="margin-top:4px">
+          <li class="feat__li" style="font-size:.86rem"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="b.story.l1"><b>Verifica contra tu código</b>: cada criterio recibe un veredicto respaldado por el archivo y la línea que lo prueba.</span></li>
+          <li class="feat__li" style="font-size:.86rem"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="b.story.l2"><b>Publica</b> en Azure Boards, Jira o monday.com — y nada llega al tablero solo.</span></li>
+          <li class="feat__li" style="font-size:.86rem"><svg class="feat__tick" aria-hidden="true"><use href="#i-check"/></svg><span data-i18n-html="b.story.l3"><b>Construye</b>: una historia, de uno a varios repositorios, en dos fases con una compuerta humana en medio.</span></li>
+        </ul>
+      </article>
+
+      <article class="cell" data-reveal>
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-phone"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.mob.h">Tu teléfono, como segunda pantalla</h3>
+        <p class="cell__p" data-i18n="b.mob.p">Enciende el servidor de control remoto, pon los seis dígitos en el navegador del móvil y ya. Sin tienda de apps, sin cuenta, sin nada publicado a internet. Cada dispositivo se revoca uno a uno desde el escritorio.</p>
+      </article>
+
+      <article class="cell" data-reveal style="--d:70ms">
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-windows-app"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.win.h">Ventanas propias</h3>
+        <p class="cell__p" data-i18n="b.win.p">Cualquier app del riel puede desprenderse a su propia ventana. <b>Desprender mueve, nunca duplica</b>: no hay forma de pedir dos ventanas sobre lo mismo, así que nunca acabas con dos editores sobre un archivo pisándose.</p>
+      </article>
+
+      <article class="cell cell--am" data-reveal style="--d:140ms">
+        <span class="cell__ico"><svg aria-hidden="true"><use href="#i-sparkle"/></svg></span>
+        <h3 class="cell__h" data-i18n="b.you.h">Y hazla tuya</h3>
+        <p class="cell__p" data-i18n="b.you.p">Tema claro, oscuro o del sistema con el color de acento que quieras. Interfaz en español e inglés. Paleta de comandos, atajos reconfigurables, el orden del riel en tus manos y un tour guiado que puedes dejar y retomar.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== demo reel ===================== -->
+<section class="band band--tight">
+  <div class="wrap">
+    <div class="head head--center">
+      <span class="eyebrow" data-i18n="reel.eyebrow">En movimiento</span>
+      <h2 class="h-1" data-i18n-html="reel.title">Míralo <em class="ser">funcionando</em></h2>
+    </div>
+    <div class="reel" id="reel" data-video="media/demo" data-reveal>
+      <img src="screenshots/windows.png" width="1500" height="1198" loading="lazy" decoding="async"
+           alt="Fotograma del vídeo de demostración de CodeFlow">
+      <div class="reel__veil">
+        <button class="reel__play" type="button" id="reelPlay" aria-label="Reproducir la demostración">
+          <svg aria-hidden="true"><use href="#i-play"/></svg>
+        </button>
+      </div>
+      <span class="shot__slot"><svg aria-hidden="true"><use href="#i-film"/></svg> media/demo.mp4</span>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== privacy ===================== -->
+<section class="band" id="privacidad">
+  <div class="wrap">
+    <div class="vow" data-reveal>
+      <div class="head" style="margin-bottom:0;max-width:720px">
+        <div class="head__top">
+          <span class="eyebrow eyebrow--am" data-i18n="vow.eyebrow">Seguridad y privacidad</span>
+          <span class="sec-ix">06 / 06</span>
+        </div>
+        <h2 class="h-1" data-i18n-html="vow.title">Es una app de escritorio.<br>El único servidor es el que <em class="ser">tú</em> enciendes.</h2>
+      </div>
+
+      <div class="vow__grid">
+        <div class="vow__i">
+          <span class="vow__k" data-i18n="vow.k1">Sin cuenta</span>
+          <h3 class="vow__h" data-i18n="vow.h1">Ni telemetría</h3>
+          <p class="vow__p" data-i18n="vow.p1">No hay que registrarse en nada. El servidor de control remoto es el que enciendes tú, en tu propia red, y lo vuelves a apagar.</p>
+        </div>
+        <div class="vow__i">
+          <span class="vow__k" data-i18n="vow.k2">Llavero del SO</span>
+          <h3 class="vow__h" data-i18n="vow.h2">Tus tokens, nunca en texto plano</h3>
+          <p class="vow__p" data-i18n="vow.p2">Los PAT y las contraseñas de las bases de datos van al llavero del sistema operativo, no a la base de datos de la app.</p>
+        </div>
+        <div class="vow__i">
+          <span class="vow__k" data-i18n="vow.k3">Por usuario</span>
+          <h3 class="vow__h" data-i18n="vow.h3">Datos en tu propia cuenta</h3>
+          <p class="vow__p" data-i18n="vow.p3">La base de datos, los ajustes y la bóveda viven en los datos de aplicación de tu usuario, donde otra cuenta de la misma máquina no puede leerlos.</p>
+        </div>
+        <div class="vow__i">
+          <span class="vow__k" data-i18n="vow.k4">Offline</span>
+          <h3 class="vow__h" data-i18n="vow.h4">Dos caminos completos</h3>
+          <p class="vow__p" data-i18n="vow.p4">Cline sobre Ollama para lo conversacional y el motor incluido para el autocompletado. Tu código nunca sale de la máquina.</p>
+        </div>
+        <div class="vow__i">
+          <span class="vow__k" data-i18n="vow.k5">Antes del commit</span>
+          <h3 class="vow__h" data-i18n="vow.h5">Escaneo de secretos</h3>
+          <p class="vow__p" data-i18n="vow.p5">Detecta claves de API, tokens y llaves privadas y te para a tiempo. Reglas deterministas, sin enviar nada a ninguna parte.</p>
+        </div>
+        <div class="vow__i">
+          <span class="vow__k" data-i18n="vow.k6">Tuyos</span>
+          <h3 class="vow__h" data-i18n="vow.h6">Repos y backups intocables</h3>
+          <p class="vow__p" data-i18n="vow.p6">La app no los borra nunca: ni al restablecer, ni al desinstalar. Viven en tu carpeta y ahí se quedan.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== download ===================== -->
+<section class="band" id="descargar">
+  <div class="wrap">
+    <div class="get" data-reveal>
+      <span class="eyebrow" style="justify-content:center" data-i18n="get.eyebrow">Descarga</span>
+      <h2 class="h-1" style="margin-top:var(--s-4)" data-i18n-html="get.title">Ábrelo y <em class="ser">ya</em></h2>
+      <p class="lede" style="margin:var(--s-4) auto 0;text-align:center" data-i18n="get.lede">
+        Descarga el instalador, ábrelo y listo. La app se actualiza sola cuando aparece una versión
+        nueva, y puede seguir viva en la bandeja para que tus terminales y tareas de IA no se caigan
+        al cerrar la ventana.
+      </p>
+
+      <div class="get__cta">
+        <a class="dl" id="dl-win2" href="https://github.com/sorodriguezz/code-flow/releases/latest" data-os="win">
+          <span class="dl__badge" data-i18n="hero.yours">Tu sistema</span>
+          <svg class="dl__os" aria-hidden="true"><use href="#i-win"/></svg>
+          <span>
+            <span class="dl__t" data-i18n="get.win">Windows · Instalador</span>
+            <span class="dl__s" data-dl-meta>.exe · x64 · 73 MB</span>
+          </span>
+          <svg class="dl__arrow" aria-hidden="true"><use href="#i-dl"/></svg>
+        </a>
+        <a class="dl" id="dl-mac2" href="https://github.com/sorodriguezz/code-flow/releases/latest" data-os="mac">
+          <span class="dl__badge" data-i18n="hero.yours">Tu sistema</span>
+          <svg class="dl__os" aria-hidden="true"><use href="#i-apple"/></svg>
+          <span>
+            <span class="dl__t" data-i18n="get.mac">macOS · Apple Silicon</span>
+            <span class="dl__s" data-dl-meta>.dmg · aarch64 · 80 MB</span>
+          </span>
+          <svg class="dl__arrow" aria-hidden="true"><use href="#i-dl"/></svg>
+        </a>
+      </div>
+
+      <div class="get__meta">
+        <div class="get__mi">
+          <span class="get__mk" data-i18n="get.k1">Versión</span>
+          <span class="get__mv"><span data-version>1.20.1</span> · <span data-published>—</span></span>
+        </div>
+        <div class="get__mi">
+          <span class="get__mk" data-i18n="get.k2">Windows</span>
+          <span class="get__mv" data-i18n="get.v2">.exe o .msi · x64 · 10 y 11</span>
+        </div>
+        <div class="get__mi">
+          <span class="get__mk" data-i18n="get.k3">macOS</span>
+          <span class="get__mv" data-i18n="get.v3">.dmg · Apple Silicon (M1+)</span>
+        </div>
+        <div class="get__mi">
+          <span class="get__mk" data-i18n="get.k4">Licencia</span>
+          <span class="get__mv" data-i18n="get.v4">Source-available · uso gratuito</span>
+        </div>
+        <div class="get__mi">
+          <span class="get__mk" data-i18n="get.k5">Idiomas</span>
+          <span class="get__mv">Español · English</span>
+        </div>
+      </div>
+
+      <p class="hero__fine" style="margin-top:var(--s-5)">
+        <a href="https://github.com/sorodriguezz/code-flow/releases" target="_blank" rel="noopener" data-i18n="get.all">Todas las versiones y notas de cada release</a>
+        <span class="sep" aria-hidden="true">·</span>
+        <a href="https://github.com/sorodriguezz/code-flow/blob/main/LICENSE.es.md" target="_blank" rel="noopener" data-i18n="get.lic">Licencia</a>
+      </p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ===================== footer ===================== -->
+<footer class="foot">
+  <div class="wrap">
+    <div class="foot__grid">
+      <div>
+        <a class="brand" href="#top">
+          <span class="brand__mark" aria-hidden="true">
+            <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+              <g fill="#FFC131"><path d="M 287.1088 306.3596 A 304.5458 304.5458 0 1 1 638.6394 695.1124 A 204.1753 204.1753 0 0 0 648.2765 599.2187 A 214.4050 214.4050 0 1 0 403.7621 271.6684 A 358.1623 358.1623 0 0 0 287.1088 306.3596 Z"/><circle cx="577.9549" cy="396.6739" r="79.7190"/></g>
+              <g fill="#24C8DB"><path d="M 736.8912 717.6404 A 304.5458 304.5458 0 1 1 385.3606 328.8876 A 204.1753 204.1753 0 0 0 375.7235 424.7813 A 214.4050 214.4050 0 1 0 620.2379 752.3316 A 358.1623 358.1623 0 0 0 736.8912 717.6404 Z"/><circle cx="446.0451" cy="627.3261" r="79.7190"/></g>
+            </svg>
+          </span>
+          CodeFlow
+        </a>
+        <p class="body-c" style="margin-top:var(--s-3);font-size:.88rem;max-width:34ch" data-i18n="foot.tag">
+          Git, reviews e IA en un solo flujo. Una app nativa para Windows y macOS.
+        </p>
+      </div>
+
+      <div>
+        <h3 class="foot__h" data-i18n="foot.h1">Producto</h3>
+        <div class="foot__l">
+          <a href="#workspace" data-i18n="nav.workspace">Workspace</a>
+          <a href="#ia" data-i18n="nav.ai">IA</a>
+          <a href="#review" data-i18n="nav.review">Review</a>
+          <a href="#herramientas" data-i18n="nav.tools">Herramientas</a>
+          <a href="#descargar" data-i18n="nav.download">Descargar</a>
+        </div>
+      </div>
+
+      <div>
+        <h3 class="foot__h" data-i18n="foot.h2">Proyecto</h3>
+        <div class="foot__l">
+          <a href="https://github.com/sorodriguezz/code-flow" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/sorodriguezz/code-flow/releases" target="_blank" rel="noopener">Releases</a>
+          <a href="https://github.com/sorodriguezz/code-flow/issues" target="_blank" rel="noopener">Issues</a>
+          <a href="https://github.com/sorodriguezz/code-flow/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener" data-i18n="foot.contrib">Contribuir</a>
+        </div>
+      </div>
+
+      <div>
+        <h3 class="foot__h" data-i18n="foot.h3">Documentación</h3>
+        <div class="foot__l">
+          <a href="https://github.com/sorodriguezz/code-flow/blob/main/README.es.md" target="_blank" rel="noopener">README (ES)</a>
+          <a href="https://github.com/sorodriguezz/code-flow/blob/main/README.md" target="_blank" rel="noopener">README (EN)</a>
+          <a href="https://github.com/sorodriguezz/code-flow/blob/main/LICENSE.es.md" target="_blank" rel="noopener" data-i18n="get.lic">Licencia</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot__btm">
+      <span data-i18n="foot.copy">© 2026 Sebastián Rodríguez Zapata · Source-available, no open source</span>
+      <span data-i18n="foot.made">Hecho para quien quiere Git, reviews e IA en un solo flujo</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/site.js" defer></script>
+</body>
+</html>

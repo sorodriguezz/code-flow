@@ -554,7 +554,7 @@ CodeFlow es software de **código visible, no de código abierto** — mira [`LI
 - **Lo que no puedes hacer:** redistribuirla, modificarla, bifurcarla hacia tu propio producto,
   venderla, ofrecerla como servicio alojado, ni usar su código para entrenar un modelo.
 
-Copyright © 2026 [TU NOMBRE LEGAL]. Todos los derechos reservados.
+Copyright © 2026 Sebastián Rodríguez Zapata. Todos los derechos reservados.
 
 ---
 

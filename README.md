@@ -537,7 +537,7 @@ CodeFlow is **source-available, not open source** — see [`LICENSE`](LICENSE).
 - **What you may not do:** redistribute it, modify it, fork it into your own product, sell it, offer
   it as a hosted service, or use its code to train a model.
 
-Copyright © 2026 [TU NOMBRE LEGAL]. All rights reserved.
+Copyright © 2026 Sebastián Rodríguez Zapata. All rights reserved.
 
 ---
 
