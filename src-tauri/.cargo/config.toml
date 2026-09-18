@@ -1,0 +1,9 @@
+# Cargo runs a freshly built executable through this wrapper, which code-signs it with a stable
+# local certificate first. See scripts/sign-dev.sh for why the signature has to stop changing.
+# Only the Apple targets are listed: nothing about Windows or Linux builds goes through it, and on
+# a machine without the certificate the wrapper runs the binary unchanged.
+[target.aarch64-apple-darwin]
+runner = "scripts/sign-dev.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/sign-dev.sh"
