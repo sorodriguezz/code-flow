@@ -5,6 +5,7 @@ import {
   ClipboardList,
   Database,
   Layers,
+  MessagesSquare,
   MonitorSmartphone,
   NotebookPen,
   Send,
@@ -112,15 +113,30 @@ const APPS: WorkspaceApp[] = [
     labelKey: "tabbar.diagrams",
     descriptionKey: "tabbar.diagramsDescription",
   },
-  // Last, and the only app here that is *not* scoped to the workspace: a password does not belong
-  // to the workspace it was typed in, and losing one because a workspace was tidied up is not a
-  // trade worth making. Its list narrows by workspace; the vault itself does not. See
-  // `vaultStore`'s closing comment.
+  // The first app here that is *not* scoped to the workspace: a password does not belong to the
+  // workspace it was typed in, and losing one because a workspace was tidied up is not a trade
+  // worth making. Its list narrows by workspace; the vault itself does not. See `vaultStore`'s
+  // closing comment.
   {
     id: "vault",
     icon: KeyRound,
     labelKey: "tabbar.vault",
     descriptionKey: "tabbar.vaultDescription",
+  },
+  // Last, and the second app here that is not workspace-scoped — for a different reason than the
+  // vault above it. The vault is global because a secret outlives the workspace it was typed in;
+  // chat is global because the list was *designed* flat, the way ChatGPT's is, and a conversation
+  // you started this morning has to still be one click away after you switch workspace to answer
+  // something else. A `workspace_id` is still recorded on every conversation (backup groups by it,
+  // and so does the run-isolation stamp) — the sidebar simply does not filter on it.
+  //
+  // It is also the only app on this rail that routinely has nothing to do with a repository, which
+  // is what earns it a place in `WORKSPACE_VIEWS` rather than among the repository tabs.
+  {
+    id: "chat",
+    icon: MessagesSquare,
+    labelKey: "tabbar.chat",
+    descriptionKey: "tabbar.chatDescription",
   },
 ];
 

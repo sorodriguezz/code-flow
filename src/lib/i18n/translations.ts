@@ -2481,13 +2481,61 @@ const en = {
   "ai.billingHint": "Top up your account (or switch this task to another provider in Settings) and try again.",
   "ai.openBilling": "Open billing page",
   "ai.openLink": "More information",
+  // The remedies for a provider that is installed but not configured. Each of these accompanies
+  // the CLI's own verbatim error rather than replacing it — the error is what the user would
+  // search for, and the line below is what saves them having to.
+  "ai.setupSignedOut": "This provider is not signed in. Sign in and send the message again:",
+  "chat.attachRemove": "Remove attachment",
+  "chat.attachNeedsConversation": "Send a first message — the attachment is stored with the conversation.",
+  "chat.attachImageBlind": "Stored, but {provider} cannot look at an image: it will read the file rather than see it.",
+  "chat.attachTextOnly": "Attach files. {provider} reads them as files — it cannot look at an image.",
+  "chat.groupComposerPlaceholder": "New chat in {name}…",
+  "chat.groupStart": "Start",
+  "chat.groupNoChats": "No conversations in this project yet.",
+  "chat.groupInstructions": "Instructions",
+  "chat.groupInstructionsPlaceholder": "e.g. Always answer in English. This project is about a mortgage at 25 years.",
+  "chat.groupContext": "Context",
+  "chat.groupContextAdd": "Add a document",
+  "chat.groupContextEmpty": "Add PDFs or documents for every chat in this project to consult.",
+  "chat.groupOpen": "Open project",
+  "chat.groupExpand": "Expand folder",
+  "chat.groupCollapse": "Collapse folder",
+  "chat.statusUnread": "Unread reply",
+  "chat.statusRunning": "Working…",
+  "chat.statusFailed": "The last turn failed",
+  "chat.endpointUnreachable": "This CLI cannot reach {url}. Nothing is answering there, and it will keep retrying — check the endpoint configured for this provider.",
+  "chat.endpointUnreachableKnown": "This CLI cannot reach {url} — that is {service}'s address, and it is not running. It will keep retrying until you stop it.",
+  "chat.groupsTitle": "Folders",
+  "chat.groupNew": "New folder",
+  "chat.groupNamePlaceholder": "Folder name",
+  "chat.groupRename": "Rename folder",
+  "chat.groupDelete": "Delete folder",
+  "chat.groupDeleteHint": "The conversations in it are kept — they go back to the ungrouped list.",
+  "chat.groupMoveTo": "Move to folder",
+  "chat.groupNone": "No folder",
+  "chat.groupUngrouped": "Ungrouped",
+  "chat.groupEmpty": "Empty",
+  "chat.effortTitle": "Reasoning effort",
+  "chat.effortDefault": "The CLI's own setting",
+  "chat.effortLow": "Low",
+  "chat.effortMedium": "Medium",
+  "chat.effortHigh": "High",
+  "chat.effortMax": "Maximum",
+  "chat.effortHint": "Higher levels think longer and cost more. Each CLI has its own scale, so this is mapped to the nearest step it accepts.",
+  "ai.setupCopyCommand": "Copy command",
+  "ai.setupRunInTerminal": "Run in terminal",
+  "ai.setupTerminalTitle": "Provider sign-in",
+  "ai.setupModelSuggest": "That model no longer exists for this provider. It suggested these:",
+  "ai.setupModelGone": "The configured model does not exist for this provider. Pick another one in the composer.",
+  "ai.setupBinaryMissing": "{binary} is not installed, or is not on the PATH this app can see.",
+  "ai.setupOpenDocs": "Installation instructions",
+  "ai.setupUntrustedDir": "The CLI refused to run in this directory. Updating it usually fixes this — the app already passes the flag it is asking for.",
   "chat.changeModelTitle": "Change the model this chat uses",
   "chat.modelForChat": "Model for chat",
   "chat.loadingModels": "Loading versions…",
   "chat.noModels": "This provider didn't report any models. Set one in Settings.",
   "chat.configureModels": "Configure providers and tasks",
-  "chat.providerLocked":
-    "Each provider keeps its own sessions, so an open chat can't move between them. Start a new chat to switch provider — here you can only change the current provider's version.",
+  "chat.providerLocked": "Start a new chat to switch provider",
   "settings.templateCustom": "Customized",
   "settings.templateDefault": "Default",
   "settings.templateReset": "Restore default",
@@ -3241,6 +3289,7 @@ const en = {
   "shortcuts.cmdViewGraph": "Go to History",
   "shortcuts.cmdViewChanges": "Go to Changes",
   "shortcuts.cmdViewEditor": "Go to Editor",
+  "shortcuts.cmdFocusChatComposer": "Focus the chat composer",
   "shortcuts.cmdViewNext": "Next top tab",
   "shortcuts.cmdViewPrev": "Previous top tab",
   "shortcuts.cmdProjectSwitcher": "Switch repository…",
@@ -3476,6 +3525,113 @@ const en = {
   "chat.viewOnGitlab": "View on GitLab",
   "chat.confirmPostGitlab": "Post {n} comment(s) on merge request !{id} in GitLab?",
   "chat.postedGitlab": "Posted to GitLab",
+
+  /* The chat workspace. Everything above this point belongs to the AI panel's repository chat and
+     stays where it is; the keys below are the full-window one reached from the rail. */
+  "chat.workspaceTitle": "Chat",
+  "chat.newChat": "New chat",
+  "chat.searchPlaceholder": "Search conversations",
+  "chat.searchNoMatches": "No conversation matches that.",
+  /* The second section of the search results: conversations whose *title* did not match but whose
+     message bodies did. It is labelled and kept apart rather than merged into the list, because a
+     row that shows a title with none of the query's words in it reads as a bug until you are told
+     why it is there. */
+  "chat.foundInMessages": "Found in messages",
+  "chat.pinnedGroup": "Pinned",
+  "chat.recentGroup": "Recent",
+  "chat.archivedGroup": "Archived",
+  "chat.untitled": "New conversation",
+  "chat.rename": "Rename",
+  "chat.renamePrompt": "New name for this conversation",
+  "chat.pin": "Pin",
+  "chat.unpin": "Unpin",
+  "chat.archive": "Archive",
+  "chat.unarchive": "Restore",
+  "chat.branch": "Branch from here",
+  "chat.delete": "Delete",
+  "chat.deleteConfirm": "Delete “{title}”? The conversation and its messages go with it.",
+  "chat.showArchived": "Show archived",
+  "chat.hideArchived": "Hide archived",
+  "chat.sidebarEmpty": "No conversations yet. Start one — it doesn’t need a repository.",
+  "chat.emptyTitle": "Ask anything",
+  "chat.emptyBody": "A conversation here doesn’t need a repository open. Attach one when the question is about code, and the model can read it.",
+  "chat.jumpToLatest": "Jump to latest",
+  /* The empty transcript of a conversation that exists but has no turns yet — distinct from
+     `chat.emptyTitle`, which is the no-conversation-selected state of the whole workspace. */
+  "chat.emptyTurnTitle": "Nothing asked yet",
+  "chat.emptyTurnSubtitle": "Type below to start. Without a repository attached the model can read and search, but it won’t write anything.",
+  /* Under the pending bubble, for the four CLIs that emit nothing until the message is finished.
+     Saying so beats a progress bar that is lying about what it knows — see the capability matrix. */
+  "chat.noStreamingNotice": "This CLI sends the answer in one piece — it will appear when it’s done.",
+  /* The escape hatch on the typewriter reveal used for the providers that do not stream. By the
+     time the text is being uncovered at reading speed it is already whole on disk, so the wait
+     belongs to us and not to the model, and an uninterruptible one is the exact failure of every
+     "realistic typing" effect. */
+  "chat.skipReveal": "Show it all",
+  "chat.thinkingLabel": "Reasoning",
+  /* Two strings, not one with a tense: the block is open while the model is still emitting
+     `thinking_delta` and stays on screen after it stops, and "Reasoning…" left on a finished turn
+     reads as a reply that never arrived. */
+  "chat.thinkingLive": "Reasoning…",
+  "chat.thinkingDone": "Reasoned",
+  "chat.thinkingShow": "Show reasoning",
+  "chat.thinkingHide": "Hide reasoning",
+  "chat.stopped": "Stopped",
+  "chat.failed": "This turn failed",
+  "chat.regenerate": "Regenerate",
+  "chat.editMessage": "Edit and resend",
+  /* The banner above the composer while an earlier turn is being asked again. "Edit" is the wrong
+     word for what a CLI session can actually do: nothing is rewritten, the old turn and its answer
+     stay in the transcript and in the engine's context, and what this sends is a new turn. Without
+     the banner the user believes they corrected a question they in fact only asked twice. */
+  "chat.reAskingTurn": "Asking turn {n} again — the original stays in the transcript",
+  "chat.copyCode": "Copy code",
+  "chat.copied": "Copied",
+  /* On the regenerate / edit / branch buttons. None of the six CLIs can rewind a session, so each
+     of these is a fresh session replaying the prefix — cheap to store, paid for again in tokens. */
+  "chat.replayCost": "Re-runs the conversation so far as context",
+  "chat.branchHere": "Branch from this message",
+  "chat.composerPlaceholder": "Ask anything…",
+  "chat.send": "Send",
+  "chat.stop": "Stop",
+  "chat.attach": "Attach an image",
+  "chat.attachUnsupported": "{provider} can’t read images",
+  /* Two different refusals for a pasted image, and never a silent drop. An image that simply
+     vanishes looks like the app lost it, and the next thing the user does is describe the
+     screenshot in words to a model that never received it. */
+  "chat.pasteImageNeedsFile": "Paste can’t carry an image here — no CLI reads one from stdin. Use the attach button so the model gets a path it can open.",
+  "chat.pasteImageUnsupported": "{provider} can’t read images at all, so this paste would go nowhere.",
+  /* The line the attach button appends to the draft. Phrased as an instruction because that is
+     literally the mechanism: the CLI is an agent holding a file tool, and the only honest way to
+     "attach" an image to it is to tell it where the image is. */
+  "chat.attachedImageLine": "Look at the image at {path}",
+  "chat.attachRepo": "Attach a repository",
+  "chat.detachRepo": "Detach the repository",
+  "chat.noRepoBadge": "No repository · read-only",
+  "chat.noRepoHint": "With no repository attached this conversation can’t write files. Attach one to let the model edit.",
+  "chat.repoBadge": "Repository · {name}",
+  "chat.commandsApp": "CodeFlow",
+  "chat.commandsProvider": "{provider} commands",
+  "chat.commandsNone": "{provider} reports no slash commands in headless mode.",
+  "chat.openInTerminal": "Open {provider} in a terminal instead",
+  "chat.sourceCliReported": "reported by the CLI",
+  "chat.sourceDocumented": "documented",
+  "chat.sourceApp": "CodeFlow",
+  "chat.cmdNew": "Start a new conversation",
+  "chat.cmdModel": "Change the model",
+  "chat.cmdProvider": "Change the provider",
+  "chat.cmdClear": "Clear the transcript",
+  "chat.cmdExport": "Export as Markdown",
+  "chat.cmdBranch": "Branch from the last turn",
+  /* The honest strip under the picker. See the capability matrix in `lib/aiProviders`: a control
+     that silently does nothing for four of six CLIs is worse than one that isn’t offered. */
+  "chat.ambiguousResumeWarning": "{provider} resumes whichever conversation ran last, not this one. Two open at once will cross contexts.",
+  "chat.warnProviderSwitch": "Switching to {provider} is a transplant, not a resume: the transcript so far is re-sent as context on the next turn.",
+  "chat.noQuota": "{provider} publishes no usage limit",
+  "chat.quickAskTitle": "Quick ask",
+  "chat.quickAskPlaceholder": "Ask and press Enter…",
+  "chat.quickAskOpenFull": "Open in CodeFlow",
+  "chat.quickAskClose": "Close",
   "pr.openComments": "Open comments ({n})",
   "pr.loadingComments": "Loading comments…",
   "pr.noComments": "No comments yet",
@@ -3709,6 +3865,8 @@ const en = {
   "tabbar.notesDescription": "Markdown notes, books, tags and templates — the writing that surrounds this workspace's code",
   "tabbar.diagrams": "Diagrams",
   "tabbar.diagramsDescription": "Flowcharts, architecture and ER diagrams in folders — the drawing that surrounds this workspace's code",
+  "tabbar.chat": "Chat",
+  "tabbar.chatDescription": "Conversations with your AI CLIs — one flat list, with or without a repository behind them",
   "tabbar.reorderHint": "Hold to drag it into a new position",
 
   "diagrams.title": "Diagrams",

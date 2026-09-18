@@ -30,6 +30,21 @@ describe("window identity", () => {
     expect(identity.satellite).toEqual({ kind: "repo", refId: "abc123" });
   });
 
+  /**
+   * The quick-ask window, which is the kind this guard forgot.
+   *
+   * `windows.rs` builds it as `window.html?kind=quick&ref=ask`, and for as long as `parseIdentity`
+   * listed only `app` and `repo` it answered `satellite: null` for a window that was otherwise
+   * perfectly healthy — so `SatelliteApp` fell through to its "nothing readable" branch and painted
+   * a skeleton under a global hotkey, forever. Nothing failed loudly: the webview loaded, the label
+   * was right, and every check but this one passed.
+   */
+  it("reads the quick-ask window", () => {
+    const identity = parseIdentity("sat-quick-ask", "?kind=quick&ref=ask");
+    expect(identity.main).toBe(false);
+    expect(identity.satellite).toEqual({ kind: "quick", refId: "ask" });
+  });
+
   /** The prefix is the whole of the test, so a window called `mobile` or `settings` one day is not
    *  silently treated as a satellite. */
   it("only the sat- prefix makes a satellite", () => {

@@ -4,7 +4,7 @@
 > [`LICENSE`](LICENSE), en inglés. Si algo no coincide entre ambos textos,
 > manda el inglés.
 
-Copyright © 2026 [TU NOMBRE LEGAL]. Todos los derechos reservados.
+Copyright © 2026 Sebastián Rodríguez Zapata. Todos los derechos reservados.
 
 CodeFlow es software de **código visible** (*source-available*). **No es código
 abierto ni software libre.** El código fuente se publica para que puedas

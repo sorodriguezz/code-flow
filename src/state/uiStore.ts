@@ -5,11 +5,11 @@ import type { ApiSettingsTab } from "./apiModalStore";
 // its commands. Erased at compile time; there is no runtime cycle.
 import type { ShortcutGroup } from "../lib/shortcuts";
 
-/** `api`, `agents`, `stories`, `remote`, `notes`, `diagrams` and `vault` are the odd ones out: the
- * built-in API client, the agent console, the user-stories workspace, the SSH host manager, the
- * Markdown notebook, the diagram library and the keyring all render whether or not a project is
- * open (see `App.tsx`), and all seven are reached from the app rail down the right edge rather than
- * from the tab bar.
+/** `api`, `agents`, `stories`, `remote`, `notes`, `diagrams`, `vault` and `chat` are the odd ones
+ * out: the built-in API client, the agent console, the user-stories workspace, the SSH host
+ * manager, the Markdown notebook, the diagram library, the keyring and the chat workspace all
+ * render whether or not a project is open (see `App.tsx`), and all eight are reached from the app
+ * rail down the right edge rather than from the tab bar.
  *
  * Six of them are scoped to the *workspace*. The keyring is not — it is global, and its list merely
  * narrows by workspace. See `vaultStore`'s closing comment for why that difference matters. */
@@ -27,7 +27,24 @@ export type MainView =
   | "remote"
   | "notes"
   | "diagrams"
-  | "vault";
+  | "vault"
+  /**
+   * The chat workspace — the odd one among the odd ones, and for a different reason than the vault.
+   *
+   * It is reached from the rail and it renders with no project open, like the seven above it. But
+   * where the vault is global *because a secret outlives the workspace it was typed in*, chat is
+   * global because of a deliberate product decision about the shape of the list: **one flat
+   * conversation list, ChatGPT's model**, not one list per workspace. A `workspace_id` is still
+   * written on every conversation — backup groups by it, and the run-isolation stamp needs it — but
+   * the sidebar does not filter on it, so switching workspace does not change what you can see.
+   *
+   * The consequence to keep in mind when touching this: a conversation is *not* guaranteed to be
+   * about the repository, or about any repository. A repo-less conversation is now the default
+   * case, which is why this id has to be in `WORKSPACE_VIEWS` in `App.tsx` — see the argument
+   * there — and why the chat's own commands treat `projectId: null` as ordinary rather than as a
+   * missing precondition.
+   */
+  | "chat";
 
 /** The three directions the stories section works in. Its own sub-tab, one level under the view. */
 export type StoriesMode = "batches" | "review" | "wiki";
@@ -127,6 +144,20 @@ interface UiState {
   apiSettingsTab: ApiSettingsTab | undefined;
   /** Which of the API tab's two workspaces is on screen. */
   apiWorkspace: ApiWorkspace;
+  /**
+   * A nonce bumped every time something asks for the chat composer to take the caret.
+   *
+   * A counter rather than a boolean, and a counter rather than a ref handed around, for the reason
+   * `apiCommandStore` keeps a nonce: pressing ⌘L twice in a row has to focus twice, and two
+   * identical requests are one unchanged value to a store subscriber. The composer watches this and
+   * calls `focus()` on each change; nothing has to be consumed or cleared, so a composer that is
+   * not mounted yet simply misses a request it could not have honoured anyway.
+   *
+   * It lives here rather than in a command store of its own because `⌘L` is not shared with a
+   * second owner the way `⌘S` is — there is exactly one composer per window — and because the
+   * shortcut has to switch view *and* focus in one move, which is two writes to this store.
+   */
+  chatComposerFocus: number;
   setActiveView: (view: MainView) => void;
   setStoriesMode: (mode: StoriesMode) => void;
   /** Opens the stories section on a given sub-tab, in one move. */
@@ -157,6 +188,14 @@ interface UiState {
   /** Opens the API tab straight onto one of its workspaces — for the command palette and shortcuts,
    * which have to both switch view and pick a side. */
   openApiWorkspace: (workspace: ApiWorkspace) => void;
+  /**
+   * Opens the chat workspace and asks its composer for the caret, in one move.
+   *
+   * Both halves matter: `chat.placeholder` has promised "⌘L to focus chat" in both dictionaries
+   * since long before anything implemented it, and a chord that focused a composer on a screen you
+   * are not looking at would be a stranger promise still.
+   */
+  focusChatComposer: () => void;
   toggleSettings: () => void;
   closeSettings: () => void;
   openInEditor: (relPath: string, line?: number) => void;
@@ -189,6 +228,7 @@ export const useUiStore = create<UiState>((set) => ({
   settingsTab: null,
   apiSettingsTab: undefined,
   apiWorkspace: "requests",
+  chatComposerFocus: 0,
   pendingEditorPath: null,
   pendingEditorLine: null,
   aiPanelOpen: false,
@@ -221,6 +261,14 @@ export const useUiStore = create<UiState>((set) => ({
   setApiWorkspace: (apiWorkspace) => set({ apiWorkspace }),
   openApiWorkspace: (apiWorkspace) =>
     set({ activeView: "api", apiWorkspace, settingsOpen: false }),
+  // Settings closed for the same reason `setActiveView` closes it: it covers the whole app, and a
+  // composer focused behind it takes the keystrokes nobody can see the effect of.
+  focusChatComposer: () =>
+    set((s) => ({
+      activeView: "chat",
+      settingsOpen: false,
+      chatComposerFocus: s.chatComposerFocus + 1,
+    })),
   toggleSettings: () => set((s) => ({ settingsOpen: !s.settingsOpen })),
   closeSettings: () => set({ settingsOpen: false }),
   openInEditor: (relPath, line) =>

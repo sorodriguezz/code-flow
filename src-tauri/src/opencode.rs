@@ -139,6 +139,37 @@ impl AiEngine for OpenCodeEngine {
         cmd
     }
 
+    /// opencode spells reasoning effort as a model *variant* — `--variant minimal|high|max`, in its
+    /// own words "provider-specific reasoning effort". Only three of the four neutral levels have
+    /// somewhere to go: `medium` is the absence of a variant, so it maps to no argument rather than
+    /// to a guess, which leaves the model on whatever its own default is. That is the honest answer
+    /// for a CLI that does not have a middle step.
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        let variant = match effort {
+            crate::ai::effort::LOW => "minimal",
+            crate::ai::effort::HIGH => "high",
+            crate::ai::effort::MAX => "max",
+            _ => return Vec::new(),
+        };
+        vec!["--variant".into(), variant.into()]
+    }
+
+    /// Overridden because the derivation above would answer "no": `medium` is deliberately the one
+    /// level this engine maps to nothing, and that must not read as "cannot be asked at all".
+    fn supports_effort(&self) -> bool {
+        true
+    }
+
+    /// `opencode run -f <path>` is this CLI's documented way to attach a file to a message, and it
+    /// takes an array — so every attachment goes through it, images included. Whether the model
+    /// then *sees* an image or reads its bytes depends on which model the user has opencode
+    /// pointed at, which is why `acceptsImages` stays false for this provider on the UI side: the
+    /// app cannot promise what it cannot check.
+    fn attachment_args(&self, attachments: &[crate::ai::AiAttachment]) -> Vec<String> {
+        attachments.iter().flat_map(|a| ["-f".to_string(), a.path.clone()]).collect()
+    }
+
+
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
         interpret_output(success, status_label, stdout, stderr)
     }

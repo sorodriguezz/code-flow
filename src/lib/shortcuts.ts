@@ -27,7 +27,11 @@ export type ShortcutGroup =
    *  inside `ApiView` and so appeared in neither the cheat sheet nor the keybindings screen. */
   | "api"
   /** The keyring. One entry so far — locking it — and it is the one that matters. */
-  | "vault";
+  | "vault"
+  /** The chat workspace. Its own group rather than a pair of rows under "views", because only one
+   *  of its two chords is a destination: the other focuses the composer, which is an action inside
+   *  the screen and reads as nonsense in a list of places to go. */
+  | "chat";
 
 export type ShortcutId =
   | "app.commandPalette"
@@ -47,6 +51,8 @@ export type ShortcutId =
   | "view.notes"
   | "view.diagrams"
   | "view.vault"
+  | "view.chat"
+  | "chat.focusComposer"
   | "view.remote"
   | "view.pipelines"
   | "db.newConsole"
@@ -136,6 +142,7 @@ export const SHORTCUT_GROUP_LABELS: Record<ShortcutGroup, TranslationKey> = {
   git: "shortcuts.groupGit",
   api: "api.title",
   vault: "tabbar.vault",
+  chat: "tabbar.chat",
 };
 
 /**
@@ -160,6 +167,11 @@ const VIEW_ORDER: { view: MainView; workspace?: ApiWorkspace }[] = [
   // Diagrams are here because they are document views like the six above them.
   { view: "notes" },
   { view: "diagrams" },
+  // Chat belongs with the document views above rather than with the two absentees below: it holds
+  // no live session the way `remote` does and puts no lock screen up the way the vault does, and
+  // arriving in it by accident costs the reader exactly a transcript they can read. It is last
+  // because it is the newest, and because cycling is how the rail's apps are discovered.
+  { view: "chat" },
   // The keyring is deliberately absent, for a sharper version of `remote`'s reason: cycling into it
   // by accident would put a lock screen — or worse, an open vault — on screen in the middle of
   // moving between documents. It has its own chord.
@@ -420,6 +432,38 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     // with the letter of the thing they open.
     defaultChord: "Mod+Shift+M",
     run: () => useUiStore.getState().setActiveView("remote"),
+  },
+  {
+    id: "view.chat",
+    group: "chat",
+    labelKey: "tabbar.chat",
+    // Mod+1..Mod+0 are *all* spoken for — graph through stories take 1..7, notes 8, diagrams 9 and
+    // the vault 0 — so this follows Remote and Pipelines into Mod+Shift with a letter. H rather
+    // than the obvious C: Mod+Shift+C is the editor's CodeSnap, and the next letter of "chat" is
+    // Remote's Mod+Shift+M twice over. H is in the word, and nothing else wants it.
+    defaultChord: "Mod+Shift+H",
+    run: () => useUiStore.getState().setActiveView("chat"),
+  },
+  {
+    /**
+     * Focus the composer — the app keeping a promise it has been printing for releases.
+     *
+     * `chat.placeholder` reads "⌘L to focus chat" in English and "⌘L para enfocar el chat" in
+     * Spanish, and until now nothing anywhere bound ⌘L: the placeholder sat in the AI panel's
+     * textarea and in the mobile chat screen telling the user about a keystroke that did nothing.
+     * The chord is genuinely free (⌘⇧L is the vault's lock, ⌘L itself is claimed by no one), so the
+     * fix is to implement the promise rather than to edit the string and lose the affordance.
+     *
+     * It is a *view* switch as well as a focus, which is why it goes through the store's own
+     * action: focusing a composer on a screen the user is not looking at would be a stranger
+     * outcome than doing nothing. See `focusChatComposer` in `uiStore` for why the request travels
+     * as a nonce.
+     */
+    id: "chat.focusComposer",
+    group: "chat",
+    labelKey: "shortcuts.cmdFocusChatComposer",
+    defaultChord: "Mod+L",
+    run: () => useUiStore.getState().focusChatComposer(),
   },
   {
     // Conditional, unlike every other view: the tab only exists on a repository linked to a host

@@ -147,8 +147,25 @@ impl AiEngine for GeminiEngine {
         }
         // Skip permission prompts when the flow may write (chat / fix) or when agy has to read the
         // temp brief file headlessly. A small read-only prompt needs neither.
+        //
+        // The second reason is the uncomfortable one, and it is why `--sandbox` follows. agy has no
+        // narrow "you may read this one file" grant — its only two levers are this flag, which
+        // auto-approves *every* tool request including `write_file` and the shell, and `--sandbox`.
+        // So a run that only ever needed to read a temp brief ends up holding the same authority as
+        // one that was asked to refactor a repository. That is tolerable when the caller opted into
+        // writing; it is not what a read-only conversation was promised.
+        //
+        // Since the brief goes to a file whenever it contains a newline — which a system prompt
+        // joined to a user message always does — this is not a corner case: it is every turn of
+        // every repo-less chat. `--sandbox` does not undo the over-grant, but it is the only
+        // narrowing agy offers, and it takes the shell away, which is the part that turns a read
+        // grant into an arbitrary one. See `commands::chat_cmd`'s module doc, which is careful to
+        // claim intent rather than enforcement for exactly this reason.
         if inv.auto_approve_edits || needs_read_permission {
             cmd.arg("--dangerously-skip-permissions");
+            if !inv.auto_approve_edits {
+                cmd.arg("--sandbox");
+            }
         }
         // Multi-turn chat: resume the most recent conversation. Not this conversation — agy gives a
         // headless caller no id to be specific with, so two chats on one project can cross. See the
@@ -160,6 +177,15 @@ impl AiEngine for GeminiEngine {
             cmd.current_dir(dir);
         }
         cmd
+    }
+
+    /// `agy --effort low|medium|high`, verified on the installed CLI. It has nothing above `high`,
+    /// so `max` saturates there rather than being passed through — agy rejects the whole run on an
+    /// unrecognised value, and losing a turn to a level that does not exist is a worse trade than
+    /// thinking one step less hard than asked.
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        let level = if effort == crate::ai::effort::MAX { "high" } else { effort };
+        vec!["--effort".into(), level.into()]
     }
 
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {

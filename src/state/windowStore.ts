@@ -6,7 +6,7 @@ import {
   openSatellite,
   type SatelliteInfo,
 } from "../lib/tauri/windows";
-import { WINDOW, type SatelliteKind } from "../lib/windowIdentity";
+import { WINDOW, type DetachableKind } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
 import { translate } from "./languageStore";
 
@@ -42,10 +42,10 @@ interface WindowState {
    * Returns `false` when it refused, so the caller can leave the app where it is rather than
    * marking an icon for a window that was never built.
    */
-  detach: (kind: SatelliteKind, refId: string, title: string) => Promise<boolean>;
+  detach: (kind: DetachableKind, refId: string, title: string) => Promise<boolean>;
   focus: (label: string) => Promise<void>;
   /** Whether this app or repository is showing in a window of its own. */
-  detachedLabel: (kind: SatelliteKind, refId: string) => string | null;
+  detachedLabel: (kind: DetachableKind, refId: string) => string | null;
 }
 
 /** What Settings offers, and what a fresh install gets. Four covers the case this feature was asked
@@ -100,7 +100,7 @@ export const useWindowStore = create<WindowState>((set, get) => ({
  * answer changes. In a satellite it always answers `null` for the thing that satellite is showing:
  * a window must not draw itself as "open somewhere else".
  */
-export function useDetachedLabel(kind: SatelliteKind, refId: string): string | null {
+export function useDetachedLabel(kind: DetachableKind, refId: string): string | null {
   return useWindowStore((s) => {
     const found = s.satellites.find((sat) => sat.kind === kind && sat.ref_id === refId);
     if (!found || found.label === WINDOW.label) return null;

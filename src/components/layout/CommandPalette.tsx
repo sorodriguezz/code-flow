@@ -17,6 +17,7 @@ import {
   Glasses,
   History,
   MessageCircle,
+  MessagesSquare,
   MonitorSmartphone,
   Plus,
   Route,
@@ -84,6 +85,10 @@ const VIEW_ITEMS: {
   { id: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
   { id: "diagrams", labelKey: "tabbar.diagrams", icon: Workflow },
   { id: "vault", labelKey: "tabbar.vault", icon: KeyRound },
+  // The same glyph the rail uses, and deliberately not `MessageCircle` above — that one is already
+  // spelled for the AI panel's repository chat in the actions group below, and two rows sharing an
+  // icon in one palette is how you pick the wrong one.
+  { id: "chat", labelKey: "tabbar.chat", icon: MessagesSquare },
 ];
 
 const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {

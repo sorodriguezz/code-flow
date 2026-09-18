@@ -18,9 +18,13 @@
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, AiUsage, QUOTA_MARKER};
+use crate::ai::{
+    quota_signal, refusal_reply, AiDelta, AiDeltaKind, AiEngine, AiInvocation, AiRateLimit, AiRun,
+    AiUsage, QUOTA_MARKER,
+};
 
 /// Commit-message generation always runs on Haiku regardless of the user's configured review
 /// model — it's a small, mechanical task that doesn't need a bigger model.
@@ -108,6 +112,15 @@ impl AiEngine for ClaudeEngine {
         // nothing to show until the process exits. The final `result` event carries exactly the
         // payload the old format produced, so `interpret_output` reads the same fields.
         cmd.arg("--output-format").arg("stream-json").arg("--verbose");
+        // Partial frames **only when somebody is watching them arrive.** The flag turns the event
+        // log into one frame per token, several times the output volume of the same answer, and
+        // every other flow through this engine — commit messages, PR reviews, the fix-one-finding
+        // pass — throws that away unread. It needs `-p` and `--output-format stream-json
+        // --verbose`, all three of which are already above, so the condition is the only thing
+        // standing between this and being free.
+        if inv.stream_deltas.is_some() {
+            cmd.arg("--include-partial-messages");
+        }
         if !inv.allowed_tools.is_empty() {
             cmd.arg("--allowedTools").arg(inv.allowed_tools.join(","));
         }
@@ -123,9 +136,245 @@ impl AiEngine for ClaudeEngine {
         cmd
     }
 
+    /// Claude's scale is this app's scale — `--effort low|medium|high|xhigh|max`. The two extra
+    /// steps it offers above `high` are why the neutral scale tops out at `max` rather than at
+    /// `high`: this is the one CLI that would have lost a level to a three-step vocabulary.
+    /// Claude Code's read-only set, which is the one this app's `--allowedTools` actually enforces.
+    fn read_only_tools(&self) -> Vec<String> {
+        ["Read", "Grep", "Glob", "WebFetch", "WebSearch"].iter().map(|s| s.to_string()).collect()
+    }
+
+
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        vec!["--effort".into(), effort.into()]
+    }
+
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
+        // Filed before the verdict is judged, because the two are independent: a run that failed
+        // still reported its plan windows and still listed the commands this install has, and a
+        // failure is precisely when the first of those is worth having.
+        record_run_meta(stdout);
         interpret_output(success, status_label, stdout, stderr)
     }
+
+    /// The only engine that does. See [`AiEngine::streams_partial`] for what rests on that.
+    fn streams_partial(&self) -> bool {
+        true
+    }
+
+    fn parse_delta(&self, line: &str) -> Vec<AiDelta> {
+        parse_delta_line(line)
+    }
+}
+
+/// Pulls the text/thinking chunks out of one line of `--include-partial-messages` output.
+///
+/// The shape, captured verbatim from `claude 2.1.266` rather than assumed:
+///
+/// ```json
+/// {"type":"stream_event","event":{"type":"content_block_delta","index":1,
+///  "delta":{"type":"text_delta","text":"one"}}}
+/// ```
+///
+/// Three things about it are worth writing down, because none is guessable:
+///
+/// 1. **The reply is not block 0.** On a thinking-capable model, index 0 is a `thinking` block and
+///    its deltas arrive *before* the first `text_delta` of index 1. A reader that assumed the
+///    first deltas it saw were the answer would paint the model's reasoning into the bubble.
+/// 2. **`signature_delta` is dropped on the floor.** It carries the base64 attestation of the
+///    thinking block — hundreds of characters of it, per block, in the same `content_block_delta`
+///    envelope as real text. It is not prose, nobody can read it, and appending it to either
+///    channel would dump a wall of base64 into the middle of a sentence.
+/// 3. **The field is named after the kind.** `text_delta` carries `text`, `thinking_delta` carries
+///    `thinking`. There is no shared key to read.
+///
+/// Every failure is silent and empty by construction: this runs per line inside the output pump,
+/// and a newer CLI that renamed a field must cost this turn its typing, never the run.
+fn parse_delta_line(line: &str) -> Vec<AiDelta> {
+    let line = line.trim();
+    if !line.starts_with('{') {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Vec::new();
+    };
+    if str_field(&value, "type") != Some("stream_event") {
+        return Vec::new();
+    }
+    let Some(event) = value.get("event") else { return Vec::new() };
+    if str_field(event, "type") != Some("content_block_delta") {
+        return Vec::new();
+    }
+    let Some(delta) = event.get("delta") else { return Vec::new() };
+    let (kind, key) = match str_field(delta, "type") {
+        Some("text_delta") => (AiDeltaKind::Text, "text"),
+        Some("thinking_delta") => (AiDeltaKind::Thinking, "thinking"),
+        // `signature_delta` and anything a later version adds: not prose, not ours to render.
+        _ => return Vec::new(),
+    };
+    match str_field(delta, key) {
+        Some(text) => vec![AiDelta { kind, text: text.to_string() }],
+        None => Vec::new(),
+    }
+}
+
+/// One string field of a JSON object, borrowed. A free function rather than a closure so that it
+/// hands back a `&str` tied to the value instead of a `String` per lookup — four allocations per
+/// token, on the one path in this file that runs per token.
+fn str_field<'v>(value: &'v serde_json::Value, key: &str) -> Option<&'v str> {
+    value.get(key).and_then(serde_json::Value::as_str)
+}
+
+/// What the most recent `claude` run said about itself beyond its answer.
+///
+/// **Why a cache and not two more fields on [`AiRun`]**: `AiRun` is built with struct literals by
+/// all six engines, so a field added to it is a compile error in five files this change does not
+/// own. The contract asked for `AiRun.rate_limit` and `AiRun.slash_commands`; this is the closest
+/// shape that keeps the tree building, and it is also what the only consumer actually wants — the
+/// provider-command menu asks "what does this install support", which is a property of the CLI and
+/// not of any one turn, and the quota meter asks "how full am I now".
+#[derive(Debug, Clone, Default)]
+pub struct ClaudeRunMeta {
+    /// How full the plan windows were when the last run finished, if it said. Free here; the same
+    /// number costs `ai_quota.rs` a keychain read and an HTTPS call.
+    pub rate_limit: Option<AiRateLimit>,
+    /// Every slash command this install offers, **as reported — with no leading `/`** (114 of them
+    /// on the machine this was verified against, plugins and user commands included). A caller
+    /// building a menu row adds the slash.
+    pub slash_commands: Vec<String>,
+}
+
+fn meta_cell() -> &'static Mutex<ClaudeRunMeta> {
+    static META: OnceLock<Mutex<ClaudeRunMeta>> = OnceLock::new();
+    META.get_or_init(Mutex::default)
+}
+
+/// The most recent run's report. Empty before the first `claude` run of this process, which is a
+/// real state and the reason the command menu renders app commands alone until then rather than
+/// asserting this install has none.
+pub fn last_run_meta() -> ClaudeRunMeta {
+    meta_cell().lock().map(|m| m.clone()).unwrap_or_default()
+}
+
+/// Files what a finished run reported about itself.
+///
+/// **Each half is only replaced by a run that actually said something.** A run that failed to
+/// launch, or one whose output was cut short, prints neither the init event nor a rate-limit one;
+/// letting that overwrite a good answer with an empty one would make the command menu flicker
+/// empty on the first failed turn and stay that way.
+fn record_run_meta(stdout: &str) {
+    let rate_limit = parse_rate_limit(stdout);
+    let slash_commands = parse_slash_commands(stdout);
+    let Ok(mut meta) = meta_cell().lock() else { return };
+    if rate_limit.is_some() {
+        meta.rate_limit = rate_limit;
+    }
+    if !slash_commands.is_empty() {
+        meta.slash_commands = slash_commands;
+    }
+}
+
+/// The `rate_limit_event` line, captured verbatim from a real run:
+///
+/// ```json
+/// {"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour",
+///  "unifiedWindows":{"five_hour":{"utilization":0.31,"resetsAt":1789700400},
+///                    "seven_day":{"utilization":0.53,"resetsAt":1790010000}}}}
+/// ```
+///
+/// `utilization` is a **fraction**, not a percentage — 0.31 is 31% of the five-hour window spent.
+/// It is converted here, once, so that [`AiRateLimit`] can hold the same 0–100 the rest of the app
+/// means by "percent" and nothing downstream has to remember which source it came from.
+///
+/// The last such line wins: the CLI reports one per API call, and a turn that made several has
+/// only one current answer.
+fn parse_rate_limit(stdout: &str) -> Option<AiRateLimit> {
+    let mut found = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        // Cheap gate first: this walks a log that can be megabytes of tool chatter, and a JSON
+        // parse per line of it would cost more than the number is worth.
+        if !line.starts_with('{') || !line.contains("\"rate_limit_event\"") {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<RateLimitEvent>(line) else { continue };
+        if event.event_type != "rate_limit_event" {
+            continue;
+        }
+        let Some(windows) = event.rate_limit_info.and_then(|info| info.unified_windows) else {
+            continue;
+        };
+        found = Some(AiRateLimit {
+            five_hour_pct: windows.five_hour.utilization * 100.0,
+            seven_day_pct: windows.seven_day.utilization * 100.0,
+        });
+    }
+    found
+}
+
+/// The `slash_commands` array of the `system`/`init` event — every command this install can
+/// expand, including the ones plugins and the user added, which is why it is read from the run
+/// instead of curated here.
+///
+/// The first init wins: a run emits exactly one, and it is the eighth line or so of a stream whose
+/// first entries are hook events.
+fn parse_slash_commands(stdout: &str) -> Vec<String> {
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') || !line.contains("\"slash_commands\"") {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<InitEvent>(line) else { continue };
+        if event.event_type != "system" || event.subtype.as_deref() != Some("init") {
+            continue;
+        }
+        if !event.slash_commands.is_empty() {
+            return event.slash_commands;
+        }
+    }
+    Vec::new()
+}
+
+/// Both shapes are defaulted end to end on purpose: these events are telemetry riding along with
+/// the answer, and a field the CLI renames next month must cost the meter its number, never the
+/// turn its reply.
+#[derive(Deserialize)]
+struct RateLimitEvent {
+    #[serde(rename = "type", default)]
+    event_type: String,
+    #[serde(default)]
+    rate_limit_info: Option<RateLimitInfo>,
+}
+
+#[derive(Deserialize)]
+struct RateLimitInfo {
+    #[serde(rename = "unifiedWindows", default)]
+    unified_windows: Option<UnifiedWindows>,
+}
+
+#[derive(Deserialize)]
+struct UnifiedWindows {
+    #[serde(default)]
+    five_hour: RateWindow,
+    #[serde(default)]
+    seven_day: RateWindow,
+}
+
+#[derive(Default, Deserialize)]
+struct RateWindow {
+    /// 0–1, as the CLI reports it.
+    #[serde(default)]
+    utilization: f64,
+}
+
+#[derive(Deserialize)]
+struct InitEvent {
+    #[serde(rename = "type", default)]
+    event_type: String,
+    #[serde(default)]
+    subtype: Option<String>,
+    #[serde(default)]
+    slash_commands: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -415,5 +664,126 @@ mod tests {
         let run = interpret_output(true, "exit status: 0", stdout, "").unwrap();
         assert_eq!(run.model, None);
         assert_eq!(run.text, "ok");
+    }
+
+    /// Verbatim from `claude -p "say ok" --model haiku --output-format stream-json --verbose
+    /// --include-partial-messages` on 2.1.266, trimmed to the frames this module reads. Note the
+    /// order: index 0 is a *thinking* block and its two deltas arrive before index 1 says a single
+    /// word of the answer.
+    const TEXT_DELTA: &str = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"one"}}}"#;
+    const THINKING_DELTA: &str = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"weighing it up","estimated_tokens":null}}}"#;
+    const SIGNATURE_DELTA: &str = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqsDCrIBCBEYAipAEFo9Brtx9J255x9KjthY"}}}"#;
+
+    #[test]
+    fn a_text_delta_becomes_one_chunk_of_the_reply() {
+        assert_eq!(
+            parse_delta_line(TEXT_DELTA),
+            vec![AiDelta { kind: AiDeltaKind::Text, text: "one".to_string() }]
+        );
+    }
+
+    /// Routed to the reasoning channel, not the answer's. Merging the two is irreversible: once
+    /// concatenated, nothing in the text says where the thinking stopped.
+    #[test]
+    fn a_thinking_delta_goes_to_the_reasoning_channel() {
+        assert_eq!(
+            parse_delta_line(THINKING_DELTA),
+            vec![AiDelta { kind: AiDeltaKind::Thinking, text: "weighing it up".to_string() }]
+        );
+    }
+
+    /// Hundreds of characters of base64 attestation, in the same envelope as real text. Appending
+    /// it to either channel would dump a wall of it into the middle of a sentence.
+    #[test]
+    fn a_signature_delta_is_dropped() {
+        assert!(parse_delta_line(SIGNATURE_DELTA).is_empty());
+    }
+
+    /// The same stream carries block starts/stops and message envelopes. They are partial-message
+    /// frames — the pump keeps them out of the trace ring — but they are not text.
+    #[test]
+    fn a_stream_event_that_is_not_a_delta_yields_nothing() {
+        let starts = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#;
+        assert!(parse_delta_line(starts).is_empty());
+        let stops = r#"{"type":"stream_event","event":{"type":"message_stop"}}"#;
+        assert!(parse_delta_line(stops).is_empty());
+    }
+
+    /// A truncated line is normal, not exceptional: the pump splits on newlines and a CLI can be
+    /// killed mid-write. It must cost the turn its typing, never the run.
+    #[test]
+    fn malformed_json_never_panics() {
+        assert!(parse_delta_line(r#"{"type":"stream_event","event":{"type":"content_bl"#).is_empty());
+        assert!(parse_delta_line("{}").is_empty());
+        assert!(parse_delta_line(r#"{"type":"stream_event"}"#).is_empty());
+    }
+
+    #[test]
+    fn a_plain_text_line_is_not_a_delta() {
+        assert!(parse_delta_line("Loading the model…").is_empty());
+        assert!(parse_delta_line("").is_empty());
+    }
+
+    /// Verbatim from the same run. `utilization` is a fraction; this module reports percent.
+    const RATE_LIMIT_LINE: &str = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1789700400,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.31,"resetsAt":1789700400},"seven_day":{"utilization":0.53,"resetsAt":1790010000}}},"uuid":"f8d76120","session_id":"6f6c67f1"}"#;
+
+    #[test]
+    fn reads_both_plan_windows_off_the_run_that_spent_them() {
+        let limit = parse_rate_limit(RATE_LIMIT_LINE).expect("a rate limit event");
+        assert!((limit.five_hour_pct - 31.0).abs() < 0.001, "got {limit:?}");
+        assert!((limit.seven_day_pct - 53.0).abs() < 0.001, "got {limit:?}");
+    }
+
+    /// The common case by far: nothing in the log mentions a rate limit, which is "cannot tell"
+    /// rather than "zero used".
+    #[test]
+    fn a_run_without_a_rate_limit_event_reports_nothing() {
+        assert!(parse_rate_limit(STREAM_JSON_STDOUT).is_none());
+        assert!(parse_rate_limit("not json at all").is_none());
+    }
+
+    #[test]
+    fn reads_the_slash_commands_this_install_offers() {
+        let stdout = format!(
+            "{}\n{}\n{RATE_LIMIT_LINE}\n",
+            r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart"}"#,
+            r#"{"type":"system","subtype":"init","session_id":"s-1","model":"claude-haiku-4-5-20251001","slash_commands":["compact","model","deep-research"],"tools":["Read"]}"#,
+        );
+        let stdout = stdout.as_str();
+        assert_eq!(parse_slash_commands(stdout), vec!["compact", "model", "deep-research"]);
+        // …and the same buffer still yields the rate limit, since both scans are independent.
+        assert!(parse_rate_limit(stdout).is_some());
+    }
+
+    /// An older CLI, or a run that died before it printed its banner. The menu then shows the
+    /// app's own commands alone, which is honest; asserting this install has none is not.
+    #[test]
+    fn a_run_without_an_init_event_reports_no_commands() {
+        assert!(parse_slash_commands(STREAM_JSON_STDOUT).is_empty());
+        assert!(parse_slash_commands("").is_empty());
+    }
+
+    /// The flag is what turns the event log into one frame per token. Every non-chat flow through
+    /// this engine throws those away unread, so it must not be paid for by default.
+    #[test]
+    fn partial_messages_are_only_asked_for_when_someone_is_streaming() {
+        let quiet = AiInvocation::new("write a commit message", "the diff");
+        let args = command_args(&ClaudeEngine.build_command("claude", &quiet));
+        assert!(!args.iter().any(|a| a == "--include-partial-messages"), "{args:?}");
+
+        let mut streaming = AiInvocation::new("hello", "");
+        streaming.stream_deltas = Some(crate::ai::DeltaSink {
+            conversation_id: "c-1".to_string(),
+            message_id: "m-1".to_string(),
+        });
+        let args = command_args(&ClaudeEngine.build_command("claude", &streaming));
+        assert!(args.iter().any(|a| a == "--include-partial-messages"), "{args:?}");
+        // The flag only works alongside these, and this builder is what has to keep passing them.
+        assert!(args.iter().any(|a| a == "--verbose"), "{args:?}");
+        assert!(args.iter().any(|a| a == "stream-json"), "{args:?}");
+    }
+
+    fn command_args(cmd: &Command) -> Vec<String> {
+        cmd.as_std().get_args().map(|a| a.to_string_lossy().to_string()).collect()
     }
 }

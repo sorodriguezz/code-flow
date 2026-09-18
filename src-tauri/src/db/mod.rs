@@ -1,6 +1,7 @@
 pub mod api_backup;
 pub mod api_queries;
 pub mod api_sync;
+pub mod chat_queries;
 pub mod datasource_queries;
 pub mod diagram_queries;
 pub mod keyvault_queries;

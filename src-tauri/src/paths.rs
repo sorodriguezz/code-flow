@@ -369,6 +369,80 @@ pub fn sandbox_path(diagram_id: &str) -> PathBuf {
     sandbox_dir().join(format!("{diagram_id}.sqlite"))
 }
 
+/// The working directory a conversation that is about **no repository** runs its engine in.
+///
+/// Every CLI this app drives takes a `cwd`, and none of them takes "nowhere". Left unset the
+/// process inherits CodeFlow's own working directory — which on a packaged macOS build is `/`, and
+/// on a `cargo run` is this source checkout. Either is a real tree full of real files that a model
+/// with `Read`, `Grep` and `Glob` will happily wander into, and the second one is the app's own
+/// source. So a repo-less chat is given a directory that is deliberately, permanently empty: it is
+/// not a sandbox (see [`crate::commands::chat_cmd`] on why nothing here can be), but it is at least
+/// somewhere where "list the files around you" has a true and uninteresting answer.
+///
+/// **One directory for every conversation, not one per conversation.** There is nothing in it to
+/// keep apart: the chat writes no files, the engines are told not to, and a per-conversation folder
+/// would be a sweep to write, a row to reconcile and a leak when one is missed — all to isolate an
+/// emptiness from itself. [`sandbox_dir`] is per-diagram for the opposite reason: those directories
+/// hold the user's typed fixtures.
+///
+/// **State and not cache**, for the same reason [`sandbox_dir`] is: `cache_dir`'s contract is that
+/// deleting it with the app closed is a no-op nobody notices, and a directory an engine may be
+/// running in while the app is open is not something a cleaner should be free to remove underneath
+/// it. `wipe_plan` reaches it for free, since it removes every entry under the state root.
+///
+/// Created lazily by the caller — a folder that appears on first launch for a feature the user has
+/// not opened is the app deciding what they are working on.
+pub fn chat_scratch_dir() -> PathBuf {
+    state_dir().join("chat-scratch")
+}
+
+/// Where a conversation's attached files live, one directory per conversation.
+///
+/// **Copies, not references.** An attachment is copied in rather than pointed at, for two reasons
+/// that both bite in practice: the user is free to move or delete the original the moment after
+/// attaching it, and several of these CLIs are given a restricted view of the filesystem, so a path
+/// in the user's Downloads folder is not necessarily a path the engine may read. A copy under the
+/// app's own state root is reachable and cannot be pulled out from under a conversation.
+///
+/// **The lifetime is the conversation, not the turn**, which is the non-obvious part. Deleting the
+/// file as soon as the model has read it is the tidier-sounding rule and it is wrong: the next turn
+/// may well re-read it. On a resuming engine the earlier read is still in the session transcript so
+/// it *often* does not need to — but "often" is not a guarantee, and Cline cannot resume at all, so
+/// it re-sends the whole context every turn and a path that has since vanished fails outright.
+/// A model asked to read a file that is no longer there produces either an error mid-answer or a
+/// confident guess, and neither is worth the disk space saved.
+///
+/// So they are removed with the conversation ([`crate::db::chat_queries::delete_conversation`]'s
+/// caller), and anything left behind by a crash or by a deletion that happened while the app was
+/// closed is collected by the startup sweep. State and not cache, for the same reason
+/// [`chat_scratch_dir`] is.
+pub fn chat_attachments_dir() -> PathBuf {
+    state_dir().join("chat-attachments")
+}
+
+/// One conversation's attachment directory. The id is a UUID minted by this app, so it needs no
+/// sanitising to be a safe path segment — but it is checked anyway at the command boundary, because
+/// "this id always comes from us" is exactly the kind of invariant that stops being true quietly.
+pub fn chat_conversation_attachments_dir(conversation_id: &str) -> PathBuf {
+    chat_attachments_dir().join(conversation_id)
+}
+
+/// Where a *project's* shared context files live — the PDFs and documents attached to a group
+/// rather than to one conversation.
+///
+/// A sibling root rather than a subfolder of [`chat_attachments_dir`], and the reason is the sweep:
+/// that one deletes any directory whose name is not a live conversation id, and a group id sitting
+/// among them would be collected on the first launch after it was created. Two roots, two sweeps,
+/// neither able to mistake the other's folders for garbage.
+pub fn chat_group_context_dir(group_id: &str) -> PathBuf {
+    state_dir().join("chat-group-context").join(group_id)
+}
+
+/// The root of the above, for the orphan sweep.
+pub fn chat_group_context_root() -> PathBuf {
+    state_dir().join("chat-group-context")
+}
+
 /// A "please wipe everything" request has to be handled on the *next* launch, before the
 /// database is opened — deleting `codeflow.db` out from under this process's own open SQLite
 /// connection would fail on Windows (can't remove a file that's still locked open). Requesting

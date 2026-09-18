@@ -258,6 +258,34 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             tray::show_main_window(app);
         }))
+        // After the single instance, never before it — see above. Neither of these is a reason to
+        // let a rival process reach this far.
+        //
+        // The quick-ask hotkey. Its handler lives here rather than in `windows.rs` because the
+        // plugin takes one for the whole process at build time; `register_quick_ask_shortcut` then
+        // binds and rebinds the accelerator against it. Only one chord is ever registered, so the
+        // handler does not need to ask which one fired.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    // Pressed only. Both edges are delivered, and acting on the release as well
+                    // would open the ask box and toggle it shut again on a single tap.
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        windows::toggle_quick_ask(app);
+                    }
+                })
+                .build(),
+        )
+        // Launch at login, registered so the preference has somewhere to land. Nothing calls it
+        // yet: it is the companion to the hotkey rather than a feature of its own — a system-wide
+        // chord that only works once you have remembered to start the app is a chord nobody builds
+        // a habit around — and wiring the setting is a frontend change this backend does not own.
+        // `MacosLauncher::LaunchAgent` because the alternative (a login item) is the one macOS
+        // shows in a list the user cannot explain, under a name that is not the app's.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
@@ -318,6 +346,33 @@ pub fn run() {
             // reopening them at launch turned out to be the wrong idea twice over. See
             // `windows::SatelliteRegistry::parked`.
             windows::forget_persisted_desk(app.handle());
+            // The quick-ask chord, bound for this session from whatever the user last chose.
+            //
+            // Logged rather than returned, and only here: a `?` on this would mean an accelerator
+            // some other application already owns — Spotlight, Raycast, a window manager — stops
+            // CodeFlow from starting at all, which is a catastrophic answer to a hotkey conflict.
+            // The path where failure *is* returned is `register_quick_ask_shortcut`, called from
+            // the settings field the accelerator was typed into, which is the one place there is
+            // somebody to tell. The tray's "New quick ask" keeps the feature reachable meanwhile.
+            {
+                let accelerator = app
+                    .state::<db::Db>()
+                    .0
+                    .lock()
+                    .ok()
+                    .and_then(|conn| {
+                        db::queries::get_setting(&conn, windows::QUICK_ASK_ACCELERATOR_KEY)
+                            .ok()
+                            .flatten()
+                    })
+                    .filter(|a| !a.trim().is_empty())
+                    .unwrap_or_else(|| windows::DEFAULT_QUICK_ASK_ACCELERATOR.to_string());
+                if let Err(e) =
+                    windows::register_quick_ask_shortcut(app.handle().clone(), accelerator)
+                {
+                    applog::info(&format!("window: quick-ask hotkey unavailable — {e}"));
+                }
+            }
             // Delete every DBML scratch database whose diagram is gone. Covers the three ways a
             // file can outlive its owner: a workspace deleted while the app was shut, a backup
             // restored over the database, and a crash between removing the file and removing the
@@ -495,6 +550,41 @@ pub fn run() {
             windows::list_satellites,
             windows::satellite_spec,
             windows::restore_satellites,
+            windows::quick_ask_open,
+            windows::quick_ask_close,
+            windows::register_quick_ask_shortcut,
+            commands::chat_cmd::chat_create_conversation,
+            commands::chat_cmd::chat_send,
+            commands::chat_cmd::chat_list_conversations,
+            commands::chat_cmd::chat_get_conversation,
+            commands::chat_cmd::chat_rename_conversation,
+            commands::chat_cmd::chat_set_engine,
+            commands::chat_cmd::chat_set_unread,
+            commands::chat_cmd::chat_inflight_turns,
+            commands::chat_cmd::chat_set_effort,
+            commands::chat_cmd::chat_effort_support,
+            commands::chat_cmd::chat_list_groups,
+            commands::chat_cmd::chat_create_group,
+            commands::chat_cmd::chat_rename_group,
+            commands::chat_cmd::chat_delete_group,
+            commands::chat_cmd::chat_set_group_collapsed,
+            commands::chat_cmd::chat_reorder_groups,
+            commands::chat_cmd::chat_set_conversation_group,
+            commands::chat_cmd::chat_set_group_instructions,
+            commands::chat_attach::chat_group_attach_file,
+            commands::chat_attach::chat_group_list_context,
+            commands::chat_attach::chat_group_remove_context,
+            commands::chat_attach::chat_attach_file,
+            commands::chat_attach::chat_attach_bytes,
+            commands::chat_attach::chat_list_attachments,
+            commands::chat_attach::chat_remove_attachment,
+            commands::chat_attach::chat_sweep_attachments,
+            commands::chat_cmd::chat_delete_conversation,
+            commands::chat_cmd::chat_set_pinned,
+            commands::chat_cmd::chat_set_archived,
+            commands::chat_cmd::chat_search_conversations,
+            commands::chat_cmd::chat_provider_commands,
+            commands::chat_cmd::chat_branch_conversation,
             commands::sandbox_cmd::sandbox_open,
             commands::sandbox_cmd::sandbox_status,
             commands::sandbox_cmd::sandbox_counts,

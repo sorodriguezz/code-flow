@@ -112,6 +112,7 @@ const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => 
 const DiagramsView = lazy(() =>
   import("./components/diagrams/DiagramsView").then((m) => ({ default: m.DiagramsView })),
 );
+const ChatView = lazy(() => import("./components/chat/ChatView").then((m) => ({ default: m.ChatView })));
 
 const loadServicesDock = () =>
   import("./components/services/ServicesDock").then((m) => ({ default: m.ServicesDock }));
@@ -266,7 +267,17 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
  * you click a different repository. And Notes is the clearest case after the stories: the decision
  * you wrote down last March is about the system, not about a checkout. Diagrams is the same case
  * one step further out: an architecture drawing describes the system, and a repository is one of
- * the boxes in it. */
+ * the boxes in it.
+ *
+ * Chat is the case that makes this list load-bearing rather than tidy. A conversation bound to a
+ * repository is now the *exception*: the common one is a question with no checkout behind it at
+ * all — how does this protocol work, draft me a migration, what did we decide about retries — and
+ * that is exactly the question you have when no project is open, or when the one that is open is
+ * not the one you are asking about. Leaving it out of this list would put the "no project open"
+ * empty state in front of the one screen whose entire premise is that it does not need one, which
+ * is not a degraded feature but the absence of the feature. It is here on the same footing as the
+ * vault below it — membership buys the exemption from the empty state, not a claim about scoping —
+ * and its own scoping is stranger than the vault's: see the note on `MainView` in `uiStore`. */
 const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "api", render: () => <ApiView /> },
   { id: "agents", render: () => <AgentsView /> },
@@ -278,6 +289,10 @@ const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   // the keyring is global. Membership here is what exempts a view from the "no project" empty
   // state, and the gate is `workspaceId !== null`, which is true whenever the app is usable.
   { id: "vault", render: () => <VaultView /> },
+  // Last, and here for the argument in the note above: the conversation list is flat and global,
+  // so nothing about this view narrows when the workspace changes — but it must survive "no
+  // project open", which is what this list is for.
+  { id: "chat", render: () => <ChatView /> },
 ];
 
 /**

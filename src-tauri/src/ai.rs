@@ -449,6 +449,71 @@ impl AiUsage {
     }
 }
 
+/// How full the provider's plan windows were at the moment a run finished, as the CLI itself said.
+///
+/// **Free, and otherwise paid for twice.** `ai_quota.rs` answers the same question by reading the
+/// CLI's OAuth token out of the keychain and making its own HTTPS call to the provider — which is
+/// a user-visible keychain prompt the first time, a network round trip every time, and a number
+/// that is only as fresh as the last time somebody opened the quota panel. Claude Code prints the
+/// same figures on the run that just spent them, unprompted, so a run that streams is a free
+/// refresh of a number the meter would otherwise have to go and fetch.
+///
+/// Both fields are **0–100**, matching `ai_quota`'s `used_percent`, not the 0–1 fraction the CLI
+/// reports. The conversion happens once, at the parse boundary, precisely so that nothing
+/// downstream has to remember which of the two conventions this particular source uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AiRateLimit {
+    /// The rolling five-hour session window.
+    pub five_hour_pct: f64,
+    /// The weekly window.
+    pub seven_day_pct: f64,
+}
+
+/// Where the intra-message chunks of one reply are to be delivered.
+///
+/// It carries the *addressing*, not a channel: the chunks go out as Tauri events from
+/// [`crate::ai_runs::emit_delta`], and what the frontend cannot work out on its own is which
+/// message of which conversation a chunk belongs to. The run id alone is not enough — a
+/// conversation can start a second run before the first has finished painting, and a chunk landing
+/// in the wrong bubble is worse than no streaming at all.
+///
+/// Owned `String`s rather than borrows of the invocation: the sink is cloned into the pump task,
+/// which outlives the borrow that built the invocation.
+#[derive(Debug, Clone)]
+pub struct DeltaSink {
+    pub conversation_id: String,
+    pub message_id: String,
+}
+
+/// One chunk of a reply, as it is being written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiDelta {
+    pub kind: AiDeltaKind,
+    pub text: String,
+}
+
+/// Which of a message's two text channels a chunk belongs to.
+///
+/// Kept apart all the way to the frontend because they are rendered in different places: the
+/// answer types into the bubble, the reasoning into a collapsed block above it. Merging them here
+/// and separating them later is not possible — once concatenated, nothing in the text says where
+/// the thinking stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiDeltaKind {
+    Text,
+    Thinking,
+}
+
+impl AiDeltaKind {
+    /// The wire word, which is also what the frontend's `AiChatDeltaEvent["kind"]` union spells.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AiDeltaKind::Text => "text",
+            AiDeltaKind::Thinking => "thinking",
+        }
+    }
+}
+
 /// One headless invocation, described in provider-neutral terms. Each [`AiEngine`] translates
 /// these into its own CLI's flags in [`AiEngine::build_command`].
 pub struct AiInvocation<'a> {
@@ -478,6 +543,20 @@ pub struct AiInvocation<'a> {
     /// Runs are headless (no TTY), so an interactive permission prompt can never be answered —
     /// the write-capable flows (chat, "fix with AI") set this so they can actually change files.
     pub auto_approve_edits: bool,
+    /// Files the user attached to this turn, already copied under the app's own root. Passed to
+    /// the engines that have a flag for them, and named in the message for the rest — see
+    /// [`AiEngine::attachment_args`].
+    pub attachments: &'a [AiAttachment],
+    /// How hard the model should think, on this app's own four-step scale — or `None` to leave the
+    /// CLI's default alone, which is what every flow but chat does.
+    ///
+    /// Provider-neutral on purpose, because the six CLIs disagree about both the spelling and the
+    /// number of steps: Claude takes five (`low`…`max`), Codex wants a config override rather than
+    /// a flag, opencode calls it a model *variant*, Cline calls it `--thinking`, and agy stops at
+    /// `high`. Each engine maps this to its own vocabulary in [`AiEngine::effort_args`], and an
+    /// engine whose scale is shorter saturates rather than guessing at a level its CLI would
+    /// reject. See [`effort`] for the values.
+    pub effort: Option<&'a str>,
     /// Which feature is spending the tokens — one of [`task`]'s constants.
     ///
     /// Recorded alongside the usage, and *only* used for that. Every operation in this file sets
@@ -485,6 +564,15 @@ pub struct AiInvocation<'a> {
     /// [`run`]: a new flow that forgets shows up as [`task::OTHER`] in the meter instead of
     /// silently joining whatever the last caller happened to be doing.
     pub task: &'static str,
+    /// Ask the engine for token-level deltas, delivered to this sink as the reply is written.
+    ///
+    /// Only honoured by an engine whose [`AiEngine::streams_partial`] is true, and ignored
+    /// everywhere else — so a caller may always set it and never has to branch on the provider to
+    /// decide whether asking is allowed. `None` is the default and is what every non-chat flow
+    /// wants: a commit message nobody watches being typed has no use for partial frames, and on
+    /// Claude asking for them also switches the CLI into a mode that prints several times as much
+    /// output for the same answer.
+    pub stream_deltas: Option<DeltaSink>,
 }
 
 /// The feature labels recorded against a run's usage.
@@ -493,6 +581,44 @@ pub struct AiInvocation<'a> {
 /// that enum is about *routing* (which provider answers), and several distinct features share one
 /// routing bucket — a PR review, a pre-commit review and a story review all route as `review` but
 /// are three different questions when you are asking where your tokens went.
+/// One file attached to a turn.
+///
+/// Always a copy under [`crate::paths::chat_attachments_dir`] by the time it gets here, never the
+/// path the user picked — see `commands::chat_attach` for why that distinction is load-bearing.
+#[derive(Debug, Clone)]
+pub struct AiAttachment {
+    pub path: String,
+    pub name: String,
+    /// Whether an engine that understands images would see this as one. Only two of the six can,
+    /// and only one of those takes a flag for it, so this decides both the flag and what the UI is
+    /// allowed to promise.
+    pub is_image: bool,
+}
+
+/// How hard the model is asked to think, in this app's vocabulary rather than any one CLI's.
+///
+/// Four steps, because four is the most the *shortest* provider scale can be mapped onto without
+/// two of them becoming the same flag. Absent — no value at all — is a fifth state and the default
+/// everywhere: it means "do not pass a flag", which leaves whatever the user configured in the
+/// CLI's own settings in charge. That distinction matters. A user who set
+/// `model_reasoning_effort = "max"` in `~/.codex/config.toml` has said what they want, and an app
+/// that helpfully sent `medium` on every turn would silently overrule them.
+pub mod effort {
+    pub const LOW: &str = "low";
+    pub const MEDIUM: &str = "medium";
+    pub const HIGH: &str = "high";
+    /// The top of each CLI's own scale, whatever it happens to call it — `max` on Claude, `xhigh`
+    /// on Codex and Cline, and plain `high` on agy, which has nothing above it.
+    pub const MAX: &str = "max";
+
+    /// Whether `value` is one of the four. Anything else is dropped at the boundary rather than
+    /// forwarded, so a stale setting cannot become an argument a CLI refuses the whole run over —
+    /// which is exactly how a malformed model id used to take a conversation down.
+    pub fn valid(value: &str) -> bool {
+        matches!(value, LOW | MEDIUM | HIGH | MAX)
+    }
+}
+
 pub mod task {
     /// A run that predates this labelling, or a caller that has not been given one yet.
     pub const OTHER: &str = "other";
@@ -554,7 +680,10 @@ impl<'a> AiInvocation<'a> {
             skills_note: String::new(),
             resume_session_id: None,
             auto_approve_edits: false,
+            attachments: &[],
+            effort: None,
             task: task::OTHER,
+            stream_deltas: None,
         }
     }
 }
@@ -699,6 +828,73 @@ pub trait AiEngine: Send + Sync {
     /// system prompt and project context on every turn, instead of only on the first.
     fn resumes_sessions(&self) -> bool {
         true
+    }
+
+    /// Whether this engine can emit intra-message text deltas — the reply arriving a few tokens at
+    /// a time rather than as one block when the turn is over.
+    ///
+    /// **Only Claude Code can, today.** For the others, stream-json is an *event* log — tool
+    /// calls, steps, then the finished text — and four of the six emit nothing at all about the
+    /// message until it is complete. So this is not a detail the UI can paper over: a transcript
+    /// that types for one provider and sits still for the rest has to *say* which it is doing,
+    /// which is why the capability is reported here rather than assumed, and why
+    /// [`AiInvocation::stream_deltas`] is honoured only when this is true.
+    fn streams_partial(&self) -> bool {
+        false
+    }
+
+    /// Pull text/thinking deltas out of one line of this CLI's stream.
+    ///
+    /// Called per line, on the hot path of a streaming run, and therefore held to two rules: a
+    /// line it does not recognise costs an empty `Vec` and no allocation, and **no input can make
+    /// it panic** — this runs inside the output pump, where an unwrap on a field a newer CLI
+    /// version renamed would take the whole run's output down with it rather than degrading to
+    /// "this turn did not type".
+    fn parse_delta(&self, _line: &str) -> Vec<AiDelta> {
+        Vec::new()
+    }
+
+    /// The tools this engine should be limited to for a read-only conversation, in **its own**
+    /// vocabulary — or empty when it has no allow-list flag and the limit cannot be enforced.
+    ///
+    /// Asked of the engine rather than kept as one list at the call site, because the names are not
+    /// shared: Claude's `Read`/`Grep`/`Glob` are grok's `read_file`/`grep`/`list_dir`, and a single
+    /// hardcoded set would either be silently wrong for one of them or have to carry a translation
+    /// table that belongs here. An engine that returns nothing gets intent rather than enforcement,
+    /// which `commands::chat_cmd`'s module doc is careful to say out loud.
+    fn read_only_tools(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// This engine's own flags for the attached files, if it has any.
+    ///
+    /// Most do not, and that is fine: the universal mechanism is that the message names the
+    /// absolute paths and the engine reads them with its own file tool, which every one of these
+    /// six has. This hook is for the two that can do better — `codex -i` hands an image to the
+    /// model as an image rather than as bytes to read, and `opencode -f` is that CLI's documented
+    /// way to attach anything. An engine returning nothing still gets the files; it just reads them.
+    fn attachment_args(&self, _attachments: &[AiAttachment]) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// This engine's own arguments for one of [`effort`]'s four levels.
+    ///
+    /// Returned as owned strings rather than written onto a `Command`, so the mapping stays a pure
+    /// function the engine's own tests can assert on — every one of these flags was read off a
+    /// `--help` on a real install, and the thing worth protecting is that they stay that way.
+    ///
+    /// An empty `Vec` means "this engine cannot be asked", which is a legitimate answer and not a
+    /// gap: the UI reads [`AiEngine::supports_effort`] and hides the control rather than offering
+    /// a dial that turns nothing.
+    fn effort_args(&self, _effort: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Whether this engine takes a reasoning level at all. Derived from the mapping above rather
+    /// than declared separately, so the two cannot drift: an engine that gained a flag and forgot
+    /// to flip a boolean would otherwise advertise nothing while quietly accepting it.
+    fn supports_effort(&self) -> bool {
+        !self.effort_args(effort::MEDIUM).is_empty()
     }
 }
 
@@ -981,13 +1177,95 @@ impl Collected {
 /// `read` calls would decode into replacement characters if each chunk were decoded on its own,
 /// silently corrupting the very output an engine is about to parse. Line splitting happens on the
 /// byte buffer for the same reason: each emitted line is a complete byte sequence.
+/// Everything the pump needs to turn lines into deltas, in a form that can be moved into a spawned
+/// task: the engine by its `&'static str` id (rebuilt inside, exactly as [`record_usage`] does —
+/// `engine_for` is a match on a static string, so this is cheaper than making the trait object
+/// `'static`) and the addressing for the chunks.
+#[derive(Clone)]
+struct DeltaPump {
+    engine: &'static str,
+    sink: DeltaSink,
+}
+
+/// The substring that gates the whole delta path.
+///
+/// One `contains` over a line that is about to be allocated anyway, and everything that is not a
+/// partial-message frame — the assistant turns, the tool calls, the final verdict — takes the
+/// ordinary [`ai_runs::emit_line`] route without ever reaching a JSON parser. It is a filter and
+/// not a decision: a line that passes it is still confirmed by an actual parse below, because a
+/// tool call that *searches for* `stream_event` carries the same substring and is exactly the kind
+/// of line the trace exists to remember.
+const STREAM_EVENT_TAG: &str = "\"stream_event\"";
+
+/// Whether this line is one of the CLI's partial-message frames, confirmed rather than guessed.
+fn is_stream_event_line(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line.trim())
+        .ok()
+        .and_then(|value| Some(value.get("type")?.as_str()? == "stream_event"))
+        .unwrap_or(false)
+}
+
+/// Routes one complete line of output: to the run log, or — when it is a partial-message frame and
+/// this run asked for deltas — to the frontend as chunks of the reply being written.
+///
+/// **A `stream_event` line never reaches [`ai_runs::emit_line`]**, and that is the point of this
+/// function rather than a convenience. The trace behind `emit_line` is a 300-entry ring; a turn
+/// under `--include-partial-messages` prints one frame per token, so routing them through it would
+/// leave every stored trace holding the last 300 word fragments of the answer with every tool call
+/// evicted — the trace stops being a record of what the agent *did*. It renders as nothing today
+/// (`formatAgentLogLine` returns null for the type), which is exactly why the eviction would have
+/// been invisible.
+///
+/// `strip_ansi` is skipped on that path too. It allocates a fresh `String` per call and the frames
+/// are machine-written JSON that carries no escape sequences; at one call per token that is
+/// hundreds of pointless allocations per reply.
+fn emit_pumped(
+    ctx: &RunCtx,
+    stream: &'static str,
+    raw: &[u8],
+    deltas: Option<&DeltaPump>,
+    engine: Option<&dyn AiEngine>,
+) {
+    let text = String::from_utf8_lossy(raw);
+    let Some((deltas, engine)) = deltas.zip(engine) else {
+        ai_runs::emit_line(ctx, stream, &strip_ansi(&text));
+        return;
+    };
+    if !text.contains(STREAM_EVENT_TAG) {
+        ai_runs::emit_line(ctx, stream, &strip_ansi(&text));
+        return;
+    }
+    let line = text.trim_end();
+    let parsed = engine.parse_delta(line);
+    // An empty result is ambiguous — a frame carrying nothing we render (`content_block_start`, a
+    // dropped signature) reads the same as a line that merely mentioned the words. Only the second
+    // belongs in the trace, so the parse decides, and only for the handful of lines that got here.
+    if parsed.is_empty() && !is_stream_event_line(line) {
+        ai_runs::emit_line(ctx, stream, &strip_ansi(&text));
+        return;
+    }
+    for delta in parsed {
+        ai_runs::emit_delta(
+            ctx,
+            &deltas.sink.conversation_id,
+            &deltas.sink.message_id,
+            delta.kind.as_str(),
+            &delta.text,
+        );
+    }
+}
+
 async fn pump<R: tokio::io::AsyncRead + Unpin>(
     pipe: Option<R>,
     stream: &'static str,
     ctx: Option<RunCtx>,
+    deltas: Option<DeltaPump>,
 ) -> Vec<u8> {
     let mut collected = Collected::default();
     let Some(mut pipe) = pipe else { return collected.finish() };
+    // Built once per pump rather than per line: `engine_for` boxes a zero-sized type, but doing it
+    // sixty times a second for the length of a turn is work for nothing.
+    let delta_engine = deltas.as_ref().map(|d| engine_for(d.engine));
 
     let mut buf = [0u8; 8192];
     let mut pending: Vec<u8> = Vec::new();
@@ -1002,18 +1280,18 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
         pending.extend_from_slice(&buf[..read]);
         while let Some(idx) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=idx).collect();
-            ai_runs::emit_line(ctx, stream, &strip_ansi(&String::from_utf8_lossy(&line)));
+            emit_pumped(ctx, stream, &line, deltas.as_ref(), delta_engine.as_deref());
         }
         // A CLI drawing a progress bar rewrites one line forever with `\r` and never sends a
         // newline; without this the buffer would grow unbounded and the user would see nothing.
         if pending.len() > 8192 {
-            ai_runs::emit_line(ctx, stream, &strip_ansi(&String::from_utf8_lossy(&pending)));
+            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref());
             pending.clear();
         }
     }
     if let Some(ctx) = &ctx {
         if !pending.is_empty() {
-            ai_runs::emit_line(ctx, stream, &strip_ansi(&String::from_utf8_lossy(&pending)));
+            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref());
         }
     }
     collected.finish()
@@ -1140,6 +1418,25 @@ async fn spawn_once(
     let dirs = search_dirs();
     let program = resolve_binary(binary, &dirs);
     let mut cmd = engine.build_command(&program, inv);
+    // Appended here rather than inside each `build_command`, for the same reason the process group
+    // and the console flag are: it is the one place every engine's command passes through, and a
+    // seventh engine then gets the level by implementing one pure mapping instead of remembering to
+    // call it. Validated at this boundary too — a level that is not one of the four is dropped
+    // rather than forwarded, because a CLI refuses the *entire run* over an argument it does not
+    // recognise, and losing a turn to a stale setting is the failure mode a malformed model id
+    // already taught this codebase once.
+    if let Some(level) = inv.effort.filter(|l| effort::valid(l)) {
+        for arg in engine.effort_args(level) {
+            cmd.arg(arg);
+        }
+    }
+    // Same place, same reason. The paths are also named in the message itself, so an engine with no
+    // flag here still receives the files — this only adds the better channel where one exists.
+    if !inv.attachments.is_empty() {
+        for arg in engine.attachment_args(inv.attachments) {
+            cmd.arg(arg);
+        }
+    }
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     apply_path(&mut cmd, &dirs);
     // The engines build their own `Command`, so the no-console-window flag is applied here —
@@ -1174,8 +1471,18 @@ async fn spawn_once(
     // Both pipes are drained concurrently with the wait: reading them only after the process
     // exits would deadlock any CLI whose output outgrows the OS pipe buffer, and there'd be
     // nothing to stream in the meantime.
-    let stdout_task = tokio::spawn(pump(child.stdout.take(), "stdout", ctx.clone()));
-    let stderr_task = tokio::spawn(pump(child.stderr.take(), "stderr", ctx.clone()));
+    // Only stdout carries the CLI's event stream, so only stdout is offered the delta parser —
+    // stderr is banners and warnings and would pay the `contains` for nothing. The engine's own
+    // capability is checked here rather than trusted from the caller: an invocation may always
+    // carry a sink (see [`AiInvocation::stream_deltas`]), and this is where "may ask" becomes
+    // "does stream".
+    let deltas = inv
+        .stream_deltas
+        .as_ref()
+        .filter(|_| engine.streams_partial())
+        .map(|sink| DeltaPump { engine: engine.id(), sink: sink.clone() });
+    let stdout_task = tokio::spawn(pump(child.stdout.take(), "stdout", ctx.clone(), deltas));
+    let stderr_task = tokio::spawn(pump(child.stderr.take(), "stderr", ctx.clone(), None));
 
     let status = tokio::select! {
         status = child.wait() => status.map_err(|e| e.to_string())?,
@@ -4306,9 +4613,102 @@ const INLINE_ASK_LIMIT: usize = 4_000;
 const BULK_ASK: &str =
     "Your instructions for this turn are in the input provided with this message. Read all of it and carry it out.";
 
-/// Open-ended, multi-turn chat about the currently open repository — unlike review/analyze this
-/// isn't a one-shot call, so it resumes the same CLI session across turns (via `session_id`)
-/// instead of re-explaining the whole conversation each message.
+/// One turn of an open-ended, multi-turn conversation — the general form.
+///
+/// Everything a turn needs that is *not* a property of the engine, gathered into one struct because
+/// the alternative is a ten-argument function where two `Option<&str>` and two `bool`s sit next to
+/// each other and can be transposed without the compiler noticing.
+///
+/// Three of these fields did not exist while the only chat in the app was the AI panel's, and each
+/// is here because the `chat` workspace made a premise false:
+///   * `system_prompt` — the built-in one tells the model it is talking about "the repository the
+///     user has open". A conversation bound to no repository has none, and a prompt that insists
+///     otherwise invites a model to go looking for one.
+///   * `auto_approve_edits` — the panel's chat always writes, because it is always about a checkout
+///     the user is working in. A repo-less conversation must not, and that is a product decision
+///     rather than a default (see `commands::chat_cmd`).
+///   * `stream_deltas` — a chat is the one flow where a reply is *watched* being written, and the
+///     only one where paying the extra output volume of a partial-message stream buys anything.
+pub struct ChatTurn<'a> {
+    /// The workspace's review contexts, sent once per engine session.
+    pub contexts: &'a [(String, String)],
+    pub message: &'a str,
+    /// The engine's resume token from the previous turn, or `None` to start a session.
+    pub session_id: Option<&'a str>,
+    pub allowed_tools: &'a [String],
+    pub cwd: &'a str,
+    /// Replaces [`DEFAULT_CHAT_SYSTEM_PROMPT`] for this conversation. `None` uses it.
+    pub system_prompt: Option<&'a str>,
+    /// Whether the engine may create and edit files without a permission prompt it could never be
+    /// asked in a headless run. See [`AiInvocation::auto_approve_edits`].
+    pub auto_approve_edits: bool,
+    /// Where token-level chunks go, for an engine that can produce them. See [`DeltaSink`].
+    pub stream_deltas: Option<DeltaSink>,
+    /// How hard to think, on [`effort`]'s scale — `None` leaves the CLI's own configured default
+    /// in charge, which is what a conversation that never touched the control wants.
+    pub effort: Option<&'a str>,
+    /// Files attached to this turn, already copied under the app's own root.
+    pub attachments: &'a [AiAttachment],
+}
+
+/// Runs one [`ChatTurn`].
+///
+/// Unlike review/analyze this isn't a one-shot call, so it resumes the same CLI session across
+/// turns (via `session_id`) instead of re-explaining the whole conversation each message.
+pub async fn chat_turn(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    turn: ChatTurn<'_>,
+) -> Result<AiRun, String> {
+    // Project context and the system prompt only need to be established once — a resumed session
+    // already carries the earlier turns forward. `-p` carries the user's actual message; stdin
+    // is just the one-time context (stdin = data, `-p` = ask). An engine that doesn't resume
+    // sessions server-side (Cline) has nothing carrying them forward, so it gets them every turn.
+    let needs_context = turn.session_id.is_none() || !engine.resumes_sessions();
+    let mut stdin_payload = String::new();
+    if needs_context && !turn.contexts.is_empty() {
+        stdin_payload.push_str("PROJECT CONTEXT:\n");
+        for (name, content) in turn.contexts {
+            stdin_payload.push_str(&format!("- {name}: {content}\n"));
+        }
+    }
+
+    let system_prompt =
+        if needs_context { Some(turn.system_prompt.unwrap_or(DEFAULT_CHAT_SYSTEM_PROMPT)) } else { None };
+
+    // A short message stays where it reads best — `-p` is the ask, and an engine's own logs show it
+    // there. A long one moves into the data, which is the only part of an invocation with no length
+    // ceiling. Counted in `chars()` and not bytes so the switch cannot land mid-code-point.
+    let bulky = turn.message.chars().count() > INLINE_ASK_LIMIT;
+    if bulky {
+        if !stdin_payload.is_empty() {
+            stdin_payload.push('\n');
+        }
+        stdin_payload.push_str(turn.message);
+    }
+
+    let mut inv = AiInvocation::new(if bulky { BULK_ASK } else { turn.message }, &stdin_payload);
+    inv.system_prompt = system_prompt;
+    inv.model = model;
+    inv.allowed_tools = turn.allowed_tools;
+    inv.cwd = Some(turn.cwd);
+    inv.resume_session_id = turn.session_id;
+    inv.auto_approve_edits = turn.auto_approve_edits;
+    inv.stream_deltas = turn.stream_deltas;
+    inv.effort = turn.effort;
+    inv.attachments = turn.attachments;
+    inv.task = task::CHAT;
+    run(engine, binary, inv).await
+}
+
+/// Open-ended, multi-turn chat about the currently open repository — the AI panel's chat.
+///
+/// Kept as its own name and signature after [`chat_turn`] generalised it, because its three
+/// answers to that generalisation are not defaults but decisions about *this* flow: the repository
+/// system prompt, edits auto-approved (the panel's chat is meant to help work on the checkout, and
+/// a headless run can never be asked for permission — running commands still needs the shell tool
+/// enabled in Settings), and no delta sink, since nothing on that screen types.
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_with_repo(
     engine: &dyn AiEngine,
@@ -4320,44 +4720,26 @@ pub async fn chat_with_repo(
     allowed_tools: &[String],
     cwd: &str,
 ) -> Result<AiRun, String> {
-    // Project context and the system prompt only need to be established once — a resumed session
-    // already carries the earlier turns forward. `-p` carries the user's actual message; stdin
-    // is just the one-time context (stdin = data, `-p` = ask). An engine that doesn't resume
-    // sessions server-side (Cline) has nothing carrying them forward, so it gets them every turn.
-    let needs_context = session_id.is_none() || !engine.resumes_sessions();
-    let mut stdin_payload = String::new();
-    if needs_context && !contexts.is_empty() {
-        stdin_payload.push_str("PROJECT CONTEXT:\n");
-        for (name, content) in contexts {
-            stdin_payload.push_str(&format!("- {name}: {content}\n"));
-        }
-    }
-
-    let system_prompt = if needs_context { Some(DEFAULT_CHAT_SYSTEM_PROMPT) } else { None };
-
-    // A short message stays where it reads best — `-p` is the ask, and an engine's own logs show it
-    // there. A long one moves into the data, which is the only part of an invocation with no length
-    // ceiling. Counted in `chars()` and not bytes so the switch cannot land mid-code-point.
-    let bulky = message.chars().count() > INLINE_ASK_LIMIT;
-    if bulky {
-        if !stdin_payload.is_empty() {
-            stdin_payload.push('\n');
-        }
-        stdin_payload.push_str(message);
-    }
-
-    let mut inv = AiInvocation::new(if bulky { BULK_ASK } else { message }, &stdin_payload);
-    inv.system_prompt = system_prompt;
-    inv.model = model;
-    inv.allowed_tools = allowed_tools;
-    inv.cwd = Some(cwd);
-    inv.resume_session_id = session_id;
-    // The chat is meant to help work on the repo, so let it create/edit files without an
-    // (unanswerable, headless) permission prompt. Running commands still needs the shell tool
-    // enabled in Settings.
-    inv.auto_approve_edits = true;
-    inv.task = task::CHAT;
-    run(engine, binary, inv).await
+    chat_turn(
+        engine,
+        binary,
+        model,
+        ChatTurn {
+            contexts,
+            message,
+            session_id,
+            allowed_tools,
+            cwd,
+            system_prompt: None,
+            auto_approve_edits: true,
+            stream_deltas: None,
+            // The AI panel's repo chat has no per-conversation control, so it leaves every CLI on
+            // its own configured default rather than inventing a level for it.
+            effort: None,
+            attachments: &[],
+        },
+    )
+    .await
 }
 
 /// Applies a single code-review finding's fix directly to the working tree. Unlike the read-only
@@ -4393,6 +4775,38 @@ pub async fn apply_finding_fix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule the pump's trace suppression rests on: a *frame* is dropped from the run log, a
+    /// line that merely says the words is not. The second case is not hypothetical — an agent
+    /// working on this very module greps for `stream_event`, and that tool call is exactly the
+    /// kind of line the trace exists to remember. The cheap substring gate cannot tell the two
+    /// apart, which is why it is a filter and the parse is the decision.
+    #[test]
+    fn only_a_real_frame_counts_as_a_stream_event() {
+        let frame = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#;
+        assert!(is_stream_event_line(frame));
+        assert!(frame.contains(STREAM_EVENT_TAG));
+
+        let grep = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Grep","input":{"pattern":"stream_event"}}]}}"#;
+        assert!(grep.contains(STREAM_EVENT_TAG), "the cheap gate lets this through…");
+        assert!(!is_stream_event_line(grep), "…and the parse is what stops it");
+    }
+
+    /// Everything a pump can hand this: a half-written line from a killed CLI, a plain banner, the
+    /// empty tail. None of them is a frame and none of them may panic.
+    #[test]
+    fn a_line_that_is_not_json_is_not_a_frame() {
+        assert!(!is_stream_event_line(r#"{"type":"stream_event","eve"#));
+        assert!(!is_stream_event_line("Loading…"));
+        assert!(!is_stream_event_line(""));
+    }
+
+    /// The two spellings are one contract with the frontend's `AiChatDeltaEvent["kind"]` union.
+    #[test]
+    fn a_delta_kind_spells_itself_the_way_the_frontend_reads_it() {
+        assert_eq!(AiDeltaKind::Text.as_str(), "text");
+        assert_eq!(AiDeltaKind::Thinking.as_str(), "thinking");
+    }
 
     /// The whole point of the tagging rule: a diagnosis quotes the user's broken query back at
     /// them, and the block offered for insertion has to be the *fix*, not the quote.
@@ -5023,5 +5437,103 @@ mod tests {
         let answer = json_answer(hopeless).expect("there is an object here");
         assert!(serde_json::from_str::<serde_json::Value>(&answer).is_err());
         assert!(answer.contains("<sin valor>"), "the user is shown what the model actually wrote");
+    }
+
+    /// The reasoning-level mapping, pinned per engine.
+    ///
+    /// Every flag below was read off a `--help` on a real install, and the failure this guards
+    /// against is silent: a CLI refuses the *entire run* over an argument it does not recognise, so
+    /// a wrong mapping does not degrade the answer, it destroys the turn. Asserting on the exact
+    /// argv is the only way that stays true through a refactor.
+    #[test]
+    fn each_engine_speaks_its_own_dialect_of_effort() {
+        let claude = crate::claude::ClaudeEngine;
+        assert_eq!(claude.effort_args(effort::HIGH), ["--effort", "high"]);
+        // Claude is the one CLI with steps above `high`, which is why the neutral scale has four.
+        assert_eq!(claude.effort_args(effort::MAX), ["--effort", "max"]);
+
+        // Codex has no flag at all — it is a config key, through the same `-c` the approval policy
+        // already uses. `max` is passed through rather than folded into `xhigh`: on a real install
+        // the two are distinct levels with `max` above, so the fold cost the user a tier.
+        assert_eq!(
+            crate::codex::CodexEngine.effort_args(effort::MAX),
+            ["-c", "model_reasoning_effort=\"max\""]
+        );
+        assert_eq!(
+            crate::codex::CodexEngine.effort_args(effort::HIGH),
+            ["-c", "model_reasoning_effort=\"high\""]
+        );
+
+        // agy stops at `high`, so `max` saturates rather than being passed through to a value the
+        // CLI would reject.
+        assert_eq!(crate::gemini::GeminiEngine.effort_args(effort::MAX), ["--effort", "high"]);
+
+        assert_eq!(crate::grok::GrokEngine.effort_args(effort::LOW), ["--reasoning-effort", "low"]);
+        assert_eq!(crate::cline::ClineEngine.effort_args(effort::MAX), ["--thinking", "xhigh"]);
+
+        // opencode calls it a model variant and has no middle step: `medium` maps to no argument,
+        // which leaves the model on its own default instead of guessing at one.
+        let opencode = crate::opencode::OpenCodeEngine;
+        assert_eq!(opencode.effort_args(effort::LOW), ["--variant", "minimal"]);
+        assert!(opencode.effort_args(effort::MEDIUM).is_empty());
+        assert!(opencode.supports_effort(), "an engine with no middle step can still be asked");
+    }
+
+    /// Anything outside the four levels is dropped rather than forwarded.
+    #[test]
+    fn an_unknown_level_is_not_a_level() {
+        assert!(effort::valid("max"));
+        assert!(!effort::valid("xhigh"), "that is Codex's word, not this app's");
+        assert!(!effort::valid(""), "empty means 'send no flag', and never reaches an engine");
+    }
+
+    /// The read-only tool sets, per engine and in each engine's own words.
+    ///
+    /// The failure this pins down is one that already happened: a single hardcoded list in Claude
+    /// Code's vocabulary was handed to grok, whose tools have different names, so nothing matched
+    /// and a conversation the UI called read-only ran with the full agent profile.
+    #[test]
+    fn read_only_sets_are_written_in_each_engines_own_vocabulary() {
+        let claude = crate::claude::ClaudeEngine.read_only_tools();
+        assert!(claude.contains(&"Read".to_string()));
+        assert!(!claude.iter().any(|t| t == "Write" || t == "Edit" || t == "Bash"));
+
+        let grok = crate::grok::GrokEngine.read_only_tools();
+        assert!(grok.contains(&"read_file".to_string()), "grok does not know what `Read` is");
+        assert!(!grok.iter().any(|t| t == "write_file" || t == "bash" || t == "edit_file"));
+
+        // The four with no allow-list flag say so by returning nothing, rather than returning a set
+        // that would be silently dropped and read as enforcement.
+        for engine in [
+            Box::new(crate::gemini::GeminiEngine) as Box<dyn AiEngine>,
+            Box::new(crate::codex::CodexEngine),
+            Box::new(crate::opencode::OpenCodeEngine),
+            Box::new(crate::cline::ClineEngine),
+        ] {
+            assert!(engine.read_only_tools().is_empty(), "{} has no allow-list flag", engine.id());
+        }
+    }
+
+    /// Attachments reach the two engines with a flag for them, and only where the flag applies.
+    #[test]
+    fn only_the_engines_with_a_file_flag_get_one() {
+        let shot = AiAttachment { path: "/tmp/a/x.png".into(), name: "x.png".into(), is_image: true };
+        let log = AiAttachment { path: "/tmp/a/y.log".into(), name: "y.log".into(), is_image: false };
+        let both = [shot.clone(), log.clone()];
+
+        // Codex's `-i` is for images specifically — it hands the model an image rather than a path
+        // to read, so a log file must not go through it.
+        assert_eq!(crate::codex::CodexEngine.attachment_args(&both), ["-i", "/tmp/a/x.png"]);
+
+        // opencode's `-f` attaches anything, and takes an array.
+        assert_eq!(
+            crate::opencode::OpenCodeEngine.attachment_args(&both),
+            ["-f", "/tmp/a/x.png", "-f", "/tmp/a/y.log"]
+        );
+
+        // The rest get nothing here and still receive the files: the message names the paths, and
+        // every one of these CLIs has a file-reading tool. That is the universal channel.
+        assert!(crate::claude::ClaudeEngine.attachment_args(&both).is_empty());
+        assert!(crate::grok::GrokEngine.attachment_args(&both).is_empty());
     }
 }

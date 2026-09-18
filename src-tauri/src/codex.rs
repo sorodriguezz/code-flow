@@ -129,9 +129,59 @@ impl AiEngine for CodexEngine {
             // though `current_dir` below already points there.
             cmd.arg("--cd").arg(dir);
             cmd.current_dir(dir);
+            // Codex refuses to start outside a Git repository — "Not inside a trusted directory and
+            // --skip-git-repo-check was not specified" — and exits 1 before the model is ever asked
+            // anything. That guard is aimed at the case it was designed for: an agent given write
+            // access to a directory with no version control has no undo, so Codex makes you say so
+            // out loud. Every flow in this app but one hands it a working copy, where the check
+            // passes unremarked.
+            //
+            // The exception is a repo-less chat, which runs in an empty scratch directory by
+            // design. There the check is answering a question nobody asked: there is nothing to
+            // lose an undo for, and the sandbox above is already `read-only`. So the flag goes in
+            // only when the directory genuinely is not in a work tree — which keeps the guard doing
+            // its job everywhere it has one, rather than switching it off globally and quietly
+            // widening what a `workspace-write` run in an unversioned folder may do.
+            if !in_git_work_tree(dir) {
+                cmd.arg("--skip-git-repo-check");
+            }
         }
         cmd
     }
+
+    /// Codex has no flag for this — it is a config key, so it goes through the same `-c` override
+    /// the approval policy already uses.
+    ///
+    /// **`max` is passed through, not folded into `xhigh`.** It used to be: Codex's own migration
+    /// notes map a source `max` onto `xhigh`, and that read as authoritative. It is not — those
+    /// notes are about translating *another* agent's scale, and Codex's own is longer. A real
+    /// install settles it: `~/.codex/config.toml` accepts `model_reasoning_effort = "max"` at its
+    /// root, and the desktop app enumerates `["none","minimal","low","medium","high","xhigh","max",
+    /// "ultra"]` — `xhigh` and `max` are distinct levels with `max` above. Sending `xhigh` for our
+    /// top step was quietly asking for one tier less than the user chose.
+    ///
+    /// `ultra` sits above `max` in that list and is deliberately not sent: it appears only in the
+    /// desktop application's own enumeration, and this app's scale has nothing to map onto it.
+    ///
+    /// Worth knowing before changing this: `~/.codex/config.toml` may already carry a
+    /// `model_reasoning_effort`, and a `-c` override beats it for this run only. That is why the
+    /// app sends nothing at all unless a level was explicitly chosen — see [`AiInvocation::effort`].
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        vec!["-c".into(), format!("model_reasoning_effort=\"{effort}\"")]
+    }
+
+    /// `codex exec -i <FILE>` hands an image to the model **as an image**, which is a different
+    /// thing from asking it to read the file: this is the only engine here with real vision through
+    /// a flag. Non-image attachments get nothing — they are named in the message and Codex reads
+    /// them with its own file tool, like everywhere else.
+    fn attachment_args(&self, attachments: &[crate::ai::AiAttachment]) -> Vec<String> {
+        attachments
+            .iter()
+            .filter(|a| a.is_image)
+            .flat_map(|a| ["-i".to_string(), a.path.clone()])
+            .collect()
+    }
+
 
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
         interpret_output(success, status_label, stdout, stderr)
@@ -148,6 +198,30 @@ pub(crate) fn codex_home() -> Option<std::path::PathBuf> {
         return Some(std::path::PathBuf::from(dir));
     }
     Some(dirs::home_dir()?.join(".codex"))
+}
+
+/// Whether `dir` sits inside a Git work tree, answered by walking up for a `.git` entry.
+///
+/// Deliberately a filesystem walk rather than `git rev-parse --is-inside-work-tree`: this runs on
+/// the way to building every Codex command, and paying for a subprocess — plus its failure modes,
+/// on a machine where `git` may not be on the GUI app's `PATH` at all — to answer a question that
+/// is four `exists()` calls would be a poor trade. A `.git` **file** counts as much as a directory,
+/// because that is what a worktree and a submodule check out.
+///
+/// Being wrong is cheap in the direction that matters. A false negative adds
+/// `--skip-git-repo-check` to a run that did not need it, which changes nothing. A false positive
+/// omits it and Codex says so plainly, on stderr, before spending anything.
+fn in_git_work_tree(dir: &str) -> bool {
+    let mut cur = std::path::Path::new(dir);
+    loop {
+        if cur.join(".git").exists() {
+            return true;
+        }
+        match cur.parent() {
+            Some(parent) => cur = parent,
+            None => return false,
+        }
+    }
 }
 
 /// The model catalog Codex refreshes into `models_cache.json`. Reading it is what keeps this

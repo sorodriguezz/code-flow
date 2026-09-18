@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ArrowUp,
@@ -25,7 +25,6 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { renderMarkdown } from "../../lib/markdown";
 import { CONFIRM_POST_KEYS, POSTED_KEYS, VIEW_ON_KEYS } from "../../lib/providerLabels";
 import {
   discardPrFinding,
@@ -33,7 +32,6 @@ import {
   notifyStateChange,
   REVIEW_SKIPPED,
 } from "../../lib/tauri/commands";
-import { parseClaudeError } from "../../lib/claudeError";
 import {
   listCommentThreads,
   resolveCommentThread,
@@ -84,14 +82,13 @@ import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
 import { usePrWatchStore, EMPTY_TRACKED, type TrackedPr } from "../../state/prWatchStore";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
-import { useChatStore, liveSessionsOf, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
+import { useChatStore, liveSessionsOf, EMPTY_CHAT } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { useResolutionsStore, EMPTY_RESOLUTIONS } from "../../state/resolutionsStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
@@ -103,6 +100,12 @@ import { ChatModelPicker } from "./ChatModelPicker";
 import { ReviewLevelSelector } from "./ReviewLevelSelector";
 import { ReviewEngineTag } from "./ReviewEngineTag";
 import { AiErrorBanner } from "./AiErrorBanner";
+// The transcript bubble lives in `components/chat` now: this panel, the agent console's task thread
+// and the chat workspace were drawing three near-identical copies of it, and three copies of a
+// component whose memoisation contract has to be got exactly right (see its doc comment) is three
+// chances to get it wrong. Nothing about this panel's rendering changed in the move — `variant` and
+// `stamp` default to what it has always drawn.
+import { ChatMessageBubble, dayDivider } from "../chat/ChatMessageBubble";
 import type { PrDecision, PullRequestSummary, PrCommentThread, SavedFinding } from "../../types/domain";
 
 const PANEL_MIN = 280;
@@ -1418,175 +1421,9 @@ function useCopy(): [boolean, (text: string) => void] {
   return [copied, copy];
 }
 
-/** How long a turn took, in the largest unit that still reads as a duration. Past a minute the
- * seconds count stops being one — an agentic turn can run for ten of them, and "616.7s" makes the
- * reader do the division. Mirrors `formatElapsed` in `AiRunLog`, so the timer that ran during the
- * turn and the stamp left behind afterwards agree on how to spell the same span. */
-const formatResponseTime = (ms: number) => {
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  const total = Math.round(ms / 1000);
-  if (total < 60) return `${(ms / 1000).toFixed(1)}s`;
-  const pad = (value: number) => String(value).padStart(2, "0");
-  if (total < 3600) return `${Math.floor(total / 60)}:${pad(total % 60)}`;
-  return `${Math.floor(total / 3600)}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`;
-};
-
 /** The app's own language decides how timestamps read, not the OS locale — otherwise a chat in a
  * Spanish UI would print English dates. */
 const useLocale = () => (useLanguageStore((s) => s.language) === "es" ? "es-ES" : "en-US");
-
-/** Parses a stored RFC 3339 stamp, tolerating the `undefined` of turns recorded before timestamps
- * were kept and the (theoretical) unparseable value rather than rendering "Invalid Date". */
-function parseStamp(iso: string | undefined): Date | null {
-  if (!iso) return null;
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-/** One muted 10px line under a turn: when it happened and, for an answer, what produced it —
- * engine, model, CLI version, and how long it took.
- *
- * Deliberately a single row rather than a chip or a header. The process log sitting right above
- * it is already a box, and this is reference information you go looking for ("which model wrote
- * this?"), not something the transcript should be announcing. Only the time is shown; the day is
- * carried by the divider between days, and the full date is on hover. */
-function ChatStamp({ message }: { message: ChatMessage }) {
-  const t = useT();
-  const locale = useLocale();
-  const when = parseStamp(message.createdAt);
-
-  const parts: string[] = [];
-  if (message.role === "assistant") {
-    if (message.responseTimeMs !== undefined) parts.push(`⏱ ${formatResponseTime(message.responseTimeMs)}`);
-    if (message.provider) parts.push(providerDisplayLabel(message.provider, t));
-    // An empty provider still yields the raw model id, which is the honest answer for a turn
-    // recorded before the provider was tracked.
-    if (message.model) parts.push(modelDisplayLabel(message.provider ?? "", message.model, t));
-    if (message.engineVersion) parts.push(`v${message.engineVersion}`);
-  }
-  if (when) parts.push(when.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }));
-  if (parts.length === 0) return null;
-
-  return (
-    <div
-      title={when?.toLocaleString(locale)}
-      className={`px-0.5 text-[10px] leading-tight text-[var(--cf-text-muted)] ${
-        message.role === "user" ? "text-right" : ""
-      }`}
-    >
-      {parts.join(" · ")}
-    </div>
-  );
-}
-
-/** The date to announce before `message`, or `null` when it falls on the same day as the one
- * before it. Carrying the day here keeps every per-message stamp down to a bare time. */
-function dayDivider(message: ChatMessage, previous: ChatMessage | undefined, locale: string): string | null {
-  const when = parseStamp(message.createdAt);
-  if (!when) return null;
-  const before = parseStamp(previous?.createdAt);
-  if (before && before.toDateString() === when.toDateString()) return null;
-  return when.toLocaleDateString(locale, { day: "numeric", month: "long", year: "numeric" });
-}
-
-/**
- * One turn in the transcript.
- *
- * Memoised on `message` alone, which is enough because the store never mutates a message: a turn
- * is appended whole (the question when it is asked, the answer when it lands) and its object is
- * never touched again — see `chatStore.send`. So an unchanged identity really does mean unchanged
- * content, and the bubble whose content *did* change still re-renders on the very same commit.
- * Without this, every keystroke in the composer below (which is `ChatSection` state) re-rendered
- * the whole transcript, markdown subtrees and all.
- *
- * If a future engine ever streams tokens into an existing message, it must replace the message
- * object each time rather than mutating `content` in place, or the answer will appear frozen.
- */
-const ChatBubble = memo(function ChatBubble({ message }: { message: ChatMessage }) {
-  const t = useT();
-  const [copied, copy] = useCopy();
-  const [traceOpen, setTraceOpen] = useState(false);
-  // The recorded process behind this answer. Rendered under every kind of assistant turn —
-  // including the failed and the stopped ones, where "what was it doing when it died?" is the
-  // whole question.
-  const trace = message.trace;
-  const traceLog = trace && trace.length > 0 && (
-    <div className="mr-auto max-w-[95%] pt-1">
-      <AiRunLog
-        lines={trace}
-        running={false}
-        label={t("ai.traceSteps", { n: trace.length })}
-        expanded={traceOpen}
-        onToggle={() => setTraceOpen((v) => !v)}
-      />
-    </div>
-  );
-  const html = useMemo(
-    () => (message.role === "assistant" && !message.isError ? renderMarkdown(message.content) : null),
-    [message.role, message.content, message.isError],
-  );
-  // Parsed at render, not stored: a reopened conversation gets the same billing link and retry
-  // advice as the moment it failed, from the raw text kept in the transcript.
-  const parsedError = useMemo(
-    () => (message.isError ? parseClaudeError(message.content) : null),
-    [message.isError, message.content],
-  );
-
-  if (parsedError) {
-    return (
-      <div className="mr-auto max-w-[95%] space-y-1">
-        <AiErrorBanner error={parsedError} compact />
-        {traceLog}
-        <ChatStamp message={message} />
-      </div>
-    );
-  }
-
-  if (message.isCancelled) {
-    return (
-      <div className="mr-auto max-w-[85%] space-y-1">
-        <div className="flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-1 text-[11px] text-[var(--cf-text-muted)]">
-          <Square size={9} className="fill-current" />
-          {t("ai.runStopped")}
-        </div>
-        {traceLog}
-        <ChatStamp message={message} />
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-1">
-      <div
-        // Selectable as a bubble rather than only through the markdown class inside it: a plain
-        // (non-markdown) message — a user's own turn, a cancelled run's text — renders as a bare
-        // string here and would otherwise be the one kind of message you couldn't quote back.
-        className={`group relative select-text rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
-          message.role === "user"
-            ? "ml-auto max-w-[85%] whitespace-pre-wrap border border-[color-mix(in_oklab,var(--cf-accent)_30%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_14%,var(--cf-surface))] text-[var(--cf-text)]"
-            : "mr-auto max-w-[85%] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] text-[var(--cf-text)]"
-        }`}
-      >
-        {html !== null ? (
-          <div className="cf-markdown-preview cf-markdown-chat" dangerouslySetInnerHTML={{ __html: html }} />
-        ) : (
-          message.content
-        )}
-        <button
-          onClick={() => copy(message.content)}
-          title={t("chat.copyMessage")}
-          className={`absolute -top-2 flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] opacity-0 shadow-sm group-hover:opacity-100 ${
-            message.role === "user" ? "-left-2" : "-right-2"
-          }`}
-        >
-          {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} className="text-[var(--cf-text-muted)]" />}
-        </button>
-      </div>
-      {traceLog}
-      <ChatStamp message={message} />
-    </div>
-  );
-});
 
 function ChatSection({ projectId }: { projectId: string }) {
   const t = useT();
@@ -1662,7 +1499,7 @@ function ChatSection({ projectId }: { projectId: string }) {
                       <div className="h-px flex-1 bg-[var(--cf-border)]" />
                     </div>
                   )}
-                  <ChatBubble message={m} />
+                  <ChatMessageBubble message={m} />
                 </Fragment>
               );
             })}

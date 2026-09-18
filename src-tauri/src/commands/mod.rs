@@ -5,6 +5,8 @@ pub mod agents_cmd;
 pub mod api_cmd;
 pub mod app_cmd;
 pub mod backup_cmd;
+pub mod chat_attach;
+pub mod chat_cmd;
 pub mod checkpoint_cmd;
 pub mod claude_cmd;
 pub mod db_cmd;

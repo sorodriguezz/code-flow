@@ -167,6 +167,15 @@ impl AiEngine for ClineEngine {
         cmd
     }
 
+    /// `cline --thinking none|low|medium|high|xhigh`. Its scale matches Claude's in length, so the
+    /// mapping is direct with `max` landing on `xhigh`. Bare `--thinking` would mean `medium` and
+    /// omitting it leaves the provider default, which is exactly the "no level chosen" case that
+    /// never reaches this function.
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        let level = if effort == crate::ai::effort::MAX { "xhigh" } else { effort };
+        vec!["--thinking".into(), level.into()]
+    }
+
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
         interpret_output(success, status_label, stdout, stderr)
     }

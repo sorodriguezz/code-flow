@@ -46,16 +46,24 @@ const LABEL_PREFIX: &str = "sat-";
 
 /// What a satellite holds.
 ///
-/// Two kinds, because they scope differently and the difference is visible to the user. An `App`
+/// Three kinds, because they scope differently and the difference is visible to the user. An `App`
 /// belongs to the **workspace**, so it follows whichever workspace the main window is showing. A
 /// `Repo` belongs to one repository, which lives in exactly one workspace — so when the main window
 /// moves to another workspace, that window has nothing to show and says so rather than going on
 /// displaying the previous workspace's repository.
+///
+/// `Quick` belongs to **nothing**, and that is its entire design. It is the global-hotkey ask box:
+/// one composer, one answer, no sidebar and no workspace, raised over whatever the user was doing
+/// in whatever application. It is a satellite only in the mechanical sense — it is built by this
+/// module, it carries the `sat-` prefix so `capabilities/default.json` covers it, and it appears in
+/// the registry so the ceiling counts it. Everywhere the other two kinds follow the main window,
+/// this one deliberately does not; see [`close_all`].
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum SatelliteKind {
     App,
     Repo,
+    Quick,
 }
 
 impl SatelliteKind {
@@ -63,6 +71,7 @@ impl SatelliteKind {
         match self {
             SatelliteKind::App => "app",
             SatelliteKind::Repo => "repo",
+            SatelliteKind::Quick => "quick",
         }
     }
 }
@@ -297,12 +306,34 @@ pub fn focus_satellite(app: AppHandle, label: String) -> Result<(), String> {
 /// desk is being put away, and the next time it comes out — a tray restore, tomorrow's launch — it
 /// should look the way it was left. Closing one satellite by hand is the gesture that means "not
 /// this one any more", and that path does update the list.
+///
+/// # The one exception: [`SatelliteKind::Quick`]
+///
+/// The rule above rests on a premise — "a satellite alone on screen is an app the user cannot
+/// navigate" — and the quick-ask window is the one satellite the premise is false for. It has no
+/// sidebar and no rail *by design*: it is a composer and an answer, reachable from a global hotkey
+/// while the user is in another application entirely, and it needs nothing from the main window to
+/// be usable.
+///
+/// Sweeping it up here would make it worse than not shipping it. The main window hides to the tray
+/// on its close button, on ⌘W and on Alt+F4 — gestures a user performs precisely *because* they are
+/// done with the desk and are going back to their editor, which is exactly the moment the ask box
+/// becomes the only reason the app is still running. A hotkey that works until you put the window
+/// away, and then silently opens nothing, is a feature that trains people not to use it.
+///
+/// It is still closed on quit: the process going takes every window with it, which is the real
+/// lifetime this window is scoped to.
 pub fn close_all(app: &AppHandle) {
     let labels: Vec<String> = app
         .state::<SatelliteRegistry>()
         .open
         .lock()
-        .map(|held| held.keys().cloned().collect())
+        .map(|held| {
+            held.values()
+                .filter(|info| info.kind != SatelliteKind::Quick)
+                .map(|info| info.label.clone())
+                .collect()
+        })
         .unwrap_or_default();
     for label in labels {
         if let Some(window) = app.get_webview_window(&label) {
@@ -373,6 +404,217 @@ pub async fn restore_satellites(app: AppHandle) -> usize {
         }
     }
     opened
+}
+
+// ===================== the quick-ask window =====================
+
+/// The one quick-ask window's `ref_id`, and therefore its label: `sat-quick-ask`.
+///
+/// A constant rather than a parameter because there is exactly one, always. The satellite registry
+/// is keyed by label and [`open_satellite`]'s "asking for one that already exists focuses it" rule
+/// is what makes the hotkey idempotent — pressing the chord twice raises the box, it does not build
+/// a second one. Giving each press its own id would trade that for a screenful of ask boxes and
+/// would hit [`MAX_SATELLITES`] in eight presses.
+const QUICK_REF_ID: &str = "ask";
+
+/// The accelerator the ask box is bound to when the user has expressed no preference.
+///
+/// ⌥Space is what ChatGPT's own desktop app uses on macOS, which is the whole argument: a chord
+/// people already have in their fingers for "ask something" beats one this app picked for being
+/// free. It is rebindable precisely because it is somebody else's choice — see
+/// [`register_quick_ask_shortcut`].
+pub const DEFAULT_QUICK_ASK_ACCELERATOR: &str = "Alt+Space";
+
+/// The `app_settings` key holding the user's accelerator, read at startup by `lib.rs`.
+pub const QUICK_ASK_ACCELERATOR_KEY: &str = "quick_ask_accelerator";
+
+/// Raises the ask box, building it if it is not there.
+///
+/// Its own builder rather than a branch inside [`open_satellite`], because almost nothing about the
+/// geometry is shared: this window is small, centred, resizable only within a narrow band, has no
+/// task-bar entry to alt-tab to, and floats above other applications — which is the only way a box
+/// summoned by a global hotkey can work at all, since the application the user was in keeps the
+/// focus the moment it is drawn behind it.
+///
+/// It is still registered in [`SatelliteRegistry`], and that is deliberate: `forget` must reap it
+/// on `Destroyed`, `list_satellites` must count it against the ceiling, and [`close_all`] has to be
+/// able to *see* it in order to skip it.
+pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
+    let label = label_for(SatelliteKind::Quick, QUICK_REF_ID);
+    crate::applog::info(&format!("window: open_quick_ask {label}"));
+
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(label);
+    }
+
+    let registry = app.state::<SatelliteRegistry>();
+    {
+        let held = registry.open.lock().map_err(|e| e.to_string())?;
+        if held.len() >= MAX_SATELLITES {
+            return Err(format!("too many windows are open (limit {MAX_SATELLITES})"));
+        }
+    }
+
+    let url = format!("window.html?kind={}&ref={}", SatelliteKind::Quick.slug(), QUICK_REF_ID);
+
+    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .title("CodeFlow")
+        .inner_size(720.0, 420.0)
+        .min_inner_size(520.0, 220.0)
+        .center()
+        // Above the application the user was working in, because that application still has the
+        // focus when this appears and a box that opens behind it is a chord that did nothing.
+        .always_on_top(true)
+        // Not a destination to alt-tab into. It is summoned and dismissed; leaving a task-bar entry
+        // behind would make it a fourth CodeFlow window in the switcher that nobody put there.
+        .skip_taskbar(true)
+        // No frame on any platform, unlike the other satellites: there is no title bar to draw,
+        // because there is nothing in this window a title bar would be about.
+        .decorations(false)
+        .resizable(true);
+
+    // A resized ask box should not be remembered anywhere or restored by `window_state` — it is
+    // summoned at a size, used, and dismissed. Nothing here opts it in, which is the point of
+    // saying so: `window_state` tracks the main window by label.
+    #[cfg(target_os = "macos")]
+    {
+        // Follows the user onto whichever desktop/space they are on. Without it the chord switches
+        // spaces out from under them to show a window that was opened on another one — the single
+        // most disorienting thing a global hotkey can do.
+        builder = builder.visible_on_all_workspaces(true);
+    }
+
+    builder.build().map_err(|e| e.to_string())?;
+
+    if let Ok(mut held) = registry.open.lock() {
+        held.insert(
+            label.clone(),
+            SatelliteInfo {
+                label: label.clone(),
+                kind: SatelliteKind::Quick,
+                ref_id: QUICK_REF_ID.to_string(),
+                title: "CodeFlow".to_string(),
+            },
+        );
+    }
+    announce(&app);
+    Ok(label)
+}
+
+/// What the hotkey, the tray item and the frontend all call. See [`open_quick_ask`].
+#[tauri::command]
+pub async fn quick_ask_open(app: AppHandle) -> Result<String, String> {
+    open_quick_ask(app).await
+}
+
+/// Destroys the ask box, webview and all.
+///
+/// The heavier of the two ways it goes away, and the one that is not the ordinary one: dismissing
+/// it — Escape, or the hotkey pressed while it is up — **hides** it, because it is re-summoned many
+/// times in a session and rebuilding a webview each time is the difference between "instant" and "a
+/// beat" (`QuickAskWindow.tsx` says the same thing at its own Escape handler). This is the command
+/// for genuinely being done with it: it releases the webview and takes the window out of the
+/// registry, which is what frees its slot against [`MAX_SATELLITES`].
+///
+/// Nothing is lost either way. The conversation is in SQLite from the moment the question is
+/// asked — it is already the first row of the main window's sidebar — so a rebuilt box starting
+/// empty is the correct state rather than a loss.
+#[tauri::command]
+pub fn quick_ask_close(app: AppHandle) -> Result<(), String> {
+    let label = label_for(SatelliteKind::Quick, QUICK_REF_ID);
+    if let Some(window) = app.get_webview_window(&label) {
+        window.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Binds (or rebinds) the system-wide chord that raises the ask box.
+///
+/// # Why this returns `Err` rather than logging
+///
+/// A global accelerator is a claim on a chord for the whole machine, and the two ways it fails are
+/// both invisible: the string does not parse (`"Alt+Spce"`, a modifier name from a different
+/// platform's vocabulary), or the chord is already owned by another application — Spotlight,
+/// Alfred, Raycast and a dozen window managers all live in exactly the same keys this feature wants.
+/// Neither produces anything the user can see. They press the chord, nothing happens, and there is
+/// no surface anywhere in the app that would explain why: the setting still shows what they typed.
+///
+/// So the failure is returned, loudly, to the one context that can say something about it — the
+/// settings field the accelerator was typed into. A silently unbound hotkey is the worst available
+/// outcome and is the one this signature exists to prevent.
+///
+/// **Every previous binding is dropped first.** Rebinding without unregistering would leave the old
+/// chord live as well, so a user who moved the hotkey three times would have three of them — and,
+/// worse, would have no way to get rid of the ones they moved away from short of restarting.
+#[tauri::command]
+pub fn register_quick_ask_shortcut(app: AppHandle, accelerator: String) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let accelerator = accelerator.trim();
+    if accelerator.is_empty() {
+        return Err("a quick-ask shortcut needs an accelerator".to_string());
+    }
+
+    let manager = app.global_shortcut();
+    // Not conditional on there being one: the plugin's own bookkeeping is the authority on what is
+    // registered, and this process may have inherited a binding from an earlier call in this
+    // session that failed halfway.
+    manager.unregister_all().map_err(|e| e.to_string())?;
+
+    manager
+        .on_shortcut(accelerator, |app, _shortcut, event| {
+            // Pressed only. The plugin delivers both edges, and acting on the release as well would
+            // open the box and immediately toggle it shut again on a single tap.
+            if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                return;
+            }
+            toggle_quick_ask(app);
+        })
+        .map_err(|e| {
+            crate::applog::info(&format!("window: quick-ask shortcut '{accelerator}' refused: {e}"));
+            format!("could not bind '{accelerator}': {e}")
+        })?;
+
+    crate::applog::info(&format!("window: quick-ask shortcut bound to '{accelerator}'"));
+    Ok(())
+}
+
+/// What one press of the chord does: raise the box, or put it away if it is already up.
+///
+/// A toggle rather than "always open", because the chord is the only control this window is
+/// guaranteed to have — it is summoned over another application, so the user's hands are on the
+/// keyboard and nowhere near its close button. Pressing it again has to be the way out, or the
+/// hotkey is a one-way door.
+///
+/// **Hidden, not closed** — the same choice Escape makes inside the window, for the same reason:
+/// this is pressed many times in a session and a rebuilt webview is a visible beat before the box
+/// appears. [`quick_ask_close`] is the other one, for being done with it.
+pub fn toggle_quick_ask(app: &AppHandle) {
+    let label = label_for(SatelliteKind::Quick, QUICK_REF_ID);
+    if let Some(window) = app.get_webview_window(&label) {
+        // Focused means "you are looking at it and pressed the chord again" — dismiss. Anything
+        // else — hidden, or up but behind another application — is a request to raise it. Checking
+        // focus rather than visibility is what makes the second case work: a visible box the user
+        // cannot see because their editor is over it must come forward, not disappear.
+        if window.is_focused().unwrap_or(false) {
+            let _ = window.hide();
+        } else {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+        return;
+    }
+    let handle = app.clone();
+    // The builder is async and this is called from the hotkey callback, which is not.
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = open_quick_ask(handle).await {
+            crate::applog::info(&format!("window: quick ask could not open: {e}"));
+        }
+    });
 }
 
 /// Tells every window which satellites exist now.
@@ -457,6 +699,52 @@ mod tests {
         let registry = SatelliteRegistry::default();
         assert!(registry.parked.lock().unwrap().is_empty());
         assert!(registry.open.lock().unwrap().is_empty());
+    }
+
+    /// The label the spec names, and the property that makes the hotkey idempotent: one ask box,
+    /// always at the same address.
+    #[test]
+    fn the_quick_ask_window_is_a_singleton_at_a_known_label() {
+        let label = label_for(SatelliteKind::Quick, QUICK_REF_ID);
+        assert_eq!(label, "sat-quick-ask");
+        assert!(is_satellite(&label), "it must be covered by the `sat-*` capability");
+        assert_eq!(label, label_for(SatelliteKind::Quick, QUICK_REF_ID));
+    }
+
+    /// The cascade trap, as a test. `close_all` runs when the main window hides to the tray, and
+    /// the whole point of the ask box is that it survives that — see the note on `close_all`.
+    #[test]
+    fn hiding_the_desk_leaves_the_ask_box_alone() {
+        let registry = SatelliteRegistry::default();
+        {
+            let mut held = registry.open.lock().unwrap();
+            for (label, kind, ref_id) in [
+                ("sat-app-notes", SatelliteKind::App, "notes"),
+                ("sat-quick-ask", SatelliteKind::Quick, QUICK_REF_ID),
+            ] {
+                held.insert(
+                    label.to_string(),
+                    SatelliteInfo {
+                        label: label.to_string(),
+                        kind,
+                        ref_id: ref_id.to_string(),
+                        title: String::new(),
+                    },
+                );
+            }
+        }
+
+        // The predicate `close_all` closes on, exercised without a window system.
+        let doomed: Vec<String> = registry
+            .open
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|info| info.kind != SatelliteKind::Quick)
+            .map(|info| info.label.clone())
+            .collect();
+
+        assert_eq!(doomed, vec!["sat-app-notes".to_string()]);
     }
 
     /// The main window is not a satellite, and neither is anything that merely mentions one.

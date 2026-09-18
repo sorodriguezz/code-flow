@@ -552,6 +552,24 @@ fn rehome_global_rows(conn: &Connection, from: &str) -> rusqlite::Result<()> {
            AND collection_id IN (SELECT id FROM api_collections WHERE workspace_id = ?2)",
         params![from, into],
     )?;
+    // Chat conversations, and **all** of them — not the `scope = 'global'` subset the loop above
+    // moves, because `chat_conversations` has no `scope` column to filter on. That is not an
+    // omission: the chat sidebar is flat and global by design, the way ChatGPT's is, so every
+    // conversation is global in the only sense the user can perceive. `workspace_id` is a stamp
+    // the list never filters on — it exists for the backup grouping and the run-isolation
+    // bookkeeping, and nothing in the UI ever tells the user which workspace a chat was started
+    // under.
+    //
+    // Which makes the cascade the sharpest edge in this function. A user who deletes an empty
+    // workspace as housekeeping has no way to know that three unrelated conversations were filed
+    // against it, and no warning that they are about to go. Compare `project_id` on the same
+    // table, which is `ON DELETE SET NULL` precisely so that deleting a project *orphans* its
+    // chats instead of shredding them — leaving the much coarser parent free to shred them would
+    // have been the same mistake one level up.
+    conn.execute(
+        "UPDATE chat_conversations SET workspace_id = ?2 WHERE workspace_id = ?1",
+        params![from, into],
+    )?;
     rehome_vault_rows(conn, from)?;
     Ok(())
 }
@@ -4608,6 +4626,42 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM note_books WHERE id = 'b2'", [], |row| row.get(0))
             .unwrap();
         assert_eq!(survivors, 0, "a workspace-scoped book still goes with its workspace");
+    }
+
+    /// Chat conversations are the sharpest case of the rule above, because nothing in the UI even
+    /// hints that a conversation belongs to a workspace.
+    ///
+    /// The sidebar is flat and global the way ChatGPT's is — `list_conversations` never filters on
+    /// `workspace_id` — so a user deleting an empty workspace as housekeeping has no way to know
+    /// that conversations were filed against it. Unlike a global note, which at least appears under
+    /// a workspace's shelf, there is no screen anywhere that would have warned them. All of them
+    /// move, not just a `scope = 'global'` subset, because the table has no `scope` column to
+    /// narrow by: every conversation is global in the only sense the user can perceive.
+    #[test]
+    fn deleting_a_workspace_rehomes_its_chat_conversations() {
+        let conn = two_workspaces();
+        conn.execute_batch(
+            "INSERT INTO chat_conversations (id, workspace_id, title, provider, created_at, updated_at) \
+               VALUES ('k1', 'w1', 'About Postgres', 'claude', 't', 't');
+             INSERT INTO chat_messages (id, conversation_id, turn, role, content, created_at) \
+               VALUES ('m1', 'k1', 1, 'user', 'hola', 't');",
+        )
+        .unwrap();
+
+        delete_workspace(&conn, "w1").unwrap();
+
+        let home: Option<String> = conn
+            .query_row("SELECT workspace_id FROM chat_conversations WHERE id = 'k1'", [], |row| row.get(0))
+            .optional()
+            .unwrap();
+        assert_eq!(home.as_deref(), Some("w2"), "the conversation should have moved, not been shredded");
+
+        // The second cascade is the one that would have made this unrecoverable: messages hang off
+        // the conversation, so losing the parent loses every turn in it.
+        let turns: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_messages WHERE conversation_id = 'k1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(turns, 1, "the transcript must survive with its conversation");
     }
 
     /// The other end of the same rule: with nothing left to be global *to*, the cascade is right.

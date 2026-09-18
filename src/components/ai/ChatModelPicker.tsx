@@ -27,11 +27,37 @@ const EDGE = 8;
  * Switching provider mid-chat can't work: each CLI keeps its own session store, so the turns so far
  * live somewhere the next engine can't read, and its resume token means nothing there. Rather than
  * silently dropping the thread, the other providers are locked behind "new chat".
+ *
+ * # Bound mode (`bound` + `onPick`)
+ *
+ * The paragraph above describes the AI panel, where the chip *is* the routing. The chat workspace
+ * is the other case: there a conversation carries its own provider and model in its row, and
+ * `chat_send` runs on those rather than on the workspace's routing. Reading the global setting
+ * there produces a chip that names one engine while the turn goes to another — and worse, applies
+ * the "locked" padlock to the one provider the conversation is actually running on, because the
+ * lock is computed against the routing rather than against the thread.
+ *
+ * So a caller that owns the answer passes it in, and takes the write. Both props or neither:
+ * `bound` without `onPick` would render a value the menu cannot change.
  */
-export function ChatModelPicker({ liveModel, chatActive }: { liveModel: string | null; chatActive: boolean }) {
+export function ChatModelPicker({
+  liveModel,
+  chatActive,
+  bound,
+  onPick,
+}: {
+  liveModel: string | null;
+  chatActive: boolean;
+  /** The engine this chip is describing, when it is not the workspace's chat routing. */
+  bound?: { provider: string; model: string };
+  /** Where a selection goes in bound mode. Without it the pick falls through to the routing. */
+  onPick?: (provider: string, model: string) => void | Promise<void>;
+}) {
   const t = useT();
-  const providerId = useTaskProvider("chat");
-  const configuredModel = useAiProviderStore((s) => s.taskModels.chat ?? s.model);
+  const routedProvider = useTaskProvider("chat");
+  const routedModel = useAiProviderStore((s) => s.taskModels.chat ?? s.model);
+  const providerId = bound?.provider ?? routedProvider;
+  const configuredModel = bound?.model ?? routedModel;
   const setTaskRouting = useAiProviderStore((s) => s.setTaskRouting);
   const modelsByProvider = useAiModelsStore((s) => s.byProvider);
   const ensureModels = useAiModelsStore((s) => s.ensure);
@@ -117,6 +143,13 @@ export function ChatModelPicker({ liveModel, chatActive }: { liveModel: string |
 
   const pick = async (nextProvider: string, model: string) => {
     setOpen(false);
+    // In bound mode the selection belongs to the conversation, and writing it to the workspace
+    // routing as well would change what every *future* chat starts on because someone re-pointed
+    // one thread. The two are deliberately not kept in step.
+    if (onPick) {
+      await onPick(nextProvider, model);
+      return;
+    }
     await setTaskRouting("chat", nextProvider, model);
   };
 
@@ -191,11 +224,11 @@ export function ChatModelPicker({ liveModel, chatActive }: { liveModel: string |
                     );
                   })}
                 </div>
-                {chatActive && (
-                  <p className="shrink-0 border-t border-[var(--cf-border)] px-2.5 py-1.5 text-[10px] leading-snug text-[var(--cf-text-muted)]">
-                    {t("chat.providerLocked")}
-                  </p>
-                )}
+                {/* No standing explanation under the list. The padlock already says the row cannot
+                    be chosen, and the reason it cannot — each CLI keeps its own sessions, so an
+                    open chat cannot move between them — is on the row's own tooltip, which is where
+                    someone who wants the reason will look for it. A paragraph pinned to the bottom
+                    of a menu is read once and then occupies the menu forever. */}
               </>
 
             ) : (
