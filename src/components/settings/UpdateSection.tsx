@@ -1,6 +1,23 @@
-import { Check, Download, Loader2, RefreshCw, RotateCw, Sparkles, TriangleAlert } from "lucide-react";
+import { Check, Coffee, Download, Globe, Loader2, RefreshCw, RotateCw, Sparkles, TriangleAlert } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdateStore } from "../../state/updateStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+
+/** Where the support button goes. Opened in the system browser rather than the app's own webview,
+ *  and that is not a detail: a payment page inside CodeFlow is a page with no address bar, and
+ *  nobody should be asked to reach for a card in a window that cannot prove where it is. */
+const KOFI_URL = "https://ko-fi.com/sorodriguezz";
+
+/** The product page — what CodeFlow is, for somebody who has not got it yet. It lives next to the
+ *  support button because they answer the same two questions a person has on this screen: what is
+ *  this, and how do I say thanks. */
+const SITE_URL = "https://getcodeflow.vercel.app";
+
+/** Both links leave the app the same way, and that is the whole rule: a site rendered inside
+ *  CodeFlow would be a browser with no address bar, no back button and no way for the user to tell
+ *  what they are looking at. `catch` because a machine with no handler for http(s) is not a reason
+ *  to throw inside a settings pane. */
+const openExternally = (url: string) => () => void openUrl(url).catch(() => {});
 
 /** Self-service updater: downloads the published GitHub release for a newer signed build and
  * installs it in place, so the user never has to uninstall/reinstall by hand. Only works in the
@@ -54,13 +71,33 @@ export function UpdateSection() {
         </p>
       )}
 
-      {/* Idle / up-to-date / error → "Check for updates" */}
-      {(status === "idle" || status === "checking" || status === "uptodate" || status === "error") && (
-        <button onClick={() => void checkNow(true)} disabled={status === "checking"} className={btnOutline}>
-          {status === "checking" ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-          {status === "checking" ? t("settings.checkingUpdates") : t("settings.checkForUpdates")}
+      {/* The two buttons share a row but not a condition. "Check for updates" is gone while a
+          download runs, and a support link that blinked out of existence alongside it would read as
+          a bug rather than as tact — so it renders unconditionally and simply sits alone for the
+          minute an update takes. */}
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Idle / up-to-date / error → "Check for updates" */}
+        {(status === "idle" || status === "checking" || status === "uptodate" || status === "error") && (
+          <button onClick={() => void checkNow(true)} disabled={status === "checking"} className={btnOutline}>
+            {status === "checking" ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            {status === "checking" ? t("settings.checkingUpdates") : t("settings.checkForUpdates")}
+          </button>
+        )}
+
+        <button onClick={openExternally(SITE_URL)} className={btnOutline} title={t("settings.visitSiteHint")}>
+          <Globe size={14} />
+          {t("settings.visitSite")}
         </button>
-      )}
+
+        {/* Outline, never the accent: the app is free and stays free, so this asks once and quietly
+            from a screen the user already had a reason to open. Only the icon carries Ko-fi's own
+            red — the accent colour is the user's to choose, and a brand mark that changes hue with
+            the theme stops reading as the brand it links to. */}
+        <button onClick={openExternally(KOFI_URL)} className={btnOutline} title={t("settings.supportKofiHint")}>
+          <Coffee size={14} className="text-[#ff5e5b]" />
+          {t("settings.supportKofi")}
+        </button>
+      </div>
 
       {/* Two ways to have nothing to install, and they are not the same sentence: "you are on the
           latest" would be a claim nobody checked when the release simply has no build for this

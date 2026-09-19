@@ -55,7 +55,6 @@ export function ChatComposer({
   onOpenTerminal,
   disabled,
   disabledReason,
-  compact = false,
 }: {
   provider: string;
   /** The model this conversation runs on. Its own prop rather than read from the workspace routing:
@@ -75,7 +74,8 @@ export function ChatComposer({
   /** Stores bytes with no file behind them, which is what a pasted screenshot is. */
   onAttachBytes?: (name: string, data: Uint8Array) => Promise<void>;
   onRemoveAttachment?: (attachmentId: string) => void;
-  /** Re-points the conversation. Absent in the quick-ask window, which has no picker to press. */
+  /** Re-points the conversation. Absent until there is a conversation to re-point: before that the
+   *  chip writes the workspace's chat routing itself, which is what the next question will run on. */
   onPickEngine?: (provider: string, model: string) => void | Promise<void>;
   onPickEffort?: (effort: string) => void | Promise<void>;
   sending: boolean;
@@ -90,8 +90,6 @@ export function ChatComposer({
   onOpenTerminal?: () => void;
   disabled?: boolean;
   disabledReason?: string;
-  /** The quick-ask window's variant: no capability strip, no model picker row — just the box. */
-  compact?: boolean;
 }) {
   const t = useT();
   const boxRef = useRef<HTMLTextAreaElement>(null);
@@ -263,19 +261,17 @@ export function ChatComposer({
           />
 
           <div className="flex items-center gap-1.5 px-0.5">
-            {!compact && (
-              /* `bound` is what makes this chip tell the truth: the conversation's engine, not the
-                 workspace's chat routing. Without it the padlock lands on the provider the thread
-                 is actually running on, because "locked" is computed against the routing. */
-              <ChatModelPicker
-                liveModel={null}
-                chatActive={turns > 0}
-                bound={{ provider, model }}
-                onPick={onPickEngine}
-              />
-            )}
+            {/* `bound` is what makes this chip tell the truth: the conversation's engine, not the
+                workspace's chat routing. Without it the padlock lands on the provider the thread is
+                actually running on, because "locked" is computed against the routing. */}
+            <ChatModelPicker
+              liveModel={null}
+              chatActive={turns > 0}
+              bound={{ provider, model }}
+              onPick={onPickEngine}
+            />
 
-            {!compact && onPickEffort && (
+            {onPickEffort && (
               <EffortPicker
                 value={effort}
                 supported={effortSupported}

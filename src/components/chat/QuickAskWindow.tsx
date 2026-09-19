@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ArrowUpRight, MessagesSquare } from "lucide-react";
+import { ArrowUpRight, MessagesSquare, X } from "lucide-react";
 import { ChatComposer } from "./ChatComposer";
 import { ChatMessageBubble } from "./ChatMessageBubble";
 import { ThinkingBlock } from "./ThinkingBlock";
@@ -26,9 +26,20 @@ const EMPTY_QUICK_ATTACHMENTS: ChatAttachment[] = [];
  * The quick-ask window: one question, one answer, and nothing else at all.
  *
  * Summoned by a global hotkey over whatever the user was doing, expected to be gone a few seconds
- * later. So it has no sidebar, no header and no model picker — every one of those would be a
- * permanent control on a window whose whole point is that it is temporary, and the routing they
- * would change already has a home in Settings and in the full workspace.
+ * later. So it has no sidebar and no transcript — both would be the full workspace with pieces
+ * missing rather than a box for one question.
+ *
+ * # Everything needed to ask *this* question is in this window
+ *
+ * Which engine answers, how hard it thinks, and the way out. The window is built with
+ * `decorations(false)` (see `open_quick_ask`), so there is no title bar to hang any of it on and no
+ * close button but the one drawn here — a box summoned over another application cannot send the
+ * user somewhere else to configure it and still be the cheap thing it claims to be.
+ *
+ * The two pickers cost one short row under the input and they are not decoration: the model decides
+ * who answers, and the level is the difference between an answer in two seconds and an answer in
+ * forty. Both are also the only place those can be set for the conversation this window is about to
+ * create — before the first question there is no row anywhere else to carry them.
  *
  * # It is a real conversation, not a scratchpad
  *
@@ -53,6 +64,11 @@ export function QuickAskWindow() {
   const stopTurn = useConversationStore((s) => s.stop);
   const streamingText = useConversationStore((s) => s.streamingText);
   const streamingThinking = useConversationStore((s) => s.streamingThinking);
+  const setEngine = useConversationStore((s) => s.setEngine);
+  const setEffort = useConversationStore((s) => s.setEffort);
+  const setPendingEffort = useConversationStore((s) => s.setPendingEffort);
+  const pendingEffort = useConversationStore((s) => s.pendingEffort);
+  const effortProviders = useConversationStore((s) => s.effortProviders);
 
   /** The conversation this window has asked into, if it has asked yet. Local rather than the
    *  store's `activeId`: the main window's selection is its own business, and a quick ask must not
@@ -106,6 +122,18 @@ export function QuickAskWindow() {
     if (conversationId) stopTurn(conversationId);
   }, [conversationId, stopTurn]);
 
+  /** Before the first question there is no row to write the level to, so it is held as this
+   *  window's pending level and `create` applies it to the conversation it makes — which is what
+   *  keeps the *opening* question from being the one turn that ignored the dial. After that the
+   *  conversation owns it, exactly as in the full workspace. */
+  const onPickEffort = useCallback(
+    (value: string) => {
+      if (conversationId) return setEffort(conversationId, value);
+      setPendingEffort(value);
+    },
+    [conversationId, setEffort, setPendingEffort],
+  );
+
   const pendingId = session.pendingMessageId;
   const pendingText = pendingId ? (streamingText[pendingId] ?? "") : "";
   const pendingThinking = pendingId ? (streamingThinking[pendingId] ?? "") : "";
@@ -122,7 +150,26 @@ export function QuickAskWindow() {
   const streamsTokens = providerCapabilities(provider).streamsTokens;
 
   return (
-    <div className="flex h-full flex-col bg-[var(--cf-surface)]">
+    <div className="relative flex h-full flex-col bg-[var(--cf-surface)]">
+      {/* The only way out that can be seen. Escape does the same thing and is what most presses
+          will use, but a window with no frame and no title bar offers a mouse absolutely nothing,
+          and a keyboard shortcut nobody was told about is not an affordance.
+
+          Hides rather than destroys, exactly as Escape does: this box is summoned many times in a
+          session and rebuilding its webview each time is the difference between "instant" and "a
+          beat". Nothing is lost either way — the conversation is in SQLite from the moment the
+          question was asked, and a run already under way is a subprocess that outlives the window
+          and is watched from the main window's status bar. */}
+      <button
+        type="button"
+        onClick={() => void getCurrentWindow().hide()}
+        title={t("chat.quickAskClose")}
+        aria-label={t("chat.quickAskClose")}
+        className="absolute right-2 top-2 z-10 rounded-md p-1 text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.07]"
+      >
+        <X size={14} />
+      </button>
+
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pt-4">
         {!answer && !session.sending && (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
@@ -173,11 +220,17 @@ export function QuickAskWindow() {
       </div>
 
       <ChatComposer
-        compact
         provider={provider}
         model={model}
-        effort={session.effort}
-        effortSupported={false}
+        effort={conversationId ? session.effort : pendingEffort}
+        // Asked once at startup and empty when the probe failed, which hides the dial rather than
+        // drawing one that turns nothing — the same rule the full composer follows.
+        effortSupported={effortProviders.includes(provider)}
+        onPickEffort={onPickEffort}
+        // Before the first question there is no row to re-point, and the chip falls through to the
+        // workspace's chat routing on its own — which is exactly what the next question will run
+        // on. Once a conversation exists it owns its engine, so the pick goes to the row instead.
+        onPickEngine={conversationId ? (p, m) => setEngine(conversationId, p, m) : undefined}
         attachments={EMPTY_QUICK_ATTACHMENTS}
         sending={session.sending}
         turns={session.messages.length}

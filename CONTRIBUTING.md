@@ -38,6 +38,27 @@ pnpm install
 pnpm tauri dev
 ```
 
+### On macOS: one certificate, once
+
+Ask macOS for your Keychain password on every launch and you have hit this. The
+linker ad-hoc signs each build, and an ad-hoc signature is a bare hash of the
+executable — so every rebuild is a new app as far as the Keychain is concerned,
+and "Always Allow" means "until you next press save".
+
+Give it one signature that never changes and the authorization sticks:
+
+1. Open **Keychain Access** → menu **Keychain Access › Certificate Assistant ›
+   Create a Certificate…**
+2. Name it **`CodeFlow Dev`**, Identity Type **Self Signed Root**, Certificate
+   Type **Code Signing**. Nothing else needs changing, and no Apple account is
+   involved.
+3. Rebuild. `src-tauri/scripts/sign-dev.sh` finds it from then on and says so in
+   your terminal while it cannot.
+
+Answer the password prompt once more after that and it should be the last one.
+A different name works if you export `CODEFLOW_SIGN_IDENTITY`. Skip all of this
+and everything still builds and runs — you just keep typing your password.
+
 Before you push, run what CI runs on every pull request:
 
 ```bash
@@ -105,6 +126,27 @@ issue público.
 pnpm install
 pnpm tauri dev
 ```
+
+### En macOS: un certificado, una sola vez
+
+Si macOS te pide la contraseña del llavero en cada arranque, es esto. El linker
+firma cada build en modo ad-hoc, y una firma ad-hoc no es más que un hash del
+ejecutable — así que cada recompilación es una app nueva para el llavero, y
+"Permitir siempre" dura hasta que vuelvas a guardar.
+
+Dale una firma que no cambie y la autorización se queda:
+
+1. Abre **Acceso a Llaveros** → menú **Acceso a Llaveros › Asistente de
+   certificados › Crear un certificado…**
+2. Llámalo **`CodeFlow Dev`**, tipo de identidad **Raíz autofirmada**, tipo de
+   certificado **Firma de código**. No hace falta tocar nada más, y no
+   interviene ninguna cuenta de Apple.
+3. Recompila. A partir de ahí `src-tauri/scripts/sign-dev.sh` lo encuentra solo,
+   y mientras no pueda te lo dice por la terminal.
+
+Responde al aviso de contraseña una vez más y debería ser la última. Si
+prefieres otro nombre, exporta `CODEFLOW_SIGN_IDENTITY`. Si te saltas todo esto
+igual compila y funciona — solo seguirás escribiendo la contraseña.
 
 Antes de subir, corre lo mismo que corre CI en cada pull request:
 

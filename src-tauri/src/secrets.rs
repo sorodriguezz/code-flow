@@ -9,8 +9,13 @@
 //! things follow. The first is that an app signed ad-hoc — which is every build not signed with a
 //! real certificate — has a designated requirement that is a bare hash of the executable, so it
 //! stops matching at the next rebuild and "Always Allow" quietly means "until the next update".
-//! That one cannot be fixed here; it is fixed by signing with a Developer ID. The second *is* fixed
-//! here: with one item per credential, authorizing the app was never a single act. This install
+//! That one is not fixed in *this file*, but it is fixed: `scripts/sign-dev.sh` signs every
+//! `cargo run` with one self-signed certificate that never changes, so the requirement becomes
+//! `identifier "..." and certificate leaf = H"..."` and outlives the rebuild. It needs no Apple
+//! account — but it does need that certificate to exist, which is a one-time manual step, and
+//! until somebody does it the prompts come back exactly as described. A *shipped* build still
+//! wants a Developer ID. The second problem *is* fixed here: with one item per credential,
+//! authorizing the app was never a single act. This install
 //! reached eighteen items — a token per Git host, a key per Supabase project, a passphrase, two
 //! cloud grants, one per database connection — and the scheduled backup, which walks all of them
 //! unattended, turned that into a burst of prompts a minute after launch with nothing on screen to

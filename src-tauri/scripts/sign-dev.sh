@@ -21,7 +21,11 @@ BIN="$1"
 [ -n "$BIN" ] || { echo "sign-dev.sh: cargo passed no binary" >&2; exit 64; }
 shift
 
-if [ "$(uname -s)" = "Darwin" ] && security find-identity -v -p codesigning 2>/dev/null | grep -qF "$IDENTITY"; then
+if [ "$(uname -s)" != "Darwin" ]; then
+    exec "$BIN" "$@"
+fi
+
+if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$IDENTITY"; then
     # Pinning the bundle identifier onto the bare binary lets `tauri dev` and a locally signed
     # .app share one Keychain ACL rather than needing an authorization each. Test binaries keep
     # the default identifier, so they stay on their own ACL and their own com.codeflow.app.test
@@ -33,6 +37,17 @@ if [ "$(uname -s)" = "Darwin" ] && security find-identity -v -p codesigning 2>/d
         codesign --force --sign "$IDENTITY" --timestamp=none "$BIN" \
             >/dev/null 2>&1 || echo "sign-dev.sh: codesign failed, running unsigned" >&2
     fi
+elif [ "${BIN##*/}" = "codeflow" ]; then
+    # Said out loud, because the silent version of this branch is indistinguishable from the fix
+    # working. Everything here is conditional on a certificate somebody has to create by hand once,
+    # and when it is missing the only symptom is the Keychain asking for the password again after a
+    # rebuild — which looks exactly like the bug this was written to remove, with nothing anywhere
+    # connecting the two. One line naming the missing identity is the difference between "this is
+    # broken" and "this machine has not done the one-time step".
+    #
+    # Only for the app binary: the test harness runs this wrapper too, and a notice per test binary
+    # would bury the output of `cargo test`.
+    echo "sign-dev.sh: no \"$IDENTITY\" code-signing identity found, running unsigned — macOS will ask for your Keychain password again after every rebuild. CONTRIBUTING.md has the one-time fix." >&2
 fi
 
 exec "$BIN" "$@"

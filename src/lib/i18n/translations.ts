@@ -1968,7 +1968,8 @@ const en = {
   "settings.searchResults": "{n} results",
   "settings.sectionNavLabel": "Panes in this section",
   "settings.searchClear": "Clear search",
-  "settings.searchTermsGeneral": "language, windows, tour, quit, data, folder, reset",
+  "settings.searchTermsGeneral":
+    "language, windows, tour, quit, data, folder, reset, donate, support, ko-fi, coffee, website",
   "settings.searchTermsAppearance": "theme, colors, dark, light, font, editor theme, accent",
   "settings.searchTermsKeys": "shortcuts, keys, keyboard, bindings, chords",
   "settings.searchTermsProjects": "repositories, repos, clone, workspaces, folders",
@@ -2204,6 +2205,11 @@ const en = {
   "settings.updateReady": "Update installed — restart to apply it.",
   "settings.restartNow": "Restart now",
   "settings.updateError": "Couldn't check for updates. This only works in the installed app.",
+  "settings.visitSite": "Visit the website",
+  "settings.visitSiteHint": "What CodeFlow is, on one page — the link to send anyone who asks.",
+  "settings.supportKofi": "Support on Ko-fi",
+  "settings.supportKofiHint":
+    "CodeFlow is free and stays free. If it saves you time, you can buy me a coffee.",
   "update.autoHint": "CodeFlow checks when it starts and once an hour after that.",
   "update.alertTitle": "New update available",
   "update.alertDownloadingTitle": "Updating CodeFlow",

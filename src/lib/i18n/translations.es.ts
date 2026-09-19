@@ -1935,7 +1935,8 @@ export const es = {
   "settings.searchResults": "{n} resultados",
   "settings.sectionNavLabel": "Paneles de esta sección",
   "settings.searchClear": "Limpiar búsqueda",
-  "settings.searchTermsGeneral": "idioma, ventanas, tour, salir, datos, carpeta, restablecer",
+  "settings.searchTermsGeneral":
+    "idioma, ventanas, tour, salir, datos, carpeta, restablecer, donar, apoyar, ko-fi, café, sitio web",
   "settings.searchTermsAppearance": "tema, colores, oscuro, claro, fuente, tema del editor, acento",
   "settings.searchTermsKeys": "atajos, teclas, teclado, combinaciones",
   "settings.searchTermsProjects": "repositorios, repos, clonar, workspaces, carpetas",
@@ -2171,6 +2172,11 @@ export const es = {
   "settings.updateReady": "Actualización instalada — reinicia para aplicarla.",
   "settings.restartNow": "Reiniciar ahora",
   "settings.updateError": "No se pudo buscar actualizaciones. Solo funciona en la app instalada.",
+  "settings.visitSite": "Ver el sitio web",
+  "settings.visitSiteHint": "Lo que es CodeFlow en una página — el enlace para quien te pregunte.",
+  "settings.supportKofi": "Apóyame en Ko-fi",
+  "settings.supportKofiHint":
+    "CodeFlow es gratis y lo seguirá siendo. Si te ahorra tiempo, puedes invitarme un café.",
   "update.autoHint": "CodeFlow busca al iniciar y una vez por hora mientras esté abierta.",
   "update.alertTitle": "Nueva actualización disponible",
   "update.alertDownloadingTitle": "Actualizando CodeFlow",
