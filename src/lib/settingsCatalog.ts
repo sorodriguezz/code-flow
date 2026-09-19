@@ -19,6 +19,7 @@
  */
 
 import {
+  Bell,
   Blocks,
   Bot,
   BookOpen,
@@ -37,6 +38,7 @@ import {
   MessageSquareText,
   Network,
   PackagePlus,
+  RefreshCw,
   Route,
   Palette,
   Scissors,
@@ -50,6 +52,7 @@ import {
   SquarePen,
   TerminalSquare,
   Upload,
+  Volume2,
   Waypoints,
   Wrench,
   type LucideIcon,
@@ -251,6 +254,18 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "tabbar.vault",
     icon: KeyRound,
     group: "global",
+    // Two panes because they are two different errands, not because the pane was long: one is
+    // configuration you set and forget, the other is a report you come back to read.
+    tabs: [
+      { id: "settings", labelKey: "vault.settings", icon: Settings2 },
+      {
+        id: "health",
+        labelKey: "vault.healthTitle",
+        hintKey: "vault.healthHint",
+        icon: ShieldCheck,
+        searchKey: "settings.searchTermsVaultHealth",
+      },
+    ],
     searchKey: "settings.searchTermsVault",
   },
   {
@@ -258,6 +273,19 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "tabbar.pipelines",
     icon: Route,
     group: "global",
+    // "Availability" is not padding to fill a rail. "Why is there no Pipelines tab on this
+    // repository" is the question this section is actually opened with, and the answer was a
+    // footnote under the one knob — which is the last place somebody looks for it.
+    tabs: [
+      {
+        id: "polling",
+        labelKey: "pipelines.pollLabel",
+        hintKey: "pipelines.pollHint",
+        icon: RefreshCw,
+        searchKey: "settings.searchTermsPipelines",
+      },
+      { id: "availability", labelKey: "pipelines.availabilityTab", icon: Route },
+    ],
     searchKey: "settings.searchTermsPipelines",
   },
   {
@@ -265,6 +293,16 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "notifications.settingsTitle",
     icon: MessageSquareText,
     group: "global",
+    // The two questions in the order they get asked: how loudly, and about what.
+    tabs: [
+      { id: "delivery", labelKey: "notifications.deliveryTitle", icon: Volume2 },
+      {
+        id: "sources",
+        labelKey: "notifications.sourcesTitle",
+        hintKey: "notifications.sourcesHint",
+        icon: Bell,
+      },
+    ],
     searchKey: "settings.searchTermsNotifications",
   },
   {
@@ -308,6 +346,39 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     searchKey: "settings.searchTermsSkills",
   },
 ];
+
+/**
+ * Sections that carry a **vertical** sub-rail and scroll the pane beside it rather than the whole
+ * column, so their heading and rail stay put while you read down a long list.
+ *
+ * It lives here rather than in `SettingsView` because it is a fact about a section, and this file is
+ * where the other three live. That move is not tidiness: the set is the second half of building a
+ * rail, and when it was somewhere else the first half could be written without it — which is exactly
+ * what happened. A pane with a rail and no entry here gets no definite height to divide, so its own
+ * `overflow-y` never engages and the rail scrolls away with the content it was meant to stay above.
+ * The test beside this file makes that omission impossible to ship.
+ */
+export const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>([
+  "claude",
+  "backup",
+  "api",
+  "editor",
+  "vault",
+  "pipelines",
+  "notifications",
+]);
+
+/**
+ * Sections with panes but deliberately *no* vertical rail.
+ *
+ * `ReviewSettings` uses the horizontal strip with an underline instead of the rail with a pill (see
+ * the note in `ActivePill` on why those are two indicators and not one). There is no rail to pin, so
+ * the whole column scrolling is the correct behaviour rather than an oversight.
+ *
+ * Listed rather than merely absent, so a section that grows panes has to make this choice on
+ * purpose instead of falling into one.
+ */
+export const HORIZONTAL_TAB_SECTIONS = new Set<SettingsSectionId>(["review"]);
 
 /** The tabs of one section, or an empty array for a section that has none. */
 export function tabsFor(id: SettingsSectionId): SettingsTabDef[] {

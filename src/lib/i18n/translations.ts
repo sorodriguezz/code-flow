@@ -1866,6 +1866,7 @@ const en = {
   "quota.updatedNow": "Updated just now",
   "quota.updatedAgo": "Updated {minutes} min ago",
   "quota.readAt": "Read {time}",
+  "notifications.deliveryTitle": "Sound and alerts",
   "notifications.sourceChat": "Assistant",
   "notifications.unseen": "{n} unread",
   "notifications.empty": "Nothing here yet",
@@ -1968,6 +1969,7 @@ const en = {
   "settings.searchResults": "{n} results",
   "settings.sectionNavLabel": "Panes in this section",
   "settings.searchClear": "Clear search",
+  "settings.searchTermsVaultHealth": "health, reused, weak, old, passwords, audit",
   "settings.searchTermsGeneral":
     "language, windows, tour, quit, data, folder, reset, donate, support, ko-fi, coffee, website",
   "settings.searchTermsAppearance": "theme, colors, dark, light, font, editor theme, accent",
@@ -2122,6 +2124,10 @@ const en = {
   "settings.searchTermsPipelines": "ci, builds, actions, polling, refresh, rate limit",
   "pipelines.settingsHint": "How often the app asks your CI host about a build that is still running.",
   "pipelines.pollDefaultNote": "The default. Fine for one build at a time; raise it if you watch several repositories on the same token.",
+  "pipelines.availabilityTab": "Where it shows",
+  "pipelines.availabilityBody":
+    "The Pipelines tab appears only on a repository linked to a CI host — GitHub Actions, GitLab CI or Azure Pipelines. A repository with no such remote, or one whose host is connected but has never run anything, shows no tab at all rather than an empty one.",
+  "pipelines.availabilityHosts": "Connect a host under Settings › Git Hosting.",
   "pipelines.settingsFooter": "The Pipelines tab only appears on repositories linked to a host that has CI — GitHub Actions, GitLab CI or Azure Pipelines.",
   "changes.menuHistory": "File history",
   "changes.menuCopyPath": "Copy path",

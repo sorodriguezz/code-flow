@@ -10,7 +10,7 @@
  * when I am not looking at the app, and which of these do I care about at all.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Bell, BellOff, Volume2 } from "lucide-react";
 import { nativePermission, requestNativePermission } from "../../lib/nativeNotify";
 import { NOTIFICATION_SOURCE_LABEL, notify, type NotificationSource } from "../../state/notificationStore";
@@ -18,7 +18,9 @@ import { usePreferencesStore } from "../../state/preferencesStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
-import { Group, Note, SettingsHeader } from "../api/settingsChrome";
+import { Note, Panel, SettingsHeader } from "../api/settingsChrome";
+import { SettingsRail, useSectionTab } from "./settingsNav";
+import { tabsFor } from "../../lib/settingsCatalog";
 
 /** Every source, in the order the bell groups them. Derived from the label map so a source added
  *  there cannot be forgotten here. */
@@ -63,7 +65,8 @@ function Toggle({
   );
 }
 
-export function NotificationSettings() {
+/** How loudly. The three switches and the button that proves they work. */
+function DeliveryPane() {
   const t = useT();
   const soundEnabled = usePreferencesStore((s) => s.notificationSoundEnabled);
   const setSoundEnabled = usePreferencesStore((s) => s.setNotificationSoundEnabled);
@@ -71,8 +74,6 @@ export function NotificationSettings() {
   const setNativeEnabled = usePreferencesStore((s) => s.setNativeNotificationsEnabled);
   const onlyBackground = usePreferencesStore((s) => s.nativeNotificationsOnlyBackground);
   const setOnlyBackground = usePreferencesStore((s) => s.setNativeNotificationsOnlyBackground);
-  const muted = usePreferencesStore((s) => s.mutedNotificationSources);
-  const setMuted = usePreferencesStore((s) => s.setNotificationSourceMuted);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
 
   const [permission, setPermission] = useState<"granted" | "denied" | "default" | null>(null);
@@ -96,85 +97,125 @@ export function NotificationSettings() {
   };
 
   return (
-    <section>
-      <SettingsHeader title={t("notifications.settingsTitle")} hint={t("notifications.settingsHint")} />
+    <>
+      <Toggle
+        label={t("notifications.soundLabel")}
+        hint={t("notifications.soundHint")}
+        checked={soundEnabled}
+        onChange={(value) => void setSoundEnabled(value)}
+      />
 
-      <Group title={t("notifications.settingsTitle")}>
+      <Toggle
+        label={t("notifications.systemLabel")}
+        hint={t("notifications.systemHint")}
+        checked={nativeEnabled}
+        disabled={permission === "denied"}
+        onChange={(value) => void toggleNative(value)}
+      />
+
+      {permission === "denied" && <Note tone="warning">{t("notifications.systemDenied")}</Note>}
+
+      {/* Only meaningful once the system notifications are on — shown always but inert, rather
+          than appearing and disappearing under the pointer as the switch above is flipped. */}
+      <div className="pl-6">
         <Toggle
-          label={t("notifications.soundLabel")}
-          hint={t("notifications.soundHint")}
-          checked={soundEnabled}
-          onChange={(value) => void setSoundEnabled(value)}
+          label={t("notifications.onlyBackgroundLabel")}
+          hint={t("notifications.onlyBackgroundHint")}
+          checked={onlyBackground}
+          disabled={!nativeEnabled}
+          onChange={(value) => void setOnlyBackground(value)}
         />
+      </div>
 
-        <Toggle
-          label={t("notifications.systemLabel")}
-          hint={t("notifications.systemHint")}
-          checked={nativeEnabled}
-          disabled={permission === "denied"}
-          onChange={(value) => void toggleNative(value)}
-        />
+      <button
+        type="button"
+        onClick={() =>
+          notify({
+            source: "chat",
+            workspaceId,
+            titleKey: "notifications.testTitle",
+            detail: t("notifications.settingsTitle"),
+            status: "info",
+          })
+        }
+        className="mt-1.5 flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[11.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
+      >
+        <Volume2 size={12} />
+        {t("notifications.testButton")}
+      </button>
+    </>
+  );
+}
 
-        {permission === "denied" && <Note tone="warning">{t("notifications.systemDenied")}</Note>}
+/** About what. Every source the bell knows, each one mutable on its own. */
+function SourcesPane() {
+  const t = useT();
+  const muted = usePreferencesStore((s) => s.mutedNotificationSources);
+  const setMuted = usePreferencesStore((s) => s.setNotificationSourceMuted);
 
-        {/* Only meaningful once the system notifications are on — shown always but inert, rather
-            than appearing and disappearing under the pointer as the switch above is flipped. */}
-        <div className="pl-6">
-          <Toggle
-            label={t("notifications.onlyBackgroundLabel")}
-            hint={t("notifications.onlyBackgroundHint")}
-            checked={onlyBackground}
-            disabled={!nativeEnabled}
-            onChange={(value) => void setOnlyBackground(value)}
-          />
+  return (
+      <ul>
+        {SOURCES.map((source) => {
+          const off = muted.includes(source);
+          return (
+            <li key={source}>
+              <label className="flex cursor-pointer items-center gap-2 py-1">
+                <span className="shrink-0">
+                  <Checkbox checked={!off} onChange={(value) => void setMuted(source, !value)} />
+                </span>
+                {off ? (
+                  <BellOff size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                ) : (
+                  <Bell size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                )}
+                {/* Wraps rather than truncates, like every other label in this window. */}
+                <span className="min-w-0 flex-1 break-words text-[12.5px] leading-snug text-[var(--cf-text)]">
+                  {t(NOTIFICATION_SOURCE_LABEL[source])}
+                </span>
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+  );
+}
+
+export function NotificationSettings() {
+  const t = useT();
+  const tabs = tabsFor("notifications");
+  const [tab, setTab] = useSectionTab("notifications", tabs, "delivery");
+  const active = tabs.find((entry) => entry.id === tab) ?? tabs[0];
+
+  // The source list is much taller than the four switches, so arriving at one while scrolled
+  // through the other would start it in the middle. Same fix as `EditorSettings`: land at the top
+  // before the frame is painted rather than as a visible correction after it.
+  const paneRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    paneRef.current?.scrollTo({ top: 0 });
+  }, [tab]);
+
+  return (
+    <section className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0">
+        <SettingsHeader title={t("notifications.settingsTitle")} hint={t("notifications.settingsHint")} />
+      </div>
+
+      <div className="flex min-h-0 flex-1 gap-4">
+        <SettingsRail tabs={tabs} active={tab} onSelect={setTab} layoutId="cf-notifications-settings-pill" />
+
+        <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
+          <Panel>
+            {/* The rail names the pane, so no heading is repeated here — but the hint says what the
+                label cannot, so it stays. Same call as the editor and AI sections. */}
+            {active?.hintKey && (
+              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+            )}
+
+            {tab === "delivery" && <DeliveryPane />}
+            {tab === "sources" && <SourcesPane />}
+          </Panel>
         </div>
-
-        <button
-          type="button"
-          onClick={() =>
-            notify({
-              source: "chat",
-              workspaceId,
-              titleKey: "notifications.testTitle",
-              detail: t("notifications.settingsTitle"),
-              status: "info",
-            })
-          }
-          className="mt-1.5 flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[11.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
-        >
-          <Volume2 size={12} />
-          {t("notifications.testButton")}
-        </button>
-      </Group>
-
-      <Group title={t("notifications.sourcesTitle")}>
-        <p className="mb-1.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
-          {t("notifications.sourcesHint")}
-        </p>
-        <ul>
-          {SOURCES.map((source) => {
-            const off = muted.includes(source);
-            return (
-              <li key={source}>
-                <label className="flex cursor-pointer items-center gap-2 py-1">
-                  <span className="shrink-0">
-                    <Checkbox checked={!off} onChange={(value) => void setMuted(source, !value)} />
-                  </span>
-                  {off ? (
-                    <BellOff size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-                  ) : (
-                    <Bell size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-                  )}
-                  {/* Wraps rather than truncates, like every other label in this window. */}
-                  <span className="min-w-0 flex-1 break-words text-[12.5px] leading-snug text-[var(--cf-text)]">
-                    {t(NOTIFICATION_SOURCE_LABEL[source])}
-                  </span>
-                </label>
-              </li>
-            );
-          })}
-        </ul>
-      </Group>
+      </div>
     </section>
   );
 }

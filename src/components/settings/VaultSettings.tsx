@@ -13,12 +13,11 @@
  * The health report below the controls is the part that is new rather than moved.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Clock,
   Copy,
-  KeyRound,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
@@ -29,7 +28,9 @@ import { useT, type Translate } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import { useVaultStore } from "../../state/vaultStore";
 import { VaultSettingsBody } from "../vault/VaultSettingsModal";
-import { Group, Note, SettingsHeader } from "../api/settingsChrome";
+import { Note, Panel, SettingsHeader } from "../api/settingsChrome";
+import { SettingsRail, useSectionTab } from "./settingsNav";
+import { tabsFor } from "../../lib/settingsCatalog";
 import { Skeleton } from "../common/Skeleton";
 import type { PasswordHealth, PasswordVerdict } from "../../types/vault";
 
@@ -168,23 +169,50 @@ function HealthReport() {
 
 export function VaultSettings() {
   const t = useT();
+  const tabs = tabsFor("vault");
+  // Settings first, health second, and that order is the argument: the auto-lock timer and the
+  // master password are why somebody opens this section, and the report is what they come back to
+  // read later. The old pane had the report on top, where it pushed the controls below the fold.
+  const [tab, setTab] = useSectionTab("vault", tabs, "settings");
+  const active = tabs.find((entry) => entry.id === tab) ?? tabs[0];
+
+  // A long flagged-entry list and a short block of controls are nowhere near the same height, so
+  // arriving at one while scrolled through the other left it starting in the middle. Same fix and
+  // same reason as `EditorSettings`.
+  const paneRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    paneRef.current?.scrollTo({ top: 0 });
+  }, [tab]);
+
   return (
-    <section>
-      <SettingsHeader title={t("tabbar.vault")} hint={t("vault.settingsHint")} />
+    <section className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0">
+        <SettingsHeader title={t("tabbar.vault")} hint={t("vault.settingsHint")} />
+      </div>
 
-      <Group title={t("vault.healthTitle")}>
-        <p className="mb-2 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("vault.healthHint")}</p>
-        <HealthReport />
-      </Group>
+      <div className="flex min-h-0 flex-1 gap-4">
+        <SettingsRail tabs={tabs} active={tab} onSelect={setTab} layoutId="cf-vault-settings-pill" />
 
-      <Group title={t("vault.settings")}>
-        <VaultSettingsBody />
-      </Group>
+        <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
+          <Panel>
+            {/* The rail names the pane, so no heading is repeated here — but the hint says what the
+                label cannot, so it stays. Same call as the editor and AI sections. */}
+            {active?.hintKey && (
+              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+            )}
 
-      <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-        <KeyRound size={11} className="mt-[2px] shrink-0" />
-        {t("vault.settingsFooter")}
-      </p>
+            {tab === "settings" && (
+              <>
+                <VaultSettingsBody />
+                <div className="mt-3">
+                  <Note>{t("vault.settingsFooter")}</Note>
+                </div>
+              </>
+            )}
+            {tab === "health" && <HealthReport />}
+          </Panel>
+        </div>
+      </div>
     </section>
   );
 }

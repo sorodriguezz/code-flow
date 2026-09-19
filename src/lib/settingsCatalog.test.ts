@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { SETTINGS_SECTIONS, searchSettings, tabsFor } from "./settingsCatalog";
+import {
+  HORIZONTAL_TAB_SECTIONS,
+  SELF_SCROLLING_SECTIONS,
+  SETTINGS_SECTIONS,
+  searchSettings,
+  tabsFor,
+} from "./settingsCatalog";
 import { translations, type TranslationKey } from "./i18n/translations";
 import { es as spanish } from "./i18n/translations.es";
 
@@ -31,6 +37,36 @@ describe("the settings catalog", () => {
         if (tab.hintKey) expect(translations.en[tab.hintKey]).toBeTruthy();
       }
       if (section.searchKey) expect(translations.en[section.searchKey]).toBeTruthy();
+    }
+  });
+
+  it("decides, for every section with panes, whether it scrolls its own pane", () => {
+    // The bug this pins: a section can be given a vertical rail without being handed a definite
+    // height, and the symptom is not a crash — it is the heading and the rail scrolling away with
+    // the content they were meant to stay above, which only shows up by looking. Neither set may
+    // merely omit a section: one of the two has to claim it, on purpose.
+    for (const section of SETTINGS_SECTIONS) {
+      if (!section.tabs?.length) continue;
+      const rail = SELF_SCROLLING_SECTIONS.has(section.id);
+      const strip = HORIZONTAL_TAB_SECTIONS.has(section.id);
+      expect(
+        rail !== strip,
+        `${section.id} has panes but is in ${rail && strip ? "both" : "neither"} of ` +
+          `SELF_SCROLLING_SECTIONS and HORIZONTAL_TAB_SECTIONS`,
+      ).toBe(true);
+    }
+  });
+
+  it("never claims a section that does not exist", () => {
+    const ids = new Set(SETTINGS_SECTIONS.map((section) => section.id));
+    for (const id of [...SELF_SCROLLING_SECTIONS, ...HORIZONTAL_TAB_SECTIONS]) {
+      expect(ids.has(id), `${id} is not a section`).toBe(true);
+    }
+  });
+
+  it("only lets a section scroll its own pane when it has panes to scroll", () => {
+    for (const id of SELF_SCROLLING_SECTIONS) {
+      expect(tabsFor(id).length, `${id} scrolls its own pane but declares no panes`).toBeGreaterThan(0);
     }
   });
 

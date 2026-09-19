@@ -25,7 +25,12 @@ import { EditorSettings } from "./EditorSettings";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import { useFocusTrap } from "../../lib/useFocusTrap";
-import { SETTINGS_SECTIONS, searchSettings, type SettingsHit } from "../../lib/settingsCatalog";
+import {
+  SELF_SCROLLING_SECTIONS,
+  SETTINGS_SECTIONS,
+  searchSettings,
+  type SettingsHit,
+} from "../../lib/settingsCatalog";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 const NAV_MIN = 160;
@@ -44,10 +49,8 @@ const NAV_MAX = 320;
  */
 const ALPHA_SECTIONS = new Set<SettingsSectionId>();
 
-/** Sections that carry a sub-nav and scroll the pane beside it rather than the whole column, so
- * their heading and rail stay put while you read down a long list. They need a definite height to
- * do that, which is what the `h-full` below hands them. */
-const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>(["claude", "backup", "api", "editor"]);
+// `SELF_SCROLLING_SECTIONS` is imported from the catalog rather than kept here: it is the second
+// half of building a sub-rail, and a section can only be given one in the catalog.
 
 /**
  * One row of the settings nav, wearing the same selected treatment as the Graph/Changes/Editor

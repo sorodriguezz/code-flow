@@ -1839,6 +1839,7 @@ export const es = {
   "quota.updatedNow": "Actualizado justo ahora",
   "quota.updatedAgo": "Actualizado hace {minutes} min",
   "quota.readAt": "Leído {time}",
+  "notifications.deliveryTitle": "Sonido y avisos",
   "notifications.sourceChat": "Asistente",
   "notifications.unseen": "{n} sin ver",
   "notifications.empty": "Todavía no hay nada",
@@ -1935,6 +1936,7 @@ export const es = {
   "settings.searchResults": "{n} resultados",
   "settings.sectionNavLabel": "Paneles de esta sección",
   "settings.searchClear": "Limpiar búsqueda",
+  "settings.searchTermsVaultHealth": "salud, repetidas, débiles, antiguas, contraseñas, auditoría",
   "settings.searchTermsGeneral":
     "idioma, ventanas, tour, salir, datos, carpeta, restablecer, donar, apoyar, ko-fi, café, sitio web",
   "settings.searchTermsAppearance": "tema, colores, oscuro, claro, fuente, tema del editor, acento",
@@ -2089,6 +2091,10 @@ export const es = {
   "settings.searchTermsPipelines": "ci, builds, actions, sondeo, refresco, límite de peticiones",
   "pipelines.settingsHint": "Cada cuánto le pregunta la app a tu host de CI por un build que sigue corriendo.",
   "pipelines.pollDefaultNote": "El valor por defecto. Va bien para un build a la vez; súbelo si vigilas varios repositorios con el mismo token.",
+  "pipelines.availabilityTab": "Dónde aparece",
+  "pipelines.availabilityBody":
+    "La pestaña Pipelines solo aparece en un repositorio enlazado a un host con CI — GitHub Actions, GitLab CI o Azure Pipelines. Un repositorio sin ese remoto, o cuyo host está conectado pero nunca ha ejecutado nada, no muestra pestaña en vez de mostrar una vacía.",
+  "pipelines.availabilityHosts": "Conecta un host en Ajustes › Integraciones.",
   "pipelines.settingsFooter": "La pestaña Pipelines solo aparece en repositorios enlazados a un host con CI — GitHub Actions, GitLab CI o Azure Pipelines.",
   "changes.menuHistory": "Historial del archivo",
   "changes.menuCopyPath": "Copiar ruta",
