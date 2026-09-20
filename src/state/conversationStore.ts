@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import {
   chatBranchConversation,
+  chatCavemanLevels,
+  chatCavemanResolve,
+  chatCompact,
+  chatContextWindow,
   chatCreateConversation,
   chatDeleteConversation,
   chatGetConversation,
@@ -12,6 +16,8 @@ import {
   chatCreateGroup,
   chatRenameGroup,
   chatDeleteGroup,
+  chatSetGroupArchived,
+  chatSetGroupPinned,
   chatSetGroupCollapsed,
   chatReorderGroups,
   chatSetConversationGroup,
@@ -20,29 +26,34 @@ import {
   chatGroupListContext,
   chatGroupRemoveContext,
   chatListAttachments,
+  chatListOutputs,
   chatRemoveAttachment,
   chatSweepAttachments,
   chatInflightTurns,
   chatSetEffort,
   chatEffortSupport,
+  chatModelEffortSupport,
   chatSearchConversations,
   chatSend,
   chatSetArchived,
+  chatSetCaveman,
   chatSetPinned,
+  chatUncompact,
   type ChatConversation,
   type ChatGroup,
   type ChatAttachment,
   type ChatMessageRow,
+  type ChatOutput,
   type ChatSearchHit,
 } from "../lib/tauri/chatCommands";
 import { isRepoBusy, notifyStateChange, REPO_BUSY_MARKER } from "../lib/tauri/commands";
-import { onAiChatDelta, onAiDone, type AiChatDeltaEvent } from "../lib/tauri/events";
+import { onAiChatDelta, onAiDone, onStateInvalidate, type AiChatDeltaEvent } from "../lib/tauri/events";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { parseTrace } from "./chatStore";
 import { formatAgentLogLine } from "../lib/agentLog";
 import { providerCapabilities } from "../lib/aiProviders";
 import { translate } from "./languageStore";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 
@@ -97,6 +108,32 @@ export interface ConversationMessage extends Omit<ChatMessageRow, "trace"> {
   /** The model's reasoning, from `thinking_delta`. Feeds the collapsible block, never the answer
    *  bubble — the two interleave in the stream and must not interleave on screen. */
   thinking?: string;
+  /** Files this turn wrote, by path relative to the conversation's working directory. Parsed from
+   *  the row; see `pathsOf`. */
+  outputs?: string[];
+}
+
+/**
+ * Rehydrates the `outputs` column, which arrives either as the stored JSON string or as an already
+ * parsed array depending on how the backend hands it over — exactly like `trace`, and accepted in
+ * both shapes here rather than betting on one.
+ *
+ * Anything that is not an array of strings answers `undefined`: a malformed column should draw no
+ * chips, not a chip whose path is `[object Object]`.
+ */
+export function pathsOf(raw: unknown): string[] | undefined {
+  const parsed = typeof raw === "string" ? safeParse(raw) : raw;
+  if (!Array.isArray(parsed)) return undefined;
+  const paths = parsed.filter((entry): entry is string => typeof entry === "string");
+  return paths.length > 0 ? paths : undefined;
+}
+
+function safeParse(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -321,6 +358,35 @@ export function pickEvictions(
   return gone;
 }
 
+/**
+ * The question that produced the answer at `turn`, or `null` when there is none in this transcript.
+ *
+ * **The two halves of one exchange share a turn number.** That is not an accident to be worked
+ * around — it is what makes "branch at turn N" expressible at all, and `chat_queries` says so at the
+ * read that orders them: the tiebreak on `created_at` is what keeps the question above its answer
+ * when both carry turn 3.
+ *
+ * Which makes the comparison here the whole of the function, and it is `<=`. It was `<`, and that
+ * was wrong in both directions at once: on the first exchange there is no user message *before*
+ * turn 0, so Regenerate found nothing and returned in silence — a button that did nothing at all on
+ * the most common case there is. On every later exchange it found the previous exchange's question
+ * and asked *that* again, which is worse than nothing, because it looks like it worked.
+ *
+ * Found by turn rather than by index because a transcript read back from disk and one grown in this
+ * session number their messages the same way, and only the turn survives the reload.
+ */
+export function questionBehind(
+  messages: readonly ConversationMessage[],
+  turn: number,
+): ConversationMessage | null {
+  return messages
+    .filter((m) => m.role === "user" && m.turn <= turn)
+    .reduce<ConversationMessage | null>(
+      (last, m) => (last === null || m.turn > last.turn ? m : last),
+      null,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // the store
 // ---------------------------------------------------------------------------
@@ -460,7 +526,13 @@ function liveTitle(message: string): string {
 }
 
 function toMessage(row: ChatMessageRow): ConversationMessage {
-  return { ...row, isError: !!row.isError, isCancelled: !!row.isCancelled, trace: traceOf(row.trace) };
+  return {
+    ...row,
+    isError: !!row.isError,
+    isCancelled: !!row.isCancelled,
+    trace: traceOf(row.trace),
+    outputs: pathsOf(row.outputs),
+  };
 }
 
 interface ConversationState {
@@ -528,8 +600,55 @@ interface ConversationState {
   /** How hard the model thinks, for every future turn of this conversation. `""` clears it and
    *  hands the decision back to whatever the CLI itself is configured with. */
   setEffort: (conversationId: string, effort: string) => Promise<void>;
+  /**
+   * The compression style every future answer in this conversation comes back in.
+   *
+   * `""` turns it off. Free and immediate: the style rides on each turn's message, so unlike a
+   * provider change there is no session to lose and no transcript to replay.
+   */
+  setCaveman: (conversationId: string, level: string) => Promise<void>;
+  /** The levels this build knows, in picker order. Empty until `init` has answered — the picker
+   *  draws nothing rather than a list it invented. */
+  cavemanLevels: string[];
+  /**
+   * The style the *next* conversation will be created with, for the same reason `pendingEffort`
+   * exists: `/caveman` on the empty state has no row to write to, and a command that silently does
+   * nothing is worse than one that is absent.
+   */
+  pendingCaveman: string;
+  setPendingCaveman: (level: string) => void;
+  /**
+   * Applies `/caveman <argument>` to a conversation, or holds it for the next one when none is
+   * open. Resolves the word through the backend first — see {@link chatCavemanResolve} — and
+   * answers `false` when it is not a level, so the caller can say which words are.
+   */
+  applyCaveman: (conversationId: string | null, argument: string) => Promise<boolean>;
   /** Provider ids that accept a level at all, loaded once. Empty until `init` has answered. */
   effortProviders: string[];
+  /**
+   * Whether the *model* a `(provider, model)` pair names can use a level, keyed by
+   * {@link effortKey}. Missing means "not asked yet", and every reader treats that as yes.
+   *
+   * Permissive on purpose. The engine half of the gate is synchronous, so a CLI with no flag at
+   * all never draws the control for a frame; this half arrives a tick later, and defaulting it to
+   * no would make the dial blink out of existence on every engine switch — for the ordinary case,
+   * where the model does reason.
+   */
+  effortByModel: Record<string, boolean>;
+  /** Asks the backend about one pair, once. Fire-and-forget: the answer lands in
+   *  {@link ChatState.effortByModel} and re-renders whoever is reading it. */
+  ensureEffortSupport: (provider: string, model: string) => void;
+  /**
+   * This model's context window in tokens, or `null` where the app will not name one. Missing means
+   * "not asked yet", which every reader draws as no bar at all rather than as a guess.
+   *
+   * Asked of the backend rather than held in a table beside the meter, because the backend decides
+   * with the same number: `auto_compact_if_full` compares the last turn's occupancy against it. Two
+   * tables would let the ring read 92% while the turn that follows it thinks there is room.
+   */
+  windowByModel: Record<string, number | null>;
+  /** Asks the backend about one model, once. Fire-and-forget, like {@link ensureEffortSupport}. */
+  ensureContextWindow: (model: string) => void;
   /**
    * The reasoning level the *next* conversation will be created with.
    *
@@ -550,6 +669,11 @@ interface ConversationState {
   loadGroups: () => Promise<void>;
   createGroup: (name: string, color: string) => Promise<ChatGroup | null>;
   renameGroup: (groupId: string, name: string, color: string) => Promise<void>;
+  /** Pins a folder above the rest, or unpins it. */
+  setGroupPinned: (groupId: string, pinned: boolean) => Promise<void>;
+  /** Puts a folder on the shelf, or takes it back. Nothing inside it moves — the list is what
+   *  hides, so restoring brings the folder back with its conversations still filed. */
+  setGroupArchived: (groupId: string, archived: boolean) => Promise<void>;
   /** Removes the folder and returns its conversations to the ungrouped list. Never deletes a chat. */
   deleteGroup: (groupId: string) => Promise<void>;
   toggleGroup: (groupId: string) => Promise<void>;
@@ -572,12 +696,48 @@ interface ConversationState {
    *  copies them in as they are picked — so this is a view of that folder, not a pending upload. */
   attachments: Record<string, ChatAttachment[]>;
   loadAttachments: (conversationId: string) => Promise<void>;
+  /**
+   * Files the *turns* produced, per conversation — the other direction from `attachments`.
+   *
+   * Not persisted anywhere: the conversation's working directory is the record, and this is a
+   * listing of it. Which is why it is re-read rather than appended to — a turn can overwrite a file
+   * it wrote before, and a store that only ever grew would show two chips for one spreadsheet.
+   */
+  outputs: Record<string, ChatOutput[]>;
+  loadOutputs: (conversationId: string) => Promise<void>;
   addAttachment: (conversationId: string, file: ChatAttachment) => void;
   removeAttachment: (conversationId: string, attachmentId: string) => Promise<void>;
   setPinned: (conversationId: string, pinned: boolean) => Promise<void>;
   setArchived: (conversationId: string, archived: boolean) => Promise<void>;
   remove: (conversationId: string) => Promise<void>;
   branch: (conversationId: string, atTurn: number) => Promise<string | null>;
+
+  // ---- compaction ----
+  /**
+   * The run id of the compaction in flight on each conversation, while one is.
+   *
+   * Keyed by conversation rather than held as a single flag for the same reason `sending` is on the
+   * session and not on the store: two conversations may be busy at once, and a window showing one
+   * of them must not draw the other's spinner. Absent means nothing is compacting, which is almost
+   * always.
+   */
+  compacting: Record<string, string>;
+  /**
+   * Replaces the earlier turns of a conversation with a summary the model writes of them.
+   *
+   * **A real turn.** It costs what a turn costs, it shows up in the status bar and can be stopped
+   * from there, and it can fail. Nothing is deleted: the transcript is untouched and
+   * {@link uncompact} puts the full replay back — what changes is what the *next* turn is sent.
+   *
+   * `guidance` is whatever the user typed after `/compact`, steering what the summary keeps —
+   * "quédate con los nombres de archivo", "olvida lo de los tests". It is added to the standing
+   * instructions rather than replacing them, so a steer cannot accidentally turn the summary into
+   * something unusable as context.
+   */
+  compact: (conversationId: string, guidance?: string) => Promise<void>;
+  /** Throws the summary away, so the whole transcript is replayed again. Instant and free. */
+  uncompact: (conversationId: string) => Promise<void>;
+
   search: (query: string, limit?: number) => Promise<ChatSearchHit[]>;
   sessionFor: (conversationId: string | null) => ConversationSession;
 }
@@ -610,6 +770,21 @@ function reloadAfterTurn(conversationId: string) {
   });
 }
 
+/**
+ * The cache key for one `(provider, model)` pair.
+ *
+ * `\u0000` as the separator because a model id can contain anything a provider serves — opencode
+ * and cline address theirs as `provider/model`, so `/`, `:` and `-` are all spoken for — and a
+ * separator that collided would make two different pairs share one answer.
+ */
+export function effortKey(provider: string, model: string): string {
+  return `${provider}\u0000${model}`;
+}
+
+/** Pairs with a probe in flight, so two composers asking at once cost one call. Module-level
+ *  rather than store state: it is bookkeeping about requests, and nothing renders from it. */
+const asking = new Set<string>();
+
 export const useConversationStore = create<ConversationState>((set, get) => ({
   conversations: [],
   byConversation: {},
@@ -618,11 +793,15 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   streamingThinking: {},
   listing: false,
   effortProviders: [],
+  effortByModel: {},
   pendingEffort: "",
+  cavemanLevels: [],
+  pendingCaveman: "",
   groups: [],
   activeGroupId: null,
   groupContext: {},
   attachments: {},
+  outputs: {},
 
   init: () => {
     if (subscribed) return;
@@ -684,6 +863,48 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       offs.push(off);
     });
 
+    /**
+     * A conversation changed somewhere that is not this window.
+     *
+     * The gap this closes is the ask box's, and it is the one the whole quick-ask feature was
+     * falling into: a question asked there writes a real row, and the window holding the chat
+     * workspace listed its conversations *before* that row existed. Nothing told it. Press the
+     * chord, ask, dismiss the box — and the thread was simply not in the sidebar, with the app
+     * sitting open on the chat tab the whole time.
+     *
+     * "Open in CodeFlow" is not the answer to this, and that is the point worth being clear about:
+     * that button is an addressed request to *show* one conversation (see `lib/chatBridge`), and
+     * the common gesture is not to press it. The box is dismissed with Escape or its ✕, which hide
+     * the window without changing anything the rest of the app can observe — no satellite is
+     * created or destroyed, so even the window-list signal `ChatView` wakes on never fires.
+     *
+     * `state:invalidate` is the right carrier and already exists: `send` raises it at the end of
+     * every turn, the Rust side emits it to *every* window, and `windowBus`'s own note says that
+     * anything which could be a row should travel this way rather than as a bus message. A
+     * conversation is a row.
+     *
+     * **The sender hears its own frame**, because the emit is a broadcast with no window label on
+     * it. That is harmless and deliberately not filtered: the list reload is idempotent, and the
+     * transcript re-read is guarded on exactly the two states where memory is the only copy — a
+     * turn in flight, and an answer still being uncovered by the typewriter.
+     */
+    void onStateInvalidate((event) => {
+      if (event.domain !== "chat") return;
+      // The list first and always: the row may be new, or may just have moved to the top.
+      void get().loadConversations(true);
+      const id = event.conversation;
+      // Only the conversation on screen here, and only when this window is not the one writing it.
+      if (!id || get().activeId !== id) return;
+      // The files first and unconditionally: a turn that produced a spreadsheet changed the
+      // directory whether or not this window is the one showing the conversation.
+      void get().loadOutputs(id);
+      const session = get().byConversation[id];
+      if (session?.sending || session?.revealingMessageId) return;
+      void get().open(id);
+    }).then((off) => {
+      offs.push(off);
+    });
+
     void get().adoptInflight();
     // Which engines accept a level at all, asked once. The composer hides the control for the rest
     // rather than drawing a dial that turns nothing — the same rule the capability matrix follows.
@@ -696,6 +917,12 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       (effortProviders) => set({ effortProviders }),
       // A failed probe leaves the list empty, which hides the control everywhere. That is the safe
       // direction: an absent control is a smaller lie than one whose setting is silently dropped.
+      () => {},
+    );
+    // Same shape, same reason: the picker offers what this build's backend actually accepts, and an
+    // empty list means it offers nothing rather than a list the frontend made up.
+    void chatCavemanLevels().then(
+      (cavemanLevels) => set({ cavemanLevels }),
       () => {},
     );
   },
@@ -807,6 +1034,19 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         // real value, which is now the honest one.
       }
     }
+    // The same dance for the answer style, and for the same reason: `/caveman` typed on the empty
+    // state has no row to write to, so it is held here and applied to the row the first message
+    // creates — otherwise the one turn that ignored the command would be the opening one.
+    const pendingStyle = get().pendingCaveman;
+    if (pendingStyle) {
+      try {
+        await chatSetCaveman(created.id, pendingStyle);
+        conversation = { ...conversation, cavemanLevel: pendingStyle };
+      } catch {
+        // Same trade as above: a style that failed to stick costs a verbose first answer, not a
+        // conversation.
+      }
+    }
     touch(conversation.id);
     set((s) => ({
       conversations: [conversation, ...s.conversations.filter((c) => c.id !== conversation.id)],
@@ -843,6 +1083,9 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       void chatSetUnread(conversationId, false).catch(() => {});
     }
     touch(conversationId);
+    // What earlier turns left behind, refreshed on every open: the directory can have changed
+    // since this window last looked — another window's turn, or the user deleting a file by hand.
+    void get().loadOutputs(conversationId);
     const cached = get().byConversation[conversationId];
     // The three cases where memory is the only copy, and pointing at it is the whole of the work.
     //
@@ -856,6 +1099,27 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       set({ activeId: conversationId });
       prune();
       return;
+    }
+
+    /**
+     * A conversation this window's list has never heard of.
+     *
+     * The list is loaded once per window and then kept current by whoever changes it *here*, which
+     * is the whole of the assumption and it is not true: a conversation can be created in another
+     * webview entirely. The ask box is the ordinary case — it writes a real row and then hands the
+     * id over — and a notification followed from the status bar is the other one.
+     *
+     * Without the row there is nothing to build a session onto: the `set` below finds no `meta`,
+     * gives up on `base`, and leaves `activeId` pointing at a conversation the view draws as empty.
+     * So the list is re-read first, which also puts the conversation in the sidebar it is about to
+     * be selected in. Guarded on not having it, so the ordinary click — the row came *from* the
+     * sidebar — pays nothing.
+     */
+    if (!cached && !get().conversations.some((c) => c.id === conversationId)) {
+      // Archived included, the same as `ChatView`'s own load: a conversation that has been archived
+      // is still one this can be asked to open, and listing without it would leave us exactly where
+      // we started.
+      await get().loadConversations(true).catch(() => {});
     }
 
     // Everything else is re-read, *including* transcripts this store already holds. Not an early
@@ -1032,6 +1296,10 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           isError: false,
           isCancelled: false,
           thinking: get().streamingThinking[messageId] || undefined,
+          // Straight from the reply rather than from a re-read: on a provider whose answer is
+          // uncovered by the typewriter, `open` declines to re-read while the reveal is running,
+          // so waiting for one would leave the chips missing for as long as the reveal lasts.
+          outputs: reply.outputs.length > 0 ? reply.outputs : undefined,
           // A copy of the live log, never the store's own array — see `snapshotTrace`.
           trace: trace.length > 0 ? trace : undefined,
         };
@@ -1058,6 +1326,11 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         } else {
           beginReveal(conversationId, messageId, reply.text);
         }
+
+        // Said once, after the answer rather than before it: the user asked a question and got
+        // one, and the housekeeping that happened on the way is a footnote to that, not an event of
+        // its own. The durable record is the mark in the transcript.
+        if (reply.compacted) pushSuccessToast(translate("chat.compactedAuto"));
 
         reloadAfterTurn(conversationId);
         // The turn is persisted by the time this resolves, so a phone can go and read it. Nothing
@@ -1158,12 +1431,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     if (!conversationId) return;
     const session = get().byConversation[conversationId];
     if (!session || session.sending) return;
-    // The question that produced the answer at `turn` is the last user message before it. Found by
-    // turn rather than by index because a transcript read from disk and one grown in this session
-    // number their messages the same way, and only the turn survives the reload.
-    const question = session.messages
-      .filter((m) => m.role === "user" && m.turn < turn)
-      .reduce<ConversationMessage | null>((last, m) => (last === null || m.turn > last.turn ? m : last), null);
+    const question = questionBehind(session.messages, turn);
     if (!question) return;
     get().send(conversationId, question.content);
   },
@@ -1222,6 +1490,27 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
 
   setPendingEffort: (effort) => set({ pendingEffort: effort }),
 
+  setPendingCaveman: (level) => set({ pendingCaveman: level }),
+
+  applyCaveman: async (conversationId, argument) => {
+    const level = await chatCavemanResolve(argument).catch(() => null);
+    if (level === null) return false;
+    // With no conversation open the level is held for the one the next message creates — the same
+    // thing `pendingEffort` does for the reasoning dial.
+    if (conversationId) await get().setCaveman(conversationId, level);
+    else set({ pendingCaveman: level });
+    return true;
+  },
+
+  setCaveman: async (conversationId, level) => {
+    await chatSetCaveman(conversationId, level);
+    set((s) => ({
+      conversations: s.conversations.map((c) =>
+        c.id === conversationId ? { ...c, cavemanLevel: level } : c,
+      ),
+    }));
+  },
+
   setEffort: async (conversationId, effort) => {
     await chatSetEffort(conversationId, effort);
     set((s) => {
@@ -1233,6 +1522,43 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           : s.byConversation,
       };
     });
+  },
+
+  windowByModel: {},
+
+  ensureContextWindow: (model) => {
+    const key = model.trim();
+    // Same two guards as `ensureEffortSupport`, for the same reason: the map answers "already
+    // known", `asking` answers "already in flight". The key is prefixed so it cannot collide with
+    // an effort key in the shared set.
+    const flight = `window:${key}`;
+    if (key in get().windowByModel || asking.has(flight)) return;
+    asking.add(flight);
+    void chatContextWindow(key)
+      .then((tokens) => set((s) => ({ windowByModel: { ...s.windowByModel, [key]: tokens } })))
+      // A failed probe stays unrecorded rather than stored as `null`: both render the same today,
+      // but writing it down would mean one bad call permanently removed the bar for that model.
+      .catch(() => {})
+      .finally(() => {
+        asking.delete(flight);
+      });
+  },
+
+  ensureEffortSupport: (provider, model) => {
+    const key = effortKey(provider, model);
+    // Two guards, and they are not the same: the map answers "already known", `asking` answers
+    // "already in flight". Without the second, two composers mounted in one window ask for the
+    // same pair on the same frame and both pay for it.
+    if (key in get().effortByModel || asking.has(key)) return;
+    asking.add(key);
+    void chatModelEffortSupport(provider, model)
+      .then((supported) => set((s) => ({ effortByModel: { ...s.effortByModel, [key]: supported } })))
+      // A failed probe is left unrecorded rather than stored as `false`: unknown already reads as
+      // yes, and writing the failure down would hide the control for good over one bad call.
+      .catch(() => {})
+      .finally(() => {
+        asking.delete(key);
+      });
   },
 
   // ---- folders ----
@@ -1249,6 +1575,19 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
 
   renameGroup: async (groupId, name, color) => {
     await chatRenameGroup(groupId, name, color);
+    await get().loadGroups();
+  },
+
+  setGroupPinned: async (groupId, pinned) => {
+    await chatSetGroupPinned(groupId, pinned);
+    await get().loadGroups();
+  },
+
+  setGroupArchived: async (groupId, archived) => {
+    // An archived folder that is still the open page would leave the user reading something the
+    // sidebar no longer offers a way back to, so the selection goes with it.
+    if (archived && get().activeGroupId === groupId) set({ activeGroupId: null });
+    await chatSetGroupArchived(groupId, archived);
     await get().loadGroups();
   },
 
@@ -1332,6 +1671,14 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     set((s) => ({ attachments: { ...s.attachments, [conversationId]: files } }));
   },
 
+  loadOutputs: async (conversationId) => {
+    // A conversation whose directory was never created answers with an empty list rather than
+    // failing, so the ordinary case — a chat that has produced nothing — costs one cheap call and
+    // renders nothing.
+    const files = await chatListOutputs(conversationId).catch(() => [] as ChatOutput[]);
+    set((s) => ({ outputs: { ...s.outputs, [conversationId]: files } }));
+  },
+
   addAttachment: (conversationId, file) => {
     set((s) => ({
       attachments: {
@@ -1384,6 +1731,90 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     set((s) => ({ conversations: [conversation, ...s.conversations] }));
     await get().open(conversation.id);
     return conversation.id;
+  },
+
+  compacting: {},
+
+  compact: async (conversationId, guidance) => {
+    // Two guards for two different collisions. A second compaction would summarise a summary being
+    // written; a compaction during a turn would summarise a conversation one exchange shorter than
+    // the one on screen and then clear the session that exchange is about to be written into. The
+    // Rust side refuses both as well — it takes the conversation's lease — but refusing here is
+    // what keeps the button from looking broken.
+    if (get().compacting[conversationId]) return;
+    if (get().byConversation[conversationId]?.sending) return;
+
+    const runId = newRunId("chat");
+    const title = get().conversations.find((c) => c.id === conversationId)?.title ?? "";
+    set((s) => ({ compacting: { ...s.compacting, [conversationId]: runId } }));
+    useAiRunStore.getState().start(runId, {
+      kindKey: "chat.compacting",
+      detail: title,
+      target: { view: "chat", select: { kind: "chatAppConversation", id: conversationId } },
+      workspaceId: get().byConversation[conversationId]?.workspaceId,
+    });
+
+    try {
+      const result = await chatCompact(conversationId, runId, guidance);
+      set((s) => ({
+        conversations: s.conversations.map((c) =>
+          c.id === conversationId
+            ? {
+                ...c,
+                compactedSummary: result.summary,
+                compactedThroughTurn: result.through_turn,
+                // The last measurement described the context that was just replaced, so it is not
+                // a measurement of anything any more. Cleared on the Rust side too; mirrored here
+                // so the meter stops claiming ninety thousand tokens the instant the summary
+                // lands, rather than at whatever point the next turn happens to run.
+                contextTokens: null,
+                // Cleared on the Rust side in the same statement that filed the summary — see
+                // `chat_queries::set_compaction`. Mirrored here rather than re-read, because a row
+                // that still named a session would have the capabilities panel and the meter both
+                // claiming this thread resumes when its next turn will not.
+                engineSessionId: null,
+              }
+            : c,
+        ),
+        byConversation: s.byConversation[conversationId]
+          ? {
+              ...s.byConversation,
+              [conversationId]: { ...s.byConversation[conversationId], sessionId: null },
+            }
+          : s.byConversation,
+      }));
+      // The number, not an adjective. "Compactado" alone gives the user nothing to judge whether it
+      // was worth a turn; a percentage off the replay is exactly what they were buying.
+      const saved = result.before_chars > 0
+        ? Math.max(0, Math.round((1 - result.after_chars / result.before_chars) * 100))
+        : 0;
+      pushSuccessToast(translate("chat.compactedBy", { percent: saved }));
+    } catch (e) {
+      // A cancellation is the user pressing Stop on their own compaction. Nothing was written —
+      // the summary is filed only after the run returns — so there is nothing to explain.
+      if (!isCancellation(e)) pushErrorToast(String(e));
+    } finally {
+      useAiRunStore.getState().finish(runId);
+      set((s) => {
+        const next = { ...s.compacting };
+        delete next[conversationId];
+        return { compacting: next };
+      });
+    }
+  },
+
+  uncompact: async (conversationId) => {
+    await chatUncompact(conversationId).catch((e: unknown) => {
+      pushErrorToast(String(e));
+      throw e;
+    });
+    set((s) => ({
+      conversations: s.conversations.map((c) =>
+        c.id === conversationId
+          ? { ...c, compactedSummary: "", compactedThroughTurn: null, contextTokens: null }
+          : c,
+      ),
+    }));
   },
 
   search: (query, limit) => chatSearchConversations(query, limit),

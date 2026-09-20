@@ -4,8 +4,11 @@ import { ArrowUp, Paperclip, Square } from "lucide-react";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { EffortPicker } from "./EffortPicker";
 import { AttachmentBar } from "./AttachmentBar";
+import { ChatCapabilities } from "./ChatCapabilities";
+import { ContextMeter, type ContextReading } from "./ContextMeter";
+import { CavemanChip } from "./CavemanChip";
 import type { ChatAttachment } from "../../lib/tauri/chatCommands";
-import { CommandMenu, type ChatAppCommand } from "./CommandMenu";
+import { CommandMenu, appCommandFor, type ChatAppCommand } from "./CommandMenu";
 import { COLUMN_GUTTER, READING_COLUMN } from "./chatChrome";
 import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
 import { useT } from "../../state/languageStore";
@@ -38,6 +41,7 @@ export function ChatComposer({
   model,
   effort,
   effortSupported,
+  canWriteFiles = false,
   attachments,
   onAttachPath,
   onAttachBytes,
@@ -53,6 +57,8 @@ export function ChatComposer({
   onStop,
   onRunAppCommand,
   onOpenTerminal,
+  context,
+  caveman,
   disabled,
   disabledReason,
 }: {
@@ -66,6 +72,9 @@ export function ChatComposer({
   /** Whether this conversation's engine accepts a level at all — false hides the control rather
    *  than drawing a dial that turns nothing. */
   effortSupported: boolean;
+  /** Whether this conversation's turns may write files the user can download — the
+   *  file-generation setting, since no chat here is bound to a repository. */
+  canWriteFiles?: boolean;
   /** Files already copied into this conversation's folder and staged for the next turn. */
   attachments: ChatAttachment[];
   /** Copies a file the user picked. Absent before a conversation exists — there is no folder to
@@ -86,8 +95,16 @@ export function ChatComposer({
   onDraftChange: (value: string) => void;
   onSend: (message: string) => void;
   onStop: () => void;
-  onRunAppCommand: (command: ChatAppCommand) => void;
+  /** Runs one of the app's own commands. `args` is whatever followed the name, empty for the
+   *  commands that take none — see `appCommandFor`. */
+  onRunAppCommand: (command: ChatAppCommand, args: string) => void;
   onOpenTerminal?: () => void;
+  /** How full this conversation's context is, and the compaction control. Absent where there is
+   *  nothing to measure — an empty composer, or the ask box, which is one question and no thread. */
+  context?: ContextReading;
+  /** The conversation's answer-compression mode, when it is in one. Absent — and drawing nothing —
+   *  is the ordinary state; the mode is entered from the `/` menu. */
+  caveman?: { level: string; levels: string[]; onPick: (level: string) => void };
   disabled?: boolean;
   disabledReason?: string;
 }) {
@@ -137,9 +154,19 @@ export function ChatComposer({
   const submit = useCallback(() => {
     const trimmed = draft.trim();
     if (!trimmed || sending || disabled) return;
+    // A typed command runs instead of being sent. Until this existed, pressing Enter on `/compact`
+    // sent those seven characters to the model — the menu could only be used by clicking a row,
+    // which is the one way nobody uses a slash command. See `appCommandFor` for what counts as one;
+    // anything that does not is an ordinary message, including a line that merely starts with `/`.
+    const command = appCommandFor(trimmed);
+    if (command) {
+      onDraftChange("");
+      onRunAppCommand(command.id, command.args);
+      return;
+    }
     onSend(trimmed);
     onDraftChange("");
-  }, [draft, sending, disabled, onSend, onDraftChange]);
+  }, [draft, sending, disabled, onSend, onDraftChange, onRunAppCommand]);
 
   /** The `/` menu is open while the draft is a single token beginning with a slash. It closes the
    *  moment a space is typed, because by then the user is writing arguments, not choosing. */
@@ -210,7 +237,9 @@ export function ChatComposer({
             provider={provider}
             onRunApp={(command) => {
               onDraftChange("");
-              onRunAppCommand(command);
+              // No arguments from a click: the row was picked before anything could be typed after
+              // it. `/compact` with a steer is reached by typing it, which `submit` handles.
+              onRunAppCommand(command, "");
             }}
             onInsert={(name) => {
               onDraftChange(`${name} `);
@@ -278,6 +307,27 @@ export function ChatComposer({
                 disabled={disabled}
                 onPick={onPickEffort}
               />
+            )}
+
+            {/* Beside the reasoning dial because they answer the same shape of question — what is
+                this engine going to do with my request — and because the one thing people get
+                wrong about this workspace is what a repo-less chat may touch. */}
+            <ChatCapabilities
+              provider={provider}
+              effortSupported={effortSupported}
+              canWriteFiles={canWriteFiles}
+            />
+
+            {/* Last of the four, and deliberately the one nearest the send button: it is the only
+                control here that describes what the *next* press will cost rather than how it will
+                behave. */}
+            {context && <ContextMeter reading={context} />}
+
+            {/* Left of the paperclip and right of the meter, which puts the two things that change
+                what the *answer* looks like next to each other and keeps the two that act on this
+                message — attach, send — together at the end. Renders nothing when the mode is off. */}
+            {caveman && (
+              <CavemanChip level={caveman.level} levels={caveman.levels} onPick={caveman.onPick} />
             )}
 
             <button

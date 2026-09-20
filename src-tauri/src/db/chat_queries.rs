@@ -46,7 +46,8 @@ const CONVERSATION_COLUMNS: &str = "c.id, c.workspace_id, c.project_id, p.name, 
                                     (SELECT m.is_error FROM chat_messages m \
                                       WHERE m.conversation_id = c.id \
                                       ORDER BY m.turn DESC LIMIT 1), \
-                                    c.engine_session_id, \
+                                    c.compacted_summary, c.compacted_through_turn, \
+                                    c.context_tokens, c.caveman_level, c.engine_session_id, \
                                     c.pinned_at, c.archived_at, c.parent_conversation_id, \
                                     c.branched_at_turn, c.created_at, c.updated_at";
 
@@ -58,13 +59,15 @@ const CONVERSATION_FROM: &str =
 /// The message columns, in the order [`map_message`] reads them.
 const MESSAGE_COLUMNS: &str = "id, conversation_id, turn, role, content, provider, model, \
                                engine_version, response_time_ms, is_error, is_cancelled, trace, \
-                               created_at";
+                               outputs, created_at";
 
-/// The same list with a literal `NULL` where `trace` was. See the module comment: the column is
-/// not read at all, rather than read and dropped.
+/// The same list with a literal `NULL` where `trace` was — but **`outputs` is still read**. It is a
+/// short array of filenames, not a megabyte of log, and it is what the chips under an answer are
+/// drawn from: dropping it here would mean a reopened conversation showed no files until something
+/// asked for traces.
 const MESSAGE_COLUMNS_NO_TRACE: &str = "id, conversation_id, turn, role, content, provider, \
                                         model, engine_version, response_time_ms, is_error, \
-                                        is_cancelled, NULL, created_at";
+                                        is_cancelled, NULL, outputs, created_at";
 
 /// How many characters a generated title may be. Roughly what fits on one line of the sidebar at
 /// its default width; past that the row elides and the extra characters are storage nobody reads.
@@ -91,13 +94,17 @@ fn map_conversation(row: &rusqlite::Row) -> rusqlite::Result<ChatConversation> {
         // `None` on a conversation with no messages at all — a thread that was created and never
         // asked anything has not failed, so the absence reads as false rather than as unknown.
         last_failed: row.get::<_, Option<i64>>(11)?.unwrap_or(0) != 0,
-        engine_session_id: row.get(12)?,
-        pinned_at: row.get(13)?,
-        archived_at: row.get(14)?,
-        parent_conversation_id: row.get(15)?,
-        branched_at_turn: row.get(16)?,
-        created_at: row.get(17)?,
-        updated_at: row.get(18)?,
+        compacted_summary: row.get(12)?,
+        compacted_through_turn: row.get(13)?,
+        context_tokens: row.get(14)?,
+        caveman_level: row.get(15)?,
+        engine_session_id: row.get(16)?,
+        pinned_at: row.get(17)?,
+        archived_at: row.get(18)?,
+        parent_conversation_id: row.get(19)?,
+        branched_at_turn: row.get(20)?,
+        created_at: row.get(21)?,
+        updated_at: row.get(22)?,
     })
 }
 
@@ -115,7 +122,8 @@ fn map_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRow> {
         is_error: row.get::<_, i64>(9)? != 0,
         is_cancelled: row.get::<_, i64>(10)? != 0,
         trace: row.get(11)?,
-        created_at: row.get(12)?,
+        outputs: row.get(12)?,
+        created_at: row.get(13)?,
     })
 }
 
@@ -128,14 +136,30 @@ fn map_message(row: &rusqlite::Row) -> rusqlite::Result<ChatMessageRow> {
 /// and a denormalised counter is a number one of them eventually forgets. Archived conversations
 /// are excluded from the count, because the sidebar hides them by default and a folder reading "7"
 /// while showing three rows is worse than one extra join over a few hundred rows.
+///
+/// # The order, which is four clauses and each of them earns its place
+///
+/// Archived to the bottom, pinned to the top, and **within each band the most recently used first**
+/// — the same rule `list_conversations` has always followed, so the two halves of the sidebar no
+/// longer disagree about what "first" means. A project's recency is the newest turn in any of its
+/// live chats, falling back to when it was created, which is what puts a project you just made at
+/// the top before it has any chats in it to be recent.
+///
+/// `sort_order` survives as a tiebreaker rather than as the sort. It only decides between two
+/// projects whose last activity lands on the same microsecond, which in practice means two empty
+/// ones created in the same breath; `created_at` settles anything after that so the list can never
+/// come back in a different order for the same data.
 pub fn list_groups(conn: &Connection) -> rusqlite::Result<Vec<ChatGroup>> {
     let mut stmt = conn.prepare(
         "SELECT g.id, g.name, g.color, g.sort_order, g.collapsed, g.instructions, g.created_at,
-                COUNT(c.id) FILTER (WHERE c.archived_at IS NULL)
+                COUNT(c.id) FILTER (WHERE c.archived_at IS NULL), g.pinned_at, g.archived_at
          FROM chat_groups g
          LEFT JOIN chat_conversations c ON c.group_id = g.id
          GROUP BY g.id
-         ORDER BY g.sort_order, g.created_at",
+         ORDER BY g.archived_at IS NOT NULL,
+                  g.pinned_at IS NULL,
+                  COALESCE(MAX(c.updated_at) FILTER (WHERE c.archived_at IS NULL), g.created_at) DESC,
+                  g.sort_order, g.created_at",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(ChatGroup {
@@ -147,6 +171,8 @@ pub fn list_groups(conn: &Connection) -> rusqlite::Result<Vec<ChatGroup>> {
             instructions: row.get(5)?,
             created_at: row.get(6)?,
             conversation_count: row.get(7)?,
+            pinned_at: row.get(8)?,
+            archived_at: row.get(9)?,
         })
     })?;
     rows.collect()
@@ -171,6 +197,8 @@ pub fn create_group(conn: &Connection, name: &str, color: &str) -> rusqlite::Res
         instructions: String::new(),
         created_at: now(),
         conversation_count: 0,
+        pinned_at: None,
+        archived_at: None,
     })
 }
 
@@ -180,7 +208,7 @@ pub fn get_group(conn: &Connection, id: &str) -> rusqlite::Result<Option<ChatGro
     conn.query_row(
         "SELECT g.id, g.name, g.color, g.sort_order, g.collapsed, g.instructions, g.created_at,
                 (SELECT COUNT(*) FROM chat_conversations c
-                  WHERE c.group_id = g.id AND c.archived_at IS NULL)
+                  WHERE c.group_id = g.id AND c.archived_at IS NULL), g.pinned_at, g.archived_at
          FROM chat_groups g WHERE g.id = ?1",
         params![id],
         |row| {
@@ -193,6 +221,8 @@ pub fn get_group(conn: &Connection, id: &str) -> rusqlite::Result<Option<ChatGro
                 instructions: row.get(5)?,
                 created_at: row.get(6)?,
                 conversation_count: row.get(7)?,
+                pinned_at: row.get(8)?,
+                archived_at: row.get(9)?,
             })
         },
     )
@@ -353,16 +383,98 @@ pub fn get_conversation(
 /// The model is written back rather than assumed because a CLI may pick for itself — an empty
 /// `model` on the invocation means "engine's choice", and the transcript has to be able to say
 /// which choice that was.
+///
+/// `context_tokens` is `None` for an engine that reported nothing, and `None` **keeps whatever was
+/// already there** rather than clearing it. That is the difference between "this turn did not say"
+/// and "this conversation has never been measured", and the meter draws them differently: the
+/// previous turn's figure is stale by one exchange, which is a far better answer than a gauge that
+/// empties itself every time a CLI is quiet about its usage.
 pub fn update_session(
     conn: &Connection,
     id: &str,
     engine_session_id: Option<&str>,
     model: &str,
+    context_tokens: Option<i64>,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE chat_conversations SET engine_session_id = ?2, model = ?3, updated_at = ?4
+        "UPDATE chat_conversations
+         SET engine_session_id = ?2, model = ?3,
+             context_tokens = COALESCE(?5, context_tokens), updated_at = ?4
          WHERE id = ?1",
-        params![id, engine_session_id, model, now()],
+        params![id, engine_session_id, model, now(), context_tokens],
+    )?;
+    Ok(())
+}
+
+/// Sets the compression style every future answer in this conversation comes back in.
+///
+/// `""` turns it off. **The engine session is kept**, unlike a provider change or a compaction:
+/// the style rides on each turn's message rather than on the system prompt (see
+/// [`crate::caveman`]), so it takes effect on the very next question with nothing to re-establish
+/// and nothing to replay. That is the whole reason it was built that way.
+///
+/// `updated_at` is bumped: this changes what every future answer looks like, which is work on the
+/// conversation in the sense the sidebar's order means.
+pub fn set_caveman_level(conn: &Connection, id: &str, level: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE chat_conversations SET caveman_level = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, level, now()],
+    )?;
+    Ok(())
+}
+
+/// Files a summary of the turns up to `through_turn`, and **drops the engine's own memory of them**.
+///
+/// The second half is not a side effect, it is the point. Compacting a conversation whose engine
+/// still holds the full session would achieve exactly nothing: the next turn would resume that
+/// session, the summary would never be sent, and the context would go on growing while the UI
+/// claimed it had been reduced. Clearing `engine_session_id` is what makes the next turn open a
+/// fresh session — which is the one and only condition under which `chat_cmd::replayed_prefix`
+/// sends anything at all, summary included.
+///
+/// So the two writes are one fact with two halves, and they belong in one statement: *what this
+/// thread's earlier turns now say is this text, and nobody is holding a longer version of them.*
+///
+/// `context_tokens` goes back to NULL for the same reason, one step further on: it is a
+/// measurement of a context that no longer exists. Leaving it would have the meter reporting
+/// ninety thousand tokens on a thread whose whole point is that it no longer carries them, right
+/// up until the next turn happened to run. Null sends the meter back to estimating, which counts
+/// the summary and is therefore right immediately.
+///
+/// `updated_at` is bumped. Compacting is work done on the conversation — it costs a turn and it
+/// changes what the next one will be told — so a thread that was just compacted belongs at the top
+/// of the sidebar, unlike pinning or filing, which do not.
+pub fn set_compaction(
+    conn: &Connection,
+    id: &str,
+    summary: &str,
+    through_turn: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE chat_conversations
+         SET compacted_summary = ?2, compacted_through_turn = ?3,
+             engine_session_id = NULL, context_tokens = NULL, updated_at = ?4
+         WHERE id = ?1",
+        params![id, summary, through_turn, now()],
+    )?;
+    Ok(())
+}
+
+/// Throws a summary away, so the whole transcript is replayed again.
+///
+/// The undo for the above, and it is a real one: nothing was deleted when the conversation was
+/// compacted — every message is still its own row — so dropping the summary restores the full
+/// context exactly. `context_tokens` is cleared here too, and for the mirror-image reason: whatever
+/// was last measured described the *compacted* context, which is not the one being restored. The session token is *not* restored, because it cannot be: the engine that
+/// minted it has long since been told a shorter story, and resuming it now would continue from the
+/// summary while the app believed it had gone back to the full transcript.
+pub fn clear_compaction(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE chat_conversations
+         SET compacted_summary = '', compacted_through_turn = NULL,
+             context_tokens = NULL, updated_at = ?2
+         WHERE id = ?1",
+        params![id, now()],
     )?;
     Ok(())
 }
@@ -461,6 +573,24 @@ pub fn set_pinned(conn: &Connection, id: &str, pinned: bool) -> rusqlite::Result
     Ok(())
 }
 
+/// Pins a folder, or unpins it. The mirror of [`set_pinned`] one level up.
+pub fn set_group_pinned(conn: &Connection, id: &str, pinned: bool) -> rusqlite::Result<()> {
+    let at = if pinned { Some(now()) } else { None };
+    conn.execute("UPDATE chat_groups SET pinned_at = ?2 WHERE id = ?1", params![id, at])?;
+    Ok(())
+}
+
+/// Archives a folder, or brings it back.
+///
+/// **The conversations inside are untouched**, which is the difference between this and deleting
+/// the folder — they keep their `group_id`, so restoring puts the folder back with everything in
+/// it. The list is what hides; nothing moves.
+pub fn set_group_archived(conn: &Connection, id: &str, archived: bool) -> rusqlite::Result<()> {
+    let at = if archived { Some(now()) } else { None };
+    conn.execute("UPDATE chat_groups SET archived_at = ?2 WHERE id = ?1", params![id, at])?;
+    Ok(())
+}
+
 pub fn set_archived(conn: &Connection, id: &str, archived: bool) -> rusqlite::Result<()> {
     let at = if archived { Some(now()) } else { None };
     conn.execute(
@@ -509,8 +639,8 @@ pub fn append_message(conn: &Connection, msg: &ChatMessageRow) -> rusqlite::Resu
     conn.execute(
         "INSERT INTO chat_messages
              (id, conversation_id, turn, role, content, provider, model, engine_version,
-              response_time_ms, is_error, is_cancelled, trace, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              response_time_ms, is_error, is_cancelled, trace, outputs, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             msg.id,
             msg.conversation_id,
@@ -524,6 +654,7 @@ pub fn append_message(conn: &Connection, msg: &ChatMessageRow) -> rusqlite::Resu
             i64::from(msg.is_error),
             i64::from(msg.is_cancelled),
             msg.trace,
+            msg.outputs,
             if msg.created_at.is_empty() { at.clone() } else { msg.created_at.clone() },
         ],
     )?;
@@ -732,6 +863,7 @@ mod tests {
             is_error: false,
             is_cancelled: false,
             trace: None,
+            outputs: None,
             created_at: String::new(),
         }
     }
@@ -749,6 +881,116 @@ mod tests {
             trace: trace.map(str::to_string),
             ..user_message(conversation_id, turn, content)
         }
+    }
+
+    /// The folder list's own contract, which is three sorts in one `ORDER BY` and therefore the
+    /// place a silent mistake would live: pinned above plain, archived below both, and the user's
+    /// own `sort_order` deciding within each band rather than being overruled by it.
+    #[test]
+    fn folders_sort_pinned_first_and_archived_last() {
+        let conn = seeded();
+        let plain = create_group(&conn, "plain", "").unwrap();
+        let pinned = create_group(&conn, "pinned", "").unwrap();
+        let shelved = create_group(&conn, "shelved", "").unwrap();
+        // Created in that order, so `sort_order` alone would list them plain, pinned, shelved.
+        set_group_pinned(&conn, &pinned.id, true).unwrap();
+        set_group_archived(&conn, &shelved.id, true).unwrap();
+
+        let names: Vec<String> = list_groups(&conn).unwrap().into_iter().map(|g| g.name).collect();
+        assert_eq!(names, ["pinned", "plain", "shelved"]);
+    }
+
+    /// Recency, which is now the sort and not a tiebreaker: the project whose chat was last spoken
+    /// to comes first, and a project with no chats at all falls back to when it was made.
+    ///
+    /// `sort_order` runs the other way here on purpose — the projects are created in the order
+    /// that would produce the *opposite* list — so a regression to the old manual sort fails this
+    /// instead of passing by coincidence.
+    #[test]
+    fn projects_sort_by_their_last_conversation() {
+        let conn = seeded();
+        let first = create_group(&conn, "first", "").unwrap();
+        let second = create_group(&conn, "second", "").unwrap();
+        let third = create_group(&conn, "third", "").unwrap();
+
+        for (group, at) in [
+            (&first, "2026-01-03T00:00:00+00:00"),
+            (&second, "2026-01-01T00:00:00+00:00"),
+            (&third, "2026-01-02T00:00:00+00:00"),
+        ] {
+            let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+            set_conversation_group(&conn, &chat.id, Some(&group.id)).unwrap();
+            conn.execute(
+                "UPDATE chat_conversations SET updated_at = ?2 WHERE id = ?1",
+                params![chat.id, at],
+            )
+            .unwrap();
+        }
+
+        let names: Vec<String> = list_groups(&conn).unwrap().into_iter().map(|g| g.name).collect();
+        assert_eq!(names, ["first", "third", "second"]);
+    }
+
+    /// An archived chat must not keep its project warm. The sidebar does not draw it, so it is not
+    /// an interaction the user can see, and a project would otherwise sit at the top of the list on
+    /// the strength of a conversation nobody can reach.
+    ///
+    /// Both `created_at`s are pinned into the past first. Without that the test proves nothing: a
+    /// project whose only chat is archived falls back to when it was *made*, which for a project
+    /// created during the test is today and beats every dated conversation in the fixture — so the
+    /// list would come out right for the wrong reason.
+    #[test]
+    fn a_shelved_conversation_does_not_count_as_recent() {
+        let conn = seeded();
+        let quiet = create_group(&conn, "quiet", "").unwrap();
+        let busy = create_group(&conn, "busy", "").unwrap();
+        conn.execute(
+            "UPDATE chat_groups SET created_at = '2025-01-01T00:00:00+00:00'",
+            [],
+        )
+        .unwrap();
+
+        // `quiet` holds the newest turn in the database — but it is archived.
+        let shelved = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        set_conversation_group(&conn, &shelved.id, Some(&quiet.id)).unwrap();
+        set_archived(&conn, &shelved.id, true).unwrap();
+        conn.execute(
+            "UPDATE chat_conversations SET updated_at = '2030-01-01T00:00:00+00:00' WHERE id = ?1",
+            params![shelved.id],
+        )
+        .unwrap();
+
+        let live = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        set_conversation_group(&conn, &live.id, Some(&busy.id)).unwrap();
+        conn.execute(
+            "UPDATE chat_conversations SET updated_at = '2026-01-01T00:00:00+00:00' WHERE id = ?1",
+            params![live.id],
+        )
+        .unwrap();
+
+        let names: Vec<String> = list_groups(&conn).unwrap().into_iter().map(|g| g.name).collect();
+        assert_eq!(names, ["busy", "quiet"]);
+    }
+
+    /// Archiving a folder must not touch what is in it. The sidebar stops drawing the folder, and
+    /// that is the whole of it — restoring has to bring the conversations back with it, which it
+    /// can only do if they never left.
+    #[test]
+    fn archiving_a_folder_keeps_its_conversations_filed() {
+        let conn = seeded();
+        let group = create_group(&conn, "project", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        set_conversation_group(&conn, &chat.id, Some(&group.id)).unwrap();
+
+        set_group_archived(&conn, &group.id, true).unwrap();
+        let shelved = list_groups(&conn).unwrap().into_iter().find(|g| g.id == group.id).unwrap();
+        assert!(shelved.archived_at.is_some());
+        assert_eq!(shelved.conversation_count, 1, "the count is of what is filed, not of what is shown");
+
+        set_group_archived(&conn, &group.id, false).unwrap();
+        let back = list_groups(&conn).unwrap().into_iter().find(|g| g.id == group.id).unwrap();
+        assert!(back.archived_at.is_none());
+        assert_eq!(back.conversation_count, 1);
     }
 
     /// The sidebar's contract in one test: everything pinned is above everything else, and inside
@@ -1027,13 +1269,89 @@ mod tests {
         let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
         assert!(chat.engine_session_id.is_none());
 
-        update_session(&conn, &chat.id, Some("sess-1"), "claude-sonnet-4-5").unwrap();
+        update_session(&conn, &chat.id, Some("sess-1"), "claude-sonnet-4-5", Some(12_000)).unwrap();
         let updated = get_conversation(&conn, &chat.id).unwrap().unwrap();
         assert_eq!(updated.engine_session_id.as_deref(), Some("sess-1"));
         assert_eq!(updated.model, "claude-sonnet-4-5");
+        assert_eq!(updated.context_tokens, Some(12_000));
 
         // An engine that cannot resume clears it rather than keeping a stale id around.
-        update_session(&conn, &chat.id, None, "claude-sonnet-4-5").unwrap();
+        update_session(&conn, &chat.id, None, "claude-sonnet-4-5", None).unwrap();
         assert!(get_conversation(&conn, &chat.id).unwrap().unwrap().engine_session_id.is_none());
+    }
+
+    /// A turn whose engine said nothing about tokens must not empty the meter.
+    ///
+    /// The two nulls mean different things and the column can only hold one of them: "this CLI is
+    /// quiet about usage" has to leave the last real measurement standing, or a conversation on
+    /// opencode would show a full gauge on the turns that reported and an empty one on the turns
+    /// that did not, flickering between them with nothing having changed.
+    #[test]
+    fn a_silent_turn_keeps_the_last_measured_context() {
+        let conn = seeded();
+        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+
+        update_session(&conn, &chat.id, Some("s"), "m", Some(48_000)).unwrap();
+        update_session(&conn, &chat.id, Some("s"), "m", None).unwrap();
+        assert_eq!(get_conversation(&conn, &chat.id).unwrap().unwrap().context_tokens, Some(48_000));
+
+        // And a turn that does report overwrites it, including downwards — which is exactly what a
+        // compaction looks like from here.
+        update_session(&conn, &chat.id, Some("s"), "m", Some(3_000)).unwrap();
+        assert_eq!(get_conversation(&conn, &chat.id).unwrap().unwrap().context_tokens, Some(3_000));
+    }
+
+    /// Changing the answer style **keeps** the engine session, unlike every other write here that
+    /// changes what a turn is sent.
+    ///
+    /// Worth pinning because the neighbours all do the opposite — `set_engine` on a provider change
+    /// and `set_compaction` both clear it — so "make this consistent" is a plausible edit. It would
+    /// be wrong: the style rides on each turn's message rather than on the system prompt, so there
+    /// is nothing to re-establish, and dropping the session would make switching style cost a full
+    /// replay of the transcript on a feature whose entire purpose is spending fewer tokens.
+    #[test]
+    fn a_style_change_costs_nothing_and_keeps_the_session() {
+        let conn = seeded();
+        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        update_session(&conn, &chat.id, Some("sess-1"), "m", Some(9_000)).unwrap();
+
+        set_caveman_level(&conn, &chat.id, "ultra").unwrap();
+        let on = get_conversation(&conn, &chat.id).unwrap().unwrap();
+        assert_eq!(on.caveman_level, "ultra");
+        assert_eq!(on.engine_session_id.as_deref(), Some("sess-1"), "no replay is owed for a style");
+        assert_eq!(on.context_tokens, Some(9_000), "and nothing was re-measured");
+
+        // Off is the empty string, so there is exactly one spelling of off.
+        set_caveman_level(&conn, &chat.id, "").unwrap();
+        assert_eq!(get_conversation(&conn, &chat.id).unwrap().unwrap().caveman_level, "");
+    }
+
+    /// Compacting replaces the earlier turns *and* drops the engine's own copy of them.
+    ///
+    /// The second half is the one that can be quietly removed by someone tidying this up, and the
+    /// symptom would not look like a bug: the summary is filed, the UI says "compacted", and the
+    /// next turn resumes the untouched session and sends none of it.
+    #[test]
+    fn compacting_files_a_summary_and_forgets_the_session() {
+        let conn = seeded();
+        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        update_session(&conn, &chat.id, Some("sess-1"), "m", Some(90_000)).unwrap();
+
+        set_compaction(&conn, &chat.id, "hablamos de migraciones", 11).unwrap();
+        let after = get_conversation(&conn, &chat.id).unwrap().unwrap();
+        assert_eq!(after.compacted_summary, "hablamos de migraciones");
+        assert_eq!(after.compacted_through_turn, Some(11));
+        assert!(after.engine_session_id.is_none(), "the engine must not still hold the long version");
+        assert!(
+            after.context_tokens.is_none(),
+            "a measurement of the context that was just replaced is not a measurement of anything"
+        );
+
+        // Undoing it restores the full replay and does **not** invent a session to resume.
+        clear_compaction(&conn, &chat.id).unwrap();
+        let undone = get_conversation(&conn, &chat.id).unwrap().unwrap();
+        assert_eq!(undone.compacted_summary, "");
+        assert!(undone.compacted_through_turn.is_none());
+        assert!(undone.engine_session_id.is_none());
     }
 }

@@ -54,6 +54,21 @@ export interface ChatConversation {
   unread: boolean;
   /** Whether the most recent turn failed, derived by the listing query from the last message. */
   lastFailed: boolean;
+  /** What the turns up to {@link compactedThroughTurn} were compacted down to, or `""` on a thread
+   *  nobody has compacted. Shown in the transcript, not merely used: it is the only copy of what
+   *  the engine will be told those turns said. */
+  compactedSummary: string;
+  /** The last turn the summary covers, or `null`. The two always move together — a summary with no
+   *  cut cannot be replayed, since nothing would say which messages it already stands for. */
+  compactedThroughTurn: number | null;
+  /** The compression style this conversation's answers come back in — one of the levels
+   *  `chatCavemanLevels` returns, or `""` for off. Adapted from the Caveman skill; see
+   *  `src-tauri/src/caveman.rs`. */
+  cavemanLevel: string;
+  /** How many tokens the engine said it read on the most recent turn, cache included, or `null`
+   *  before any turn has reported. **Measured, never computed**: the context meter falls back to an
+   *  estimate when this is null and says which of the two it is showing. */
+  contextTokens: number | null;
   /** The engine's own resume token for the most recent turn, which is a different thing from `id` —
    *  see the comment on `ChatSession.conversationId` in `state/chatStore.ts` for why the app mints
    *  its own identity instead of borrowing the CLI's. `null` until a turn has landed. */
@@ -95,6 +110,15 @@ export interface ChatMessageRow {
    * directly.
    */
   trace?: AiRunLine[] | null;
+  /**
+   * Relative paths of the files this turn wrote, as the **raw JSON string** the column holds — the
+   * same opacity `trace` has, and for the same reason: what the transcript wants is a parsed array,
+   * and `conversationStore`'s `pathsOf` is the one place that conversion happens.
+   *
+   * Absent or `null` for almost every message. Only paths: size and existence live with the
+   * directory, so a file deleted from disk stops being offered rather than leaving a row that lies.
+   */
+  outputs?: string[] | string | null;
   createdAt: string;
 }
 
@@ -132,6 +156,13 @@ export interface ChatSearchHit {
  */
 export interface ChatReply extends EngineReply {
   message_id: string;
+  /** Whether this turn compacted the conversation before running, because what it was about to
+   *  send was close to a limit. The transcript shows the summary either way; this is so the window
+   *  can explain the extra wait rather than leaving it looking like a stall. */
+  compacted: boolean;
+  /** Relative paths of the files this turn produced, already persisted on the row. Returned as
+   *  well so the window that asked can draw the chips without re-reading the transcript. */
+  outputs: string[];
 }
 
 // ---------- conversations ----------
@@ -183,8 +214,50 @@ export const chatSetEffort = (conversationId: string, effort: string) =>
   invoke<void>("chat_set_effort", { conversationId, effort });
 
 /** Which provider ids accept a level at all, asked of the engines rather than hardcoded here —
- *  so the composer hides the control instead of offering a dial that turns nothing. */
+ *  so the composer hides the control instead of offering a dial that turns nothing. Fixed for a
+ *  build, which is why it is read once at startup. */
 export const chatEffortSupport = () => invoke<string[]>("chat_effort_support");
+
+/** Whether the level would reach a model that can use it. The other half of the question above,
+ *  and the half that moves: opencode and cline address arbitrary models, so the engine having the
+ *  flag says nothing about whether `ollama/llama3` will read it. */
+export const chatModelEffortSupport = (provider: string, model: string) =>
+  invoke<boolean>("chat_model_effort_support", { provider, model });
+
+/** This model's context window in tokens, or `null` where the app will not name one — which is
+ *  every locally-served model, since the name does not decide the window there. Asked of the
+ *  backend rather than kept in a table here because `auto_compact_if_full` decides with the same
+ *  number; see `ai::context_window_for`. */
+export const chatContextWindow = (model: string) =>
+  invoke<number | null>("chat_context_window", { model });
+
+/**
+ * Sets the compression style every future answer in this conversation comes back in.
+ *
+ * `""` turns it off. Unlike a provider change this keeps the engine session and costs nothing: the
+ * style travels with each turn's message rather than with the system prompt, so it applies to the
+ * very next question with no replay. See `src-tauri/src/caveman.rs`.
+ */
+export const chatSetCaveman = (conversationId: string, level: string) =>
+  invoke<void>("chat_set_caveman", { conversationId, level });
+
+/** The levels this build knows, in picker order. Read from the backend rather than listed here,
+ *  because `chat_send` decides with the same list — a second copy would let the picker offer a
+ *  level the turn refuses. */
+export const chatCavemanLevels = () => invoke<string[]>("chat_caveman_levels");
+
+/**
+ * Turns what the user typed after `/caveman` into a level to store.
+ *
+ * `""` means they asked to stop, a level means that level, and `null` means the word is neither —
+ * the caller says so with the list, in the interface language.
+ *
+ * A round trip for a string comparison, deliberately: the vocabulary — which word means stop, what
+ * a bare command means, which levels exist — is one thing and lives in `caveman.rs`. The half of it
+ * that used to live here was the half that would not have been updated when a level was added.
+ */
+export const chatCavemanResolve = (argument: string) =>
+  invoke<string | null>("chat_caveman_resolve", { argument });
 
 export const chatDeleteConversation = (conversationId: string) =>
   invoke<void>("chat_delete_conversation", { conversationId });
@@ -204,6 +277,41 @@ export const chatSearchConversations = (query: string, limit?: number) =>
  *  context, because no CLI here can rewind one. */
 export const chatBranchConversation = (conversationId: string, atTurn: number) =>
   invoke<ChatConversation>("chat_branch_conversation", { conversationId, atTurn });
+
+/** What a compaction did — see {@link chatCompact}. */
+export interface ChatCompaction {
+  summary: string;
+  through_turn: number;
+  /** Characters the next turn would have replayed before compacting, and after. Counted exactly on
+   *  the Rust side rather than estimated, which is why they are characters and not tokens. */
+  before_chars: number;
+  after_chars: number;
+}
+
+/**
+ * Replaces the earlier turns of a conversation with a summary the model writes of them.
+ *
+ * **This runs a turn**: it costs what a turn costs, it takes the conversation's lease so nothing
+ * else can run meanwhile, and it can fail. Give it a `runId` — the stop button and the live log
+ * both key off one, and a compaction on a long thread is not quick.
+ *
+ * **It destroys no messages.** The transcript is untouched; what changes is what the *next* turn is
+ * sent, and {@link chatUncompact} puts that back. The one thing that really goes is the engine's
+ * own session, which is what makes the summary reach it at all.
+ */
+export const chatCompact = (conversationId: string, runId?: string, guidance?: string) =>
+  invoke<ChatCompaction>("chat_compact", {
+    conversationId,
+    runId: runId ?? null,
+    // What the user typed after `/compact`, steering what the summary keeps. Appended to the base
+    // instructions on the Rust side, never substituted for them — see `chat_compact`.
+    guidance: guidance?.trim() || null,
+  });
+
+/** Throws the summary away, so the whole transcript is replayed again. Instant and free — nothing
+ *  was deleted when it was compacted. */
+export const chatUncompact = (conversationId: string) =>
+  invoke<void>("chat_uncompact", { conversationId });
 
 // ---------- turns ----------
 
@@ -273,6 +381,10 @@ export interface ChatGroup {
   color: string;
   sortOrder: number;
   collapsed: boolean;
+  /** When it was pinned, or null. Pinned folders sort above the rest. */
+  pinnedAt?: string | null;
+  /** When it was archived, or null. Archived keeps everything inside it — only the list hides. */
+  archivedAt?: string | null;
   /** Standing instructions for every conversation in this project, appended to the base system
    *  prompt on every turn. Read fresh at send time, so editing them changes what the existing chats
    *  are told next time they run. */
@@ -292,6 +404,14 @@ export const chatRenameGroup = (groupId: string, name: string, color: string) =>
 
 /** Removes the folder. Its conversations go back to the ungrouped list — this never deletes a
  *  chat, which is the one rule the feature has to get right. */
+/** Pins a folder to the top of the sidebar, or unpins it. */
+export const chatSetGroupPinned = (groupId: string, pinned: boolean) =>
+  invoke<void>("chat_set_group_pinned", { groupId, pinned });
+
+/** Puts a folder on the shelf, or takes it back. The conversations inside are untouched. */
+export const chatSetGroupArchived = (groupId: string, archived: boolean) =>
+  invoke<void>("chat_set_group_archived", { groupId, archived });
+
 export const chatDeleteGroup = (groupId: string) => invoke<void>("chat_delete_group", { groupId });
 
 export const chatSetGroupCollapsed = (groupId: string, collapsed: boolean) =>
@@ -349,6 +469,43 @@ export const chatRemoveAttachment = (conversationId: string, attachmentId: strin
  *  cleanup cannot cover a crash, or a workspace deletion that cascaded rows away without passing
  *  through the chat commands. Returns how many folders it removed. */
 export const chatSweepAttachments = () => invoke<number>("chat_sweep_attachments");
+
+/**
+ * One file a conversation's turns left behind in its own working directory.
+ *
+ * The other direction from `ChatAttachment`: that one is a file the user gave the model, this one
+ * is a file the model gave the user. They are deliberately separate shapes — an attachment is
+ * addressed by a stored id and is named to the engine, an output is addressed by its path inside
+ * the conversation's directory and is only ever copied out.
+ */
+export interface ChatOutput {
+  /** Path relative to the conversation's working directory — the file's identity for saving. */
+  path: string;
+  /** The last segment, for the chip. */
+  name: string;
+  bytes: number;
+  /** Milliseconds since the epoch; `0` when the platform would not say. */
+  modifiedMs: number;
+  /** Whether the transcript should *show* this rather than merely offer it. Decided on the Rust
+   *  side so one list of image types governs attachments coming in and outputs going out. */
+  isImage: boolean;
+}
+
+/** Everything the turns of this conversation have produced, newest first. The directory is the
+ *  record, so this is a listing and not a query — see `chat_list_outputs`. */
+export const chatListOutputs = (conversationId: string) =>
+  invoke<ChatOutput[]>("chat_list_outputs", { conversationId });
+
+/** Copies one produced file out to wherever the save dialog landed. A copy, not a move: a
+ *  follow-up turn still has to be able to find the file it is being asked to change. */
+export const chatSaveOutput = (conversationId: string, relPath: string, destPath: string) =>
+  invoke<void>("chat_save_output", { conversationId, relPath, destPath });
+
+/** The bytes of one produced file, for showing it inline. Refused above 8 MB — see
+ *  `OUTPUT_PREVIEW_MAX_BYTES`; the chip still offers the file, only the picture is withheld. */
+export const chatReadOutput = (conversationId: string, relPath: string) =>
+  invoke<number[]>("chat_read_output", { conversationId, relPath });
+
 
 export const chatSetGroupInstructions = (groupId: string, instructions: string) =>
   invoke<void>("chat_set_group_instructions", { groupId, instructions });

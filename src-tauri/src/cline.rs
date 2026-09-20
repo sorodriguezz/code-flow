@@ -599,6 +599,10 @@ fn interpret_output(
             text,
             // No resumable session exists to report — see the module docs.
             session_id: None,
+            // `None`: this app does not read this CLI's output step by step, so it has no
+            // figure for the *final* prompt — only a cumulative total, which is a bill and not a
+            // gauge. The chat's context meter estimates instead, and says so.
+            context_tokens: None,
         });
     }
 
@@ -611,7 +615,10 @@ fn interpret_output(
     let Some(detail) = detail else {
         return Err(match success {
             true => "cline no devolvió contenido".to_string(),
-            false => format!("cline falló ({status_label}) sin salida en stdout ni stderr"),
+            // A kill with no output is not a failed answer, it is a process that never started —
+            // and the difference is the whole message. See `ai::killed_without_output`.
+            false => crate::ai::killed_without_output("cline", status_label)
+                .unwrap_or_else(|| format!("cline falló ({status_label}) sin salida en stdout ni stderr")),
         });
     };
     if quota_signal(&detail) {
@@ -647,6 +654,26 @@ fn nonblank(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The failure this was written for: signal 9, not a byte on either stream. What the user must
+    /// not be told is that the model failed, because the agent never ran.
+    #[test]
+    fn a_kill_with_no_output_is_explained_rather_than_transcribed() {
+        let err = interpret_output(false, "signal: 9 (SIGKILL)", "", "").unwrap_err();
+        assert!(!err.contains("sin salida en stdout ni stderr"), "got {err}");
+        assert!(err.contains("antes de escribir nada"), "got {err}");
+        // The remedy has to be in the message; a diagnosis nobody can act on is the old message
+        // with more words.
+        assert!(err.contains("137"), "got {err}");
+    }
+
+    /// Every other empty failure keeps the wording it had — this is a special case, not a new
+    /// default for anything that comes back quiet.
+    #[test]
+    fn an_ordinary_empty_failure_is_unchanged() {
+        let err = interpret_output(false, "exit status: 1", "", "").unwrap_err();
+        assert!(err.contains("sin salida en stdout ni stderr"), "got {err}");
+    }
 
     /// Trimmed from a live `cline --json -P ollama` run: the events this module skips, then the
     /// `run_result` it reads.

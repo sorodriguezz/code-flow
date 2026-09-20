@@ -175,6 +175,13 @@ impl AiEngine for GeminiEngine {
         }
         if let Some(dir) = inv.cwd {
             cmd.current_dir(dir);
+            // **And named to agy as a directory it may use**, which `current_dir` alone does not
+            // do. `--add-dir` is what scopes this CLI's file access, and until now the only thing
+            // in that scope was the temp folder holding the brief — so a turn asked for a PNG
+            // wrote it *next to the brief*, in `/var/folders/.../codeflow-agy-…`, where nothing
+            // looks for it and the OS eventually deletes it. The working directory has to be in
+            // the scope for a file written there to be a file anybody sees.
+            cmd.arg("--add-dir").arg(dir);
         }
         cmd
     }
@@ -338,6 +345,10 @@ fn interpret_output(
         session_id: Some(SESSION_SENTINEL.to_string()),
         model: None,
         usage: usage.filter(|u| !u.is_empty()),
+        // `None`: this app does not read this CLI's output step by step, so it has no
+        // figure for the *final* prompt — only a cumulative total, which is a bill and not a
+        // gauge. The chat's context meter estimates instead, and says so.
+        context_tokens: None,
     })
 }
 

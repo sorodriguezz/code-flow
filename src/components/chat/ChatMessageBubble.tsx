@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Check, Copy, GitBranch, Pencil, RefreshCw, Square, type LucideIcon } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
 import { parseClaudeError } from "../../lib/claudeError";
@@ -8,7 +9,12 @@ import type { AiRunLine } from "../../state/aiRunStore";
 import { AiErrorBanner } from "../ai/AiErrorBanner";
 import { AiRunLog } from "../ai/AiRunLog";
 import { CostChip, formatResponseTime, parseStamp, useCopy, useLocale } from "./chatChrome";
-import { highlightCodeBlocks } from "../../lib/codeHighlight";
+import { highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
+import { bodyForBlock, fileNameForBlock } from "../../lib/codeFileName";
+import { OutputBar } from "./OutputBar";
+import type { ChatOutput } from "../../lib/tauri/chatCommands";
+import { writeFileBytes } from "../../lib/tauri/commands";
+import { pushErrorToast } from "../../state/toastStore";
 import { findTheme } from "../../lib/codeThemes";
 import { useThemeStore } from "../../state/themeStore";
 
@@ -100,6 +106,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   stamp = "full",
   streamText,
   actions,
+  outputs,
 }: {
   message: ChatBubbleMessage;
   variant?: ChatBubbleVariant;
@@ -111,6 +118,18 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
    *  markdown once, when it is whole. */
   streamText?: string;
   actions?: ChatBubbleActions;
+  /**
+   * Files this turn wrote, and the conversation to save them out of.
+   *
+   * One object rather than two props because it is all-or-nothing — there is nothing to do with
+   * either half alone — and because the caller has to memoise it anyway: this component compares
+   * its props by reference, so a fresh object per render would re-render every bubble in the
+   * transcript on every token of the one in flight.
+   *
+   * Absent everywhere but the chat workspace. The AI panel's repo chat and the agent console show
+   * the same turns and have no working directory behind them.
+   */
+  outputs?: { conversationId: string; files: ChatOutput[] };
 }) {
   const t = useT();
   const [copied, copy] = useCopy();
@@ -147,7 +166,13 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     [message.isError, message.content],
   );
 
-  const bodyRef = useCodeBlockCopy(html, reading, t("chat.copyCode"));
+  const bodyRef = useCodeBlockActions(
+    html,
+    reading,
+    t("chat.copyCode"),
+    t("chat.saveCode"),
+    t("chat.codeFileStem"),
+  );
 
   const stampRow = <ChatStamp message={message} detail={stamp} />;
 
@@ -250,21 +275,36 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         )}
       </div>
       {traceLog}
-      {/* The reading variant keeps its controls on a row of their own rather than floating them
-          over the text: the assistant's turn has no box for a floating button to sit on the corner
-          of, and a row that appears on hover under a paragraph is what every reading surface does.
-
-          The row takes the side its turn is on — right under a user's bubble, left under an
-          assistant's. A transcript is read as two columns, and controls that always start at the
-          left margin detach from the short right-aligned bubble they belong to and read as if they
-          were the *reply's*. The timestamp under each turn already follows this rule; the controls
-          were the one thing that did not. */}
-      {reading && !streaming && (
-        <div
-          className={`flex items-center gap-1 pt-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 hover:opacity-100 ${
-            isUser ? "justify-end" : ""
-          }`}
-        >
+      {/* Under the answer that made them, and above the hover controls: the files are part of what
+          this turn said, and the row below is what you *do* about the turn. */}
+      {outputs && outputs.files.length > 0 && (
+        <div className="pt-1.5">
+          <OutputBar conversationId={outputs.conversationId} files={outputs.files} label={false} />
+        </div>
+      )}
+      {/*
+        One row under the turn: what it cost, and what you can do about it.
+       
+        They were two rows — controls, then a stamp beneath them — which is two lines of chrome
+        under every paragraph of a reading surface, and the pair drifted apart on screen because
+        only one of them was ever visible at rest.
+       
+        The row takes the side its turn is on, and the stamp takes the *outer* edge of it: left of
+        the controls under an assistant's answer, right of them under a user's bubble. A transcript
+        is read as two columns, and metadata that always starts at the left margin detaches from
+        the short right-aligned bubble it belongs to and reads as if it were the reply's.
+       
+        Ordering it this way is also what keeps the row still. The stamp is the only part drawn at
+        rest; the controls appear on hover on whichever side faces the middle of the column, so
+        they grow into empty space instead of pushing the one thing that was already there.
+       
+        The controls keep the hover reveal — `focus-within` as well, so the keyboard can reach what
+        the mouse uncovers — and the stamp does not: it is information, not an action.
+      */}
+      {reading && !streaming ? (
+        <div className={`flex items-center gap-1.5 pt-0.5 ${isUser ? "justify-end" : ""}`}>
+          {!isUser && stampRow}
+          <div className="flex items-center gap-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 hover:opacity-100">
           <BubbleAction
             icon={copied ? Check : Copy}
             label={t("chat.copyMessage")}
@@ -298,9 +338,14 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
               costTitle={t("chat.replayCost", { n: actions.replayTurns ?? 0 })}
             />
           )}
+          </div>
+          {isUser && stampRow}
         </div>
+      ) : (
+        // The panel variant and a turn still being written have no controls to sit beside, so the
+        // stamp keeps the plain line it always had.
+        stampRow
       )}
-      {stampRow}
     </div>
   );
 });
@@ -353,7 +398,14 @@ function BubbleAction({
  * transcripts are 12px sidebars whose code blocks are four columns wide, and this lift is a
  * refactor of those, not a redesign.
  */
-function useCodeBlockCopy(html: string | null, enabled: boolean, label: string) {
+function useCodeBlockActions(
+  html: string | null,
+  enabled: boolean,
+  copyLabel: string,
+  saveLabel: string,
+  /** The generic stem a saved block falls back to — "snippet", "fragmento". */
+  fileStem: string,
+) {
   const ref = useRef<HTMLDivElement>(null);
 
   // The active code scheme, so a block in an answer is coloured exactly like the same code in the
@@ -382,34 +434,143 @@ function useCodeBlockCopy(html: string | null, enabled: boolean, label: string) 
     const host = ref.current;
     if (!host || !enabled || html === null) return;
     const added: HTMLButtonElement[] = [];
-    for (const pre of Array.from(host.querySelectorAll("pre"))) {
-      // `<pre>` is statically positioned by the stylesheet, and an absolutely-positioned child
-      // would otherwise anchor itself to the nearest positioned ancestor — the bubble — and land
-      // on the first code block's corner no matter which block it belonged to.
-      (pre as HTMLElement).style.position = "relative";
+    const wrappers: HTMLElement[] = [];
+
+    /** One of these corner buttons, styled the same and placed by how far in from the right. */
+    const corner = (glyph: string, title: string, right: number, onClick: () => void) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.title = label;
-      button.setAttribute("aria-label", label);
-      button.textContent = "⧉";
+      button.title = title;
+      button.setAttribute("aria-label", title);
+      button.textContent = glyph;
       button.style.cssText =
-        "position:absolute;top:6px;right:6px;width:22px;height:22px;border-radius:6px;" +
+        `position:absolute;top:6px;right:${right}px;width:22px;height:22px;border-radius:6px;` +
         "border:1px solid var(--cf-border);background:var(--cf-surface);color:var(--cf-text-muted);" +
         "font-size:11px;line-height:1;cursor:pointer;opacity:0;transition:opacity .12s";
-      const show = () => (button.style.opacity = "1");
-      const hide = () => (button.style.opacity = "0");
-      pre.addEventListener("mouseenter", show);
-      pre.addEventListener("mouseleave", hide);
-      button.addEventListener("click", () => {
-        void navigator.clipboard.writeText(pre.textContent ?? "");
-        button.textContent = "✓";
-        setTimeout(() => (button.textContent = "⧉"), 1500);
+      button.addEventListener("click", onClick);
+      return button;
+    };
+
+    for (const pre of Array.from(host.querySelectorAll("pre"))) {
+      /*
+       * The buttons hang off a wrapper around the `<pre>`, never off the `<pre>` itself.
+       *
+       * The `<pre>` is the horizontal scroll container (`.cf-markdown-preview pre` is
+       * `overflow-x: auto`), and an absolutely-positioned child of a scrolling box is placed
+       * against its **content**, not against the part of it you can see. So `right: 6px` did not
+       * mean "six pixels from the right edge of the block", it meant "six pixels past the end of
+       * the longest line" — and scrolling a block sideways sent both buttons sliding into the
+       * middle of the code, sitting on top of whatever was there. They describe the block, not a
+       * position in the text, so they belong to something that does not scroll.
+       *
+       * Idempotent, because this effect re-runs on a DOM it has already wrapped whenever the
+       * labels change with the app's language. A second wrapper would nest inside the first and
+       * the buttons would be positioned against a box the width of the code again.
+       */
+      let frame = pre.parentElement;
+      if (!frame?.classList.contains("cf-chat-code")) {
+        const box = document.createElement("div");
+        box.className = "cf-chat-code";
+        pre.replaceWith(box);
+        box.append(pre);
+        frame = box;
+      }
+      // Inline, and **not** left to `.cf-chat-code` in the stylesheet. This one declaration is what
+      // gives the buttons a containing block; without it they anchor to whatever positioned
+      // ancestor they find — the bubble, or further — and every block's pair lands in one pile far
+      // from the code it belongs to, invisible in practice. The class still exists, for the padding
+      // that keeps the first line out from under them, but that is cosmetic: losing it puts text
+      // under a button, while losing this loses the button. A control should not depend on a
+      // stylesheet to be reachable, and the code it replaced did exactly this on the `<pre>`.
+      frame.style.position = "relative";
+      wrappers.push(frame);
+
+      /**
+       * The block's source, read from the `<code>` and **not** from the `<pre>`.
+       *
+       * These buttons are appended *inside* the `<pre>`, so `pre.textContent` is the code plus
+       * whatever glyphs are sitting in its corner — which is why copying a block used to put a
+       * stray `⧉` on the clipboard, and would now have put one in a saved file too. The `<code>`
+       * holds the code and nothing else. It still reads back the original source after
+       * highlighting, which replaces its children with spans but changes no text.
+       */
+      const language = languageOf(pre.querySelector("code")?.className ?? "");
+      // `bodyForBlock` is what strips the naming line the system prompt asks the model for, and
+      // only in the formats where that line is not valid syntax — see `lib/codeFileName`. Both
+      // buttons read through it, so copying and saving can never produce two different files.
+      const sourceOf = () =>
+        bodyForBlock(language, (pre.querySelector("code") ?? pre).textContent ?? "");
+
+      const copy = corner("⧉", copyLabel, 6, () => {
+        void navigator.clipboard.writeText(sourceOf());
+        copy.textContent = "✓";
+        setTimeout(() => (copy.textContent = "⧉"), 1500);
       });
-      pre.appendChild(button);
-      added.push(button);
+
+      const save = corner("↓", saveLabel, 32, () => {
+        const source = sourceOf();
+        // Named from the raw text, saved from the stripped one: the naming line is the only place
+        // the name exists, so reading it back out of a body it has already been removed from would
+        // lose it exactly when it is most wanted.
+        const raw = (pre.querySelector("code") ?? pre).textContent ?? "";
+        const suggested = fileNameForBlock(language, raw, fileStem);
+        // The extension the name ended up with, offered as the dialog's filter so the platform
+        // does not append a second one. A `Dockerfile` has none and gets no filter rather than a
+        // filter for the empty string.
+        const dot = suggested.lastIndexOf(".");
+        const extension = dot > 0 ? suggested.slice(dot + 1) : null;
+        void (async () => {
+          try {
+            const path = await saveDialog({
+              defaultPath: suggested,
+              filters: extension
+                ? [{ name: extension.toUpperCase(), extensions: [extension] }]
+                : undefined,
+            });
+            if (!path) return;
+            await writeFileBytes(path, new TextEncoder().encode(source));
+          } catch (e) {
+            // A refused directory, a full disk, a name the platform rejects. Saying so beats a
+            // button that looks like it worked and left nothing behind.
+            pushErrorToast(String(e));
+          }
+        })();
+      });
+
+      const show = () => {
+        copy.style.opacity = "1";
+        save.style.opacity = "1";
+      };
+      const hide = () => {
+        copy.style.opacity = "0";
+        save.style.opacity = "0";
+      };
+      // On the frame, not on the `<pre>`: the buttons are now the `<pre>`'s siblings rather than
+      // its children, so a pointer moving from the code onto a button *leaves* the `<pre>` — which
+      // hid the button out from under the cursor that was reaching for it.
+      frame.addEventListener("mouseenter", show);
+      frame.addEventListener("mouseleave", hide);
+      // Focus reveals them too, and not as a nicety: a button at `opacity:0` is still in the tab
+      // order, so without this a keyboard user tabs onto a control they cannot see and has no way
+      // to know what pressing space would do. The pointer and the caret get the same affordance.
+      for (const button of [copy, save]) {
+        button.addEventListener("focus", show);
+        button.addEventListener("blur", hide);
+      }
+      frame.append(copy, save);
+      added.push(copy, save);
     }
-    return () => added.forEach((button) => button.remove());
-  }, [html, enabled, label]);
+    return () => {
+      added.forEach((button) => button.remove());
+      // Unwrapped too, so a bubble that stops offering the buttons stops reserving room for them.
+      // `replaceWith` on a node React has already discarded has no parent and does nothing, which
+      // is the common case: changing `html` rewrites this subtree wholesale.
+      wrappers.forEach((frame) => {
+        const pre = frame.firstElementChild;
+        if (pre) frame.replaceWith(pre);
+      });
+    };
+  }, [html, enabled, copyLabel, saveLabel, fileStem]);
   return ref;
 }
 

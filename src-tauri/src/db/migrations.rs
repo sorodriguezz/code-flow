@@ -1710,6 +1710,11 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             color       TEXT NOT NULL DEFAULT '',
             sort_order  INTEGER NOT NULL DEFAULT 0,
             collapsed   INTEGER NOT NULL DEFAULT 0,
+            -- Pinned and archived, the same two shelves a conversation has. Timestamps rather than
+            -- flags, for the same reason as there: "when did this get put away" is worth keeping
+            -- and costs nothing, and NULL is an unambiguous "no".
+            pinned_at   TEXT,
+            archived_at TEXT,
             -- Standing instructions for every conversation filed here — what a "project" means in
             -- this app. Appended to the base system prompt rather than replacing it: the base one
             -- is what tells a repo-less engine it has no repository and must not write files, and a
@@ -1761,6 +1766,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- who set `model_reasoning_effort = "max"` in ~/.codex/config.toml has already said
             -- what they want, and sending a level on every turn would silently overrule them.
             effort        TEXT NOT NULL DEFAULT '',
+            -- Which compression style the answers come back in, or empty for none. See
+            -- `crate::caveman`: it is a prompt, not a flag, so unlike `effort` every engine
+            -- honours it and no engine has to support anything.
+            caveman_level TEXT NOT NULL DEFAULT '',
             -- Which folder this thread is filed under, or NULL for the ungrouped list at the top.
             --
             -- ON DELETE SET NULL, and that is the whole design of deleting a group: removing a
@@ -1777,6 +1786,37 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- none of them is an unread reply. Set when an assistant turn is persisted, cleared
             -- when the conversation is opened.
             unread        INTEGER NOT NULL DEFAULT 0,
+            -- What the earlier turns of this thread were compacted down to, and how far the
+            -- compaction reached. Empty and NULL on a thread nobody has compacted, which is most
+            -- of them.
+            --
+            -- Two columns rather than one, because a summary with no turn number cannot be used:
+            -- replaying it means "this stands in for turns 1..N, and here are the turns after N
+            -- verbatim", and without N there is no way to know which messages it already covers —
+            -- the engine would be handed the summary *and* everything it summarised.
+            --
+            -- The text is the model's, produced by `chat_compact`, and it is shown to the user in
+            -- the transcript. It must be, for the same reason the replay cost is on the buttons
+            -- that cause one: this is the only copy of what the engine will be told the earlier
+            -- half of the conversation said, and a summary nobody can read is a context nobody can
+            -- check.
+            compacted_summary TEXT NOT NULL DEFAULT '',
+            compacted_through_turn INTEGER,
+            -- How many tokens the engine said it read on the most recent turn — its own
+            -- `input_tokens` plus whatever it served from cache — or NULL before any turn has
+            -- reported.
+            --
+            -- **Measured, never computed.** This is the same rule `ai_usage` follows: the number
+            -- comes out of the CLI's own result event and nothing here derives it from character
+            -- counts. That matters because it is what the context meter shows, and an estimate
+            -- drawn as a gauge is a number people plan around — a thread that reads "62% full" had
+            -- better be 62% full. Where no turn has reported, the frontend says so and estimates
+            -- out loud instead of quietly filling this in.
+            --
+            -- The most recent turn only, not a history: what the meter answers is "how much is in
+            -- front of the model *now*", and every earlier turn's figure is a smaller version of
+            -- the same conversation. `ai_usage` is where spend over time is kept.
+            context_tokens INTEGER,
             -- Whatever this engine calls the session these turns can be continued under — a Claude
             -- session uuid, an `agy-last` sentinel, nothing at all for an engine that cannot
             -- resume. A cache for the next `--resume`, never an identity: see the block comment.
@@ -1832,6 +1872,9 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- reading the column and dropping it: a thirty-turn conversation would otherwise push
             -- ~18 MB across the IPC boundary to render a transcript that shows none of it.
             trace         TEXT,
+            -- Relative paths of the files this turn wrote into the conversation's working
+            -- directory, as a JSON array. Null for almost every message; see `ChatMessageRow`.
+            outputs       TEXT,
             created_at    TEXT NOT NULL
         );
 
@@ -1884,9 +1927,12 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_tab_to_workspace_terminals(conn)?;
     add_repo_origin_to_diagrams(conn)?;
     add_effort_to_chat_conversations(conn)?;
+    add_outputs_to_chat_messages(conn)?;
+    add_state_to_chat_groups(conn)?;
     add_groups_to_chat_conversations(conn)?;
     add_instructions_to_chat_groups(conn)?;
     add_unread_to_chat_conversations(conn)?;
+    add_compaction_to_chat_conversations(conn)?;
     align_project_ado_org_with_connections(conn)?;
     file_loose_notes_into_a_book(conn)?;
     move_ollama_settings_to_cline(conn)?;
@@ -2303,6 +2349,66 @@ fn add_groups_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
 ///
 /// It needs to exist at all because the chat workspace shipped before the reasoning control did,
 /// so there are databases in the wild with conversations in them and no column to hold a level.
+/// Gives an already-created `chat_groups` its `pinned_at` and `archived_at`.
+///
+/// Additive and nullable, so every folder that existed before this is neither pinned nor archived —
+/// which is exactly what it was.
+fn add_state_to_chat_groups(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "chat_groups")? {
+        return Ok(());
+    }
+    if !has_column(conn, "chat_groups", "pinned_at")? {
+        conn.execute_batch("ALTER TABLE chat_groups ADD COLUMN pinned_at TEXT;")?;
+    }
+    if !has_column(conn, "chat_groups", "archived_at")? {
+        conn.execute_batch("ALTER TABLE chat_groups ADD COLUMN archived_at TEXT;")?;
+    }
+    Ok(())
+}
+
+fn add_outputs_to_chat_messages(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "chat_messages")? && !has_column(conn, "chat_messages", "outputs")? {
+        conn.execute_batch("ALTER TABLE chat_messages ADD COLUMN outputs TEXT;")?;
+    }
+    Ok(())
+}
+
+/// Gives an already-created `chat_conversations` the two compaction columns.
+///
+/// Additive, and the defaults are the pre-compaction state exactly: every conversation that existed
+/// before this has no summary and no cut, which is what an empty string and a NULL say. Nothing
+/// re-reads or rewrites a transcript here — compacting is a turn the user asks for, never a
+/// migration.
+fn add_compaction_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "chat_conversations")? {
+        return Ok(());
+    }
+    if !has_column(conn, "chat_conversations", "compacted_summary")? {
+        conn.execute_batch(
+            "ALTER TABLE chat_conversations ADD COLUMN compacted_summary TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    if !has_column(conn, "chat_conversations", "compacted_through_turn")? {
+        conn.execute_batch(
+            "ALTER TABLE chat_conversations ADD COLUMN compacted_through_turn INTEGER;",
+        )?;
+    }
+    // Nullable with no default, and the null is the meaning: a conversation that ran every one of
+    // its turns before this column existed has no reported figure, and zero would be a lie the
+    // meter would draw as an empty gauge on a thread with thirty turns in it.
+    if !has_column(conn, "chat_conversations", "context_tokens")? {
+        conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN context_tokens INTEGER;")?;
+    }
+    // Empty is off, which is what every conversation that existed before this was.
+    if !has_column(conn, "chat_conversations", "caveman_level")? {
+        conn.execute_batch(
+            "ALTER TABLE chat_conversations ADD COLUMN caveman_level TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    Ok(())
+}
+
+/// Gives an already-created `chat_conversations` its `effort` column.
 fn add_effort_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
     if table_exists(conn, "chat_conversations")? && !has_column(conn, "chat_conversations", "effort")? {
         conn.execute_batch("ALTER TABLE chat_conversations ADD COLUMN effort TEXT NOT NULL DEFAULT '';")?;

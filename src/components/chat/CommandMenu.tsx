@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Eraser,
   GitBranch,
   MessageSquarePlus,
-  SlidersHorizontal,
+  Shrink,
+  SpellCheck,
   SquareTerminal,
   Upload,
   type LucideIcon,
@@ -23,16 +23,64 @@ const SOURCE_KEYS: Record<ProviderCommand["source"], TranslationKey> = {
 };
 
 /** The commands this app answers itself. Never sent to a CLI — see the component's note. */
-export type ChatAppCommand = "new" | "model" | "provider" | "clear" | "export" | "branch";
+export type ChatAppCommand = "new" | "export" | "branch" | "compact" | "caveman";
 
-const APP_COMMANDS: { id: ChatAppCommand; name: string; icon: LucideIcon; descriptionKey: TranslationKey }[] = [
+interface AppCommand {
+  id: ChatAppCommand;
+  /** Typed, so **never translated**. A command whose name changed with the interface language would
+   *  be a different command in each one: the muscle memory would break on a switch, and anything
+   *  written down — a note, a README, a message to somebody else — would work for half the users.
+   *  The description beside it is prose and does follow the language. */
+  name: string;
+  icon: LucideIcon;
+  descriptionKey: TranslationKey;
+  /**
+   * Whether text after the command belongs to it.
+   *
+   * Only `/compact` takes any today, and the default matters more than the exception: without it,
+   * `/new empezar de cero` would silently run `/new` and throw the sentence away. For everything
+   * else an exact match is the only match, so a line that merely *starts* with a command name is
+   * an ordinary message and is sent as one.
+   */
+  takesArgs?: boolean;
+}
+
+const APP_COMMANDS: AppCommand[] = [
   { id: "new", name: "/new", icon: MessageSquarePlus, descriptionKey: "chat.cmdNew" },
-  { id: "model", name: "/model", icon: SlidersHorizontal, descriptionKey: "chat.cmdModel" },
-  { id: "provider", name: "/provider", icon: SlidersHorizontal, descriptionKey: "chat.cmdProvider" },
-  { id: "clear", name: "/clear", icon: Eraser, descriptionKey: "chat.cmdClear" },
   { id: "export", name: "/export", icon: Upload, descriptionKey: "chat.cmdExport" },
   { id: "branch", name: "/branch", icon: GitBranch, descriptionKey: "chat.cmdBranch" },
+  { id: "compact", name: "/compact", icon: Shrink, descriptionKey: "chat.cmdCompact", takesArgs: true },
+  { id: "caveman", name: "/caveman", icon: SpellCheck, descriptionKey: "chat.cmdCaveman", takesArgs: true },
 ];
+
+/**
+ * The app command a composed line runs, if it runs one at all.
+ *
+ * Exists because picking a row in the menu was, until now, the *only* way to run one of these:
+ * typing `/compact` and pressing Enter sent the literal seven characters to the model, which read
+ * as the command being ignored. The menu is a discovery aid, not the mechanism.
+ *
+ * Exported and pure so it can be tested without a DOM — the parsing is where the surprises live:
+ * an exact match for most commands, an exact match *or* a name followed by arguments for the ones
+ * that take them, and nothing at all for a line that merely begins with the same letters.
+ */
+export function appCommandFor(line: string): { id: ChatAppCommand; args: string } | null {
+  const text = line.trim();
+  if (!text.startsWith("/")) return null;
+  // Only the first line. A `/compact` with a pasted paragraph under it is a message about a
+  // command, not a command — and running it would swallow the paragraph.
+  if (text.includes("\n")) return null;
+  const cut = text.search(/\s/);
+  const name = (cut === -1 ? text : text.slice(0, cut)).toLowerCase();
+  const args = cut === -1 ? "" : text.slice(cut).trim();
+  const command = APP_COMMANDS.find((candidate) => candidate.name === name);
+  if (!command) return null;
+  // Arguments handed to a command that does not take them mean the user was writing a sentence,
+  // not invoking anything. Sending it is the safe reading: the worst case is a model that answers
+  // a question about a slash command, rather than an action taken by surprise.
+  if (args && !command.takesArgs) return null;
+  return { id: command.id, args };
+}
 
 /**
  * The `/` menu.

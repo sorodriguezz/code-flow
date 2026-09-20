@@ -285,7 +285,7 @@ fn interpret_output(
         if refusal_reply(raw) {
             return Err(format!("{QUOTA_MARKER}{raw}"));
         }
-        return Ok(AiRun { text: raw.to_string(), session_id: None, model: None, usage: None });
+        return Ok(AiRun { text: raw.to_string(), session_id: None, model: None, usage: None, context_tokens: None });
     };
 
     let text = reply.text.trim();
@@ -317,6 +317,10 @@ fn interpret_output(
         session_id: reply.session_id.filter(|s| !s.trim().is_empty()),
         model,
         usage: usage.filter(|u| !u.is_empty()),
+        // `None`: this app does not read this CLI's output step by step, so it has no
+        // figure for the *final* prompt — only a cumulative total, which is a bill and not a
+        // gauge. The chat's context meter estimates instead, and says so.
+        context_tokens: None,
     })
 }
 

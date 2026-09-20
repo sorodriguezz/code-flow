@@ -4,7 +4,7 @@ import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Lock, Settings2
 import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "./ProviderGlyph";
 import { modelOptionsFor } from "../settings/modelPicker";
-import { useAiModelsStore } from "../../state/aiModelsStore";
+import { MODELS_MAX_AGE_MS, useAiModelsStore } from "../../state/aiModelsStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
 import { useUiStore } from "../../state/uiStore";
@@ -92,8 +92,11 @@ export function ChatModelPicker({
 
   const browse = (id: string) => {
     setBrowsing(id);
-    // Only now do we ask this one provider for its list.
-    void ensureModels([id]);
+    // Only now do we ask this one provider for its list — and with an age, because opening this
+    // submenu *is* the question "what can I pick". Cached for the whole session it answered with
+    // whatever was installed when the app booted: a model pulled ten minutes ago was missing from
+    // the list, and one deleted an hour ago was still here and still selectable.
+    void ensureModels([id], MODELS_MAX_AGE_MS);
   };
 
   // Re-measured on every stage change, since the two steps have different heights.

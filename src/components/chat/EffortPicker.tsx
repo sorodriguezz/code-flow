@@ -37,8 +37,21 @@ const LABEL: Record<string, TranslationKey> = {
  * it happens" wants `max`; "what is the flag for X" should not pay for it. Pinning it globally
  * would mean the setting is always wrong for one of the two.
  *
- * Rendered only for providers whose engine reports support, which is why `supported` is a prop
- * rather than a lookup here — an absent control is honest, a dial that turns nothing is not.
+ * # Why it is a prop and not a lookup
+ *
+ * `supported` arrives already decided, because the decision needs two things this component has no
+ * business knowing: whether the CLI takes the flag at all, and whether the model it is pointed at
+ * would read it. The second is the one that moves — opencode and cline drive whatever their
+ * configured providers serve, so the same CLI can be aimed at a model that reasons and at one that
+ * does not, and a dial over the second spends a flag nobody reads. See `ChatView`.
+ *
+ * # Why there is no footnote
+ *
+ * There was one: two sentences about higher levels costing more and each CLI having its own scale.
+ * Both true, neither actionable — a menu of five words does not need a paragraph explaining that
+ * the last one is the biggest, and the scale translation is the app's problem, not the reader's.
+ * An absent control is honest, a dial that turns nothing is not, and a dial that turns something
+ * needs no defence.
  */
 export function EffortPicker({
   value,
@@ -111,9 +124,6 @@ export function EffortPicker({
               {value === level && <Check size={12} className="text-[var(--cf-accent)]" />}
             </button>
           ))}
-          <p className="border-t border-[var(--cf-border)] px-2.5 pb-1 pt-1.5 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
-            {t("chat.effortHint")}
-          </p>
         </div>
       )}
     </div>

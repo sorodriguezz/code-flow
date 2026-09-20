@@ -28,6 +28,7 @@ import { startWindowBoundsTracking } from "./lib/windowControls";
 import { useRemoteActionShortcuts } from "./lib/useGlobalShortcuts";
 import { onWindowMessage } from "./lib/windowBus";
 import { showDiagramHere } from "./lib/dbmlBridge";
+import { showChatHere } from "./lib/chatBridge";
 import { pushErrorToast } from "./state/toastStore";
 
 /**
@@ -194,6 +195,23 @@ function AppWindow({ refId }: { refId: string }) {
       void showDiagramHere(message.workspaceId, message.diagramId).catch((e: unknown) =>
         pushErrorToast(String(e)),
       );
+    });
+  }, [refId]);
+
+  /**
+   * A conversation handed over by the hotkey ask box, when this is *the* chat window.
+   *
+   * The same shape, one app along: the message names a conversation and only the window holding the
+   * chat workspace can show one, which is what the `refId` guard says. The ask box routes to this
+   * window in preference to the shell whenever it exists — detaching the chat is the user saying
+   * this is where chats happen, and opening a second copy in the shell is the duplication the whole
+   * multi-window design rules out. See `lib/chatBridge.ts`.
+   */
+  useEffect(() => {
+    if (refId !== "chat") return;
+    return onWindowMessage((message) => {
+      if (message.kind !== "open-chat" || message.to !== WINDOW.label) return;
+      void showChatHere(message.conversationId).catch((e: unknown) => pushErrorToast(String(e)));
     });
   }, [refId]);
 

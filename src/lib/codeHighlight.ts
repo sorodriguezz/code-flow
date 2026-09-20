@@ -105,6 +105,48 @@ function colourResolver(theme: CodeTheme): (tokenType: string) => string | undef
   };
 }
 
+/** Languages whose tokenizer has been pulled in, one promise each so a burst of blocks in the same
+ *  language waits on one load rather than starting several. Module-level: the tokenizers live in
+ *  Monaco's own global registry, so a second window or a later transcript inherits nothing from
+ *  this map — but within a window, warming a language is permanent and paid once. */
+const warmed = new Map<string, Promise<void>>();
+
+/**
+ * Makes sure Monaco can actually tokenize `language` before anybody asks it to.
+ *
+ * **`monaco.editor.tokenize` is synchronous, and Monaco's languages are not.** All ~90 are
+ * *registered* the moment `monaco-editor` is imported, so `getLanguages()` lists them and
+ * `tokenize` accepts the id — but each one's Monarch grammar is a separate module fetched on
+ * demand, and until it arrives `tokenize` answers with one catch-all token per line. Not an error,
+ * not an empty result: a shape that looks exactly like a file with no syntax in it. Every token
+ * then resolves to the theme's fallback colour and the block comes out the colour of plain text.
+ *
+ * Which is the bug this exists for, and it was invisible for the worst possible reason: the block
+ * is marked `data-cf-hl` before the work, so the one pass that ran with no grammar was also the
+ * only pass that would ever run. The first answer of a session came out grey and stayed grey,
+ * while a later one — by then something else had pulled the grammar in — came out coloured. In a
+ * detached chat window, where nothing else ever loads Monaco, *nothing* was coloured, which is how
+ * it was finally reported.
+ *
+ * `colorize` is the fix because it is the public call that loads a grammar: it is async precisely
+ * because it waits for one. The text handed to it is empty — the return value is thrown away and
+ * the load is the entire point.
+ *
+ * A language Monaco cannot serve rejects, is swallowed, and gets tokenized cold anyway: that block
+ * renders as plain text, which is what it would have done regardless.
+ */
+function warm(monaco: typeof import("monaco-editor"), language: string): Promise<void> {
+  let pending = warmed.get(language);
+  if (!pending) {
+    pending = monaco.editor.colorize("", language, {}).then(
+      () => undefined,
+      () => undefined,
+    );
+    warmed.set(language, pending);
+  }
+  return pending;
+}
+
 /**
  * Colours every fenced block inside `host`, in place.
  *
@@ -123,6 +165,12 @@ export async function highlightCodeBlocks(host: HTMLElement, theme: CodeTheme): 
   // Loaded only now, and only once per session: the first code block in the first answer pays for
   // it, and a transcript of prose never does.
   const monaco = await import("monaco-editor");
+  // Every language this batch needs, warmed before a single token is asked for. See `warm`.
+  await Promise.all(
+    Array.from(new Set(blocks.map((code) => languageOf(code.className)))).flatMap((language) =>
+      language ? [warm(monaco, language)] : [],
+    ),
+  );
   const colourOf = colourResolver(theme);
   let done = 0;
 

@@ -5,7 +5,7 @@ import { modelOptionsFor } from "../settings/modelPicker";
 import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { useAgentsStore } from "../../state/agentsStore";
-import { useAiModelsStore } from "../../state/aiModelsStore";
+import { MODELS_MAX_AGE_MS, useAiModelsStore } from "../../state/aiModelsStore";
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 
@@ -99,8 +99,10 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
   const openMenu = () => {
     setOpen(true);
     // Only now do we ask this one provider for its list — a CLI's `models` command is a process
-    // spawn, so it is paid for on demand rather than on mount.
-    if (provider) void ensureModels([provider]);
+    // spawn, so it is paid for on demand rather than on mount. With an age, for the reason
+    // `ChatModelPicker` spells out: opening this menu is a question, and a session-old answer to it
+    // offers models that are gone and hides ones that arrived.
+    if (provider) void ensureModels([provider], MODELS_MAX_AGE_MS);
   };
 
   /** `undefined` while the fetch is in flight; `modelOptionsFor` keeps the curated catalog for the

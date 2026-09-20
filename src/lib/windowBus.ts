@@ -94,7 +94,25 @@ export type WindowMessage =
    * which would then draw a second Diagrams view over the rail it had already handed away. The
    * label is `MAIN_LABEL` or a satellite's; a window whose label does not match drops it.
    */
-  | { kind: "open-diagram"; to: string; workspaceId: string; diagramId: string };
+  | { kind: "open-diagram"; to: string; workspaceId: string; diagramId: string }
+  /**
+   * Put this conversation on screen, please.
+   *
+   * What "Open in CodeFlow" in the ask box actually does. Before it, that button broadcast
+   * `focus-main` and nothing else: the main window came forward still showing whatever it was
+   * showing, with a sidebar listed before the conversation existed — so the one gesture the quick
+   * ask offers for "keep this" landed on a window that had never heard of it.
+   *
+   * **Addressed, for the same reason `open-diagram` is.** With the chat app detached onto its own
+   * window, an unaddressed frame would be obeyed by that window *and* by the shell, and the shell
+   * would draw a second chat over the rail it has already handed away.
+   *
+   * No workspace travels with the id, and that is the one way it differs from `open-diagram`: the
+   * conversation list is flat and global on purpose (see `ConversationSidebar`), so a conversation
+   * is addressable by its own id from any workspace and the receiving window has nowhere to move
+   * to.
+   */
+  | { kind: "open-chat"; to: string; conversationId: string };
 
 interface Frame {
   from: string;

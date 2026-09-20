@@ -190,6 +190,21 @@ impl AiEngine for CodexEngine {
     fn cached_models(&self) -> Option<Vec<String>> {
         read_models_cache(&codex_home()?)
     }
+
+    /// Codex is the one engine that can answer this for real rather than by the shape of a name:
+    /// the catalog it maintains for itself states each model's reasoning levels, and a model listed
+    /// with none is a model the `-c model_reasoning_effort` override would be thrown away on.
+    ///
+    /// Falls back to the name rule when there is no catalog yet — a fresh install, before the CLI
+    /// has ever run — rather than hiding a dial because a file has not been written.
+    fn model_supports_effort(&self, model: &str) -> bool {
+        if !self.supports_effort() {
+            return false;
+        }
+        codex_home()
+            .and_then(|home| cached_model_reasons(&home, model))
+            .unwrap_or_else(|| !crate::ai::model_is_known_non_reasoning(model))
+    }
 }
 
 /// Codex's state directory: `$CODEX_HOME` when set (the CLI's own override), else `~/.codex`.
@@ -253,6 +268,38 @@ fn read_models_cache(codex_home: &std::path::Path) -> Option<Vec<String>> {
     // An empty catalog is indistinguishable from "no catalog" for the caller's purposes, and
     // `None` lets the frontend fall back to its curated list instead of showing nothing.
     (!slugs.is_empty()).then_some(slugs)
+}
+
+/// Whether the catalog says this model takes a reasoning level.
+///
+/// `None` when the question cannot be answered here — no cache file, unparseable, or a slug the
+/// catalog has never heard of — which is different from "no", and the caller treats it that way.
+/// The slug is matched exactly: Codex's own `--model` takes exactly these strings, so anything else
+/// the user typed is a model this catalog cannot speak for.
+fn cached_model_reasons(codex_home: &std::path::Path, model: &str) -> Option<bool> {
+    #[derive(serde::Deserialize)]
+    struct Cache {
+        #[serde(default)]
+        models: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        slug: String,
+        #[serde(default)]
+        supported_reasoning_levels: Vec<serde_json::Value>,
+    }
+
+    let wanted = model.trim();
+    if wanted.is_empty() {
+        return None;
+    }
+    let raw = std::fs::read_to_string(codex_home.join("models_cache.json")).ok()?;
+    let cache: Cache = serde_json::from_str(&raw).ok()?;
+    cache
+        .models
+        .into_iter()
+        .find(|entry| entry.slug == wanted)
+        .map(|entry| !entry.supported_reasoning_levels.is_empty())
 }
 
 /// Pulls the rollout id out of `codex exec`'s stderr preamble, which prints one `key: value` per
@@ -330,6 +377,10 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
         // Tokens, never a price: a ChatGPT plan is a flat fee, so the run genuinely has no dollar
         // figure to report and the meter shows it as "no price" rather than as free.
         usage: events.and_then(|events| events.usage),
+        // `None`: this app does not read this CLI's output step by step, so it has no
+        // figure for the *final* prompt — only a cumulative total, which is a bill and not a
+        // gauge. The chat's context meter estimates instead, and says so.
+        context_tokens: None,
     })
 }
 

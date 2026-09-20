@@ -36,6 +36,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { restoreSatellites } from "./lib/tauri/windows";
 import { onWindowMessage } from "./lib/windowBus";
 import { showDiagramHere } from "./lib/dbmlBridge";
+import { showChatHere } from "./lib/chatBridge";
 import { WINDOW } from "./lib/windowIdentity";
 import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
@@ -709,6 +710,16 @@ export default function App() {
             // window has already handed away.
             if (message.to !== WINDOW.label) break;
             void showDiagramHere(message.workspaceId, message.diagramId).catch((e: unknown) =>
+              pushErrorToast(String(e)),
+            );
+            break;
+          case "open-chat":
+            // "Open in CodeFlow" in the hotkey ask box, in the ordinary case where the chat
+            // workspace has not been detached. Addressed for the same reason the line above is:
+            // with the chat on its own window that frame is for *that* window, and obeying it here
+            // would draw a second chat over the rail this one has already handed away.
+            if (message.to !== WINDOW.label) break;
+            void showChatHere(message.conversationId).catch((e: unknown) =>
               pushErrorToast(String(e)),
             );
             break;

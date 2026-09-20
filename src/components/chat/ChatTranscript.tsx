@@ -8,11 +8,14 @@ import {
   type ChatBubbleMessage,
 } from "./ChatMessageBubble";
 import { ThinkingBlock } from "./ThinkingBlock";
+import { SelectionActions } from "./SelectionActions";
+import { CompactionMark } from "./CompactionMark";
 import { COLUMN_GUTTER, READING_COLUMN, useLocale } from "./chatChrome";
 import { providerCapabilities } from "../../lib/aiProviders";
 import { diagnoseRun, serviceOnPort } from "../../lib/runDiagnosis";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useT } from "../../state/languageStore";
+import type { ChatOutput } from "../../lib/tauri/chatCommands";
 import { EMPTY_CONVERSATION, useConversationStore } from "../../state/conversationStore";
 import type { ConversationMessage } from "../../state/conversationStore";
 
@@ -55,10 +58,17 @@ const STICK_THRESHOLD = 40;
  */
 export function ChatTranscript({
   onEditRequest,
+  onQuoteReply,
+  onQuoteNewChat,
 }: {
   /** Puts a past user turn back in the composer for editing. Lives in `ChatView` because the
    *  composer is a sibling, not a child — the transcript knows which turn, not where the caret is. */
   onEditRequest: (turn: number, content: string) => void;
+  /** Quotes a selected passage into this conversation's composer. Same division of labour as
+   *  `onEditRequest`: the transcript knows what was selected, `ChatView` owns the draft. */
+  onQuoteReply: (passage: string) => void;
+  /** Carries a selected passage into a conversation that does not exist yet. */
+  onQuoteNewChat: (passage: string) => void;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -84,6 +94,20 @@ export function ChatTranscript({
    *  reader crosses the threshold rather than on every scroll event. */
   const [detached, setDetached] = useState(false);
   const [logExpanded, setLogExpanded] = useState(false);
+  /**
+   * Where this conversation was compacted, if it was.
+   *
+   * Two primitive selectors rather than one returning the conversation row: a selector that built
+   * an object would hand back a new reference on every store change and re-render the transcript
+   * on every keystroke anywhere in the app.
+   */
+  const compactedThrough = useConversationStore(
+    (s) => s.conversations.find((c) => c.id === s.activeId)?.compactedThroughTurn ?? null,
+  );
+  const compactedSummary = useConversationStore(
+    (s) => s.conversations.find((c) => c.id === s.activeId)?.compactedSummary ?? "",
+  );
+  const uncompact = useConversationStore((s) => s.uncompact);
 
   const atBottom = useCallback(() => {
     const el = scrollRef.current;
@@ -186,22 +210,35 @@ export function ChatTranscript({
           )}
 
           {session.messages.map((message, index) => (
-            <TranscriptTurn
-              key={message.id}
-              message={message}
-              previous={session.messages[index - 1]}
-              locale={locale}
-              conversationId={activeId}
-              // Every action on a turn is disabled while another one is running, for the reason
-              // `chat_send` enforces on its own side: a conversation holds one lease and can only
-              // resume its engine session once at a time. A turn still being uncovered by the
-              // typewriter is excluded for a softer reason: its text on screen is not yet the text
-              // that would be replayed, so a cost chip counting it would be counting a lie.
-              canAct={!session.sending && session.revealingMessageId === null}
-              revealing={message.id === session.revealingMessageId}
-              onSkipReveal={onSkipReveal}
-              onEditRequest={onEditRequest}
-            />
+            <Fragment key={message.id}>
+              <TranscriptTurn
+                message={message}
+                previous={session.messages[index - 1]}
+                locale={locale}
+                conversationId={activeId}
+                // Every action on a turn is disabled while another one is running, for the reason
+                // `chat_send` enforces on its own side: a conversation holds one lease and can only
+                // resume its engine session once at a time. A turn still being uncovered by the
+                // typewriter is excluded for a softer reason: its text on screen is not yet the text
+                // that would be replayed, so a cost chip counting it would be counting a lie.
+                canAct={!session.sending && session.revealingMessageId === null}
+                revealing={message.id === session.revealingMessageId}
+                onSkipReveal={onSkipReveal}
+                onEditRequest={onEditRequest}
+              />
+              {/* The line the engine's memory starts at. Drawn between the turns it covers and the
+                  ones sent verbatim, which is the only place it means anything — a band at the top
+                  of the transcript would say "this was compacted" without saying *how far*. */}
+              {compactedThrough !== null &&
+                message.turn === compactedThrough &&
+                session.messages[index + 1]?.turn !== compactedThrough && (
+                  <CompactionMark
+                    turns={compactedThrough + 1}
+                    summary={compactedSummary}
+                    onUndo={() => void uncompact(activeId)}
+                  />
+                )}
+            </Fragment>
           ))}
 
           {session.sending && (
@@ -223,13 +260,19 @@ export function ChatTranscript({
                 lands — their headless modes emit structured steps and no intra-message text — so
                 this strip is the entire answer to "is it alive", and a `ThinkingOrb` sitting where
                 the reply will be would be a decoration standing in for information the app actually
-                has. `AiRunLog` already renders the steps, the elapsed time and Stop; there is
-                nothing to add and a lot to get wrong by re-drawing it.
+                has. `AiRunLog` already renders the steps and the elapsed time; there is nothing
+                to add and a lot to get wrong by re-drawing it.
+
+                Its Stop is the one thing this view does not want. The composer's send button has
+                already become Stop while a turn runs, and it sits where the hand already is — two
+                buttons for one action, one above the transcript and one below it, read as two
+                different actions.
               */}
               <AiRunLog
                 runId={session.runId ?? undefined}
                 running
                 startedAt={session.runStartedAt}
+                showStop={false}
                 expanded={logExpanded}
                 onToggle={() => setLogExpanded((v) => !v)}
               />
@@ -257,6 +300,11 @@ export function ChatTranscript({
           )}
         </div>
       </div>
+
+      {/* Scoped to the scroller, so a selection in the sidebar or the composer is somebody else's.
+          It portals to the body and positions itself from the viewport, which is why it can be a
+          sibling here rather than inside the clipping scroll box. */}
+      <SelectionActions scope={scrollRef} onQuoteReply={onQuoteReply} onQuoteNewChat={onQuoteNewChat} />
 
       {detached && (
         <button
@@ -314,6 +362,23 @@ const TranscriptTurn = memo(function TranscriptTurn({
   const branch = useConversationStore((s) => s.branch);
   const setEngine = useConversationStore((s) => s.setEngine);
   const sessionProvider = useConversationStore((s) => s.byConversation[conversationId]?.provider ?? null);
+  /**
+   * The files this turn wrote, resolved against what the directory holds now.
+   *
+   * Two sources, deliberately. The message says *which paths were this turn's* — nothing else can,
+   * since the directory is a flat set of files with no memory of who wrote what. The listing says
+   * what still exists and how big it is, so a file the user has since deleted quietly loses its chip
+   * instead of keeping one that fails when pressed.
+   */
+  const listing = useConversationStore((s) => s.outputs[conversationId]);
+  const produced = useMemo(() => {
+    const paths = message.outputs;
+    if (!paths || !listing) return undefined;
+    const files = paths
+      .map((path) => listing.find((file) => file.path === path))
+      .filter((file): file is ChatOutput => file !== undefined);
+    return files.length > 0 ? { conversationId, files } : undefined;
+  }, [message.outputs, listing, conversationId]);
 
   const bubble = useMemo<ChatBubbleMessage>(
     () => ({
@@ -368,7 +433,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
       {/* `group` here and not on the bubble: the hover row lives inside the bubble component but
           must reveal on hover of the whole turn, divider excluded. */}
       <div className="group">
-        <ChatMessageBubble message={bubble} variant="reading" actions={actions} />
+        <ChatMessageBubble message={bubble} variant="reading" actions={actions} outputs={produced} />
         {revealing && (
           // The typewriter is a courtesy, not a rule. An answer that is already whole on disk and
           // merely being uncovered at reading speed must always be skippable, or the kindness

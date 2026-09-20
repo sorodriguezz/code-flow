@@ -452,10 +452,37 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
 
     let registry = app.state::<SatelliteRegistry>();
     {
-        let held = registry.open.lock().map_err(|e| e.to_string())?;
+        let mut held = registry.open.lock().map_err(|e| e.to_string())?;
+        /*
+         * The slot is **claimed here, before the build**, and that ordering is the whole point.
+         *
+         * `get_webview_window` above answers "is it already on screen?", and between that question
+         * and the window existing there is a window of time this function is not alone in: it is
+         * `async`, it is reached from a hotkey that can be tapped twice, and it was until recently
+         * reached twice for a single press (see `register_quick_ask_shortcut`). Two calls that both
+         * found nothing both went on to build, and the result was two identical undecorated windows
+         * centred on top of each other — an ask box that survived its own close button and looked
+         * like it was refusing to be dragged, because the one underneath was not moving.
+         *
+         * Claiming the label under the same lock that checks it makes the second call a no-op. It
+         * is released again if the build fails, so a refusal does not leave a slot claimed for a
+         * window that never existed.
+         */
+        if held.contains_key(&label) {
+            return Ok(label);
+        }
         if held.len() >= MAX_SATELLITES {
             return Err(format!("too many windows are open (limit {MAX_SATELLITES})"));
         }
+        held.insert(
+            label.clone(),
+            SatelliteInfo {
+                label: label.clone(),
+                kind: SatelliteKind::Quick,
+                ref_id: QUICK_REF_ID.to_string(),
+                title: "CodeFlow".to_string(),
+            },
+        );
     }
 
     let url = format!("window.html?kind={}&ref={}", SatelliteKind::Quick.slug(), QUICK_REF_ID);
@@ -487,19 +514,16 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
         builder = builder.visible_on_all_workspaces(true);
     }
 
-    builder.build().map_err(|e| e.to_string())?;
-
-    if let Ok(mut held) = registry.open.lock() {
-        held.insert(
-            label.clone(),
-            SatelliteInfo {
-                label: label.clone(),
-                kind: SatelliteKind::Quick,
-                ref_id: QUICK_REF_ID.to_string(),
-                title: "CodeFlow".to_string(),
-            },
-        );
+    if let Err(e) = builder.build() {
+        // Hands the claim back. A slot held for a window that failed to open would count against
+        // `MAX_SATELLITES` for the life of the process, and — worse here — the guard above would
+        // read it as "already open" and answer every future press of the chord with a no-op.
+        if let Ok(mut held) = registry.open.lock() {
+            held.remove(&label);
+        }
+        return Err(e.to_string());
     }
+
     announce(&app);
     Ok(label)
 }
@@ -508,6 +532,31 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 pub async fn quick_ask_open(app: AppHandle) -> Result<String, String> {
     open_quick_ask(app).await
+}
+
+/// Puts the main window back on screen, from a window that is not it.
+///
+/// # Why `setFocus` from the frontend was not enough
+///
+/// The `focus-main` message on the window bus does exactly what it says: the main window calls
+/// `setFocus()` on itself. That is the right amount of work for the case it was written for — a
+/// satellite re-attaching, where the main window is on screen and merely behind something.
+///
+/// The ask box is the case where it is not. Its entire premise is that it is reachable *while the
+/// desk is away*: the main window hides to the tray on its close button, on ⌘W and on Alt+F4, and
+/// `close_all` deliberately spares this one window so the hotkey goes on working afterwards (see
+/// the note there). So "Open in CodeFlow" is routinely pressed with the main window hidden — and
+/// `setFocus()` on a window the platform has hidden raises nothing. The conversation was handed
+/// over correctly, to a window the user never saw.
+///
+/// [`crate::tray::show_main_window`] is the single door every restore path already goes through —
+/// the tray's *Show*, a left click on the icon, a second launch, the macOS Dock `Reopen` — and it
+/// is the one that knows the whole of the inverse of hiding: `show` before `unminimize` before
+/// `set_focus`, the WebView2 controller told to draw again on Windows, and `app:foreground` emitted
+/// so the frontend knows it is being looked at. This is that door, with a doorbell on the outside.
+#[tauri::command]
+pub fn show_main_window(app: AppHandle) {
+    crate::tray::show_main_window(&app);
 }
 
 /// Destroys the ask box, webview and all.
@@ -564,19 +613,27 @@ pub fn register_quick_ask_shortcut(app: AppHandle, accelerator: String) -> Resul
     // session that failed halfway.
     manager.unregister_all().map_err(|e| e.to_string())?;
 
-    manager
-        .on_shortcut(accelerator, |app, _shortcut, event| {
-            // Pressed only. The plugin delivers both edges, and acting on the release as well would
-            // open the box and immediately toggle it shut again on a single tap.
-            if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                return;
-            }
-            toggle_quick_ask(app);
-        })
-        .map_err(|e| {
-            crate::applog::info(&format!("window: quick-ask shortcut '{accelerator}' refused: {e}"));
-            format!("could not bind '{accelerator}': {e}")
-        })?;
+    // `register`, and **not** `on_shortcut`. The difference is one call per press.
+    //
+    // The plugin dispatches a press to *both* handlers it can find: the one attached to the
+    // shortcut itself and the process-wide one given to `Builder::with_handler` — see
+    // `set_event_handler` in the plugin, which calls each in turn with no `else` between them. This
+    // function used to attach its own, and `lib.rs` already installs the process-wide one, so a
+    // single ⌥Space ran `toggle_quick_ask` twice.
+    //
+    // What that looked like is worth writing down, because nothing about it says "the hotkey fired
+    // twice": two calls reach the `get_webview_window` guard in `open_quick_ask` before either has
+    // built anything, so both go on to build — and the result is **two identical undecorated
+    // windows, centred, exactly on top of each other**. One ask box that will not go away when you
+    // close it, whose composer is not the one you can see, and which appears to ignore being
+    // dragged because the window underneath stays where it was.
+    //
+    // So the handler stays in exactly one place, which is where `lib.rs` says it is, and this
+    // function does the one thing its name claims: bind the chord.
+    manager.register(accelerator).map_err(|e| {
+        crate::applog::info(&format!("window: quick-ask shortcut '{accelerator}' refused: {e}"));
+        format!("could not bind '{accelerator}': {e}")
+    })?;
 
     crate::applog::info(&format!("window: quick-ask shortcut bound to '{accelerator}'"));
     Ok(())

@@ -434,6 +434,54 @@ fn usage_of(parsed: &ClaudeCliResult) -> Option<AiUsage> {
     }
 }
 
+/// How many tokens were in front of the model on the **final** step of this run.
+///
+/// # Why not the `result` event's usage
+///
+/// That object is the run's *bill*: it sums every API call the turn made, so an answer that read
+/// four files reports roughly four prompts' worth of input. Correct for spend — `ai_usage` uses
+/// exactly that — and badly wrong as an answer to "how full is the context", which is the question
+/// the chat's meter asks. It would grow with the amount of tool use rather than with the length of
+/// the conversation, and on a long agentic turn it would sail past the model's window while the
+/// conversation itself was nowhere near it.
+///
+/// So this reads the **last** `assistant` event instead. Each one carries the usage of the single
+/// API call that produced it, and the last one is the call that wrote the answer — by then holding
+/// the whole conversation, the system prompt, the tool schemas and every tool result so far. That
+/// is the occupancy figure, and it is one the app could not compute for itself at any price.
+///
+/// The three input fields are summed because a token served from cache takes up exactly as much of
+/// the window as one that was not — the distinction that matters to a bill does not exist here.
+///
+/// `None` when no assistant event carried usage, which covers a run that failed before answering
+/// and any future output format this does not recognise. The caller falls back to an estimate and
+/// says that it has.
+fn last_step_context(stdout: &str) -> Option<i64> {
+    for line in stdout.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = value.get("message").and_then(|m| m.get("usage")) else {
+            continue;
+        };
+        let field = |name: &str| usage.get(name).and_then(serde_json::Value::as_i64).unwrap_or(0);
+        let total = field("input_tokens")
+            + field("cache_read_input_tokens")
+            + field("cache_creation_input_tokens");
+        if total > 0 {
+            return Some(total);
+        }
+    }
+    None
+}
+
 /// Picks the payload to interpret out of the CLI's stdout.
 ///
 /// Under `stream-json` stdout is one JSON event per line and the last `{"type":"result",…}` is
@@ -498,6 +546,7 @@ fn interpret_output(
             session_id: parsed.and_then(|p| p.session_id),
             model,
             usage,
+            context_tokens: last_step_context(stdout),
         });
     }
 
@@ -524,7 +573,7 @@ fn interpret_output(
     if refusal_reply(fallback) {
         return Err(format!("{QUOTA_MARKER}{fallback}"));
     }
-    Ok(AiRun { text: fallback.to_string(), session_id: None, model: None, usage: None })
+    Ok(AiRun { text: fallback.to_string(), session_id: None, model: None, usage: None, context_tokens: None })
 }
 
 #[cfg(test)]
@@ -701,6 +750,61 @@ mod tests {
 
     /// The same stream carries block starts/stops and message envelopes. They are partial-message
     /// frames — the pump keeps them out of the trace ring — but they are not text.
+    /// The meter's number is the **last** prompt, not the sum of every prompt in the turn.
+    ///
+    /// This is the one that would ship wrong and look right: both numbers are "tokens the engine
+    /// reported", both grow over a conversation, and the cumulative one is what the `result` event
+    /// hands you if you ask it for usage. The difference only shows on an agentic turn — where the
+    /// sum is several times the context — which is exactly the turn where a gauge reading 98% on a
+    /// twelve-message conversation sends the user off to compact something that was never full.
+    #[test]
+    fn the_context_figure_is_the_final_prompt_and_not_the_turn_total() {
+        // Two steps: the model reads a file, then answers. Each assistant event carries the usage
+        // of its own API call, and the `result` event carries the sum.
+        let stdout = concat!(
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":8000,"cache_creation_input_tokens":0,"output_tokens":90}},"session_id":"s-1"}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"…"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"usage":{"input_tokens":40,"cache_read_input_tokens":8000,"cache_creation_input_tokens":1200,"output_tokens":300}},"session_id":"s-1"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","result":"listo","session_id":"s-1","usage":{"input_tokens":50,"cache_read_input_tokens":16000,"cache_creation_input_tokens":1200,"output_tokens":390}}"#,
+        );
+
+        // The last step: 40 + 8000 + 1200. The turn total would be 17 250 — more than twice as
+        // much, and rising with every tool call rather than with the conversation.
+        assert_eq!(last_step_context(stdout), Some(9_240));
+    }
+
+    /// Cache hits count. They are the cheap tokens on a bill and ordinary ones in a window.
+    #[test]
+    fn tokens_served_from_cache_still_occupy_the_window() {
+        let cached = r#"{"type":"assistant","message":{"usage":{"input_tokens":3,"cache_read_input_tokens":54000,"output_tokens":120}}}"#;
+        assert_eq!(last_step_context(cached), Some(54_003));
+    }
+
+    /// A run with nothing to measure says so, rather than reporting zero.
+    ///
+    /// Zero and "unknown" are drawn differently by the meter — one is an empty gauge, the other
+    /// falls back to estimating — so collapsing them here would show a thirty-turn conversation as
+    /// carrying nothing the first time an output format changed.
+    #[test]
+    fn a_run_that_reported_no_usage_measures_nothing() {
+        assert_eq!(last_step_context(""), None);
+        assert_eq!(last_step_context("not json at all\nnor this"), None);
+        // An assistant event with a usage block full of zeros is the same non-answer.
+        assert_eq!(
+            last_step_context(r#"{"type":"assistant","message":{"usage":{"input_tokens":0}}}"#),
+            None,
+        );
+        // And the result event's own total is deliberately *not* read as a fallback: a number
+        // that means something else is not a worse version of this one, it is a different one.
+        assert_eq!(
+            last_step_context(r#"{"type":"result","usage":{"input_tokens":900,"cache_read_input_tokens":12000}}"#),
+            None,
+        );
+    }
+
     #[test]
     fn a_stream_event_that_is_not_a_delta_yields_nothing() {
         let starts = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#;

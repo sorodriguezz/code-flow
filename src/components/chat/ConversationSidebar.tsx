@@ -2,13 +2,14 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
-  AlertTriangle,
   ChevronDown,
   ChevronRight,
+  Folder,
   FolderPlus,
   FolderOpen,
   GitBranch,
   MessageSquarePlus,
+  MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
@@ -17,12 +18,12 @@ import {
   X,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { StatusDot, type ConversationStatus } from "./StatusDot";
 import { ICON_BUTTON, ROW, ROW_ACTIVE, ROW_IDLE, useLocale } from "./chatChrome";
 import { relativeTime } from "../notes/notesChrome";
 import type { ChatConversation, ChatGroup, ChatSearchHit } from "../../lib/tauri/chatCommands";
-import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
 import { dropTarget, useChatDragStore, type ChatDrag } from "../../state/chatDragStore";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { confirmAction } from "../../state/confirmStore";
@@ -104,16 +105,7 @@ export function ConversationSidebar() {
    * one chat per repository; a flat sidebar where both are visibly open at once makes it a daily
    * one, which is why the warning lives on the row rather than in a release note.
    */
-  const perProvider = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const conversation of conversations) {
-      if (conversation.archivedAt) continue;
-      counts[conversation.provider] = (counts[conversation.provider] ?? 0) + 1;
-    }
-    return counts;
-  }, [conversations]);
-
-  const groups = useConversationStore((s) => s.groups);
+  const allGroups = useConversationStore((s) => s.groups);
   const activeGroupId = useConversationStore((s) => s.activeGroupId);
 
   // ---- drag and drop ----
@@ -222,6 +214,21 @@ export function ConversationSidebar() {
     });
   }, [conversations, trimmed, showArchived]);
 
+  /**
+   * Folders the sidebar draws, which is all of them until one is archived.
+   *
+   * The same switch the conversations obey, on purpose: "show archived" is one shelf, not two. The
+   * backend already orders pinned first and archived last, so this only has to decide whether the
+   * archived ones are drawn at all — and an archived folder still holds its conversations, which is
+   * why hiding it here is a view filter and never a move.
+   */
+  const groups = useMemo(
+    () => (showArchived ? allGroups : allGroups.filter((group) => !group.archivedAt)),
+    [allGroups, showArchived],
+  );
+
+  const { pinned: pinnedProjects, loose: looseProjects } = useMemo(() => splitProjects(groups), [groups]);
+
   // Three groups in the order the eye should meet them, and archived last on purpose: it is the
   // shelf, not the desk. A pinned row that has also been archived stays in the archived group,
   // because "I am done with this" is the more recent statement of the two.
@@ -304,34 +311,55 @@ export function ConversationSidebar() {
           icon: conversation.archivedAt ? ArchiveRestore : Archive,
           onClick: () => void store.setArchived(conversation.id, !conversation.archivedAt),
         },
-        // Filing, flattened into the menu rather than hidden behind a submenu: `ContextMenu` has no
-        // submenus, and the alternative — a modal with a folder list — turns a one-click action
-        // into three. A user with twenty folders would want the submenu; a user with twenty folders
-        // is not who this list is for.
+        /*
+         * Filing, behind one entry with the list on its arrow.
+         *
+         * It was flat — `Move to a project: A`, `Move to a project: B`, one row each — which
+         * repeated the only words that do not vary, read as several different actions rather than
+         * one with several destinations, and grew downward until the verbs above and below it
+         * (branch, delete) were pushed out of sight. One destination, one arrow, and the projects
+         * inside where the length costs nothing.
+         *
+         * "No project" lives in the submenu too, as the first entry: it is the same choice — which
+         * project — with the answer "none", and a separate top-level row for it would be the flat
+         * version creeping back one item at a time.
+         */
         ...(() => {
-          const folders = useConversationStore.getState().groups;
-          if (folders.length === 0) return [] as MenuItem[];
-          return [
+          const projects = useConversationStore.getState().groups;
+          const destinations: MenuItem[] = [
             ...(conversation.groupId
               ? [
                   {
                     label: t("chat.groupNone"),
                     icon: FolderOpen,
-                    separated: true,
                     onClick: () => void store.setConversationGroup(conversation.id, null),
                   } satisfies MenuItem,
                 ]
               : []),
-            ...folders
-              // The folder it is already in is not a destination.
+            ...projects
+              // The project it is already in is not a destination.
               .filter((group) => group.id !== conversation.groupId)
-              .map((group, at) => ({
-                label: t("chat.groupMoveTo") + ": " + group.name,
-                icon: FolderOpen,
-                separated: at === 0 && !conversation.groupId,
+              .map((group) => ({
+                label: group.name,
+                leading: (
+                  <FolderOpen size={13} className="mt-[2px] shrink-0 opacity-70" style={{ color: group.color || "var(--cf-accent)" }} />
+                ),
                 onClick: () => void store.setConversationGroup(conversation.id, group.id),
               })),
-          ] satisfies MenuItem[];
+          ];
+          // Nowhere to move it to and nothing to move it out of: the verb has no object, so it is
+          // not offered at all rather than opening onto an empty list.
+          if (destinations.length === 0) return [] as MenuItem[];
+          return [
+            {
+              label: t("chat.groupMoveTo"),
+              icon: FolderOpen,
+              separated: true,
+              // Never called — the arrow is the whole of this entry. See `MenuItem.children`.
+              onClick: () => {},
+              children: destinations,
+            } satisfies MenuItem,
+          ];
         })(),
         {
           label: t("chat.cmdBranch"),
@@ -373,7 +401,11 @@ export function ConversationSidebar() {
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col" data-tour="chat-sidebar">
+    /* `select-none` on the whole column. Every row here is a button and every heading is a label —
+       there is nothing to copy — and without it a press that drifts a few pixels, which is what
+       arming a drag looks like, paints a selection across half the list instead. The search field
+       sets `select-text` back on itself, because there the text is the point. */
+    <div className="flex h-full min-h-0 select-none flex-col" data-tour="chat-sidebar">
       <div className="flex items-center gap-1 px-2 pb-1 pt-2">
         <div className="relative min-w-0 flex-1">
           <Search
@@ -385,7 +417,7 @@ export function ConversationSidebar() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("chat.searchPlaceholder")}
-            className="w-full rounded-lg border border-[var(--cf-border)] bg-transparent py-[5px] pl-7 pr-6 text-[12px] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+            className="w-full select-text rounded-lg border border-[var(--cf-border)] bg-transparent py-[5px] pl-7 pr-6 text-[12px] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
           />
           {query && (
             <button
@@ -446,7 +478,7 @@ export function ConversationSidebar() {
             destination they navigate to deliberately, and burying the deliberate thing under the
             incidental one is the wrong way round. It also makes the drop targets the thing you have
             to scroll to find, which is the opposite of what a drag wants. Do not move it back. */}
-        {pinned.length > 0 && (
+        {(pinnedProjects.length > 0 || pinned.length > 0) && (
           // Also an "ungrouped" drop target, and not as a convenience: a pinned conversation is by
           // definition a loose one — filing something now takes it out of the pinned list entirely
           // — so the two blocks are one destination that the folders happen to sit between. A
@@ -462,13 +494,31 @@ export function ConversationSidebar() {
             }`}
           >
             <GroupHeading text={t("chat.pinnedGroup")} />
+            {/* Projects above chats inside the band: a project is a place and a chat is a thing in
+                one, so the containers come before the contents — and each half keeps its own
+                recency order rather than the two being interleaved by date, which would shuffle
+                two different kinds of row together and make the list unreadable at a glance. */}
+            {pinnedProjects.map((group) => (
+              <FolderSection
+                key={group.id}
+                group={group}
+                conversations={byGroup[group.id] ?? []}
+                activeId={activeId}
+                locale={locale}
+                onSelect={selectRow}
+                onMenu={openMenu}
+                onPressRow={pressRow}
+                active={activeGroupId === group.id}
+                dropActive={overGroup === group.id && dragging?.fromGroupId !== group.id}
+                dragging={dragging !== null}
+              />
+            ))}
             {pinned.map((conversation) => (
               <ConversationRow
                 key={conversation.id}
                 conversation={conversation}
                 active={conversation.id === activeId}
                 locale={locale}
-                siblings={perProvider[conversation.provider] ?? 1}
                 onSelect={selectRow}
                 onMenu={openMenu}
                 onPressRow={pressRow}
@@ -477,18 +527,17 @@ export function ConversationSidebar() {
           </div>
         )}
 
-        {groups.length > 0 && <GroupHeading text={t("chat.groupsTitle")} />}
+        {looseProjects.length > 0 && <GroupHeading text={t("chat.groupsTitle")} />}
         {/* Empty folders are still drawn — a folder that disappears when its last chat is moved out
             is a folder the user has to create again, and they made it on purpose. It is also the
             only thing there is to aim a drag at. */}
-        {groups.map((group) => (
+        {looseProjects.map((group) => (
           <FolderSection
             key={group.id}
             group={group}
             conversations={byGroup[group.id] ?? []}
             activeId={activeId}
             locale={locale}
-            perProvider={perProvider}
             onSelect={selectRow}
             onMenu={openMenu}
             onPressRow={pressRow}
@@ -513,7 +562,8 @@ export function ConversationSidebar() {
         >
           {/* The heading earns its place only when something sits above this list. A sidebar whose
               only content is six recent chats does not need to be told they are recent. */}
-          {ungrouped.length > 0 && (groups.length > 0 || pinned.length > 0) && (
+          {ungrouped.length > 0 &&
+            (looseProjects.length > 0 || pinnedProjects.length > 0 || pinned.length > 0) && (
             <GroupHeading text={t("chat.recentGroup")} />
           )}
           {ungrouped.map((conversation) => (
@@ -522,7 +572,6 @@ export function ConversationSidebar() {
               conversation={conversation}
               active={conversation.id === activeId}
               locale={locale}
-              siblings={perProvider[conversation.provider] ?? 1}
               onSelect={selectRow}
               onMenu={openMenu}
               onPressRow={pressRow}
@@ -539,7 +588,6 @@ export function ConversationSidebar() {
                 conversation={conversation}
                 active={conversation.id === activeId}
                 locale={locale}
-                siblings={perProvider[conversation.provider] ?? 1}
                 onSelect={selectRow}
                 onMenu={openMenu}
                 onPressRow={pressRow}
@@ -623,7 +671,6 @@ function FolderSection({
   conversations,
   activeId,
   locale,
-  perProvider,
   onSelect,
   onMenu,
   onPressRow,
@@ -635,7 +682,6 @@ function FolderSection({
   conversations: ChatConversation[];
   activeId: string | null;
   locale: string;
-  perProvider: Record<string, number>;
   onSelect: (id: string) => void;
   onMenu: (event: React.MouseEvent, conversation: ChatConversation) => void;
   onPressRow: (event: React.PointerEvent, conversation: ChatConversation) => void;
@@ -649,7 +695,13 @@ function FolderSection({
 }) {
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // Lifted out of `ColorSwatchPicker` because the menu has to be able to open it too — see the
+  // `open` prop's note there. The palette still hangs off the folder glyph either way.
+  const [colorOpen, setColorOpen] = useState(false);
   const store = useConversationStore();
+  /** A folder with no colour of its own follows the app's accent, so it keeps matching the window
+   *  when the theme changes instead of being frozen at whatever indigo was default that day. */
+  const folderColor = group.color || "var(--cf-accent)";
 
   const items: MenuItem[] = [
     {
@@ -660,6 +712,29 @@ function FolderSection({
           if (name?.trim()) void store.renameGroup(group.id, name.trim(), group.color);
         });
       },
+    },
+    {
+      // The entry exists because the glyph alone did not do the job: it is eleven pixels and it
+      // does not announce that it is a control, so somebody looking for "the option to change the
+      // colour" looks here and used to find nothing. Both roads lead to the same palette.
+      label: t("chat.groupColor"),
+      leading: (
+        <span
+          className="h-3 w-3 rounded-full ring-1 ring-inset ring-black/10 dark:ring-white/20"
+          style={{ background: folderColor }}
+        />
+      ),
+      onClick: () => setColorOpen(true),
+    },
+    {
+      label: group.pinnedAt ? t("chat.unpin") : t("chat.pin"),
+      icon: group.pinnedAt ? PinOff : Pin,
+      onClick: () => void store.setGroupPinned(group.id, !group.pinnedAt),
+    },
+    {
+      label: group.archivedAt ? t("chat.unarchive") : t("chat.archive"),
+      icon: group.archivedAt ? ArchiveRestore : Archive,
+      onClick: () => void store.setGroupArchived(group.id, !group.archivedAt),
     },
     {
       label: t("chat.groupDelete"),
@@ -689,19 +764,27 @@ function FolderSection({
         dropActive ? "bg-[var(--cf-accent-soft)] ring-1 ring-[var(--cf-accent)]" : ""
       }`}
     >
-      {/* Two affordances on one row, and the split matters: the chevron folds the list, the name
-          opens the project's own page. A project is a place you go — it holds instructions and
-          shared documents — so its name must lead somewhere, and collapsing must stay reachable
-          without leaving where you are. Nested buttons are invalid HTML, so this is a row with two
-          buttons rather than a button containing one. */}
+      {/* Three affordances on one row, and the split matters: the chevron folds the list, the name
+          opens the project's own page, the folder is its colour. A project is a place you go — it
+          holds instructions and shared documents — so its name must lead somewhere, and collapsing
+          must stay reachable without leaving where you are. Nested buttons are invalid HTML, so
+          this is a row of buttons rather than a button containing them.
+
+          The folder earns its click by being the thing it changes: it *is* the colour, so pressing
+          it to pick another is direct rather than a second control standing next to it explaining
+          what the first one means. The colour has been in the row's model since folders shipped and
+          nothing ever drew it — a stored value nobody could see or set. */}
       <div
+        // Same rule as the conversation rows: the right-click lands on the project *and* opens its
+        // menu, so the actions in it are visibly about the row you pressed.
         onContextMenu={(event) => {
           event.preventDefault();
+          void store.openGroup(group.id);
           setMenu({ x: event.clientX, y: event.clientY });
         }}
         className={`mt-3 flex w-full items-center gap-1 px-1.5 pb-1 text-[10.5px] uppercase tracking-wide ${
           active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-        }`}
+        } ${group.archivedAt ? "opacity-55" : ""}`}
       >
         <button
           type="button"
@@ -711,17 +794,58 @@ function FolderSection({
         >
           {group.collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
         </button>
+        <ColorSwatchPicker
+          // The raw value, empty included: the picker needs to know a folder has *no* colour in
+          // order to ring its none cell, and a fallback substituted here would hide that.
+          value={group.color}
+          title={t("chat.groupColor")}
+          align="start"
+          allowNone
+          noneTitle={t("chat.groupColorNone")}
+          open={colorOpen}
+          onOpenChange={setColorOpen}
+          onChange={(color) => void store.renameGroup(group.id, group.name, color)}
+          trigger={
+            // Filled rather than outlined, because at eleven pixels an outline is four thin
+            // strokes and the colour is what the glyph is for. Open when the list is, shut when it
+            // is folded: the icon then says the same thing as the chevron beside it instead of
+            // contradicting it.
+            group.collapsed ? (
+              <Folder size={11} style={{ color: folderColor }} className="fill-current opacity-90" />
+            ) : (
+              <FolderOpen size={11} style={{ color: folderColor }} className="opacity-90" />
+            )
+          }
+        />
+        {/* The count rides inside the name's button for the reason the timestamp does one level
+            down: it is part of the same statement — this project, this much in it — and a number
+            you can point at but not press is a target the app appears to have missed. */}
         <button
           type="button"
           onClick={() => void store.openGroup(group.id)}
           title={t("chat.groupOpen")}
-          className="min-w-0 flex-1 truncate text-left uppercase hover:text-[var(--cf-text)]"
+          className="flex min-w-0 flex-1 items-center gap-1 text-left uppercase hover:text-[var(--cf-text)]"
         >
-          {group.name}
+          <span className="cf-fade-edge min-w-0 flex-1">{group.name}</span>
+          <span className="shrink-0 normal-case tracking-normal">
+            {conversations.length > 0 ? conversations.length : t("chat.groupEmpty")}
+          </span>
         </button>
-        <span className="shrink-0 normal-case tracking-normal">
-          {conversations.length > 0 ? conversations.length : t("chat.groupEmpty")}
-        </span>
+        {/* The same button the conversation rows carry, for the same reason: right-click is a
+            gesture you have to already know about, and a folder now has five things in its menu
+            rather than two. */}
+        <button
+          type="button"
+          onClick={(event) => {
+            event.preventDefault();
+            setMenu({ x: event.clientX, y: event.clientY });
+          }}
+          title={t("chat.rowMenu")}
+          aria-label={t("chat.rowMenu")}
+          className="shrink-0 rounded p-0.5 opacity-55 transition-opacity hover:bg-black/[0.06] hover:text-[var(--cf-text)] hover:opacity-100 focus-visible:opacity-100 dark:hover:bg-white/[0.08]"
+        >
+          <MoreHorizontal size={13} />
+        </button>
       </div>
 
       {!group.collapsed &&
@@ -731,7 +855,6 @@ function FolderSection({
             conversation={conversation}
             active={conversation.id === activeId}
             locale={locale}
-            siblings={perProvider[conversation.provider] ?? 1}
             onSelect={onSelect}
             onMenu={onMenu}
             onPressRow={onPressRow}
@@ -749,6 +872,29 @@ function FolderSection({
       {menu && <ContextMenu x={menu.x} y={menu.y} items={items} onClose={() => setMenu(null)} />}
     </div>
   );
+}
+
+/**
+ * Which band each project is drawn in.
+ *
+ * Pinned projects belong in the pinned band, above the pinned chats — the same shelf, because
+ * pinning means one thing and it should not mean it in two different places.
+ *
+ * **Archived beats pinned**, the rule the conversations have always followed: a project put away on
+ * the shelf stays on the shelf even if it was pinned first, or turning on "show archived" would
+ * pull it back to the very top of the sidebar, which is the opposite of what archiving it said.
+ *
+ * Both lists arrive already sorted — the backend orders projects pinned, then archived, then by
+ * their newest turn — so this only ever filters. It must never re-sort: doing it here would put a
+ * second opinion about order in a second language, and the two would drift.
+ *
+ * Exported for the test. The split is three words of logic and one of them is a precedence rule,
+ * which is exactly the kind of thing that comes back wrong after an unrelated edit.
+ */
+export function splitProjects(groups: ChatGroup[]): { pinned: ChatGroup[]; loose: ChatGroup[] } {
+  const shelved = (group: ChatGroup) => Boolean(group.archivedAt);
+  const onTop = (group: ChatGroup) => Boolean(group.pinnedAt) && !shelved(group);
+  return { pinned: groups.filter(onTop), loose: groups.filter((group) => !onTop(group)) };
 }
 
 function GroupHeading({ text }: { text: string }) {
@@ -778,7 +924,6 @@ const ConversationRow = memo(function ConversationRow({
   conversation,
   active,
   locale,
-  siblings,
   onSelect,
   onMenu,
   onPressRow,
@@ -787,7 +932,6 @@ const ConversationRow = memo(function ConversationRow({
   active: boolean;
   locale: string;
   /** How many live conversations share this row's provider, this one included. */
-  siblings: number;
   onSelect: (id: string) => Promise<void> | void;
   onMenu: (event: React.MouseEvent, conversation: ChatConversation) => void;
   /** Arms a drag. The row does not decide whether one has begun — that is the scroller's job, from
@@ -801,11 +945,7 @@ const ConversationRow = memo(function ConversationRow({
   const running = useConversationStore(
     (s) => s.byConversation[conversation.id]?.sending ?? false,
   );
-  const caps = providerCapabilities(conversation.provider);
-  const name = providerDisplayLabel(conversation.provider, t);
   const when = relativeTime(conversation.updatedAt, locale);
-
-  const crossTalk = caps.resumeIsAmbiguous && siblings > 1;
 
   /** Running beats unread beats failed, and the order is the point: a thread whose last turn failed
    *  but which is being retried right now is *running*, and saying "failed" over a live run would
@@ -821,31 +961,75 @@ const ConversationRow = memo(function ConversationRow({
         : "read";
 
   return (
-    <button
-      type="button"
+    // A row with two buttons rather than a button containing one, which nesting would make invalid
+    // HTML — the same shape the folder header above uses, and for the same reason.
+    <div
       onPointerDown={(event) => onPressRow?.(event, conversation)}
-      onClick={() => void onSelect(conversation.id)}
-      onContextMenu={(event) => onMenu(event, conversation)}
+      // A right-click selects the row as well as opening its menu, the way a file manager does.
+      // A menu of six verbs floating over a list of twenty rows does not say which row it is about
+      // unless that row is lit, and "delete" is not a verb to get wrong by one line.
+      onContextMenu={(event) => {
+        void onSelect(conversation.id);
+        onMenu(event, conversation);
+      }}
       className={`${ROW} ${active ? ROW_ACTIVE : ROW_IDLE} ${conversation.archivedAt ? "opacity-55" : ""}`}
     >
-      <StatusDot status={status} />
-      <ProviderGlyph providerId={conversation.provider} size={12} className="shrink-0 opacity-70" />
-      <span className="min-w-0 flex-1 truncate">{conversation.title || t("chat.untitled")}</span>
-      {conversation.parentConversationId && (
-        <GitBranch size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
-      )}
-      {crossTalk && (
-        // A native `title` rather than a tooltip component: the row is already a button carrying a
-        // context menu, and a third interactive layer on it would fight both.
-        <span title={t("chat.ambiguousResumeWarning", { provider: name })} className="shrink-0">
-          <AlertTriangle size={11} className="text-[var(--cf-warning)]" />
-        </span>
-      )}
-      {when && (
-        <span className="shrink-0 text-[10px] tabular-nums text-[var(--cf-text-muted)] opacity-0 group-hover/row:opacity-100">
-          {when}
-        </span>
-      )}
-    </button>
+      {/* The timestamp is *inside* the button, not beside it.
+       
+          Outside, it was a dead strip: the row lit up under the pointer, the cursor stayed a
+          pointer, and a click on "hace 3 horas" did nothing at all — which reads as the app having
+          missed the click rather than as an area that was never a target. Everything on this row
+          except the menu button means the same thing, so it should all do the same thing. */}
+      <button
+        type="button"
+        onClick={() => void onSelect(conversation.id)}
+        className="flex min-w-0 flex-1 items-center gap-2 text-left"
+      >
+        <StatusDot status={status} />
+        <ProviderGlyph providerId={conversation.provider} size={12} className="shrink-0 opacity-70" />
+        <span className="cf-fade-edge min-w-0 flex-1">{conversation.title || t("chat.untitled")}</span>
+        {conversation.parentConversationId && (
+          <GitBranch size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+        )}
+        {/* `hidden`, not `opacity-0`: invisible and *still in the layout* is what made every title
+            truncate early and left a blank strip on the right of a list whose whole job is to let
+            you recognise a conversation by its name. "hace 3 horas" is sixty pixels the row was
+            reserving for something nobody was looking at. Out of the flow at rest, the title gets
+            those pixels; on hover it gives them back. */}
+        {when && (
+          <span className="hidden shrink-0 text-[10px] tabular-nums text-[var(--cf-text-muted)] group-hover/row:inline">
+            {when}
+          </span>
+        )}
+      </button>
+      {/*
+        The same menu the right-click opens, on a button that says so.
+        
+        Right-click was the only way in, which is a gesture that has to be guessed — nothing on the
+        row admitted there was anything to right-click. It appears on hover and on keyboard focus
+        rather than at rest, because eleven permanent dot-triples down a narrow list read as
+        decoration and the list is meant to be read, not operated.
+      */}
+      <button
+        type="button"
+        // The press must not reach the row, or holding the menu button and drifting five pixels
+        // would start dragging the conversation into a folder instead of opening its menu.
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          onMenu(event, conversation);
+        }}
+        title={t("chat.rowMenu")}
+        aria-label={t("chat.rowMenu")}
+        // Always drawn, unlike the timestamp beside it, and the asymmetry is deliberate on both
+        // counts. `hidden` is the only way to stop reserving space, and a `display: none` button
+        // cannot be tabbed to — so hiding this one would take the folder menu away from the
+        // keyboard entirely. It is also the affordance that says the menu exists at all, which was
+        // the point of adding it, and seventeen muted pixels is a price the row can pay.
+        className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] opacity-55 transition-opacity hover:bg-black/[0.06] hover:text-[var(--cf-text)] hover:opacity-100 focus-visible:opacity-100 group-hover/row:opacity-100 dark:hover:bg-white/[0.08]"
+      >
+        <MoreHorizontal size={13} />
+      </button>
+    </div>
   );
 });

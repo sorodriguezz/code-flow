@@ -1510,6 +1510,23 @@ pub struct ChatConversation {
     /// settle, and the two would eventually disagree.
     #[serde(default)]
     pub last_failed: bool,
+    /// What the turns up to [`Self::compacted_through_turn`] were compacted down to, or empty on a
+    /// thread nobody has compacted. Shown in the transcript, not just used: it is the only copy of
+    /// what the engine will be told those turns said.
+    #[serde(default)]
+    pub compacted_summary: String,
+    /// The last turn the summary covers. `None` when there is no summary; the two always move
+    /// together, because a summary without a cut cannot be replayed — see the column comment.
+    #[serde(default)]
+    pub compacted_through_turn: Option<i64>,
+    /// What the engine said it read on the most recent turn, or `None` before one has reported.
+    /// Measured, never computed — see the column comment in `migrations`.
+    #[serde(default)]
+    pub context_tokens: Option<i64>,
+    /// One of `caveman::LEVELS`, or empty for off. A prompt rather than a flag, so it works on
+    /// every engine — see [`crate::caveman`].
+    #[serde(default)]
+    pub caveman_level: String,
     pub engine_session_id: Option<String>,
     pub pinned_at: Option<String>,
     pub archived_at: Option<String>,
@@ -1533,6 +1550,14 @@ pub struct ChatGroup {
     pub color: String,
     pub sort_order: i64,
     pub collapsed: bool,
+    /// When it was pinned, or `None`. Pinned folders sort above the rest regardless of
+    /// `sort_order`, which stays the user's own arrangement within each half.
+    #[serde(default)]
+    pub pinned_at: Option<String>,
+    /// When it was archived, or `None`. An archived folder keeps its conversations and its
+    /// instructions; it is only hidden from the list until the user asks to see the shelf.
+    #[serde(default)]
+    pub archived_at: Option<String>,
     /// Standing instructions for every conversation in this project. Empty is the ordinary state.
     #[serde(default)]
     pub instructions: String,
@@ -1575,6 +1600,14 @@ pub struct ChatMessageRow {
     /// reader, because the only consumer of a trace re-fetches the conversation with `with_trace`
     /// on before it can show one.
     pub trace: Option<String>,
+    /// Paths, relative to the conversation's working directory, of the files **this turn** left
+    /// behind — a JSON array of strings, or `None` for the overwhelming majority of messages that
+    /// produced nothing.
+    ///
+    /// Only the paths. Size and existence stay with the directory, which is the record for both, so
+    /// a spreadsheet the user deleted from disk does not leave a row claiming it is still there and
+    /// a file a later turn overwrote reports its new size rather than the one it had here.
+    pub outputs: Option<String>,
     pub created_at: String,
 }
 

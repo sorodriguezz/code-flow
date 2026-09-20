@@ -281,6 +281,30 @@ body {
   height: 0;
 }
 
+/* A title that runs out of room dissolves instead of ending in an ellipsis.
+ *
+ * `…` is three characters that say "there is more" and nothing else, and in a list of chat titles
+ * — which are the first line of the question, so they are long and they differ late — it lands in
+ * the same place on every row and turns the right edge into a column of dots. Next to a menu
+ * button that is itself three dots, it reads as a second control.
+ *
+ * A mask instead: the text fades to nothing over the last stretch of its box. Same information —
+ * the sentence visibly continues past the edge — with no glyph of its own, and it also puts a gap
+ * of quiet between the words and the `⋯`, which is what the ellipsis never did.
+ *
+ * The element still has to be `overflow: hidden; white-space: nowrap`; the mask only paints. Both
+ * spellings of the property, because the app runs in WKWebView and `-webkit-mask-image` is the one
+ * older WebKit reads — it costs a line and removes a whole class of "works here, not there".
+ *
+ * The fade only shows where there is text under it, so a short title is untouched: its box still
+ * runs the full width of the row, and the masked stretch is empty space. */
+.cf-fade-edge {
+  overflow: hidden;
+  white-space: nowrap;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent 100%);
+}
+
 /* Dragging the window is left entirely to the `data-tauri-drag-region` attribute: Tauri's injected
    mousedown handler walks the event path and gives up as soon as it meets a button, link, input or
    anything with an interactive role, so the title bar's own controls keep their clicks.
@@ -1827,6 +1851,34 @@ body.cf-dragging * {
 .cf-markdown-chat pre {
   padding: 0.6em 0.8em;
   font-size: 0.95em;
+}
+
+/* The frame `ChatMessageBubble` wraps around every fenced block so its copy and save buttons have
+ * something to sit in the corner of.
+ *
+ * It exists because the `<pre>` scrolls. A child positioned absolutely inside a scrolling box is
+ * placed against that box's content, so buttons pinned to `right: 6px` were pinned to the end of
+ * the longest line — scroll the block sideways and they came riding in over the code. This element
+ * is the same size as the block and does not scroll, which is what "top right of the block" needs
+ * to mean.
+ *
+ * Deliberately no margin of its own. The `<pre>`'s margins collapse straight through a wrapper
+ * with no border, padding or inline content, so the spacing between blocks is exactly what it was
+ * before this element existed — and `position: relative` does not create a block formatting
+ * context, so it does not interfere. Giving this div padding or a border would silently change the
+ * rhythm of every answer in the app.
+ *
+ * `position: relative` is set inline by the same code that creates the buttons, not here. It is
+ * the one declaration they cannot work without, and a control that becomes unreachable when a
+ * stylesheet does not arrive is not a control. What is left in this file is the padding, which is
+ * cosmetic in the exact sense that matters: without it a long first line runs under the buttons,
+ * which is a blemish, not a loss. */
+/* After `.cf-markdown-chat pre` and `.cf-markdown-preview pre`, both of which set `padding`
+ * wholesale at the same specificity — order is what carries this one. */
+.cf-chat-code > pre {
+  /* Room for the pair, so the first line does not begin underneath them. Text further right still
+   * passes under on scroll, which is why the buttons carry an opaque background. */
+  padding-right: 3.5rem;
 }
 
 /* Single-line variant (`renderInlineMarkdown`) — a finding's subtitle/why/suggestion field,

@@ -121,4 +121,15 @@ describe("the quota path still behaves", () => {
     expect(billing.kind).toBe("billing");
     expect(billing.actionUrl).toBe("https://example.com/billing");
   });
+
+  it("reads opencode Zen's own wording as billing rather than as a window that will reopen", () => {
+    // Credits do not come back on a clock, so "usage" here would be advice to wait for something
+    // that is never going to happen. No `resetHint` either, for the same reason.
+    const zen = parseClaudeError(
+      "QUOTA_EXCEEDED::APIError: Upstream request failed: Insufficient account funds",
+    );
+    expect(zen.isQuotaExceeded).toBe(true);
+    expect(zen.kind).toBe("billing");
+    expect(zen.resetHint).toBeNull();
+  });
 });

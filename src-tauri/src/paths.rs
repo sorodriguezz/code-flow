@@ -379,21 +379,33 @@ pub fn sandbox_path(diagram_id: &str) -> PathBuf {
 /// not a sandbox (see [`crate::commands::chat_cmd`] on why nothing here can be), but it is at least
 /// somewhere where "list the files around you" has a true and uninteresting answer.
 ///
-/// **One directory for every conversation, not one per conversation.** There is nothing in it to
-/// keep apart: the chat writes no files, the engines are told not to, and a per-conversation folder
-/// would be a sweep to write, a row to reconcile and a leak when one is missed — all to isolate an
-/// emptiness from itself. [`sandbox_dir`] is per-diagram for the opposite reason: those directories
-/// hold the user's typed fixtures.
+/// **One directory per conversation**, which it did not used to be. The old shared `chat-scratch`
+/// was right while the premise held — "the chat writes no files, so there is nothing to keep
+/// apart" — and file generation is exactly the change that ends it. The moment a turn can produce
+/// an `informe.xlsx`, one shared folder means every conversation sees every other conversation's
+/// output, a follow-up question reads the wrong file, and "what did *this* chat make?" has no
+/// answer. [`sandbox_dir`] is per-diagram for the same reason, one feature earlier.
+///
+/// **Stable across turns, deliberately.** Not a fresh directory per turn: "now add a column to
+/// that spreadsheet" is the second half of the feature, and it only works if the file the previous
+/// turn wrote is still in front of the engine.
 ///
 /// **State and not cache**, for the same reason [`sandbox_dir`] is: `cache_dir`'s contract is that
-/// deleting it with the app closed is a no-op nobody notices, and a directory an engine may be
-/// running in while the app is open is not something a cleaner should be free to remove underneath
-/// it. `wipe_plan` reaches it for free, since it removes every entry under the state root.
+/// deleting it with the app closed is a no-op nobody notices, and these are files the user was
+/// shown and offered — a cleaner is not free to take them. `wipe_plan` reaches it for free, since
+/// it removes every entry under the state root.
 ///
 /// Created lazily by the caller — a folder that appears on first launch for a feature the user has
 /// not opened is the app deciding what they are working on.
-pub fn chat_scratch_dir() -> PathBuf {
-    state_dir().join("chat-scratch")
+pub fn chat_outputs_dir() -> PathBuf {
+    state_dir().join("chat-outputs")
+}
+
+/// One conversation's working directory. The id is a UUID this app minted, so it needs no
+/// sanitising to be a safe path segment — and it is checked at the command boundary anyway, for the
+/// reason [`chat_conversation_attachments_dir`] gives.
+pub fn chat_conversation_outputs_dir(conversation_id: &str) -> PathBuf {
+    chat_outputs_dir().join(conversation_id)
 }
 
 /// Where a conversation's attached files live, one directory per conversation.

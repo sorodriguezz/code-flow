@@ -5,7 +5,9 @@ import {
   reduceDelta,
   revealedLength,
   startTypewriter,
+  questionBehind,
   traceOf,
+  type ConversationMessage,
   type EvictionCandidate,
   type StreamingBuffers,
 } from "./conversationStore";
@@ -270,5 +272,54 @@ describe("traceOf", () => {
     expect(traceOf("{not json")).toBeUndefined();
     expect(traceOf(42)).toBeUndefined();
     expect(traceOf([1, null, "two"])).toBeUndefined();
+  });
+});
+
+describe("questionBehind", () => {
+  /** A transcript the way `chat_queries` orders one: the question and its answer share a turn. */
+  function exchange(turn: number, question: string, answer: string): ConversationMessage[] {
+    const base = {
+      conversationId: "conv-1",
+      provider: "claude",
+      model: null,
+      engineVersion: null,
+      responseTimeMs: null,
+      isError: false,
+      isCancelled: false,
+      createdAt: turn * 1000,
+    } as unknown as ConversationMessage;
+    return [
+      { ...base, id: `u${turn}`, turn, role: "user", content: question },
+      { ...base, id: `a${turn}`, turn, role: "assistant", content: answer },
+    ];
+  }
+
+  it("finds the question of the very first exchange", () => {
+    // The case Regenerate did nothing at all on: with `<` there is no user message before turn 0.
+    const messages = exchange(0, "why is the sky blue?", "Rayleigh scattering.");
+    expect(questionBehind(messages, 0)?.content).toBe("why is the sky blue?");
+  });
+
+  it("finds this exchange's question, not the one before it", () => {
+    const messages = [
+      ...exchange(0, "why is the sky blue?", "Rayleigh scattering."),
+      ...exchange(1, "and at sunset?", "Longer path, more scattering."),
+    ];
+    expect(questionBehind(messages, 1)?.content).toBe("and at sunset?");
+  });
+
+  it("reaches back when an exchange has no question of its own", () => {
+    // A turn the engine added without being asked — a continuation — still regenerates from the
+    // last question that was actually put to it.
+    const messages = [
+      ...exchange(0, "summarise this", "Part one."),
+      { ...exchange(1, "", "Part two.")[1], id: "a1" },
+    ];
+    expect(questionBehind(messages, 1)?.content).toBe("summarise this");
+  });
+
+  it("answers null when nothing was ever asked", () => {
+    expect(questionBehind([], 0)).toBeNull();
+    expect(questionBehind(exchange(3, "later", "answer"), 1)).toBeNull();
   });
 });

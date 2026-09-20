@@ -17,6 +17,13 @@ const KEY = "auto_fetch_interval_seconds";
 const SECRET_SCAN_KEY = "secret_scan_enabled";
 const NOTIFICATION_SOUND_KEY = "notification_sound_enabled";
 const BLAME_ANNOTATION_KEY = "blame_annotation_enabled";
+/** Whether a chat with no repository may produce files. Unset means on — the Rust side reads the
+ *  same key and defaults the same way; see `CHAT_FILE_GENERATION_KEY` in `chat_cmd.rs`. */
+const CHAT_FILE_GENERATION_KEY = "chat_file_generation";
+/** Whether a turn may compact its own conversation before running when it is close to a limit.
+ *  Unset means on, and the Rust side defaults the same way; see `CHAT_AUTO_COMPACT_KEY` in
+ *  `chat_cmd.rs`. */
+const CHAT_AUTO_COMPACT_KEY = "chat_auto_compact";
 const WINDOW_LIMIT_KEY = "satellite_window_limit";
 export const MIN_AUTO_FETCH_SECONDS = 10;
 
@@ -91,6 +98,25 @@ interface PreferencesState {
    */
   blameAnnotationEnabled: boolean;
   /**
+   * Whether a conversation with no repository may write files into its own working directory.
+   *
+   * On by default. It is what turns "here is a CSV in a code block" into "here is the .xlsx I
+   * built", and what the header badge stops promising read-only about — so a user who wants the
+   * narrower behaviour back turns it off here rather than discovering it was never offered.
+   */
+  chatFileGenerationEnabled: boolean;
+  /**
+   * Whether a turn may summarise its own conversation before running, when what it is about to send
+   * is close to a limit.
+   *
+   * On by default, because the alternative is silent: past `REPLAY_CHAR_BUDGET` the backend drops
+   * the oldest turns and answers anyway, and a resumed session that overflows is refused by the CLI
+   * or truncated by it. Both read as the model becoming forgetful rather than as a limit being
+   * reached. Off, the meter still shows the size and the button is still there — the user just does
+   * it themselves.
+   */
+  chatAutoCompactEnabled: boolean;
+  /**
    * How many apps and repositories may be open in windows of their own, besides the main one.
    *
    * A setting rather than a constant because the right answer is about the machine, not about the
@@ -128,6 +154,8 @@ interface PreferencesState {
   setNotificationSourceMuted: (source: string, muted: boolean) => Promise<void>;
   setPipelinePollSeconds: (seconds: number) => Promise<void>;
   setBlameAnnotationEnabled: (enabled: boolean) => Promise<void>;
+  setChatFileGenerationEnabled: (enabled: boolean) => Promise<void>;
+  setChatAutoCompactEnabled: (enabled: boolean) => Promise<void>;
   setSatelliteLimit: (limit: number) => Promise<void>;
   /** Saves the list and adopts the normalised version the backend stored. */
   setLockedBranchRules: (rules: string[]) => Promise<void>;
@@ -145,6 +173,8 @@ function clamp(seconds: number): number {
 export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   autoFetchSeconds: 0,
   secretScanEnabled: true,
+  chatFileGenerationEnabled: true,
+  chatAutoCompactEnabled: true,
   notificationSoundEnabled: false,
   nativeNotificationsEnabled: false,
   nativeNotificationsOnlyBackground: true,
@@ -171,6 +201,8 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         PIPELINE_POLL_KEY,
         BLAME_ANNOTATION_KEY,
         WINDOW_LIMIT_KEY,
+        CHAT_FILE_GENERATION_KEY,
+        CHAT_AUTO_COMPACT_KEY,
       ]).catch(
         () => ({}) as Record<string, string>,
       ),
@@ -205,6 +237,15 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       // Same one-liner, same reason: unset and explicit-false are both "don't blame anything".
       blameAnnotationEnabled: stored[BLAME_ANNOTATION_KEY] === "true",
       satelliteLimit: clampWindows(stored[WINDOW_LIMIT_KEY]),
+      // Unset is on, like `secretScanEnabled` and unlike most of the booleans above: this one is a
+      // capability the chat workspace is built around rather than an extra to opt into.
+      chatFileGenerationEnabled: (stored[CHAT_FILE_GENERATION_KEY] ?? null) === null
+        ? true
+        : stored[CHAT_FILE_GENERATION_KEY] === "true",
+      // Same shape, same reason: a protection is on until somebody says otherwise.
+      chatAutoCompactEnabled: (stored[CHAT_AUTO_COMPACT_KEY] ?? null) === null
+        ? true
+        : stored[CHAT_AUTO_COMPACT_KEY] === "true",
       lockedBranchRules: rules,
     });
     // The store that enforces it keeps its own copy, so the rail can refuse without reaching across
@@ -216,6 +257,16 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     const value = clamp(seconds);
     set({ autoFetchSeconds: value });
     await setSetting(KEY, String(value));
+  },
+
+  setChatFileGenerationEnabled: async (enabled) => {
+    set({ chatFileGenerationEnabled: enabled });
+    await setSetting(CHAT_FILE_GENERATION_KEY, String(enabled));
+  },
+
+  setChatAutoCompactEnabled: async (enabled) => {
+    set({ chatAutoCompactEnabled: enabled });
+    await setSetting(CHAT_AUTO_COMPACT_KEY, String(enabled));
   },
 
   setSecretScanEnabled: async (enabled) => {

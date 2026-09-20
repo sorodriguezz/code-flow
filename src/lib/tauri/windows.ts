@@ -39,3 +39,14 @@ export const restoreSatellites = () => invoke<number>("restore_satellites");
  *  for the restore path and for anything asking about a window that is not this one. */
 export const satelliteSpec = (label: string) =>
   invoke<SatelliteInfo | null>("satellite_spec", { label });
+
+/**
+ * Puts the main window back on screen, asked from a window that is not it.
+ *
+ * Not the same thing as the `focus-main` bus message, which has the main window call `setFocus()`
+ * on itself: that is enough for a satellite re-attaching, and does nothing at all when the main
+ * window is **hidden to the tray** — which is the ask box's ordinary case, since the whole point of
+ * the hotkey is that it works after the desk has been put away. See `show_main_window` in
+ * `windows.rs` for the rest of what restoring actually involves.
+ */
+export const showMainWindow = () => invoke<void>("show_main_window");

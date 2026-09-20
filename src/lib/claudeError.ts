@@ -5,7 +5,19 @@ const QUOTA_MARKER = "QUOTA_EXCEEDED::";
  * rather than both shown as "you hit your limit". */
 export type QuotaKind = "usage" | "billing";
 
-const BILLING_SIGNALS = ["insufficient balance", "insufficient credit", "out of credit", "payment required", "billing"];
+/** Must stay in step with the billing half of `QUOTA_SIGNALS` in `ai.rs`: that list decides
+ *  whether a refusal is recognised at all, this one decides which of the two remedies is offered.
+ *  A phrase in one and not the other is the worst outcome available here — the refusal is caught
+ *  and then the user is told to wait for a window that does not exist, because a prepaid balance
+ *  does not refill on a clock. */
+const BILLING_SIGNALS = [
+  "insufficient balance",
+  "insufficient credit",
+  "insufficient account funds",
+  "out of credit",
+  "payment required",
+  "billing",
+];
 
 /**
  * A run that failed because the provider is not *set up*, rather than because the model could not

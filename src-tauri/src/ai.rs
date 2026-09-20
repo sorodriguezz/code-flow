@@ -33,8 +33,9 @@ pub const QUOTA_MARKER: &str = "QUOTA_EXCEEDED::";
 
 /// Phrases that mean "the provider refused because of a limit or your account balance", not that
 /// something is broken. The billing ones matter for the credit-based CLIs (opencode bills per
-/// token, so it answers with "Insufficient balance" rather than a rate limit).
-const QUOTA_SIGNALS: [&str; 11] = [
+/// token, so it answers with "Insufficient balance" rather than a rate limit) — and it has more
+/// than one wording for it, which is why the gateway's is listed separately below.
+const QUOTA_SIGNALS: [&str; 12] = [
     "usage limit",
     "rate limit",
     "quota exceeded",
@@ -43,6 +44,13 @@ const QUOTA_SIGNALS: [&str; 11] = [
     "limit reached",
     "insufficient balance",
     "insufficient credit",
+    // opencode Zen's gateway, verbatim: `APIError: Upstream request failed: Insufficient account
+    // funds`. The whole phrase and not the looser "insufficient funds", which is ordinary
+    // vocabulary in payment code — and [`refusal_reply`] reads *successful* replies, so a short
+    // answer about a transfer being declined would be thrown away as a refusal. The cost of
+    // missing a wording is an accurate error in the wrong box; the cost of matching too widely is
+    // an answer the user waited for, deleted.
+    "insufficient account funds",
     "out of credit",
     "payment required",
     "billing",
@@ -417,6 +425,23 @@ pub struct AiRun {
     /// What the run cost, as the engine itself reported it. `None` when the CLI said nothing —
     /// which is a different fact from "it cost nothing", and the usage meter shows it as such.
     pub usage: Option<AiUsage>,
+    /// How many tokens were in front of the model on the **last step of this turn** — the context
+    /// occupancy, which is what the chat's context meter draws.
+    ///
+    /// **Not `usage.input_tokens`, and the difference is the whole reason this is a separate
+    /// field.** `usage` is cumulative over the turn: an agentic answer that made six tool calls
+    /// made six API calls, and the reported input is the sum of six prompts. As a bill that is
+    /// exactly right; as a gauge of "how full is the window" it is six times wrong, and it grows
+    /// with the amount of *work* rather than with the length of the conversation.
+    ///
+    /// What this holds instead is the prompt size of the final call: everything the model was
+    /// holding when it wrote the answer, system prompt and tool schemas included — the figure the
+    /// estimate in `lib/contextWindow.ts` cannot reach.
+    ///
+    /// `None` from every engine whose output this app does not read step by step, which today is
+    /// all of them but Claude. Those conversations fall back to the estimate, and the meter says
+    /// which of the two it is showing rather than presenting one as the other.
+    pub context_tokens: Option<i64>,
 }
 
 /// One finished run's own account of what it spent.
@@ -896,7 +921,176 @@ pub trait AiEngine: Send + Sync {
     fn supports_effort(&self) -> bool {
         !self.effort_args(effort::MEDIUM).is_empty()
     }
+
+    /// Whether the level would reach a model that can actually use it.
+    ///
+    /// [`supports_effort`](AiEngine::supports_effort) answers for the *CLI*, and for four of the six
+    /// that is the whole answer because the CLI only drives models from one family. It is not the
+    /// answer for opencode and cline, which address arbitrary models as `provider/model` — a dial
+    /// over `ollama/llama3` sends a flag no one reads, and the user pays for a control that does
+    /// nothing.
+    ///
+    /// Overridden by an engine that can look the model up for real; see `codex.rs`, which reads the
+    /// catalog the CLI maintains for itself. Everything else falls back to
+    /// [`model_is_known_non_reasoning`], which is a *name* rule and is therefore wrong eventually —
+    /// so it is written to be wrong in the harmless direction.
+    fn model_supports_effort(&self, model: &str) -> bool {
+        self.supports_effort() && !model_is_known_non_reasoning(model)
+    }
 }
+
+/// Model families that are known **not** to reason, matched on the id rather than listed by it.
+///
+/// # Why this shape and not a list of models that do
+///
+/// Because the ids rotate. Every one of these CLIs pulls its model list from a service that adds
+/// and retires names without asking, three of the six lists in `aiProviders.ts` are explicitly
+/// fallbacks for exactly that reason, and an allow-list would hide the dial on every model released
+/// after this file was last touched — quietly, and for the newest and most capable ones first.
+///
+/// So the question asked here is the negative one, and an id nobody recognises keeps its dial. The
+/// two ways to be wrong are not equal: a dial shown for a model that ignores it costs a flag the
+/// CLI drops, while a dial hidden from a model that wanted it takes away a control with no hint
+/// that it ever existed.
+///
+/// Matched on *families and suffixes*, never exact ids, so a new point release of something already
+/// named here is caught without an edit. Only families whose whole generation predates reasoning
+/// are listed; where a family is split (Claude 3.7 thinks and Claude 3.5 does not) the boundary is
+/// part of the pattern.
+pub fn model_is_known_non_reasoning(model: &str) -> bool {
+    let id = model.trim().to_ascii_lowercase();
+    if id.is_empty() {
+        // No `--model` flag at all: the CLI picks, and it picks its current default, which is the
+        // one model most likely to reason. Never hide the dial over a name nobody stated.
+        return false;
+    }
+    // `provider/model` — the shape opencode and cline use. The provider says nothing about
+    // reasoning (`ollama/qwq` reasons, `ollama/llama3` does not), so the judgement is on the tail.
+    let name = id.rsplit('/').next().unwrap_or(&id);
+
+    // Claude before extended thinking. 3.7 and everything after it reasons, so the generation is
+    // matched digit by digit rather than as "claude-3".
+    if name.starts_with("claude-3-opus")
+        || name.starts_with("claude-3-sonnet")
+        || name.starts_with("claude-3-haiku")
+        || name.starts_with("claude-3-5")
+        || name.starts_with("claude-3.5")
+    {
+        return true;
+    }
+    // OpenAI before the reasoning series. `gpt-5` and the `o`-series are deliberately absent.
+    if name.starts_with("gpt-3") || name.starts_with("gpt-4") || name.starts_with("chatgpt-4") {
+        return true;
+    }
+    // Gemini before thinking, plus the Flash-Lite tier, which is the cheap non-thinking rung of
+    // every generation.
+    if name.starts_with("gemini-1") || name.starts_with("gemini-2.0") || name.contains("flash-lite")
+    {
+        return true;
+    }
+    // Open-weight families with no reasoning generation. Note what is *not* here: `deepseek-r1`,
+    // `qwq`, `qwen3`, `magistral` and `gpt-oss` all reason, and `deepseek-coder` is matched by its
+    // own prefix rather than by `deepseek`.
+    const OPEN_WEIGHT: [&str; 9] = [
+        "llama-2", "llama2", "llama-3", "llama3", "codellama", "mistral-", "mixtral", "gemma",
+        "deepseek-coder",
+    ];
+    if OPEN_WEIGHT.iter().any(|family| name.starts_with(family)) {
+        return true;
+    }
+    // A plain instruction-tuned or chat build of anything, which is how a non-reasoning variant of
+    // a family that also ships a reasoning one is usually named.
+    name.ends_with("-instruct") || name.ends_with("-chat")
+}
+/// The context window of a model in tokens, or `None` when this app does not know it.
+///
+/// The sibling of [`model_is_known_non_reasoning`] and built the same way — families, never exact
+/// ids, because the ids rotate — but it answers in the opposite direction, and that difference is
+/// the whole design.
+///
+/// # `None` is the safe answer here, not `true`
+///
+/// The reasoning deny-list fails *open*: an unknown id keeps its dial, because a dial shown to a
+/// model that ignores it costs nothing. This one fails **closed**, because what it feeds is a gauge
+/// and an automatic compaction. A window guessed too large lets a turn be sent that cannot fit; a
+/// window guessed too small spends a turn compacting a conversation with plenty of room. Both are
+/// paid for by the user, so nothing is guessed: what is not listed has no percentage, no bar, and
+/// no automatic trigger.
+///
+/// # Why no open-weight family is listed
+///
+/// Because for those the *name does not decide the window*. `ollama` will serve a model whose
+/// nominal window is 128k with `num_ctx` at 4096 and say nothing about it, and opencode and cline
+/// both address exactly that kind of endpoint. A table keyed on the name would be most confident
+/// precisely where it is least likely to be right — which is the setup this whole feature exists
+/// for. Those conversations are protected by [`crate::commands::chat_cmd::REPLAY_CHAR_BUDGET`]
+/// instead, which is a limit this app actually owns and can measure against.
+pub fn context_window_for(model: &str) -> Option<i64> {
+    let id = model.trim().to_ascii_lowercase();
+    if id.is_empty() {
+        return None;
+    }
+    // `provider/model`, the shape opencode and cline use. Only the tail names a family — and one of
+    // those providers is the user's own machine.
+    let name = id.rsplit('/').next().unwrap_or(&id);
+
+    // Longest match wins, so a family that later needs splitting can be split without the shorter
+    // prefix silently answering for both halves.
+    const WINDOWS: [(&str, i64); 10] = [
+        // Anthropic has held 200k across every generation these CLIs can address.
+        ("claude-", 200_000),
+        // Gemini's 1M is the headline of the 1.5 line onwards; the flash tiers share it.
+        ("gemini-", 1_000_000),
+        // OpenAI: the 4o generation is 128k, the 4.1 line moved to ~1M, the 5 line sits at 400k.
+        ("gpt-4o", 128_000),
+        ("gpt-4.1", 1_000_000),
+        ("gpt-5", 400_000),
+        ("o3", 200_000),
+        ("o4-mini", 200_000),
+        // xAI: the 2 and 3 lines are 128k-class, grok-4 is larger.
+        ("grok-2", 131_072),
+        ("grok-3", 131_072),
+        ("grok-4", 256_000),
+    ];
+    WINDOWS
+        .iter()
+        .filter(|(prefix, _)| name.starts_with(prefix))
+        .max_by_key(|(prefix, _)| prefix.len())
+        .map(|(_, tokens)| *tokens)
+}
+
+/// The one thing worth saying about a CLI that was killed outright and wrote nothing.
+///
+/// A process that dies on signal 9 with empty stdout *and* empty stderr has told the user nothing,
+/// and the message the engines produced for it — "falló (signal: 9 (SIGKILL)) sin salida en stdout
+/// ni stderr" — is a transcription of that nothing. It reads as the model failing, which is the one
+/// thing it is not: the agent never ran.
+///
+/// Observed on this app with `cline`, whose npm install patches the compiled binary *after* it was
+/// signed. macOS on Apple Silicon refuses to start a Mach-O whose signature no longer matches, and
+/// it refuses by killing it before `main`, which is why there is not a byte of output to report.
+/// `codesign -v` says `invalid signature (code or signature have been modified)`; re-signing it
+/// ad-hoc fixes it until the next reinstall.
+///
+/// Returns `None` for every other status, so a caller can fall through to its own wording.
+pub fn killed_without_output(engine: &str, status_label: &str) -> Option<String> {
+    let killed = status_label.contains("signal: 9") || status_label.contains("SIGKILL");
+    if !killed {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    let cause = "En macOS eso casi nunca es el modelo ni la pregunta: lo habitual es un ejecutable \
+                 cuya firma dejó de ser válida —un instalador lo parcheó después de firmarlo— y el \
+                 sistema lo mata antes de que arranque. Ejecútalo a mano en una terminal: si sale \
+                 con código 137 y sin una línea de salida, es eso, y se arregla volviendo a \
+                 firmarlo con `codesign --force --sign -`.";
+    #[cfg(not(target_os = "macos"))]
+    let cause = "Un proceso que muere así sin escribir nada no llegó a arrancar: lo habitual es que \
+                 el sistema lo matara por falta de memoria. Ejecútalo a mano en una terminal para \
+                 ver si termina con código 137.";
+    Some(format!("{engine} fue terminado por el sistema antes de escribir nada ({status_label}). {cause}"))
+}
+
 
 /// Resolves the engine for a provider id. Unknown/empty ids fall back to Claude so a corrupt or
 /// missing `ai_provider` setting can never leave the app with no working engine.
@@ -4964,6 +5158,23 @@ mod tests {
         assert!(!quota_signal("error: unknown flag --nope"));
     }
 
+    /// opencode Zen ran out of prepaid credit and said so in words no other provider uses. Without
+    /// this the run came back as a raw red `APIError`, which is the app declining to read a message
+    /// it can read: the remedy is to top up, and nothing on screen said so.
+    #[test]
+    fn the_zen_gateway_wording_for_an_empty_balance_is_a_quota_signal() {
+        assert!(quota_signal("APIError: Upstream request failed: Insufficient account funds"));
+    }
+
+    /// The other half of that decision. `refusal_reply` reads replies that *succeeded*, and this
+    /// app is pointed at codebases full of payment handling — a model quoting an ordinary decline
+    /// must not have its answer thrown away as a billing refusal.
+    #[test]
+    fn an_ordinary_decline_in_a_reply_is_not_a_refusal() {
+        assert!(!quota_signal("the transfer fails with insufficient funds and returns 402"));
+        assert!(!refusal_reply("`TransferError::InsufficientFunds` is what that branch returns."));
+    }
+
     /// The bug this guards: a *finished* review whose own prose mentioned a rate limit was read
     /// as the provider refusing, so the analysis the user waited for was thrown away and shown
     /// to them as "you are out of quota". A model writing about limits is not a model being
@@ -5477,6 +5688,90 @@ mod tests {
         assert_eq!(opencode.effort_args(effort::LOW), ["--variant", "minimal"]);
         assert!(opencode.effort_args(effort::MEDIUM).is_empty());
         assert!(opencode.supports_effort(), "an engine with no middle step can still be asked");
+    }
+
+    /// The rule fails towards *showing* the dial, which is the whole design: a model nobody has
+    /// heard of is far more likely to be one released after this file than one that cannot reason.
+    #[test]
+    fn an_unknown_model_keeps_its_dial() {
+        assert!(!model_is_known_non_reasoning(""), "no --model at all means the CLI's own default");
+        assert!(!model_is_known_non_reasoning("gpt-9-whatever-they-call-it-next"));
+        assert!(!model_is_known_non_reasoning("claude-opus-7"));
+        assert!(!model_is_known_non_reasoning("some-provider/a-model-shipped-tomorrow"));
+    }
+
+    /// The families that genuinely predate reasoning, including the two boundaries that are easy to
+    /// get wrong: Claude splits mid-3, and `deepseek-coder` is not `deepseek-r1`.
+    #[test]
+    fn the_pre_reasoning_families_lose_it() {
+        for id in [
+            "claude-3-opus-20240229",
+            "claude-3-5-sonnet-20241022",
+            "gpt-4o",
+            "gpt-4.1-mini",
+            "gemini-1.5-pro",
+            "gemini-2.0-flash",
+            "gemini-3.6-flash-lite",
+            "ollama/llama3.1:8b",
+            "ollama/mixtral",
+            "ollama/deepseek-coder-v2",
+            "openrouter/qwen2.5-72b-instruct",
+        ] {
+            assert!(model_is_known_non_reasoning(id), "{id} does not reason");
+        }
+
+        for id in [
+            "claude-3-7-sonnet-20250219",
+            "claude-sonnet-5",
+            "gpt-5.6-sol",
+            "o3-mini",
+            "gemini-3.1-pro-high",
+            "ollama/deepseek-r1:32b",
+            "ollama/qwq",
+            "opencode/gpt-oss-120b",
+        ] {
+            assert!(!model_is_known_non_reasoning(id), "{id} reasons");
+        }
+    }
+
+    /// The judgement is on the model, never on the provider in front of it: one Ollama serves both
+    /// kinds, so a prefix rule on `ollama/` would be wrong for half of what it matches.
+    #[test]
+    fn the_provider_prefix_is_not_the_model() {
+        assert!(model_is_known_non_reasoning("ollama/llama3"));
+        assert!(!model_is_known_non_reasoning("ollama/qwen3:8b"));
+        assert!(model_is_known_non_reasoning("LMSTUDIO/Mistral-7B-Instruct"), "case is not signal");
+    }
+
+    /// The window table is allowed to be incomplete and is not allowed to be wrong.
+    ///
+    /// Its two consumers make that asymmetry expensive: a gauge people plan around, and an
+    /// automatic compaction that spends a turn. A missing entry costs a bar nobody had; a wrong one
+    /// either lets a turn be sent that cannot fit, or compacts a conversation with plenty of room.
+    #[test]
+    fn the_window_table_answers_only_where_it_is_sure() {
+        // Families, across the dated ids that rotate under them.
+        assert_eq!(context_window_for("claude-sonnet-4-5-20250929"), Some(200_000));
+        assert_eq!(context_window_for("gemini-2.5-pro"), Some(1_000_000));
+        // Through the `provider/model` prefix opencode and cline use.
+        assert_eq!(context_window_for("anthropic/claude-opus-4-1"), Some(200_000));
+        // Longest match wins: `gpt-4.1` is a megatoken, `gpt-4o` is not.
+        assert_eq!(context_window_for("gpt-4.1-mini"), Some(1_000_000));
+        assert_eq!(context_window_for("gpt-4o-mini"), Some(128_000));
+
+        // And silence everywhere else. The local ones are the point: ollama serves a nominally
+        // 128k model at whatever `num_ctx` says, so the name is not evidence.
+        for unknown in [
+            "",
+            "   ",
+            "ollama/llama3.3",
+            "qwen2.5-coder:32b",
+            "mistral-small",
+            "deepseek-r1",
+            "a-model-shipped-tomorrow",
+        ] {
+            assert_eq!(context_window_for(unknown), None, "{unknown} must not get a number");
+        }
     }
 
     /// Anything outside the four levels is dropped rather than forwarded.

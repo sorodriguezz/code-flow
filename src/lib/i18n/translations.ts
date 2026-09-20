@@ -1999,6 +1999,16 @@ const en = {
   "settings.searchTermsSkills": "skills, mcp, tools",
   "settings.tasksTitle": "Tasks and prompts",
   "settings.tasksHint": "One row per AI action: which engine runs it and what it is told. Editing a prompt only changes that action.",
+  /* The one switch on this screen that is not about routing: whether a conversation with no
+     repository may write files. Worded as what it enables rather than as a permission, because that
+     is how it is reached — somebody asks for a spreadsheet and wants to know why they got a CSV. */
+  "settings.chatFileGenerationLabel": "Let chats without a repository create files",
+  "settings.chatFileGenerationHint":
+    "A chat with no repository open runs in a folder of its own and can build the files you ask it for \u2014 a spreadsheet, a slide deck, a PDF \u2014 which then appear above the composer, ready to save. It still cannot reach any of your repositories. Turn it off and those chats can only answer in text, which they save as code blocks.",
+  "settings.chatAutoCompactLabel":
+    "Summarise a conversation before it overflows",
+  "settings.chatAutoCompactHint":
+    "When what a turn is about to send is close to the limit, it first asks the model to summarise the conversation so far and sends that instead of the earlier turns. Costs one extra turn, once, and deletes nothing — the transcript stays and the summary can be undone. Off, a full conversation is quietly truncated instead, which reads as the model forgetting.",
   "settings.tasksSearchPlaceholder": "Search a task or a prompt…",
   "settings.tasksOnlyCustom": "Edited only",
   "settings.tasksNoCustom": "You haven't edited any prompt yet — everything runs on the built-in text.",
@@ -2510,22 +2520,24 @@ const en = {
   "chat.groupContextAdd": "Add a document",
   "chat.groupContextEmpty": "Add PDFs or documents for every chat in this project to consult.",
   "chat.groupOpen": "Open project",
-  "chat.groupExpand": "Expand folder",
-  "chat.groupCollapse": "Collapse folder",
+  "chat.groupExpand": "Expand project",
+  "chat.groupCollapse": "Collapse project",
   "chat.statusUnread": "Unread reply",
   "chat.statusRunning": "Working…",
   "chat.statusFailed": "The last turn failed",
   "chat.endpointUnreachable": "This CLI cannot reach {url}. Nothing is answering there, and it will keep retrying — check the endpoint configured for this provider.",
   "chat.endpointUnreachableKnown": "This CLI cannot reach {url} — that is {service}'s address, and it is not running. It will keep retrying until you stop it.",
-  "chat.groupsTitle": "Folders",
-  "chat.groupNew": "New folder",
-  "chat.groupNamePlaceholder": "Folder name",
-  "chat.groupRename": "Rename folder",
-  "chat.groupDelete": "Delete folder",
-  "chat.groupDeleteHint": "The conversations in it are kept — they go back to the ungrouped list.",
-  "chat.groupMoveTo": "Move to folder",
-  "chat.groupNone": "No folder",
-  "chat.groupUngrouped": "Ungrouped",
+  "chat.groupsTitle": "Projects",
+  "chat.groupNew": "New project",
+  "chat.groupNamePlaceholder": "Project name",
+  "chat.groupRename": "Rename project",
+  "chat.groupColor": "Project colour",
+  "chat.groupColorNone": "No colour \u2014 follow the app\u2019s accent",
+  "chat.groupDelete": "Delete project",
+  "chat.groupDeleteHint": "The conversations in it are kept \u2014 they go back to the list with no project.",
+  "chat.groupMoveTo": "Move to project",
+  "chat.groupNone": "No project",
+  "chat.groupUngrouped": "No project",
   "chat.groupEmpty": "Empty",
   "chat.effortTitle": "Reasoning effort",
   "chat.effortDefault": "The CLI's own setting",
@@ -2533,7 +2545,6 @@ const en = {
   "chat.effortMedium": "Medium",
   "chat.effortHigh": "High",
   "chat.effortMax": "Maximum",
-  "chat.effortHint": "Higher levels think longer and cost more. Each CLI has its own scale, so this is mapped to the nearest step it accepts.",
   "ai.setupCopyCommand": "Copy command",
   "ai.setupRunInTerminal": "Run in terminal",
   "ai.setupTerminalTitle": "Provider sign-in",
@@ -3550,9 +3561,10 @@ const en = {
      why it is there. */
   "chat.foundInMessages": "Found in messages",
   "chat.pinnedGroup": "Pinned",
-  "chat.recentGroup": "Recent",
+  "chat.recentGroup": "Chats",
   "chat.archivedGroup": "Archived",
   "chat.untitled": "New conversation",
+  "chat.rowMenu": "More actions",
   "chat.rename": "Rename",
   "chat.renamePrompt": "New name for this conversation",
   "chat.pin": "Pin",
@@ -3565,8 +3577,48 @@ const en = {
   "chat.showArchived": "Show archived",
   "chat.hideArchived": "Hide archived",
   "chat.sidebarEmpty": "No conversations yet. Start one — it doesn’t need a repository.",
-  "chat.emptyTitle": "Ask anything",
-  "chat.emptyBody": "A conversation here doesn’t need a repository open. Attach one when the question is about code, and the model can read it.",
+  /* The empty chat's greeting, picked by the clock — see `greetingKey` in `ChatWelcome`. Three
+     strings rather than one neutral line because this is the most-visited screen in the workspace
+     and the one place the app gets to sound like it noticed somebody arrived. */
+  "chat.welcomeMorning": "Good morning",
+  "chat.welcomeAfternoon": "Good afternoon",
+  "chat.welcomeEvening": "Good evening",
+  /* A question, not a statement: the whole screen is a text box waiting to be typed into. */
+  "chat.welcomeAsk": "What are you working on?",
+  /* "Attach one" used to mean a repository, which is not something this workspace can do — the
+     attachment that exists is a file, on the paperclip beside the composer. */
+  "chat.emptyBody": "A conversation here needs no repository open, and reaches none either. Attach a file when the question is about code, and the model can read it.",
+  /* The four openers under the greeting. Each pair is the words on the chip and the text it leaves
+     in the composer, caret at the end — so they end mid-thought, with a colon and a blank line for
+     whatever is about to be pasted in. A starter that reads like a finished question is a demo. */
+  /* The openers on the empty chat. Each draft states the shape of the answer as well as the
+     subject — the part a person will not type and the part that decides whether the reply is worth
+     reading — and ends at a label with a blank line, so there is nothing to delete before pasting.
+     See `ChatWelcome`. */
+  "chat.starterErrorLabel": "Explain an error",
+  "chat.starterErrorHint": "The likeliest cause, how to check it, and the shortest fix.",
+  "chat.starterErrorDraft":
+    "I have this error and I don\u2019t know what it means. Tell me the likeliest cause, how to confirm it in under a minute, and the smallest fix that resolves it. If several causes are possible, order them by likelihood.\n\nError:\n",
+  "chat.starterCommitLabel": "Write a commit",
+  "chat.starterCommitHint": "Conventional Commits, imperative, with the why in the body.",
+  "chat.starterCommitDraft":
+    "Write the commit message for these changes. Use Conventional Commits, an imperative subject of 72 characters or less, and a body that explains why it was done rather than which lines moved. If they mix unrelated things, tell me how to split it.\n\nChanges:\n",
+  "chat.starterReviewLabel": "Review a snippet",
+  "chat.starterReviewHint": "Bugs and edge cases first, without rewriting the whole thing.",
+  "chat.starterReviewDraft":
+    "Review this code. Start with real bugs and edge cases, then readability, and leave style for last. Don\u2019t rewrite it wholesale: propose the smallest change for each point and tell me which one you would do first.\n\nCode:\n",
+  "chat.starterGitLabel": "A git command",
+  "chat.starterGitHint": "The command, what each flag does, and how to undo it.",
+  "chat.starterGitDraft":
+    "How do I do this with git? Give me the command, explain what each flag does, tell me what changes if the repository isn\u2019t clean, and how to undo it if it goes wrong.\n\nI want to: ",
+  "chat.starterDiffLabel": "Understand a diff",
+  "chat.starterDiffHint": "What actually changes, and what it might break.",
+  "chat.starterDiffDraft":
+    "Read this diff and tell me what actually changes in behaviour, what might break, and what a reviewer would look at before approving it. Ignore anything that is only formatting.\n\nDiff:\n",
+  "chat.starterFileLabel": "Make a file",
+  "chat.starterFileHint": "A spreadsheet, a deck or an image, ready to download.",
+  "chat.starterFileDraft":
+    "Build me a file I can download. Tell me first what you will build it with, and when you are done check that it is there and say what you left.\n\nI want: ",
   "chat.jumpToLatest": "Jump to latest",
   /* The empty transcript of a conversation that exists but has no turns yet — distinct from
      `chat.emptyTitle`, which is the no-conversation-selected state of the whole workspace. */
@@ -3597,7 +3649,104 @@ const en = {
      stay in the transcript and in the engine's context, and what this sends is a new turn. Without
      the banner the user believes they corrected a question they in fact only asked twice. */
   "chat.reAskingTurn": "Asking turn {n} again — the original stays in the transcript",
+  /* The strip above the composer listing what this conversation's turns wrote to disk — the mirror
+     of the attachment chips, pointing the other way. */
+  "chat.outputsLabel": "Files from this chat",
+  "chat.outputSave": "Save {name}\u2026",
+  /* The panel beside the reasoning dial: what this conversation can and cannot do. Every line is a
+     flag the app already acts on or a state of this conversation — deliberately not a capability
+     grid, which would be one more thing here claiming something it cannot check. Nothing that the
+     reader cannot act on: the prose about repositories and interpreters that used to close this
+     panel was cut, and the interpreter check now happens in the turn that needs it. See
+     `ChatCapabilities`. */
+  "chat.capabilitiesTitle": "What this chat can do",
+  "chat.capabilitiesHeading": "This conversation, on {provider}",
+  "chat.capImagesIn": "Look at images you attach",
+  "chat.capImagesInNo": "{provider} reads an attached image as bytes, not as a picture.",
+  "chat.capFilesOut": "Create files you can download",
+  "chat.capFilesOutYes": "They appear under the answer that made them, ready to save.",
+  "chat.capFilesOutNo": "Turn it on in Settings \u203a AI tasks. Until then it can only answer in text.",
+  "chat.capStreams": "Write the answer as it thinks",
+  "chat.capStreamsNo": "This CLI sends the reply in one piece: it appears when it is ready.",
+  "chat.capResume": "Pick this conversation up again",
+  "chat.capResumeNone": "It keeps no session, so every turn re-sends the whole conversation \u2014 a long one costs more each time.",
+  "chat.capEffort": "Take a reasoning level",
+
+  /* ---- the context meter, and compaction ----
+
+     The meter answers one question a chat client normally leaves the user to discover the hard
+     way: how much of the model's window this conversation is already taking. It matters here more
+     than in a hosted chat, because both of the ways it fills up are silent — a resuming CLI fills
+     its own window out of sight, and a replaying one is truncated by `REPLAY_CHAR_BUDGET` without
+     telling anyone. The first symptom either way is a model that has forgotten the beginning.
+
+     Two phrasings for the number, and they must stay distinguishable: `contextMeasured` is the
+     engine's own report and `contextEstimated` is this app counting characters. The `~` in front
+     of the estimate is the visible half of the same distinction. */
+  "chat.contextTitle": "Context window",
+  /* The unit, when there is no window to be a fraction of. */
+  "chat.contextTokensLabel": "tokens",
+  "chat.contextOfWindow": "of {total} · {percent}%",
+  "chat.contextMeasured": "Measured: what the engine reported reading on the last turn.",
+  "chat.contextEstimated": "Estimated from the text — no turn here has reported its usage yet.",
+  /* Said out loud rather than shown as a missing bar nobody can interpret. The honest version of
+     "we don't know" is worth more than a gauge at the wrong scale, which is what a locally-served
+     model would get: ollama will run a nominally-128k model at 4096 and the name says nothing. */
+  "chat.contextUnknownWindow": "We don’t know this model’s window, so there is no percentage — a gauge with the wrong scale is worse than none.",
+  "chat.contextResumes": "The next question continues the engine’s session: only your message is sent.",
+  "chat.contextReplays": "The next question opens a fresh session and re-sends the conversation as context.",
+  "chat.contextAutoOn": "If it fills up, the next question summarises it first — once, and it says so.",
+  "chat.contextAutoOff": "Nothing happens on its own: compacting is this button.",
+  "chat.compactedAuto": "The conversation was full, so it was summarised before sending",
+  "chat.contextCompacted": "The first {n} turns travel as a summary.",
+  "chat.contextShowSummary": "Read the summary",
+  "chat.contextHideSummary": "Hide the summary",
+  "chat.contextUncompact": "Undo",
+  "chat.contextCompact": "Compact the conversation",
+  "chat.contextCompacting": "Compacting…",
+  /* Both halves matter. "Costs a turn" is why it carries a coin; "deletes nothing" is what makes
+     it safe to press, and it is literally true — every message stays, only what the *next* turn is
+     sent changes. */
+  "chat.contextCompactHint": "Asks the model to summarise what you have discussed and sends that instead of the earlier turns. Costs one turn, deletes nothing.",
+  /* The status-bar row while it runs. */
+  "chat.compacting": "Compacting conversation",
+  "chat.compactedBy": "Compacted: {percent}% less context",
+  /* The divider in the transcript. The messages above it are still there for the reader and gone
+     for the model, and that gap is exactly what this has to name. */
+  "chat.compactionMark": "Summarised up to here · {n} turns",
+  "chat.compactionExplains": "The messages above are still here for you. The model receives this summary in their place.",
+  "chat.compactionUndo": "Undo the compaction and send the full conversation again",
+
+  /* ---- acting on a selected passage ---- */
+  "chat.quoteReply": "Reply to this",
+  "chat.quoteNewChat": "Send to another chat",
+
+  /* ---- caveman mode ----
+
+     Compressed answers, adapted from the Caveman skill by Julius Brussee (MIT,
+     github.com/JuliusBrussee/caveman) — see `src-tauri/src/caveman.rs`. The level names are
+     that project's and are identifiers: never translated, because `/caveman ultra` has to mean
+     the same thing here as in a terminal. Only the sentence under each one is prose. */
+  "chat.cmdCaveman": "Compressed answers, caveman style — add a level, or “off”",
+  "chat.cavemanOn": "Answers come back compressed: {level}",
+  "chat.cavemanOff": "Back to normal answers",
+  "chat.cavemanUnknown": "“{level}” is not a level. There are: {levels} — or “off”.",
+  "chat.cavemanLite": "No filler or hedging. Full sentences, just tight.",
+  "chat.cavemanFull": "Drops articles, fragments allowed, short synonyms. The classic.",
+  "chat.cavemanUltra": "Also drops conjunctions. One word where one will do.",
+  "chat.cavemanWenyanLite": "Answers in semi-classical Chinese, grammar intact.",
+  "chat.cavemanWenyanFull": "Answers in full classical Chinese (文言文).",
+  "chat.cavemanWenyanUltra": "Classical Chinese taken to the extreme.",
+
+
   "chat.copyCode": "Copy code",
+  /* The other corner button on a code block: writes it to a file the user picks. The suggested
+     name comes from the model's own first-line comment when it wrote one, and otherwise from the
+     fence language — see `lib/codeFileName`. */
+  "chat.saveCode": "Save as\u2026",
+  /* The generic stem for a saved block whose name had to be guessed: "snippet.py". A word, not a
+     sentence — it becomes a filename. */
+  "chat.codeFileStem": "snippet",
   "chat.copied": "Copied",
   /* On the regenerate / edit / branch buttons. None of the six CLIs can rewind a session, so each
      of these is a fresh session replaying the prefix — cheap to store, paid for again in tokens. */
@@ -3620,7 +3769,12 @@ const en = {
   "chat.attachRepo": "Attach a repository",
   "chat.detachRepo": "Detach the repository",
   "chat.noRepoBadge": "No repository · read-only",
-  "chat.noRepoHint": "With no repository attached this conversation can’t write files. Attach one to let the model edit.",
+  /* The same badge when file generation is on. It drops the read-only claim — which would be false
+     — and keeps the one that is still true and is the one people are actually asking about. */
+  "chat.noRepoWritableBadge": "No repository · own folder",
+  "chat.noRepoWritableHint":
+    "This conversation cannot reach any of your repositories. It runs in a folder of its own, where it can write the files you ask it for — they appear above the composer, ready to save. Turn this off in Settings › AI tasks.",
+  "chat.noRepoHint": "This conversation reaches no repository, and right now it cannot write files either. Turn on file generation in Settings › AI tasks.",
   "chat.repoBadge": "Repository · {name}",
   "chat.commandsApp": "CodeFlow",
   "chat.commandsProvider": "{provider} commands",
@@ -3630,11 +3784,11 @@ const en = {
   "chat.sourceDocumented": "documented",
   "chat.sourceApp": "CodeFlow",
   "chat.cmdNew": "Start a new conversation",
-  "chat.cmdModel": "Change the model",
-  "chat.cmdProvider": "Change the provider",
-  "chat.cmdClear": "Clear the transcript",
   "chat.cmdExport": "Export as Markdown",
   "chat.cmdBranch": "Branch from the last turn",
+  /* The only app command that takes anything after its name, so the row says so — there is
+     nowhere else the argument form would be discovered. */
+  "chat.cmdCompact": "Summarise the earlier turns to free up context — add what to keep after the command",
   /* The honest strip under the picker. See the capability matrix in `lib/aiProviders`: a control
      that silently does nothing for four of six CLIs is worse than one that isn’t offered. */
   "chat.ambiguousResumeWarning": "{provider} resumes whichever conversation ran last, not this one. Two open at once will cross contexts.",
@@ -3740,6 +3894,8 @@ const en = {
   "ai.waitingForOutput": "Starting…",
   "ai.traceSteps": "Process · {n} steps",
   "ai.stepsN": "{n} steps",
+  "ai.quietFor": "No output for {time}",
+  "ai.quietHint": "The CLI is still running but has printed nothing for a while. It may be blocked before it ever reached the model — an MCP server that never came up, or a sign-in waiting for a browser nobody can open in a headless run. Stop ends it, and everything it started.",
   "pr.reviewAgain": "Review again",
   "checkpoints.title": "Restore points",
   "checkpoints.empty": "No checkpoints",

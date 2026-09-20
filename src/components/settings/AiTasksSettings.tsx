@@ -52,6 +52,8 @@ import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT, type Translate } from "../../state/languageStore";
+import { usePreferencesStore } from "../../state/preferencesStore";
+import { Checkbox } from "../common/Checkbox";
 import { modelRouteLabel } from "../ai/ModelTag";
 import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
@@ -74,6 +76,10 @@ function fold(text: string): string {
 export function AiTasksSettings() {
   const t = useT();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const fileGeneration = usePreferencesStore((s) => s.chatFileGenerationEnabled);
+  const setFileGeneration = usePreferencesStore((s) => s.setChatFileGenerationEnabled);
+  const autoCompact = usePreferencesStore((s) => s.chatAutoCompactEnabled);
+  const setAutoCompact = usePreferencesStore((s) => s.setChatAutoCompactEnabled);
 
   // ---------- routing ----------
   const defaultProvider = useAiProviderStore((s) => s.providerId);
@@ -264,6 +270,39 @@ export function AiTasksSettings() {
 
   return (
     <div>
+      {/* ---------- what a chat with no repository may do ----------
+
+          Here and not under a "chat" heading, because there is no chat section and this is a
+          statement about what an AI task is allowed to do — which is what this screen is. It sits
+          above the toolbar rather than among the task rows: it is not one task's setting, it
+          changes what every repo-less conversation can do. */}
+      <label className="mb-3 flex items-start gap-2 text-[13px]">
+        <span className="mt-[2px]">
+          <Checkbox checked={fileGeneration} onChange={(checked) => void setFileGeneration(checked)} />
+        </span>
+        <span>
+          {t("settings.chatFileGenerationLabel")}
+          <span className="mt-0.5 block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+            {t("settings.chatFileGenerationHint")}
+          </span>
+        </span>
+      </label>
+
+      {/* Beside it for the same reason it is on this screen at all: both are statements about what
+          a turn may do on its own. This one spends a turn without being asked for it, which is
+          exactly the kind of thing that has to be switchable and has to say so out loud. */}
+      <label className="mb-3 flex items-start gap-2 text-[13px]">
+        <span className="mt-[2px]">
+          <Checkbox checked={autoCompact} onChange={(checked) => void setAutoCompact(checked)} />
+        </span>
+        <span>
+          {t("settings.chatAutoCompactLabel")}
+          <span className="mt-0.5 block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+            {t("settings.chatAutoCompactHint")}
+          </span>
+        </span>
+      </label>
+
       {/* ---------- the toolbar ---------- */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="relative min-w-[200px] flex-1">

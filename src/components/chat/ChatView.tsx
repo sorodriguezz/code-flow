@@ -2,18 +2,23 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { FolderGit2, MessagesSquare, Pencil, ShieldCheck } from "lucide-react";
 import { ChatTranscript } from "./ChatTranscript";
+import { ChatWelcome } from "./ChatWelcome";
 import { ChatComposer } from "./ChatComposer";
+import type { ContextReading } from "./ContextMeter";
 import { ConversationSidebar } from "./ConversationSidebar";
 import { GroupView } from "./GroupView";
 import { COLUMN_GUTTER, READING_COLUMN } from "./chatChrome";
 import type { ChatAppCommand } from "./CommandMenu";
-import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { openTerminal, writeFileBytes } from "../../lib/tauri/commands";
 import { chatAttachBytes, chatAttachFile, type ChatAttachment } from "../../lib/tauri/chatCommands";
-import { EMPTY_CONVERSATION, useConversationStore } from "../../state/conversationStore";
+import { EMPTY_CONVERSATION, effortKey, useConversationStore } from "../../state/conversationStore";
+import { estimateTokens } from "../../lib/contextWindow";
+import { appendQuote, passageForNewChat } from "../../lib/quoteSelection";
+import { providerCapabilities } from "../../lib/aiProviders";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useUiStore } from "../../state/uiStore";
+import { usePreferencesStore } from "../../state/preferencesStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
 import { useWindowStore } from "../../state/windowStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -24,6 +29,10 @@ import { useT } from "../../state/languageStore";
  *  reference on every render. A fresh `[]` would be a new prop each time and would defeat every
  *  memo below it. */
 const EMPTY_ATTACHMENTS: ChatAttachment[] = [];
+
+/** The key the not-yet-created conversation's draft is filed under. Empty rather than a made-up
+ *  word because conversation ids are uuids: nothing real can ever collide with it. */
+const NEW_CHAT_DRAFT = "";
 
 /**
  * The chat workspace.
@@ -85,7 +94,22 @@ export function ChatView() {
   // is describing what the *next* one will start on, which is the workspace routing. Once a
   // conversation exists its own row wins — `chat_send` runs on that, not on the routing.
   const model = session.model || routedModel;
-  const effortSupported = effortProviders.includes(provider);
+  /**
+   * Two gates, and they answer different questions: does this CLI take the flag, and would the
+   * model it is pointed at do anything with it. The first is fixed for a build and read once at
+   * startup; the second follows the model picker, because opencode and cline drive whatever their
+   * configured providers serve — a dial over `ollama/llama3` spends a flag nobody reads.
+   *
+   * Unknown reads as yes. The probe is one IPC round trip, and defaulting it to no would blink the
+   * control out of existence on every engine switch for the ordinary case.
+   */
+  const effortByModel = useConversationStore((s) => s.effortByModel);
+  const ensureEffortSupport = useConversationStore((s) => s.ensureEffortSupport);
+  useEffect(() => {
+    if (effortProviders.includes(provider)) ensureEffortSupport(provider, model);
+  }, [effortProviders, provider, model, ensureEffortSupport]);
+  const effortSupported =
+    effortProviders.includes(provider) && (effortByModel[effortKey(provider, model)] ?? true);
   const attachments = (activeId && attachmentsByConversation[activeId]) || EMPTY_ATTACHMENTS;
 
   // Read back from disk when the conversation changes, rather than trusting what is in memory: the
@@ -124,14 +148,76 @@ export function ChatView() {
   const sidebarWidth = useLayoutStore((s) => s.sizes.chatSidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
-  const openSettings = useUiStore((s) => s.openSettings);
+  // Read here rather than passed down: the badge is the only thing in this view that changes with
+  // it, and the setting is global.
+  const fileGeneration = usePreferencesStore((s) => s.chatFileGenerationEnabled);
   const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
 
-  const [draft, setDraft] = useState("");
-  /** The turn whose text is sitting in the composer for a second attempt. Held only so the banner
-   *  above the composer can say which one — the send itself is an ordinary send, because nothing
-   *  here can rewind a turn. `null` for an ordinary message, which is almost always. */
-  const [editingTurn, setEditingTurn] = useState<number | null>(null);
+  /**
+   * What is typed but not sent, **per conversation**.
+   *
+   * One shared string was the obvious shape and the wrong one: the composer follows you. Half a
+   * question typed in one thread appears in the next one you open, and going back to the first
+   * finds it empty — so the same bug both plants text where it does not belong and loses text that
+   * does. Attachments never had this problem (they are files, filed under the conversation that
+   * owns them), which made the composer the one thing in this view that ignored which chat you were
+   * in.
+   *
+   * Held here rather than on `conversationStore`'s session, and that is not laziness. Sessions are
+   * **evicted** past `MAX_LIVE_CONVERSATIONS` to keep transcripts and their traces out of memory;
+   * an unsent paragraph is a few hundred bytes and is the user's, so it must not be subject to a
+   * cap that exists to bound something else entirely. Keeping it here means the expensive thing can
+   * still be dropped while the irreplaceable one is not.
+   *
+   * Not persisted, so a restart loses them. Within a session — which is where this was reported and
+   * is where switching chats happens — going back to a thread finds exactly what you left in it.
+   */
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  /** The turn whose text is sitting in the composer for a second attempt, per conversation. Held
+   *  only so the banner above the composer can say which one — the send itself is an ordinary send,
+   *  because nothing here can rewind a turn. Keyed for the same reason the drafts are: the banner
+   *  used to follow you into a conversation whose turn 3 was somebody else's. */
+  const [editingTurns, setEditingTurns] = useState<Record<string, number>>({});
+
+  /** The key a conversation's unsent state is filed under. The empty string stands for "no
+   *  conversation open" — the composer on the welcome screen, whose text belongs to the thread the
+   *  first message will create. Ids are uuids, so it cannot collide with one. */
+  const draftKey = activeId ?? NEW_CHAT_DRAFT;
+  const draft = drafts[draftKey] ?? "";
+  const editingTurn = editingTurns[draftKey] ?? null;
+
+  /**
+   * Writes a draft under an explicit key.
+   *
+   * Explicit because two callers change the *conversation* and the draft in the same breath —
+   * "send this to another chat" deselects first — and a setter bound to whatever `draftKey` was
+   * when the callback was created would file the new text under the conversation the user just
+   * left. That is the original bug wearing a different hat.
+   */
+  const setDraftFor = useCallback((key: string, value: string | ((current: string) => string)) => {
+    setDrafts((all) => {
+      const current = all[key] ?? "";
+      const next = typeof value === "function" ? value(current) : value;
+      return next === current ? all : { ...all, [key]: next };
+    });
+  }, []);
+  const setDraft = useCallback(
+    (value: string | ((current: string) => string)) => setDraftFor(draftKey, value),
+    [setDraftFor, draftKey],
+  );
+  const setEditingTurn = useCallback(
+    (turn: number | null) =>
+      setEditingTurns((all) => {
+        if (turn === null) {
+          if (!(draftKey in all)) return all;
+          const rest = { ...all };
+          delete rest[draftKey];
+          return rest;
+        }
+        return all[draftKey] === turn ? all : { ...all, [draftKey]: turn };
+      }),
+    [draftKey],
+  );
 
   useEffect(() => {
     // `init` subscribes to `ai:chat-delta` and is idempotent; the listing is what the sidebar
@@ -183,7 +269,21 @@ export function ChatView() {
    */
   useEffect(() => {
     void adoptInflight();
-  }, [satellites, adoptInflight]);
+    /**
+     * And the list with it, which is the half this was missing.
+     *
+     * `windows:satellites` fires when the ask box is built and again when the chat comes back from
+     * a window of its own, and both are moments this window's list can have fallen behind: every
+     * conversation created in another webview is a row this store has never listed. Detaching the
+     * chat made it appear — that window boots and lists fresh — and closing it put the stale list
+     * back on screen, which is the shape the bug was reported in: "as an island I can see it, back
+     * in the app I cannot."
+     *
+     * One indexed query over a list the sidebar is already rendering, on a signal that fires when a
+     * window opens or closes and at no other time.
+     */
+    void loadConversations(true);
+  }, [satellites, adoptInflight, loadConversations]);
 
   const conversation = useMemo(
     () => conversations.find((candidate) => candidate.id === activeId) ?? null,
@@ -209,10 +309,144 @@ export function ChatView() {
     return null;
   }, [projectsByWorkspace, session.projectId]);
 
-  const onEditRequest = useCallback((turn: number, content: string) => {
-    setDraft(content);
-    setEditingTurn(turn);
-  }, []);
+  const compacting = useConversationStore((s) => (activeId ? Boolean(s.compacting[activeId]) : false));
+  const autoCompactEnabled = usePreferencesStore((s) => s.chatAutoCompactEnabled);
+  const cavemanLevels = useConversationStore((s) => s.cavemanLevels);
+  const setCaveman = useConversationStore((s) => s.setCaveman);
+  const pendingCaveman = useConversationStore((s) => s.pendingCaveman);
+  const setPendingCaveman = useConversationStore((s) => s.setPendingCaveman);
+  // Asked once per model and cached. `undefined` — not yet answered — and `null` — asked, and the
+  // app will not name a window for this one — draw identically, so there is no flash of a wrong bar
+  // while the probe is in flight.
+  const windowByModel = useConversationStore((s) => s.windowByModel);
+  const ensureContextWindow = useConversationStore((s) => s.ensureContextWindow);
+  useEffect(() => {
+    if (model) ensureContextWindow(model);
+  }, [model, ensureContextWindow]);
+  const compact = useConversationStore((s) => s.compact);
+  const uncompact = useConversationStore((s) => s.uncompact);
+
+  /**
+   * How much is in front of the model, assembled from the two places that know.
+   *
+   * The conversation row carries the *measured* figure — what the engine itself reported reading on
+   * the last turn — and the transcript is what an estimate is counted from before any turn has
+   * reported. Which of the two is being shown is passed through rather than smoothed over; see
+   * `ContextMeter`.
+   *
+   * The estimate counts **what would actually be sent**, not the whole transcript: on a compacted
+   * thread the earlier turns are replaced by the summary, so counting them would report a context
+   * the user has already paid a turn to get rid of.
+   */
+  const contextReading = useMemo<ContextReading | undefined>(() => {
+    if (!activeId || !conversation) return undefined;
+    // Nothing has been asked yet, so there is nothing to be full of. A ring at 0% on an empty chat
+    // is chrome with no information in it.
+    if (session.messages.length === 0) return undefined;
+
+    const cut = conversation.compactedThroughTurn;
+    const summary = conversation.compactedSummary ?? "";
+    const replayed = cut === null ? session.messages : session.messages.filter((m) => m.turn > cut);
+    const measured = conversation.contextTokens ?? null;
+    const window = windowByModel[model] ?? null;
+    // Both halves, because either one alone is wrong: a provider that cannot resume never has a
+    // token, and a provider that can may still be starting fresh — which is exactly the state a
+    // compaction leaves the thread in.
+    const resumes =
+      providerCapabilities(session.provider).resumesSessions && Boolean(session.sessionId);
+    return {
+      tokens:
+        measured ??
+        estimateTokens([summary, ...replayed.map((m) => m.content)].filter(Boolean).join("\n\n")),
+      measured: measured !== null,
+      window,
+      resumes,
+      /*
+       * Whether the backend would actually compact this conversation on its own, which is a
+       * narrower question than whether the setting is on.
+       *
+       * A replaying turn is always protected: the backend builds the prefix and measures it against
+       * its own budget. A *resuming* one can only be protected where both halves of a percentage
+       * exist — a reported occupancy and a window the app will name — and on four of the six
+       * engines neither does. Saying "it will compact itself" there would be a promise this app
+       * cannot keep, so the panel only makes it where it is true. Mirrors
+       * `auto_compact_if_full`.
+       */
+      autoCompacts:
+        autoCompactEnabled && (!resumes || (measured !== null && window !== null)),
+      compactedTurns: cut === null ? 0 : cut + 1,
+      summary,
+      compacting,
+      onCompact: () => void compact(activeId),
+      onUncompact: () => void uncompact(activeId),
+    };
+  }, [
+    activeId,
+    conversation,
+    session.messages,
+    session.provider,
+    session.sessionId,
+    model,
+    windowByModel,
+    autoCompactEnabled,
+    compacting,
+    compact,
+    uncompact,
+  ]);
+
+  const onEditRequest = useCallback(
+    (turn: number, content: string) => {
+      setDraft(content);
+      setEditingTurn(turn);
+    },
+    // Both setters are bound to the conversation that is open *now*. An empty list here would
+    // freeze them on the first render's key — which is the welcome screen's — and every edit would
+    // land in a draft nobody is looking at.
+    [setDraft, setEditingTurn],
+  );
+
+  /**
+   * "Responder esto" — the selected passage becomes a quote in *this* conversation's composer.
+   *
+   * It does not send, for the same reason the welcome openers do not: what the user is about to
+   * type is the question, and the quote is only the part of the answer they are pointing at. The
+   * conversation's own context is already with the engine — resumed or replayed — so nothing has to
+   * be re-explained; the quote's whole job is to say *which part* of it the next question is about.
+   *
+   * Appended to whatever is already in the composer, because quoting after starting to type is the
+   * ordinary order of that gesture.
+   */
+  const onQuoteReply = useCallback(
+    (passage: string) => {
+      setDraft((current) => appendQuote(current, passage));
+      useUiStore.setState((s) => ({ chatComposerFocus: s.chatComposerFocus + 1 }));
+    },
+    [setDraft],
+  );
+
+  /**
+   * "Enviar a otro chat" — the passage starts a conversation of its own.
+   *
+   * `deselect` rather than `create`: a conversation here is minted by its first message (see
+   * `onSend`), so this leaves the workspace on the empty state with the passage in the composer and
+   * the caret after it. Pressing send creates the thread; changing your mind leaves no empty row in
+   * the sidebar, which is the whole reason creation works that way.
+   *
+   * The passage is carried **unquoted**. In a new chat it is the entire message and there is
+   * nothing to distinguish it *from*; see `lib/quoteSelection`.
+   */
+  const onQuoteNewChat = useCallback(
+    (passage: string) => {
+      deselect();
+      setEditingTurn(null);
+      // Written under the new-chat key explicitly, not through `setDraft`: `deselect` has changed
+      // which conversation is open, but this closure still holds the old `draftKey`, so the bound
+      // setter would put the passage in the thread the user just left.
+      setDraftFor(NEW_CHAT_DRAFT, passageForNewChat(passage));
+      useUiStore.setState((s) => ({ chatComposerFocus: s.chatComposerFocus + 1 }));
+    },
+    [deselect, setDraftFor, setEditingTurn],
+  );
 
   /**
    * Sends, creating the conversation on the first message.
@@ -238,12 +472,31 @@ export function ChatView() {
         if (id) send(id, message);
       });
     },
-    [activeId, send, create, provider, routedModel],
+    [activeId, send, create, provider, routedModel, setEditingTurn],
   );
 
   const onStop = useCallback(() => {
     if (activeId) stopTurn(activeId);
   }, [activeId, stopTurn]);
+
+  /**
+   * An opener from the welcome screen: put it in the composer, then hand over the caret.
+   *
+   * **It does not send.** Every starter is half a sentence — the interesting part is the error, the
+   * diff or the snippet that has not been pasted yet — so sending on the click would fire off a
+   * question the user had not finished asking, on a surface where each question costs a real turn.
+   *
+   * The focus is the other half of the gesture and is bumped through `uiStore` rather than a ref,
+   * because that is the channel `ChatComposer` already listens on; it also lands the caret at the
+   * end of the text, which is exactly where the rest of the question goes.
+   */
+  const onPickStarter = useCallback(
+    (text: string) => {
+      setDraft(text);
+      useUiStore.setState((s) => ({ chatComposerFocus: s.chatComposerFocus + 1 }));
+    },
+    [setDraft],
+  );
 
   /** Opens the provider's own CLI where the conversation is anchored. Only offered when there is a
    *  repository behind the chat: the terminal dock is keyed by project, and a shell opened for a
@@ -281,27 +534,50 @@ export function ChatView() {
   }, [conversation, session.messages, t]);
 
   const runAppCommand = useCallback(
-    (command: ChatAppCommand) => {
+    (command: ChatAppCommand, args: string) => {
       switch (command) {
         case "new":
+          // Not a delete: it drops the *selection*, so the next message starts a new thread and
+          // everything said so far is still in the list on the left. `submit` has already emptied
+          // the composer by the time this runs, which is why there is no `setDraft("")` here — and
+          // why the `/clear` that used to sit beside this was the same command under a name that
+          // means "wipe the conversation" everywhere else.
           deselect();
-          break;
-        case "clear":
-          // Not a delete and deliberately not one: it drops the *selection*, so the next message
-          // starts somewhere new and everything said so far is still in the list on the left.
-          setDraft("");
-          deselect();
-          break;
-        case "model":
-        case "provider":
-          // Both land on the same screen because they are the same setting: the chat task's route
-          // is a provider *and* a model, and splitting them into two destinations would mean one of
-          // the two commands always took you to the wrong half.
-          openSettings("review");
           break;
         case "export":
           void exportTranscript();
           break;
+        case "compact":
+          // The same action the meter's button runs, plus the one thing the button cannot offer:
+          // whatever the user typed after the command steers what the summary keeps. `/compact
+          // quédate con las rutas de archivo` is a different summary from `/compact` alone, and
+          // there is nowhere else in the app to say so.
+          if (activeId) void useConversationStore.getState().compact(activeId, args);
+          break;
+        case "caveman": {
+          /*
+           * `/caveman`, `/caveman ultra`, `/caveman off`.
+           *
+           * What each of those *means* is the backend's — which word stops the mode, what a bare
+           * command gives you, which levels exist. This only reports the refusal, because the
+           * sentence has to be in the interface language and the list has to be the real one.
+           *
+           * An unrecognised word is said out loud rather than quietly rounded to a level: a user
+           * who typed `/caveman ultra-max` believing they had changed something would go on
+           * reading the same answers and blaming the model.
+           */
+          void useConversationStore
+            .getState()
+            .applyCaveman(activeId, args)
+            .then((applied) => {
+              if (applied) return;
+              const known = useConversationStore.getState().cavemanLevels;
+              pushErrorToast(
+                t("chat.cavemanUnknown", { level: args.trim(), levels: known.join(", ") }),
+              );
+            });
+          break;
+        }
         case "branch": {
           // From the last turn, which is what "branch this conversation" means with no turn picked.
           // The per-turn branch lives on the bubble's hover row.
@@ -311,7 +587,7 @@ export function ChatView() {
         }
       }
     },
-    [deselect, openSettings, exportTranscript, activeId, session.messages],
+    [deselect, exportTranscript, activeId, session.messages, t],
   );
 
   // Writability follows the conversation's own `projectId`, not the lookup above: a repository the
@@ -323,7 +599,13 @@ export function ChatView() {
   return (
     <div className="flex h-full min-h-0 bg-[var(--cf-surface)]" data-tour="chat-view">
       <div
-        style={{ width: sidebarWidth }}
+        // The stored width, capped at a share of the window. The handle below lets it reach 420px,
+        // which is a third of a comfortable window and two fifths of the smallest one the app
+        // allows — a width chosen on a wide monitor should not follow you onto a narrow one and
+        // leave the transcript with less room than the list of its own titles. `%` rather than a
+        // media query because there is nothing to switch: the cap simply stops applying once the
+        // window is wide enough for the number the user picked.
+        style={{ width: sidebarWidth, maxWidth: "34%" }}
         className="flex shrink-0 flex-col border-r border-[var(--cf-border)]"
       >
         <ConversationSidebar />
@@ -359,12 +641,22 @@ export function ChatView() {
                 {repoName}
               </span>
             ) : (
+              /*
+               * Two different true statements, and picking the wrong one is the failure this
+               * branch exists to prevent.
+               *
+               * "Read-only" was accurate while a repo-less turn could not write anything. With
+               * file generation on it can — into a directory of its own, holding nothing of the
+               * user's, but a badge that still said read-only would be the app lying about the one
+               * fact this header carries. What stays true either way is the part that matters:
+               * nothing here can reach your repositories.
+               */
               <span
-                title={t("chat.noRepoHint")}
+                title={t(fileGeneration ? "chat.noRepoWritableHint" : "chat.noRepoHint")}
                 className="flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-2 text-[10.5px] leading-[18px] text-[var(--cf-text-muted)]"
               >
                 <ShieldCheck size={10} />
-                {t("chat.noRepoBadge")}
+                {t(fileGeneration ? "chat.noRepoWritableBadge" : "chat.noRepoBadge")}
               </span>
             ))}
 
@@ -377,17 +669,17 @@ export function ChatView() {
           <GroupView group={activeGroup} />
         ) : activeId === null ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            {/* `min-h-0` on the scroller and `h-full` inside it, because `EmptyState` centres
+            {/* `min-h-0` on the scroller and `h-full` inside it, because `ChatWelcome` centres
                 itself in the box it is given and a flex child with no minimum would shrink to the
                 height of its own text — leaving the hero hard against the composer instead of in
                 the middle of the space above it. */}
             <div className={`min-h-0 flex-1 overflow-y-auto ${READING_COLUMN} ${COLUMN_GUTTER}`}>
               <div className="h-full">
-                <EmptyState
-                  icon={MessagesSquare}
-                  title={t("chat.emptyTitle")}
-                  subtitle={t("chat.emptyBody")}
-                />
+                {/* The file opener is only offered when a turn here could actually write one —
+                    the same gate the composer's capabilities panel reads. A card promising a
+                    spreadsheet on a chat that cannot produce one would be the thing this whole
+                    workspace has spent the week removing. */}
+                <ChatWelcome onPickStarter={onPickStarter} canWriteFiles={writable || fileGeneration} />
               </div>
             </div>
             {/* The composer is on screen with no conversation open, which is the ChatGPT behaviour
@@ -400,6 +692,9 @@ export function ChatView() {
               effort={pendingEffort}
               effortSupported={effortSupported}
               onPickEffort={setPendingEffort}
+              // The style `/caveman` left here for the conversation the first message will create.
+              // Held rather than written, because there is no row yet — see `pendingCaveman`.
+              caveman={{ level: pendingCaveman, levels: cavemanLevels, onPick: setPendingCaveman }}
               attachments={EMPTY_ATTACHMENTS}
               sending={false}
               turns={0}
@@ -407,13 +702,18 @@ export function ChatView() {
               onDraftChange={setDraft}
               onSend={onSend}
               onStop={onStop}
+              canWriteFiles={writable || fileGeneration}
               onRunAppCommand={runAppCommand}
               onOpenTerminal={onOpenTerminal}
             />
           </div>
         ) : (
           <>
-            <ChatTranscript onEditRequest={onEditRequest} />
+            <ChatTranscript
+              onEditRequest={onEditRequest}
+              onQuoteReply={onQuoteReply}
+              onQuoteNewChat={onQuoteNewChat}
+            />
             {editingTurn !== null && (
               // Said out loud, because the composer looks identical either way and what is about
               // to happen is not what "edit" usually means. Nothing is replaced: the old turn and
@@ -455,8 +755,23 @@ export function ChatView() {
               onDraftChange={setDraft}
               onSend={onSend}
               onStop={onStop}
+              canWriteFiles={writable || fileGeneration}
               onRunAppCommand={runAppCommand}
               onOpenTerminal={onOpenTerminal}
+              context={contextReading}
+              caveman={{
+                level: conversation?.cavemanLevel ?? "",
+                levels: cavemanLevels,
+                onPick: (level) => {
+                  if (activeId) void setCaveman(activeId, level);
+                },
+              }}
+              // Shut while a compaction runs, and this is not politeness. The backend takes the
+              // conversation's lease for the whole summarising turn, so a message sent meanwhile
+              // is refused — and the composer has already cleared the draft by then, so the
+              // question is simply gone. A closed box for twenty seconds beats a lost paragraph.
+              disabled={compacting}
+              disabledReason={t("chat.contextCompacting")}
             />
           </>
         )}

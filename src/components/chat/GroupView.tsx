@@ -94,7 +94,18 @@ export function GroupView({ group }: { group: ChatGroup }) {
   }, [attachContext, group.id]);
 
   return (
-    <div className="flex min-h-0 flex-1 overflow-hidden">
+    /*
+     * `@container`, and the aside below reads it instead of the viewport.
+     *
+     * It was `lg:block` — a *window* breakpoint on a panel that is not the window. The chat sits
+     * next to a sidebar the user can drag to 420px, inside a window whose minimum is 1024, so
+     * "the window is at least 1024 wide" was true at exactly the moment this pane had 600px left
+     * and could least afford to give 320 of them away. The page then ran on ~280px: the title
+     * wrapped, the composer squeezed, and the reading column stopped being one.
+     *
+     * The pane knows its own width, so the pane decides.
+     */
+    <div className="@container flex min-h-0 flex-1 overflow-hidden">
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className={`${READING_COLUMN} ${COLUMN_GUTTER} space-y-6 py-8`}>
           <h1 className="text-[26px] font-semibold tracking-tight">{group.name}</h1>
@@ -165,7 +176,7 @@ export function GroupView({ group }: { group: ChatGroup }) {
       {/* The rail. Fixed width and its own scroller: it is a settings surface for the project, and
           letting it share the reading column's scroll would mean the instructions scroll away while
           you are reading the conversation list they apply to. */}
-      <aside className="hidden w-[320px] shrink-0 overflow-y-auto border-l border-[var(--cf-border)] p-4 lg:block">
+      <aside className="hidden w-[320px] shrink-0 overflow-y-auto border-l border-[var(--cf-border)] p-4 @3xl:block">
         <section className="pb-5">
           {/* No explanatory line under this heading: the field's own placeholder is an example of
               exactly what goes in it, which teaches the same thing in the space the answer would

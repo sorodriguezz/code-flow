@@ -17,7 +17,8 @@ import { useT } from "../../state/languageStore";
  * - **The line under it** is the activity: the newest thing the CLI printed, which *does* change
  *   every second. Before the first line arrives it says so rather than looking stalled.
  * - **The right edge** is the evidence that it is alive and the way out: elapsed time, how many
- *   steps have gone by, and Stop.
+ *   steps have gone by, and Stop — the last of which a caller can turn off with `showStop` when
+ *   something closer to the user's hands already offers it.
  * - **The bar along the bottom** is indeterminate on purpose. A run has no percentage — anything
  *   that looked like one would be a lie — but "still moving" is real information, and it is what
  *   the eye checks when a review takes two minutes.
@@ -34,6 +35,7 @@ export function AiRunLog({
   running,
   startedAt,
   label,
+  showStop = true,
   expanded,
   onToggle,
 }: {
@@ -49,6 +51,16 @@ export function AiRunLog({
   startedAt?: number | null;
   /** Overrides the headline. A finished trace wants something stable like "3 steps". */
   label?: string;
+  /**
+   * Whether this card draws its own Stop.
+   *
+   * The run is always stoppable; the question is who says so. In the AI panel and the agent tasks
+   * this card is the only thing on screen that knows a run exists, so it has to carry the control.
+   * In a chat it does not: the composer's send button has already become Stop, two centimetres
+   * below and in the place the user's hand is. Two buttons for one action in one view read as two
+   * different actions, so the chat passes `false` and keeps the one that is where you are typing.
+   */
+  showStop?: boolean;
   expanded: boolean;
   onToggle: () => void;
 }) {
@@ -59,6 +71,7 @@ export function AiRunLog({
   const cancel = useAiRunStore((s) => s.cancel);
   const scrollRef = useRef<HTMLDivElement>(null);
   const elapsed = useElapsed(running, startedAt ?? null);
+  const quietFor = useQuiet(running, lines?.length ?? 0, elapsed);
 
   // Follow the tail, the way a terminal does.
   useEffect(() => {
@@ -71,6 +84,9 @@ export function AiRunLog({
   // One entry can carry a couple of lines (an assistant turn's prose plus the tool it called);
   // the newest of them is what the run is doing right now.
   const lastLine = lines[lines.length - 1]?.text.split("\n").pop();
+  // Not while stopping: a run being killed is expected to say nothing, and announcing that as a
+  // stall would be the app worrying about something it is doing itself.
+  const quiet = running && !cancelling && quietFor >= QUIET_AFTER_SECONDS;
 
   const chevron = expanded ? (
     <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
@@ -121,10 +137,23 @@ export function AiRunLog({
       <div className="flex items-center gap-2.5 px-2.5 py-2">
         <ThinkingOrb size="sm" />
 
-        <button onClick={onToggle} className="min-w-0 flex-1 text-left">
+        <button
+          onClick={onToggle}
+          title={quiet ? t("ai.quietHint") : undefined}
+          className="min-w-0 flex-1 text-left"
+        >
           <span className="flex items-center gap-1.5">
-            <span className="shrink-0 text-[12px] font-medium text-[var(--cf-text)]">
-              {label ?? (cancelling ? t("ai.stopping") : t("ai.working"))}
+            <span
+              className={`shrink-0 text-[12px] font-medium ${
+                quiet ? "text-[var(--cf-warning)]" : "text-[var(--cf-text)]"
+              }`}
+            >
+              {label ??
+                (cancelling
+                  ? t("ai.stopping")
+                  : quiet
+                    ? t("ai.quietFor", { time: formatElapsed(quietFor) })
+                    : t("ai.working"))}
             </span>
             {/* "Working…" on its own never said *what* is working, and the answer isn't derivable
                 from the panel: the provider and model come from per-task routing, so the run in
@@ -152,7 +181,7 @@ export function AiRunLog({
           </span>
         </button>
 
-        {runId && (
+        {runId && showStop && (
           <button
             onClick={() => void cancel(runId)}
             disabled={cancelling}
@@ -207,6 +236,44 @@ export function RunEngineChip({ runId }: { runId?: string }) {
 
 /** Seconds since the run started, ticking while it does. Counted from `startedAt` when the caller
  * knows it — mount time is only a fallback for a run whose start nobody recorded. */
+/**
+ * How long a run may print nothing before the card says so.
+ *
+ * Four minutes, and the number is chosen against the *quietest* engine rather than the chattiest.
+ * Every CLI here emits an event stream while it works — steps, tool calls, reasoning — so silence
+ * is not how any of them behave normally, not even the ones that withhold the reply itself until
+ * the end. What it does look like is a run blocked before it ever reached the model: an MCP server
+ * that never completed its handshake, an auth flow waiting for a browser nobody can open in a
+ * headless run. Those hang indefinitely, because nothing in `ai.rs` times a child out — `Stop` is
+ * the only way out and this is the only thing that will tell you to reach for it.
+ *
+ * Generous on purpose. The cost of being late is a few more minutes of an already-wasted wait; the
+ * cost of being early is crying stall on a model that was thinking.
+ */
+const QUIET_AFTER_SECONDS = 240;
+
+/**
+ * Seconds since the run last printed a line.
+ *
+ * Measured two ways, deliberately. A run that has printed **nothing** has been quiet for its whole
+ * life, so that one is simply the elapsed time and is exact — and it is also the case this exists
+ * for. Once a line has arrived the clock restarts from when this card *saw* it, which under-reports
+ * for a card that adopted a run already in flight: it cannot know when the last line landed, and
+ * under-reporting silence is the only direction that never invents it.
+ *
+ * `elapsed` is passed in rather than timed again — it already ticks once a second, which is the
+ * beat this needs, and a second interval would only duplicate it.
+ */
+function useQuiet(running: boolean, steps: number, elapsed: number): number {
+  const since = useRef(Date.now());
+  useEffect(() => {
+    since.current = Date.now();
+  }, [steps]);
+  if (!running) return 0;
+  if (steps === 0) return elapsed;
+  return Math.max(0, Math.floor((Date.now() - since.current) / 1000));
+}
+
 function useElapsed(running: boolean, startedAt: number | null): number {
   const [seconds, setSeconds] = useState(() => (startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0));
   useEffect(() => {

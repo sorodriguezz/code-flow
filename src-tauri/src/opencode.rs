@@ -416,6 +416,10 @@ fn interpret_output(
             session_id: parsed.session_id,
             model: None,
             usage: None,
+            // `None`: this app does not read this CLI's output step by step, so it has no
+            // figure for the *final* prompt — only a cumulative total, which is a bill and not a
+            // gauge. The chat's context meter estimates instead, and says so.
+            context_tokens: None,
         });
     }
 
@@ -449,7 +453,7 @@ fn interpret_output(
     }
     // No events means no session id to report. `None` costs this conversation its continuity (the
     // next turn starts fresh and re-sends the project context) but never resumes the wrong one.
-    Ok(AiRun { text: text.to_string(), session_id: None, model: None, usage: None })
+    Ok(AiRun { text: text.to_string(), session_id: None, model: None, usage: None, context_tokens: None })
 }
 
 /// Rewrites opencode's bare "Session not found" into something actionable. It means the id we asked
@@ -563,6 +567,20 @@ mod tests {
     #[test]
     fn a_quota_error_event_gets_the_marker() {
         let stdout = r#"{"type":"error","sessionID":"ses_a","error":{"name":"APIError","data":{"message":"Insufficient balance"}}}"#;
+        let err = interpret_output(true, "exit status: 0", stdout, "").unwrap_err();
+        assert!(err.starts_with(QUOTA_MARKER), "got {err}");
+    }
+
+    /// The *other* thing opencode says when the money runs out, which for a while reached the user
+    /// as a raw red `APIError` because the signal list only knew "Insufficient balance". Zen bills
+    /// prepaid credit and its gateway phrases the refusal as the upstream call failing, so nothing
+    /// in the message looks like a limit until you know that "funds" is the tell.
+    ///
+    /// The event shape is reconstructed from what the app rendered on screen rather than captured
+    /// off stdout, so the string under test is the message, not the framing around it.
+    #[test]
+    fn the_zen_gateway_running_out_of_credit_gets_the_marker_too() {
+        let stdout = r#"{"type":"error","sessionID":"ses_a","error":{"name":"APIError","data":{"message":"Upstream request failed: Insufficient account funds"}}}"#;
         let err = interpret_output(true, "exit status: 0", stdout, "").unwrap_err();
         assert!(err.starts_with(QUOTA_MARKER), "got {err}");
     }
