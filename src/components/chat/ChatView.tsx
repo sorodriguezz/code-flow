@@ -80,6 +80,10 @@ export function ChatView() {
   const loadAttachments = useConversationStore((s) => s.loadAttachments);
   const addAttachment = useConversationStore((s) => s.addAttachment);
   const removeAttachment = useConversationStore((s) => s.removeAttachment);
+  const pendingAttachments = useConversationStore((s) => s.pendingAttachments);
+  const attachPendingFile = useConversationStore((s) => s.attachPending);
+  const attachPendingBytes = useConversationStore((s) => s.attachPendingBytes);
+  const removePendingAttachment = useConversationStore((s) => s.removePendingAttachment);
   const stopTurn = useConversationStore((s) => s.stop);
   const deselect = useConversationStore((s) => s.deselect);
 
@@ -143,6 +147,37 @@ export function ChatView() {
       }
     },
     [activeId, addAttachment],
+  );
+
+  /**
+   * The same two, for the composer on the empty state — where the file is picked before the
+   * conversation it belongs to exists.
+   *
+   * Worth having rather than disabling the button, because a document is very often *why* somebody
+   * starts a chat: the old paperclip told them to send a message first, which meant asking the
+   * question before the thing it is about could be attached. The file is staged now and moved into
+   * the conversation the first message creates — see `conversationStore.create`.
+   */
+  const attachPendingPath = useCallback(
+    async (path: string) => {
+      try {
+        await attachPendingFile(path);
+      } catch (e) {
+        pushErrorToast(String(e));
+      }
+    },
+    [attachPendingFile],
+  );
+
+  const attachPendingData = useCallback(
+    async (name: string, data: Uint8Array) => {
+      try {
+        await attachPendingBytes(name, data);
+      } catch (e) {
+        pushErrorToast(String(e));
+      }
+    },
+    [attachPendingBytes],
   );
 
   const sidebarWidth = useLayoutStore((s) => s.sizes.chatSidebarWidth);
@@ -695,7 +730,10 @@ export function ChatView() {
               // The style `/caveman` left here for the conversation the first message will create.
               // Held rather than written, because there is no row yet — see `pendingCaveman`.
               caveman={{ level: pendingCaveman, levels: cavemanLevels, onPick: setPendingCaveman }}
-              attachments={EMPTY_ATTACHMENTS}
+              attachments={pendingAttachments}
+              onAttachPath={attachPendingPath}
+              onAttachBytes={attachPendingData}
+              onRemoveAttachment={(id) => void removePendingAttachment(id)}
               sending={false}
               turns={0}
               draft={draft}

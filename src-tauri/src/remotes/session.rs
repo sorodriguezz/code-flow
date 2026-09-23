@@ -39,6 +39,7 @@ pub fn open(
         // exclusion undone. A blank `cwd` because the local one says nothing about where this shell
         // actually is.
         terminal::Origin { cwd: String::new(), profile: "ssh".into(), owner: None },
+        terminal::PtyHooks::default(),
     )
     .map_err(|e| explain(spec, e))
 }

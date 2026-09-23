@@ -47,6 +47,15 @@ use crate::db::{chat_queries, Db};
 /// about disk — every one of these bytes is on its way to a model that has to read it.
 const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 
+/// How long a staging directory for an unstarted chat is kept before the sweep calls it abandoned.
+///
+/// A week, and deliberately not an hour. This is the one thing here collected by the clock rather
+/// than by whether its owner still exists, so the number is really answering "how long might
+/// somebody leave a window open with a file attached and the question not yet asked" — and the
+/// cost of guessing long is a few megabytes under the state root, while the cost of guessing short
+/// is a document deleted out from under a composer that is still showing its chip.
+const PENDING_ATTACHMENT_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
 /// Extensions the engines can actually *see* as images rather than read as bytes.
 const IMAGE_EXTENSIONS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "bmp"];
 
@@ -103,6 +112,14 @@ fn safe_group_dir(group_id: &str) -> Result<PathBuf, String> {
     Ok(crate::paths::chat_group_context_dir(group_id))
 }
 
+/// A staging directory for files attached before there is a conversation to file them under. Its
+/// own root as well, and [`crate::paths::chat_pending_attachments_root`] says why that is not
+/// optional here.
+fn safe_pending_dir(pending_id: &str) -> Result<PathBuf, String> {
+    safe_id(pending_id)?;
+    Ok(crate::paths::chat_pending_attachments_dir(pending_id))
+}
+
 /// Copies a file into a directory this module owns, and describes the copy.
 ///
 /// The shared half of attaching, so the conversation and the project paths cannot drift on the
@@ -125,6 +142,26 @@ fn store_file(dir: &Path, source_path: &str) -> Result<ChatAttachment, String> {
     let target = dir.join(stored_name(source_path, &uuid_prefix()));
     std::fs::copy(source, &target).map_err(|e| format!("could not copy the attachment: {e}"))?;
     Ok(describe(&target, meta.len()))
+}
+
+/// Writes bytes that have no file behind them into a directory this module owns.
+///
+/// The other half of [`store_file`], sharing everything that must not differ between a file the
+/// user picked and one the clipboard handed over: the same ceiling, the same stored name, the same
+/// description back.
+fn store_bytes(dir: &Path, name: &str, data: Vec<u8>) -> Result<ChatAttachment, String> {
+    if data.len() as u64 > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "that is {:.1} MB; the limit is {} MB",
+            data.len() as f64 / (1024.0 * 1024.0),
+            MAX_ATTACHMENT_BYTES / (1024 * 1024)
+        ));
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("could not create the attachment directory: {e}"))?;
+    let target = dir.join(stored_name(name, &uuid_prefix()));
+    let len = data.len() as u64;
+    std::fs::write(&target, data).map_err(|e| format!("could not write the attachment: {e}"))?;
+    Ok(describe(&target, len))
 }
 
 /// Everything in a directory this module owns, as attachments.
@@ -239,19 +276,7 @@ pub fn chat_attach_bytes(
     name: String,
     data: Vec<u8>,
 ) -> Result<ChatAttachment, String> {
-    let dir = safe_conversation_dir(&conversation_id)?;
-    if data.len() as u64 > MAX_ATTACHMENT_BYTES {
-        return Err(format!(
-            "that is {:.1} MB; the limit is {} MB",
-            data.len() as f64 / (1024.0 * 1024.0),
-            MAX_ATTACHMENT_BYTES / (1024 * 1024)
-        ));
-    }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("could not create the attachment directory: {e}"))?;
-    let target = dir.join(stored_name(&name, &uuid_prefix()));
-    let len = data.len() as u64;
-    std::fs::write(&target, data).map_err(|e| format!("could not write the attachment: {e}"))?;
-    Ok(describe(&target, len))
+    store_bytes(&safe_conversation_dir(&conversation_id)?, &name, data)
 }
 
 #[tauri::command]
@@ -265,6 +290,99 @@ pub fn chat_list_attachments(conversation_id: String) -> Result<Vec<ChatAttachme
 #[tauri::command]
 pub fn chat_remove_attachment(conversation_id: String, attachment_id: String) -> Result<(), String> {
     remove_from(&safe_conversation_dir(&conversation_id)?, &attachment_id)
+}
+
+// ===================== attached before there was a conversation =====================
+//
+// The composer on the empty state can attach too, and the file has to go somewhere before the row
+// it belongs to exists. It goes to a staging directory of the window's own, and the first message
+// moves it into the conversation it creates — see [`chat_adopt_pending_attachments`], which is the
+// only part of this worth reading twice.
+//
+// These three are the conversation commands above with a different root. They are separate
+// functions rather than one with a flag because the root decides the lifetime, and a boolean
+// argument deciding whether a file is swept by owner or by age is the kind of parameter that gets
+// passed wrong once and is never noticed.
+
+#[tauri::command]
+pub fn chat_attach_pending_file(
+    pending_id: String,
+    source_path: String,
+) -> Result<ChatAttachment, String> {
+    store_file(&safe_pending_dir(&pending_id)?, &source_path)
+}
+
+#[tauri::command]
+pub fn chat_attach_pending_bytes(
+    pending_id: String,
+    name: String,
+    data: Vec<u8>,
+) -> Result<ChatAttachment, String> {
+    store_bytes(&safe_pending_dir(&pending_id)?, &name, data)
+}
+
+#[tauri::command]
+pub fn chat_remove_pending_attachment(
+    pending_id: String,
+    attachment_id: String,
+) -> Result<(), String> {
+    remove_from(&safe_pending_dir(&pending_id)?, &attachment_id)
+}
+
+/// Moves everything staged for the next chat into the conversation that now exists, and returns it
+/// described under its new paths.
+///
+/// **Moved, not copied, and the paths are why.** What the engine is handed is an absolute path, and
+/// the copy it names has to still be there for every later turn of the conversation — a follow-up
+/// question can make the model read the file again. A staged copy left where it was would be under
+/// a root swept by age, so the second half of a long conversation would find its own attachment
+/// gone; and copying instead of moving would leave the original there to be swept anyway, having
+/// spent the disk twice.
+///
+/// Per file rather than renaming the directory whole, because the target may already exist — a
+/// conversation created by one path and adopted into by another — and a directory rename that
+/// failed for that reason would drop every file at once.
+///
+/// Best effort per file and never an error for a staging directory that is not there: the caller is
+/// the first message of a conversation, and a turn the user has already pressed send on must not be
+/// lost over a folder. What it returns is what actually arrived, which is also what the composer
+/// then shows — so a file that did not make it is visibly absent rather than named to a model that
+/// cannot open it.
+#[tauri::command]
+pub fn chat_adopt_pending_attachments(
+    pending_id: String,
+    conversation_id: String,
+) -> Result<Vec<ChatAttachment>, String> {
+    adopt_into(&safe_pending_dir(&pending_id)?, &safe_conversation_dir(&conversation_id)?)
+}
+
+/// The move itself, over two directories that have already been checked. Split out so it can be
+/// tested against two real folders without a state root behind it.
+fn adopt_into(from: &Path, to: &Path) -> Result<Vec<ChatAttachment>, String> {
+    let Ok(entries) = std::fs::read_dir(from) else { return Ok(Vec::new()) };
+    std::fs::create_dir_all(to).map_err(|e| format!("could not create the attachment directory: {e}"))?;
+    let mut adopted = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let target = to.join(entry.file_name());
+        // Both roots are under the state directory, so this is a rename on one filesystem. The
+        // copy is the fallback for the case that is not true of — a state root the user has
+        // pointed at another volume — and it must not leave the original behind to be swept.
+        if std::fs::rename(entry.path(), &target).is_err() {
+            if std::fs::copy(entry.path(), &target).is_err() {
+                continue;
+            }
+            let _ = std::fs::remove_file(entry.path());
+        }
+        adopted.push(describe(&target, meta.len()));
+    }
+    // Same order the listing uses, so the chips do not reshuffle as the conversation takes them on.
+    adopted.sort_by(|a, b| a.name.cmp(&b.name));
+    let _ = std::fs::remove_dir_all(from);
+    Ok(adopted)
 }
 
 /// Removes a conversation's whole attachment directory. Called when the conversation is deleted.
@@ -319,6 +437,11 @@ pub fn chat_sweep_attachments(db: State<'_, Db>) -> Result<usize, String> {
     // rule is the same (no owner, no directory) but the thing being collected is heavier, and a
     // root that is never swept is a root that grows for the life of the install.
     removed += sweep_root(&crate::paths::chat_outputs_dir(), &live);
+
+    // And the files staged for a chat that was never started. The odd one out: swept by age
+    // rather than by owner, because the thing that owns a staging directory is an open composer.
+    // See [`PENDING_ATTACHMENT_TTL`].
+    removed += sweep_stale(&crate::paths::chat_pending_attachments_root(), PENDING_ATTACHMENT_TTL);
 
     // And the dependency trees inside the directories that *do* have an owner.
     removed += sweep_dependency_trees(&crate::paths::chat_outputs_dir());
@@ -657,6 +780,36 @@ pub fn discard_conversation_outputs(conversation_id: &str) {
 }
 
 /// Removes every directory under `root` whose name is not in `live`. Returns how many went.
+/// Removes directories under `root` that nothing has touched for `max_age`.
+///
+/// The by-the-clock counterpart of [`sweep_root`], for the one root whose folders have no owner to
+/// look up: a staging directory belongs to a composer, and a composer lives in a window's memory
+/// rather than in the database. Asking "is there still a row for this" would answer no for every
+/// one of them, including the one somebody is typing beside right now.
+///
+/// A directory whose age cannot be read is left alone. This sweep exists to collect what is
+/// certainly garbage, and "unknown" is not that.
+fn sweep_stale(root: &Path, max_age: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else { return 0 };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_dir() {
+            continue;
+        }
+        let Ok(age) = meta.modified().and_then(|at| {
+            now.duration_since(at).map_err(|_| std::io::Error::other("modified in the future"))
+        }) else {
+            continue;
+        };
+        if age > max_age && std::fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 fn sweep_root(root: &Path, live: &std::collections::HashSet<String>) -> usize {
     let Ok(entries) = std::fs::read_dir(root) else { return 0 };
     let mut removed = 0;
@@ -676,6 +829,58 @@ fn uuid_prefix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-attach-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The whole promise of staging: what was attached before the conversation existed is *in* the
+    /// conversation's directory afterwards, under the path the engine will be given, and the
+    /// staging folder is gone — not left behind for the age sweep to find while the model is still
+    /// being told to read from it.
+    #[test]
+    fn staged_files_move_into_the_conversation() {
+        let from = scratch("from");
+        let to = scratch("to");
+        std::fs::write(from.join("a1b2c3d4-factura.pdf"), b"pdf").unwrap();
+        std::fs::write(from.join("e5f6a7b8-captura.png"), b"png").unwrap();
+
+        let adopted = adopt_into(&from, &to).unwrap();
+
+        assert_eq!(
+            adopted.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["captura.png", "factura.pdf"],
+            "described by the name the user sees, in listing order"
+        );
+        assert!(adopted.iter().all(|a| Path::new(&a.path).exists()), "the path handed to an engine works");
+        assert!(adopted.iter().any(|a| a.is_image), "a png is still an image after the move");
+        assert!(!from.exists(), "the staging folder does not outlive the adoption");
+        assert_eq!(list_dir(&to).len(), 2);
+        std::fs::remove_dir_all(&to).ok();
+    }
+
+    /// The ordinary case by a wide margin: a chat started with no file attached. It must not be an
+    /// error, and it must not create the conversation's directory for nothing.
+    #[test]
+    fn adopting_nothing_is_not_a_failure() {
+        let to = scratch("empty-to");
+        std::fs::remove_dir_all(&to).unwrap();
+        let missing = std::env::temp_dir().join(format!("cf-attach-none-{}", uuid::Uuid::new_v4()));
+
+        assert!(adopt_into(&missing, &to).unwrap().is_empty());
+        assert!(!to.exists(), "no attachments, no folder");
+    }
+
+    /// A staging id is the one path component here that arrives over IPC, and it names a directory
+    /// that is deleted whole.
+    #[test]
+    fn a_staging_id_cannot_climb_out_of_its_root() {
+        assert!(safe_pending_dir("../../etc").is_err());
+        assert!(safe_pending_dir("").is_err());
+        assert!(safe_pending_dir(&uuid::Uuid::new_v4().to_string()).is_ok());
+    }
 
     /// The rule the chips under an answer live by: you can tell the hammer from the shelf because
     /// there is a shelf.

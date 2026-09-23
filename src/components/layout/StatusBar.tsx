@@ -198,6 +198,7 @@ export function StatusBar() {
           are actually on screen, which is why it is a sibling rule and not six separators. */}
       <div className="cf-bar-group ml-auto flex shrink-0 items-center">
         <AgentActivity />
+        <ServicesActivity />
         <CompletionActivity />
         <SystemMeter />
         <BatteryMeter />

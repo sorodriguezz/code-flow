@@ -172,6 +172,10 @@ pub fn satellite_spec(
 /// rather than derived here: the name of an app is a translated string and the name of a repository
 /// is user data, and neither belongs in Rust.
 ///
+/// `workspace_id` is the workspace of the window it was opened from, and the window opens on it.
+/// `None` is a restore from the tray, where the window goes back to the workspace it recorded for
+/// itself. A window that is already open ignores it: it keeps the workspace it was switched to.
+///
 /// Returns the label either way, so the caller can go straight on to focusing it.
 #[tauri::command]
 pub async fn open_satellite(
@@ -179,6 +183,7 @@ pub async fn open_satellite(
     kind: SatelliteKind,
     ref_id: String,
     title: String,
+    workspace_id: Option<String>,
 ) -> Result<String, String> {
     let label = label_for(kind, &ref_id);
 
@@ -210,11 +215,17 @@ pub async fn open_satellite(
     //
     // The identity travels in the query string because it is needed to paint the first frame, and a
     // command round-trip before the first frame is a window that opens empty and then fills in.
-    let url = format!(
+    let mut url = format!(
         "window.html?kind={}&ref={}",
         kind.slug(),
         urlencode(&ref_id)
     );
+    // In the query string for the same reason as the identity: the window picks its workspace
+    // while it boots, before any command could answer. Recording it in a setting for the window to
+    // read instead would race the window's own first read.
+    if let Some(workspace) = workspace_id.as_deref().filter(|w| !w.is_empty()) {
+        url.push_str(&format!("&ws={}", urlencode(workspace)));
+    }
 
     let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title(&title)
@@ -399,7 +410,9 @@ pub async fn restore_satellites(app: AppHandle) -> usize {
         if app.get_webview_window(&entry.label).is_some() {
             continue;
         }
-        if open_satellite(app.clone(), entry.kind, entry.ref_id, entry.title).await.is_ok() {
+        // No workspace: a restored window goes back to the one it recorded, not to the main
+        // window's.
+        if open_satellite(app.clone(), entry.kind, entry.ref_id, entry.title, None).await.is_ok() {
             opened += 1;
         }
     }

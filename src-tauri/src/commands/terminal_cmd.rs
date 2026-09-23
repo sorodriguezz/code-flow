@@ -401,7 +401,7 @@ pub fn clear_workspace_terminals(
 /// call at any moment: an unchanged session costs it a flag check. Errors are swallowed — this runs
 /// where there is nobody to tell, and a failed flush costs the last few seconds of scrollback
 /// rather than anything the user is holding.
-pub fn flush_transcripts(app: &AppHandle) {
+pub fn flush_transcripts<R: tauri::Runtime>(app: &AppHandle<R>) {
     let registry = app.state::<TerminalRegistry>();
     let changed = terminal::drain_transcripts(&registry);
     if changed.is_empty() {

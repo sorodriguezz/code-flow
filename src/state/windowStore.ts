@@ -9,6 +9,7 @@ import {
 import { WINDOW, type DetachableKind } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
 import { translate } from "./languageStore";
+import { useWorkspaceStore } from "./workspaceStore";
 
 /**
  * Which apps and repositories are open in windows of their own.
@@ -77,7 +78,9 @@ export const useWindowStore = create<WindowState>((set, get) => ({
       return false;
     }
     try {
-      await openSatellite(kind, refId, title);
+      // Opened where it was asked for: an app detached while this window sits on "Tienda" shows
+      // "Tienda", whatever that window was switched to the last time it was open.
+      await openSatellite(kind, refId, title, useWorkspaceStore.getState().activeWorkspaceId);
       return true;
     } catch (err) {
       pushErrorToast(String(err));

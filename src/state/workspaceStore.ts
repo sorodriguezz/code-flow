@@ -19,11 +19,38 @@ const LAST_PROJECT_KEY = "last_active_project_id";
  * to switch decides where all of them open next time, which is the opposite of independent.
  *
  * The main window keeps the unsuffixed key. That is not only for compatibility with what is already
- * stored: it is also the fallback a satellite reads on its very first boot, so a window detached
- * while the main one sits on "Tienda" opens on "Tienda" and only diverges once the user says so.
+ * stored: it is also a satellite's fallback when it has nothing better — no opener, and no workspace
+ * of its own that still exists. Where a window opens is decided by `opener` first.
  */
 function windowKey(base: string): string {
   return WINDOW.main ? base : `${base}:${WINDOW.label}`;
+}
+
+/**
+ * The workspace this window was opened from, until the first load has used it.
+ *
+ * **Opening a window is saying where it should be.** The window's own key alone made every app
+ * window come back on whatever it was last switched to — so an app opened from "Tienda" showed the
+ * workspace it was on a week ago, and one whose last workspace had since been deleted fell through
+ * to the first in the list. The opener's workspace travels in the query string (see
+ * `open_satellite`) and wins at boot; the window's own key is what a tray restore goes back to.
+ *
+ * Consumed rather than read each time: it answers "where does this window open", not "where does
+ * it go when it switches".
+ */
+let opener: string | null = WINDOW.openedIn;
+
+/** The first of `ids` that names something in `rows`. */
+function firstKnown<T extends { id: string }>(rows: T[], ids: Array<string | null>): T | undefined {
+  for (const id of ids) {
+    const found = id ? rows.find((row) => row.id === id) : undefined;
+    if (found) return found;
+  }
+  return undefined;
+}
+
+async function setting(key: string): Promise<string | null> {
+  return api.getSetting(key).catch(() => null);
 }
 
 interface WorkspaceState {
@@ -115,14 +142,23 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       }
       set({ workspaces });
       if (!get().activeWorkspaceId && workspaces.length > 0) {
-        // This window's own choice first; the main window's as the fallback, so a satellite that
-        // has never been pointed anywhere opens where the app is — see `windowKey`.
-        const own = await api.getSetting(windowKey(LAST_WORKSPACE_KEY)).catch(() => null);
-        const lastId =
-          own ?? (WINDOW.main ? null : await api.getSetting(LAST_WORKSPACE_KEY).catch(() => null));
-        const restored = lastId ? workspaces.find((w) => w.id === lastId) : undefined;
-        const target = restored ?? workspaces[0];
+        // The main window: where it was. A satellite: where it was opened from (see `opener`),
+        // else its own last choice (a tray restore), else where the main window is — and only
+        // then the first workspace, which is a fallback, not a default. Each candidate is checked
+        // against the list, so a recorded workspace that has since been deleted moves on to the
+        // next one instead of straight to the first.
+        const ids = WINDOW.main
+          ? [await setting(LAST_WORKSPACE_KEY)]
+          : [opener, await setting(windowKey(LAST_WORKSPACE_KEY)), await setting(LAST_WORKSPACE_KEY)];
+        const target = firstKnown(workspaces, ids) ?? workspaces[0];
         set({ activeWorkspaceId: target.id });
+        if (!WINDOW.main && target.id === opener) {
+          // Recorded, so that putting this window away and back brings it here rather than to
+          // wherever it was before it was opened this time.
+          void api.setSetting(windowKey(LAST_WORKSPACE_KEY), target.id);
+        } else {
+          opener = null;
+        }
         await get().loadProjects(target.id);
       }
     } finally {
@@ -133,10 +169,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   loadProjects: async (workspaceId) => {
     const projects = await api.listProjects(workspaceId);
     set((s) => ({ projectsByWorkspace: { ...s.projectsByWorkspace, [workspaceId]: projects } }));
+    // A window just opened from another lands on that window's repository too, when it is in this
+    // workspace. Apps are detached from the main window, so the main window's key is the opener's.
+    const fromOpener = !WINDOW.main && opener === workspaceId;
+    if (fromOpener) opener = null;
     if (!get().activeProjectId && projects.length > 0) {
-      const lastId = await api.getSetting(windowKey(LAST_PROJECT_KEY)).catch(() => null);
-      const restored = lastId ? projects.find((p) => p.id === lastId) : undefined;
-      set({ activeProjectId: (restored ?? projects[0]).id });
+      const ids = fromOpener
+        ? [await setting(LAST_PROJECT_KEY), await setting(windowKey(LAST_PROJECT_KEY))]
+        : [await setting(windowKey(LAST_PROJECT_KEY))];
+      set({ activeProjectId: (firstKnown(projects, ids) ?? projects[0]).id });
     }
   },
 

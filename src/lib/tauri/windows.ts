@@ -18,9 +18,12 @@ export interface SatelliteInfo {
  * `title` is what the OS calls the window (task bar, ⌘`, the window menu), so it is passed from
  * here: an app's name is a translated string and a repository's is user data, and neither belongs
  * on the Rust side.
+ *
+ * `workspaceId` is the workspace of the window doing the opening, and the new window opens on it.
+ * A window that is already open keeps its own.
  */
-export const openSatellite = (kind: DetachableKind, refId: string, title: string) =>
-  invoke<string>("open_satellite", { kind, refId, title });
+export const openSatellite = (kind: DetachableKind, refId: string, title: string, workspaceId: string | null) =>
+  invoke<string>("open_satellite", { kind, refId, title, workspaceId });
 
 export const focusSatellite = (label: string) => invoke<void>("focus_satellite", { label });
 

@@ -28,7 +28,7 @@ use super::queries::now;
 
 const SERVICE_COLUMNS: &str = "id, workspace_id, group_id, name, kind, project_id, cwd, command, \
      env, ports, ready_kind, ready_value, depends_on, autorestart, color, sort_order, created_at, \
-     updated_at";
+     updated_at, detected_ports";
 const GROUP_COLUMNS: &str = "id, workspace_id, name, sort_order, created_at, updated_at";
 
 fn map_service(row: &rusqlite::Row) -> rusqlite::Result<Service> {
@@ -51,6 +51,7 @@ fn map_service(row: &rusqlite::Row) -> rusqlite::Result<Service> {
         sort_order: row.get(15)?,
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
+        detected_ports: row.get(18)?,
     })
 }
 
@@ -103,8 +104,8 @@ pub fn create_service(conn: &Connection, service: &Service) -> rusqlite::Result<
     conn.execute(
         "INSERT INTO services (id, workspace_id, group_id, name, kind, project_id, cwd, command,
              env, ports, ready_kind, ready_value, depends_on, autorestart, color, sort_order,
-             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17)",
+             created_at, updated_at, detected_ports)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17, '[]')",
         params![
             id,
             service.workspace_id,
@@ -157,6 +158,18 @@ pub fn update_service(conn: &Connection, service: &Service) -> rusqlite::Result<
             now(),
         ],
     )?;
+    Ok(())
+}
+
+/// Records the ports a service was just seen listening on.
+///
+/// Its own statement rather than part of [`update_service`], and not only for tidiness: the editor
+/// saves whole rows, and a save that carried the value the form was opened with would quietly undo
+/// what the supervisor learned while the form was open. `updated_at` is left alone for the same
+/// reason — nothing the user wrote has changed.
+pub fn set_detected_ports(conn: &Connection, id: &str, ports: &[u16]) -> rusqlite::Result<()> {
+    let encoded = serde_json::to_string(ports).unwrap_or_else(|_| "[]".to_string());
+    conn.execute("UPDATE services SET detected_ports = ?2 WHERE id = ?1", params![id, encoded])?;
     Ok(())
 }
 
@@ -266,6 +279,7 @@ mod tests {
             sort_order: 0,
             created_at: String::new(),
             updated_at: String::new(),
+            detected_ports: "[]".into(),
         }
     }
 
@@ -311,6 +325,23 @@ mod tests {
         let found = get_service(&conn, "s1").unwrap().unwrap();
         assert_eq!(found.group_id, None, "it is ungrouped, not deleted");
         assert!(list_groups(&conn, "w1").unwrap().is_empty());
+    }
+
+    /// What the supervisor learns survives a save from the editor, which does not carry it.
+    #[test]
+    fn a_save_from_the_editor_keeps_the_learned_ports() {
+        let conn = seeded();
+        let created = create_service(&conn, &service("s1", "web", "[]")).unwrap();
+        set_detected_ports(&conn, &created.id, &[5173, 24678]).unwrap();
+
+        let mut edited = get_service(&conn, "s1").unwrap().unwrap();
+        edited.name = "web-shop".into();
+        edited.detected_ports = "[]".into();
+        update_service(&conn, &edited).unwrap();
+
+        let found = get_service(&conn, "s1").unwrap().unwrap();
+        assert_eq!(found.name, "web-shop");
+        assert_eq!(found.detected_ports, "[5173,24678]");
     }
 
     /// A workspace going away takes its services with it, which is what the foreign key is for.

@@ -1438,9 +1438,9 @@ pub struct Service {
     pub command: String,
     /// JSON object.
     pub env: String,
-    /// JSON array of numbers.
+    /// JSON array of numbers the user pinned. Optional — see `detected_ports`.
     pub ports: String,
-    /// `none` | `port` | `log` | `http`.
+    /// `auto` | `port` | `log` | `http` | `exit` | `none`. See `services::supervisor::Gate`.
     pub ready_kind: String,
     pub ready_value: String,
     /// JSON array of service ids.
@@ -1450,6 +1450,14 @@ pub struct Service {
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// JSON array of the ports the last run was seen listening on. Written by the supervisor, never
+    /// by the editor — defaulted so a row sent from the form without it still deserializes.
+    #[serde(default = "empty_json_array")]
+    pub detected_ports: String,
+}
+
+fn empty_json_array() -> String {
+    "[]".to_string()
 }
 
 /// A folder of services that start together, in dependency order.

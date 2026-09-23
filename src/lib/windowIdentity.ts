@@ -63,6 +63,12 @@ export interface WindowIdentity {
   main: boolean;
   /** What this satellite holds, or `null` in the main window. */
   satellite: { kind: SatelliteKind; refId: string } | null;
+  /**
+   * The workspace of the window that opened this one, which is where it opens. `null` in the main
+   * window, and in a satellite put back from the tray — that one goes back to the workspace it
+   * recorded for itself. See `workspaceStore.loadWorkspaces`.
+   */
+  openedIn: string | null;
 }
 
 /**
@@ -76,7 +82,7 @@ export interface WindowIdentity {
  */
 export function parseIdentity(label: string, search: string): WindowIdentity {
   if (!label.startsWith(SATELLITE_PREFIX)) {
-    return { label, main: true, satellite: null };
+    return { label, main: true, satellite: null, openedIn: null };
   }
 
   // The identity travels in the query string the window was opened with, so the first frame can be
@@ -87,6 +93,7 @@ export function parseIdentity(label: string, search: string): WindowIdentity {
   return {
     label,
     main: false,
+    openedIn: params.get("ws") || null,
     // A satellite whose query string says nothing readable is still a satellite — it must not
     // fall back to being the main window, which is the one mistake with real consequences. It
     // renders "this window holds something this version does not know about" instead.
@@ -104,7 +111,7 @@ function read(): WindowIdentity {
     return parseIdentity(getCurrentWindow().label, window.location.search);
   } catch {
     // No Tauri here — see the note above.
-    return { label: "main", main: true, satellite: null };
+    return { label: "main", main: true, satellite: null, openedIn: null };
   }
 }
 

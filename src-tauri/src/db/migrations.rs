@@ -1653,14 +1653,14 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- JSON object. Values may be `{"vault":"<entry id>"}` rather than a literal, so a
             -- secret stays in the keyring and never becomes a row in this table.
             env          TEXT NOT NULL DEFAULT '{}',
-            -- JSON array of numbers, for the `localhost:5173` link on the row. Declared rather than
-            -- discovered: reading them out of the output is a guess, and a wrong link is worse than
-            -- none.
+            -- JSON array of numbers the user pinned by hand. Optional: what a service listens on
+            -- is discovered from its process tree (see `detected_ports`), so this only exists for
+            -- the case discovery cannot see — a port published by something outside the tree.
             ports        TEXT NOT NULL DEFAULT '[]',
-            -- What "it is up" means: none | port | log | http. Without one, `depends_on` is a lie —
-            -- starting the API the instant the database *process* exists is the failure this is
-            -- here to prevent.
-            ready_kind   TEXT NOT NULL DEFAULT 'none',
+            -- What "it is up" means: auto | port | log | http | exit | none. `auto` watches the
+            -- process tree for a listening port. Without a gate, `depends_on` is a lie — starting the
+            -- API the instant the database *process* exists is the failure this is here to prevent.
+            ready_kind   TEXT NOT NULL DEFAULT 'auto',
             -- The port number, the pattern to look for, or the URL — whichever `ready_kind` needs.
             ready_value  TEXT NOT NULL DEFAULT '',
             -- JSON array of service ids in this workspace. A cycle is refused on save, naming the
@@ -1672,7 +1672,11 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             color        TEXT NOT NULL DEFAULT '',
             sort_order   INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL,
-            updated_at   TEXT NOT NULL
+            updated_at   TEXT NOT NULL,
+            -- JSON array of the ports the service was last *seen* listening on, written by the
+            -- supervisor. A fact about the last run rather than a setting, kept so the next run's
+            -- `auto` gate knows a port is coming — see `services::supervisor`.
+            detected_ports TEXT NOT NULL DEFAULT '[]'
         );
         CREATE INDEX IF NOT EXISTS idx_services_workspace
             ON services (workspace_id, sort_order);
@@ -1933,6 +1937,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_instructions_to_chat_groups(conn)?;
     add_unread_to_chat_conversations(conn)?;
     add_compaction_to_chat_conversations(conn)?;
+    add_detected_ports_to_services(conn)?;
     align_project_ado_org_with_connections(conn)?;
     file_loose_notes_into_a_book(conn)?;
     move_ollama_settings_to_cline(conn)?;
@@ -2304,6 +2309,24 @@ fn add_scope_to_scoped_tables(conn: &Connection) -> rusqlite::Result<()> {
 /// Three columns, all defaulting to the empty string, and the default is the whole migration: every
 /// diagram that already exists was made in the app and stays that way. Only a row whose
 /// `origin_path` is non-empty is a bridge, and nothing writes one except `link_file`.
+/// Services learned their own ports, and `none` stopped being the default gate.
+///
+/// Two changes that only make sense together, which is why they share the one-time trigger of the
+/// column appearing. `detected_ports` is where the supervisor writes what a service was seen
+/// listening on. And every row that said `none` said it because it was the default, whose label
+/// promised "the command finishes" while the executor treated it as "ready the instant it starts" —
+/// so no row holding it chose it. They become `auto`, which is what a default was meant to be.
+/// Guarded by the column so a `none` somebody picks from now on is left alone.
+fn add_detected_ports_to_services(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "services")? && !has_column(conn, "services", "detected_ports")? {
+        conn.execute_batch(
+            "ALTER TABLE services ADD COLUMN detected_ports TEXT NOT NULL DEFAULT '[]';
+             UPDATE services SET ready_kind = 'auto' WHERE ready_kind = 'none';",
+        )?;
+    }
+    Ok(())
+}
+
 /// Gives an already-created `chat_conversations` its `unread` column.
 fn add_unread_to_chat_conversations(conn: &Connection) -> rusqlite::Result<()> {
     if table_exists(conn, "chat_conversations")? && !has_column(conn, "chat_conversations", "unread")? {

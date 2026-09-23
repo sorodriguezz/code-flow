@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use uuid::Uuid;
 
 use crate::shell_profiles::ShellProfile;
@@ -185,12 +185,35 @@ struct TerminalOutputEvent {
     id: String,
     data: String,
     owner: Option<String>,
+    /// This chunk's position in the session, from 1. See [`PtyHooks::on_output`] for the one reader
+    /// that needs it: a pane replaying a history kept elsewhere skips the chunks already in it.
+    seq: u64,
 }
 
 #[derive(Clone, Serialize)]
 struct TerminalExitEvent {
     id: String,
     owner: Option<String>,
+    /// The process's exit code, when it could be collected. `None` for a session closed from this
+    /// side (the kill is ours, so its code says nothing) and for a child that outlived its pty.
+    code: Option<i32>,
+}
+
+/// What a caller that runs a *program* — rather than a shell somebody types into — needs from the
+/// pty beyond its bytes on screen. Empty for every shell; the Services supervisor is what fills it.
+///
+/// Both callbacks run on the session's emitter thread, so they see exactly what the pane sees, in
+/// the same order, and they must be quick: a callback that blocks holds up the terminal's output.
+#[derive(Default)]
+pub struct PtyHooks {
+    /// Extra environment variables for the child, on top of this process's own.
+    pub env: Vec<(String, String)>,
+    /// Every chunk, with its sequence number, *before* it is emitted — so anything the callback
+    /// records is guaranteed to contain every chunk a listener has been sent up to that number.
+    pub on_output: Option<Arc<dyn Fn(u64, &str) + Send + Sync>>,
+    /// Once, when the pty has closed and the session is gone from the registry, with the exit code
+    /// if one could be collected. Called before `terminal:exit` is emitted.
+    pub on_exit: Option<Box<dyn FnOnce(Option<i32>) + Send>>,
 }
 
 /// Which shell to run is decided by [`crate::shell_profiles`]; this only turns the answer into a
@@ -234,6 +257,7 @@ pub fn open_terminal(
             profile: profile.name.clone(),
             owner,
         },
+        PtyHooks::default(),
     )
 }
 
@@ -296,15 +320,18 @@ fn take_utf8(carry: &mut Vec<u8>) -> String {
     }
 }
 
-pub fn open_pty(
-    app: AppHandle,
+#[allow(clippy::too_many_arguments)]
+pub fn open_pty<R: Runtime>(
+    app: AppHandle<R>,
     registry: &TerminalRegistry,
     program: &str,
     args: &[String],
     cwd: Option<&str>,
     record: Option<Recording>,
     origin: Origin,
+    hooks: PtyHooks,
 ) -> Result<String, String> {
+    let PtyHooks { env, on_output, on_exit } = hooks;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -335,6 +362,10 @@ pub fn open_pty(
     // programs look for, since terminfo has no entry that means truecolor.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // After the two above, so a caller that genuinely wants a different `TERM` can still say so.
+    for (key, value) in &env {
+        cmd.env(key, value);
+    }
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -413,6 +444,7 @@ pub fn open_pty(
         // Far enough in the past that the very first byte of a session is emitted on sight rather
         // than held for a frame — a shell's prompt must not appear to arrive late.
         let mut last_flush = Instant::now() - FLUSH_INTERVAL;
+        let mut seq: u64 = 0;
         loop {
             let mut queued = lock_outbox(lock);
             // Parked, not polled: an idle terminal costs nothing at all, and an idle bench of six
@@ -439,12 +471,19 @@ pub fn open_pty(
             let data = std::mem::take(&mut queued.pending);
             drop(queued);
             last_flush = Instant::now();
+            seq += 1;
+            // Before the emit, never after: whatever the hook records must already hold this chunk
+            // by the time any listener can see its number. See `PtyHooks::on_output`.
+            if let Some(tap) = &on_output {
+                tap(seq, &data);
+            }
             let _ = emitter_app.emit(
                 "terminal:output",
                 TerminalOutputEvent {
                     id: emitter_id.clone(),
                     data,
                     owner: emitter_owner.clone(),
+                    seq,
                 },
             );
         }
@@ -472,18 +511,54 @@ pub fn open_pty(
         // thing the `Transcript` doc comment says the feature exists to prevent. Remote sessions
         // carry no key and are unaffected; this is the desktop bench's guarantee.
         crate::commands::terminal_cmd::flush_transcripts(&emitter_app);
-        if let Some(registry) = emitter_app.try_state::<TerminalRegistry>() {
-            if let Ok(mut sessions) = registry.0.lock() {
-                sessions.remove(&emitter_id);
-            }
+        let removed = emitter_app
+            .try_state::<TerminalRegistry>()
+            .and_then(|registry| registry.0.lock().ok().and_then(|mut sessions| sessions.remove(&emitter_id)));
+        // Outside the registry lock: reaping can wait a moment for a child that is still on its way
+        // out, and every other terminal would wait with it. `None` when the session was closed from
+        // this side — `close_terminal` took it out of the map first, and the kill was ours.
+        let code = removed.and_then(|mut session| reap(session.child.as_mut()));
+        if let Some(on_exit) = on_exit {
+            on_exit(code);
         }
         let _ = emitter_app.emit(
             "terminal:exit",
-            TerminalExitEvent { id: emitter_id, owner: emitter_owner },
+            TerminalExitEvent { id: emitter_id, owner: emitter_owner, code },
         );
     });
 
     Ok(id)
+}
+
+/// The exit code of a child whose pty has just closed.
+///
+/// The pty closing and the process being reapable are not the same instant — the last write and
+/// the `exit()` after it race — so this gives it a short while rather than asking once. A child
+/// that is still alive after that has closed its terminal and carried on, which is not an exit at
+/// all; it answers `None` and the child is left to whoever holds it.
+fn reap(child: &mut (dyn Child + Send + Sync)) -> Option<i32> {
+    for attempt in 0..40 {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Some(if status.success() { 0 } else { status.exit_code().max(1) as i32 });
+            }
+            Ok(None) if attempt < 39 => std::thread::sleep(Duration::from_millis(25)),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// The pid of a session's own process — the shell or program the pty was opened with, not
+/// whatever it has started since. `None` once the session is gone.
+pub fn pid_of(registry: &TerminalRegistry, id: &str) -> Option<u32> {
+    let sessions = registry.0.lock().ok()?;
+    sessions.get(id)?.child.process_id()
+}
+
+/// Whether a session is still in the registry — which is to say its pty has not closed yet.
+pub fn is_open(registry: &TerminalRegistry, id: &str) -> bool {
+    registry.0.lock().map(|sessions| sessions.contains_key(id)).unwrap_or(false)
 }
 
 /// The outbox, poisoning ignored.

@@ -27,7 +27,11 @@ import {
   chatGroupRemoveContext,
   chatListAttachments,
   chatListOutputs,
+  chatAdoptPendingAttachments,
+  chatAttachPendingBytes,
+  chatAttachPendingFile,
   chatRemoveAttachment,
+  chatRemovePendingAttachment,
   chatSweepAttachments,
   chatInflightTurns,
   chatSetEffort,
@@ -707,6 +711,23 @@ interface ConversationState {
   loadOutputs: (conversationId: string) => Promise<void>;
   addAttachment: (conversationId: string, file: ChatAttachment) => void;
   removeAttachment: (conversationId: string, attachmentId: string) => Promise<void>;
+  /**
+   * Files staged for a conversation that does not exist yet — the composer on the empty state.
+   *
+   * A list of its own rather than an entry in `attachments` under some placeholder key, because
+   * these live in a different place on disk and under a different rule: the folder they are in has
+   * no conversation to be swept against, so it is collected by age instead. {@link create} moves
+   * them into the next conversation this window creates — wherever it was started from — and
+   * empties this, which is the only transition; nothing here is ever read by a turn.
+   *
+   * Not persisted, exactly like the drafts in `ChatView`: an unsent question and the file that goes
+   * with it are the same gesture, and a restart losing one while keeping the other would be worse
+   * than losing both.
+   */
+  pendingAttachments: ChatAttachment[];
+  attachPending: (sourcePath: string) => Promise<void>;
+  attachPendingBytes: (name: string, data: Uint8Array) => Promise<void>;
+  removePendingAttachment: (attachmentId: string) => Promise<void>;
   setPinned: (conversationId: string, pinned: boolean) => Promise<void>;
   setArchived: (conversationId: string, archived: boolean) => Promise<void>;
   remove: (conversationId: string) => Promise<void>;
@@ -740,6 +761,25 @@ interface ConversationState {
 
   search: (query: string, limit?: number) => Promise<ChatSearchHit[]>;
   sessionFor: (conversationId: string | null) => ConversationSession;
+}
+
+/**
+ * Where this window stages files attached before a conversation exists.
+ *
+ * Module-level rather than store state because nothing draws it: what the composer shows is
+ * `pendingAttachments`, and this is only the folder they are sitting in. Minted on the first
+ * attach so a window that never attaches anything never creates a directory, and kept for the
+ * window's lifetime so the second file joins the first.
+ *
+ * Per window on purpose. Two windows each starting a chat must not stage into the same folder —
+ * whichever sent first would carry off the other's file.
+ */
+let pendingAttachmentDir: string | null = null;
+
+/** The staging id, minting one if this window has not needed one yet. */
+function pendingDir(): string {
+  pendingAttachmentDir ??= crypto.randomUUID();
+  return pendingAttachmentDir;
 }
 
 let subscribed = false;
@@ -801,6 +841,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   activeGroupId: null,
   groupContext: {},
   attachments: {},
+  pendingAttachments: [],
   outputs: {},
 
   init: () => {
@@ -1047,6 +1088,26 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         // conversation.
       }
     }
+    // And the files, for the third time the same problem: the empty state has a paperclip and no
+    // row to hang the file on, so it was staged in a folder of this window's own. This is where it
+    // stops being temporary — the copies are *moved* into this conversation's directory, because
+    // the path the engine is about to be handed has to keep working for every later turn, and the
+    // staging root is swept by age.
+    let adopted: ChatAttachment[] = [];
+    if (get().pendingAttachments.length > 0) {
+      try {
+        adopted = await chatAdoptPendingAttachments(pendingDir(), created.id);
+      } catch (e) {
+        // Said out loud, unlike the two failures above. A level or a style that did not stick costs
+        // a wordier first answer; a document that did not arrive is usually the entire reason the
+        // chat was started, and the turn is about to be sent either way.
+        pushErrorToast(String(e));
+      }
+      set({ pendingAttachments: [] });
+      // Cleared so the next new chat stages somewhere of its own rather than into a folder this
+      // conversation has already emptied.
+      pendingAttachmentDir = null;
+    }
     touch(conversation.id);
     set((s) => ({
       conversations: [conversation, ...s.conversations.filter((c) => c.id !== conversation.id)],
@@ -1056,6 +1117,10 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         // marking it unloaded would send `open` to fetch a transcript that cannot exist yet.
         [conversation.id]: { ...newSession(conversation), loaded: true, persisted: true },
       },
+      // Filed in the same breath as the row, because `ChatView` sends the first message the moment
+      // this resolves and `send` reads the staged list to decide what to name to the engine.
+      attachments:
+        adopted.length > 0 ? { ...s.attachments, [conversation.id]: adopted } : s.attachments,
       activeId: conversation.id,
     }));
     prune();
@@ -1686,6 +1751,23 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         [conversationId]: [...(s.attachments[conversationId] ?? []), file],
       },
     }));
+  },
+
+  attachPending: async (sourcePath) => {
+    const file = await chatAttachPendingFile(pendingDir(), sourcePath);
+    set((s) => ({ pendingAttachments: [...s.pendingAttachments, file] }));
+  },
+
+  attachPendingBytes: async (name, data) => {
+    const file = await chatAttachPendingBytes(pendingDir(), name, Array.from(data));
+    set((s) => ({ pendingAttachments: [...s.pendingAttachments, file] }));
+  },
+
+  removePendingAttachment: async (attachmentId) => {
+    // `pendingDir()` rather than the stored id, and it cannot mint one here: a chip can only be
+    // removed if it was added, and adding is what mints the folder.
+    await chatRemovePendingAttachment(pendingDir(), attachmentId);
+    set((s) => ({ pendingAttachments: s.pendingAttachments.filter((a) => a.id !== attachmentId) }));
   },
 
   removeAttachment: async (conversationId, attachmentId) => {

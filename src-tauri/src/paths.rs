@@ -455,6 +455,31 @@ pub fn chat_group_context_root() -> PathBuf {
     state_dir().join("chat-group-context")
 }
 
+/// Where a file attached **before the conversation exists** waits.
+///
+/// The empty state has a composer in it, so the first message is what mints the row — which left
+/// the paperclip with nothing to copy into and a disabled button explaining that you had to send
+/// something first. A document is very often the reason somebody starts a chat at all, so instead
+/// of moving the row's creation earlier (an abandoned welcome screen would leave an empty
+/// conversation in the sidebar every time) the file is staged here and *moved* into the
+/// conversation the first message creates. See `commands::chat_attach::chat_adopt_pending_attachments`.
+///
+/// A sibling root rather than a folder among the conversations', for the reason
+/// [`chat_group_context_dir`] gives and one more: that sweep deletes any directory whose name is
+/// not a live conversation id, **every window runs it at startup**, and a staging folder is by
+/// definition not a conversation yet — so a satellite opened while somebody was still typing their
+/// first message would collect the file out from under them. Two roots, and this one is swept by
+/// age instead of by owner, because it has no owner to ask about.
+pub fn chat_pending_attachments_root() -> PathBuf {
+    state_dir().join("chat-pending-attachments")
+}
+
+/// One staging directory. The id is a UUID this window minted for its own composer and is checked
+/// at the command boundary like every other id that arrives over IPC.
+pub fn chat_pending_attachments_dir(pending_id: &str) -> PathBuf {
+    chat_pending_attachments_root().join(pending_id)
+}
+
 /// A "please wipe everything" request has to be handled on the *next* launch, before the
 /// database is opened — deleting `codeflow.db` out from under this process's own open SQLite
 /// connection would fail on Windows (can't remove a file that's still locked open). Requesting

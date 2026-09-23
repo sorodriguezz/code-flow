@@ -51,6 +51,7 @@ mod review_memory;
 mod search;
 mod secret_scan;
 mod secrets;
+mod services;
 mod shell_env;
 mod shell_profiles;
 /// AWS request signing, shared by the API client and the Remote workspace's S3 transport.
@@ -316,6 +317,9 @@ pub fn run() {
             db::init_scratch().expect("failed to initialize a scratch database")
         })
         .manage(TerminalRegistry::default())
+        // The Services supervisor. An `Arc` because its tasks outlive every command that starts
+        // them: a dependency wait, a readiness gate and an autorestart backoff all hold it.
+        .manage(std::sync::Arc::new(services::Supervisor::default()))
         .manage(ApiRegistry::default())
         .manage(DbRegistry::default())
         // The keyring's unlocked data key. Managed state rather than a value passed around, so
@@ -433,6 +437,9 @@ pub fn run() {
             // Here for the same reason as everything above it — `setup` is where the `AppHandle`
             // is — and cheap when the bench is empty, which is most installs most of the time.
             commands::terminal_cmd::spawn_transcript_flush(app.handle().clone());
+            // Watches running services for the ports they open and Compose for its containers.
+            // Idle while nothing runs — one look a second at an empty map.
+            services::supervisor::spawn_monitor(app.handle().clone());
             // The remote-control server, in two halves that must happen in this order.
             //
             // `attach` registers the Rust-side listeners that republish app events onto the
@@ -583,6 +590,10 @@ pub fn run() {
             commands::chat_attach::chat_attach_bytes,
             commands::chat_attach::chat_list_attachments,
             commands::chat_attach::chat_remove_attachment,
+            commands::chat_attach::chat_attach_pending_file,
+            commands::chat_attach::chat_attach_pending_bytes,
+            commands::chat_attach::chat_remove_pending_attachment,
+            commands::chat_attach::chat_adopt_pending_attachments,
             commands::chat_attach::chat_sweep_attachments,
             commands::chat_attach::chat_list_outputs,
             commands::chat_attach::chat_save_output,
@@ -620,9 +631,16 @@ pub fn run() {
             commands::services_cmd::rename_service_group,
             commands::services_cmd::delete_service_group,
             commands::services_cmd::reorder_services,
-            commands::services_cmd::start_service,
-            commands::services_cmd::probe_port,
-            commands::services_cmd::probe_http,
+            commands::services_cmd::services_start,
+            commands::services_cmd::services_stop,
+            commands::services_cmd::services_restart,
+            commands::services_cmd::services_runtime,
+            commands::services_cmd::service_log,
+            commands::services_cmd::service_clear_log,
+            commands::services_cmd::service_detect,
+            commands::services_cmd::services_detect_workspace,
+            commands::services_cmd::services_listening_ports,
+            commands::services_cmd::services_free_port,
             commands::services_cmd::service_path_exists,
             commands::repos::pick_folder,
             commands::repos::scan_folder,
@@ -1305,6 +1323,12 @@ pub fn run() {
                 // a pty is — so this is the whole of what "don't lose my work" can mean here, and
                 // it is the moment it has to happen.
                 commands::terminal_cmd::flush_transcripts(_app_handle);
+                // Services, stopped the way the Stop button stops them — Ctrl-C first — rather than
+                // by the process exiting under them. The difference is Compose: its Ctrl-C takes the
+                // containers down, and an app that simply exits leaves them running.
+                _app_handle
+                    .state::<std::sync::Arc<services::Supervisor>>()
+                    .shutdown(_app_handle, std::time::Duration::from_secs(8));
                 let registry = _app_handle.state::<DbRegistry>();
                 tauri::async_runtime::block_on(registry.close_all());
                 // The Remote workspace's own `static` maps, for the reason the comment above gives:

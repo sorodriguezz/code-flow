@@ -77,8 +77,9 @@ export function ChatComposer({
   canWriteFiles?: boolean;
   /** Files already copied into this conversation's folder and staged for the next turn. */
   attachments: ChatAttachment[];
-  /** Copies a file the user picked. Absent before a conversation exists — there is no folder to
-   *  copy into yet, which is why the button is disabled on the empty state. */
+  /** Copies a file the user picked. Absent only where the surface declines files outright (the ask
+   *  box), and the paperclip is then not drawn at all. The empty state *does* pass one: the file is
+   *  staged and moved into the conversation the first message creates. */
   onAttachPath?: (path: string) => Promise<void>;
   /** Stores bytes with no file behind them, which is what a pasted screenshot is. */
   onAttachBytes?: (name: string, data: Uint8Array) => Promise<void>;
@@ -195,7 +196,9 @@ export function ChatComposer({
     if (!file) return;
     event.preventDefault();
     if (!onAttachBytes) {
-      setImageNotice(t("chat.attachNeedsConversation"));
+      // The ask box is the only surface that reaches this, and it declines files on purpose. Said
+      // out loud rather than swallowed: an image that vanishes on paste reads as the app losing it.
+      setImageNotice(t("chat.attachNotHere"));
       return;
     }
     setImageNotice(caps.acceptsImages ? null : t("chat.attachImageBlind"));
@@ -209,10 +212,7 @@ export function ChatComposer({
   };
 
   const attach = async () => {
-    if (!onAttachPath) {
-      setImageNotice(t("chat.attachNeedsConversation"));
-      return;
-    }
+    if (!onAttachPath) return;
     // No extension filter. The old one offered images only, which was the narrower half of what
     // actually works: every engine here has a file-reading tool, so a log, a CSV or a PDF is the
     // case that works *everywhere*, while an image is the case only some can see.
@@ -330,22 +330,27 @@ export function ChatComposer({
               <CavemanChip level={caveman.level} levels={caveman.levels} onPick={caveman.onPick} />
             )}
 
-            <button
-              type="button"
-              onClick={() => void attach()}
-              disabled={!onAttachPath || disabled}
-              title={
-                onAttachPath
-                  ? caps.acceptsImages
+            {/* Absent rather than disabled where the surface takes no files at all — the ask box,
+                and nothing else. The same rule the reasoning dial follows: a control that cannot do
+                anything is worse than no control, and this one spent a version explaining that you
+                had to send a message first, on a composer whose whole job is the message you have
+                not sent yet. */}
+            {onAttachPath && (
+              <button
+                type="button"
+                onClick={() => void attach()}
+                disabled={disabled}
+                title={
+                  caps.acceptsImages
                     ? t("chat.attach")
                     : t("chat.attachTextOnly", { provider: providerDisplayLabel(provider, t) })
-                  : t("chat.attachNeedsConversation")
-              }
-              aria-label={t("chat.attach")}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-white/[0.07]"
-            >
-              <Paperclip size={14} />
-            </button>
+                }
+                aria-label={t("chat.attach")}
+                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-white/[0.07]"
+              >
+                <Paperclip size={14} />
+              </button>
+            )}
 
             {sending ? (
               <button

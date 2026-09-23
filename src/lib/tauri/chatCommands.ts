@@ -471,6 +471,27 @@ export const chatRemoveAttachment = (conversationId: string, attachmentId: strin
 export const chatSweepAttachments = () => invoke<number>("chat_sweep_attachments");
 
 /**
+ * The same three, for a file attached on the empty state — where there is no conversation yet to
+ * file it under, so it is staged under an id the composer minted for itself.
+ *
+ * `chatAdoptPendingAttachments` is what makes that temporary: it moves everything staged into the
+ * conversation the first message created and returns it under its new paths, which is what the
+ * composer then shows. Anything never adopted is collected by age, not by owner — see
+ * `PENDING_ATTACHMENT_TTL` in `chat_attach.rs`.
+ */
+export const chatAttachPendingFile = (pendingId: string, sourcePath: string) =>
+  invoke<ChatAttachment>("chat_attach_pending_file", { pendingId, sourcePath });
+
+export const chatAttachPendingBytes = (pendingId: string, name: string, data: number[]) =>
+  invoke<ChatAttachment>("chat_attach_pending_bytes", { pendingId, name, data });
+
+export const chatRemovePendingAttachment = (pendingId: string, attachmentId: string) =>
+  invoke<void>("chat_remove_pending_attachment", { pendingId, attachmentId });
+
+export const chatAdoptPendingAttachments = (pendingId: string, conversationId: string) =>
+  invoke<ChatAttachment[]>("chat_adopt_pending_attachments", { pendingId, conversationId });
+
+/**
  * One file a conversation's turns left behind in its own working directory.
  *
  * The other direction from `ChatAttachment`: that one is a file the user gave the model, this one

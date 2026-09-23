@@ -31,6 +31,22 @@ describe("window identity", () => {
   });
 
   /**
+   * The workspace it was opened from, which is where it opens.
+   *
+   * Without it an app window came back on whatever it was last switched to — or, when that
+   * workspace had been deleted, on the first one in the list — instead of on the workspace the user
+   * was looking at when they opened it.
+   */
+  it("reads the workspace it was opened from, and nothing when restored", () => {
+    const opened = parseIdentity("sat-app-notes", "?kind=app&ref=notes&ws=62a2a45f-2441-4d42");
+    expect(opened.openedIn).toBe("62a2a45f-2441-4d42");
+    expect(opened.satellite).toEqual({ kind: "app", refId: "notes" });
+    expect(parseIdentity("sat-app-notes", "?kind=app&ref=notes").openedIn).toBeNull();
+    expect(parseIdentity("sat-app-notes", "?kind=app&ref=notes&ws=").openedIn).toBeNull();
+    expect(parseIdentity("main", "?ws=62a2a45f").openedIn).toBeNull();
+  });
+
+  /**
    * The quick-ask window, which is the kind this guard forgot.
    *
    * `windows.rs` builds it as `window.html?kind=quick&ref=ask`, and for as long as `parseIdentity`

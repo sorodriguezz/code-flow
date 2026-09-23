@@ -1,7 +1,8 @@
+import { useEffect } from "react";
 import { CirclePlay } from "lucide-react";
 import { Tooltip } from "../common/Tooltip";
 import { useT } from "../../state/languageStore";
-import { STATUS_TONE, deriveRunning, useServicesStore } from "../../state/servicesStore";
+import { STATUS_TONE, deriveRunning, ensureServicesSync, useServicesStore } from "../../state/servicesStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 
@@ -24,10 +25,9 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
  */
 export function ServicesActivity() {
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  // Subscribed to the two maps the answer is derived from, then derived — a selector returning a
-  // fresh array on every store write would re-render this bar on every line of output.
+  // Subscribed to the map the answer is derived from, then derived — a selector returning a fresh
+  // array on every store write would hand back a new reference each time.
   const runtime = useServicesStore((s) => s.runtime);
-  const runningInfo = useServicesStore((s) => s.runningInfo);
   // Services live in the bottom panel now, so this opens the panel rather than switching view.
   // Not `togglePanel`: pressing a "3 running" badge is a request to see them, and a toggle would
   // close the panel for anyone who already had it open.
@@ -35,10 +35,13 @@ export function ServicesActivity() {
   const togglePanel = useTerminalStore((s) => s.togglePanel);
   const t = useT();
 
-  const running = deriveRunning(runtime, runningInfo, workspaceId);
+  useEffect(() => ensureServicesSync(), []);
+
+  const running = deriveRunning(runtime, workspaceId);
   const total = running.length;
   const elsewhere = running.filter((r) => r.foreign).length;
-  const starting = running.some((r) => r.status === "starting");
+  const starting = running.some((r) => r.status === "starting" || r.status === "stopping");
+  const failing = running.some((r) => r.status === "failed");
 
   if (total === 0) return null;
 
@@ -55,7 +58,10 @@ export function ServicesActivity() {
         onClick={() => !panelOpen && togglePanel()}
         className="flex items-center gap-1 px-1.5 text-[11px] tabular-nums text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
       >
-        <CirclePlay size={12} style={{ color: starting ? STATUS_TONE.starting : STATUS_TONE.ready }} />
+        <CirclePlay
+          size={12}
+          style={{ color: failing ? STATUS_TONE.failed : starting ? STATUS_TONE.starting : STATUS_TONE.ready }}
+        />
         {total}
       </button>
     </Tooltip>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronUp, Settings2, TerminalSquare } from "lucide-react";
+import { ChevronDown, Settings2, TerminalSquare } from "lucide-react";
 import { listShellProfiles } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
@@ -21,7 +21,7 @@ export function ProfileMenu({ onPick, disabled }: { onPick: (profileId: string) 
   const [profiles, setProfiles] = useState<ShellProfile[]>([]);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ right: number; bottom: number; maxHeight: number } | null>(null);
+  const [pos, setPos] = useState<{ right: number; top?: number; bottom?: number; maxHeight: number } | null>(null);
 
   // The menu has to live in a portal, not beside the trigger: the dock's own container is
   // `overflow-hidden` (it animates its height open and closed), so anything positioned above the
@@ -29,13 +29,18 @@ export function ProfileMenu({ onPick, disabled }: { onPick: (profileId: string) 
   const reposition = useCallback(() => {
     const rect = triggerRef.current?.getBoundingClientRect();
     if (!rect) return;
-    setPos({
-      // Right-aligned to the trigger, growing upward: the dock sits at the bottom of the window,
-      // so there is never room below it.
-      right: Math.max(4, window.innerWidth - rect.right),
-      bottom: window.innerHeight - rect.top + 4,
-      maxHeight: Math.max(120, rect.top - 12),
-    });
+    // Right-aligned to the trigger. Downward when it fits: the trigger heads the terminals in the
+    // dock's list now, not a tab strip on the dock's bottom edge, so there is usually room below —
+    // and a menu that opens away from its caret reads as the wrong control. Upward when the dock is
+    // too short for it.
+    const right = Math.max(4, window.innerWidth - rect.right);
+    const below = window.innerHeight - rect.bottom - 12;
+    const above = rect.top - 12;
+    if (below >= 240 || below >= above) {
+      setPos({ right, top: rect.bottom + 4, maxHeight: Math.max(120, below) });
+    } else {
+      setPos({ right, bottom: window.innerHeight - rect.top + 4, maxHeight: Math.max(120, above) });
+    }
   }, []);
 
   useLayoutEffect(() => {
@@ -81,7 +86,10 @@ export function ProfileMenu({ onPick, disabled }: { onPick: (profileId: string) 
         aria-expanded={open}
         className="flex h-5 w-4 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
       >
-        <ChevronUp size={11} />
+        {/* Down, as every "more ways to do this" caret beside a button is. Up read as "collapse
+            this section", which is what an up-chevron at the end of a heading means everywhere
+            else in the app. */}
+        <ChevronDown size={11} />
       </button>
       {open &&
         pos &&
@@ -89,7 +97,7 @@ export function ProfileMenu({ onPick, disabled }: { onPick: (profileId: string) 
           <div
             ref={menuRef}
             role="menu"
-            style={{ position: "fixed", right: pos.right, bottom: pos.bottom, maxHeight: pos.maxHeight }}
+            style={{ position: "fixed", right: pos.right, top: pos.top, bottom: pos.bottom, maxHeight: pos.maxHeight }}
             className="z-[9999] min-w-[200px] overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
           >
             <p className="px-2 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">

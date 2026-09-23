@@ -131,11 +131,18 @@ function useSatelliteBoot(): boolean {
         // rectangle tracking the main window's does.
         startWindowBoundsTracking(),
         useWindowStore.getState().init(),
-        // Lands on this window's own last workspace, falling back to the main window's on a first
-        // boot — see `workspaceStore`'s `windowKey`. So a window detached while main sits on
-        // "Tienda" opens on "Tienda", and from then on it holds whatever *it* was pointed at.
+        // Lands on the workspace of the window it was opened from — see `workspaceStore`'s
+        // `opener`. So a window detached while main sits on "Tienda" opens on "Tienda", and from
+        // then on it holds whatever *it* is pointed at.
         useWorkspaceStore.getState().loadWorkspaces(),
       ]);
+      // Spent. A reload of this window is not another "open it from there", so it must come back to
+      // what it was switched to since, which its own key has.
+      if (WINDOW.openedIn) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("ws");
+        window.history.replaceState(window.history.state, "", url);
+      }
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
       setReady(true);
     })();
@@ -150,10 +157,9 @@ function useSatelliteBoot(): boolean {
    * look at another. Each window now holds its own, chosen from its title bar and recorded under
    * its own key.
    *
-   * A *fresh* satellite still opens where the app is, but through the stored setting rather than
-   * through the bus: `loadWorkspaces` reads this window's own key and falls back to the main
-   * window's. That happens once, at boot, and is why the `workspace` bus message has no listener
-   * left at all.
+   * Every time it is *opened* it opens where it was opened from — the workspace travels in its query
+   * string, not on the bus — and a tray restore brings it back to the one it recorded. That happens
+   * once, at boot, and is why the `workspace` bus message has no listener left at all.
    *
    * The one thing that must still cross the boundary is a workspace that has stopped existing: a
    * window left pointing at a deleted one would list rows nothing owns. `state:invalidate` already

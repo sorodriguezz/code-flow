@@ -1,37 +1,25 @@
-//! Starting services, and the two questions the executor cannot answer from JavaScript.
+//! The Services workspace's commands: definitions in, and the supervisor's verbs out.
 //!
 //! # A service is a terminal with a name
 //!
-//! Nothing here spawns a process of its own. [`start_service`] resolves a working directory,
-//! builds one command line and hands it to [`crate::terminal::open_pty`] — the same call the
-//! terminal dock and the Remote workspace already use. What that buys, for free: colour, a real
-//! tty (so `vite` and `docker compose` print their progress the way they do in a terminal),
-//! `terminal:output` / `terminal:exit` events the existing xterm pane already knows how to render,
-//! and Ctrl-C, resize and close that already work. The only thing this file adds on top is a name
-//! and a `cwd` policy.
-//!
-//! # Why the orchestration is *not* here
-//!
-//! Dependency order, readiness gates and restarts live in the frontend's `servicesStore`, in the
-//! main window and nowhere else — the same split as the agent-chain executor, and for the same
-//! reason. The gate that matters most is "this line appeared in the output", and the output is
-//! already streaming into the frontend; moving the whole graph into Rust to avoid one round trip
-//! per probe would mean re-implementing the log stream on the other side of it.
-//!
-//! What the frontend genuinely cannot do is open a TCP socket or make an arbitrary HTTP request
-//! from a webview under a strict origin policy. Those two are [`probe_port`] and [`probe_http`],
-//! and they are the entire backend half of the gates.
+//! Nothing here spawns a process of its own. The supervisor resolves a working directory, builds
+//! one command line and hands it to [`crate::terminal::open_pty`] — the same call the terminal dock
+//! and the Remote workspace use — so a service gets colour, a real tty, the xterm pane, Ctrl-C and
+//! resize for free. What it adds on top is a name, an order, a gate and a way to stop a whole tree.
+//! See [`crate::services::supervisor`] for why that orchestration lives here and not in the webview.
 
 use std::collections::HashMap;
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
 
-use tauri::{AppHandle, State};
+use serde::Serialize;
+use tauri::{AppHandle, Manager, State};
 
 use crate::db::models::{Service, ServiceGroup};
 use crate::db::{queries, service_queries, Db};
-use crate::terminal::{Origin, TerminalRegistry};
+use crate::services::detect::{self, Candidate};
+use crate::services::ports;
+use crate::services::supervisor::{RuntimeView, ServiceLog};
+use crate::services::Supervisor;
 
 #[tauri::command]
 pub fn list_services(db: State<Db>, workspace_id: String) -> Result<Vec<Service>, String> {
@@ -56,18 +44,15 @@ pub fn create_service(db: State<Db>, service: Service) -> Result<Service, String
 
 /// Saves a service, refusing a dependency graph that cannot finish.
 ///
-/// The check is here rather than in the executor because a cycle is a mistake in the *definition*,
-/// and the moment to say so is while the person who made it is looking at the form. In the executor
-/// it would surface as a group that starts nothing, hours later, with no obvious cause — and the
-/// executor would have to carry cycle detection anyway to avoid hanging.
+/// The check is here rather than in the supervisor because a cycle is a mistake in the
+/// *definition*, and the moment to say so is while the person who made it is looking at the form.
 #[tauri::command]
 pub fn update_service(db: State<Db>, service: Service) -> Result<(), String> {
     if service.name.trim().is_empty() {
         return Err("a service needs a name".into());
     }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let mut all = service_queries::list_services(&conn, &service.workspace_id)
-        .map_err(|e| e.to_string())?;
+    let mut all = service_queries::list_services(&conn, &service.workspace_id).map_err(|e| e.to_string())?;
     // The saved version, not the stored one: the cycle being introduced is in the edit.
     for existing in all.iter_mut() {
         if existing.id == service.id {
@@ -80,18 +65,23 @@ pub fn update_service(db: State<Db>, service: Service) -> Result<(), String> {
     service_queries::update_service(&conn, &service).map_err(|e| e.to_string())
 }
 
+/// Deletes a service — stopped first, and awaited: deleting the definition of something still
+/// running would leave a process nothing on screen can name, let alone stop.
 #[tauri::command]
-pub fn delete_service(db: State<Db>, id: String) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    service_queries::delete_service(&conn, &id).map_err(|e| e.to_string())
+pub async fn delete_service(app: AppHandle, id: String) -> Result<(), String> {
+    let supervisor = Supervisor::of(&app);
+    supervisor.stop(&app, std::slice::from_ref(&id)).await;
+    {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        service_queries::delete_service(&conn, &id).map_err(|e| e.to_string())?;
+    }
+    supervisor.forget(&id);
+    Ok(())
 }
 
 #[tauri::command]
-pub fn create_service_group(
-    db: State<Db>,
-    workspace_id: String,
-    name: String,
-) -> Result<ServiceGroup, String> {
+pub fn create_service_group(db: State<Db>, workspace_id: String, name: String) -> Result<ServiceGroup, String> {
     if name.trim().is_empty() {
         return Err("a group needs a name".into());
     }
@@ -115,6 +105,148 @@ pub fn delete_service_group(db: State<Db>, id: String) -> Result<(), String> {
 pub fn reorder_services(db: State<Db>, workspace_id: String, ids: Vec<String>) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     service_queries::reorder_services(&conn, &workspace_id, &ids).map_err(|e| e.to_string())
+}
+
+/// Starts `ids` and everything they wait for. Returns as soon as the work is queued; progress
+/// arrives as `services:runtime` events.
+#[tauri::command(async)]
+pub fn services_start(app: AppHandle, workspace_id: String, ids: Vec<String>) -> Result<(), String> {
+    Supervisor::of(&app).start(&app, &workspace_id, &ids)
+}
+
+/// Stops `ids`, dependents first, and returns once every one of them is down.
+#[tauri::command]
+pub async fn services_stop(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
+    Supervisor::of(&app).stop(&app, &ids).await;
+    Ok(())
+}
+
+/// Stops what is running of `ids`, then starts them all again in dependency order.
+#[tauri::command]
+pub async fn services_restart(app: AppHandle, workspace_id: String, ids: Vec<String>) -> Result<(), String> {
+    Supervisor::of(&app).restart(&app, &workspace_id, &ids).await
+}
+
+/// Every service the supervisor knows about, in any workspace — what a webview that has just
+/// loaded (or reloaded) needs to draw the truth instead of "nothing is running".
+#[tauri::command]
+pub fn services_runtime(app: AppHandle) -> Vec<RuntimeView> {
+    Supervisor::of(&app).snapshot()
+}
+
+/// What a service has printed, across restarts, for a console that is mounting.
+#[tauri::command]
+pub fn service_log(app: AppHandle, id: String) -> ServiceLog {
+    Supervisor::of(&app).log(&id)
+}
+
+#[tauri::command]
+pub fn service_clear_log(app: AppHandle, id: String) {
+    Supervisor::of(&app).clear_log(&id);
+}
+
+/// What a folder can run, best first. See [`crate::services::detect`].
+#[tauri::command]
+pub async fn service_detect(path: String) -> Vec<Candidate> {
+    tauri::async_runtime::spawn_blocking(move || detect::detect(Path::new(path.trim())))
+        .await
+        .unwrap_or_default()
+}
+
+/// One repository's suggestions, for the importer.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectCandidates {
+    pub project_id: String,
+    pub project_name: String,
+    pub path: String,
+    pub candidates: Vec<Candidate>,
+}
+
+/// What every repository in a workspace can run — the "detect services" button.
+#[tauri::command]
+pub async fn services_detect_workspace(app: AppHandle, workspace_id: String) -> Result<Vec<ProjectCandidates>, String> {
+    let projects = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::list_projects(&conn, &workspace_id).map_err(|e| e.to_string())?
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        projects
+            .into_iter()
+            .map(|project| ProjectCandidates {
+                candidates: detect::detect(Path::new(&project.local_path)),
+                project_id: project.id,
+                project_name: project.name,
+                path: project.local_path,
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// One listening port on this machine, and the service it belongs to when it is one of ours.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PortRow {
+    pub port: u16,
+    pub address: String,
+    pub pid: u32,
+    pub process: String,
+    pub service_id: Option<String>,
+    pub service_name: Option<String>,
+    pub workspace_id: Option<String>,
+}
+
+/// Every TCP port something is listening on — the Ports view — with the owning service named where
+/// the process belongs to one. Docker's published ports are attributed by number, since the
+/// process holding them is Docker's, not the service's.
+#[tauri::command]
+pub async fn services_listening_ports(app: AppHandle) -> Vec<PortRow> {
+    let owners = Supervisor::of(&app).port_owners();
+    let listeners = tauri::async_runtime::spawn_blocking(ports::all_listeners).await.unwrap_or_default();
+    let by_pid: HashMap<u32, &(String, String, String)> =
+        owners.by_pid.iter().map(|(pid, owner)| (*pid, owner)).collect();
+    let by_port: HashMap<u16, &(String, String, String)> =
+        owners.by_port.iter().map(|(port, owner)| (*port, owner)).collect();
+    let mut rows: Vec<PortRow> = listeners
+        .into_iter()
+        .map(|listener| {
+            let owner = by_pid.get(&listener.pid).or_else(|| by_port.get(&listener.port)).copied();
+            PortRow {
+                port: listener.port,
+                address: listener.address,
+                pid: listener.pid,
+                process: listener.process,
+                service_id: owner.map(|o| o.0.clone()),
+                service_name: owner.map(|o| o.1.clone()),
+                workspace_id: owner.map(|o| o.2.clone()),
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| a.port.cmp(&b.port).then(a.pid.cmp(&b.pid)));
+    rows.dedup_by(|a, b| a.port == b.port && a.pid == b.pid);
+    rows
+}
+
+/// Ends the process holding a port — the answer to "address already in use" when the holder is
+/// not a service this app can stop by name. Refuses the two pids no user means.
+#[tauri::command]
+pub async fn services_free_port(pid: u32) -> Result<(), String> {
+    if pid <= 1 || pid == std::process::id() {
+        return Err("that process cannot be stopped from here".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || ports::terminate(pid))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Whether a path is a directory, for the service editor to say so before the first run rather than
+/// after it. Cheap enough to call on every keystroke of a path field.
+#[tauri::command]
+pub fn service_path_exists(path: String) -> bool {
+    !path.trim().is_empty() && Path::new(path.trim()).is_dir()
 }
 
 /// The first cycle in a set of services, named, or `None` when the graph is a DAG.
@@ -162,163 +294,6 @@ fn find_cycle(services: &[Service]) -> Option<String> {
     None
 }
 
-/// Where a service runs.
-///
-/// A `project_id` means the directory is relative to that repository's checkout, which is what lets
-/// a definition survive the folder being moved or the repository being re-cloned somewhere else.
-/// Without one, `cwd` is taken as absolute. An empty `cwd` under a project is the repository root.
-///
-/// The join is `Path::join`, which treats an absolute `cwd` as a replacement rather than appending
-/// it — so a definition that names both a project and an absolute path lands on the absolute path.
-/// That is the behaviour a person typing an absolute path expects, and the alternative (a silently
-/// mangled `/repo//usr/local/bin`) is not a directory anywhere.
-fn resolve_cwd(db: &Db, service: &Service) -> Result<Option<String>, String> {
-    let base: Option<PathBuf> = match &service.project_id {
-        Some(project_id) => {
-            let conn = db.0.lock().map_err(|e| e.to_string())?;
-            let project = queries::get_project(&conn, project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| "this service points at a repository that is no longer here".to_string())?;
-            Some(PathBuf::from(project.local_path))
-        }
-        None => None,
-    };
-
-    let trimmed = service.cwd.trim();
-    let resolved = match (base, trimmed.is_empty()) {
-        (Some(root), true) => Some(root),
-        (Some(root), false) => Some(root.join(trimmed)),
-        (None, true) => None,
-        (None, false) => Some(PathBuf::from(trimmed)),
-    };
-
-    let Some(path) = resolved else { return Ok(None) };
-    if !path.is_dir() {
-        return Err(format!("{} is not a folder", path.display()));
-    }
-    Ok(Some(path.to_string_lossy().into_owned()))
-}
-
-/// Starts one service in a pty and returns the terminal session id.
-///
-/// The command is run **through a shell** rather than split into argv here, and that is the whole
-/// reason a service can be `docker compose up db && echo ready` or `pnpm dev --host`: splitting on
-/// spaces would break quoting, and asking the user to fill in an args array would make the common
-/// case worse to serve the rare one. It is the same trust boundary the terminal dock already has —
-/// this is a command the user typed into their own machine's shell.
-#[tauri::command]
-pub fn start_service(
-    app: AppHandle,
-    db: State<Db>,
-    registry: State<TerminalRegistry>,
-    id: String,
-) -> Result<String, String> {
-    let service = {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        service_queries::get_service(&conn, &id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "that service no longer exists".to_string())?
-    };
-    if service.command.trim().is_empty() {
-        return Err("this service has no command to run".into());
-    }
-
-    let cwd = resolve_cwd(&db, &service)?;
-    let (program, args) = shell_invocation(&service.command);
-
-    crate::terminal::open_pty(
-        app,
-        &registry,
-        &program,
-        &args,
-        cwd.as_deref(),
-        None,
-        Origin {
-            cwd: cwd.clone().unwrap_or_default(),
-            // The service's own name, so the terminal registry — which the Remote workspace and a
-            // paired phone also read — lists it as what it is rather than as an anonymous shell.
-            profile: service.name.clone(),
-            owner: None,
-        },
-    )
-}
-
-/// The shell a one-line command is handed to, per platform.
-///
-/// `cmd /C` on Windows rather than PowerShell: it is present on every installation, it needs no
-/// execution-policy exemption, and a command that wants PowerShell can say so as its own first
-/// word. `sh -lc` elsewhere — a **login** shell, because the whole point of a service is that it
-/// runs `pnpm`, `docker` and `cargo`, which live on a `PATH` a non-login shell on macOS does not
-/// have (the same problem `shell_env::import_login_path` exists for).
-fn shell_invocation(command: &str) -> (String, Vec<String>) {
-    #[cfg(windows)]
-    {
-        ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])
-    }
-    #[cfg(not(windows))]
-    {
-        ("/bin/sh".to_string(), vec!["-lc".to_string(), command.to_string()])
-    }
-}
-
-/// Whether something is listening on this port — the `port` readiness gate.
-///
-/// A TCP connect and nothing more: no protocol, no read. "Postgres is accepting connections" is
-/// exactly a successful connect, and anything cleverer would need per-service knowledge this has no
-/// business having.
-///
-/// The timeout is short and the failure is silent, because this is polled: a closed port is the
-/// expected answer for as long as the service is starting, and it is not an error until the caller
-/// gives up. Resolving the host is part of the timeout budget — a `localhost` that resolves slowly
-/// is a stall the caller has to be able to bound.
-#[tauri::command]
-pub async fn probe_port(host: String, port: u16, timeout_ms: u64) -> bool {
-    let budget = Duration::from_millis(timeout_ms.clamp(50, 5_000));
-    tauri::async_runtime::spawn_blocking(move || {
-        let target = if host.trim().is_empty() { "127.0.0.1".to_string() } else { host };
-        let Ok(addrs) = (format!("{target}:{port}")).to_socket_addrs() else { return false };
-        let addrs: Vec<SocketAddr> = addrs.collect();
-        addrs
-            .iter()
-            .any(|addr| std::net::TcpStream::connect_timeout(addr, budget).is_ok())
-    })
-    .await
-    .unwrap_or(false)
-}
-
-/// Whether this URL answers — the `http` readiness gate.
-///
-/// Any status below 500 counts as up, which is the useful definition rather than the strict one: a
-/// health endpoint behind auth answers 401, a bare `/` on an API answers 404, and both mean the
-/// server is listening and serving. A 5xx means it is up but broken, which is not ready.
-///
-/// Redirects are followed by reqwest's default policy — a dev server redirecting `/` to `/app` is
-/// still up.
-#[tauri::command]
-pub async fn probe_http(url: String, timeout_ms: u64) -> bool {
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_millis(timeout_ms.clamp(100, 10_000)))
-        // A dev server with a self-signed certificate is the normal case for `https://localhost`,
-        // and refusing to talk to it would make the gate unusable for exactly the setup it is for.
-        // This request reads nothing but a status code from a loopback address the user configured.
-        .danger_accept_invalid_certs(true)
-        .build()
-    else {
-        return false;
-    };
-    match client.get(&url).send().await {
-        Ok(response) => response.status().as_u16() < 500,
-        Err(_) => false,
-    }
-}
-
-/// Whether a path is a directory, for the service editor to say so before the first run rather than
-/// after it. Cheap enough to call on every keystroke of a path field.
-#[tauri::command]
-pub fn service_path_exists(path: String) -> bool {
-    !path.trim().is_empty() && Path::new(path.trim()).is_dir()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,7 +310,7 @@ mod tests {
             command: "true".into(),
             env: "{}".into(),
             ports: "[]".into(),
-            ready_kind: "none".into(),
+            ready_kind: "auto".into(),
             ready_value: String::new(),
             depends_on: serde_json::to_string(deps).unwrap(),
             autorestart: false,
@@ -343,6 +318,7 @@ mod tests {
             sort_order: 0,
             created_at: String::new(),
             updated_at: String::new(),
+            detected_ports: "[]".into(),
         }
     }
 
@@ -402,21 +378,5 @@ mod tests {
             service("web", "web-shop", &["a", "b"]),
         ];
         assert_eq!(find_cycle(&services), None);
-    }
-
-    /// A closed port answers false rather than hanging or erroring — the expected answer for as
-    /// long as a service is still starting.
-    #[tokio::test]
-    async fn a_closed_port_is_not_ready() {
-        // Port 1 on loopback: reserved, and nothing binds it.
-        assert!(!probe_port("127.0.0.1".into(), 1, 200).await);
-    }
-
-    /// And an open one answers true, which is the whole of the `port` gate.
-    #[tokio::test]
-    async fn a_listening_port_is_ready() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(probe_port("127.0.0.1".into(), port, 500).await);
     }
 }

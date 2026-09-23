@@ -80,9 +80,9 @@ interface TerminalState {
 }
 
 /** What a mounted `TerminalPane` hands the router: where to put this session's bytes, and what
- * to do when its shell ends. */
+ * to do when its shell ends. `seq` is the chunk's number in its session, when the backend sent one. */
 export interface TerminalSink {
-  write: (data: string) => void;
+  write: (data: string, seq?: number) => void;
   exit: () => void;
 }
 
@@ -111,7 +111,7 @@ const sinks = new Map<string, TerminalSink>();
  * transcript covers it either.
  */
 interface PendingOutput {
-  chunks: string[];
+  chunks: Array<{ data: string; seq?: number }>;
   bytes: number;
   exited: boolean;
 }
@@ -153,15 +153,15 @@ export function startTerminalRouter(): void {
   void onTerminalOutput((e) => {
     const sink = sinks.get(e.id);
     if (sink) {
-      sink.write(e.data);
+      sink.write(e.data, e.seq);
       return;
     }
     const held = holdForLater(e.id);
     if (!held) return;
-    held.chunks.push(e.data);
+    held.chunks.push({ data: e.data, seq: e.seq });
     held.bytes += e.data.length;
     while (held.bytes > PENDING_LIMIT_BYTES && held.chunks.length > 1) {
-      held.bytes -= held.chunks.shift()!.length;
+      held.bytes -= held.chunks.shift()!.data.length;
     }
   });
   void onTerminalExit((e) => {
@@ -188,7 +188,7 @@ export function registerTerminalSink(id: string, sink: TerminalSink): () => void
   introduced.add(id);
   if (held) {
     pending.delete(id);
-    for (const chunk of held.chunks) sink.write(chunk);
+    for (const chunk of held.chunks) sink.write(chunk.data, chunk.seq);
     if (held.exited) sink.exit();
   }
   return () => {
@@ -196,6 +196,19 @@ export function registerTerminalSink(id: string, sink: TerminalSink): () => void
     // double-invoked effects in dev, a `sessionId` swap) cannot unregister the live sink.
     if (sinks.get(id) === sink) sinks.delete(id);
   };
+}
+
+/**
+ * Tells the router that this session's history is kept somewhere else, so it must not hold the
+ * session's output for a first pane.
+ *
+ * A service's output is recorded by the supervisor from the first byte (see `service_log`), and its
+ * console replays that record when it mounts. Holding the same bytes here as well would be half a
+ * megabyte per service nobody has looked at yet — and would hand the pane every early chunk twice.
+ */
+export function disownTerminalBacklog(id: string): void {
+  introduced.add(id);
+  pending.delete(id);
 }
 
 /** Drops the router's bookkeeping for a session that is gone for good, so closing a tab does not

@@ -123,6 +123,9 @@ export function TerminalPane({
   sessionId,
   visible,
   replay,
+  backlog,
+  readOnly = false,
+  quietExit = false,
   onCommand,
   onClose,
   closeLabel,
@@ -141,6 +144,28 @@ export function TerminalPane({
    * dependency list: the terminal is rebuilt when `sessionId` changes and at no other time.
    */
   replay?: string;
+  /**
+   * History kept somewhere else, fetched when the pane mounts — a service's console, whose output
+   * the supervisor records from the first byte whether or not a pane was open to see it.
+   *
+   * The pane attaches to the live session *first* and holds what arrives, then writes the history,
+   * then releases what it held — skipping every live chunk numbered at or below `seq`, which the
+   * history already contains. That order is the whole trick: attaching after the fetch would lose
+   * whatever the process printed during the round trip, and not numbering the chunks would print
+   * the overlap twice.
+   *
+   * Read once, at mount, like `replay`.
+   */
+  backlog?: () => Promise<{ text: string; seq: number }>;
+  /**
+   * A pane showing what a process *printed*, with no process behind it any more — a stopped
+   * service's last run. Nothing typed goes anywhere, nothing is resized, no live output is routed
+   * to it, and the cursor is hidden so the pane does not look like it is waiting for input.
+   */
+  readOnly?: boolean;
+  /** Leaves out the `[process exited]` line. For a pane whose owner says so better elsewhere — a
+   *  service's console, whose header already reads "exited with code 1". */
+  quietExit?: boolean;
   /**
    * Called with each whole line the user typed and submitted, for the panes that keep a history.
    *
@@ -169,6 +194,9 @@ export function TerminalPane({
   // Captured at first render and never updated, so a parent re-rendering with a longer transcript
   // (the store reloaded, say) cannot make this pane replay it again over a live shell.
   const replayRef = useRef(replay);
+  const backlogRef = useRef(backlog);
+  const readOnlyRef = useRef(readOnly);
+  const quietExitRef = useRef(quietExit);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   /** The size the pty was last told about, so an unchanged fit costs nothing. See `fitAndReport`. */
@@ -244,6 +272,7 @@ export function TerminalPane({
   /** Paste writes to the pty directly instead of going through xterm, because the pty is where typed
    *  input goes: `term.paste()` would echo locally and hand the shell a line it never saw typed. */
   const pasteClipboard = useCallback(() => {
+    if (readOnlyRef.current) return;
     void navigator.clipboard
       .readText()
       .then((text) => {
@@ -296,6 +325,7 @@ export function TerminalPane({
       // back something the user never highlighted. Off, right-click leaves the selection alone
       // and the menu acts on what is on screen.
       rightClickSelectsWord: false,
+      disableStdin: readOnlyRef.current,
     });
     themedAs.current = resolved;
     const fitAddon = new FitAddon();
@@ -313,6 +343,7 @@ export function TerminalPane({
 
     const lines = new TypedLineBuffer();
     const dataDisposable = term.onData((data) => {
+      if (readOnlyRef.current) return;
       void writeTerminal(sessionId, data);
       // After the write, never instead of it: reconstructing the line must not be able to swallow
       // a keystroke. `onCommandRef` rather than the prop, so a parent that re-renders with a new
@@ -326,10 +357,49 @@ export function TerminalPane({
     // Registering also flushes, in order, whatever the shell printed between being spawned and
     // this — its first pane — mounting; that used to fall in the gap before `await listen(...)`
     // resolved.
-    const unregister = registerTerminalSink(sessionId, {
-      write: (data) => term.write(data),
-      exit: () => term.write("\r\n[process exited]\r\n"),
-    });
+    //
+    // With a `backlog`, live chunks are held until the history is on screen and then released
+    // minus the ones it already contains — see the prop.
+    let disposed = false;
+    let holding = !!backlogRef.current;
+    let floor = 0;
+    const held: Array<{ data: string; seq?: number }> = [];
+    const deliver = (data: string, seq?: number) => {
+      if (seq !== undefined && seq <= floor) return;
+      term.write(data);
+    };
+    const unregister = readOnlyRef.current
+      ? () => {}
+      : registerTerminalSink(sessionId, {
+          write: (data, seq) => {
+            if (holding) held.push({ data, seq });
+            else deliver(data, seq);
+          },
+          exit: () => {
+            if (quietExitRef.current) return;
+            // Held like output, so an exit that lands mid-fetch is not printed above the history.
+            if (holding) held.push({ data: "\r\n[process exited]\r\n" });
+            else term.write("\r\n[process exited]\r\n");
+          },
+        });
+    if (backlogRef.current) {
+      void backlogRef
+        .current()
+        .then(({ text, seq }) => {
+          if (disposed) return;
+          floor = seq;
+          if (text) term.write(text);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (disposed) return;
+          holding = false;
+          for (const chunk of held) deliver(chunk.data, chunk.seq);
+          held.length = 0;
+          // A record with nothing behind it: no cursor, or it reads as a prompt waiting for input.
+          if (readOnlyRef.current) term.write("\x1b[?25l");
+        });
+    }
 
     // Measured here, not captured earlier. This used to send `term.cols/rows` read from the
     // synchronous `fit()` above — and that fit ran while the dock was still at the `height: 0`
@@ -381,6 +451,7 @@ export function TerminalPane({
     box.addEventListener("mousedown", onMouseDown, true);
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(fitFrame);
       box.removeEventListener("mousedown", onMouseDown, true);
       document.removeEventListener("mouseup", onMouseUp, true);
@@ -471,7 +542,8 @@ export function TerminalPane({
     // re-render of the whole screen buffer.
     if (term.cols === reportedRef.current.cols && term.rows === reportedRef.current.rows) return;
     reportedRef.current = { cols: term.cols, rows: term.rows };
-    void resizeTerminal(sessionId, term.cols, term.rows);
+    // A read-only pane has no pty to tell; xterm has already reflowed itself.
+    if (!readOnlyRef.current) void resizeTerminal(sessionId, term.cols, term.rows);
   };
 
   const refit = () => {
@@ -713,7 +785,7 @@ export function TerminalPane({
               disabled: !menu.hasSelection,
               onClick: () => copySelection(),
             },
-            { label: t("terminal.paste"), icon: ClipboardPaste, onClick: pasteClipboard },
+            ...(readOnly ? [] : [{ label: t("terminal.paste"), icon: ClipboardPaste, onClick: pasteClipboard }]),
             ...(onClose
               ? [{ label: closeLabel ?? t("terminal.close"), icon: X, danger: true, separated: true, onClick: onClose }]
               : []),

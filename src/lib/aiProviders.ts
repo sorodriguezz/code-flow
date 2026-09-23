@@ -271,6 +271,9 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
   // populated live — it's maintained by hand. The "Custom" field is the escape hatch for anything
   // newer than the last release.
   claude: [
+    // Newest first, and that order carries weight: `sameModelFamily` below walks this list in
+    // order, so `claude-opus-5` would answer for a dated `claude-opus-5-5-…` if it came first.
+    { id: "claude-opus-5-5", label: "Opus 5.5" },
     { id: "claude-opus-5", label: "Opus 5" },
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-opus-4-8", label: "Opus 4.8" },

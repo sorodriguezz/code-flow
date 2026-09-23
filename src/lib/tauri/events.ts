@@ -15,13 +15,16 @@ export const onGitDone = (handler: (event: GitDoneEvent) => void) =>
 export interface TerminalOutputEvent {
   id: string;
   data: string;
+  /** This chunk's position in its session, from 1 — what lets a pane that replayed a history kept
+   *  elsewhere skip the chunks already in it. See `TerminalPane`'s `backlog`. */
+  seq?: number;
 }
 
 export const onTerminalOutput = (handler: (event: TerminalOutputEvent) => void) =>
   listen<TerminalOutputEvent>("terminal:output", (e) => handler(e.payload));
 
-export const onTerminalExit = (handler: (event: { id: string }) => void) =>
-  listen<{ id: string }>("terminal:exit", (e) => handler(e.payload));
+export const onTerminalExit = (handler: (event: { id: string; code?: number | null }) => void) =>
+  listen<{ id: string; code?: number | null }>("terminal:exit", (e) => handler(e.payload));
 
 /** How far along a file transfer is. `total` covers the *whole* transfer, not the current file —
  *  a folder of two hundred files gets one bar that fills once. */
