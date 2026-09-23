@@ -10,6 +10,7 @@ import {
   shippedProfile,
   type IconProfile,
 } from "../lib/icons/profiles";
+import { watchSettings } from "../lib/settingsSync";
 
 /**
  * The explorer's custom iconography: named profiles, one of them active per repository.
@@ -34,8 +35,10 @@ const LEGACY_FOLDER_KEY = "editor_default_folder_icon";
 
 /** One row per repository, keyed on its path — the same shape `editor_hidden:` uses, and the same
  * scope the editor's tree itself is opened at. */
+const SELECTION_PREFIX = "editor_icon_profile:";
+
 function selectionKey(repoPath: string): string {
-  return `editor_icon_profile:${repoPath}`;
+  return `${SELECTION_PREFIX}${repoPath}`;
 }
 
 interface IconRulesState {
@@ -52,6 +55,8 @@ interface IconRulesState {
   init: () => Promise<void>;
   /** Points the store at a repository and reads that repository's choice. */
   setRepo: (repoPath: string | null) => Promise<void>;
+  /** Re-reads the current repository's choice after another window changed it. */
+  refreshSelection: () => Promise<void>;
   /** Switches the *current repository* to another profile. Writes nothing when none is open — there
    * would be nowhere to write it, and a selection that silently applied everywhere is the behaviour
    * profiles exist to end. */
@@ -261,6 +266,17 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
       });
     },
 
+    refreshSelection: async () => {
+      const { repoPath } = get();
+      if (!repoPath) return;
+      const chosen = await getSetting(selectionKey(repoPath)).catch(() => null);
+      // The repository may have changed while the read was out; its own `setRepo` has the answer.
+      if (get().repoPath !== repoPath) return;
+      const { profiles, loaded } = get();
+      const wanted = chosen?.trim() || DEFAULT_PROFILE_ID;
+      set(applied(profiles, loaded ? resolve(profiles, wanted) : wanted));
+    },
+
     selectProfile: async (id) => {
       const { profiles, repoPath } = get();
       set(applied(profiles, id));
@@ -404,3 +420,13 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
     },
   };
 });
+
+// The profiles are edited in Settings › Editor (main window only) and drawn by every explorer, a
+// repository window's included. `init` re-reads the list and re-checks the active id against it.
+watchSettings([KEY], () => useIconRulesStore.getState().init());
+// The per-repository choice, which the same screen writes for the repository open in *its* window —
+// the one a repository window may be holding. See `lib/settingsSync`.
+watchSettings(
+  (key) => key.startsWith(SELECTION_PREFIX),
+  () => useIconRulesStore.getState().refreshSelection(),
+);

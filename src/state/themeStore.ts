@@ -8,6 +8,7 @@ import {
   DEFAULT_LIGHT_THEME,
 } from "../lib/codeThemes";
 import { withThemeTransition } from "../lib/themeTransition";
+import { watchSettings } from "../lib/settingsSync";
 import { useAccentStore } from "./accentStore";
 import type { ThemePreference } from "../types/domain";
 
@@ -21,6 +22,8 @@ interface ThemeState {
   /** The scheme in force right now, as Monaco knows it — what every editor passes as `theme`. */
   monacoTheme: string;
   init: () => Promise<void>;
+  /** Re-reads the three rows after another window wrote one — see `lib/settingsSync`. */
+  sync: () => Promise<void>;
   setPreference: (pref: ThemePreference) => Promise<void>;
   setThemeId: (mode: "light" | "dark", id: string) => Promise<void>;
 }
@@ -35,6 +38,27 @@ function systemPrefersDark(): boolean {
 
 function resolve(pref: ThemePreference): "light" | "dark" {
   return pref === "system" ? (systemPrefersDark() ? "dark" : "light") : pref;
+}
+
+/** The three rows, read in one round trip, with the defaults `init` and `sync` both fall back to. */
+async function readStored(): Promise<{
+  preference: ThemePreference;
+  darkThemeId: string;
+  lightThemeId: string;
+} | null> {
+  // One round-trip for the three keys, not a `Promise.all` of three. The parallelism was
+  // imaginary: `get_setting` takes the database mutex per key, so the Rust end served them one
+  // after another — and this read is on the critical path of the very first paint, since the
+  // window shows a default palette until it lands. `getSettings` omits absent keys, so unset falls
+  // through to the defaults below exactly as a `null` from `getSetting` did.
+  const stored = await getSettings([SETTING_KEY, DARK_KEY, LIGHT_KEY]).catch(() => null);
+  if (!stored) return null;
+  const raw = stored[SETTING_KEY];
+  return {
+    preference: raw === "light" || raw === "dark" || raw === "system" ? raw : "system",
+    darkThemeId: findTheme(stored[DARK_KEY] ?? DEFAULT_DARK_THEME, "dark").id,
+    lightThemeId: findTheme(stored[LIGHT_KEY] ?? DEFAULT_LIGHT_THEME, "light").id,
+  };
 }
 
 /** Applies a mode + its chosen scheme in one go: the `data-theme` attribute (which the CSS
@@ -61,21 +85,11 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   monacoTheme: monacoThemeName(resolve("system") === "dark" ? DEFAULT_DARK_THEME : DEFAULT_LIGHT_THEME),
 
   init: async () => {
-    // One round-trip for the three keys, not a `Promise.all` of three. The parallelism was
-    // imaginary: `get_setting` takes the database mutex per key, so the Rust end served them one
-    // after another — and this read is on the critical path of the very first paint, since the
-    // window shows a default palette until it lands. `?? null` keeps unset behaving exactly as
-    // `getSetting`'s `null` did (`getSettings` omits absent keys), so a preference deliberately
-    // stored as "" is still distinct from one that was never written.
-    const stored = await getSettings([SETTING_KEY, DARK_KEY, LIGHT_KEY]).catch(
-      () => ({}) as Record<string, string>,
-    );
-    const storedPref = stored[SETTING_KEY] ?? null;
-    const storedDark = stored[DARK_KEY] ?? null;
-    const storedLight = stored[LIGHT_KEY] ?? null;
-    const preference = (storedPref as ThemePreference | null) ?? "system";
-    const darkThemeId = findTheme(storedDark ?? DEFAULT_DARK_THEME, "dark").id;
-    const lightThemeId = findTheme(storedLight ?? DEFAULT_LIGHT_THEME, "light").id;
+    const { preference, darkThemeId, lightThemeId } = (await readStored()) ?? {
+      preference: "system" as const,
+      darkThemeId: DEFAULT_DARK_THEME,
+      lightThemeId: DEFAULT_LIGHT_THEME,
+    };
     const resolved = resolve(preference);
     const monacoTheme = applyToDocument(resolved, resolved === "dark" ? darkThemeId : lightThemeId);
     set({ preference, resolved, darkThemeId, lightThemeId, monacoTheme });
@@ -89,6 +103,36 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
       // and "something went wrong with the app".
       withThemeTransition(() => {
         set({ resolved: next, monacoTheme: applyToDocument(next, next === "dark" ? dark : light) });
+      });
+    });
+  },
+
+  sync: async () => {
+    const stored = await readStored();
+    if (!stored) return;
+    const { preference, darkThemeId, lightThemeId } = stored;
+    const resolved = resolve(preference);
+    const current = get();
+    const showing = current.resolved === "dark" ? current.darkThemeId : current.lightThemeId;
+    const next = resolved === "dark" ? darkThemeId : lightThemeId;
+
+    // Nothing on screen moves — "System" picked while the OS already agrees, or a scheme chosen for
+    // the mode this window is not in. Remembered without a curtain, for the reason `setPreference`
+    // gives: a wipe over an identical window reads as a stutter.
+    if (resolved === current.resolved && next === showing) {
+      set({ preference, darkThemeId, lightThemeId });
+      return;
+    }
+
+    // Wiped, like the main window's own switch — this window is changing colour for the same reason
+    // and at the same moment, and should look like it.
+    withThemeTransition(() => {
+      set({
+        preference,
+        resolved,
+        darkThemeId,
+        lightThemeId,
+        monacoTheme: applyToDocument(resolved, next),
       });
     });
   },
@@ -136,3 +180,7 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     await setSetting(mode === "dark" ? DARK_KEY : LIGHT_KEY, theme.id);
   },
 }));
+
+// Light/dark and the two schemes are picked in Settings, which only the main window has — so a
+// detached window learns about them here or not at all. See `lib/settingsSync`.
+watchSettings([SETTING_KEY, DARK_KEY, LIGHT_KEY], () => useThemeStore.getState().sync());

@@ -10,7 +10,7 @@ import { readFileText, writeFileText, resolveConflictWithAi } from "../../lib/ta
 import { useRepoStore } from "../../state/repoStore";
 import { useThemeStore } from "../../state/themeStore";
 import { parseClaudeError } from "../../lib/claudeError";
-import { languageForPath } from "../../lib/monacoLanguage";
+import { useFileLanguage } from "../../lib/useFileLanguage";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -56,7 +56,7 @@ export function ConflictResolveModal({ filePath, onClose }: { filePath: string; 
   }, [filePath]);
 
   const busy = loading || accepting;
-  const language = languageForPath(filePath);
+  const language = useFileLanguage(filePath, original);
   const theme = useThemeStore((s) => s.monacoTheme);
 
   const accept = async () => {

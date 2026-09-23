@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { getSetting, getSettings, setSetting } from "../lib/tauri/commands";
 import { AI_PROVIDERS, DEFAULT_AI_PROVIDER } from "../lib/aiProviders";
 import { AI_TASKS } from "../lib/aiTasks";
+import { watchSettings } from "../lib/settingsSync";
 
 const KEY = "ai_provider";
 
@@ -168,3 +169,12 @@ export const useAiProviderStore = create<AiProviderState>((set, get) => ({
  * one task elsewhere is reflected in the UI. */
 export const useTaskProvider = (task: string) =>
   useAiProviderStore((s) => s.taskProviders[task]?.trim() || s.providerId);
+
+// Providers and per-task routing are chosen in Settings (main window only), and a detached chat or
+// Agents window routes its own turns off this table. The family is wide — one provider row, one per
+// task, one model per provider and per provider-task pair — so it is matched by shape; a false
+// positive costs one re-read of a table nothing on screen depends on changing.
+watchSettings(
+  (key) => key === KEY || key.startsWith("ai_provider_") || key.endsWith("_model"),
+  () => useAiProviderStore.getState().init(),
+);

@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
 import { loadLanguage, translations, type Language, type TranslationKey } from "../lib/i18n/translations";
+import { watchSettings } from "../lib/settingsSync";
 
 const KEY = "app_language";
 
@@ -87,3 +88,7 @@ export function useT(): Translate {
 export function translate(key: TranslationKey, params?: Record<string, string | number>): string {
   return render(useLanguageStore.getState().language, key, params);
 }
+
+// Chosen in Settings › General, which only the main window has — a detached window kept speaking the
+// old language until it was reopened. `init` is the re-read: it loads the dictionary before the flip.
+watchSettings([KEY], () => useLanguageStore.getState().init());

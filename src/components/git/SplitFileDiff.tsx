@@ -3,7 +3,7 @@ import { DiffEditor } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import type { FileDiffInfo } from "../../types/domain";
 import { useThemeStore } from "../../state/themeStore";
-import { languageForPath } from "../../lib/monacoLanguage";
+import { useFileLanguage } from "../../lib/useFileLanguage";
 import { reconstructSides } from "../../lib/diffText";
 // The side effects Monaco needs before the first `<DiffEditor>` mounts — the bundled copy handed to
 // `@monaco-editor/react` (so nothing is fetched from a CDN), the language workers, and the 21 theme
@@ -93,13 +93,15 @@ export function SplitFileDiff({ file, height }: { file: FileDiffInfo; height: nu
   }, []);
 
   const sides = useMemo(() => (live ? reconstructSides(file) : null), [live, file]);
+  // A delimited file keeps its column colours in the diff too — read off the side that exists now.
+  const language = useFileLanguage(path, sides?.modified ?? "");
 
   return (
     <div ref={holderRef} style={{ height }}>
       {sides ? (
         <DiffEditor
           height="100%"
-          language={languageForPath(path)}
+          language={language}
           original={sides.original}
           modified={sides.modified}
           theme={monacoTheme}

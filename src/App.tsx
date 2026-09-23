@@ -51,6 +51,7 @@ import { useTerminalStore } from "./state/terminalStore";
 import { useShortcutsStore } from "./state/shortcutsStore";
 import { useIconRulesStore } from "./state/iconRulesStore";
 import { useFileNestingStore } from "./state/fileNestingStore";
+import { useCsvStore } from "./state/csvStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
 import { useBlameStore } from "./state/blameStore";
@@ -561,6 +562,9 @@ export default function App() {
         // tree, it would rearrange it in front of the user. Nothing per repository to go with it —
         // a pattern names filenames, not paths.
         initFileNesting(),
+        // How delimited files are coloured. With the rest of the editor's look, so a `.csv` restored
+        // into a tab at boot opens in its columns rather than as plain text that recolours a beat later.
+        useCsvStore.getState().init(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
         startWindowBoundsTracking(),

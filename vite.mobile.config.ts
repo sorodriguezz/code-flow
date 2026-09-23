@@ -69,9 +69,13 @@ function mobileBundle(): Plugin {
       // rather than a standalone window with an icon. Two platforms, two mechanisms, and both are
       // needed for the same result.
       //
-      // The icon is the app's own 512×512, read straight from where Tauri already keeps it. No
-      // resizing step and no second copy in git: 512 is the largest size any installer asks for,
-      // and every consumer downscales.
+      // The icon is the app's own home-screen tile, read straight from where Tauri keeps the rest
+      // of the set — `icon-pwa.png`, rendered from the same `icon-macos.svg` as the Dock icon. Not
+      // `icon.png`, which is the mark on transparency: iOS paints a transparent touch icon's
+      // background black, and the manifest also offers this file as `maskable`, which Android crops
+      // to a circle and fills with whatever the transparency lets through. A full-bleed tile with
+      // the mark inside the safe zone survives both. No resizing step: 512 is the largest size any
+      // installer asks for, and every consumer downscales.
       this.emitFile({
         type: "asset",
         fileName: "manifest.webmanifest",
@@ -80,7 +84,7 @@ function mobileBundle(): Plugin {
       this.emitFile({
         type: "asset",
         fileName: "icon-512.png",
-        source: readFileSync("src-tauri/icons/icon.png"),
+        source: readFileSync("src-tauri/icons/icon-pwa.png"),
       });
     },
   };

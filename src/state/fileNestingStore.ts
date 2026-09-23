@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
+import { watchSettings } from "../lib/settingsSync";
 import { DEFAULT_NESTING_PATTERNS, type NestingPattern } from "../lib/fileNesting";
 
 /**
@@ -176,3 +177,6 @@ export const useFileNestingStore = create<FileNestingState>((set, get) => {
     },
   };
 });
+
+// Toggled in the explorer of whichever window has one; the other trees follow. See `lib/settingsSync`.
+watchSettings([KEY], () => useFileNestingStore.getState().init());

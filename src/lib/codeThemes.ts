@@ -13,6 +13,8 @@
  * "Monokai" is getting Monokai.
  */
 
+import { RAINBOW_COLUMNS } from "./csvDialect";
+
 export interface CodeThemeUi {
   bg: string;
   surface: string;
@@ -628,6 +630,70 @@ export interface TokenRule {
   fontStyle?: "italic";
 }
 
+/**
+ * The colours a delimited file's columns cycle through in this scheme — `RAINBOW_COLUMNS` of them.
+ *
+ * Taken from the scheme's own palette rather than from a rainbow of our choosing, which is what the
+ * Rainbow CSV extension does too: the columns then look like they belong to the theme the user
+ * picked, and every colour is one the theme's author already made readable on its background. The
+ * first column is the plain text colour, as it is there.
+ *
+ * Six of the shipped schemes have only six distinct token colours, and two more have seven. The gap
+ * is filled with the comment colour in the fourth slot (Rainbow CSV's own fourth column is its
+ * comment scope) and, after that, even mixes of two neighbouring palette colours — colours the theme
+ * does not name but is made of, so they sit in it and stay readable on its background.
+ *
+ * The one colour no column may take is the muted text colour: it is what the separators are
+ * painted in (`delimiter`), and a column wearing it vanishes into them. GitHub Dark's comments are
+ * exactly that grey, which is why it is excluded up front rather than trusted to differ.
+ */
+export function rainbowPalette(theme: CodeTheme): string[] {
+  const t = theme.tokens;
+  const seen = new Set<string>([theme.ui.textMuted.toLowerCase()]);
+  const distinct = (colors: string[]) =>
+    colors.filter((color) => {
+      const key = color.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  const vivid = distinct([
+    t.variable,
+    t.keyword,
+    t.string,
+    t.fn,
+    t.number,
+    t.type,
+    t.tag,
+    t.attribute,
+    t.operator,
+    t.constant,
+  ]);
+  const palette = vivid.slice(0, RAINBOW_COLUMNS);
+  const blends = [
+    [1, 2],
+    [3, 4],
+    [2, 5],
+    [4, 1],
+  ]
+    .filter(([a, b]) => vivid[a] && vivid[b])
+    .map(([a, b]) => mixHex(vivid[a], vivid[b]));
+  const pads = distinct([t.comment, ...blends]);
+  if (palette.length < RAINBOW_COLUMNS && pads.length > 0) palette.splice(3, 0, pads.shift()!);
+  while (palette.length < RAINBOW_COLUMNS && pads.length > 0) palette.push(pads.shift()!);
+  // Only reachable by a scheme far sparser than any shipped one: repeat from the start rather than
+  // leave a slot to Monaco's fallback.
+  for (let i = 0; palette.length < RAINBOW_COLUMNS; i += 1) palette.push(palette[i]);
+  return palette;
+}
+
+/** The colour halfway between two `#rrggbb` colours. */
+function mixHex(a: string, b: string): string {
+  const channel = (hex: string, at: number) => parseInt(hex.slice(1 + at * 2, 3 + at * 2), 16);
+  const mixed = [0, 1, 2].map((at) => Math.round((channel(a, at) + channel(b, at)) / 2));
+  return `#${mixed.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
 /** How a scheme colours code, as scope→colour rules.
  *
  * Shared rather than inlined at the Monaco registration, because the code-snapshot renderer
@@ -664,6 +730,8 @@ export function tokenRulesFor(theme: CodeTheme): TokenRule[] {
     { token: "attribute.name", foreground: theme.tokens.attribute },
     { token: "attribute.value", foreground: theme.tokens.string },
     { token: "annotation", foreground: theme.tokens.attribute },
+    // A delimited file's columns — see `rainbowPalette`, and `monacoCsv.ts` for the tokens.
+    ...rainbowPalette(theme).map((foreground, index) => ({ token: `rainbow${index + 1}`, foreground })),
   ];
 }
 

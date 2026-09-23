@@ -30,7 +30,7 @@ import { InlineEditWidget } from "./InlineEditWidget";
 import { ChangePeek, peekHeightOf } from "./ChangePeek";
 import type { CodeSnapTarget } from "./CodeSnapModal";
 import { modelPathFor } from "../../lib/editorModel";
-import { languageForPath } from "../../lib/monacoLanguage";
+import { useFileLanguage } from "../../lib/useFileLanguage";
 import { FileGlyph } from "../common/FileGlyph";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
 import { changeBlocksOf, sameHunk, type ChangeBlock, type GutterMark } from "../../lib/diffBlocks";
@@ -55,6 +55,7 @@ import { EmptyState } from "../common/EmptyState";
 import type { BlameHunkInfo, FileDiffInfo, Project } from "../../types/domain";
 import { usePackageJsonLens } from "./usePackageJsonLens";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { CsvSeparatorPicker } from "./CsvSeparatorPicker";
 import { useTypeScript } from "./useTypeScript";
 import { useLanguageServer } from "./useLanguageServer";
 import { useInlineCompletion } from "./useInlineCompletion";
@@ -810,6 +811,11 @@ export function EditorPane({
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.path === activePath) ?? null, [tabs, activePath]);
   const content = activeTab?.content ?? "";
+  /** The model's path, which is also what a separator picked for this one file is filed under. */
+  const activeModelPath = activeTab ? modelPathFor(project, activeTab.path) : undefined;
+  /** `languageForPath`, except a delimited file's language is its separator — read from the file as
+   *  it was opened, so typing never re-colours it. See `useFileLanguage`. */
+  const editorLanguage = useFileLanguage(activeTab?.path ?? null, activeTab?.originalContent ?? "", activeModelPath);
   const dirty = activeTab ? activeTab.content !== activeTab.originalContent : false;
   const previewKind = previewKindFor(activePath);
   /** The parser, held in state so its arrival re-renders. `useState`'s initialiser form is what
@@ -1740,7 +1746,7 @@ export function EditorPane({
     const ed = editorRef.current;
     const model = ed?.getModel();
     const selection = ed?.getSelection();
-    const shared = { language: languageForPath(activeTab.path), path: activeTab.path };
+    const shared = { language: editorLanguage, path: activeTab.path };
 
     if (model && selection && !selection.isEmpty()) {
       const startLine = selection.startLineNumber;
@@ -1761,7 +1767,7 @@ export function EditorPane({
     // No selection — the whole file. Read from the tab rather than the model so this also works
     // in preview-only mode, where Monaco isn't mounted at all.
     onCodeSnap({ ...shared, code: activeTab.content, startLine: 1, endLine: activeTab.content.split("\n").length });
-  }, [activeTab, onCodeSnap]);
+  }, [activeTab, onCodeSnap, editorLanguage]);
 
   const captureRef = useRef(captureSnapshot);
   captureRef.current = captureSnapshot;
@@ -2249,7 +2255,7 @@ export function EditorPane({
       <Editor
         height="100%"
         path={modelPathFor(project, activeTab.path)}
-        language={languageForPath(activeTab.path)}
+        language={editorLanguage}
         value={content}
         theme={monacoTheme}
         // Each tab keeps its own model, so Monaco must not throw it away when this component
@@ -2338,6 +2344,15 @@ export function EditorPane({
             menu={tabMenu}
             actions={
               <>
+                {/* Draws nothing unless this is a delimited file whose columns are coloured. */}
+                {activeModelPath && (
+                  <CsvSeparatorPicker
+                    path={activeTab.path}
+                    file={activeModelPath}
+                    text={activeTab.originalContent}
+                    language={editorLanguage}
+                  />
+                )}
                 {previewKind && (
                   <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
                     {(
@@ -2470,7 +2485,7 @@ export function EditorPane({
                    before on the left, now on the right — so it never falls back to inline. */
                 <DiffEditor
                   height="100%"
-                  language={languageForPath(activeTab.path)}
+                  language={editorLanguage}
                   original={diffSides.original}
                   modified={diffSides.modified}
                   theme={monacoTheme}

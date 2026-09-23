@@ -6,6 +6,7 @@ import { installSnippets } from "./monacoSnippets";
 import { installInlineCompletion } from "./inlineCompletion";
 import { registerDbmlLanguage } from "./monacoDbml";
 import { registerObjectScript } from "./monacoObjectScript";
+import { registerCsvLanguages } from "./monacoCsv";
 // Subpaths go through the package's own `exports` map (`./*` → `./esm/vs/*.js`), so these are
 // the mapped specifiers, not the on-disk paths.
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -166,6 +167,10 @@ registerObjectScript();
 // DBML, for `.dbml` files in the editor and for the Diagrams workspace's schema editor. Cheap:
 // a Monarch grammar and four snippets, with no dependency on `@dbml/core`. See `monacoDbml.ts`.
 registerDbmlLanguage();
+// `.csv` / `.tsv` / `.psv`, one colour per column, one language per separator. Above the two
+// installers for the same reason as the two lines above: a plain-text file got snippets and
+// Ctrl/Cmd+click before it had a language of its own, and should keep both. See `monacoCsv.ts`.
+registerCsvLanguages();
 
 // Ctrl/Cmd+click to jump to a definition. Registered here, once, because both halves of it (the
 // definition provider and the editor opener) are global to Monaco rather than per-instance —

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
 import { withThemeTransition } from "../lib/themeTransition";
+import { watchSettings } from "../lib/settingsSync";
 
 export interface AccentOption {
   id: string;
@@ -41,6 +42,8 @@ function findOption(id: string): AccentOption {
 interface AccentState {
   accentId: string;
   init: () => Promise<void>;
+  /** Re-reads the row after another window wrote it — see `lib/settingsSync`. */
+  sync: () => Promise<void>;
   setAccent: (id: string, resolvedTheme: "light" | "dark") => Promise<void>;
   apply: (resolvedTheme: "light" | "dark") => void;
 }
@@ -53,6 +56,21 @@ export const useAccentStore = create<AccentState>((set, get) => ({
     if (stored && ACCENT_OPTIONS.some((o) => o.id === stored)) {
       set({ accentId: stored });
     }
+  },
+
+  sync: async () => {
+    const stored = await getSetting(KEY).catch(() => undefined);
+    if (stored === undefined) return;
+    const id = stored && ACCENT_OPTIONS.some((o) => o.id === stored) ? stored : DEFAULT_ID;
+    if (id === get().accentId) return;
+    // The mode this window is painted in, read off the document rather than the theme store: that
+    // store imports this one, and `data-theme` is what `applyToDocument` writes it to anyway.
+    const resolved = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+    // The same curtain the main window drew for the same change — see `setAccent`.
+    withThemeTransition(() => {
+      set({ accentId: id });
+      get().apply(resolved);
+    });
   },
 
   setAccent: async (id, resolvedTheme) => {
@@ -81,3 +99,6 @@ export const useAccentStore = create<AccentState>((set, get) => ({
     document.documentElement.style.setProperty("--cf-accent", hex);
   },
 }));
+
+// Picked in Settings, which only the main window has. See `lib/settingsSync`.
+watchSettings([KEY], () => useAccentStore.getState().sync());

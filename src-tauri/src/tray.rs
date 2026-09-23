@@ -116,8 +116,21 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", labels.quit, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &quick_ask_item, &restart_item, &quit_item])?;
 
+    // The menu bar gets the mark alone, as a template: macOS paints a template image itself — black
+    // on a light bar, white on a dark one, dimmed while another app's menu is open — which a colour
+    // icon cannot do, and at 18pt the app's gradient reads as a smudge. Windows and Linux keep the
+    // app icon; their trays are drawn in colour by every app.
+    #[cfg(target_os = "macos")]
+    let (icon, template) = (tauri::include_image!("./icons/tray-template.png"), true);
+    #[cfg(not(target_os = "macos"))]
+    let (icon, template) = (
+        app.default_window_icon().cloned().expect("app icon must be bundled"),
+        false,
+    );
+
     TrayIconBuilder::with_id("main-tray")
-        .icon(app.default_window_icon().cloned().expect("app icon must be bundled"))
+        .icon(icon)
+        .icon_as_template(template)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("CodeFlow")

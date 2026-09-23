@@ -32,6 +32,7 @@ import {
   apiUpsertCookie,
 } from "../lib/tauri/apiCommands";
 import { getSetting, setSetting } from "../lib/tauri/commands";
+import { watchSettings } from "../lib/settingsSync";
 // Deliberately NOT a static import of `lib/monacoSetup`. This store is reached from `App.tsx`, so
 // anything it imports is in the entry chunk — and monaco-editor is 4 MB of it. The one place that
 // needs the namespace is `disposeTabModels`, which resolves it with a dynamic `import()`; see the
@@ -1792,4 +1793,23 @@ useWorkspaceStore.subscribe((state, previous) => {
   const { workspaceId, loading } = useApiStore.getState();
   if (workspaceId === null && !loading) return;
   void useApiStore.getState().setWorkspace(state.activeWorkspaceId);
+});
+
+/**
+ * Network, proxy and certificates are edited in two places — the client's own settings, in
+ * whichever window holds the API app, and Settings › API in the main one — and requests are sent
+ * with this window's copy. A detached client kept sending through a proxy Settings had since removed.
+ *
+ * Only once this window has loaded the store: before that there is nothing to keep current, and
+ * `init` will read the row anyway. Merged over the defaults exactly as `init` does.
+ */
+watchSettings([SETTINGS_KEY], async () => {
+  const { workspaceId, loading } = useApiStore.getState();
+  if (workspaceId === null && !loading) return;
+  // A failed read keeps what is in memory: falling back to the defaults would drop a working proxy
+  // on a hiccup, which is worse than being one edit behind.
+  const raw = await getSetting(SETTINGS_KEY).catch(() => undefined);
+  if (raw === undefined) return;
+  const stored = parseJson<StoredSettings>(raw, {});
+  useApiStore.setState({ settings: migrateSettings(stored) ?? { ...defaultApiSettings(), ...stored } });
 });

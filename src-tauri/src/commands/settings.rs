@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::db::{models::*, queries, Db};
 use crate::git::lock_rules;
@@ -30,10 +30,41 @@ pub fn get_settings(
     queries::get_settings(&conn, &keys).map_err(|e| e.to_string())
 }
 
+/// What `settings:changed` carries: which row moved, and which window moved it.
+///
+/// The key and not the value, for the reason `state:invalidate` gives: each store re-reads through
+/// the loader it already has, so nothing here has to know what any setting means.
+#[derive(Clone, serde::Serialize)]
+struct SettingChanged<'a> {
+    key: &'a str,
+    origin: &'a str,
+}
+
+/// Writes one setting, then tells every window which one.
+///
+/// **The announcement is what keeps the satellites honest.** Settings is a screen of the main
+/// window only, and every store reads its rows once, at boot — so an accent picked there, a theme,
+/// a language, used to reach a detached window only when it was next opened. `lib/settingsSync.ts`
+/// is the listening half; the window that wrote the row drops its own echo by `origin`.
+///
+/// Emitted after the lock is released and never allowed to fail the write: the row is saved by
+/// then, and a window that missed the frame still reads the new value on its next boot.
 #[tauri::command]
-pub fn set_setting(db: State<Db>, key: String, value: String) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::set_setting(&conn, &key, &value).map_err(|e| e.to_string())
+pub fn set_setting(
+    webview: tauri::Webview,
+    db: State<Db>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::set_setting(&conn, &key, &value).map_err(|e| e.to_string())?;
+    }
+    let _ = webview.emit(
+        "settings:changed",
+        SettingChanged { key: &key, origin: webview.label() },
+    );
+    Ok(())
 }
 
 // ---------- branches that come locked without anyone clicking a padlock ----------

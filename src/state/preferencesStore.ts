@@ -8,6 +8,7 @@ import {
 } from "../lib/tauri/commands";
 import { useRepoStore } from "./repoStore";
 import { DEFAULT_SATELLITE_LIMIT, useWindowStore } from "./windowStore";
+import { watchSettings } from "../lib/settingsSync";
 
 const NATIVE_NOTIFICATIONS_KEY = "native_notifications_enabled";
 const NATIVE_ONLY_BACKGROUND_KEY = "native_notifications_only_background";
@@ -339,6 +340,26 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     await refreshOpenRepoBranches();
   },
 }));
+
+// Every row `init` reads. Most are edited in Settings, which only the main window has, and several of
+// them change what a detached window does — the blame annotation in a repository window's editor,
+// the poll interval of its Pipelines tab, whether its chat may write files. `init` is the re-read.
+watchSettings(
+  [
+    KEY,
+    SECRET_SCAN_KEY,
+    NOTIFICATION_SOUND_KEY,
+    NATIVE_NOTIFICATIONS_KEY,
+    NATIVE_ONLY_BACKGROUND_KEY,
+    MUTED_SOURCES_KEY,
+    PIPELINE_POLL_KEY,
+    BLAME_ANNOTATION_KEY,
+    WINDOW_LIMIT_KEY,
+    CHAT_FILE_GENERATION_KEY,
+    CHAT_AUTO_COMPACT_KEY,
+  ],
+  () => usePreferencesStore.getState().init(),
+);
 
 /** Re-reads the open repository's branches so the padlocks in the sidebar, the status bar and the
  * branch switcher answer to the rule that has just changed. The lock is resolved backend-side, per

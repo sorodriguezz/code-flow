@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
+import { watchSettings } from "../lib/settingsSync";
 import { SHORTCUT_COMMANDS, type ShortcutId } from "../lib/shortcuts";
 import type { Chord } from "../lib/keys";
 
@@ -94,3 +95,7 @@ export function activeChords(overrides: BindingOverrides): Map<Chord, ShortcutId
   }
   return map;
 }
+
+// Rebound in Settings, and the chords a satellite binds (`useRemoteActionShortcuts`, the editor's own)
+// read these overrides. See `lib/settingsSync`.
+watchSettings([KEY], () => useShortcutsStore.getState().init());
