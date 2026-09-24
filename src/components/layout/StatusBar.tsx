@@ -1,4 +1,4 @@
-import { ChevronDown, Folder, GitBranch, Lock, Settings, Sparkles, TerminalSquare } from "lucide-react";
+import { ChevronDown, GitBranch, Lock, Settings, Sparkles, TerminalSquare } from "lucide-react";
 import { NotificationBell } from "./NotificationBell";
 import { RemoteActions } from "../git/RemoteActions";
 import { AgentActivity } from "./AgentActivity";
@@ -67,11 +67,11 @@ export function StatusBar() {
       onClick={toggleSettings}
       data-tour="open-settings"
       title={hint("app.settings", t("statusbar.settings"))}
-      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
+      className={`flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
         settingsOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
       }`}
     >
-      <Settings size={13} />
+      <Settings size={14} />
     </button>
   );
 
@@ -80,11 +80,11 @@ export function StatusBar() {
       onClick={toggleTerminalPanel}
       data-tour="toggle-terminal"
       title={hint("panel.terminal", t("terminal.toggle"))}
-      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
+      className={`flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
         terminalPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
       }`}
     >
-      <TerminalSquare size={13} />
+      <TerminalSquare size={14} />
     </button>
   );
 
@@ -93,17 +93,17 @@ export function StatusBar() {
       onClick={toggleAiPanel}
       data-tour="toggle-ai-panel"
       title={hint("panel.ai", t("statusbar.aiPanel"))}
-      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
+      className={`flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
         aiPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
       }`}
     >
-      <Sparkles size={13} />
+      <Sparkles size={14} />
     </button>
   );
 
   if (!project) {
     return (
-      <footer className="flex h-8 shrink-0 items-center gap-2 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[12px] text-[var(--cf-text-muted)]">
+      <footer className="flex h-7 shrink-0 items-center gap-2 px-2 text-[12px] text-[var(--cf-text-muted)]">
         {settingsButton}
         {terminalButton}
         {aiPanelButton}
@@ -126,7 +126,7 @@ export function StatusBar() {
   const current = branches.find((b) => b.is_head);
 
   return (
-    <footer className="flex h-8 shrink-0 items-center gap-3 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[12px] text-[var(--cf-text-muted)]">
+    <footer className="flex h-7 shrink-0 items-center gap-2.5 px-2 text-[12px] text-[var(--cf-text-muted)]">
       {settingsButton}
       {terminalButton}
       {aiPanelButton}
@@ -141,7 +141,7 @@ export function StatusBar() {
         className="flex shrink-0 items-center gap-1 whitespace-nowrap font-medium text-[var(--cf-text)]"
         title={project.local_path}
       >
-        <Folder size={11} style={{ color: project.color }} />
+        <span aria-hidden className="h-[7px] w-[7px] shrink-0 rounded-full" style={{ background: project.color }} />
         {project.name}
       </span>
       <span className="h-3 w-px shrink-0 bg-[var(--cf-border)]" />
@@ -154,7 +154,7 @@ export function StatusBar() {
       <button
         onClick={toggleBranchSwitcher}
         title={hint("branch.switcher", t("shortcuts.cmdBranchSwitcher"))}
-        className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+        className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
       >
         <GitBranch size={12} className="shrink-0" />
         {/* The one thing on this bar that gives when it runs out of room. A branch name is recovered

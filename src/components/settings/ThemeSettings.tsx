@@ -1,8 +1,10 @@
 import { Check, Laptop, Moon, Sun } from "lucide-react";
 import { useThemeStore } from "../../state/themeStore";
-import { findTheme, themesFor } from "../../lib/codeThemes";
+import { findTheme, themesFor, type CodeThemeUi } from "../../lib/codeThemes";
 import { ACCENT_OPTIONS, useAccentStore } from "../../state/accentStore";
-import { ActivePill } from "../common/ActivePill";
+import { buttonClass } from "../common/Button";
+import { chipClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import type { ThemePreference } from "../../types/domain";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -14,9 +16,111 @@ const OPTIONS: { id: ThemePreference; labelKey: TranslationKey; icon: typeof Sun
   { id: "system", labelKey: "settings.themeSystem", icon: Laptop },
 ];
 
-/** Accent swatches plus a live preview of the three places the accent actually lands: a solid
- * button, a soft-tinted selection, and a link. Picking a color from a row of identical dots is
- * guesswork; seeing what it does to the UI isn't. */
+/**
+ * One mode, drawn: its frame, and a sheet sitting on it with its hairline — the two surfaces the
+ * whole window is made of — with a line of text and the accent's own shade for that mode.
+ *
+ * Painted from the schemes actually chosen for each mode rather than from two fixed palettes, so
+ * the tile shows what picking it will do: someone on Dracula sees Dracula under "Dark".
+ */
+function ModeDrawing({ ui, accent }: { ui: CodeThemeUi; accent: string }) {
+  return (
+    <span className="absolute inset-0" style={{ background: ui.bg }}>
+      {/* The navigation on the frame: three glyph-sized marks, quiet. */}
+      <span className="absolute left-2 top-3 flex flex-col gap-1.5">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className="block h-1.5 w-2.5 rounded-full"
+            style={{ background: i === 0 ? accent : ui.textMuted, opacity: i === 0 ? 1 : 0.35 }}
+          />
+        ))}
+      </span>
+      {/* The sheet: the page where work happens, one step lighter (or darker) than the frame. */}
+      <span
+        className="absolute bottom-0 left-7 right-0 top-2.5 rounded-tl-[6px]"
+        style={{ background: ui.surface, boxShadow: `0 0 0 1px ${ui.border}` }}
+      >
+        <span className="absolute left-2.5 top-2.5 block h-1 w-10 rounded-full" style={{ background: ui.text, opacity: 0.7 }} />
+        <span
+          className="absolute left-2.5 top-[18px] block h-1 w-16 rounded-full"
+          style={{ background: ui.textMuted, opacity: 0.45 }}
+        />
+        <span className="absolute bottom-2.5 left-2.5 block h-2.5 w-9 rounded-[3px]" style={{ background: accent }} />
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Light, dark or the system's choice, as three tiles that show the mode instead of naming it.
+ *
+ * Same setting and same three values as the row of buttons it replaces. "System" is both drawings
+ * split on the diagonal, because that is what it means: whichever of the two the OS says.
+ */
+function ModeTiles() {
+  const t = useT();
+  const preference = useThemeStore((s) => s.preference);
+  const setPreference = useThemeStore((s) => s.setPreference);
+  const lightId = useThemeStore((s) => s.lightThemeId);
+  const darkId = useThemeStore((s) => s.darkThemeId);
+  const accentId = useAccentStore((s) => s.accentId);
+  const accent = ACCENT_OPTIONS.find((option) => option.id === accentId) ?? ACCENT_OPTIONS[0];
+  const light = findTheme(lightId, "light").ui;
+  const dark = findTheme(darkId, "dark").ui;
+
+  return (
+    <div className="grid max-w-[480px] grid-cols-3 gap-2.5">
+      {OPTIONS.map(({ id, labelKey, icon: Icon }) => {
+        const selected = preference === id;
+        return (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setPreference(id)}
+            aria-pressed={selected}
+            // The ring is the selection; a box-shadow, so picking a tile moves nothing.
+            className={`flex flex-col gap-2 rounded-lg p-2 text-left transition-[box-shadow,background-color] duration-100 ${
+              selected
+                ? "shadow-[0_0_0_2px_var(--cf-accent)]"
+                : "shadow-[0_0_0_1px_var(--cf-border-strong)] hover:bg-[var(--cf-hover)]"
+            }`}
+          >
+            <span aria-hidden className="relative block h-16 overflow-hidden rounded-md">
+              {id === "dark" ? (
+                <ModeDrawing ui={dark} accent={accent.dark} />
+              ) : (
+                <ModeDrawing ui={light} accent={accent.light} />
+              )}
+              {id === "system" && (
+                <span className="absolute inset-0 [clip-path:polygon(100%_0,100%_100%,0_100%)]">
+                  <ModeDrawing ui={dark} accent={accent.dark} />
+                </span>
+              )}
+            </span>
+            <span
+              className={`flex items-center gap-1.5 px-0.5 text-[13px] font-medium ${
+                selected ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
+              }`}
+            >
+              <Icon size={14} className={`shrink-0 ${selected ? "text-[var(--cf-accent)]" : ""}`} />
+              {t(labelKey)}
+              {selected && <Check size={13} className="ml-auto shrink-0 text-[var(--cf-accent)]" />}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Accent swatches plus a live preview of the places the accent actually lands: a solid button, a
+ * soft-tinted selection, a link and a chip. Picking a color from a row of identical dots is
+ * guesswork; seeing what it does to the UI isn't.
+ *
+ * Each swatch carries "Aa" in the text colour that will sit on it (`--cf-on-accent`), because every
+ * accent is a contrast pair rather than a hue: white ink on the light shades, dark ink on the dark
+ * ones. The swatch proves it can be written on. */
 function AccentPicker() {
   const t = useT();
   const resolved = useThemeStore((s) => s.resolved);
@@ -24,40 +128,49 @@ function AccentPicker() {
   const setAccent = useAccentStore((s) => s.setAccent);
 
   return (
-    <div className="space-y-2.5">
-      <p className="text-[12px] text-[var(--cf-text-muted)]">{t("settings.accentColorHint")}</p>
-      <div className="flex flex-wrap gap-2">
+    <div className="space-y-3">
+      <p className="max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">{t("settings.accentColorHint")}</p>
+      <div className="flex flex-wrap gap-2.5">
         {ACCENT_OPTIONS.map((option) => {
           const selected = accentId === option.id;
           const swatch = resolved === "dark" ? option.dark : option.light;
+          const name = t(`accent.${option.id}` as TranslationKey);
           return (
-            <button
-              key={option.id}
-              title={option.label}
-              aria-label={option.label}
-              aria-pressed={selected}
-              onClick={() => setAccent(option.id, resolved)}
-              className="flex h-7 w-7 items-center justify-center rounded-full transition-transform hover:scale-110"
-              style={{
-                background: swatch,
-                // Ring drawn with a shadow so it doesn't shift the layout when it appears.
-                boxShadow: selected ? `0 0 0 2px var(--cf-surface), 0 0 0 4px ${swatch}` : undefined,
-              }}
-            >
-              {selected && <Check size={13} className="text-white" strokeWidth={3} />}
-            </button>
+            <Tooltip key={option.id} label={name}>
+              <button
+                type="button"
+                aria-label={name}
+                aria-pressed={selected}
+                onClick={() => setAccent(option.id, resolved)}
+                className="flex h-8 w-8 items-center justify-center rounded-full text-[11px] font-semibold text-[var(--cf-on-accent)] transition-transform duration-100 hover:scale-110"
+                style={{
+                  background: swatch,
+                  // Ring drawn with a shadow so it doesn't shift the layout when it appears: a gap in
+                  // the sheet's own colour, then the swatch again.
+                  boxShadow: selected
+                    ? `0 0 0 2px var(--cf-surface), 0 0 0 4px ${swatch}`
+                    : "inset 0 0 0 1px color-mix(in oklab, var(--cf-text) 12%, transparent)",
+                }}
+              >
+                Aa
+              </button>
+            </Tooltip>
           );
         })}
       </div>
 
-      <div className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg)] px-2.5 py-2">
-        <span className="rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[11px] font-medium text-white">
+      <div className="flex flex-wrap items-center gap-3 rounded-lg bg-[var(--cf-sunken)] p-3">
+        <span className={buttonClass({ variant: "primary", size: "sm", className: "pointer-events-none" })}>
           {t("settings.accentPreviewButton")}
         </span>
-        <span className="rounded-md bg-[var(--cf-accent-soft)] px-2 py-1 text-[11px] font-medium text-[var(--cf-accent)]">
+        {/* The selected-row fill (`rowClass`), shrunk to its label. */}
+        <span className="inline-flex h-7 items-center rounded-md bg-[var(--cf-accent-soft)] px-2 text-[13px] text-[var(--cf-text)]">
           {t("settings.accentPreviewSelected")}
         </span>
-        <span className="text-[11px] text-[var(--cf-accent)] underline">{t("settings.accentPreviewLink")}</span>
+        <span className="text-[13px] text-[var(--cf-accent)] underline underline-offset-2">
+          {t("settings.accentPreviewLink")}
+        </span>
+        <span className={chipClass("accent", "ml-auto")}>{t(`accent.${accentId}` as TranslationKey)}</span>
       </div>
     </div>
   );
@@ -87,23 +200,27 @@ function ThemeGrid({ mode }: { mode: "light" | "dark" }) {
   const setThemeId = useThemeStore((s) => s.setThemeId);
 
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+    <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
       {themesFor(mode).map((theme) => {
         const selected = theme.id === selectedId;
         return (
           <button
             key={theme.id}
+            type="button"
             onClick={() => void setThemeId(mode, theme.id)}
-            style={{ background: theme.ui.bg, borderColor: selected ? undefined : theme.ui.border }}
-            className={`overflow-hidden rounded-lg border px-2.5 py-2 text-left ${
-              selected ? "border-[var(--cf-accent)] ring-1 ring-[var(--cf-accent)]" : ""
+            aria-pressed={selected}
+            // Idle, each card wears its own scheme's hairline; picked, the same 2px accent ring as
+            // the mode tiles above, so "selected" reads one way across this section.
+            style={{ background: theme.ui.bg, boxShadow: selected ? undefined : `inset 0 0 0 1px ${theme.ui.border}` }}
+            className={`overflow-hidden rounded-lg px-2.5 py-2 text-left ${
+              selected ? "shadow-[0_0_0_2px_var(--cf-accent)]" : ""
             }`}
           >
             <span className="flex items-center gap-1" style={{ color: theme.ui.text }}>
               <span className="truncate text-[12px] font-medium">{theme.name}</span>
-              {selected && <Check size={11} className="ml-auto shrink-0 text-[var(--cf-accent)]" />}
+              {selected && <Check size={12} className="ml-auto shrink-0 text-[var(--cf-accent)]" />}
             </span>
-            <span className="mt-1 block font-mono text-[10px] leading-[1.4]">
+            <span className="mt-1 block font-mono text-[10.5px] leading-[1.4]">
               <span style={{ color: theme.tokens.comment }}>// preview</span>
               <br />
               <span style={{ color: theme.tokens.keyword }}>const </span>
@@ -120,8 +237,6 @@ function ThemeGrid({ mode }: { mode: "light" | "dark" }) {
 
 export function ThemeSettings() {
   const t = useT();
-  const preference = useThemeStore((s) => s.preference);
-  const setPreference = useThemeStore((s) => s.setPreference);
   const resolved = useThemeStore((s) => s.resolved);
   // The mode you are looking at comes first — the other is a deliberate visit.
   const modes: ("light" | "dark")[] = resolved === "dark" ? ["dark", "light"] : ["light", "dark"];
@@ -133,25 +248,7 @@ export function ThemeSettings() {
           {tab === "look" && (
             <>
               <PaneBlock title={t("settings.tabThemeMode")}>
-                <div className="flex gap-2">
-                  {OPTIONS.map(({ id, labelKey, icon: Icon }) => (
-                    <button
-                      key={id}
-                      onClick={() => setPreference(id)}
-                      className={`relative flex flex-1 flex-col items-center gap-1.5 rounded-lg border px-3 py-3 text-[13px] ${
-                        preference === id
-                          ? "border-transparent text-[var(--cf-accent)]"
-                          : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                      }`}
-                    >
-                      {preference === id && <ActivePill layoutId="cf-theme-mode-pill" inset="-inset-px" radius="rounded-lg" />}
-                      <span className="relative flex flex-col items-center gap-1.5">
-                        <Icon size={18} />
-                        {t(labelKey)}
-                      </span>
-                    </button>
-                  ))}
-                </div>
+                <ModeTiles />
               </PaneBlock>
 
               {/* The picker says what an accent is for in its own first line. */}
@@ -162,13 +259,13 @@ export function ThemeSettings() {
           )}
 
           {tab === "themes" && (
-            <div className="space-y-4">
+            <div className="space-y-5">
               {modes.map((mode) => (
                 <div key={mode}>
                   {/* The scheme in force is named beside its heading, so it reads without hunting
                       the grid for the ticked card. */}
-                  <p className="mb-2 flex items-center gap-2 text-[12.5px] font-medium text-[var(--cf-text)]">
-                    {mode === "dark" ? <Moon size={13} /> : <Sun size={13} />}
+                  <p className="mb-2.5 flex items-center gap-2 text-[13px] font-semibold text-[var(--cf-text)]">
+                    {mode === "dark" ? <Moon size={14} /> : <Sun size={14} />}
                     {t(mode === "dark" ? "settings.forDarkMode" : "settings.forLightMode")}
                     <span className="ml-auto flex min-w-0 items-center gap-1.5 font-normal">
                       <ThemeSummary mode={mode} />

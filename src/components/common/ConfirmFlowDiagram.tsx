@@ -93,7 +93,7 @@ export function ConfirmFlowDiagram({ flow }: { flow: ConfirmFlow }) {
   return (
     // Extra room at the top, not padding for its own sake: the verb badge hangs above the
     // connector and would otherwise ride out over the tinted box's edge.
-    <div className="mb-4 rounded-lg bg-black/[0.02] px-3 pb-3 pt-8 dark:bg-white/[0.03]">
+    <div className="mb-4 rounded-lg bg-[var(--cf-hover)] px-3 pb-3 pt-8">
       <div className="flex items-center gap-2">
         <Node icon={preset.sourceIcon} label={flow.source} emphasis={false} tone={tone} />
 

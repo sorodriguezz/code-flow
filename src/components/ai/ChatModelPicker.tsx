@@ -228,16 +228,18 @@ export function ChatModelPicker({
         ref={triggerRef}
         onClick={() => (open ? setOpen(false) : openMenu())}
         title={t("chat.changeModelTitle")}
-        className="flex max-w-full items-center gap-1 rounded-md border border-transparent px-1.5 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] hover:border-[var(--cf-border)] hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
+        className={`flex h-[26px] max-w-full items-center gap-1.5 rounded-md px-2 text-[12px] transition-colors hover:bg-[var(--cf-hover)] ${
+          open ? "bg-[var(--cf-hover)] text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
+        }`}
       >
-        <ProviderGlyph providerId={active.id} size={11} />
+        <ProviderGlyph providerId={active.id} size={13} />
         {activeLabel}
         <span className="text-[var(--cf-text-muted)]/50">·</span>
         <span className="truncate font-medium text-[var(--cf-text)]/70">
           {modelDisplayLabel(providerId, shownModel, t)}
           {hasAccounts(providerId) && ` · ${nameOf(providerId, effectiveAccount(providerId))}`}
         </span>
-        <ChevronDown size={10} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+        <ChevronDown size={12} className={`shrink-0 opacity-70 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
 
       {open &&
@@ -249,7 +251,7 @@ export function ChatModelPicker({
           >
             {browsing === null ? (
               <>
-                <p className="shrink-0 px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+                <p className="shrink-0 px-2.5 py-1.5 text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
                   {t("chat.modelForChat")}
                 </p>
                 <div className="min-h-0 flex-1 overflow-auto p-1 pt-0">
@@ -265,13 +267,13 @@ export function ChatModelPicker({
                         className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12px] disabled:opacity-40 ${
                           p.id === providerId
                             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                            : "text-[var(--cf-text)] hover:bg-black/[0.04] disabled:hover:bg-transparent dark:hover:bg-white/[0.06]"
+                            : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)] disabled:hover:bg-transparent"
                         }`}
                       >
                         <ProviderGlyph providerId={p.id} size={12} />
                         <span className="min-w-0 flex-1 truncate">{p.label ?? labelOf(p.id)}</span>
                         {unavailable ? (
-                          <span className="shrink-0 text-[10px] text-[var(--cf-warning)]">
+                          <span className="shrink-0 text-[10.5px] text-[var(--cf-warning)]">
                             {t("settings.providerMissing")}
                           </span>
                         ) : locked ? (
@@ -389,7 +391,7 @@ function VersionItem({ label, selected, onClick }: { label: string; selected: bo
       className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12px] ${
         selected
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+          : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
       }`}
     >
       <Check size={11} className={`shrink-0 ${selected ? "" : "opacity-0"}`} />

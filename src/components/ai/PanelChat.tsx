@@ -181,7 +181,7 @@ export function PanelChat({
         <div className="mb-2.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
           <span className="min-w-0 truncate">{repoName}</span>
           <span
-            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_13%,transparent)] px-1.5 py-px text-[10px] font-semibold text-[var(--cf-warning)]"
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-warning)]"
             title={t("assistant.canEditHint", { repo: repoName })}
           >
             <FilePen size={9} />
@@ -197,7 +197,7 @@ export function PanelChat({
                 {day && (
                   <div className="flex items-center gap-2 pt-1.5">
                     <div className="h-px flex-1 bg-[var(--cf-border)]" />
-                    <span className="text-[10px] text-[var(--cf-text-muted)]">{day}</span>
+                    <span className="text-[10.5px] text-[var(--cf-text-muted)]">{day}</span>
                     <div className="h-px flex-1 bg-[var(--cf-border)]" />
                   </div>
                 )}
@@ -274,7 +274,7 @@ export function PanelChat({
             }}
             placeholder={t("assistant.askPlaceholder", { repo: repoName })}
             aria-label={t("assistant.askPlaceholder", { repo: repoName })}
-            className="max-h-[180px] resize-none bg-transparent px-1.5 py-1 text-[12.5px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
+            className="max-h-[180px] resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
           />
           <div className="flex items-center gap-1.5 px-0.5">
             <ChatModelPicker
@@ -299,7 +299,7 @@ export function PanelChat({
                 disabled={!draft.trim()}
                 title={holder ? t("assistant.sendQueued") : t("chat.send")}
                 aria-label={t("chat.send")}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent)] text-white hover:brightness-110 disabled:opacity-40"
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:opacity-40"
               >
                 {holder ? <Clock size={12} /> : <ArrowUp size={13} />}
               </button>
@@ -316,7 +316,7 @@ function AccountBreak({ label, detail }: { label: string; detail: string }) {
   return (
     <div role="separator" aria-label={`${label}. ${detail}`} title={detail} className="flex items-center gap-2 pt-1.5">
       <div className="h-px flex-1 bg-[color-mix(in_oklab,var(--cf-warning)_40%,transparent)]" />
-      <span className="flex min-w-0 items-center gap-1 text-[10px] font-medium text-[var(--cf-warning)]">
+      <span className="flex min-w-0 items-center gap-1 text-[10.5px] font-medium text-[var(--cf-warning)]">
         <UsersRound size={10} className="shrink-0" />
         <span className="truncate">{label}</span>
       </span>

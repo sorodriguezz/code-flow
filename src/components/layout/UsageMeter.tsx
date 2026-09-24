@@ -117,7 +117,7 @@ export function UsageMeter() {
         onClick={() => setOpen((wasOpen) => !wasOpen)}
         aria-expanded={open}
         title={shownLabel ? `${t("quota.title")} · ${shownLabel}` : t("quota.title")}
-        className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] tabular-nums hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
+        className={`flex h-[22px] shrink-0 items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums hover:bg-[var(--cf-hover)] ${
           open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
         }`}
       >
@@ -125,14 +125,14 @@ export function UsageMeter() {
             has to be, now that the pill is quota and nothing else. Quota is only fetched once the
             panel is opened (see above), so a button that waited for a number would be waiting on a
             click it is the only way to make. The bare gauge is the invitation. */}
-        <Gauge size={12} className="shrink-0" />
+        <Gauge size={14} className="shrink-0" />
         {shown && (
           <span
             className={
               severityOf(shown.limit.used_percent) === "critical"
-                ? "text-[#ef4444]"
+                ? "text-[var(--cf-danger)]"
                 : severityOf(shown.limit.used_percent) === "low"
-                  ? "text-[#f59e0b]"
+                  ? "text-[var(--cf-warning)]"
                   : undefined
             }
           >
@@ -160,9 +160,9 @@ export function UsageMeter() {
                 disabled={quotaLoading}
                 title={t("quota.refresh")}
                 aria-label={t("quota.refresh")}
-                className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-60 disabled:hover:bg-transparent dark:hover:bg-white/[0.08]"
+                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-60 disabled:hover:bg-transparent"
               >
-                <RefreshCw size={11} className={quotaLoading ? "animate-spin" : undefined} />
+                <RefreshCw size={13} className={quotaLoading ? "animate-spin" : undefined} />
               </button>
             </div>
 

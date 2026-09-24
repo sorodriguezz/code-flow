@@ -1,5 +1,4 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
-import { motion } from "framer-motion";
 import { ChevronDown, CirclePlay, Pencil, Plus, SplitSquareHorizontal, TerminalSquare, X } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -96,7 +95,6 @@ export function ServicesDock() {
   const [selection, setSelection] = useState<Selection>({ kind: "terminals" });
   const [editing, setEditing] = useState<Editing | null>(null);
   const [importing, setImporting] = useState(false);
-  const [resizing, setResizing] = useState(false);
 
   const activeProjectId = project?.id ?? null;
   const activeProj = activeProjectId ? byProject[activeProjectId] : undefined;
@@ -156,17 +154,14 @@ export function ServicesDock() {
   const busyHere = here.some((r) => ["waiting", "starting", "stopping", "restarting"].includes(r!.status));
 
   return (
-    <motion.div
-      initial={{ height: 0, opacity: 0 }}
-      animate={{ height, opacity: 1 }}
-      exit={{ height: 0, opacity: 0 }}
-      // Off while dragging: `animate` eases toward every height the drag hands it, so the panel
-      // would trail the pointer by the whole duration.
-      transition={resizing ? { duration: 0 } : { duration: 0.18, ease: "easeOut" }}
+    <div
+      // The second sheet of the work column, under the view. It opens at its height with its
+      // contents fading in — not by animating `height`, which relaid out the window every frame.
+      style={{ height }}
       data-tour="terminal-dock"
       // Shrinkable, and `min-h-0` with it: at `shrink-0` a panel taller than the room left in the
       // column overflows under the status bar, which paints on top — taking the prompt with it.
-      className="flex min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
+      className="cf-sheet cf-panel-in flex min-h-0 flex-col"
     >
       <ResizeHandle
         axis="y"
@@ -176,7 +171,7 @@ export function ServicesDock() {
         invert
         onChange={(h) => setSize("terminalPanelHeight", h)}
         onCommit={(h) => commitSize("terminalPanelHeight", h)}
-        onDragChange={setResizing}
+        seamless
       />
 
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2">
@@ -222,7 +217,7 @@ export function ServicesDock() {
         <button
           onClick={togglePanel}
           title={t("terminal.hide")}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
         >
           <ChevronDown size={13} />
         </button>
@@ -388,7 +383,7 @@ export function ServicesDock() {
           onImported={(first) => first && setSelection({ kind: "service", id: first.id })}
         />
       )}
-    </motion.div>
+    </div>
   );
 }
 
@@ -430,7 +425,7 @@ function TerminalRow({
       className={`group/row flex items-center gap-1.5 px-2 py-[3px] pl-4 text-[12px] ${
         selected
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
       }`}
     >
       {renaming ? (
@@ -493,7 +488,7 @@ function RowButton({
       }}
       title={label}
       aria-label={label}
-      className={`flex h-4 w-4 items-center justify-center rounded hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
+      className={`inline-flex h-[22px] w-[22px] items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
         danger ? "hover:text-[var(--cf-danger)]" : "hover:text-[var(--cf-text)]"
       }`}
     >

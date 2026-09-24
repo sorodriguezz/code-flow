@@ -17,6 +17,8 @@ import {
 } from "../../lib/pipelineGraph";
 import { useCiStore, runKey } from "../../state/ciStore";
 import { useT } from "../../state/languageStore";
+import { chipClass } from "../common/recipes";
+import { Segmented } from "../common/Segmented";
 import { Skeleton } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
 import { StatusGlyph } from "./RunList";
@@ -171,7 +173,7 @@ function JobCard({
       } ${pending ? "border-dashed opacity-60" : ""}`}
     >
       <StatusGlyph status={job.status} size={13} />
-      <span className="min-w-0 flex-1 truncate text-[11.5px] font-medium">{job.name}</span>
+      <span className="min-w-0 flex-1 truncate text-[12px] font-medium">{job.name}</span>
       <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
         {formatDuration(took)}
       </span>
@@ -422,14 +424,14 @@ function JobColumns({ graph, now }: { graph: PipelineGraph; now: number }) {
             {/* Empty for a column of unrelated jobs — see `declaredLabel`. The badge then carries
                 the header on its own, which is the one fact that column has to offer. */}
             {column.label && (
-              <span className="truncate text-[10px] font-bold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              <span className="truncate text-[10.5px] font-bold uppercase tracking-wide text-[var(--cf-text-muted)]">
                 {column.label}
               </span>
             )}
             {/* Said in words as well as drawn, because the drawing only works for people who
                 already know how to read it — and this is the one fact the screen exists for. */}
             {column.jobs.length > 1 && (
-              <span className="shrink-0 rounded-[3px] bg-[var(--cf-accent-soft)] px-1 text-[9px] font-bold uppercase tracking-wide text-[var(--cf-accent)]">
+              <span className="shrink-0 rounded-[3px] bg-[var(--cf-accent-soft)] px-1 text-[10.5px] font-bold uppercase tracking-wide text-[var(--cf-accent)]">
                 {t("pipelines.inParallel", { n: column.jobs.length })}
               </span>
             )}
@@ -699,12 +701,12 @@ function StageJobRow({
       className={`flex w-full shrink-0 items-center gap-1.5 rounded-[5px] px-1.5 text-left transition-colors ${
         selected
           ? "bg-[var(--cf-accent-soft)] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-accent)_40%,transparent)]"
-          : "hover:bg-black/[0.035] dark:hover:bg-white/[0.05]"
+          : "hover:bg-[var(--cf-hover)]"
       } ${pending ? "opacity-55" : ""}`}
     >
       <StatusGlyph status={job.status} size={12} />
       <span className="min-w-0 flex-1 truncate text-[11px]">{job.name}</span>
-      <span className="shrink-0 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+      <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
         {pending ? "" : formatDuration(took)}
       </span>
     </button>
@@ -780,13 +782,13 @@ function StageCard({
           {summary.overlap > 1 && (
             <span
               title={t("pipelines.overlapHint", { n: summary.overlap })}
-              className="shrink-0 rounded-[3px] border border-[var(--cf-border)] px-1 text-[9px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
+              className={chipClass("neutral", "h-[18px] px-1.5 text-[10.5px] font-semibold")}
             >
               {t("pipelines.inParallel", { n: summary.overlap })}
             </span>
           )}
         </span>
-        <span className="flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
+        <span className="flex items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)]">
           <span className="min-w-0 truncate">{progress}</span>
           <span className="ml-auto shrink-0 tabular-nums">{formatDuration(took)}</span>
         </span>
@@ -812,7 +814,7 @@ function StageCard({
             className={`flex w-full shrink-0 items-center rounded-[5px] px-1.5 text-left text-[10.5px] italic text-[var(--cf-text-muted)] transition-colors ${
               summary.placeholder && selectedId === summary.placeholder.id
                 ? "bg-[var(--cf-accent-soft)] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-accent)_40%,transparent)]"
-                : "enabled:hover:bg-black/[0.035] dark:enabled:hover:bg-white/[0.05]"
+                : "enabled:hover:bg-[var(--cf-hover)] dark:enabled:hover:bg-white/[0.05]"
             }`}
           >
             {summary.declaredJobs.length > 0
@@ -1204,7 +1206,7 @@ function Waterfall({ detail, now }: { detail: PipelineRunDetail; now: number }) 
             onClick={() => void selectJob(job.id)}
             aria-current={selected ? "page" : undefined}
             className={`flex h-6 w-full items-center rounded-[5px] text-left transition-colors ${
-              selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
             }`}
           >
             <span className="flex w-[152px] shrink-0 items-center gap-1.5 overflow-hidden pl-1.5">
@@ -1213,7 +1215,7 @@ function Waterfall({ detail, now }: { detail: PipelineRunDetail; now: number }) 
             </span>
             <span className="relative h-full flex-1">
               {jobStart === null ? (
-                <span className="absolute left-0 top-[5px] text-[10px] text-[var(--cf-text-muted)]">
+                <span className="absolute left-0 top-[5px] text-[10.5px] text-[var(--cf-text-muted)]">
                   {t("pipelines.notStarted")}
                 </span>
               ) : (
@@ -1259,7 +1261,7 @@ function Waterfall({ detail, now }: { detail: PipelineRunDetail; now: number }) 
                 bar. */}
             <span
               title={took === longest && longest > 0 ? t("pipelines.longest") : undefined}
-              className={`w-[72px] shrink-0 whitespace-nowrap pr-1.5 text-right text-[9.5px] tabular-nums ${
+              className={`w-[72px] shrink-0 whitespace-nowrap pr-1.5 text-right text-[10.5px] tabular-nums ${
                 took === longest && longest > 0
                   ? "font-semibold text-[var(--cf-text)]"
                   : "text-[var(--cf-text-muted)]"
@@ -1340,7 +1342,7 @@ export function RunGraph({
     <>
       <div className="flex h-[29px] shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5">
         <span className="mr-auto flex min-w-0 items-center gap-2">
-          <span className="truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <span className="truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {detail
               ? t("pipelines.structureOf", { name: detail.run.name })
               : t("pipelines.structure")}
@@ -1350,37 +1352,26 @@ export function RunGraph({
               the pipeline" — a reader who can't tell them apart will believe the wrong one. */}
           {detail && (
             <Tooltip label={t(label)} description={t(hint)}>
-              <span className="flex shrink-0 items-center gap-1 rounded border border-[var(--cf-border)] px-1 text-[9.5px] text-[var(--cf-text-muted)]">
+              <span className="flex shrink-0 items-center gap-1 rounded border border-[var(--cf-border)] px-1 text-[10.5px] text-[var(--cf-text-muted)]">
                 <Info size={9} className="shrink-0 opacity-70" />
                 {t(label)}
               </span>
             </Tooltip>
           )}
         </span>
-        {/* A segmented control, with room to be one.
-            It used to be two buttons separated by a one-pixel seam of `--cf-border` inside a
-            one-pixel frame of the same colour, which at 10.5px made "Grafo Cascada" read as a
-            single smudged word: the gap between the two labels was smaller than the gap between
-            the letters in either of them. What separates them now is space — a track two pixels
-            wider than its thumbs, and 10px of padding inside each — plus a raised thumb on the
-            selected one, so the pair reads as one control with one of its halves pressed. */}
-        <div className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-[2px]">
-          {(["graph", "waterfall"] as const).map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => setGraphMode(option)}
-              aria-pressed={mode === option}
-              className={`flex h-[19px] items-center rounded-[5px] px-2.5 text-[10.5px] font-semibold transition-colors ${
-                mode === option
-                  ? "bg-[var(--cf-surface)] text-[var(--cf-accent)] shadow-[0_1px_2px_rgba(0,0,0,0.16)]"
-                  : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-              }`}
-            >
-              {t(option === "graph" ? "pipelines.modeGraph" : "pipelines.modeWaterfall")}
-            </button>
-          ))}
-        </div>
+        {/* The app's one segmented control: a track, a raised thumb that slides, and room between
+            the two labels — it used to be two buttons in a one-pixel frame at 10.5px, which made
+            "Grafo Cascada" read as a single smudged word. */}
+        <Segmented
+          size="sm"
+          layoutId="cf-pipeline-graph-mode"
+          value={mode}
+          onChange={setGraphMode}
+          options={[
+            { value: "graph", label: t("pipelines.modeGraph") },
+            { value: "waterfall", label: t("pipelines.modeWaterfall") },
+          ]}
+        />
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto p-3.5">
@@ -1399,11 +1390,11 @@ export function RunGraph({
             ))}
           </div>
         ) : !detail && error ? (
-          <p className="text-[11.5px] text-[var(--cf-danger)]">{error}</p>
+          <p className="text-[12px] text-[var(--cf-danger)]">{error}</p>
         ) : !detail ? (
-          <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("pipelines.pickRun")}</p>
+          <p className="text-[12px] text-[var(--cf-text-muted)]">{t("pipelines.pickRun")}</p>
         ) : detail.jobs.length === 0 ? (
-          <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("pipelines.noJobs")}</p>
+          <p className="text-[12px] text-[var(--cf-text-muted)]">{t("pipelines.noJobs")}</p>
         ) : mode !== "graph" ? (
           <Waterfall detail={detail} now={now} />
         ) : board ? (

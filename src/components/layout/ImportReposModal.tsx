@@ -2,6 +2,7 @@ import { useState } from "react";
 import { FolderGit2, GitBranch, Loader2, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import type { DuplicateProject, FoundRepo } from "../../lib/tauri/commands";
+import { buttonClass } from "../common/Button";
 
 /**
  * Which of the repositories a pick turned up to import.
@@ -75,10 +76,10 @@ export function ImportReposModal({
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[60vh] w-[460px] flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        className="flex max-h-[60vh] w-[460px] flex-col rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-1 flex items-center justify-between">
-          <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
+          <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
             <FolderGit2 size={14} />
             {t("import.title")}
           </h3>
@@ -136,7 +137,7 @@ export function ImportReposModal({
                     : undefined
                 }
                 className={`flex items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5 last:border-b-0 ${
-                  duplicate ? "opacity-50" : "cursor-pointer hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  duplicate ? "opacity-50" : "cursor-pointer hover:bg-[var(--cf-hover)]"
                 }`}
               >
                 <input
@@ -151,7 +152,7 @@ export function ImportReposModal({
                   {repo.name}
                 </span>
                 {duplicate && (
-                  <span className="min-w-0 max-w-[55%] shrink-0 truncate text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+                  <span className="min-w-0 max-w-[55%] shrink-0 truncate text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
                     {duplicate.reason === "remote"
                       ? t("import.sameRepoAs", { name: duplicate.name })
                       : t("import.alreadyAdded")}
@@ -166,14 +167,14 @@ export function ImportReposModal({
           <button
             disabled={importing}
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost" })}
           >
             {t("common.cancel")}
           </button>
           <button
             disabled={importing || selected.length === 0}
             onClick={() => void confirm()}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {importing && <Loader2 size={13} className="animate-spin" />}
             {t("import.importCount", { count: String(selected.length) })}

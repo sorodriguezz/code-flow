@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Editor from "@monaco-editor/react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
-import { Eye, EyeOff, KeyRound, Loader2, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Eye, EyeOff, Info, KeyRound, Loader2, RefreshCw, ShieldCheck, TriangleAlert } from "lucide-react";
 import { Select, type SelectItems } from "../common/Select";
 import { Checkbox } from "../common/Checkbox";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
 import { VariableInput } from "./VariableInput";
 import { useApiStore } from "../../state/apiStore";
 import { useThemeStore } from "../../state/themeStore";
@@ -34,6 +36,10 @@ import type {
 // Secret-aware field
 // ---------------------------------------------------------------------------
 
+/** The line inside an `AuthField`: 20px of text and 4px either side fill the 30px box, border
+ * included, the height of every other form field. */
+const FIELD_TEXT = "px-2.5 py-1 text-[13px]";
+
 /**
  * One auth field.
  *
@@ -42,6 +48,9 @@ import type {
  * secret stays a plain password input until the eye is clicked and only then becomes the real
  * highlighted field. Starting masked is the point — these are credentials, and this is the panel
  * that ends up on a screen share.
+ *
+ * The box is drawn here rather than by either input, so the two swap inside one field — its focus
+ * ring and the eye staying exactly where they were.
  */
 function AuthField({
   value,
@@ -66,7 +75,15 @@ function AuthField({
   const masked = secret && !revealed;
 
   return (
-    <div className="flex items-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] focus-within:border-[var(--cf-accent)]">
+    <div
+      className={`flex h-[30px] min-w-0 items-center rounded-md border transition-[border-color,box-shadow] duration-100 ${
+        // Read-only is the inherited view: an outline on the panel's own tone, so it reads as a
+        // value being shown rather than a field waiting for input.
+        readOnly
+          ? "border-[var(--cf-border)] bg-transparent"
+          : "border-[var(--cf-field-border)] bg-[var(--cf-field)] focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
+      }`}
+    >
       {masked ? (
         <input
           type="password"
@@ -76,7 +93,7 @@ function AuthField({
           aria-label={ariaLabel}
           autoComplete="off"
           onChange={(e) => onChange(e.target.value)}
-          className="min-w-0 flex-1 bg-transparent px-2 py-1.5 text-[12px] leading-5 text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] disabled:cursor-not-allowed"
+          className={`min-w-0 flex-1 bg-transparent leading-5 text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)] disabled:cursor-not-allowed disabled:text-[var(--cf-text-muted)] ${FIELD_TEXT}`}
         />
       ) : (
         <VariableInput
@@ -87,18 +104,23 @@ function AuthField({
           placeholder={placeholder}
           ariaLabel={ariaLabel}
           className="flex-1"
+          fieldClassName={FIELD_TEXT}
         />
       )}
       {secret && (
-        <button
-          type="button"
-          onClick={() => setRevealed((on) => !on)}
-          title={revealed ? t("api.auth.mask") : t("api.auth.reveal")}
-          aria-label={revealed ? t("api.auth.mask") : t("api.auth.reveal")}
-          className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-        >
-          {revealed ? <EyeOff size={12} /> : <Eye size={12} />}
-        </button>
+        <Tooltip label={revealed ? t("api.auth.mask") : t("api.auth.reveal")}>
+          <button
+            type="button"
+            onClick={() => setRevealed((on) => !on)}
+            // A toggle keeps one name and reports its state — "Show value, pressed" — so the label
+            // that flips between showing and hiding is the tooltip's alone.
+            aria-label={t("api.auth.reveal")}
+            aria-pressed={revealed}
+            className={iconButtonClass({ size: "xs", active: revealed, className: "mr-1" })}
+          >
+            {revealed ? <EyeOff size={13} /> : <Eye size={13} />}
+          </button>
+        </Tooltip>
       )}
     </div>
   );
@@ -108,32 +130,50 @@ function AuthField({
 // Layout helpers
 // ---------------------------------------------------------------------------
 
+/** A label and its control. The label is padded down to sit on the middle of a 30px field, which
+ * is what the first line of every control here is. */
 function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <>
-      <span className="pt-1.5 text-[12px] text-[var(--cf-text-muted)]">{label}</span>
+      <span className="min-w-0 break-words pt-[5px] text-[13px] leading-5 text-[var(--cf-text-muted)]">{label}</span>
       <div className="min-w-0">
         {children}
-        {hint && <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">{hint}</p>}
+        {hint && <p className="mt-1 text-[12px] text-[var(--cf-text-muted)]">{hint}</p>}
       </div>
+    </>
+  );
+}
+
+/** Something that belongs to the controls rather than to a label — a note, the token actions — set
+ * in the control column so it lines up under the fields it is about. */
+function Aside({ children }: { children: ReactNode }) {
+  return (
+    <>
+      <span aria-hidden />
+      <div className="min-w-0">{children}</div>
     </>
   );
 }
 
 function Grid({ children }: { children: ReactNode }) {
   return (
-    <div className="grid grid-cols-[minmax(90px,150px)_minmax(0,1fr)] items-start gap-x-3 gap-y-2">
+    <div className="grid grid-cols-[minmax(96px,150px)_minmax(0,1fr)] items-start gap-x-4 gap-y-2.5">
       {children}
     </div>
   );
 }
 
 function Note({ tone = "muted", children }: { tone?: "muted" | "warning"; children: ReactNode }) {
-  const color = tone === "warning" ? "var(--cf-warning)" : "var(--cf-text-muted)";
+  const warning = tone === "warning";
+  const Icon = warning ? TriangleAlert : Info;
   return (
-    <p className="flex items-start gap-1.5 text-[11px]" style={{ color }}>
-      {tone === "warning" && <TriangleAlert size={12} className="mt-0.5 shrink-0" />}
-      <span>{children}</span>
+    <p
+      className={`flex items-start gap-1.5 text-[12px] leading-[18px] ${
+        warning ? "text-[var(--cf-warning)]" : "text-[var(--cf-text-muted)]"
+      }`}
+    >
+      <Icon size={12} className="mt-[3px] shrink-0" />
+      <span className="min-w-0">{children}</span>
     </p>
   );
 }
@@ -340,64 +380,69 @@ export function AuthEditor({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto p-3">
-      <Grid>
-        <Row label={t("api.auth.type")}>
-          <div className="flex items-center gap-2">
-            <Select
-              size="sm"
-              className="max-w-[240px]"
-              ariaLabel={t("api.auth.type")}
-              value={auth.type}
-              onChange={(value) => onChange({ ...auth, type: value as AuthType })}
-              options={types.map((type) => ({ value: type, label: t(TYPE_LABELS[type]) }))}
-            />
-            {/* Only for the types that have somewhere to put a credential. `oauth2` and `jwt` are
-                left out on purpose: filling two boxes of a six-box flow looks like a finished form
-                and is not one. A button that could only ever report "nothing to fill" is worse than
-                no button. */}
-            {authFillSupported(auth.type) && (
-              <button
-                type="button"
-                onClick={() => setPicking(true)}
-                title={t("vault.pick.action")}
-                className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-              >
-                <KeyRound size={12} />
-                {t("vault.pick.action")}
-              </button>
+    <div className="flex h-full min-h-0 flex-col overflow-auto px-3.5 py-3">
+      {/* Capped, because a form this long stretched across a wide editor puts every value a
+          screen's width from its label. */}
+      <div className="flex max-w-[720px] flex-col gap-3">
+        <Grid>
+          <Row label={t("api.auth.type")}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Select
+                size="field"
+                className="max-w-[240px]"
+                ariaLabel={t("api.auth.type")}
+                value={auth.type}
+                onChange={(value) => onChange({ ...auth, type: value as AuthType })}
+                options={types.map((type) => ({ value: type, label: t(TYPE_LABELS[type]) }))}
+              />
+              {/* Only for the types that have somewhere to put a credential. `oauth2` and `jwt` are
+                  left out on purpose: filling two boxes of a six-box flow looks like a finished form
+                  and is not one. A button that could only ever report "nothing to fill" is worse than
+                  no button. */}
+              {authFillSupported(auth.type) && (
+                <button
+                  type="button"
+                  onClick={() => setPicking(true)}
+                  className={buttonClass({ variant: "ghost", size: "sm" })}
+                >
+                  <KeyRound size={13} />
+                  {t("vault.pick.action")}
+                </button>
+              )}
+            </div>
+          </Row>
+        </Grid>
+
+        {picking && (
+          <VaultPicker
+            kinds={auth.type === "awsv4" ? ["storage", "key"] : ["login", "key"]}
+            onPick={(secret, item) => void applyVaultEntry(secret, item)}
+            onClose={() => setPicking(false)}
+          />
+        )}
+
+        {auth.type === "inherit" ? (
+          <div className="flex flex-col gap-3 rounded-lg border border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_50%,var(--cf-surface))] p-3.5">
+            {source ? (
+              <>
+                <div className="flex flex-col gap-1">
+                  <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[13px] text-[var(--cf-text)]">
+                    <ShieldCheck size={14} className="shrink-0 text-[var(--cf-accent)]" />
+                    {t("api.auth.inheritedFrom", { name: source.name })}
+                    <span className="text-[var(--cf-text-muted)]">· {t(TYPE_LABELS[inherited.type])}</span>
+                  </p>
+                  <Note>{t("api.auth.inheritedReadOnly")}</Note>
+                </div>
+                <AuthFields auth={inherited} onChange={() => {}} ctx={ctx} bufferKey={bufferKey} readOnly />
+              </>
+            ) : (
+              <Note>{t("api.auth.inheritedNone")}</Note>
             )}
           </div>
-        </Row>
-      </Grid>
-
-      {picking && (
-        <VaultPicker
-          kinds={auth.type === "awsv4" ? ["storage", "key"] : ["login", "key"]}
-          onPick={(secret, item) => void applyVaultEntry(secret, item)}
-          onClose={() => setPicking(false)}
-        />
-      )}
-
-      {auth.type === "inherit" ? (
-        <div className="flex flex-col gap-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] p-3">
-          {source ? (
-            <>
-              <p className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
-                <ShieldCheck size={13} className="text-[var(--cf-accent)]" />
-                {t("api.auth.inheritedFrom", { name: source.name })}
-                <span className="text-[var(--cf-text-muted)]">· {t(TYPE_LABELS[inherited.type])}</span>
-              </p>
-              <Note>{t("api.auth.inheritedReadOnly")}</Note>
-              <AuthFields auth={inherited} onChange={() => {}} ctx={ctx} bufferKey={bufferKey} readOnly />
-            </>
-          ) : (
-            <Note>{t("api.auth.inheritedNone")}</Note>
-          )}
-        </div>
-      ) : (
-        <AuthFields auth={auth} onChange={onChange} ctx={ctx} bufferKey={bufferKey} readOnly={false} />
-      )}
+        ) : (
+          <AuthFields auth={auth} onChange={onChange} ctx={ctx} bufferKey={bufferKey} readOnly={false} />
+        )}
+      </div>
     </div>
   );
 }
@@ -468,7 +513,13 @@ function AuthFields({
   switch (auth.type) {
     case "inherit":
     case "none":
-      return <Note>{t("api.auth.none")}</Note>;
+      return (
+        <Grid>
+          <Aside>
+            <Note>{t("api.auth.none")}</Note>
+          </Aside>
+        </Grid>
+      );
 
     case "basic":
     case "digest": {
@@ -480,13 +531,15 @@ function AuthFields({
             : { ...auth, digest: { ...auth.digest, ...patch } },
         );
       return (
-        <div className="flex flex-col gap-2">
-          <Grid>
-            <Row label={t("api.auth.username")}>{field(config.username, (username) => set({ username }))}</Row>
-            <Row label={t("api.auth.password")}>{field(config.password, (password) => set({ password }), true)}</Row>
-          </Grid>
-          {auth.type === "digest" && <Note>{t("api.auth.digestAtSend")}</Note>}
-        </div>
+        <Grid>
+          <Row label={t("api.auth.username")}>{field(config.username, (username) => set({ username }))}</Row>
+          <Row label={t("api.auth.password")}>{field(config.password, (password) => set({ password }), true)}</Row>
+          {auth.type === "digest" && (
+            <Aside>
+              <Note>{t("api.auth.digestAtSend")}</Note>
+            </Aside>
+          )}
+        </Grid>
       );
     }
 
@@ -510,7 +563,7 @@ function AuthFields({
           </Row>
           <Row label={t("api.auth.addTo")}>
             <Select
-              size="sm"
+              size="field"
               className="max-w-[200px]"
               disabled={readOnly}
               ariaLabel={t("api.auth.addTo")}
@@ -540,34 +593,34 @@ function AuthFields({
 
     case "awsv4":
       return (
-        <div className="flex flex-col gap-2">
-          <Grid>
-            <Row label={t("api.auth.accessKey")}>
-              {field(auth.awsv4.accessKey, (accessKey) => onChange({ ...auth, awsv4: { ...auth.awsv4, accessKey } }))}
-            </Row>
-            <Row label={t("api.auth.secretKey")}>
-              {field(
-                auth.awsv4.secretKey,
-                (secretKey) => onChange({ ...auth, awsv4: { ...auth.awsv4, secretKey } }),
-                true,
-              )}
-            </Row>
-            <Row label={t("api.auth.sessionToken")}>
-              {field(
-                auth.awsv4.sessionToken,
-                (sessionToken) => onChange({ ...auth, awsv4: { ...auth.awsv4, sessionToken } }),
-                true,
-              )}
-            </Row>
-            <Row label={t("api.auth.region")}>
-              {field(auth.awsv4.region, (region) => onChange({ ...auth, awsv4: { ...auth.awsv4, region } }), false, "us-east-1")}
-            </Row>
-            <Row label={t("api.auth.service")}>
-              {field(auth.awsv4.service, (service) => onChange({ ...auth, awsv4: { ...auth.awsv4, service } }), false, "execute-api")}
-            </Row>
-          </Grid>
-          <Note>{t("api.auth.awsSignedAtSend")}</Note>
-        </div>
+        <Grid>
+          <Row label={t("api.auth.accessKey")}>
+            {field(auth.awsv4.accessKey, (accessKey) => onChange({ ...auth, awsv4: { ...auth.awsv4, accessKey } }))}
+          </Row>
+          <Row label={t("api.auth.secretKey")}>
+            {field(
+              auth.awsv4.secretKey,
+              (secretKey) => onChange({ ...auth, awsv4: { ...auth.awsv4, secretKey } }),
+              true,
+            )}
+          </Row>
+          <Row label={t("api.auth.sessionToken")}>
+            {field(
+              auth.awsv4.sessionToken,
+              (sessionToken) => onChange({ ...auth, awsv4: { ...auth.awsv4, sessionToken } }),
+              true,
+            )}
+          </Row>
+          <Row label={t("api.auth.region")}>
+            {field(auth.awsv4.region, (region) => onChange({ ...auth, awsv4: { ...auth.awsv4, region } }), false, "us-east-1")}
+          </Row>
+          <Row label={t("api.auth.service")}>
+            {field(auth.awsv4.service, (service) => onChange({ ...auth, awsv4: { ...auth.awsv4, service } }), false, "execute-api")}
+          </Row>
+          <Aside>
+            <Note>{t("api.auth.awsSignedAtSend")}</Note>
+          </Aside>
+        </Grid>
       );
 
     case "oauth2":
@@ -603,7 +656,13 @@ function JwtFields({
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
 
   const jsonEditor = (kind: "header" | "payload", value: string, set: (next: string) => void) => (
-    <div className="overflow-hidden rounded-md border border-[var(--cf-border)]">
+    <div
+      className={`overflow-hidden rounded-md border transition-[border-color,box-shadow] duration-100 ${
+        readOnly
+          ? "border-[var(--cf-border)]"
+          : "border-[var(--cf-field-border)] focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
+      }`}
+    >
       <Editor
         height={110}
         language="json"
@@ -630,11 +689,11 @@ function JwtFields({
   );
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-3">
       <Grid>
         <Row label={t("api.auth.algorithm")}>
           <Select
-            size="sm"
+            size="field"
             className="max-w-[160px]"
             disabled={readOnly}
             ariaLabel={t("api.auth.algorithm")}
@@ -644,7 +703,7 @@ function JwtFields({
           />
         </Row>
         <Row label={t("api.auth.secret")}>
-          <div className="flex flex-col gap-1.5">
+          <div className="flex flex-col gap-2">
             <AuthField
               value={jwt.secret}
               onChange={(secret) => onChange({ ...jwt, secret })}
@@ -652,7 +711,7 @@ function JwtFields({
               secret
               readOnly={readOnly}
             />
-            <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+            <label className="flex w-fit cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
               <Checkbox
                 checked={jwt.secretBase64}
                 disabled={readOnly}
@@ -670,7 +729,7 @@ function JwtFields({
         </Row>
         <Row label={t("api.auth.addTo")}>
           <Select
-            size="sm"
+            size="field"
             className="max-w-[200px]"
             disabled={readOnly}
             ariaLabel={t("api.auth.addTo")}
@@ -762,24 +821,29 @@ function JwtPreview({ jwt, ctx }: { jwt: JwtAuth; ctx: VariableContext }) {
   if (result === null) return null;
 
   return (
-    <div className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] p-2">
-      <div className="mb-1 flex items-center justify-between">
-        <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("api.auth.jwtPreview")}</span>
+    <div className="rounded-lg border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 pb-2.5 pt-2">
+      <div className="mb-1.5 flex min-h-[22px] items-center justify-between gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+          {t("api.auth.jwtPreview")}
+        </span>
         {"token" in result && result.token !== "" && (
-          <button
-            type="button"
-            onClick={() => setRevealed((on) => !on)}
-            title={revealed ? t("api.auth.mask") : t("api.auth.reveal")}
-            className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          >
-            {revealed ? <EyeOff size={12} /> : <Eye size={12} />}
-          </button>
+          <Tooltip label={revealed ? t("api.auth.mask") : t("api.auth.reveal")}>
+            <button
+              type="button"
+              onClick={() => setRevealed((on) => !on)}
+              aria-label={t("api.auth.reveal")}
+              aria-pressed={revealed}
+              className={iconButtonClass({ size: "xs", active: revealed })}
+            >
+              {revealed ? <EyeOff size={13} /> : <Eye size={13} />}
+            </button>
+          </Tooltip>
         )}
       </div>
       {"error" in result ? (
         <Note tone="warning">{result.error}</Note>
       ) : (
-        <p className="select-text break-all font-mono text-[11px] leading-[1.5] text-[var(--cf-text)]">
+        <p className="select-text break-all font-mono text-[12px] leading-[1.55] text-[var(--cf-text)]">
           {revealed ? result.token : maskToken(result.token)}
         </p>
       )}
@@ -860,12 +924,13 @@ function OAuth2Fields({
     disabled: !entry.supported,
   }));
 
+  const expiredToken = oauth2.accessToken.trim() !== "" && expired;
+
   return (
-    <div className="flex flex-col gap-2">
-      <Grid>
+    <Grid>
         <Row label={t("api.auth.grantType")}>
           <Select
-            size="sm"
+            size="field"
             className="max-w-[320px]"
             disabled={readOnly}
             ariaLabel={t("api.auth.grantType")}
@@ -919,7 +984,7 @@ function OAuth2Fields({
         {shows("clientAuth") && (
           <Row label={t("api.auth.clientAuth")}>
             <Select
-              size="sm"
+              size="field"
               className="max-w-[280px]"
               disabled={readOnly}
               ariaLabel={t("api.auth.clientAuth")}
@@ -941,7 +1006,7 @@ function OAuth2Fields({
         </Row>
         <Row label={t("api.auth.addTo")}>
           <Select
-            size="sm"
+            size="field"
             className="max-w-[200px]"
             disabled={readOnly}
             ariaLabel={t("api.auth.addTo")}
@@ -958,46 +1023,51 @@ function OAuth2Fields({
             {text(oauth2.headerPrefix, (headerPrefix) => onChange({ ...oauth2, headerPrefix }), false, "Bearer")}
           </Row>
         )}
-      </Grid>
-
-      {!readOnly && (
-        <>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              disabled={busy || (!grant.supported && !hasRefreshToken)}
-              onClick={() => void requestToken(!grant.supported)}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-40"
-            >
-              {busy ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
-              {busy ? t("api.auth.gettingToken") : t("api.auth.getNewToken")}
-            </button>
-            {hasRefreshToken && (
+        {/* The token actions sit in the control column, under the fields they act on. */}
+        {!readOnly && (
+          <Aside>
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                disabled={busy}
-                onClick={() => void requestToken(true)}
-                title={t("api.auth.refresh")}
-                className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.05]"
+                disabled={busy || (!grant.supported && !hasRefreshToken)}
+                onClick={() => void requestToken(!grant.supported)}
+                className={buttonClass({ variant: "primary", size: "sm" })}
               >
-                <RefreshCw size={12} />
-                {t("api.auth.refresh")}
+                {busy ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />}
+                {busy ? t("api.auth.gettingToken") : t("api.auth.getNewToken")}
               </button>
+              {hasRefreshToken && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void requestToken(true)}
+                  title={t("api.auth.refresh")}
+                  className={buttonClass({ variant: "secondary", size: "sm" })}
+                >
+                  <RefreshCw size={13} />
+                  {t("api.auth.refresh")}
+                </button>
+              )}
+              <span
+                className={`text-[12px] ${expiredToken ? "text-[var(--cf-warning)]" : "text-[var(--cf-text-muted)]"}`}
+              >
+                {oauth2.accessToken.trim() === ""
+                  ? t("api.auth.noToken")
+                  : expired
+                    ? t("api.auth.tokenExpired")
+                    : oauth2.expiresAt > 0
+                      ? t("api.auth.tokenExpires", { when: new Date(oauth2.expiresAt * 1000).toLocaleString() })
+                      : ""}
+              </span>
+            </div>
+            {!grant.supported && (
+              <div className="mt-2">
+                <Note tone="warning">{t("api.auth.grantUnsupportedHint")}</Note>
+              </div>
             )}
-            <span className="text-[11px] text-[var(--cf-text-muted)]">
-              {oauth2.accessToken.trim() === ""
-                ? t("api.auth.noToken")
-                : expired
-                  ? t("api.auth.tokenExpired")
-                  : oauth2.expiresAt > 0
-                    ? t("api.auth.tokenExpires", { when: new Date(oauth2.expiresAt * 1000).toLocaleString() })
-                    : ""}
-            </span>
-          </div>
-          {!grant.supported && <Note tone="warning">{t("api.auth.grantUnsupportedHint")}</Note>}
-        </>
-      )}
-    </div>
+          </Aside>
+        )}
+    </Grid>
   );
 }
 

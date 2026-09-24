@@ -83,7 +83,7 @@ export function CsvSettings() {
           <Checkbox checked={rainbow} onChange={(value) => void setRainbow(value)} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[12.5px] leading-snug text-[var(--cf-text)]">{t("csv.rainbowLabel")}</span>
+          <span className="block text-[13px] leading-snug text-[var(--cf-text)]">{t("csv.rainbowLabel")}</span>
           <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
             {t("csv.rainbowHint")}
           </span>
@@ -91,7 +91,7 @@ export function CsvSettings() {
       </label>
 
       <div className={rainbow ? "" : "pointer-events-none opacity-50"}>
-        <div className="mb-1.5 text-[12.5px] text-[var(--cf-text)]">{t("csv.separatorLabel")}</div>
+        <div className="mb-1.5 text-[13px] text-[var(--cf-text)]">{t("csv.separatorLabel")}</div>
         <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t("csv.separatorLabel")}>
           {CHOICES.map((choice) => {
             const active = separator === choice;
@@ -120,7 +120,7 @@ export function CsvSettings() {
       </div>
 
       <div className={rainbow ? "" : "opacity-50"}>
-        <div className="mb-1.5 text-[12.5px] text-[var(--cf-text)]">{t("csv.preview")}</div>
+        <div className="mb-1.5 text-[13px] text-[var(--cf-text)]">{t("csv.preview")}</div>
         <Preview separator={separator} />
       </div>
     </div>

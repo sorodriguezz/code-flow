@@ -18,6 +18,7 @@ import { usePreferencesStore } from "../../state/preferencesStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
+import { buttonClass } from "../common/Button";
 import { Note, Panel, SettingsHeader } from "../api/settingsChrome";
 import { SettingsRail, useSectionTab } from "./settingsNav";
 import { tabsFor } from "../../lib/settingsCatalog";
@@ -47,13 +48,13 @@ function Toggle({
   onChange: (value: boolean) => void;
 }) {
   return (
-    <div className={`py-1.5 ${disabled ? "opacity-50" : ""}`}>
-      <label className="flex cursor-pointer items-start gap-2">
+    <div className={`py-2 ${disabled ? "opacity-50" : ""}`}>
+      <label className="flex cursor-pointer items-start gap-2.5">
         <span className="mt-[1px] shrink-0">
           <Checkbox checked={checked} onChange={disabled ? () => {} : onChange} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block break-words text-[12.5px] leading-snug text-[var(--cf-text)]">{label}</span>
+          <span className="block break-words text-[13px] leading-snug text-[var(--cf-text)]">{label}</span>
           {hint && (
             <span className="mt-0.5 block break-words text-[11px] leading-snug text-[var(--cf-text-muted)]">
               {hint}
@@ -138,9 +139,9 @@ function DeliveryPane() {
             status: "info",
           })
         }
-        className="mt-1.5 flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[11.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)]"
+        className={buttonClass({ variant: "secondary", size: "sm", className: "mt-2" })}
       >
-        <Volume2 size={12} />
+        <Volume2 size={13} />
         {t("notifications.testButton")}
       </button>
     </>
@@ -159,17 +160,22 @@ function SourcesPane() {
           const off = muted.includes(source);
           return (
             <li key={source}>
-              <label className="flex cursor-pointer items-center gap-2 py-1">
+              {/* A list row: the whole line toggles, and says so under the pointer. */}
+              <label className="-mx-1.5 flex min-h-8 cursor-pointer items-center gap-2.5 rounded-md px-1.5 py-1 transition-colors duration-100 hover:bg-[var(--cf-hover)]">
                 <span className="shrink-0">
                   <Checkbox checked={!off} onChange={(value) => void setMuted(source, !value)} />
                 </span>
                 {off ? (
-                  <BellOff size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  <BellOff size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
                 ) : (
-                  <Bell size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  <Bell size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
                 )}
                 {/* Wraps rather than truncates, like every other label in this window. */}
-                <span className="min-w-0 flex-1 break-words text-[12.5px] leading-snug text-[var(--cf-text)]">
+                <span
+                  className={`min-w-0 flex-1 break-words text-[13px] leading-snug ${
+                    off ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"
+                  }`}
+                >
                   {t(NOTIFICATION_SOURCE_LABEL[source])}
                 </span>
               </label>
@@ -208,7 +214,7 @@ export function NotificationSettings() {
             {/* The rail names the pane, so no heading is repeated here — but the hint says what the
                 label cannot, so it stays. Same call as the editor and AI sections. */}
             {active?.hintKey && (
-              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+              <p className="mb-3 text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
             )}
 
             {tab === "delivery" && <DeliveryPane />}

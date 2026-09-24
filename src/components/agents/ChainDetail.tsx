@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import {
   Check,
+  ChevronRight,
   ExternalLink,
   FolderGit2,
   GitCompare,
   Link2,
+  Pause,
   Play,
   RotateCcw,
   SkipForward,
@@ -16,10 +18,13 @@ import {
   Wand2,
   X,
 } from "lucide-react";
+import { areaClass } from "./areaClass";
 import { chainStatusOf, reasonText } from "./chainStatus";
 import { StoryPlanGate } from "./StoryPlanGate";
 import { AiRunLog } from "../ai/AiRunLog";
-import { ThinkingOrb } from "../common/ThinkingOrb";
+import { buttonClass, iconButtonClass, type ButtonVariant } from "../common/Button";
+import { chipClass, fieldClass, toolbarClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useChainStore } from "../../state/chainStore";
@@ -104,32 +109,35 @@ export function ChainDetail({ chainId }: { chainId: string }) {
 
   return (
     <>
-      {/* Same 29px as the rails either side — see the note on the task header. */}
-      <div className="flex h-[29px] shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
+      {/* The toolbar every surface shares — 44px, level with the explorer's head beside it. The
+          status is said in words and a static glyph: while the plan runs, the orb is on its row in
+          the tree and on the run card below, and a third copy up here would only add motion. */}
+      <div className={toolbarClass}>
         {chain.kind === "story" ? (
-          <Wand2 size={14} className="shrink-0 text-[var(--cf-accent)]" />
+          <Wand2 size={16} className="shrink-0 text-[var(--cf-accent)]" />
         ) : (
-          <Link2 size={14} className="shrink-0 text-[var(--cf-accent)]" />
+          <Link2 size={16} className="shrink-0 text-[var(--cf-accent)]" />
         )}
-        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold" title={chain.goal || chain.title}>
+        <span className="min-w-0 flex-1 truncate text-[14px] font-semibold" title={chain.goal || chain.title}>
           {chain.title}
         </span>
         {chain.work_item_url && (
-          <button
-            type="button"
-            onClick={() => void openExternalUrl(chain.work_item_url).catch((e: unknown) => pushErrorToast(String(e)))}
-            title={t("agents.storyOpenBoard")}
-            className="flex shrink-0 items-center gap-1 rounded bg-black/[0.05] px-1.5 py-[1px] text-[10px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] dark:bg-white/[0.07]"
-          >
-            {chain.work_item_key || `#${chain.work_item_id}`}
-            <ExternalLink size={9} />
-          </button>
+          <Tooltip label={t("agents.storyOpenBoard")}>
+            <button
+              type="button"
+              onClick={() => void openExternalUrl(chain.work_item_url).catch((e: unknown) => pushErrorToast(String(e)))}
+              className={chipClass("neutral", "font-mono transition-colors hover:text-[var(--cf-accent)]")}
+            >
+              {chain.work_item_key || `#${chain.work_item_id}`}
+              <ExternalLink size={11} />
+            </button>
+          </Tooltip>
         )}
-        <span className={`flex shrink-0 items-center gap-1.5 text-[11px] ${color}`}>
-          {chain.status === "running" ? <ThinkingOrb size="sm" /> : <StatusIcon size={12} />}
+        <span className={`flex shrink-0 items-center gap-1.5 text-[12px] font-medium ${color}`}>
+          <StatusIcon size={14} />
           <span className="truncate">{t(labelKey)}</span>
         </span>
-        <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+        <span className="shrink-0 text-[12px] tabular-nums text-[var(--cf-text-faint)]">
           {t("agents.stepN", { n: chain.current_step + 1, total: chain.step_count })}
         </span>
         {/* One repository reads as its name; several read as a count, because the names would not
@@ -137,16 +145,17 @@ export function ChainDetail({ chainId }: { chainId: string }) {
             is "which working copies can this plan write to". */}
         {chain.repo_count > 1 ? (
           <span
-            className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)]"
+            className={chipClass("neutral")}
             title={repos.map((repo) => repo.name || t("chain.projectGone")).join(" · ")}
           >
-            <FolderGit2 size={11} />
+            <FolderGit2 size={12} />
             {t("agents.chainRepos", { n: chain.repo_count })}
           </span>
         ) : (
           projectName && (
-            <span className="max-w-[160px] shrink-0 truncate text-[11px] text-[var(--cf-text-muted)]">
-              {projectName}
+            <span className={chipClass("neutral", "max-w-[180px]")}>
+              <FolderGit2 size={12} className="shrink-0" />
+              <span className="min-w-0 truncate">{projectName}</span>
             </span>
           )
         )}
@@ -154,15 +163,16 @@ export function ChainDetail({ chainId }: { chainId: string }) {
             scheduler advances the chain from the store, so a running step keeps running, its turn
             still lands, and the row in the tree keeps counting. Sitting on the open plan to keep it
             alive is exactly the thing an autonomous run should not ask of anyone. */}
-        <button
-          type="button"
-          onClick={() => void useChainStore.getState().select(null)}
-          title={t("agents.closeChain")}
-          aria-label={t("agents.closeChain")}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-        >
-          <X size={13} />
-        </button>
+        <Tooltip label={t("agents.closeChain")}>
+          <button
+            type="button"
+            onClick={() => void useChainStore.getState().select(null)}
+            aria-label={t("agents.closeChain")}
+            className={iconButtonClass()}
+          >
+            <X size={15} />
+          </button>
+        </Tooltip>
       </div>
 
       {/* The plan's own progress, directly under its title — one cell per step, in plan order. A
@@ -187,66 +197,69 @@ export function ChainDetail({ chainId }: { chainId: string }) {
       </div>
 
       {reason && (
-        <p className="shrink-0 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
+        <p className="shrink-0 border-b border-[var(--cf-border)] px-4 py-2 text-[12px] text-[var(--cf-text-muted)]">
           {reason}
         </p>
       )}
 
       {/* No `space-y` any more: the gap between two steps is the rail, and a margin on top of it
-          would break the line the rail exists to draw. */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
-        {chain.goal.trim() !== "" && (
-          <p className="mb-2 whitespace-pre-wrap rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
-            {chain.goal}
-          </p>
-        )}
-        {steps.map((step, at) => {
-          const next = steps[at + 1];
-          return (
-            // Assembled top-down, one row after the next, in the order the chain runs in — the
-            // shape of the thing the pane is describing. Capped at a dozen because past that the
-            // stagger stops reading as a sequence and starts reading as a slow list.
-            <div
-              key={step.id}
-              className="cf-step-in"
-              style={{ animationDelay: `${Math.min(at, 12) * 45}ms` }}
-            >
-              {/* The two halves of a story run, named. 2N rows in one flat list is honest about what
-                  runs but says nothing about the shape, and the shape — read everything, stop, then
-                  write some of it — is the whole point of the feature. */}
-              {step.phase !== "" && step.phase !== steps[at - 1]?.phase && (
-                <p className="mb-1 mt-2 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                  {t(step.phase === "analyze" ? "agents.storyPhaseAnalyze" : "agents.storyPhaseImplement")}
-                </p>
-              )}
-              <StepRow
-                step={step}
-                isGate={gated && step.id === waiting?.id}
-                showRepo={chain.repo_count > 1}
-                idle={idle}
-              />
-              {next && (
-                <StepRail
-                  carried={step.status === "done"}
-                  flowing={step.status === "done" && next.status === "running"}
+          would break the line the rail exists to draw. The plan reads down one column of a
+          readable width rather than stretching across a wide window. */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div className="mx-auto w-full max-w-[760px]">
+          {chain.goal.trim() !== "" && (
+            <p className="mb-3 whitespace-pre-wrap rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3.5 py-3 text-[13px] leading-relaxed text-[var(--cf-text-muted)]">
+              {chain.goal}
+            </p>
+          )}
+          {steps.map((step, at) => {
+            const next = steps[at + 1];
+            return (
+              // Assembled top-down, one row after the next, in the order the chain runs in — the
+              // shape of the thing the pane is describing. Capped at a dozen because past that the
+              // stagger stops reading as a sequence and starts reading as a slow list.
+              <div
+                key={step.id}
+                className="cf-step-in"
+                style={{ animationDelay: `${Math.min(at, 12) * 45}ms` }}
+              >
+                {/* The two halves of a story run, named. 2N rows in one flat list is honest about what
+                    runs but says nothing about the shape, and the shape — read everything, stop, then
+                    write some of it — is the whole point of the feature. */}
+                {step.phase !== "" && step.phase !== steps[at - 1]?.phase && (
+                  <p className="mb-2 mt-3 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)] after:h-px after:flex-1 after:bg-[var(--cf-border)] after:content-['']">
+                    {t(step.phase === "analyze" ? "agents.storyPhaseAnalyze" : "agents.storyPhaseImplement")}
+                  </p>
+                )}
+                <StepRow
+                  step={step}
+                  isGate={gated && step.id === waiting?.id}
+                  showRepo={chain.repo_count > 1}
+                  idle={idle}
                 />
-              )}
-            </div>
-          );
-        })}
+                {next && (
+                  <StepRail
+                    carried={step.status === "done"}
+                    flowing={step.status === "done" && next.status === "running"}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {planGate ? (
         <StoryPlanGate chain={chain} steps={steps} />
       ) : (
         gated && (
-          <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-2">
-            <p className="mb-1.5 text-[11px] text-[var(--cf-text-muted)]">{t("agents.gatePreview")}</p>
+          <div className="shrink-0 border-t border-[var(--cf-border)] px-4 py-2.5">
+            <p className="mb-1.5 text-[12px] text-[var(--cf-text-muted)]">{t("agents.gatePreview")}</p>
             <textarea
               value={draft ?? ""}
               rows={6}
               onChange={(e) => setDraft(e.target.value)}
-              className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[11px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+              className={areaClass({ size: "sm", mono: true })}
             />
           </div>
         )
@@ -260,7 +273,7 @@ export function ChainDetail({ chainId }: { chainId: string }) {
           that back to the step rows. Opening it is also what makes the second click the
           confirmation, which N engine sessions against a real working copy deserve. */}
       {rerunAll !== null && (
-        <div className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-3 py-2">
+        <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-4 py-2.5">
           <input
             autoFocus
             value={rerunAll}
@@ -273,7 +286,7 @@ export function ChainDetail({ chainId }: { chainId: string }) {
               setRerunAll(null);
             }}
             placeholder={t("agents.rerunChainPlaceholder")}
-            className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[11px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: "sm", className: "flex-1" })}
           />
           <button
             type="button"
@@ -281,14 +294,14 @@ export function ChainDetail({ chainId }: { chainId: string }) {
               void store.rerunFrom(chainId, 0, rerunAll);
               setRerunAll(null);
             }}
-            className="shrink-0 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[11px] font-medium text-white hover:brightness-110"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             {t("agents.rerunChainGo", { n: stepTotal })}
           </button>
         </div>
       )}
 
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-[var(--cf-border)] px-3 py-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-[var(--cf-border)] px-4 py-2.5">
         {chain.status === "running" && (
           <Action
             icon={Square}
@@ -335,7 +348,7 @@ export function ChainDetail({ chainId }: { chainId: string }) {
             onClick={() => setRerunAll((current) => (current === null ? "" : null))}
           />
         )}
-        <span className="ml-auto flex items-center gap-1.5">
+        <span className="ml-auto flex items-center gap-2">
           {!["done", "aborted"].includes(chain.status) && (
             <Action icon={Square} label={t("agents.abortChain")} onClick={() => void store.abort(chainId)} />
           )}
@@ -375,9 +388,9 @@ const MAX_STEP_ATTEMPTS = 3;
 function StepRail({ carried, flowing }: { carried: boolean; flowing: boolean }) {
   return (
     <div className="flex" aria-hidden="true">
-      {/* 20px, so the 2px rail straddles 20–22 and its centre lands on the badge's: 1px border +
-          10px of `px-2.5` + half of the 20px number circle. */}
-      <div className="cf-chain-rail ml-[20px] h-3">
+      {/* 23px, so the 2px rail straddles 23–25 and its centre lands on the badge's: 1px border +
+          12px of `px-3` + half of the 22px number circle. */}
+      <div className="cf-chain-rail ml-[23px] h-3.5">
         {/* The green grows downward when the handoff happens rather than appearing whole, so the
             segment says which way the plan runs and not merely that it passed. */}
         <span className={`cf-chain-rail-fill ${carried ? "cf-chain-rail-fill-on" : ""}`} />
@@ -400,19 +413,10 @@ function Action({
   primary?: boolean;
   danger?: boolean;
 }) {
+  const variant: ButtonVariant = primary ? "primary" : danger ? "danger-ghost" : "secondary";
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium ${
-        primary
-          ? "bg-[var(--cf-accent)] text-white hover:brightness-110"
-          : danger
-            ? "border border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-            : "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-      }`}
-    >
-      <Icon size={12} />
+    <button type="button" onClick={onClick} className={buttonClass({ variant })}>
+      <Icon size={14} />
       {label}
     </button>
   );
@@ -429,8 +433,12 @@ function Action({
  *
  * Running is the one state that moves: a ring turns around the number, which is the pane's answer
  * to "where is it right now" from across the room.
+ *
+ * A step behind a gate that has not run yet wears its number filled in the accent: the stop is part
+ * of the plan's shape, and it should be visible from the number column alone — before the chain
+ * gets there, not only once it is parked.
  */
-function StepBadge({ status, index }: { status: ChainStepStatus; index: number }) {
+export function StepBadge({ status, index, gate = false }: { status: ChainStepStatus; index: number; gate?: boolean }) {
   const tone =
     status === "done"
       ? "bg-[color-mix(in_oklab,var(--cf-success)_18%,transparent)] text-[var(--cf-success)]"
@@ -440,21 +448,38 @@ function StepBadge({ status, index }: { status: ChainStepStatus; index: number }
           ? "bg-[color-mix(in_oklab,var(--cf-warning)_18%,transparent)] text-[var(--cf-warning)]"
           : status === "running"
             ? "cf-step-ring bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-            : "bg-black/[0.06] text-[var(--cf-text-muted)] dark:bg-white/[0.1]";
+            : gate && status === "pending"
+              ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]"
+              : "bg-[var(--cf-press)] text-[var(--cf-text-muted)]";
 
   return (
     <span
-      className={`relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold tabular-nums transition-colors ${tone}`}
+      className={`relative flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums transition-colors ${tone}`}
     >
       {status === "done" ? (
-        <Check size={11} strokeWidth={3} className="cf-step-pop" />
+        <Check size={12} strokeWidth={3} className="cf-step-pop" />
       ) : status === "error" ? (
-        <TriangleAlert size={10} />
+        <TriangleAlert size={11} />
       ) : status === "skipped" ? (
-        <SkipForward size={10} />
+        <SkipForward size={11} />
       ) : (
         index + 1
       )}
+    </span>
+  );
+}
+
+/**
+ * "Review before running this step", as a chip with the pause glyph. In the accent while the gate is
+ * still ahead of the plan; quiet once the step has been reached, when it is history rather than a
+ * stop coming up.
+ */
+export function GateChip({ ahead }: { ahead: boolean }) {
+  const t = useT();
+  return (
+    <span className={chipClass(ahead ? "accent" : "neutral", "max-w-full")}>
+      <Pause size={11} className="shrink-0" />
+      <span className="min-w-0 truncate">{t("agents.gateBefore")}</span>
     </span>
   );
 }
@@ -490,11 +515,11 @@ function StepRow({
 
   return (
     <div
-      className={`relative rounded-lg border px-2.5 py-2 transition-colors ${
+      className={`relative rounded-lg border bg-[var(--cf-surface)] px-3 py-2.5 transition-colors ${
         running
-          ? "cf-step-live border-[var(--cf-accent)]"
+          ? "cf-step-live border-[var(--cf-accent-line)]"
           : isGate
-            ? "border-[var(--cf-accent)]"
+            ? "border-[var(--cf-accent)] shadow-[0_0_0_1px_var(--cf-accent)]"
             : "border-[var(--cf-border)]"
       }`}
     >
@@ -505,12 +530,11 @@ function StepRow({
           <span className="cf-step-scan-beam" />
         </span>
       )}
-      <div className="flex items-center gap-2">
-        <StepBadge status={step.status} index={step.step_index} />
-        {/* The orb is kept for the engine, not for the step: the badge already says which step the
-            plan is on, and this says an engine is burning context for it right now. A `running` step
-            without one is the reload case the `stepRecovered` note explains. */}
-        {running && live && <ThinkingOrb size="sm" />}
+      <div className="flex items-center gap-2.5">
+        {/* No orb beside the badge: the badge already says which step the plan is on, and the
+            engine burning context for it wears its orb once, on the run card below. A `running`
+            step without a live run is the reload case the `stepRecovered` note explains. */}
+        <StepBadge status={step.status} index={step.step_index} gate={step.gate} />
         <button
           type="button"
           onClick={() => {
@@ -521,59 +545,58 @@ function StepRow({
               setOpen((v) => !v);
             }
           }}
-          className="min-w-0 flex-1 text-left"
+          className="min-w-0 flex-1 rounded-md text-left"
           title={step.instruction}
         >
-          <span className="block truncate text-[12.5px] text-[var(--cf-text)]">
+          <span className="block truncate text-[13px] font-semibold text-[var(--cf-text)]">
             {step.agent_name || t("settings.sddNewAgent")}
           </span>
-          <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{step.instruction}</span>
+          <span className="block truncate text-[12px] text-[var(--cf-text-muted)]">{step.instruction}</span>
         </button>
         {showRepo && (
-          <span className="flex max-w-[140px] shrink-0 items-center gap-1 truncate text-[10.5px] text-[var(--cf-text-muted)]">
-            <FolderGit2 size={10} className="shrink-0" />
-            {step.project_name || t("chain.projectGone")}
+          <span className={chipClass("neutral", "max-w-[140px]")}>
+            <FolderGit2 size={11} className="shrink-0" />
+            <span className="min-w-0 truncate">{step.project_name || t("chain.projectGone")}</span>
           </span>
         )}
         {step.gate && (
-          <span className="shrink-0 rounded bg-black/[0.05] px-1.5 py-[1px] text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.07]">
-            {t("agents.gateBefore")}
+          <span className="flex min-w-0 max-w-[45%] shrink">
+            <GateChip ahead={step.status === "pending"} />
           </span>
         )}
-        {running && !live && (
-          <span className="shrink-0 text-[10px] text-[var(--cf-warning)]">{t("agents.stepRecovered")}</span>
-        )}
+        {running && !live && <span className={chipClass("warn")}>{t("agents.stepRecovered")}</span>}
         {/* A step back in the queue after a failed turn. Without this it is a `pending` row with a
             red error under it and nothing saying the chain is about to try again by itself — which
             reads as "it stopped", the exact thing the auto-retry exists to stop happening. */}
         {step.status === "pending" && step.attempts > 0 && (
-          <span className="shrink-0 text-[10px] text-[var(--cf-warning)]">
+          <span className={chipClass("warn")}>
+            <RotateCcw size={11} />
             {step.last_error === "chain.checkFailed"
               ? t("agents.stepRejected")
               : t("agents.stepRetrying", { n: step.attempts + 1, max: MAX_STEP_ATTEMPTS })}
           </span>
         )}
-        {step.task_id !== "" && !taskExists && (
-          <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{t("agents.stepTaskGone")}</span>
-        )}
+        {step.task_id !== "" && !taskExists && <span className={chipClass("neutral")}>{t("agents.stepTaskGone")}</span>}
         {/* Only while nothing is running, and on every step rather than only the failed ones: the
             common reason to send a plan back is not that it broke but that you have looked at what
             it did and want it done differently. */}
         {idle && (
-          <button
-            type="button"
-            onClick={() => setRerun((current) => (current === null ? "" : null))}
-            title={t("agents.rerunFromHere")}
-            aria-label={t("agents.rerunFromHere")}
-            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.08]"
-          >
-            <RotateCcw size={12} />
-          </button>
+          <Tooltip label={t("agents.rerunFromHere")}>
+            <button
+              type="button"
+              onClick={() => setRerun((current) => (current === null ? "" : null))}
+              aria-label={t("agents.rerunFromHere")}
+              aria-pressed={rerun !== null}
+              className={iconButtonClass({ size: "xs", active: rerun !== null })}
+            >
+              <RotateCcw size={13} />
+            </button>
+          </Tooltip>
         )}
       </div>
 
       {rerun !== null && (
-        <div className="mt-1.5 flex items-center gap-1.5">
+        <div className="mt-2 flex items-center gap-2">
           <input
             autoFocus
             value={rerun}
@@ -586,7 +609,7 @@ function StepRow({
               setRerun(null);
             }}
             placeholder={t("agents.rerunNotePlaceholder")}
-            className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[11px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: "sm", className: "flex-1" })}
           />
           <button
             type="button"
@@ -594,15 +617,16 @@ function StepRow({
               void useChainStore.getState().rerunFrom(step.chain_id, step.step_index, rerun);
               setRerun(null);
             }}
-            className="shrink-0 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[11px] font-medium text-white hover:brightness-110"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             {t("agents.rerunGo")}
           </button>
         </div>
       )}
 
+      {/* The run card, and with it the one orb this step's run wears in the pane. */}
       {running && step.run_id && live && (
-        <div className="mt-1.5">
+        <div className="mt-2.5">
           <AiRunLog runId={step.run_id} running expanded={logOpen} onToggle={() => setLogOpen((v) => !v)} />
         </div>
       )}
@@ -611,16 +635,16 @@ function StepRow({
           behind an expander: a plan that loops is a different plan, and reading it as a straight
           list because the back-edge was one click away is the misreading worth spending a line on. */}
       {(step.check_command !== "" || step.on_fail >= 0) && (
-        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[10.5px] text-[var(--cf-text-muted)]">
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
           {step.check_command !== "" && (
-            <span className="flex min-w-0 items-center gap-1">
-              <TerminalSquare size={10} className="shrink-0" />
+            <span className="flex min-w-0 items-center gap-1.5">
+              <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
               <code className="min-w-0 truncate font-mono">{step.check_command}</code>
             </span>
           )}
           {step.on_fail >= 0 && (
-            <span className="flex shrink-0 items-center gap-1 text-[var(--cf-warning)]">
-              <Undo2 size={10} />
+            <span className={chipClass("warn")}>
+              <Undo2 size={11} />
               {t("agents.stepLoopsTo", { n: step.on_fail + 1 })}
             </span>
           )}
@@ -631,14 +655,15 @@ function StepRow({
           waiting to run again — once it passes, the backend clears this, and a stale complaint
           under a green step would be the pane disagreeing with itself. */}
       {step.feedback !== "" && step.status === "pending" && (
-        <p className="mt-1.5 max-h-32 select-text overflow-auto whitespace-pre-wrap rounded-md bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+        <p className="mt-2 max-h-32 select-text overflow-auto whitespace-pre-wrap rounded-md bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
           {step.feedback}
         </p>
       )}
 
       {step.last_error && (
-        <p className="mt-1.5 whitespace-pre-wrap break-words text-[11px] text-[var(--cf-danger)]">
-          {reasonText(step.last_error, t)}
+        <p className="mt-2 flex items-start gap-1.5 whitespace-pre-wrap break-words text-[12px] text-[var(--cf-danger)]">
+          <TriangleAlert size={13} className="mt-[2px] shrink-0" />
+          <span className="min-w-0">{reasonText(step.last_error, t)}</span>
         </p>
       )}
 
@@ -647,19 +672,21 @@ function StepRow({
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
-            className="mt-1.5 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            aria-expanded={open}
+            className={buttonClass({ variant: "ghost", size: "sm", className: "-ml-2 mt-1.5" })}
           >
-            {open ? "▾" : "▸"} {t("agents.stepOutput")}
+            <ChevronRight size={13} className={`transition-transform duration-150 ${open ? "rotate-90" : ""}`} />
+            {t("agents.stepOutput")}
           </button>
           {/* The step's own answer — selectable, since the reason to expand it is to take
               something out of it and feed it somewhere else. */}
           {open && (
-            <p className="mt-1 max-h-40 select-text overflow-auto whitespace-pre-wrap rounded-md bg-black/[0.03] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
+            <p className="mt-1 max-h-40 select-text overflow-auto whitespace-pre-wrap rounded-md bg-[var(--cf-sunken)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
               {step.output_text}
             </p>
           )}
           {step.output_truncated && (
-            <p className="mt-1 text-[10.5px] text-[var(--cf-warning)]">{t("agents.outputTruncated")}</p>
+            <p className="mt-1 text-[11px] text-[var(--cf-warning)]">{t("agents.outputTruncated")}</p>
           )}
         </>
       )}

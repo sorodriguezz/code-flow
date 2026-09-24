@@ -162,7 +162,7 @@ export function StoryPlanGate({
               <label className="flex cursor-pointer items-center gap-2">
                 <Checkbox checked={decision.include} onChange={(on) => patch({ include: on })} />
                 <FolderGit2 size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-                <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">
+                <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
                   {row.repoName || t("chain.projectGone")}
                 </span>
                 <VerdictChip verdict={row.verdict} />
@@ -196,7 +196,7 @@ export function StoryPlanGate({
           onClick={approve}
           className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium disabled:opacity-50 ${
             chosen.length > 0
-              ? "bg-[var(--cf-accent)] text-white hover:brightness-110"
+              ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))]"
               : "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-accent)]"
           }`}
         >
@@ -216,15 +216,15 @@ function VerdictChip({ verdict }: { verdict: Verdict }) {
     verdict === "touches"
       ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
       : verdict === "clear"
-        ? "bg-black/[0.05] text-[var(--cf-text-muted)] dark:bg-white/[0.07]"
-        : "bg-black/[0.05] text-[var(--cf-warning)] dark:bg-white/[0.07]";
+        ? "bg-[var(--cf-hover)] text-[var(--cf-text-muted)]"
+        : "bg-[var(--cf-hover)] text-[var(--cf-warning)]";
   const label =
     verdict === "touches"
       ? "agents.storyVerdictTouches"
       : verdict === "clear"
         ? "agents.storyVerdictClear"
         : "agents.storyVerdictUnknown";
-  return <span className={`shrink-0 rounded px-1.5 py-[1px] text-[10px] ${tone}`}>{t(label)}</span>;
+  return <span className={`shrink-0 rounded px-1.5 py-[1px] text-[10.5px] ${tone}`}>{t(label)}</span>;
 }
 
 /** The analysis itself, collapsed. Expanded it is selectable — the reason to open one is to take
@@ -242,7 +242,7 @@ function Analysis({ text }: { text: string }) {
         {open ? "▾" : "▸"} {t("agents.stepOutput")}
       </button>
       {open && (
-        <p className="mt-1 max-h-48 select-text overflow-auto whitespace-pre-wrap rounded-md bg-black/[0.03] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
+        <p className="mt-1 max-h-48 select-text overflow-auto whitespace-pre-wrap rounded-md bg-[var(--cf-hover)] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
           {text}
         </p>
       )}

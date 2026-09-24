@@ -24,6 +24,8 @@ import { Checkbox } from "../common/Checkbox";
 import { Skeleton } from "../common/Skeleton";
 import { SettingsHeader } from "../api/settingsChrome";
 import { riseDelay } from "../../lib/rise";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 const DEFAULT_SKILL_MD = "---\nname: my-skill\ndescription: What this skill does and when to use it.\n---\n\n# My skill\n\nInstructions for the model…\n";
 
@@ -187,26 +189,26 @@ export function SkillsSettings() {
             onChange={(e) => setRepo(e.target.value)}
             disabled={installing}
             placeholder={t("settings.skillRepoPlaceholder")}
-            className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
+            className={fieldClass({ className: "flex-1 font-mono" })}
           />
           <input
             value={skillName}
             onChange={(e) => setSkillName(e.target.value)}
             disabled={installing}
             placeholder={t("settings.skillNamePlaceholder")}
-            className="w-40 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
+            className={fieldClass({ className: "w-40 font-mono" })}
           />
           <button
             onClick={install}
             disabled={installing || !repo.trim() || !skillName.trim()}
-            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {installing ? <Loader2 size={13} className="animate-spin" /> : <PackagePlus size={13} />}
             {installing ? t("settings.installingSkill") : t("settings.installSkill")}
           </button>
         </div>
         {lines.length > 0 && (
-          <div className="max-h-28 overflow-auto rounded-md bg-black/[0.04] p-2 font-mono text-[11px] text-[var(--cf-text-muted)] dark:bg-white/[0.06]">
+          <div className="max-h-28 overflow-auto rounded-md bg-[var(--cf-hover)] p-2 font-mono text-[11px] text-[var(--cf-text-muted)]">
             {lines.map((line, i) => (
               <div key={i} className="whitespace-pre-wrap break-all">
                 {line}
@@ -224,9 +226,9 @@ export function SkillsSettings() {
                 autoFocus
                 placeholder={t("settings.skillNamePlaceholder")}
                 onKeyDown={(e) => e.key === "Enter" && void createSkill()}
-                className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[13px] outline-none focus:border-[var(--cf-accent)]"
+                className={fieldClass({ className: "flex-1 font-mono" })}
               />
-              <button onClick={() => void createSkill()} disabled={!newName.trim()} className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40">
+              <button onClick={() => void createSkill()} disabled={!newName.trim()} className={buttonClass({ variant: "primary" })}>
                 {t("common.create")}
               </button>
               <button onClick={() => setCreating(false)} className="px-2 text-[12px] text-[var(--cf-text-muted)]">
@@ -255,7 +257,7 @@ export function SkillsSettings() {
             <div className="flex items-center gap-2 px-2.5 py-1.5 text-[12px]">
               <Checkbox checked={s.enabled} onChange={(enabled) => void toggle(s, enabled)} />
               <span className={`font-medium ${s.enabled ? "" : "text-[var(--cf-text-muted)] line-through"}`}>{s.skill_name}</span>
-              <span className="rounded bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+              <span className="rounded bg-[var(--cf-hover)] px-1.5 py-0.5 text-[10.5px] text-[var(--cf-text-muted)]">
                 {s.source_repo === "custom"
                   ? t("settings.skillBadgeCustom")
                   : s.source_repo === "local"
@@ -349,7 +351,7 @@ function SkillFilesEditor({ workspaceId, skillName }: { workspaceId: string; ski
             key={f}
             onClick={() => void openFile(f)}
             className={`rounded px-2 py-0.5 font-mono text-[11px] ${
-              f === selected ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+              f === selected ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
             }`}
           >
             {f}

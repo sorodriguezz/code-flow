@@ -16,6 +16,7 @@ import { useDiagramsStore, type DiagramAiResult } from "../../state/diagramsStor
 import { notify } from "../../state/notificationStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /** The routing row this runs under — `AiTask::Diagram` on the Rust side. */
 const TASK = "diagram";
@@ -353,13 +354,13 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
           autoFocus
           disabled={busy}
           placeholder={t(isSchema ? "diagrams.ai.dbmlPlaceholder" : "diagrams.ai.placeholder")}
-          className="w-full resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[11.5px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:opacity-60"
+          className="w-full resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:opacity-60"
         />
 
         {result && (
           <div className="flex flex-col gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] p-2">
             <div className="flex items-center gap-1.5">
-              <span className="flex-1 truncate text-[10px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+              <span className="flex-1 truncate text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
                 {result.format === "dbml"
                   ? t("diagrams.ai.previewSchema", {
                       tables: String(preview.tables.length),
@@ -418,7 +419,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
         )}
 
         <div className="flex items-center gap-2">
-          <span className="flex min-w-0 flex-1 items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
+          <span className="flex min-w-0 flex-1 items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)]">
             <ProviderGlyph providerId={providerId} size={11} />
             <span className="truncate">
               {providerLabel} · {modelLabel}
@@ -463,7 +464,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
                 // nothing reads as a broken generation; a disabled one reads as "not yet", which is
                 // what it is, and it becomes live on its own a moment later.
                 disabled={!canApply}
-                className="rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                className={buttonClass({ variant: "primary", size: "sm" })}
               >
                 {t("diagrams.ai.apply")}
               </button>
@@ -473,7 +474,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
               type="button"
               onClick={() => void submit()}
               disabled={!instruction.trim()}
-              className="rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+              className={buttonClass({ variant: "primary", size: "sm" })}
             >
               {t("diagrams.ai.generate")}
             </button>

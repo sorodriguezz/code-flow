@@ -33,12 +33,14 @@ export function ReviewEngineTag() {
 
   return (
     <span
-      // `ml-auto` rather than a fixed position: on a narrow panel the row wraps and the tag simply
-      // drops to the next line instead of squeezing the selector it sits beside.
-      className="ml-auto flex min-w-0 shrink items-center gap-1 rounded border border-[var(--cf-border)] px-1.5 py-px text-[10px] text-[var(--cf-text-muted)]"
+      // Beside the selector it qualifies, and allowed to shrink: on a narrow panel the row wraps
+      // and the tag drops to the next line instead of squeezing the selector — while the bar's
+      // right edge stays the Review button's. The neutral chip's look, spelled out because the
+      // recipe's chips never shrink and this one has to truncate.
+      className="inline-flex h-5 min-w-0 shrink items-center gap-[5px] whitespace-nowrap rounded-[5px] bg-[var(--cf-hover)] px-[7px] text-[11px] font-medium text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border)]"
       title={t("pr.reviewEngineHint", { provider: provider?.label ?? providerId, model: modelLabel })}
     >
-      <ProviderGlyph providerId={providerId} size={10} />
+      <ProviderGlyph providerId={providerId} size={12} />
       <span className="truncate">{modelLabel}</span>
     </span>
   );

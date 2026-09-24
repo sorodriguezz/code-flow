@@ -26,6 +26,7 @@ import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { SettingsHeader } from "../api/settingsChrome";
 import { riseDelay } from "../../lib/rise";
 import type { Project, Workspace } from "../../types/domain";
+import { fieldClass } from "../common/recipes";
 
 /**
  * The row being dragged, and where it would land if the pointer were released now.
@@ -345,7 +346,7 @@ export function ProjectsSettings() {
             onChange={(e) => setFilter(e.target.value)}
             placeholder={t("settings.filterPlaceholder")}
             aria-label={t("settings.filterPlaceholder")}
-            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent py-1.5 pl-7 pr-7 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full pl-7 pr-7" })}
           />
           {filtering && (
             <button
@@ -365,12 +366,12 @@ export function ProjectsSettings() {
             if (e.key === "Enter" && newName.trim()) void addNewWorkspace();
           }}
           placeholder={t("settings.newWorkspaceNamePlaceholder")}
-          className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+          className={fieldClass({ className: "min-w-0 flex-1" })}
         />
         <button
           disabled={!newName.trim()}
           onClick={() => void addNewWorkspace()}
-          className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-40"
         >
           <Plus size={13} />
           {t("settings.addWorkspace")}
@@ -430,7 +431,7 @@ export function ProjectsSettings() {
                         }
                       }}
                       aria-label={t("settings.renameWorkspace")}
-                      className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[13px] font-normal outline-none focus:border-[var(--cf-accent)]"
+                      className={fieldClass({ size: "sm", className: "min-w-0 flex-1 font-normal" })}
                     />
                     <button
                       onClick={() => void commitRename()}
@@ -462,7 +463,7 @@ export function ProjectsSettings() {
                       <Briefcase size={13} style={{ color: ws.color }} className="shrink-0" />
                       <span className="min-w-0 flex-1 break-words leading-snug">{ws.name}</span>
                       {!expanded && (
-                        <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+                        <span className="shrink-0 rounded-full bg-[var(--cf-hover)] px-1.5 py-0.5 text-[10.5px] font-normal text-[var(--cf-text-muted)]">
                           {shown.length}
                         </span>
                       )}
@@ -568,7 +569,7 @@ export function ProjectsSettings() {
                           // unlinked row, which has no strike-through, the only thing that says it
                           // at all. Every other row in this list is a repository that works, so
                           // "this one is different" needs to be readable rather than inferred.
-                          <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+                          <span className="shrink-0 rounded-full bg-[var(--cf-hover)] px-1.5 py-0.5 text-[10.5px] font-normal text-[var(--cf-text-muted)]">
                             {gone ? t("settings.projectMissing") : t("settings.projectNotARepo")}
                           </span>
                         )}

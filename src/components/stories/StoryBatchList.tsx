@@ -13,6 +13,7 @@ import { riseDelay } from "../../lib/rise";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import type { StoryBatch } from "../../types/domain";
+import { fieldClass } from "../common/recipes";
 
 /** Where a row's menu was asked for. Only the id is kept, never the row itself — a generation
  * landing replaces the row object, and a menu built from the copy captured on right-click would go
@@ -82,7 +83,7 @@ export function StoryBatchList({ width, onNewBatch }: { width: number; onNewBatc
       className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
     >
       <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1">
-        <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("stories.batches")}
         </span>
         <ToolbarButton onClick={onNewBatch} title={t("stories.newBatch")}>
@@ -102,7 +103,7 @@ export function StoryBatchList({ width, onNewBatch }: { width: number; onNewBatc
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder={t("stories.searchPlaceholder")}
-          className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-1 pl-6 pr-6 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+          className={fieldClass({ size: "sm", className: "w-full pl-6 pr-6" })}
         />
         {query && (
           <button
@@ -222,7 +223,7 @@ function BatchRow({
       }}
       style={riseDelay(at)}
       className={`cf-rise group relative flex w-full items-start rounded-md ${
-        selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
       }`}
     >
       <button

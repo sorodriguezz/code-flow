@@ -361,7 +361,7 @@ export function ServiceEditor({
                       className={`min-w-0 rounded-md border px-2 py-1.5 text-left transition-colors ${
                         chosen
                           ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]"
-                          : "border-[var(--cf-border)] hover:border-[color-mix(in_srgb,var(--cf-accent)_60%,transparent)] hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                          : "border-[var(--cf-border)] hover:border-[color-mix(in_srgb,var(--cf-accent)_60%,transparent)] hover:bg-[var(--cf-hover)]"
                       }`}
                     >
                       <div className="flex items-center gap-1.5">
@@ -369,12 +369,12 @@ export function ServiceEditor({
                           {candidate.command}
                         </span>
                         {candidate.readyKind === "exit" && (
-                          <span className="shrink-0 rounded bg-black/[0.05] px-1 text-[9px] uppercase tracking-wide text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+                          <span className="shrink-0 rounded bg-[var(--cf-hover)] px-1 text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
                             {t("services.oneShot")}
                           </span>
                         )}
                       </div>
-                      <div className="mt-0.5 truncate text-[10px] text-[var(--cf-text-muted)]" title={candidate.detail}>
+                      <div className="mt-0.5 truncate text-[10.5px] text-[var(--cf-text-muted)]" title={candidate.detail}>
                         {candidate.source}
                         {candidate.detail ? ` · ${candidate.detail}` : ""}
                       </div>
@@ -465,7 +465,7 @@ export function ServiceEditor({
               <Checkbox checked={autorestart} onChange={setAutorestart} className="mt-0.5" />
               <span className="min-w-0">
                 <span className="block text-[12px] text-[var(--cf-text)]">{t("services.autorestart")}</span>
-                <span className="block text-[10px] leading-snug text-[var(--cf-text-muted)]">
+                <span className="block text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
                   {t("services.autorestartHint")}
                 </span>
               </span>
@@ -482,12 +482,12 @@ export function ServiceEditor({
           <button
             onClick={() => setAdvanced((open) => !open)}
             aria-expanded={advanced}
-            className="flex w-full min-w-0 items-center gap-1 text-left text-[10px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className="flex w-full min-w-0 items-center gap-1 text-left text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
           >
             {advanced ? <ChevronDown size={11} className="shrink-0" /> : <ChevronRight size={11} className="shrink-0" />}
             <span className="shrink-0">{t("services.section.advanced")}</span>
             {!advanced && (
-              <span className="ml-2 min-w-0 truncate text-[10px] font-normal normal-case tracking-normal opacity-80">
+              <span className="ml-2 min-w-0 truncate text-[10.5px] font-normal normal-case tracking-normal opacity-80">
                 {advancedSummary}
               </span>
             )}
@@ -514,12 +514,12 @@ export function ServiceEditor({
                           <span className="block truncate text-[11px] font-medium text-[var(--cf-text)]">
                             {t(`services.ready.${option}` as TranslationKey)}
                             {option === "auto" && (
-                              <span className="ml-1 text-[9px] font-normal uppercase tracking-wide text-[var(--cf-accent)]">
+                              <span className="ml-1 text-[10.5px] font-normal uppercase tracking-wide text-[var(--cf-accent)]">
                                 {t("services.recommended")}
                               </span>
                             )}
                           </span>
-                          <span className="block text-[10px] leading-snug text-[var(--cf-text-muted)]">
+                          <span className="block text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
                             {t(`services.ready.${option}Hint` as TranslationKey)}
                           </span>
                         </span>
@@ -539,12 +539,12 @@ export function ServiceEditor({
                       className={`${INPUT} font-mono`}
                     />
                     {readyKind === "log" && (
-                      <p className="mt-1 text-[10px] text-[var(--cf-text-muted)]">{t("services.ready.logHelp")}</p>
+                      <p className="mt-1 text-[10.5px] text-[var(--cf-text-muted)]">{t("services.ready.logHelp")}</p>
                     )}
                   </div>
                 )}
                 {readyKind === "auto" && learned.length > 0 && (
-                  <p className="mt-2 flex flex-wrap items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
+                  <p className="mt-2 flex flex-wrap items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)]">
                     {t("services.learnedPorts")}
                     {learned.map((port) => (
                       <PortChip key={port} port={port} dim />
@@ -582,7 +582,7 @@ export function ServiceEditor({
 }
 
 const INPUT =
-  "w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]";
+  "w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]";
 
 /**
  * What every machine-read field here wears: a command, a path, a pattern, a variable.
@@ -618,8 +618,8 @@ function Section({ title, hint, children }: { title: string; hint?: string; chil
   return (
     <section>
       <div className="mb-2 flex items-baseline gap-2">
-        <h3 className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{title}</h3>
-        {hint && <span className="min-w-0 truncate text-[10px] text-[var(--cf-text-muted)] opacity-80">{hint}</span>}
+        <h3 className="text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{title}</h3>
+        {hint && <span className="min-w-0 truncate text-[10.5px] text-[var(--cf-text-muted)] opacity-80">{hint}</span>}
       </div>
       {children}
     </section>
@@ -643,9 +643,9 @@ function Labelled({
       {children}
       {/* The error replaces the hint rather than stacking under it: they answer the same question. */}
       {error ? (
-        <span className="mt-1 block text-[10px] text-[var(--cf-danger)]">{error}</span>
+        <span className="mt-1 block text-[10.5px] text-[var(--cf-danger)]">{error}</span>
       ) : hint ? (
-        <span className="mt-1 block text-[10px] leading-snug text-[var(--cf-text-muted)]">{hint}</span>
+        <span className="mt-1 block text-[10.5px] leading-snug text-[var(--cf-text-muted)]">{hint}</span>
       ) : null}
     </div>
   );

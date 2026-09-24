@@ -56,10 +56,10 @@ export const NoteOutline = memo(function NoteOutline({
           type="button"
           onClick={() => onSelect(heading, index)}
           style={{ paddingLeft: 6 + (heading.level - shallowest) * 10 }}
-          className={`block w-full truncate rounded py-[3px] pr-1.5 text-left text-[11.5px] transition-colors ${
+          className={`block w-full truncate rounded py-[3px] pr-1.5 text-left text-[12px] transition-colors ${
             index === current
               ? "bg-[var(--cf-accent-soft)] font-medium text-[var(--cf-accent)]"
-              : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.05]"
+              : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           }`}
           title={heading.text}
         >

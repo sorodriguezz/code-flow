@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { AzureSignInModal } from "./AzureSignInModal";
 import { AlertTriangle, Cloud, CornerDownLeft, Save, TerminalSquare } from "lucide-react";
+import { buttonClass, iconButtonClass, Kbd } from "../common/Button";
+import { chipClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import { useRemoteStore } from "../../state/remoteStore";
 import {
   remoteParseAzureConnection,
@@ -137,10 +140,10 @@ export function ConnectBar() {
   };
 
   return (
-    <div data-tour="remote-connect" className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
+    <div data-tour="remote-connect" className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2.5">
       <div className="flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 focus-within:border-[var(--cf-accent)]">
-          <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+        <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 transition-[border-color,box-shadow] duration-100 focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]">
+          <TerminalSquare size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
           <input
             value={line}
             onChange={(e) => setLine(e.target.value)}
@@ -155,49 +158,55 @@ export function ConnectBar() {
             placeholder={t("remote.connectPlaceholder")}
             spellCheck={false}
             autoComplete="off"
-            className="min-w-0 flex-1 bg-transparent font-mono text-[12px] outline-none placeholder:font-sans placeholder:text-[var(--cf-text-muted)]"
+            className="min-w-0 flex-1 bg-transparent font-mono text-[13px] text-[var(--cf-text)] outline-none placeholder:font-sans placeholder:text-[12px] placeholder:text-[var(--cf-text-faint)]"
           />
           {(parsed || azure) && (
-            <span className="hidden shrink-0 items-center gap-1 text-[10px] text-[var(--cf-text-muted)] sm:flex">
-              <CornerDownLeft size={10} />
+            <span className="hidden shrink-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-faint)] sm:flex">
+              <Kbd>
+                <CornerDownLeft size={10} />
+              </Kbd>
               {azure ? t("remote.azAddAccount") : t("remote.connect")}
             </span>
           )}
-        </div>
+        </label>
 
+        {/* The one filled button on the bar: it runs the line once and keeps nothing. */}
         <button
           type="button"
           onClick={() => void connect()}
           disabled={(!parsed && !azure) || busy}
-          className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:brightness-110 disabled:opacity-40"
+          className={buttonClass({ variant: "primary", size: "lg" })}
         >
-          {azure && <Cloud size={13} />}
+          {azure && <Cloud size={14} />}
           {azure ? t("remote.azAddAccount") : t("remote.connect")}
         </button>
         {/* The other way in, and for most people the better one: rather than pasting a connection
             string per account, sign in once and pick from what you already have access to. */}
-        <button
-          type="button"
-          onClick={() => setSigningIn(true)}
-          title={t("remote.azSignIn")}
-          aria-label={t("remote.azSignIn")}
-          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-        >
-          <Cloud size={13} />
-        </button>
-        {/* Absent for an account, not disabled: adding one already saves it, so a second button
-            meaning "save" would be a button with nothing left to do. */}
-        {!azure && (
+        <Tooltip label={t("remote.azSignIn")}>
           <button
             type="button"
-            onClick={() => void save()}
-            disabled={!parsed || busy}
-            title={t("remote.saveAsHost")}
-            aria-label={t("remote.saveAsHost")}
-            className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-40"
+            onClick={() => setSigningIn(true)}
+            aria-label={t("remote.azSignIn")}
+            className={iconButtonClass({ size: "md" })}
           >
-            <Save size={13} />
+            <Cloud size={16} />
           </button>
+        </Tooltip>
+        {/* Absent for an account, not disabled: adding one already saves it, so a second button
+            meaning "save" would be a button with nothing left to do. The other verb, and it stays:
+            Connect is once, this is a host row you keep. */}
+        {!azure && (
+          <Tooltip label={t("remote.saveAsHost")}>
+            <button
+              type="button"
+              onClick={() => void save()}
+              disabled={!parsed || busy}
+              aria-label={t("remote.saveAsHost")}
+              className={iconButtonClass({ size: "md" })}
+            >
+              <Save size={16} />
+            </button>
+          </Tooltip>
         )}
       </div>
 
@@ -206,6 +215,22 @@ export function ConnectBar() {
 
       {signingIn && <AzureSignInModal onClose={() => setSigningIn(false)} />}
     </div>
+  );
+}
+
+/**
+ * One thing the line was read as: the field it landed in, then the value, in the face the value is
+ * typed in. A chip per fact rather than one run-on line, so "is the port right?" is a glance at one
+ * chip instead of a read along a string.
+ */
+function ReadAs({ label, value, mono = true }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <span className={chipClass("neutral", "max-w-full")}>
+      <span className="shrink-0 text-[var(--cf-text-faint)]">{label}</span>
+      <span className={`min-w-0 truncate text-[var(--cf-text)] ${mono ? "font-mono" : ""}`}>
+        {value}
+      </span>
+    </span>
   );
 }
 
@@ -220,20 +245,24 @@ function ParsePreview({ parsed }: { parsed: ParsedCommand }) {
   const t = useT();
   const { spec } = parsed;
 
-  const bits: string[] = [];
-  if (spec.user) bits.push(`${t("remote.fieldUser")}: ${spec.user}`);
-  bits.push(`${t("remote.fieldHost")}: ${spec.host}`);
-  if (spec.port) bits.push(`${t("remote.fieldPort")}: ${spec.port}`);
-  if (spec.jump) bits.push(`${t("remote.fieldJump")}: ${spec.jump}`);
-  if (spec.key_file) bits.push(`${t("remote.fieldKeyFile")}: ${spec.key_file}`);
-  if (spec.command) bits.push(`${t("remote.fieldCommand")}: ${spec.command}`);
+  const bits: [string, string][] = [];
+  if (spec.user) bits.push([t("remote.fieldUser"), spec.user]);
+  bits.push([t("remote.fieldHost"), spec.host]);
+  if (spec.port) bits.push([t("remote.fieldPort"), String(spec.port)]);
+  if (spec.jump) bits.push([t("remote.fieldJump"), spec.jump]);
+  if (spec.key_file) bits.push([t("remote.fieldKeyFile"), spec.key_file]);
+  if (spec.command) bits.push([t("remote.fieldCommand"), spec.command]);
 
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 pt-1.5 text-[11px]">
-      <span className="font-mono text-[var(--cf-text-muted)]">{bits.join("  ·  ")}</span>
+    <div className="flex flex-wrap items-center gap-1.5 pt-2">
+      {bits.map(([label, value]) => (
+        <ReadAs key={label} label={label} value={value} />
+      ))}
+      {/* A sentence, not a chip: it names the flags it dropped, and that can run long enough to
+          need wrapping — which a chip, being one line, would clip. */}
       {parsed.ignored.length > 0 && (
-        <span className="flex items-center gap-1 text-[var(--cf-warning)]">
-          <AlertTriangle size={11} className="shrink-0" />
+        <span className="flex min-w-0 items-center gap-1 text-[11px] text-[var(--cf-warning)]">
+          <AlertTriangle size={12} className="shrink-0" />
           {t("remote.parseIgnored", { flags: parsed.ignored.join(" ") })}
         </span>
       )}
@@ -246,19 +275,23 @@ function AzurePreview({ parsed }: { parsed: ParsedAzureConnection }) {
   const t = useT();
   const { azure } = parsed.spec;
 
-  const bits: string[] = [`${t("remote.azAccount")}: ${azure.account || "—"}`];
-  bits.push(
-    `${t("remote.fieldAuth")}: ${parsed.auth === "sas" ? t("remote.azAuthSas") : t("remote.azAuthKey")}`,
-  );
-  if (azure.endpoint_suffix) bits.push(`${t("remote.azSuffix")}: ${azure.endpoint_suffix}`);
-  if (azure.endpoint) bits.push(`${t("remote.azEndpoint")}: ${azure.endpoint}`);
+  const bits: [string, string, boolean][] = [[t("remote.azAccount"), azure.account || "—", true]];
+  bits.push([
+    t("remote.fieldAuth"),
+    parsed.auth === "sas" ? t("remote.azAuthSas") : t("remote.azAuthKey"),
+    false,
+  ]);
+  if (azure.endpoint_suffix) bits.push([t("remote.azSuffix"), azure.endpoint_suffix, true]);
+  if (azure.endpoint) bits.push([t("remote.azEndpoint"), azure.endpoint, true]);
 
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 pt-1.5 text-[11px]">
+    <div className="flex flex-wrap items-center gap-1.5 pt-2">
       {/* The secret itself is never echoed — only that there is one. The line is on screen and may
           be on somebody else's screen too. */}
-      <span className="font-mono text-[var(--cf-text-muted)]">{bits.join("  ·  ")}</span>
-      <span className="text-[var(--cf-text-muted)]">{t("remote.azWillSave")}</span>
+      {bits.map(([label, value, mono]) => (
+        <ReadAs key={label} label={label} value={value} mono={mono} />
+      ))}
+      <span className="text-[11px] text-[var(--cf-text-faint)]">{t("remote.azWillSave")}</span>
     </div>
   );
 }

@@ -19,6 +19,7 @@ import type { Note, NoteBookRow, NoteSort } from "../../types/notes";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { filterNotes, useNotesStore } from "../../state/notesStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /** The orderings offered, in the order the menu lists them. */
 const SORTS: { value: NoteSort; labelKey: TranslationKey }[] = [
@@ -156,7 +157,7 @@ export function NoteGallery() {
         >
           <ArrowUpDown size={13} />
         </button>
-        <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
+        <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-[var(--cf-hover)] p-0.5">
           <ViewButton
             icon={LayoutGrid}
             label={t("notes.viewGrid")}
@@ -187,7 +188,7 @@ export function NoteGallery() {
             <button
               type="button"
               onClick={() => void createNote(openBook?.id ?? null)}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90"
+              className={buttonClass({ variant: "primary" })}
             >
               <FilePlus2 size={13} />
               {t("notes.newNote")}
@@ -407,7 +408,7 @@ function Crumb({
     <button
       type="button"
       onClick={onClick}
-      className="min-w-0 truncate rounded px-1 py-0.5 text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.05]"
+      className="min-w-0 truncate rounded px-1 py-0.5 text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
     >
       {label}
     </button>
@@ -454,7 +455,7 @@ const NoteCard = memo(function NoteCard({
       role="button"
     >
       <div className="flex items-start gap-1.5">
-        <h3 className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">
+        <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold text-[var(--cf-text)]">
           {note.title || <span className="italic text-[var(--cf-text-muted)]">{untitled}</span>}
         </h3>
         {note.pinned && (
@@ -462,7 +463,7 @@ const NoteCard = memo(function NoteCard({
         )}
       </div>
 
-      <p className="line-clamp-3 min-h-0 flex-1 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+      <p className="line-clamp-3 min-h-0 flex-1 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
         {snippet || note.excerpt}
       </p>
 
@@ -476,14 +477,14 @@ const NoteCard = memo(function NoteCard({
             </span>
           ))}
           {note.tags.length > 3 && (
-            <span className="text-[10px] text-[var(--cf-text-muted)]">
+            <span className="text-[10.5px] text-[var(--cf-text-muted)]">
               +{note.tags.length - 3}
             </span>
           )}
         </div>
       )}
 
-      <div className="flex items-center gap-2 text-[10px] text-[var(--cf-text-muted)]">
+      <div className="flex items-center gap-2 text-[10.5px] text-[var(--cf-text-muted)]">
         <span className="tabular-nums">{relativeTime(note.updated_at, locale)}</span>
         <span aria-hidden>·</span>
         <span className="tabular-nums">{readingLabel}</span>
@@ -513,7 +514,7 @@ const NoteListRow = memo(function NoteListRow({
 }) {
   return (
     <div
-      className="group flex w-full cursor-pointer items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      className="group flex w-full cursor-pointer items-center gap-3 px-3 py-2 text-left transition-colors hover:bg-[var(--cf-hover)]"
       onClick={onOpen}
       onKeyDown={(event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -529,10 +530,10 @@ const NoteListRow = memo(function NoteListRow({
       ) : (
         <span className="w-[11px] shrink-0" aria-hidden />
       )}
-      <span className="w-[180px] shrink-0 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">
+      <span className="w-[180px] shrink-0 truncate text-[13px] font-semibold text-[var(--cf-text)]">
         {note.title || <span className="italic text-[var(--cf-text-muted)]">{untitled}</span>}
       </span>
-      <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]">
+      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]">
         {snippet || note.excerpt}
       </span>
       {note.tags.length > 0 && (
@@ -546,7 +547,7 @@ const NoteListRow = memo(function NoteListRow({
           ))}
         </span>
       )}
-      <span className="hidden shrink-0 items-center gap-2 text-[10px] tabular-nums text-[var(--cf-text-muted)] md:flex">
+      <span className="hidden shrink-0 items-center gap-2 text-[10.5px] tabular-nums text-[var(--cf-text-muted)] md:flex">
         <span>{relativeTime(note.updated_at, locale)}</span>
         <span aria-hidden>·</span>
         <span>{readingLabel}</span>

@@ -5,6 +5,9 @@ import type { ShellProfile } from "../../types/domain";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import { RailSection } from "./settingsNav";
 
 const PROFILES_KEY = "terminal_profiles";
@@ -94,32 +97,36 @@ export function TerminalSettings() {
       {(tab) => (
         <>
           {tab === "default" && (
-            <Select
-              value={defaultId}
-              onChange={chooseDefault}
-              ariaLabel={t("settings.terminalDefault")}
-              placeholder={t("settings.terminalDefaultAuto")}
-              options={[
-                { value: "", label: t("settings.terminalDefaultAuto") },
-                ...[...builtins, ...custom].map((p) => ({
-                  value: p.id,
-                  label: p.name,
-                  disabled: !p.command.trim(),
-                })),
-              ]}
-            />
+            // Sized by its wrapper: the trigger is `w-full`, and a shell name does not need the
+            // whole pane.
+            <div className="max-w-sm">
+              <Select
+                value={defaultId}
+                onChange={chooseDefault}
+                ariaLabel={t("settings.terminalDefault")}
+                placeholder={t("settings.terminalDefaultAuto")}
+                options={[
+                  { value: "", label: t("settings.terminalDefaultAuto") },
+                  ...[...builtins, ...custom].map((p) => ({
+                    value: p.id,
+                    label: p.name,
+                    disabled: !p.command.trim(),
+                  })),
+                ]}
+              />
+            </div>
           )}
 
           {tab === "detected" && (
-            <div className="space-y-1">
+            <div className="space-y-1.5">
               {builtins.map((profile) => (
                 <div
                   key={profile.id}
-                  className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-2 text-[13px]"
+                  className="flex min-h-9 items-center gap-2.5 rounded-lg border border-[var(--cf-border)] px-3 py-1.5 text-[13px]"
                 >
-                  <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-                  <span className="shrink-0 font-medium">{profile.name}</span>
-                  <span className="truncate text-[11px] text-[var(--cf-text-muted)]" title={profile.command}>
+                  <TerminalSquare size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  <span className="shrink-0 font-medium text-[var(--cf-text)]">{profile.name}</span>
+                  <span className="truncate font-mono text-[11px] text-[var(--cf-text-muted)]" title={profile.command}>
                     {[profile.command, ...profile.args].join(" ")}
                   </span>
                 </div>
@@ -129,11 +136,8 @@ export function TerminalSettings() {
 
           {tab === "custom" && (
             <>
-              <div className="mb-1.5 flex items-center justify-end">
-                <button
-                  onClick={addProfile}
-                  className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline"
-                >
+              <div className="mb-2 flex items-center justify-end">
+                <button type="button" onClick={addProfile} className={buttonClass({ variant: "secondary", size: "sm" })}>
                   <Plus size={13} /> {t("settings.terminalAddProfile")}
                 </button>
               </div>
@@ -144,27 +148,30 @@ export function TerminalSettings() {
                 <div className="space-y-2">
                   {custom.map((profile) => (
                     <div key={profile.id} className="rounded-lg border border-[var(--cf-border)] p-2.5">
-                      <div className="mb-1.5 flex items-center gap-2">
+                      <div className="mb-2 flex items-center gap-2">
                         <input
                           value={profile.name}
                           onChange={(e) => updateProfile(profile.id, { name: e.target.value })}
                           placeholder={t("settings.terminalProfileName")}
-                          className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+                          className={fieldClass({ size: "sm", className: "flex-1 font-medium" })}
                         />
-                        <button
-                          onClick={() => void removeProfile(profile)}
-                          title={t("common.delete")}
-                          className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                        >
-                          <Trash2 size={13} />
-                        </button>
+                        <Tooltip label={t("common.delete")}>
+                          <button
+                            type="button"
+                            onClick={() => void removeProfile(profile)}
+                            aria-label={t("common.delete")}
+                            className="inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)]"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </Tooltip>
                       </div>
                       <div className="flex gap-2">
                         <input
                           value={profile.command}
                           onChange={(e) => updateProfile(profile.id, { command: e.target.value })}
                           placeholder={t("settings.terminalProfileCommand")}
-                          className="flex-[2] rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                          className={fieldClass({ size: "sm", className: "flex-[2] font-mono" })}
                         />
                         <input
                           value={argsDraft[profile.id] ?? profile.args.join(" ")}
@@ -174,7 +181,7 @@ export function TerminalSettings() {
                             updateProfile(profile.id, { args: parseArgs(raw) });
                           }}
                           placeholder={t("settings.terminalProfileArgs")}
-                          className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                          className={fieldClass({ size: "sm", className: "flex-1 font-mono" })}
                         />
                       </div>
                     </div>

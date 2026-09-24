@@ -29,9 +29,25 @@ import { useWorkspaceStore } from "./workspaceStore";
  * every change (`windows:satellites`). No polling — the answer changes only when a window is built
  * or destroyed, and both of those are moments the backend is already in.
  */
+/**
+ * An island that has just come back — closed, or sent back with its "return" button — kept for the
+ * few seconds the main window spends pointing at where it landed (`ReturnBurst`). `id` is unique per
+ * return, so the same app coming back twice in a row plays its animation twice.
+ */
+export interface WindowReturn {
+  id: number;
+  kind: DetachableKind;
+  refId: string;
+}
+
+/** How long a return stays in `returns`: the longest of its animations, plus a margin. */
+const RETURN_MS = 2400;
+
 interface WindowState {
   /** Every satellite open right now, this window included if it is one. */
   satellites: SatelliteInfo[];
+  /** Islands that came back in the last couple of seconds. Main window only — see `init`. */
+  returns: WindowReturn[];
   /** How many are allowed, from settings. Mirrored here so the rail can say the number in the
    *  message it shows when the answer is "no". */
   limit: number;
@@ -53,8 +69,39 @@ interface WindowState {
  *  for — API client, database, frontend, backend — with nothing left over. */
 export const DEFAULT_SATELLITE_LIMIT = 4;
 
+let nextReturnId = 0;
+
+/**
+ * Runs `play` now if this window can be seen, or as soon as it can — within a moment.
+ *
+ * The moment is for the "return" button: it brings the main window forward and closes itself in
+ * the same breath, so the list can change a beat before a minimized main window is visible again.
+ * Anything later is not a return the user is watching for. The case that matters is quitting to
+ * the tray: every island is closed then (`close_all` parks them) while the main window hides, and
+ * a burst of "it came back" animations queued for whenever the window is next shown would announce
+ * returns that never happened — the tray restore opens those same islands again.
+ */
+function whenVisible(play: () => void) {
+  if (document.visibilityState === "visible") {
+    play();
+    return;
+  }
+  const onChange = () => {
+    if (document.visibilityState !== "visible") return;
+    stop();
+    play();
+  };
+  const timer = window.setTimeout(() => stop(), 1500);
+  function stop() {
+    window.clearTimeout(timer);
+    document.removeEventListener("visibilitychange", onChange);
+  }
+  document.addEventListener("visibilitychange", onChange);
+}
+
 export const useWindowStore = create<WindowState>((set, get) => ({
   satellites: [],
+  returns: [],
   limit: DEFAULT_SATELLITE_LIMIT,
 
   init: async () => {
@@ -63,7 +110,25 @@ export const useWindowStore = create<WindowState>((set, get) => ({
     // Never torn down, and it does not need to be: the store lives as long as the window does, and
     // so does the subscription. One listener for the whole window.
     void listen<SatelliteInfo[]>("windows:satellites", (event) => {
+      const before = get().satellites;
       set({ satellites: event.payload });
+      // An island that is in the old list and not in the new one has come back: whichever way it
+      // was closed, it lands on the main window's rail or projects panel, and that is where the
+      // eye is sent. Only the main window keeps these — it is the one those icons live in.
+      if (!WINDOW.main) return;
+      const back = before.filter(
+        (s): s is SatelliteInfo & { kind: DetachableKind } =>
+          (s.kind === "app" || s.kind === "repo") && !event.payload.some((now) => now.label === s.label),
+      );
+      if (back.length === 0) return;
+      whenVisible(() => {
+        const landed = back.map((s) => ({ id: ++nextReturnId, kind: s.kind, refId: s.ref_id }));
+        set({ returns: [...get().returns, ...landed] });
+        window.setTimeout(() => {
+          const done = new Set(landed.map((r) => r.id));
+          set({ returns: get().returns.filter((r) => !done.has(r.id)) });
+        }, RETURN_MS);
+      });
     });
   },
 

@@ -7,6 +7,7 @@ import {
   Download,
   FolderOpen,
   KeyRound,
+  Loader2,
   Lock,
   RefreshCw,
   Upload,
@@ -15,6 +16,8 @@ import {
 import { motion } from "framer-motion";
 import { ApiModal, Field, GhostButton, PrimaryButton, Row } from "../api/ApiModal";
 import { ActiveUnderline } from "../common/ActivePill";
+import { buttonClass } from "../common/Button";
+import { underlineTabClass } from "../common/recipes";
 import { Actions, HelpLink, Note, Panel, SettingsHeader, Status } from "../api/settingsChrome";
 import { SettingsRail, useSectionTab } from "./settingsNav";
 import { tabsFor } from "../../lib/settingsCatalog";
@@ -158,11 +161,13 @@ function PassphraseFeedback({ value }: { value: string }) {
     // spacer standing in for the label.
     <div className="flex items-start gap-3 pb-1">
       <span className="min-w-0 flex-1" />
-      <span className="w-[360px] max-w-[62%] shrink-0 rounded-md bg-black/[0.02] px-2 py-1.5 dark:bg-white/[0.03]">
+      <span className="w-[360px] max-w-[62%] shrink-0 rounded-md bg-[var(--cf-hover)] px-2 py-1.5">
         {/* Nothing typed yet is nothing to measure, so the bars stay away until there is. */}
         {!empty && (
           <span className="mb-1 flex items-center gap-2">
             <span className="flex flex-1 gap-1">
+              {/* `layout` resizes the bars as the verdict beside them changes length, and it does it
+                  with a transform (FLIP) — never by animating their width. */}
               {[0, 1, 2, 3].map((segment) => (
                 <motion.span
                   key={segment}
@@ -174,7 +179,7 @@ function PassphraseFeedback({ value }: { value: string }) {
                 />
               ))}
             </span>
-            <span className="shrink-0 text-[10px] font-medium" style={{ color: colors[score] }}>
+            <span className="shrink-0 text-[11px] font-medium" style={{ color: colors[score] }}>
               {t(labels[score])}
             </span>
           </span>
@@ -257,10 +262,17 @@ function PassphraseGroup({ has, onChanged }: { has: boolean; onChanged: () => vo
         <Status tone="success">{t("backup.passwordSet")}</Status>
         <Actions>
           <GhostButton onClick={() => setEditing(true)}>
-            <KeyRound size={12} />
+            <KeyRound size={13} />
             {t("backup.changePassword")}
           </GhostButton>
-          <GhostButton onClick={() => void remove()}>{t("backup.removePassword")}</GhostButton>
+          {/* Red, because it takes away the one thing every backup below is sealed with. */}
+          <button
+            type="button"
+            onClick={() => void remove()}
+            className={buttonClass({ variant: "danger-ghost" })}
+          >
+            {t("backup.removePassword")}
+          </button>
         </Actions>
       </div>
     );
@@ -346,19 +358,26 @@ function IncludeRow({
           type="button"
           onClick={() => setOpen((current) => !current)}
           aria-expanded={open}
-          className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left text-[12px] text-[var(--cf-text)]"
+          className="group/include flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left text-[13px] text-[var(--cf-text)]"
         >
           {open ? (
-            <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <ChevronDown
+              size={13}
+              className="shrink-0 text-[var(--cf-text-faint)] group-hover/include:text-[var(--cf-text)]"
+            />
           ) : (
-            <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <ChevronRight
+              size={13}
+              className="shrink-0 text-[var(--cf-text-faint)] group-hover/include:text-[var(--cf-text)]"
+            />
           )}
           {/* Wraps — the switch labels are what say which half of the backup you are turning off. */}
           <span className="min-w-0 break-words leading-snug">{label}</span>
         </button>
-        <span className="shrink-0">
+        {/* The checkbox's own 16px square, so the padlock sits centred in the same column. */}
+        <span className="flex h-4 w-4 shrink-0 items-center justify-center">
           {alwaysLabel !== undefined ? (
-            <Lock size={11} className="text-[var(--cf-text-muted)]" aria-label={alwaysLabel} />
+            <Lock size={13} className="text-[var(--cf-text-muted)]" aria-label={alwaysLabel} />
           ) : (
             <Checkbox checked={checked ?? false} onChange={onChange ?? (() => {})} />
           )}
@@ -367,7 +386,7 @@ function IncludeRow({
       {open && (
         // Indented to the label rather than the chevron, so the text reads as belonging to the row
         // above it instead of starting a new one.
-        <p className="mb-1 pl-[18px] pr-6 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+        <p className="mb-1 pl-[19px] pr-6 text-[11px] leading-snug text-[var(--cf-text-muted)]">
           {detail}
         </p>
       )}
@@ -507,7 +526,7 @@ function RestoreModal({
               that can destroy work, and it was a ghost — grey text, lighter than the Cancel beside
               it, indistinguishable from a label until you hovered it. */}
           <PrimaryButton onClick={() => void run()} disabled={busy || passphrase === ""} danger={replace}>
-            <Download size={12} />
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
             {busy ? t("backup.restoring") : t("backup.restoreAction")}
           </PrimaryButton>
         </div>
@@ -531,7 +550,9 @@ function RestoreModal({
         {/* Stacked rather than a `Row`. Label and field on opposite sides of a dialog this wide put
             a hand's width of nothing between the question and where you answer it. */}
         <label className="mt-4 block">
-          <span className="mb-1.5 block text-[12px] text-[var(--cf-text)]">{t("backup.password")}</span>
+          <span className="mb-1.5 block text-[12px] font-medium text-[var(--cf-text-muted)]">
+            {t("backup.password")}
+          </span>
           <Field
             type="password"
             value={passphrase}
@@ -545,7 +566,9 @@ function RestoreModal({
             backup" — whose *unticked* meaning was written nowhere except a hint that swapped
             underneath it as you clicked. Merging is not "not replacing"; it is the other half of
             the decision, and it deserves a name and a line of its own. */}
-        <p className="mb-1.5 mt-4 text-[12px] text-[var(--cf-text)]">{t("backup.restoreModeTitle")}</p>
+        <p className="mb-1.5 mt-4 text-[12px] font-medium text-[var(--cf-text-muted)]">
+          {t("backup.restoreModeTitle")}
+        </p>
         <div className="flex flex-col gap-1.5">
           <RestoreChoice
             title={t("backup.modeMerge")}
@@ -571,7 +594,7 @@ function FileFact({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-[3px]">
       <dt className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{label}</dt>
-      <dd className="min-w-0 truncate text-[12px] text-[var(--cf-text)]" title={value}>
+      <dd className="min-w-0 truncate text-[12px] tabular-nums text-[var(--cf-text)]" title={value}>
         {value}
       </dd>
     </div>
@@ -606,20 +629,25 @@ function RestoreChoice({
       role="radio"
       aria-checked={selected}
       onClick={onSelect}
-      className="flex items-start gap-2.5 rounded-lg border p-2.5 text-left transition-colors"
-      style={{
-        borderColor: selected ? accent : "var(--cf-border)",
-        background: selected ? `color-mix(in oklab, ${accent} 8%, transparent)` : "transparent",
-      }}
+      // The chosen one is painted inline (its colour depends on which answer it is); the other
+      // takes its border and hover from classes, which an inline background would override.
+      className={`flex items-start gap-2.5 rounded-lg border p-2.5 text-left transition-colors duration-100 ${
+        selected ? "" : "border-[var(--cf-border)] hover:bg-[var(--cf-hover)]"
+      }`}
+      style={
+        selected
+          ? { borderColor: accent, background: `color-mix(in oklab, ${accent} 8%, transparent)` }
+          : undefined
+      }
     >
       <span
         className="mt-[3px] flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border"
-        style={{ borderColor: selected ? accent : "var(--cf-border)" }}
+        style={{ borderColor: selected ? accent : "var(--cf-border-strong)" }}
       >
         {selected && <span className="h-1.5 w-1.5 rounded-full" style={{ background: accent }} />}
       </span>
       <span className="min-w-0">
-        <span className="block text-[12px]" style={{ color: selected ? accent : "var(--cf-text)" }}>
+        <span className="block text-[13px]" style={{ color: selected ? accent : "var(--cf-text)" }}>
           {title}
         </span>
         <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
@@ -651,13 +679,13 @@ function RestoreDoneModal({ report, onClose }: { report: RestoreReport; onClose:
         <div className="flex w-full items-center justify-end gap-1.5">
           <GhostButton onClick={onClose}>{t("backup.later")}</GhostButton>
           <PrimaryButton onClick={() => void relaunch()}>
-            <RefreshCw size={12} />
+            <RefreshCw size={13} />
             {t("backup.restartNow")}
           </PrimaryButton>
         </div>
       }
     >
-      <div className="overflow-y-auto px-4 py-4 text-[12px]">
+      <div className="overflow-y-auto px-4 py-4 text-[13px]">
         <p className="mb-2">
           {t("backup.restoredCounts", {
             rows: String(report.rows),
@@ -967,9 +995,9 @@ export function BackupSettings() {
       </div>
 
       <div className="flex min-h-0 flex-1 gap-4">
-        {/* `layoutRoot` on a `motion.nav`, for the reason spelled out in `ApiSettingsBody`: the
-            pill's before/after rects would otherwise be measured against a scroll position the
-            arriving pane has just changed, and the slide would land as a jump. */}
+        {/* The shared rail. Its `layoutRoot` is what keeps the pill's slide measured against the
+            rail rather than against a scroll position the arriving pane has just changed, which
+            would land the slide as a jump. */}
         <SettingsRail tabs={tabs} active={tab} onSelect={setTab} layoutId="cf-backup-settings-pill" />
 
         {/* The one moving part. `overflow-y-scroll`, not `auto`: the app styles its scrollbars, so
@@ -987,7 +1015,7 @@ export function BackupSettings() {
             {/* The rail names the pane, so no heading is repeated here — but the hint says what the
                 label cannot, which is why it stays for the panes that have one. */}
             {activeTab?.hintKey && (
-              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+              <p className="mb-3 text-[12px] leading-snug text-[var(--cf-text-muted)]">
                 {t(activeTab.hintKey)}
               </p>
             )}
@@ -1000,24 +1028,21 @@ export function BackupSettings() {
 
             {/* Restoring lives in its own pane, so both halves of this one are about writing a file:
                 by hand, or on a schedule — two tabs rather than two stacked groups, see `MODES`.
-                The same underlined strip as the review section's sub-tabs, and the same `-mb-px` so
-                the active rule sits *on* the rule under the row rather than above it. */}
+                The app's underline tabs (`underlineTabClass`), whose rule sits *on* the hairline
+                under the row rather than above it. */}
             {/* One row, split in two. Sized to their labels these were a short pair huddled in the
                 top-left corner of a wide pane, which reads as a leftover control rather than as the
                 two halves this pane has; an equal share each makes the underline say which half of
                 the pane you are in. No `gap`, so the two rules meet as one line. */}
             {tab === "backup" && (
-              <div className="mb-3 flex border-b border-[var(--cf-border)]">
+              <div className="mb-3 flex h-9 items-stretch border-b border-[var(--cf-border)]">
                 {MODES.map(({ id, labelKey, icon: Icon }) => (
                   <button
                     key={id}
+                    type="button"
                     onClick={() => setMode(id)}
                     aria-current={mode === id ? "page" : undefined}
-                    className={`relative -mb-px flex flex-1 items-center justify-center gap-1.5 px-2.5 pb-2.5 pt-1.5 text-[12.5px] ${
-                      mode === id
-                        ? "text-[var(--cf-accent)]"
-                        : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                    }`}
+                    className={underlineTabClass(mode === id, "flex-1 justify-center")}
                   >
                     {mode === id && <ActiveUnderline layoutId="cf-backup-mode-underline" />}
                     <Icon size={13} />
@@ -1049,9 +1074,9 @@ export function BackupSettings() {
                   <div className="mt-5 flex justify-center">
                     <PrimaryButton onClick={() => void exportNow()} disabled={busy || state.running}>
                       {busy ? (
-                        <RefreshCw size={12} className="animate-spin" />
+                        <Loader2 size={13} className="animate-spin" />
                       ) : (
-                        <Upload size={12} />
+                        <Upload size={13} />
                       )}
                       {busy ? t("backup.exporting") : t("backup.exportNow")}
                     </PrimaryButton>
@@ -1113,7 +1138,11 @@ export function BackupSettings() {
                       disabled={listing || !state.destinationReady}
                       title={t("backup.refreshList")}
                     >
-                      <RefreshCw size={12} className={listing ? "animate-spin" : ""} />
+                      {listing ? (
+                        <Loader2 size={13} className="animate-spin" />
+                      ) : (
+                        <RefreshCw size={13} />
+                      )}
                       {t("backup.refreshList")}
                     </GhostButton>
                   }
@@ -1213,7 +1242,7 @@ function RestoreSection({
   return (
     <section className={divided ? "mt-5 border-t border-[var(--cf-border)] pt-4" : "pt-1"}>
       <div className="flex items-start justify-between gap-4">
-        <p className="min-w-0 text-[12.5px] text-[var(--cf-text)]">{title}</p>
+        <p className="min-w-0 text-[13px] font-medium text-[var(--cf-text)]">{title}</p>
         {action && <div className="shrink-0">{action}</div>}
       </div>
       {children && <div className="mt-2.5">{children}</div>}
@@ -1251,19 +1280,19 @@ function RestoreRow({
       disabled={disabled}
       onClick={onClick}
       title={hoverTitle}
-      className="flex w-full items-center gap-2.5 rounded-lg border border-[var(--cf-border)] px-3 py-2.5 text-left transition-colors hover:border-[color-mix(in_oklab,var(--cf-accent)_50%,transparent)] hover:bg-black/[0.02] disabled:opacity-40 dark:hover:bg-white/[0.03]"
+      className="flex w-full items-center gap-2.5 rounded-lg border border-[var(--cf-border)] px-3 py-2.5 text-left transition-colors duration-100 hover:border-[var(--cf-border-strong)] hover:bg-[var(--cf-hover)] disabled:pointer-events-none disabled:opacity-45"
     >
-      <Icon size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+      <Icon size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
       <span className="min-w-0 flex-1">
-        <span className="block text-[12px] text-[var(--cf-text)]">{title}</span>
+        <span className="block text-[13px] tabular-nums text-[var(--cf-text)]">{title}</span>
         {subtitle && (
-          <span className="mt-0.5 block truncate font-mono text-[10.5px] text-[var(--cf-text-muted)]">
+          <span className="mt-0.5 block truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
             {subtitle}
           </span>
         )}
       </span>
-      {aside && <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{aside}</span>}
-      <ChevronRight size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+      {aside && <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">{aside}</span>}
+      <ChevronRight size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
     </button>
   );
 }

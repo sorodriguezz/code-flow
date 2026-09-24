@@ -3,9 +3,22 @@ import { Bookmark, ChevronDown, ChevronRight, Circle, Trash2, X } from "lucide-r
 import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { FileGlyph } from "../common/FileGlyph";
+import { Tooltip } from "../common/Tooltip";
+import { Kbd } from "../common/Button";
+import { explorerHeadClass, explorerTitleClass } from "../common/recipes";
 import { readFileText } from "../../lib/tauri/commands";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
+
+/**
+ * The shared 22px icon button, for the two actions here that take something away. Its own string
+ * rather than `iconButtonClass` because the difference is the hover — the danger tint, so the press
+ * says what it does before it happens — and a second hover colour on that recipe would be a tie for
+ * the stylesheet to break rather than an override.
+ */
+const REMOVE_BUTTON =
+  "inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)]";
 
 /**
  * The two kinds of "come back to this line", in one list.
@@ -47,6 +60,7 @@ function Section({
   icon,
   rows,
   emptyLabel,
+  emptyKey,
   onOpen,
   onRemove,
   onClear,
@@ -56,6 +70,9 @@ function Section({
   icon: ReactNode;
   rows: Row[];
   emptyLabel: string;
+  /** The chord that adds one, drawn as a key cap after the sentence — from the binding registry,
+   *  which is why it is not written into `emptyLabel` any more. */
+  emptyKey?: string | null;
   onOpen: (row: Row) => void;
   onRemove: (row: Row) => void;
   onClear?: () => void;
@@ -81,38 +98,36 @@ function Section({
 
   return (
     <div className="mb-1">
-      <div className="flex items-center gap-1 px-1.5 py-1">
+      <div className="flex items-center gap-1 pr-0.5">
         <button
           onClick={() => setOpen((value) => !value)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+          aria-expanded={open}
+          className="flex h-[26px] min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 text-left text-[var(--cf-text-faint)] hover:text-[var(--cf-text)]"
         >
-          {open ? (
-            <ChevronDown size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
-          ) : (
-            <ChevronRight size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
-          )}
+          {open ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
           {icon}
-          <span className="truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {title}
-          </span>
-          <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{rows.length}</span>
+          <span className="truncate text-[11px] font-semibold uppercase tracking-[0.06em]">{title}</span>
+          <span className="shrink-0 text-[11px] font-medium tabular-nums">{rows.length}</span>
         </button>
         {onClear && rows.length > 0 && (
-          <button
-            onClick={onClear}
-            title={clearLabel}
-            aria-label={clearLabel}
-            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
-          >
-            <Trash2 size={11} />
-          </button>
+          <Tooltip side="bottom" label={clearLabel}>
+            <button onClick={onClear} aria-label={clearLabel} className={REMOVE_BUTTON}>
+              <Trash2 size={13} />
+            </button>
+          </Tooltip>
         )}
       </div>
 
       {open &&
         (rows.length === 0 ? (
-          <p className="px-2 pb-2 pl-6 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          <p className="px-2 pb-2 pl-7 text-[12px] leading-snug text-[var(--cf-text-faint)]">
             {emptyLabel}
+            {emptyKey && (
+              <>
+                {" "}
+                <Kbd>{emptyKey}</Kbd>
+              </>
+            )}
           </p>
         ) : (
           groups.map(([path, fileRows]) => {
@@ -127,21 +142,21 @@ function Section({
                   onClick={() => toggleFile(path)}
                   title={path}
                   aria-expanded={!shut}
-                  className="flex w-full items-center gap-1.5 py-0.5 pl-3 pr-2 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  className="flex h-[26px] w-full items-center gap-1.5 rounded-md pl-3 pr-2 text-left hover:bg-[var(--cf-hover)]"
                 >
                   {shut ? (
-                    <ChevronRight size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+                    <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
                   ) : (
-                    <ChevronDown size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+                    <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
                   )}
-                  <FileGlyph path={path} size={11} />
-                  <span className="shrink-0 text-[11px] text-[var(--cf-text)]">{fileName(path)}</span>
-                  <span className="min-w-0 truncate text-[10px] text-[var(--cf-text-muted)]">
+                  <FileGlyph path={path} size={13} />
+                  <span className="shrink-0 text-[12px] text-[var(--cf-text)]">{fileName(path)}</span>
+                  <span className="min-w-0 truncate text-[11px] text-[var(--cf-text-faint)]">
                     {path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ""}
                   </span>
                   {/* Only while shut: with the lines showing, the count is the lines themselves. */}
                   {shut && (
-                    <span className="ml-auto shrink-0 text-[10px] text-[var(--cf-text-muted)]">
+                    <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
                       {fileRows.length}
                     </span>
                   )}
@@ -151,28 +166,29 @@ function Section({
                     <div
                       key={row.key}
                       style={riseDelay(at)}
-                      className="cf-rise group flex items-center gap-1.5 py-0.5 pl-9 pr-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                      className="cf-rise group flex h-[26px] items-center gap-1.5 rounded-md pl-9 pr-0.5 hover:bg-[var(--cf-hover)]"
                     >
                       <button
                         onClick={() => onOpen(row)}
                         title={t("bookmarks.goTo")}
-                        className="flex min-w-0 flex-1 items-baseline gap-2 text-left"
+                        className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
                       >
-                        <span className="shrink-0 font-mono text-[11px] text-[var(--cf-accent)]">
+                        <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-accent)]">
                           {row.line}
                         </span>
-                        <span className="truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
+                        <span className="truncate font-mono text-[12px] text-[var(--cf-text-muted)]">
                           {row.label}
                         </span>
                       </button>
-                      <button
-                        onClick={() => onRemove(row)}
-                        title={t("bookmarks.remove")}
-                        aria-label={t("bookmarks.remove")}
-                        className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-danger)] group-hover:opacity-100"
-                      >
-                        <X size={11} />
-                      </button>
+                      <Tooltip side="right" label={t("bookmarks.remove")}>
+                        <button
+                          onClick={() => onRemove(row)}
+                          aria-label={t("bookmarks.remove")}
+                          className={`${REMOVE_BUTTON} opacity-0 focus-visible:opacity-100 group-hover:opacity-100`}
+                        >
+                          <X size={13} />
+                        </button>
+                      </Tooltip>
                     </div>
                   ))}
               </div>
@@ -192,6 +208,8 @@ export function BookmarksPanel({
   onOpen: (path: string, line: number) => void;
 }) {
   const t = useT();
+  /** The key that bookmarks the caret's line, for the empty section's hint. */
+  const toggleChord = useShortcutChord()("editor.bookmarkToggle");
   const bookmarks = useBookmarkStore((s) => s.bookmarks);
   const removeBookmark = useBookmarkStore((s) => s.remove);
   const clearBookmarks = useBookmarkStore((s) => s.clear);
@@ -267,18 +285,20 @@ export function BookmarksPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="shrink-0 border-b border-[var(--cf-border)] px-2 py-1.5">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("bookmarks.title")}
+      {/* The head every panel of the activity rail wears. */}
+      <div className={explorerHeadClass}>
+        <span className={explorerTitleClass}>
+          <span className="truncate">{t("bookmarks.title")}</span>
         </span>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto py-1">
+      <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5">
         <Section
           title={t("bookmarks.section")}
-          icon={<Bookmark size={11} className="shrink-0 text-[var(--cf-warning)]" />}
+          icon={<Bookmark size={13} className="shrink-0 text-[var(--cf-warning)]" />}
           rows={bookmarkRows}
           emptyLabel={t("bookmarks.empty")}
+          emptyKey={toggleChord}
           onOpen={(row) => onOpen(row.path, row.line)}
           onRemove={(row) => removeBookmark(row.key)}
           onClear={clearBookmarks}
@@ -286,7 +306,7 @@ export function BookmarksPanel({
         />
         <Section
           title={t("bookmarks.breakpoints")}
-          icon={<Circle size={9} className="shrink-0 fill-[var(--cf-danger)] text-[var(--cf-danger)]" />}
+          icon={<Circle size={10} className="shrink-0 fill-[var(--cf-danger)] text-[var(--cf-danger)]" />}
           rows={breakpointRows}
           emptyLabel={t("bookmarks.noBreakpoints")}
           onOpen={(row) => onOpen(row.path, row.line)}

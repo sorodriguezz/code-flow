@@ -9,6 +9,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { freePort, listeningPorts } from "../../lib/tauri/services";
 import type { ListeningPort } from "../../types/services";
+import { fieldClass } from "../common/recipes";
 
 /** How often the table re-reads the machine while it is on screen. */
 const REFRESH_MS = 3000;
@@ -103,7 +104,7 @@ export function PortsPanel({ onOpenService }: { onOpenService: (id: string) => v
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("services.ports.filter")}
-            className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-1 pl-6 pr-6 text-[11px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: "sm", className: "w-full pl-6 pr-6" })}
           />
           {query && (
             <button
@@ -119,7 +120,7 @@ export function PortsPanel({ onOpenService }: { onOpenService: (id: string) => v
           <button
             onClick={() => void refresh()}
             aria-label={t("services.ports.refresh")}
-            className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
             <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
           </button>
@@ -138,7 +139,7 @@ export function PortsPanel({ onOpenService }: { onOpenService: (id: string) => v
         ) : (
           <table className="w-full border-collapse text-[12px]">
             <thead className="sticky top-0 z-10 bg-[var(--cf-surface)]">
-              <tr className="text-left text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+              <tr className="text-left text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
                 <th className="border-b border-[var(--cf-border)] px-3 py-1.5 font-medium">{t("services.ports.port")}</th>
                 <th className="border-b border-[var(--cf-border)] px-3 py-1.5 font-medium">{t("services.ports.address")}</th>
                 <th className="border-b border-[var(--cf-border)] px-3 py-1.5 font-medium">{t("services.ports.process")}</th>
@@ -151,7 +152,7 @@ export function PortsPanel({ onOpenService }: { onOpenService: (id: string) => v
               {shown.map((row) => (
                 <tr
                   key={`${row.port}:${row.pid}`}
-                  className="group/port hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  className="group/port hover:bg-[var(--cf-hover)]"
                 >
                   <td className="border-b border-[var(--cf-border)] px-3 py-1 font-mono tabular-nums">
                     <button
@@ -189,7 +190,7 @@ export function PortsPanel({ onOpenService }: { onOpenService: (id: string) => v
                         <button
                           onClick={() => void openExternalUrl(`http://localhost:${row.port}`)}
                           aria-label={t("services.ports.open")}
-                          className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                         >
                           <ExternalLink size={11} />
                         </button>
@@ -199,7 +200,7 @@ export function PortsPanel({ onOpenService }: { onOpenService: (id: string) => v
                           onClick={() => void free(row)}
                           disabled={busy === row.pid}
                           aria-label={row.serviceId ? t("services.ports.stopService") : t("services.ports.free")}
-                          className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+                          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] disabled:opacity-40"
                         >
                           {busy === row.pid ? <LoaderCircle size={11} className="animate-spin" /> : <Square size={10} />}
                         </button>

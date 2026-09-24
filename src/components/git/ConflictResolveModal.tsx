@@ -12,6 +12,7 @@ import { useThemeStore } from "../../state/themeStore";
 import { parseClaudeError } from "../../lib/claudeError";
 import { useFileLanguage } from "../../lib/useFileLanguage";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /**
  * AI-assisted resolution for a single conflicted file. On open it asks the backend to merge the
@@ -85,7 +86,7 @@ export function ConflictResolveModal({ filePath, onClose }: { filePath: string; 
           {!loading && !error && (
             <button
               onClick={() => setShowDiff((v) => !v)}
-              className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
             >
               <Columns2 size={12} />
               {showDiff ? t("conflicts.aiEdit") : t("conflicts.aiViewDiff")}
@@ -145,14 +146,14 @@ export function ConflictResolveModal({ filePath, onClose }: { filePath: string; 
             <button
               onClick={onClose}
               disabled={busy}
-              className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+              className={buttonClass({ variant: "ghost" })}
             >
               {t("common.cancel")}
             </button>
             <button
               onClick={accept}
               disabled={busy || error !== null || !proposal.trim()}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+              className={buttonClass({ variant: "primary" })}
             >
               {accepting ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
               {t("conflicts.aiAccept")}

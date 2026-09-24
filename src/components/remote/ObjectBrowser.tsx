@@ -1147,7 +1147,7 @@ export function ObjectBrowser({
               onClick={() => setPathDraft(path)}
               title={t("remote.objEditPath")}
               aria-label={t("remote.objEditPath")}
-              className="ml-0.5 shrink-0 rounded p-1 text-[var(--cf-text-muted)] opacity-60 hover:opacity-100"
+              className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md ml-0.5 shrink-0 text-[var(--cf-text-muted)] opacity-60 hover:opacity-100 hover:bg-[var(--cf-hover)]"
             >
               <Pencil size={11} />
             </button>
@@ -1372,7 +1372,7 @@ export function ObjectBrowser({
                 setSearch("");
                 void load(path, "");
               }}
-              className="flex shrink-0 items-center gap-1 rounded bg-[var(--cf-accent-soft)] px-1.5 py-0.5 text-[10px] text-[var(--cf-accent)]"
+              className="flex shrink-0 items-center gap-1 rounded bg-[var(--cf-accent-soft)] px-1.5 py-0.5 text-[10.5px] text-[var(--cf-accent)]"
             >
               {search}
               <X size={9} />
@@ -1855,7 +1855,7 @@ function DetailDrawer({
           type="button"
           onClick={onClose}
           aria-label={t("common.close")}
-          className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
         >
           <X size={12} />
         </button>
@@ -1868,10 +1868,10 @@ function DetailDrawer({
           <Loader2 size={14} className="m-4 animate-spin self-center text-[var(--cf-text-muted)]" />
         ) : (
           <div className="p-2">
-            <p className="break-all pb-2 font-mono text-[10px] text-[var(--cf-text-muted)]">{properties.url}</p>
+            <p className="break-all pb-2 font-mono text-[10.5px] text-[var(--cf-text-muted)]">{properties.url}</p>
             {properties.rows.map(([name, value]) => (
               <div key={name} className="border-t border-[var(--cf-border)] py-1">
-                <span className="block text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">{name}</span>
+                <span className="block text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">{name}</span>
                 <span className="block break-all font-mono text-[11px] text-[var(--cf-text)]">{value}</span>
               </div>
             ))}
@@ -1885,10 +1885,10 @@ function DetailDrawer({
         <div className="p-2">
           {snapshots.map((snapshot) => (
             <div key={snapshot.stamp} className="border-t border-[var(--cf-border)] py-1.5">
-              <span className="block font-mono text-[10px] text-[var(--cf-text)]">
+              <span className="block font-mono text-[10.5px] text-[var(--cf-text)]">
                 {formatWhen(snapshot.modified, language) || snapshot.stamp}
               </span>
-              <span className="block text-[10px] text-[var(--cf-text-muted)]">{formatSize(snapshot.size)}</span>
+              <span className="block text-[10.5px] text-[var(--cf-text-muted)]">{formatSize(snapshot.size)}</span>
               <div className="flex gap-1 pt-1">
                 <button
                   type="button"
@@ -1901,7 +1901,7 @@ function DetailDrawer({
                       await remoteBlobRestoreSnapshot(hostId, path, snapshot.stamp);
                     })
                   }
-                  className="flex items-center gap-1 rounded border border-[var(--cf-border)] px-1.5 py-0.5 text-[10px] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-40"
+                  className="flex items-center gap-1 rounded border border-[var(--cf-border)] px-1.5 py-0.5 text-[10.5px] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-40"
                 >
                   <RotateCcw size={9} />
                   {t("remote.objRestore")}
@@ -1914,7 +1914,7 @@ function DetailDrawer({
                       await remoteBlobDeleteSnapshot(hostId, path, snapshot.stamp);
                     })
                   }
-                  className="flex items-center gap-1 rounded border border-[var(--cf-border)] px-1.5 py-0.5 text-[10px] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-40"
+                  className="flex items-center gap-1 rounded border border-[var(--cf-border)] px-1.5 py-0.5 text-[10.5px] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-40"
                 >
                   <Trash2 size={9} />
                   {t("common.delete")}
@@ -1954,7 +1954,7 @@ function Breadcrumb({
       <button
         type="button"
         onClick={() => onGo(root)}
-        className="shrink-0 rounded px-1 py-0.5 font-medium text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+        className="shrink-0 rounded px-1 py-0.5 font-medium text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
       >
         {title}
       </button>
@@ -1964,7 +1964,7 @@ function Breadcrumb({
           <button
             type="button"
             onClick={() => onGo(`${base}/${inner.slice(0, at + 1).join("/")}`)}
-            className="min-w-0 truncate rounded px-1 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+            className="min-w-0 truncate rounded px-1 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
             {segment}
           </button>

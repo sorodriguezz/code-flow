@@ -36,8 +36,8 @@ const MICROSOFT_URLS = {
 /** One numbered step. The number is drawn rather than a list marker so it survives wrapping. */
 function Step({ n, children }: { n: number; children: React.ReactNode }) {
   return (
-    <li className="mb-1.5 flex gap-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-      <span className="mt-[1px] flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-black/[0.06] text-[10px] font-semibold text-[var(--cf-text)] dark:bg-white/[0.09]">
+    <li className="mb-1.5 flex gap-2 text-[12px] leading-snug text-[var(--cf-text-muted)]">
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--cf-press)] text-[10.5px] font-semibold tabular-nums text-[var(--cf-text)]">
         {n}
       </span>
       <span className="min-w-0">{children}</span>
@@ -165,7 +165,7 @@ export function ICloudGuide({
           type="button"
           onClick={() => void backupRevealFolder(folder).catch((e: unknown) => pushErrorToast(String(e)))}
           title={folder}
-          className="mb-1 block w-full truncate rounded border border-[var(--cf-border)] bg-black/[0.02] px-1.5 py-1 text-left font-mono text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] dark:bg-white/[0.03]"
+          className="mb-1 block w-full truncate rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 py-1 text-left font-mono text-[11px] text-[var(--cf-text-muted)] transition-colors duration-100 hover:border-[var(--cf-border-strong)] hover:text-[var(--cf-text)]"
         >
           {folder}
         </button>

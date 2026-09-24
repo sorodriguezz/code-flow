@@ -1,7 +1,9 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
 import { CopyButton } from "./CopyButton";
-import { ICON_BUTTON } from "../diagrams/diagramsChrome";
+import { iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
+import { PANE_HEAD, PANE_TITLE } from "../diagrams/diagramsChrome";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -116,43 +118,48 @@ export function DbmlReference({ onClose }: { onClose: () => void }) {
       {/* A press anywhere else closes it. Transparent rather than a scrim: this is a reference held
           up beside the work, not a dialog that owns the window. */}
       <div className="fixed inset-0 z-30" onMouseDown={onClose} />
-      <aside className="absolute right-2 top-[38px] z-40 flex max-h-[calc(100%-52px)] w-[360px] flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]">
-        <header className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2.5 py-[7px]">
-          <span className="min-w-0 flex-1 truncate text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
-            {t("dbml.reference")}
-          </span>
-          <button
-            type="button"
-            className={ICON_BUTTON}
-            title={t("dbml.ref.close")}
-            aria-label={t("dbml.ref.close")}
-            onClick={onClose}
-          >
-            <X size={12} />
-          </button>
+      {/* `top-12` clears the 44px toolbar it drops from. */}
+      <aside className="absolute right-2 top-12 z-40 flex max-h-[calc(100%-60px)] w-[360px] flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]">
+        <header className={PANE_HEAD}>
+          <span className={PANE_TITLE}>{t("dbml.reference")}</span>
+          <Tooltip label={t("dbml.ref.close")}>
+            <button
+              type="button"
+              className={iconButtonClass({ size: "xs" })}
+              aria-label={t("dbml.ref.close")}
+              onClick={onClose}
+            >
+              <X size={14} />
+            </button>
+          </Tooltip>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-auto px-2.5 py-2">
-          <p className="mb-2 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+        <div className="min-h-0 flex-1 overflow-auto px-3 py-2.5">
+          <p className="mb-2.5 text-[12px] leading-snug text-[var(--cf-text-muted)]">
             {t("dbml.ref.intro")}
           </p>
           {ENTRIES.map((entry) => (
-            <section key={entry.label} className="group/example mb-2.5 last:mb-1">
-              <h3 className="mb-1 text-[9px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-accent)]">
+            <section key={entry.label} className="group/example mb-3 last:mb-1">
+              <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                 {t(entry.label)}
               </h3>
               {/* The point of a reference is to be taken from, so every block is one click from
                   the clipboard. Dimmed rather than hidden until hover: a control nobody can see is
-                  a control nobody uses, and this one exists because it was asked for by name. */}
+                  a control nobody uses, and this one exists because it was asked for by name. The
+                  block itself is a code well — the sunken tone code wears inside a sheet. */}
               <div className="relative">
-                <pre className="overflow-x-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] py-1.5 pl-2 pr-8 font-mono text-[10.5px] leading-[1.5] text-[var(--cf-text-muted)]">
+                <pre className="overflow-x-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] py-2 pl-2.5 pr-9 font-mono text-[11px] leading-[1.55] text-[var(--cf-text)]">
                   {entry.code}
                 </pre>
                 <div className="absolute right-1 top-1 opacity-55 transition-opacity focus-within:opacity-100 group-hover/example:opacity-100">
                   <CopyButton
                     text={entry.code}
                     compact
-                    className="flex items-center rounded border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[3px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
+                    className={iconButtonClass({
+                      size: "xs",
+                      className:
+                        "bg-[var(--cf-surface-raised)] shadow-[inset_0_0_0_1px_var(--cf-border)]",
+                    })}
                   />
                 </div>
               </div>

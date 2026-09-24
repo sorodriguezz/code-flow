@@ -47,13 +47,19 @@ export function TourLauncher() {
         onClick={() => (app ? startTour({ tour: app.tour }) : startTour())}
         data-tour="tour-launcher"
         aria-label={label}
-        className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-black/[0.03] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.04] ${
+        // The rail's own corner radius and a 16px glyph, so it reads as one more control of the
+        // frame it sits on; lit in the accent while unseen or running, like the apps above it.
+        className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] ${
           active || unseen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
         }`}
       >
-        <GraduationCap size={15} />
+        <GraduationCap size={16} />
         {unseen && (
-          <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />
+          // Ringed in the frame's colour so the dot separates from the glyph it sits on.
+          <span
+            aria-hidden
+            className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)] shadow-[0_0_0_2px_var(--cf-bg)]"
+          />
         )}
       </button>
     </Tooltip>

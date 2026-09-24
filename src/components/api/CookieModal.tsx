@@ -1,15 +1,56 @@
-import { useState } from "react";
-import { Cookie, Plus, Trash2 } from "lucide-react";
+import { useState, type ReactNode } from "react";
+import { Cookie, Globe, Plus, Trash2 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
-import { ApiModal, Field, GhostButton } from "./ApiModal";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
+import { ApiModal, GhostButton } from "./ApiModal";
 import { useApiStore } from "../../state/apiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { ApiCookie } from "../../types/api";
 
-const GRID = "minmax(0,1fr) minmax(0,1.5fr) minmax(0,0.7fr) minmax(0,1.1fr) 52px 62px 24px";
+const GRID = "minmax(0,1fr) minmax(0,1.5fr) minmax(0,0.7fr) minmax(0,1.1fr) 64px 76px 30px";
 const NEW_GRID = `minmax(0,1fr) ${GRID}`;
+
+/** The key/value table's box, header row and hairline rows — the same `.kv` look as the variables
+ *  table, so a cookie jar and an environment read as the same kind of sheet. */
+const TABLE = "min-w-0 overflow-hidden rounded-md border border-[var(--cf-border)]";
+const HEAD =
+  "grid h-[30px] items-center gap-1 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_60%,var(--cf-surface))] px-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
+const ROW = "grid items-center gap-1 border-b border-[var(--cf-border)] px-1 py-0.5 last:border-b-0";
+
+/** A cell's input: borderless on the row, the field fill and an inset accent ring once focused. */
+const CELL =
+  "h-7 w-full min-w-0 rounded-md bg-transparent px-2.5 font-mono text-[12px] text-[var(--cf-text)] outline-none transition-[background-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:bg-[var(--cf-field)] focus:shadow-[inset_0_0_0_1px_var(--cf-accent)]";
+
+function Cell({
+  value,
+  onChange,
+  placeholder,
+  label,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  label: string;
+}) {
+  return (
+    <input
+      type="text"
+      value={value}
+      placeholder={placeholder}
+      aria-label={label}
+      onChange={(e) => onChange(e.target.value)}
+      className={CELL}
+    />
+  );
+}
+
+/** The header row's labels, padded to sit over the text of the cells below them. */
+function HeadLabel({ children, center = false }: { children?: ReactNode; center?: boolean }) {
+  return <span className={`truncate ${center ? "text-center" : "px-2.5"}`}>{children}</span>;
+}
 
 function newCookie(workspaceId: string): ApiCookie {
   return {
@@ -143,145 +184,157 @@ export function CookieModal({ onClose }: { onClose: () => void }) {
       footer={
         <>
           <GhostButton onClick={addPending} disabled={workspaceId === null}>
-            <Plus size={12} />
+            <Plus size={14} />
             {t("api.cookie.add")}
           </GhostButton>
           <span className="ml-auto" />
-          <GhostButton onClick={() => void clearAll()} disabled={cookies.length === 0}>
-            <Trash2 size={12} />
+          <button
+            type="button"
+            onClick={() => void clearAll()}
+            disabled={cookies.length === 0}
+            className={buttonClass({ variant: "danger-ghost" })}
+          >
+            <Trash2 size={14} />
             {t("api.settings.clearCookies")}
-          </GhostButton>
+          </button>
         </>
       }
     >
-      <div className="min-h-0 flex-1 overflow-auto p-3">
+      <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
         {cookies.length === 0 && pending.length === 0 && (
-          <p className="p-3 text-[12px] text-[var(--cf-text-muted)]">{t("api.cookie.none")}</p>
+          <p className="py-2 text-[12px] text-[var(--cf-text-muted)]">{t("api.cookie.none")}</p>
         )}
 
         {domains.map((domain) => (
-          <section key={domain} className="mb-4">
-            <h3 className="mb-1 font-mono text-[11px] font-semibold text-[var(--cf-accent)]">
-              {domain}
+          <section key={domain} className="mb-5">
+            <h3 className="mb-1.5 flex min-w-0 items-center gap-1.5 font-mono text-[12px] font-semibold text-[var(--cf-text)]">
+              <Globe size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
+              <span className="truncate">{domain}</span>
             </h3>
 
-            <div
-              className="grid items-center gap-2 border-b border-[var(--cf-border)] pb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
-              style={{ gridTemplateColumns: GRID }}
-            >
-              <span>{t("api.cookie.name")}</span>
-              <span>{t("api.value")}</span>
-              <span>{t("api.cookie.path")}</span>
-              <span>{t("api.cookie.expires")}</span>
-              <span>{t("api.cookie.secure")}</span>
-              <span>{t("api.cookie.httpOnly")}</span>
-              <span />
-            </div>
+            <div className={TABLE}>
+              <div className={HEAD} style={{ gridTemplateColumns: GRID }}>
+                <HeadLabel>{t("api.cookie.name")}</HeadLabel>
+                <HeadLabel>{t("api.value")}</HeadLabel>
+                <HeadLabel>{t("api.cookie.path")}</HeadLabel>
+                <HeadLabel>{t("api.cookie.expires")}</HeadLabel>
+                <HeadLabel center>{t("api.cookie.secure")}</HeadLabel>
+                <HeadLabel center>{t("api.cookie.httpOnly")}</HeadLabel>
+                <span />
+              </div>
 
-            {(byDomain.get(domain) ?? []).map((cookie) => {
-              const row = current(cookie);
-              return (
-                <div
-                  key={cookie.id}
-                  className="grid items-center gap-2 border-b border-[var(--cf-border)] py-1"
-                  style={{ gridTemplateColumns: GRID }}
-                  onBlur={() => commit(cookie)}
-                >
-                  <Field
-                    mono
-                    value={row.name}
-                    placeholder={t("api.cookie.name")}
-                    onChange={(name) => edit(cookie, { name })}
-                  />
-                  <Field
-                    mono
-                    value={row.value}
-                    placeholder={t("api.value")}
-                    onChange={(value) => edit(cookie, { value })}
-                  />
-                  <Field
-                    mono
-                    value={row.path}
-                    placeholder="/"
-                    onChange={(path) => edit(cookie, { path })}
-                  />
-                  <Field
-                    mono
-                    value={row.expires ?? ""}
-                    placeholder={t("api.cookie.session")}
-                    onChange={(expires) => edit(cookie, { expires: expires.trim() || null })}
-                  />
-                  <span className="flex justify-center">
-                    <Checkbox
-                      checked={row.secure}
-                      onChange={(secure) => toggle(cookie, { secure })}
-                    />
-                  </span>
-                  <span className="flex justify-center">
-                    <Checkbox
-                      checked={row.http_only}
-                      onChange={(http_only) => toggle(cookie, { http_only })}
-                    />
-                  </span>
-                  <button
-                    onClick={() => void remove(cookie)}
-                    title={t("api.delete")}
-                    className="rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+              {(byDomain.get(domain) ?? []).map((cookie) => {
+                const row = current(cookie);
+                return (
+                  <div
+                    key={cookie.id}
+                    className={ROW}
+                    style={{ gridTemplateColumns: GRID }}
+                    onBlur={() => commit(cookie)}
                   >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              );
-            })}
+                    <Cell
+                      value={row.name}
+                      placeholder={t("api.cookie.name")}
+                      label={t("api.cookie.name")}
+                      onChange={(name) => edit(cookie, { name })}
+                    />
+                    <Cell
+                      value={row.value}
+                      placeholder={t("api.value")}
+                      label={t("api.value")}
+                      onChange={(value) => edit(cookie, { value })}
+                    />
+                    <Cell
+                      value={row.path}
+                      placeholder="/"
+                      label={t("api.cookie.path")}
+                      onChange={(path) => edit(cookie, { path })}
+                    />
+                    <Cell
+                      value={row.expires ?? ""}
+                      placeholder={t("api.cookie.session")}
+                      label={t("api.cookie.expires")}
+                      onChange={(expires) => edit(cookie, { expires: expires.trim() || null })}
+                    />
+                    <span className="flex justify-center">
+                      <Checkbox
+                        checked={row.secure}
+                        onChange={(secure) => toggle(cookie, { secure })}
+                      />
+                    </span>
+                    <span className="flex justify-center">
+                      <Checkbox
+                        checked={row.http_only}
+                        onChange={(http_only) => toggle(cookie, { http_only })}
+                      />
+                    </span>
+                    <span className="flex justify-center">
+                      <Tooltip label={t("api.delete")}>
+                        <button
+                          type="button"
+                          onClick={() => void remove(cookie)}
+                          aria-label={t("api.delete")}
+                          className={iconButtonClass({ size: "xs" })}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </Tooltip>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </section>
         ))}
 
         {pending.length > 0 && (
-          <section>
-            <div
-              className="grid items-center gap-2 border-b border-[var(--cf-border)] pb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
-              style={{ gridTemplateColumns: NEW_GRID }}
-            >
-              <span>{t("api.cookie.domain")}</span>
-              <span>{t("api.cookie.name")}</span>
-              <span>{t("api.value")}</span>
-              <span>{t("api.cookie.path")}</span>
-              <span>{t("api.cookie.expires")}</span>
-              <span>{t("api.cookie.secure")}</span>
-              <span>{t("api.cookie.httpOnly")}</span>
+          <section className={TABLE}>
+            <div className={HEAD} style={{ gridTemplateColumns: NEW_GRID }}>
+              <HeadLabel>{t("api.cookie.domain")}</HeadLabel>
+              <HeadLabel>{t("api.cookie.name")}</HeadLabel>
+              <HeadLabel>{t("api.value")}</HeadLabel>
+              <HeadLabel>{t("api.cookie.path")}</HeadLabel>
+              <HeadLabel>{t("api.cookie.expires")}</HeadLabel>
+              <HeadLabel center>{t("api.cookie.secure")}</HeadLabel>
+              <HeadLabel center>{t("api.cookie.httpOnly")}</HeadLabel>
               <span />
             </div>
 
             {pending.map((row) => (
               <div
                 key={row.id}
-                className="grid items-center gap-2 border-b border-[var(--cf-border)] py-1"
+                className={ROW}
                 style={{ gridTemplateColumns: NEW_GRID }}
                 onBlur={() => void commitPending(row)}
               >
-                <Field
-                  mono
+                <Cell
                   value={row.domain}
                   placeholder={t("api.cookie.domain")}
+                  label={t("api.cookie.domain")}
                   onChange={(domain) => editPending(row.id, { domain })}
                 />
-                <Field
-                  mono
+                <Cell
                   value={row.name}
                   placeholder={t("api.cookie.name")}
+                  label={t("api.cookie.name")}
                   onChange={(name) => editPending(row.id, { name })}
                 />
-                <Field
-                  mono
+                <Cell
                   value={row.value}
                   placeholder={t("api.value")}
+                  label={t("api.value")}
                   onChange={(value) => editPending(row.id, { value })}
                 />
-                <Field mono value={row.path} placeholder="/" onChange={(path) => editPending(row.id, { path })} />
-                <Field
-                  mono
+                <Cell
+                  value={row.path}
+                  placeholder="/"
+                  label={t("api.cookie.path")}
+                  onChange={(path) => editPending(row.id, { path })}
+                />
+                <Cell
                   value={row.expires ?? ""}
                   placeholder={t("api.cookie.session")}
+                  label={t("api.cookie.expires")}
                   onChange={(expires) => editPending(row.id, { expires: expires.trim() || null })}
                 />
                 <span className="flex justify-center">
@@ -296,13 +349,18 @@ export function CookieModal({ onClose }: { onClose: () => void }) {
                     onChange={(http_only) => editPending(row.id, { http_only })}
                   />
                 </span>
-                <button
-                  onClick={() => setPending((previous) => previous.filter((entry) => entry.id !== row.id))}
-                  title={t("api.removeRow")}
-                  className="rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                >
-                  <Trash2 size={12} />
-                </button>
+                <span className="flex justify-center">
+                  <Tooltip label={t("api.removeRow")}>
+                    <button
+                      type="button"
+                      onClick={() => setPending((previous) => previous.filter((entry) => entry.id !== row.id))}
+                      aria-label={t("api.removeRow")}
+                      className={iconButtonClass({ size: "xs" })}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </Tooltip>
+                </span>
               </div>
             ))}
           </section>

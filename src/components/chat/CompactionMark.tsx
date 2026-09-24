@@ -43,7 +43,7 @@ export function CompactionMark({
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          className="flex items-center gap-1.5 rounded-full border border-[var(--cf-border)] px-2 py-0.5 text-[10px] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-text)]"
+          className="flex items-center gap-1.5 rounded-full border border-[var(--cf-border)] px-2 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-text)]"
         >
           <Shrink size={10} className="shrink-0" />
           {t("chat.compactionMark", { n: turns })}

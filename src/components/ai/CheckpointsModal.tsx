@@ -13,6 +13,7 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { EmptyState } from "../common/EmptyState";
+import { buttonClass } from "../common/Button";
 
 /** Maps the backend's stable action keys onto translated labels. An unknown key (an older
  * checkpoint, a kind added later) falls back to showing the raw key rather than nothing. */
@@ -254,7 +255,7 @@ export function CheckpointsModal({ repoPath, onClose }: { repoPath: string; onCl
                       <button
                         onClick={() => void restore(checkpoint)}
                         disabled={busyId !== null}
-                        className="ml-auto flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-0.5 text-[11px] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+                        className={buttonClass({ variant: "secondary", size: "sm", className: "ml-auto" })}
                       >
                         {busyId === checkpoint.id ? (
                           <Loader2 size={11} className="animate-spin" />
@@ -278,7 +279,7 @@ export function CheckpointsModal({ repoPath, onClose }: { repoPath: string; onCl
                     <button
                       onClick={() => toggle(checkpoint)}
                       aria-expanded={open}
-                      className="mt-1.5 flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                      className="mt-1.5 flex items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
                     >
                       {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
                       {changed ? t("checkpoints.filesCount", { n: changed.length }) : t("checkpoints.files")}
@@ -287,12 +288,12 @@ export function CheckpointsModal({ repoPath, onClose }: { repoPath: string; onCl
                     {open && changed && (
                       <ul className="mt-1 space-y-0.5">
                         {changed.slice(0, 6).map((path) => (
-                          <li key={path} className="truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
+                          <li key={path} className="truncate font-mono text-[10.5px] text-[var(--cf-text-muted)]">
                             {path}
                           </li>
                         ))}
                         {changed.length > 6 && (
-                          <li className="text-[10px] text-[var(--cf-text-muted)]">
+                          <li className="text-[10.5px] text-[var(--cf-text-muted)]">
                             {t("checkpoints.andMore", { n: changed.length - 6 })}
                           </li>
                         )}

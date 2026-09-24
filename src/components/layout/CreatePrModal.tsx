@@ -10,6 +10,8 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
 import type { BranchInfo, Project, PullRequestSummary } from "../../types/domain";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 const PREFERRED_TARGETS = ["main", "master", "develop", "development"];
 
@@ -190,10 +192,10 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
       <div
         role="dialog"
         aria-modal="true"
-        className="max-h-full w-[520px] max-w-[92vw] overflow-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        className="max-h-full w-[520px] max-w-[92vw] overflow-auto rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
+          <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
             <GitPullRequest size={14} />
             {t("createPr.title")}
           </h3>
@@ -210,7 +212,7 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
           <>
             <div className="mb-3 flex items-center gap-2">
               <div className="flex-1">
-                <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+                <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
                   {t("createPr.source")}
                 </label>
                 <Select
@@ -223,7 +225,7 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
               </div>
               <span className="mt-5 text-[var(--cf-text-muted)]">→</span>
               <div className="flex-1">
-                <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+                <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
                   {t("createPr.target")}
                 </label>
                 <Select
@@ -274,10 +276,10 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
               onChange={(e) => setTitle(e.target.value)}
               placeholder={t("createPr.titlePlaceholder")}
               disabled={busy}
-              className="mb-3 w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
+              className={fieldClass({ className: "mb-3 w-full" })}
             />
 
-            <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+            <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
               {t("createPr.description")}
             </label>
             <textarea
@@ -313,14 +315,14 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
               <button
                 disabled={busy}
                 onClick={onClose}
-                className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+                className={buttonClass({ variant: "ghost" })}
               >
                 {t("common.cancel")}
               </button>
               <button
                 disabled={!canSubmit}
                 onClick={submit}
-                className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+                className={buttonClass({ variant: "primary" })}
               >
                 {creating ? <Loader2 size={13} className="animate-spin" /> : <GitPullRequest size={13} />}
                 {creating ? t("createPr.creating") : t("createPr.create")}

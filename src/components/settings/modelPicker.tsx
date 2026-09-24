@@ -1,5 +1,6 @@
 import { type ReactNode } from "react";
 import { Select } from "../common/Select";
+import { fieldClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { PROVIDER_MODELS, type AiModelOption } from "../../lib/aiProviders";
 
@@ -80,7 +81,7 @@ export function Field({
         {action}
       </div>
       {children}
-      {hint && <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">{hint}</p>}
+      {hint && <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">{hint}</p>}
     </div>
   );
 }
@@ -127,11 +128,12 @@ export function ModelField({
       />
       {choice === CUSTOM_MODEL && (
         <>
+          {/* The strip size under a strip-size picker, the form size under every other one. */}
           <input
             value={custom}
             onChange={(e) => onCustom(e.target.value)}
             placeholder={customPlaceholder ?? "model ID"}
-            className="mt-1.5 w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[13px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: size === "sm" ? "sm" : "md", className: "mt-1.5 w-full font-mono" })}
           />
           {customHint && <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">{customHint}</p>}
         </>

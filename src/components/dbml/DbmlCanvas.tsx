@@ -43,7 +43,7 @@ import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 // The mark colours and the four menu rows, shared with the inspector — see `markChrome`. They are
 // a fourth colour family beside the badge legend above, and the reason they may reuse the semantic
 // tokens the badges could not is written out there.
-import { MARK_COLOUR, markMenuItems, markNamesOf } from "./markChrome";
+import { LEGEND, MARK_COLOUR, markMenuItems, markNamesOf } from "./markChrome";
 import { useT } from "../../state/languageStore";
 import type { DbDiagramColumn } from "../../types/database";
 import type { DiagramColumnMode, DiagramDensity, DiagramNode } from "../../lib/db/erLayout";
@@ -103,22 +103,18 @@ export const DBML_CANVAS_ID = "cf-dbml-canvas";
  *
  * `PK` `NN` `AI` `U` `FK` is also the order they are drawn in, and it is the order the settings are
  * written in DBML: what a column *is*, then what it is *constrained to*, then what it *points at*.
+ *
+ * The hues themselves are `LEGEND` in `markChrome`, which the inspector and the Datos grid read as
+ * well — one table, so a column's `FK` is the same blue on the diagram, in the panel and over the
+ * grid, rather than three copies that agree until somebody edits one of them.
  */
-const KEY_COLOUR = "var(--cf-warning)";
-const LINK_COLOUR = "var(--cf-blue)";
-const ENUM_COLOUR = "var(--cf-violet)";
-const NOT_NULL_COLOUR = "var(--cf-success)";
-const AUTO_COLOUR = "var(--cf-teal)";
+const KEY_COLOUR = LEGEND.PK;
+const LINK_COLOUR = LEGEND.FK;
+const ENUM_COLOUR = LEGEND.U;
 
 /** The legend, applied. Which badges a column earns and how wide they are is `columnBadges`, in the
  *  module that measures the boxes; this is the half of it that is a drawing decision. */
-const BADGE_COLOUR: Record<DbmlBadge["label"], string> = {
-  PK: KEY_COLOUR,
-  NN: NOT_NULL_COLOUR,
-  AI: AUTO_COLOUR,
-  U: ENUM_COLOUR,
-  FK: LINK_COLOUR,
-};
+const BADGE_COLOUR: Record<DbmlBadge["label"], string> = LEGEND;
 
 /**
  * The face the cards are set in.
@@ -966,7 +962,7 @@ export const DbmlCanvas = forwardRef<
   return (
     <div
       ref={frameRef}
-      className={`relative min-h-0 select-none overflow-hidden bg-[var(--cf-bg)] outline-none ${className ?? ""}`}
+      className={`relative min-h-0 select-none overflow-hidden bg-[var(--cf-field)] outline-none ${className ?? ""}`}
       // Focusable, but not in the tab order. A press moves focus here, which is the only way the
       // search box above ever gives it up: without this the caret stays in the field for the rest
       // of the session, and every keystroke meant for the canvas goes into the query.
@@ -1430,7 +1426,7 @@ export const DbmlCanvas = forwardRef<
               {noteTip.name}
             </span>
             {noteTip.type && (
-              <span className="font-mono text-[10px] text-[var(--cf-text-muted)]">
+              <span className="font-mono text-[10.5px] text-[var(--cf-text-muted)]">
                 {noteTip.type}
               </span>
             )}
@@ -1438,7 +1434,7 @@ export const DbmlCanvas = forwardRef<
           {/* Labelled, because a sentence on its own under a column name could be read as the
               column's *description in the model* — a `comment` the database itself carries. It is
               not; it is the note the author wrote in the document, which is what the word says. */}
-          <div className="mt-1.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <div className="mt-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("dbml.inspector.note")}
           </div>
           {/* `whitespace-pre-wrap`: a fenced DBML note keeps the line breaks the author typed, and

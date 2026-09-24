@@ -3,6 +3,15 @@ import { DIMENSION, SEVERITY, VERDICT } from "./storyStatus";
 import { useT } from "../../state/languageStore";
 import type { QualityIssue, StoryQuality } from "../../lib/gherkin";
 import type { CriterionVerdict, StoryVerdict } from "../../types/domain";
+import { chipClass, type ChipTone } from "../common/recipes";
+
+/** Which chip tint each verdict wears. */
+const VERDICT_TONE: Record<StoryVerdict, ChipTone> = {
+  pass: "ok",
+  partial: "warn",
+  fail: "bad",
+  unknown: "neutral",
+};
 
 /**
  * The QA read of one story: how well it is written (INVEST + Gherkin, decided here) and whether
@@ -23,7 +32,7 @@ function scoreTone(level: StoryQuality["level"]): string {
 }
 
 const PILL =
-  "flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap";
+  "flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10.5px] font-semibold whitespace-nowrap";
 
 /** The INVEST/Gherkin score as it appears on a collapsed card. */
 export function QualityBadge({ quality }: { quality: StoryQuality }) {
@@ -36,7 +45,7 @@ export function QualityBadge({ quality }: { quality: StoryQuality }) {
           ? t("qa.badgeClean")
           : t("qa.badgeProblems", { n: problems, score: quality.score })
       }
-      className={`${PILL} bg-black/[0.06] dark:bg-white/[0.1] ${scoreTone(quality.level)}`}
+      className={`${PILL} bg-[var(--cf-press)] ${scoreTone(quality.level)}`}
     >
       <Gauge size={9} />
       {quality.score}
@@ -50,13 +59,15 @@ export function QualityBadge({ quality }: { quality: StoryQuality }) {
 export function VerdictBadge({ status, at }: { status: StoryVerdict | ""; at: string }) {
   const t = useT();
   if (!status) return null;
-  const { icon: Icon, color, labelKey } = VERDICT[status];
+  const { icon: Icon, labelKey } = VERDICT[status];
+  // The shared chip, tinted by verdict — and "Sin determinar" stays neutral, never red: an unknown
+  // is not a failure. The glyph carries the verdict too, so it survives without its colour.
   return (
     <span
       title={at ? t("qa.verifiedAt", { at: new Date(at).toLocaleString() }) : t(labelKey)}
-      className={`${PILL} bg-black/[0.06] dark:bg-white/[0.1] ${color}`}
+      className={chipClass(VERDICT_TONE[status], "h-[18px] px-1.5")}
     >
-      <Icon size={9} />
+      <Icon size={11} />
       {t(labelKey)}
     </span>
   );
@@ -129,14 +140,14 @@ export function CriterionVerdictRow({ verdict }: { verdict: CriterionVerdict }) 
   return (
     <div className="mt-1 rounded-md border border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-text)_3%,transparent)] px-2 py-1.5">
       <p className={`flex items-center gap-1.5 text-[11px] font-semibold ${color}`}>
-        <Icon size={11} className="shrink-0" />
+        <Icon size={12} className="shrink-0" />
         {t(labelKey)}
         {verdict.covered_by_test && (
           <span
             title={t("qa.coveredByTestHint")}
-            className="ml-auto flex items-center gap-1 rounded-full bg-black/[0.06] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-text-muted)] dark:bg-white/[0.1]"
+            className="ml-auto flex items-center gap-1 rounded-full bg-[var(--cf-press)] px-1.5 py-0.5 text-[10.5px] font-semibold text-[var(--cf-text-muted)]"
           >
-            <FlaskConical size={9} />
+            <FlaskConical size={11} />
             {t("qa.coveredByTest")}
           </span>
         )}
@@ -147,7 +158,7 @@ export function CriterionVerdictRow({ verdict }: { verdict: CriterionVerdict }) 
       {verdict.evidence.length > 0 && (
         <ul className="mt-1 space-y-0.5">
           {verdict.evidence.map((reference, i) => (
-            <li key={i} className="truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
+            <li key={i} className="truncate font-mono text-[10.5px] text-[var(--cf-text-muted)]">
               {reference}
             </li>
           ))}

@@ -48,6 +48,8 @@ import {
 } from "../../lib/tauri/remoteCommands";
 import type { QueueMessage, QueueSummary } from "../../types/remote";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 /**
  * Azure Queue storage: the account's queues down one side, the selected one's messages beside it.
@@ -836,7 +838,7 @@ export function QueuePanel({ hostId }: { hostId: string }) {
           from the outside, and the messages are what the width is for. */}
       <div className="flex w-56 shrink-0 flex-col border-r border-[var(--cf-border)]">
         <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1">
-          <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("remote.queues")}
             {queues.length > 0 && (
               <span className="ml-1 tabular-nums opacity-60">{queues.length}</span>
@@ -911,14 +913,14 @@ export function QueuePanel({ hostId }: { hostId: string }) {
                 className={`group flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[12px] ${
                   queue.name === selected
                     ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                    : "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                    : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
                 }`}
               >
                 <Inbox size={12} className="shrink-0 opacity-60" />
                 <span className="min-w-0 flex-1 truncate">{queue.name}</span>
                 {/* -1 is "the depth isn't known" — either not counted yet or the read failed for
                     this one — which is not the same as empty. */}
-                <span className="shrink-0 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+                <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
                   {queue.approximate_count < 0 ? "—" : `~${queue.approximate_count}`}
                 </span>
               </button>
@@ -1066,10 +1068,10 @@ export function QueuePanel({ hostId }: { hostId: string }) {
                 />
               </label>
             </div>
-            <p className="text-[10px] leading-relaxed text-[var(--cf-text-muted)]">
+            <p className="text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
               {t("remote.queueCountHint")}
             </p>
-            <p className="text-[10px] leading-relaxed text-[var(--cf-text-muted)]">
+            <p className="text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
               {t("remote.queueVisibilityHint")}
             </p>
           </div>
@@ -1203,13 +1205,13 @@ export function QueuePanel({ hostId }: { hostId: string }) {
             }}
             placeholder={t("remote.queuePutPlaceholder")}
             disabled={!selected}
-            className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 font-mono text-[11px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-40"
+            className={fieldClass({ size: "sm", className: "min-w-0 flex-1 font-mono" })}
           />
           <button
             type="button"
             onClick={() => void send()}
             disabled={!selected || !draft.trim()}
-            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white disabled:opacity-40"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             <Send size={12} />
             {t("remote.queuePut")}

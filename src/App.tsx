@@ -1,10 +1,8 @@
 import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
-import { AnimatePresence } from "framer-motion";
 import { FolderGit2, GitBranchPlus, Loader2, Trash2, Unlink } from "lucide-react";
 import { useT } from "./state/languageStore";
 import { TitleBar } from "./components/layout/TitleBar";
 import { Sidebar } from "./components/layout/Sidebar";
-import { TabBar } from "./components/layout/TabBar";
 import { AppRail } from "./components/layout/AppRail";
 import { StatusBar } from "./components/layout/StatusBar";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
@@ -20,6 +18,7 @@ import { useDataDirsStore } from "./state/dataDirsStore";
 import { UpdateAlert } from "./components/layout/UpdateAlert";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
+import { TitleTooltips } from "./components/common/TitleTooltips";
 import { NotificationPopups } from "./components/layout/NotificationPopups";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
@@ -71,6 +70,7 @@ import { startWindowBoundsTracking } from "./lib/windowControls";
 import { backgroundFetch } from "./lib/backgroundFetch";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
 import { DESKTOP_ORIGIN, onAppForeground, onRepoFsChanged, onStateInvalidate } from "./lib/tauri/events";
+import { buttonClass } from "./components/common/Button";
 
 /**
  * Everything below is split out of the entry chunk rather than compiled into it.
@@ -368,7 +368,7 @@ function NotARepoPanel({ project }: { project: Project }) {
           <button
             onClick={() => void init()}
             disabled={busy}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {initializing ? (
               <Loader2 size={13} className="animate-spin" />
@@ -380,7 +380,7 @@ function NotARepoPanel({ project }: { project: Project }) {
           <button
             onClick={() => void remove()}
             disabled={busy}
-            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "danger-ghost" })}
           >
             {removing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
             {t("common.removeFromList")}
@@ -1084,7 +1084,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden">
+    <div className="flex h-screen flex-col overflow-hidden bg-[var(--cf-bg)]">
       <TitleBar />
       {/* `overflow-hidden` is load-bearing, not tidiness.
           This row is `min-h-0` so the column inside it can shrink, but nothing was clipping that
@@ -1094,38 +1094,37 @@ export default function App() {
           paints on top. The symptom was the shell's last line disappearing behind the bar. */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <Sidebar />
-        <div className="flex min-w-0 flex-1 flex-col">
-          <TabBar />
+        {/* The work column: the view is a sheet, and the dock under it is a second one, 6px apart —
+            the frame shows between them. See the note atop `index.css`. */}
+        <div className="flex min-w-0 flex-1 flex-col gap-1.5 pb-1.5">
           {/* A floor, not `min-h-0`, now that the terminal dock below yields space instead of
               overflowing: without one, a dock taller than the window would win the whole column
               and leave the view it docks *into* at zero height. This is the point past which the
               dock shrinks instead. Still far below the content's own height, so the item shrinks
               freely — which is all `min-h-0` was ever here for. */}
-          <div data-tour="main-content" className="cf-ambient-bg min-h-[120px] flex-1 overflow-hidden">
+          <div data-tour="main-content" className="cf-sheet cf-ambient-bg min-h-[120px] flex-1">
             <MainContent />
           </div>
-          {/* The boundary sits *inside* `AnimatePresence` and keeps the dock's key, so presence is
-              still tracked per-dock and the height exit animation still runs (the dock's own
-              `motion.div` reads the presence context through the `Suspense`, which is just another
-              component in the tree). The fallback is `null` rather than a placeholder on purpose:
-              the dock animates open from zero height anyway, so "nothing yet" is what the frame
-              before it looks like either way — a shimmering bar at full height would be the only
-              way to make the chunk load visible. In practice it is never reached: this chunk is in
+          {/* The dock appears and goes; it no longer grows from zero height. Animating a height
+              re-laid the whole column out on every frame — the view above it included — which is
+              the most expensive thing a toggle can ask of the page. The fallback is `null` rather
+              than a placeholder on purpose: a shimmering bar at full height would be the only way
+              to make the chunk load visible. In practice it is never reached: this chunk is in
               `WARM_CHUNKS` and is fetched on the first idle callback after boot. */}
-          <AnimatePresence initial={false}>
-            {terminalPanelOpen && (
-              <Suspense key="terminal-dock" fallback={null}>
-                <ServicesDock />
-              </Suspense>
-            )}
-          </AnimatePresence>
+          {terminalPanelOpen && (
+            <Suspense key="terminal-dock" fallback={null}>
+              <ServicesDock />
+            </Suspense>
+          )}
         </div>
         {/* Between the view and the chat, and a sibling of both: the workspace's apps are a column
             of the window, so opening or closing the AI panel slides past the rail rather than
             moving it, and the terminal dock — which lives *inside* the column above — rises
             without pushing it around either. */}
         <AppRail />
-        <AnimatePresence initial={false}>{aiPanelOpen && <AiPanel key="ai-panel" />}</AnimatePresence>
+        {/* Mounted when open, with an opacity fade of its own (`cf-panel-in`) and no width tween —
+            the same reasoning as the dock's. */}
+        {aiPanelOpen && <AiPanel key="ai-panel" />}
       </div>
       {/* The update notice hangs off the top edge of the status bar, so it's anchored to the bar
           itself instead of to a viewport offset that would have to be kept in sync by hand. */}
@@ -1191,6 +1190,8 @@ export default function App() {
       <NotificationPopups />
       <ConfirmModal />
       <PromptModal />
+      {/* Every plain `title` in the window, drawn as the app's own tooltip — see the component. */}
+      <TitleTooltips />
       {/* Last, and above everything: the guided tour dims the whole window and drives the panels
           above from its own steps, so it has to outrank every modal it walks the user through. */}
       <TourOverlay />

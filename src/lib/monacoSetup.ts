@@ -201,3 +201,37 @@ installInlineCompletion(monaco);
  * so a new editor can't quietly reintroduce the same bug.
  */
 export const OVERFLOW_SAFE_OPTIONS = { fixedOverflowWidgets: true } as const;
+
+/**
+ * The face a code editor draws in: JetBrains Mono, the app's own mono (`--font-mono` in
+ * `index.css`), so the code in an editor and the hashes, paths and keys around it are one face.
+ *
+ * A string for Monaco's `fontFamily` option rather than the CSS variable: Monaco measures glyphs by
+ * the family name it is given, and `var(--font-mono)` is not a name. The tail is the same fallback
+ * ladder the variable ends in. Deliberately *not* folded into `OVERFLOW_SAFE_OPTIONS` — that one is
+ * about clipping, and an editor that wants another face (the notes editor draws prose in the UI
+ * sans) must be able to take the overflow fix without this.
+ */
+export const CODE_FONT_FAMILY = '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace';
+
+/**
+ * Monaco measures a font once, the first time an editor asks for it, and caches the widths per
+ * family — while the bundled face is an `@font-face` that the webview only fetches once something
+ * uses it. An editor that mounted before the file arrived measured the *fallback's* advance widths
+ * and would draw its cursor and selections at those, over text drawn in the real face: a caret that
+ * drifts a little further off with every column.
+ *
+ * So the face is asked for up front (regular and italic, which some themes use for comments), and
+ * Monaco's cache is thrown away once, when the fonts have settled. `load` rather than only
+ * `document.fonts.ready`, which resolves at once when nothing has requested the face yet — the
+ * exact case this exists for. Guarded, because the test environment has no `FontFaceSet`.
+ */
+if (typeof document !== "undefined" && document.fonts) {
+  void Promise.all([
+    document.fonts.load('13px "JetBrains Mono Variable"'),
+    document.fonts.load('italic 13px "JetBrains Mono Variable"'),
+  ])
+    .then(() => document.fonts.ready)
+    .then(() => monaco.editor.remeasureFonts())
+    .catch(() => {});
+}

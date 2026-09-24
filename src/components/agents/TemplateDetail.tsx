@@ -70,24 +70,24 @@ export function TemplateDetail({
           return (
             <div key={step.id} className="rounded-lg border border-[var(--cf-border)] px-2.5 py-2">
               <div className="flex items-center gap-2">
-                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black/[0.06] text-[10px] font-semibold tabular-nums dark:bg-white/[0.1]">
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--cf-press)] text-[10.5px] font-semibold tabular-nums">
                   {index + 1}
                 </span>
                 <span
-                  className={`min-w-0 flex-1 truncate text-[12.5px] ${
+                  className={`min-w-0 flex-1 truncate text-[13px] ${
                     agent ? "text-[var(--cf-text)]" : "text-[var(--cf-warning)]"
                   }`}
                 >
                   {agent?.name || t("agents.templateAgentGone")}
                 </span>
                 {step.gate && (
-                  <span className="shrink-0 rounded bg-black/[0.05] px-1.5 py-[1px] text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.07]">
+                  <span className="shrink-0 rounded bg-[var(--cf-hover)] px-1.5 py-[1px] text-[10.5px] text-[var(--cf-text-muted)]">
                     {t("agents.gateBefore")}
                   </span>
                 )}
               </div>
               {step.instruction.trim() !== "" && (
-                <p className="mt-1.5 whitespace-pre-wrap text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+                <p className="mt-1.5 whitespace-pre-wrap text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
                   {step.instruction}
                 </p>
               )}
@@ -129,7 +129,7 @@ function Action({
       onClick={onClick}
       className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium ${
         primary
-          ? "bg-[var(--cf-accent)] text-white hover:brightness-110"
+          ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))]"
           : danger
             ? "border border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
             : "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"

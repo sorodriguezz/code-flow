@@ -18,9 +18,11 @@ import { ContinueWithModal } from "./ContinueWithModal";
 import { useChainStore } from "../../state/chainStore";
 import { AiRunLog } from "../ai/AiRunLog";
 import { ChatMessageBubble } from "../chat/ChatMessageBubble";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
-import { ThinkingOrb } from "../common/ThinkingOrb";
+import { fieldClass, toolbarClass } from "../common/recipes";
 import { Select } from "../common/Select";
+import { Tooltip } from "../common/Tooltip";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useUiStore } from "../../state/uiStore";
@@ -120,13 +122,13 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
 
   return (
     <>
-      {/* 29px to the pixel, like every other panel header in the app (`px-2 py-1` around a 20px
-          toolbar button): the three columns of this view sit in one flex row, so a middle bar that
-          sizes itself off its own title lands its text and its bottom rule several pixels below the
-          rails either side of it. Height fixed rather than padded, because the tallest thing in here
-          is the 24px repository picker, which a 20px content box would squash. */}
-      <div className="flex h-[29px] shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
-        <Bot size={14} className="shrink-0 text-[var(--cf-accent)]" />
+      {/* The shared 44px toolbar, level with the explorer's head beside it: the columns of this
+          view sit in one flex row, so a middle bar that sized itself off its own title would land
+          its text and its bottom rule off the line the rails either side of it draw. The status is
+          words and a static glyph — while a turn runs, the orb is on the task's row in the tree and
+          on the run card below, and a third copy up here would only add motion. */}
+      <div className={toolbarClass}>
+        <Bot size={16} className="shrink-0 text-[var(--cf-accent)]" />
 
         {renaming !== null ? (
           <input
@@ -138,78 +140,85 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
               if (e.key === "Enter") commitRename();
               if (e.key === "Escape") setRenaming(null);
             }}
-            className="min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-transparent px-1.5 py-0.5 text-[12px] outline-none"
+            className={fieldClass({ size: "sm", className: "flex-1 font-semibold" })}
           />
         ) : (
           <button
             type="button"
             onDoubleClick={() => setRenaming(task.title)}
             title={task.goal || task.title}
-            className="min-w-0 flex-1 truncate text-left text-[13px] font-semibold"
+            className="min-w-0 flex-1 truncate rounded-md text-left text-[14px] font-semibold"
           >
             {task.title || t("agents.newTask")}
           </button>
         )}
 
-        <span className={`flex shrink-0 items-center gap-1.5 text-[11px] ${color}`}>
-          {status === "running" ? <ThinkingOrb size="sm" /> : <StatusIcon size={12} />}
+        <span className={`flex shrink-0 items-center gap-1.5 text-[12px] font-medium ${color}`}>
+          <StatusIcon size={14} />
           <span className="truncate">{t(labelKey)}</span>
         </span>
         {task.turns > 0 && (
-          <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+          <span className="shrink-0 text-[12px] tabular-nums text-[var(--cf-text-faint)]">
             {t("agents.turnsN", { n: task.turns })}
           </span>
         )}
 
-        <span className="w-[180px] shrink-0" title={locked ? t("agents.repoLocked") : t("agents.repositoryHint")}>
-          <Select
-            size="sm"
-            disabled={locked}
-            value={task.project_id}
-            ariaLabel={t("agents.repository")}
-            onChange={(value) => void useAgentsStore.getState().setProject(taskId, value)}
-            options={projects.map((p) => ({ value: p.id, label: p.name }))}
-          />
-        </span>
+        <Tooltip label={locked ? t("agents.repoLocked") : t("agents.repositoryHint")}>
+          <span className="w-[180px] shrink-0">
+            <Select
+              size="sm"
+              disabled={locked}
+              value={task.project_id}
+              ariaLabel={t("agents.repository")}
+              onChange={(value) => void useAgentsStore.getState().setProject(taskId, value)}
+              options={projects.map((p) => ({ value: p.id, label: p.name }))}
+            />
+          </span>
+        </Tooltip>
 
-        <button
-          type="button"
-          onClick={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            setMenu({ x: rect.right - 4, y: rect.bottom + 2 });
-          }}
-          title={t("api.moreActions")}
-          aria-label={t("api.moreActions")}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-        >
-          <MoreHorizontal size={13} />
-        </button>
+        <Tooltip label={t("api.moreActions")}>
+          <button
+            type="button"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setMenu({ x: rect.right - 4, y: rect.bottom + 2 });
+            }}
+            aria-haspopup="menu"
+            aria-label={t("api.moreActions")}
+            className={iconButtonClass()}
+          >
+            <MoreHorizontal size={15} />
+          </button>
+        </Tooltip>
       </div>
 
       <ChainStrip taskId={taskId} />
 
-      <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
-        {messages.length === 0 && !sending && (
-          <p className="whitespace-pre-wrap rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
-            {task.goal}
-          </p>
-        )}
-        {messages.map((message, i) => (
-          // The panel's own bubble, lifted into `components/chat` and shared by all three
-          // transcripts. `stamp="compact"` is what this thread has always drawn: the header above
-          // already names the agent, the repository and the model, and repeating the duration and
-          // the CLI version under every turn was noise here in a way it is not in the AI panel.
-          <ChatMessageBubble key={i} message={message} stamp="compact" />
-        ))}
-        {sending && live?.runId && (
-          <AiRunLog
-            runId={live.runId}
-            running
-            startedAt={live.runStartedAt}
-            expanded={logExpanded}
-            onToggle={() => setLogExpanded((v) => !v)}
-          />
-        )}
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        {/* One column of a readable width, like every transcript in the app. */}
+        <div className="mx-auto w-full max-w-[760px] space-y-3.5">
+          {messages.length === 0 && !sending && (
+            <p className="whitespace-pre-wrap rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3.5 py-3 text-[13px] leading-relaxed text-[var(--cf-text-muted)]">
+              {task.goal}
+            </p>
+          )}
+          {messages.map((message, i) => (
+            // The panel's own bubble, lifted into `components/chat` and shared by all three
+            // transcripts. `stamp="compact"` is what this thread has always drawn: the header above
+            // already names the agent, the repository and the model, and repeating the duration and
+            // the CLI version under every turn was noise here in a way it is not in the AI panel.
+            <ChatMessageBubble key={i} message={message} stamp="compact" />
+          ))}
+          {sending && live?.runId && (
+            <AiRunLog
+              runId={live.runId}
+              running
+              startedAt={live.runStartedAt}
+              expanded={logExpanded}
+              onToggle={() => setLogExpanded((v) => !v)}
+            />
+          )}
+        </div>
       </div>
 
       <AgentComposer taskId={taskId} />
@@ -274,50 +283,56 @@ function AgentComposer({ taskId }: { taskId: string }) {
   };
 
   return (
-    <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-2">
-      <textarea
-        value={input}
-        rows={3}
-        disabled={chainLocked}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            submit();
-          }
-        }}
-        placeholder={chainLocked ? t("agents.chainComposerLocked") : t("agents.followUpPlaceholder")}
-        className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
-      />
-      <div className="mt-1.5 flex items-center gap-2">
-        <AgentModelMenu taskId={taskId} />
-        {blockedBy && (
-          <span className="min-w-0 truncate text-[10.5px] text-[var(--cf-warning)]">
-            {t("agents.busyInRepo", { name: repoName })}
-          </span>
-        )}
-        {sending ? (
-          <button
-            type="button"
-            onClick={() => void useAgentsStore.getState().stop(taskId)}
-            disabled={cancelling}
-            className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-50"
-          >
-            <Square size={9} className="fill-current" />
-            {cancelling ? t("ai.stopping") : t("ai.stop")}
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={submit}
-            disabled={!input.trim() || blockedBy !== null || chainLocked}
-            title={t("agents.send")}
-            aria-label={t("agents.send")}
-            className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent)] text-white hover:brightness-110 disabled:opacity-40"
-          >
-            <Send size={13} />
-          </button>
-        )}
+    // A card rather than a box under a rule: the field and the controls that decide how it is sent
+    // (the model, the send) read as one object, the way the chat's composer does.
+    <div className="shrink-0 px-4 pb-4 pt-2">
+      <div className="mx-auto w-full max-w-[760px] rounded-[12px] border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-3 pb-2 pt-2.5 shadow-[var(--cf-shadow-lift)] transition-[border-color,box-shadow] duration-100 focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]">
+        <textarea
+          value={input}
+          rows={3}
+          disabled={chainLocked}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          placeholder={chainLocked ? t("agents.chainComposerLocked") : t("agents.followUpPlaceholder")}
+          aria-label={t("agents.followUpPlaceholder")}
+          className="block w-full resize-none bg-transparent text-[13px] leading-relaxed text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)] disabled:opacity-50"
+        />
+        <div className="mt-1.5 flex items-center gap-2">
+          <AgentModelMenu taskId={taskId} />
+          {blockedBy && (
+            <span className="min-w-0 truncate text-[11px] text-[var(--cf-warning)]">
+              {t("agents.busyInRepo", { name: repoName })}
+            </span>
+          )}
+          {sending ? (
+            <button
+              type="button"
+              onClick={() => void useAgentsStore.getState().stop(taskId)}
+              disabled={cancelling}
+              className={buttonClass({ variant: "secondary", size: "sm", className: "ml-auto" })}
+            >
+              <Square size={10} className="fill-current" />
+              {cancelling ? t("ai.stopping") : t("ai.stop")}
+            </button>
+          ) : (
+            <Tooltip label={t("agents.send")}>
+              <button
+                type="button"
+                onClick={submit}
+                disabled={!input.trim() || blockedBy !== null || chainLocked}
+                aria-label={t("agents.send")}
+                className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent)] text-[var(--cf-on-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:pointer-events-none disabled:opacity-40"
+              >
+                <Send size={14} />
+              </button>
+            </Tooltip>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -64,6 +64,7 @@ import { Markdown } from "../common/Markdown";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
 import { engineInfo, type DbKind, type DbNodeRef } from "../../types/database";
+import { buttonClass } from "../common/Button";
 
 const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
   ...OVERFLOW_SAFE_OPTIONS,
@@ -447,7 +448,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
         )}
 
         <span className="flex items-center gap-1">
-          <span className="text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <span className="text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("db.limit")}
           </span>
           <Select
@@ -476,7 +477,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
             <button
               onClick={() => run("one")}
               title={t("db.runHint")}
-              className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-[3px] text-[12px] font-medium text-white hover:brightness-110"
+              className={buttonClass({ variant: "primary" })}
             >
               <Play size={11} />
               {t("db.run")}
@@ -494,7 +495,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
             disabled={tab.running}
             title={t("db.explain")}
           >
-            <span className="text-[10px] font-bold">EX</span>
+            <span className="text-[10.5px] font-bold">EX</span>
           </ToolbarButton>
           <ToolbarButton
             onClick={() => store.toggleConsoleAi(tab.id)}
@@ -671,14 +672,14 @@ const AiTurn = memo(function AiTurn({
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           <button
             onClick={() => onInsert(turn.query as string)}
-            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "secondary" })}
           >
             <CornerDownLeft size={10} />
             {t("db.aiInsert")}
           </button>
           <button
             onClick={() => onReplace(turn.query as string)}
-            className="rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "secondary" })}
           >
             {t("db.aiReplace")}
           </button>
@@ -687,14 +688,14 @@ const AiTurn = memo(function AiTurn({
               the read-only flag apply exactly as they do to anything typed by hand. */}
           <button
             onClick={() => onRun(turn.query as string)}
-            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "secondary" })}
           >
             <Play size={10} />
             {t("db.aiRun")}
           </button>
           <button
             onClick={() => copy(turn.query as string)}
-            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "secondary" })}
           >
             {copied ? <Check size={10} /> : <Copy size={10} />}
             {t("db.copy")}
@@ -849,7 +850,7 @@ function ConsoleAiPanel({
         ))}
 
         {ai.running && (
-          <div className="flex items-center gap-1.5 px-2.5 text-[11.5px] text-[var(--cf-text-muted)]">
+          <div className="flex items-center gap-1.5 px-2.5 text-[12px] text-[var(--cf-text-muted)]">
             {/* The orb and not a spinner: this is an engine burning context, which is the one thing
                 the orb says and a rotating ring does not. Same mark the agent console uses. */}
             <ThinkingOrb size="sm" />
@@ -859,7 +860,7 @@ function ConsoleAiPanel({
         )}
 
         {ai.error && !ai.running && (
-          <div className="mx-2.5 flex items-start gap-1.5 rounded-md border border-[var(--cf-danger)] px-2 py-1.5 text-[11.5px] text-[var(--cf-danger)]">
+          <div className="mx-2.5 flex items-start gap-1.5 rounded-md border border-[var(--cf-danger)] px-2 py-1.5 text-[12px] text-[var(--cf-danger)]">
             <AlertTriangle size={12} className="mt-[2px] shrink-0" />
             <span className="min-w-0 break-words">{ai.error}</span>
           </div>
@@ -894,7 +895,7 @@ function ConsoleAiPanel({
                 store.toggleConsoleAi(tab.id);
               }
             }}
-            className="block max-h-[160px] w-full resize-none bg-transparent px-2.5 pb-1 pt-2 text-[12.5px] leading-[18px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
+            className="block max-h-[160px] w-full resize-none bg-transparent px-2.5 pb-1 pt-2 text-[13px] leading-[18px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
           />
           <div className="flex items-center gap-1.5 px-2 pb-1.5">
             {/* A label, never a control. Changing the routing is Settings' job — a picker here would
@@ -921,7 +922,7 @@ function ConsoleAiPanel({
                 disabled={!ai.question.trim()}
                 title={t("db.aiAsk")}
                 aria-label={t("db.aiAsk")}
-                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent)] text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-30"
+                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <ArrowUp size={12} />
               </button>
@@ -1021,7 +1022,7 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
             <Copy size={12} />
           </ToolbarButton>
         </div>
-        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-2 font-mono text-[11.5px] text-[var(--cf-text)]">
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-2 font-mono text-[12px] text-[var(--cf-text)]">
           {tab.plan}
         </pre>
       </div>
@@ -1112,13 +1113,13 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
                 store.updateConsole(tab.id, { activeResult: index })
               }
               title={entry.statement}
-              className={`shrink-0 rounded-md px-2 py-[2px] text-[11px] font-medium ${
+              className={`flex h-[22px] shrink-0 items-center gap-1 rounded-md px-2 text-[12px] font-medium tabular-nums ${
                 index === tab.activeResult
                   ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                  : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
               } ${entry.error ? "text-[var(--cf-danger)]" : ""}`}
             >
-              {entry.error ? "⚠ " : ""}
+              {entry.error && <AlertTriangle size={12} aria-hidden />}
               {index + 1}
             </button>
           ))}

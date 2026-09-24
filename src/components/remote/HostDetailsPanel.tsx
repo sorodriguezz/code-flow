@@ -1,25 +1,42 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  AlertTriangle,
   Check,
+  CheckCircle2,
   Eye,
   Loader2,
   EyeOff,
   FolderPlus,
   KeyRound,
-  Monitor,
   Plus,
-  Server,
-  Terminal,
   Trash2,
-  Waypoints,
   X,
 } from "lucide-react";
-import { Field, Row } from "../api/ApiModal";
+import { Field } from "../api/ApiModal";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ForwardDiagram } from "./ForwardDiagram";
 import { Select } from "../common/Select";
 import { Checkbox } from "../common/Checkbox";
-import { CARD, HOST_COLORS, KindGlyph, OsGlyph, Pill, kindIcon } from "./remoteChrome";
+import { Tooltip } from "../common/Tooltip";
+import { ActiveUnderline } from "../common/ActivePill";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import {
+  chipClass,
+  fieldClass,
+  inspectorClass,
+  sectionLabelClass,
+  underlineStripClass,
+  underlineTabClass,
+} from "../common/recipes";
+import {
+  DANGER_ICON_BUTTON,
+  HOST_COLORS,
+  KindGlyph,
+  OsGlyph,
+  Pill,
+  TEXTAREA,
+  kindIcon,
+} from "./remoteChrome";
 import { useOpenPrimary } from "./hostMenu";
 import { useRemoteStore, type RemoteDetailsTab } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -457,69 +474,65 @@ export function HostDetailsPanel() {
   // rather than disabled: a disabled tab is a promise that filling something in will enable it,
   // and nothing about this host ever will — see `KIND_CAPABILITIES`.
   const can = capabilities(spec);
-  const TABS: { id: Tab; label: string; icon: typeof Server }[] = [
-    { id: "connection", label: t("remote.tabConnection"), icon: Server },
-    ...(can.forwards
-      ? [{ id: "forwards" as Tab, label: t("remote.tabForwards"), icon: Waypoints }]
-      : []),
-    ...(can.screen ? [{ id: "screen" as Tab, label: t("remote.tabScreen"), icon: Monitor }] : []),
-    { id: "advanced", label: t("remote.tabAdvanced"), icon: Terminal },
+  const TABS: { id: Tab; label: string }[] = [
+    { id: "connection", label: t("remote.tabConnection") },
+    ...(can.forwards ? [{ id: "forwards" as Tab, label: t("remote.tabForwards") }] : []),
+    ...(can.screen ? [{ id: "screen" as Tab, label: t("remote.tabScreen") }] : []),
+    { id: "advanced", label: t("remote.tabAdvanced") },
   ];
 
   return (
     <>
       {/* `invert`, because the handle sits to the *left* of what it resizes — dragging toward the
-          panel has to grow it, not shrink it. */}
+          panel has to grow it, not shrink it. `seamless`, because the panel draws its own hairline
+          and a second one a pixel away read as a doubled edge. */}
       <ResizeHandle
         axis="x"
         value={width}
         min={WIDTH_MIN}
         max={WIDTH_MAX}
         invert
+        seamless
         onChange={(value) => setSize("remoteDetailsWidth", value)}
         onCommit={(value) => void commitSize("remoteDetailsWidth", value)}
       />
-      <div
-        style={{ width }}
-        className={`flex shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)] ${CARD}`}
-      >
-        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+      <div style={{ width }} className={`${inspectorClass} overflow-hidden`}>
+        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-4 pr-2">
           <OsGlyph os={spec.os} size={14} />
           <KindGlyph kind={spec.kind} size={14} />
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">
+          <h2 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--cf-text)]">
             {name || host.name}
-          </span>
-          <button
-            type="button"
-            onClick={closeDetails}
-            aria-label={t("common.close")}
-            className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-          >
-            <X size={13} />
-          </button>
+          </h2>
+          <Tooltip label={t("common.close")} side="bottom">
+            <button
+              type="button"
+              onClick={closeDetails}
+              aria-label={t("common.close")}
+              className={iconButtonClass({ size: "sm" })}
+            >
+              <X size={15} />
+            </button>
+          </Tooltip>
         </div>
 
-        <div className="flex shrink-0 gap-0.5 overflow-x-auto border-b border-[var(--cf-border)] px-1">
-          {TABS.map(({ id, label, icon: Icon }) => (
+        {/* Section tabs: the four pages of one host. Labels only — at the panel's narrowest the
+            glyphs were the difference between four tabs fitting and the last one scrolling away. */}
+        <div className={underlineStripClass}>
+          {TABS.map(({ id, label }) => (
             <button
               key={id}
               type="button"
               onClick={() => setTab(id)}
               aria-current={tab === id ? "page" : undefined}
-              title={label}
-              className={`flex shrink-0 items-center gap-1.5 border-b-2 px-2.5 py-2 text-[12px] font-medium transition-colors ${
-                tab === id
-                  ? "border-[var(--cf-accent)] text-[var(--cf-accent)]"
-                  : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-              }`}
+              className={underlineTabClass(tab === id)}
             >
-              <Icon size={13} />
               {label}
+              {tab === id && <ActiveUnderline layoutId="remote-details-tab" />}
             </button>
           ))}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2.5">
           {tab === "connection" && (
             <ConnectionTab
               name={name}
@@ -548,100 +561,112 @@ export function HostDetailsPanel() {
         {/* Pinned, and the reason the panel beats the modal: the fill-in / connect / fix loop never
             leaves this column. */}
         <div className="shrink-0 border-t border-[var(--cf-border)] p-2">
-          {/* The one action a host has, whatever it is: a shell if it has one, a screen if that is
-              what it is, files otherwise — every kind matches exactly one, in that order, same as
-              double-clicking the row. It reads "Connect" in all three cases, because that is what
-              the click *does*: this is the panel's primary action, and a bare noun in that slot
-              reads as the name of a place rather than something that happens when pressed. What
-              opens is decided by the kind, and the kind is named a few rows up. */}
-          <button
-            type="button"
-            onClick={() => {
-              // Connected and closable: this press is the other half of the toggle. Nothing is
-              // flushed and nothing is opened — disconnecting is about the sessions that are
-              // already running, not about the form's unsaved edits.
-              if (connected) {
-                void Promise.all(liveTabs.map((entry) => closeTab(entry.id)));
-                return;
-              }
-              // Flushed first, and that ordering is the point: what opens has to be what is on
-              // screen, not what the debounce had got round to saving. A cloud account is read from
-              // the row by the backend, so an unsaved key would connect as the old one.
-              flush();
-              if (!isCloudKind(spec.kind)) return openPrimary(host, spec);
-              // A cloud account has no session to open, so pressing this used to open a panel and
-              // look like nothing happened. It asks the account first, says which it was, and only
-              // opens on success — a panel that would show the same failure in smaller type is not
-              // a useful place to be sent.
-              void checkCloud(host.id).then((ok) => ok && openPrimary(host, spec));
-            }}
-            // Disconnect needs no address: the sessions it closes are already open, and a host
-            // whose address was blanked out while a shell ran would otherwise offer a dead button
-            // over a live connection.
-            disabled={(!connected && !hasAddress(spec)) || cloudStatus?.checking}
-            className={`flex w-full items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-opacity disabled:opacity-40 ${
-              connected
-                ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
-                : "bg-[var(--cf-accent)] text-white hover:brightness-110"
-            }`}
-          >
-            {cloudStatus?.checking && <Loader2 size={13} className="animate-spin" />}
-            {/* Named for what is missing rather than for a field this kind hasn't got: a storage
-                account reading "no address" was a button pointing at a box that does not exist. */}
-            {connected
-              ? liveTabs.length > 1
-                ? t("remote.disconnectN", { n: String(liveTabs.length) })
-                : t("remote.disconnect")
-              : !hasAddress(spec)
-                ? t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")
-                : cloudStatus?.checking
-                  ? t("remote.connecting")
-                  : t("remote.connect")}
-          </button>
-
-          {/* Opening *another* one, offered only while the primary button is busy saying
-              "Disconnect".
-
-              A host is not a thing you are either connected to or not — it holds as many shells,
-              file panes and screens as you open, which is why the tab list is per host and not per
-              connection. So the toggle the primary button now performs would, on its own, have
-              taken away the way to open a second shell from the panel you configure the host in.
-              This is that way back, and it stays out of the layout entirely when there is nothing
-              to disambiguate. */}
-          {connected && (
+          <div className="flex items-center gap-1.5">
+            {/* The one action a host has, whatever it is: a shell if it has one, a screen if that is
+                what it is, files otherwise — every kind matches exactly one, in that order, same as
+                double-clicking the row. It reads "Connect" in all three cases, because that is what
+                the click *does*: this is the panel's primary action, and a bare noun in that slot
+                reads as the name of a place rather than something that happens when pressed. What
+                opens is decided by the kind, and the kind is named a few rows up. */}
             <button
               type="button"
               onClick={() => {
+                // Connected and closable: this press is the other half of the toggle. Nothing is
+                // flushed and nothing is opened — disconnecting is about the sessions that are
+                // already running, not about the form's unsaved edits.
+                if (connected) {
+                  void Promise.all(liveTabs.map((entry) => closeTab(entry.id)));
+                  return;
+                }
+                // Flushed first, and that ordering is the point: what opens has to be what is on
+                // screen, not what the debounce had got round to saving. A cloud account is read from
+                // the row by the backend, so an unsaved key would connect as the old one.
                 flush();
-                openPrimary(host, spec);
+                if (!isCloudKind(spec.kind)) return openPrimary(host, spec);
+                // A cloud account has no session to open, so pressing this used to open a panel and
+                // look like nothing happened. It asks the account first, says which it was, and only
+                // opens on success — a panel that would show the same failure in smaller type is not
+                // a useful place to be sent.
+                void checkCloud(host.id).then((ok) => ok && openPrimary(host, spec));
               }}
-              disabled={!hasAddress(spec)}
-              className="mt-1.5 flex w-full items-center justify-center gap-1.5 rounded-md px-3 py-1 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)] disabled:opacity-40"
+              // Disconnect needs no address: the sessions it closes are already open, and a host
+              // whose address was blanked out while a shell ran would otherwise offer a dead button
+              // over a live connection.
+              disabled={(!connected && !hasAddress(spec)) || cloudStatus?.checking}
+              className={buttonClass({
+                variant: connected ? "secondary" : "primary",
+                size: "lg",
+                className: "min-w-0 flex-1",
+              })}
             >
-              <Plus size={12} />
-              {t("remote.connectAnother")}
+              {cloudStatus?.checking && <Loader2 size={14} className="animate-spin" />}
+              {/* Named for what is missing rather than for a field this kind hasn't got: a storage
+                  account reading "no address" was a button pointing at a box that does not exist. */}
+              {connected
+                ? liveTabs.length > 1
+                  ? t("remote.disconnectN", { n: String(liveTabs.length) })
+                  : t("remote.disconnect")
+                : !hasAddress(spec)
+                  ? t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")
+                  : cloudStatus?.checking
+                    ? t("remote.connecting")
+                    : t("remote.connect")}
             </button>
-          )}
+  
+            {/* Opening *another* one, offered only while the primary button is busy saying
+                "Disconnect".
+  
+                A host is not a thing you are either connected to or not — it holds as many shells,
+                file panes and screens as you open, which is why the tab list is per host and not per
+                connection. So the toggle the primary button now performs would, on its own, have
+                taken away the way to open a second shell from the panel you configure the host in.
+                This is that way back, and it stays out of the layout entirely when there is nothing
+                to disambiguate — a square beside Disconnect, so the pair reads as one decision. */}
+            {connected && (
+              <Tooltip label={t("remote.connectAnother")}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    flush();
+                    openPrimary(host, spec);
+                  }}
+                  disabled={!hasAddress(spec)}
+                  aria-label={t("remote.connectAnother")}
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--cf-surface)] text-[var(--cf-text)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-text)_4%,var(--cf-surface))] disabled:pointer-events-none disabled:opacity-45"
+                >
+                  <Plus size={15} />
+                </button>
+              </Tooltip>
+            )}
+          </div>
 
           {/* What the account said, kept under the button until the next attempt. The green line is
               not decoration: an account with no containers opens an empty panel, and "connected, 0
-              containers" is the difference between that and a key that was rejected. */}
+              containers" is the difference between that and a key that was rejected. The glyph goes
+              with it, so the answer is not carried by the colour alone. */}
           {isCloudKind(spec.kind) && cloudStatus && !cloudStatus.checking && (
             <p
-              className={`pt-1.5 text-[11px] leading-relaxed ${
+              className={`flex items-start gap-1.5 pt-2 text-[11px] leading-relaxed ${
                 cloudStatus.ok ? "text-[var(--cf-success)]" : "text-[var(--cf-danger)]"
               }`}
             >
-              {cloudStatus.ok
-                ? t(spec.kind === "s3" ? "remote.cloudOkS3" : "remote.cloudOk", {
-                    n: String(cloudStatus.count),
-                  })
-                : cloudStatus.error}
+              {cloudStatus.ok ? (
+                <CheckCircle2 size={12} className="mt-[3px] shrink-0" />
+              ) : (
+                <AlertTriangle size={12} className="mt-[3px] shrink-0" />
+              )}
+              <span className="min-w-0 break-words">
+                {cloudStatus.ok
+                  ? t(spec.kind === "s3" ? "remote.cloudOkS3" : "remote.cloudOk", {
+                      n: String(cloudStatus.count),
+                    })
+                  : cloudStatus.error}
+              </span>
             </p>
           )}
 
           {passwordLoaded && spec.auth === "password" && (
-            <p className="pt-1.5 text-center text-[10px] text-[var(--cf-text-muted)]">
+            <p className="pt-2 text-center text-[11px] text-[var(--cf-text-faint)]">
               {t("remote.authPasswordHint")}
             </p>
           )}
@@ -664,6 +689,71 @@ export function HostDetailsPanel() {
 // ---------------------------------------------------------------------------
 // Connection
 // ---------------------------------------------------------------------------
+
+/**
+ * One field of the editor: its label on top, the control across the whole column, the hint under
+ * it.
+ *
+ * **One column, because the panel is narrow.** It used to borrow the settings panes' `Row` — label on
+ * the left, the control in a 180px slot on the right — and at the panel's 280px floor that left the
+ * label a sliver and cut every host name, path and key to a dozen characters, which is exactly the
+ * wrong end of a value you are trying to check. Stacked, each value gets the full width.
+ *
+ * Still a `<label>`, so a click on the words lands in the field they name.
+ */
+function FormRow({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="flex flex-col gap-[5px] py-1.5">
+      <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{label}</span>
+      {children}
+      {hint && (
+        <span className="text-[11px] leading-relaxed text-[var(--cf-text-faint)]">{hint}</span>
+      )}
+    </label>
+  );
+}
+
+/** A checkbox with its label and the sentence that says what ticking it does. */
+function FlagRow({
+  checked,
+  onChange,
+  label,
+  hint,
+  disabled,
+  danger = false,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  label: string;
+  hint: string;
+  disabled?: boolean;
+  /** The hint turns danger while the box is ticked — for the one flag that makes a host unsafe. */
+  danger?: boolean;
+}) {
+  return (
+    <label className="flex items-start gap-2 py-1.5">
+      <Checkbox checked={checked} onChange={onChange} disabled={disabled} className="mt-0.5" />
+      <span className="min-w-0">
+        <span className="block text-[13px] text-[var(--cf-text)]">{label}</span>
+        <span
+          className={`block text-[11px] leading-relaxed ${
+            danger && checked ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-faint)]"
+          }`}
+        >
+          {hint}
+        </span>
+      </span>
+    </label>
+  );
+}
 
 function ConnectionTab({
   name,
@@ -768,14 +858,14 @@ function ConnectionTab({
   ];
 
   return (
-    <div className="space-y-1">
-      <Row label={t("remote.fieldName")}>
+    <div className="flex flex-col">
+      <FormRow label={t("remote.fieldName")}>
         <Field value={name} onChange={onName} />
-      </Row>
+      </FormRow>
 
       {/* First, and above the address: it decides what every field below means — and which of them
           exist at all. */}
-      <Row label={t("remote.kind")} hint={KIND_HINT[spec.kind]}>
+      <FormRow label={t("remote.kind")} hint={KIND_HINT[spec.kind]}>
         <Select
           value={spec.kind}
           onChange={(value) => onPatch({ kind: value as RemoteKind })}
@@ -786,7 +876,7 @@ function ConnectionTab({
             icon: kindIcon(kind),
           }))}
         />
-      </Row>
+      </FormRow>
 
       <GroupPicker group={group} groups={groups} onGroup={onGroup} />
 
@@ -796,9 +886,9 @@ function ConnectionTab({
       <button
         type="button"
         onClick={onFillFromVault}
-        className="flex items-center gap-1.5 self-start rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+        className={buttonClass({ variant: "ghost", size: "sm", className: "my-1 self-start" })}
       >
-        <KeyRound size={12} />
+        <KeyRound size={13} />
         {t("vault.pick.action")}
       </button>
 
@@ -830,43 +920,48 @@ function ConnectionTab({
         <>
       {/* On a screen row this address is the *screen's* — there is no second one hidden on the
           Screen page for it to disagree with. Which is also why the hint changes: a `~/.ssh/config`
-          alias means nothing to a VNC viewer. */}
-      <Row
-        label={t("remote.fieldHost")}
-        hint={isScreen ? t("remote.fieldHostScreenHint") : t("remote.fieldHostHint")}
-        wide
-      >
-        <Field value={spec.host} onChange={(host) => onPatch({ host })} mono placeholder="web-01.example.com" />
-      </Row>
-      <Row label={t("remote.fieldPort")}>
-        {/* The placeholder tracks the kind — 22, 21, 990, 5900 or 3389 — because an empty port means
-            "the usual one for this protocol", and a hard-coded 22 under an FTP host would name the
-            wrong one. */}
-        <Field
-          type="number"
-          value={spec.port === 0 ? "" : String(spec.port)}
-          onChange={(value) => onPatch({ port: Number(value) || 0 })}
-          placeholder={String(defaultPortFor(spec))}
-        />
-      </Row>
-      <Row
+          alias means nothing to a VNC viewer.
+
+          Host and port share a line, the one exception to the column: they are one address, a
+          port is five digits at most, and the pair is how the address is written everywhere else. */}
+      <div className="grid grid-cols-[minmax(0,1fr)_84px] items-start gap-2">
+        <FormRow
+          label={t("remote.fieldHost")}
+          hint={isScreen ? t("remote.fieldHostScreenHint") : t("remote.fieldHostHint")}
+        >
+          <Field value={spec.host} onChange={(host) => onPatch({ host })} mono placeholder="web-01.example.com" />
+        </FormRow>
+        <FormRow label={t("remote.fieldPort")}>
+          {/* The placeholder tracks the kind — 22, 21, 990, 5900 or 3389 — because an empty port
+              means "the usual one for this protocol", and a hard-coded 22 under an FTP host would
+              name the wrong one. */}
+          <Field
+            type="number"
+            value={spec.port === 0 ? "" : String(spec.port)}
+            onChange={(value) => onPatch({ port: Number(value) || 0 })}
+            placeholder={String(defaultPortFor(spec))}
+            mono
+          />
+        </FormRow>
+      </div>
+      <FormRow
         label={t("remote.fieldUser")}
         hint={isScreen ? t("remote.fieldUserScreenHint") : t("remote.fieldUserHint")}
       >
         <Field value={spec.user} onChange={(user) => onPatch({ user })} mono placeholder="—" />
-      </Row>
+      </FormRow>
 
       {/* The whole authentication block is SSH's. FTP has exactly one scheme — a username and a
           password on the wire — so offering it "agent" or "key" would be offering it settings the
           protocol cannot carry. Its password field is rendered unconditionally below instead. */}
       {isSsh && (
-        <Row label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.auth)?.hint}>
+        <FormRow label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.auth)?.hint}>
           <Select
             value={spec.auth}
             onChange={(value) => onPatch({ auth: value as RemoteAuth })}
             options={AUTH.map(({ value, label }) => ({ value, label }))}
           />
-        </Row>
+        </FormRow>
       )}
 
       {isSsh && spec.auth === "key" && <KeyPicker spec={spec} onPatch={onPatch} />}
@@ -881,10 +976,9 @@ function ConnectionTab({
         (isFtp && !spec.ftp.anonymous) ||
         isSmb ||
         isEmbeddedScreen) && (
-        <Row
+        <FormRow
           label={t("remote.fieldPassword")}
           hint={isEmbeddedScreen ? t("remote.fieldPasswordScreenHint") : t("remote.fieldPasswordHint")}
-          wide
         >
           <div className="flex w-full items-center gap-1">
             <Field
@@ -893,16 +987,9 @@ function ConnectionTab({
               onChange={onPassword}
               mono
             />
-            <button
-              type="button"
-              onClick={onToggleShowPassword}
-              aria-label={showPassword ? t("remote.hide") : t("remote.show")}
-              className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            >
-              {showPassword ? <EyeOff size={13} /> : <Eye size={13} />}
-            </button>
+            <RevealButton shown={showPassword} onToggle={onToggleShowPassword} />
           </div>
-        </Row>
+        </FormRow>
       )}
 
       {/* `ProxyJump` has no FTP equivalent — there is no config file on the other side to read it —
@@ -911,51 +998,41 @@ function ConnectionTab({
           field says. Agent forwarding stays behind, since nothing on the far side of a screen
           tunnel would use the socket. */}
       {(isSsh || isScreen) && (
-        <Row
+        <FormRow
           label={t("remote.fieldJump")}
           hint={isScreen ? t("remote.fieldJumpScreenHint") : t("remote.fieldJumpHint")}
-          wide
         >
           <Field value={spec.jump} onChange={(jump) => onPatch({ jump })} mono placeholder="bastion.example.com" />
-        </Row>
+        </FormRow>
       )}
 
       {isSsh && (
-        <>
-          <label className="flex items-start gap-2 py-1">
-            <Checkbox
-              checked={spec.agent_forward}
-              onChange={(agent_forward) => onPatch({ agent_forward })}
-              className="mt-px"
-            />
-            <span className="min-w-0">
-              <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.fieldAgentForward")}</span>
-              <span className="block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-                {t("remote.fieldAgentForwardHint")}
-              </span>
-            </span>
-          </label>
-        </>
+        <FlagRow
+          checked={spec.agent_forward}
+          onChange={(agent_forward) => onPatch({ agent_forward })}
+          label={t("remote.fieldAgentForward")}
+          hint={t("remote.fieldAgentForwardHint")}
+        />
       )}
 
       {isFtp && <FtpSettings spec={spec} onPatch={onPatch} />}
         </>
       )}
 
-      <Row label={t("remote.fieldTags")} hint={t("remote.fieldTagsHint")} wide>
+      <FormRow label={t("remote.fieldTags")} hint={t("remote.fieldTagsHint")}>
         {/* Edited as text rather than as chips: a comma-separated line is faster to retype than a
             chip editor is to click through, and it is what the user would have written anyway. The
             chips are how tags are *read* — on the cards and in the filter row. */}
         <TagsField tags={spec.tags} onChange={(tags) => onPatch({ tags })} />
-      </Row>
+      </FormRow>
 
-      <Row label={t("remote.fieldOs")} hint={t("remote.fieldOsHint")}>
+      <FormRow label={t("remote.fieldOs")} hint={t("remote.fieldOsHint")}>
         <Select
           value={spec.os}
           onChange={(value) => onPatch({ os: value as RemoteOs })}
           options={OS.map(({ value, label }) => ({ value, label }))}
         />
-      </Row>
+      </FormRow>
 
       <ColorPicker color={color} onColor={onColor} />
     </div>
@@ -1008,7 +1085,7 @@ function GroupPicker({
   const options = [...new Set([...groups, group.trim()].filter(Boolean))].sort();
 
   return (
-    <Row label={t("remote.fieldGroup")} hint={t("remote.fieldGroupHint")}>
+    <FormRow label={t("remote.fieldGroup")} hint={t("remote.fieldGroupHint")}>
       {creating ? (
         <input
           ref={inputRef}
@@ -1019,7 +1096,7 @@ function GroupPicker({
             if (e.key === "Enter") commit(e.currentTarget.value);
             if (e.key === "Escape") setCreating(false);
           }}
-          className="w-full rounded-md border border-[var(--cf-accent)] bg-transparent px-2 py-1.5 text-[12px] outline-none"
+          className={fieldClass({ className: "w-full" })}
         />
       ) : (
         <Select
@@ -1033,7 +1110,26 @@ function GroupPicker({
           ]}
         />
       )}
-    </Row>
+    </FormRow>
+  );
+}
+
+/** Show / hide for a secret box. A button inside the field's label, so the label still focuses the
+ *  box and the eye still only toggles. */
+function RevealButton({ shown, onToggle }: { shown: boolean; onToggle: () => void }) {
+  const t = useT();
+  const label = shown ? t("remote.hide") : t("remote.show");
+  return (
+    <Tooltip label={label}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-label={label}
+        className={iconButtonClass({ size: "sm" })}
+      >
+        {shown ? <EyeOff size={14} /> : <Eye size={14} />}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -1054,21 +1150,13 @@ function SecretField({
   onPassword: (value: string) => void;
   onToggleShowPassword: () => void;
 }) {
-  const t = useT();
   return (
-    <Row label={label} hint={hint} wide>
+    <FormRow label={label} hint={hint}>
       <div className="flex w-full items-center gap-1">
         <Field type={showPassword ? "text" : "password"} value={password} onChange={onPassword} mono />
-        <button
-          type="button"
-          onClick={onToggleShowPassword}
-          aria-label={showPassword ? t("remote.hide") : t("remote.show")}
-          className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-        >
-          {showPassword ? <EyeOff size={13} /> : <Eye size={13} />}
-        </button>
+        <RevealButton shown={showPassword} onToggle={onToggleShowPassword} />
       </div>
-    </Row>
+    </FormRow>
   );
 }
 
@@ -1109,28 +1197,28 @@ function S3Settings({
 
   return (
     <>
-      <Row label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.s3.auth)?.hint}>
+      <FormRow label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.s3.auth)?.hint}>
         <Select
           value={spec.s3.auth}
           onChange={(value) => patchS3({ auth: value as S3Auth })}
           options={AUTH.map(({ value, label }) => ({ value, label }))}
         />
-      </Row>
+      </FormRow>
 
       {spec.s3.auth === "profile" ? (
-        <Row label={t("remote.s3Profile")} hint={t("remote.s3ProfileHint")}>
+        <FormRow label={t("remote.s3Profile")} hint={t("remote.s3ProfileHint")}>
           <Field value={spec.s3.profile} onChange={(profile) => patchS3({ profile })} mono placeholder="default" />
-        </Row>
+        </FormRow>
       ) : (
         <>
-          <Row label={t("remote.s3AccessKeyId")} wide>
+          <FormRow label={t("remote.s3AccessKeyId")}>
             <Field
               value={spec.s3.access_key_id}
               onChange={(access_key_id) => patchS3({ access_key_id })}
               mono
               placeholder="AKIA…"
             />
-          </Row>
+          </FormRow>
           <SecretField
             label={t("remote.s3SecretKey")}
             hint={t("remote.s3SecretKeyHint")}
@@ -1142,32 +1230,25 @@ function S3Settings({
         </>
       )}
 
-      <Row label={t("remote.s3Region")} hint={t("remote.s3RegionHint")}>
+      <FormRow label={t("remote.s3Region")} hint={t("remote.s3RegionHint")}>
         <Field value={spec.s3.region} onChange={(region) => patchS3({ region })} mono placeholder="us-east-1" />
-      </Row>
-      <Row label={t("remote.s3Endpoint")} hint={t("remote.s3EndpointHint")} wide>
+      </FormRow>
+      <FormRow label={t("remote.s3Endpoint")} hint={t("remote.s3EndpointHint")}>
         <Field
           value={spec.s3.endpoint}
           onChange={(endpoint) => patchS3({ endpoint })}
           mono
           placeholder="https://minio.internal:9000"
         />
-      </Row>
+      </FormRow>
 
-      <label className="flex items-start gap-2 py-1">
-        <Checkbox
-          checked={spec.s3.path_style || custom}
-          onChange={(path_style) => patchS3({ path_style })}
-          disabled={custom}
-          className="mt-px"
-        />
-        <span className="min-w-0">
-          <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.s3PathStyle")}</span>
-          <span className="block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-            {custom ? t("remote.s3PathStyleForced") : t("remote.s3PathStyleHint")}
-          </span>
-        </span>
-      </label>
+      <FlagRow
+        checked={spec.s3.path_style || custom}
+        onChange={(path_style) => patchS3({ path_style })}
+        disabled={custom}
+        label={t("remote.s3PathStyle")}
+        hint={custom ? t("remote.s3PathStyleForced") : t("remote.s3PathStyleHint")}
+      />
     </>
   );
 }
@@ -1223,22 +1304,22 @@ function AzureSettings({
         }}
       />
 
-      <Row label={t("remote.azAccount")} hint={t("remote.azAccountHint")} wide>
+      <FormRow label={t("remote.azAccount")} hint={t("remote.azAccountHint")}>
         <Field
           value={spec.azure.account}
           onChange={(account) => patchAzure({ account })}
           mono
           placeholder="contoso"
         />
-      </Row>
+      </FormRow>
 
-      <Row label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.azure.auth)?.hint}>
+      <FormRow label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.azure.auth)?.hint}>
         <Select
           value={spec.azure.auth}
           onChange={(value) => patchAzure({ auth: value as AzureAuth })}
           options={AUTH.map(({ value, label }) => ({ value, label }))}
         />
-      </Row>
+      </FormRow>
 
       {spec.azure.auth === "account_key" && (
         <SecretField
@@ -1261,22 +1342,22 @@ function AzureSettings({
         />
       )}
 
-      <Row label={t("remote.azSuffix")} hint={t("remote.azSuffixHint")}>
+      <FormRow label={t("remote.azSuffix")} hint={t("remote.azSuffixHint")}>
         <Field
           value={spec.azure.endpoint_suffix}
           onChange={(endpoint_suffix) => patchAzure({ endpoint_suffix })}
           mono
           placeholder="core.windows.net"
         />
-      </Row>
-      <Row label={t("remote.azEndpoint")} hint={t("remote.azEndpointHint")} wide>
+      </FormRow>
+      <FormRow label={t("remote.azEndpoint")} hint={t("remote.azEndpointHint")}>
         <Field
           value={spec.azure.endpoint}
           onChange={(endpoint) => patchAzure({ endpoint })}
           mono
           placeholder="http://127.0.0.1:10000/devstoreaccount1"
         />
-      </Row>
+      </FormRow>
 
       <EndpointPreview spec={spec} />
     </>
@@ -1319,10 +1400,9 @@ function ConnectionStringField({ onApply }: { onApply: (parsed: ParsedAzureConne
   };
 
   return (
-    <div className="py-1">
-      <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.azConnectionString")}</span>
-      <span className="block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-        {t("remote.azConnectionStringHint")}
+    <label className="flex flex-col gap-[5px] py-1.5">
+      <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">
+        {t("remote.azConnectionString")}
       </span>
       <textarea
         value={text}
@@ -1330,21 +1410,24 @@ function ConnectionStringField({ onApply }: { onApply: (parsed: ParsedAzureConne
         onChange={(e) => void apply(e.target.value)}
         placeholder="DefaultEndpointsProtocol=https;AccountName=…;AccountKey=…"
         spellCheck={false}
-        className="mt-1.5 w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[11px] outline-none focus:border-[var(--cf-accent)]"
+        className={`${TEXTAREA} font-mono`}
       />
+      <span className="text-[11px] leading-relaxed text-[var(--cf-text-faint)]">
+        {t("remote.azConnectionStringHint")}
+      </span>
       {applied && (
-        <p className="flex items-center gap-1.5 pt-1 text-[11px] text-[var(--cf-success)]">
-          <Check size={11} className="shrink-0" />
+        <span className="flex items-center gap-1.5 text-[11px] text-[var(--cf-success)]">
+          <Check size={12} className="shrink-0" />
           {t("remote.azConnectionApplied", {
             account: applied.spec.azure.account || applied.name,
             auth: applied.auth === "sas" ? t("remote.azAuthSas") : t("remote.azAuthKey"),
           })}
-        </p>
+        </span>
       )}
       {rejected && text.trim().length > 0 && (
-        <p className="pt-1 text-[11px] text-[var(--cf-text-muted)]">{t("remote.azConnectionUnread")}</p>
+        <span className="text-[11px] text-[var(--cf-text-muted)]">{t("remote.azConnectionUnread")}</span>
       )}
-    </div>
+    </label>
   );
 }
 
@@ -1365,13 +1448,11 @@ function EndpointPreview({ spec }: { spec: RemoteHostSpec }) {
   if (rows.length === 0) return null;
 
   return (
-    <div className="py-1">
-      <span className="block text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {t("remote.azEndpointsTitle")}
-      </span>
-      <div className="mt-1 space-y-0.5">
+    <div className="pb-1">
+      <p className={`${sectionLabelClass} pl-0 pr-0`}>{t("remote.azEndpointsTitle")}</p>
+      <div className="space-y-0.5">
         {rows.map(([service, url]) => (
-          <p key={service} className="min-w-0 truncate font-mono text-[10px] text-[var(--cf-text-muted)]" title={url}>
+          <p key={service} className="min-w-0 truncate font-mono text-[11px] text-[var(--cf-text-muted)]" title={url}>
             {url}
           </p>
         ))}
@@ -1407,27 +1488,11 @@ function FtpSettings({
     label: string,
     hint: string,
     danger = false,
-  ) => (
-    <label className="flex items-start gap-2 py-1">
-      <Checkbox checked={checked} onChange={onChange} className="mt-px" />
-      <span className="min-w-0">
-        <span className="block text-[12px] text-[var(--cf-text)]">{label}</span>
-        <span
-          className={`block text-[11px] leading-relaxed ${
-            danger && checked ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-muted)]"
-          }`}
-        >
-          {hint}
-        </span>
-      </span>
-    </label>
-  );
+  ) => <FlagRow checked={checked} onChange={onChange} label={label} hint={hint} danger={danger} />;
 
   return (
-    <div className="space-y-1 pt-1">
-      <p className="pt-1 text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {t("remote.ftpSection")}
-      </p>
+    <div className="flex flex-col">
+      <p className={`${sectionLabelClass} pl-0 pr-0`}>{t("remote.ftpSection")}</p>
 
       {flag(
         spec.ftp.passive,
@@ -1469,10 +1534,10 @@ function FtpSettings({
 /**
  * The host tint, as the twenty colours it is allowed to be.
  *
- * Not a `Row`: `Row` is a `<label>`, and a label hands its clicks to the first labelable thing
- * inside it — the word "Color" would have set the host to whichever swatch happened to be first.
- * The label sits above the grid instead, which is also the only way ten swatches fit in a panel
- * that can be dragged down to 280px.
+ * Not a `FormRow`: `FormRow` is a `<label>`, and a label hands its clicks to the first labelable
+ * thing inside it — the word "Color" would have set the host to whichever swatch happened to be
+ * first. So the same shape is drawn with a plain heading above the grid, which is also the only way
+ * ten swatches fit in a panel that can be dragged down to 280px.
  *
  * A colour already stored that is not in the set keeps its own swatch at the front. It arrived from
  * the old free picker, and quietly reassigning it to the nearest allowed hue would be this screen
@@ -1493,7 +1558,7 @@ function ColorPicker({ color, onColor }: { color: string; onColor: (value: strin
       aria-pressed={hex === picked}
       onClick={() => onColor(hex)}
       style={{ background: hex }}
-      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-[var(--cf-text)]"
+      className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-full outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-[var(--cf-text)]"
     >
       {/* White on a tint whose luminance is pinned near 0.215 is ~4:1 — the check reads on every
           swatch in the set, so the selected one needs no ring competing with the colour. */}
@@ -1502,22 +1567,24 @@ function ColorPicker({ color, onColor }: { color: string; onColor: (value: strin
   );
 
   return (
-    <div className="py-1">
-      <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.fieldColor")}</span>
-      <span className="block text-[11px] text-[var(--cf-text-muted)]">{t("remote.fieldColorHint")}</span>
-      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+    <div className="flex flex-col gap-[5px] py-1.5">
+      <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("remote.fieldColor")}</span>
+      <div className="flex flex-wrap items-center gap-1.5">
         {legacy && swatch(legacy)}
         {HOST_COLORS.map(swatch)}
         {picked && (
           <button
             type="button"
             onClick={() => onColor("")}
-            className="ml-0.5 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className={buttonClass({ variant: "ghost", size: "sm" })}
           >
             {t("remote.clear")}
           </button>
         )}
       </div>
+      <span className="text-[11px] leading-relaxed text-[var(--cf-text-faint)]">
+        {t("remote.fieldColorHint")}
+      </span>
     </div>
   );
 }
@@ -1558,34 +1625,35 @@ function KeyPicker({
 
   return (
     <>
-      <Row label={t("remote.fieldKeyFile")} wide>
+      <FormRow label={t("remote.fieldKeyFile")}>
         <Field
           value={spec.key_file}
           onChange={(key_file) => onPatch({ key_file })}
           mono
           placeholder="~/.ssh/id_ed25519"
         />
-      </Row>
+      </FormRow>
       {usable.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1 py-1 pl-1">
-          <span className="text-[11px] text-[var(--cf-text-muted)]">{t("remote.keysFound")}</span>
+        <div className="flex flex-wrap items-center gap-1 pb-1.5">
+          <span className="text-[11px] text-[var(--cf-text-faint)]">{t("remote.keysFound")}</span>
           {usable.map((key) => (
             <button
               key={key.path}
               type="button"
               title={`${key.kind}${key.comment ? ` · ${key.comment}` : ""}`}
+              aria-pressed={spec.key_file === key.path}
               onClick={() => onPatch({ key_file: key.path })}
-              className={`flex shrink-0 items-center gap-1 rounded px-1.5 py-px text-[11px] transition-colors ${
+              className={
                 spec.key_file === key.path
-                  ? "bg-[var(--cf-accent)] text-white"
-                  : "bg-black/[0.05] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] dark:bg-white/[0.07]"
-              }`}
+                  ? chipClass("accent", "font-mono")
+                  : chipClass("neutral", "font-mono transition-colors duration-100 hover:text-[var(--cf-text)]")
+              }
             >
               {key.in_agent && (
                 <span
                   aria-label={t("remote.keyInAgent")}
                   title={t("remote.keyInAgent")}
-                  className="h-[5px] w-[5px] rounded-full bg-[var(--cf-success)]"
+                  className="h-1.5 w-1.5 rounded-full bg-[var(--cf-success)]"
                 />
               )}
               {key.label}
@@ -1640,20 +1708,20 @@ function ForwardsTab({
     });
 
   return (
-    <div className="space-y-2">
-      <p className="text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+    <div className="space-y-2.5 py-1.5">
+      <p className="text-[11px] leading-relaxed text-[var(--cf-text-faint)]">
         {t("remote.forwardsHelp")}
       </p>
 
       {spec.forwards.length === 0 ? (
-        <p className="py-6 text-center text-[12px] text-[var(--cf-text-muted)]">
+        <p className="py-4 text-center text-[12px] text-[var(--cf-text-faint)]">
           {t("remote.noForwards")}
         </p>
       ) : (
         spec.forwards.map((forward) => (
           <div
             key={forward.id}
-            className="space-y-2 rounded-md border border-[var(--cf-border)] p-2.5"
+            className="space-y-2.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] p-3"
           >
             <div className="flex items-center gap-2">
               <div className="w-[150px] shrink-0">
@@ -1666,23 +1734,27 @@ function ForwardsTab({
               <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
                 {describeForward(forward)}
               </span>
-              <button
-                type="button"
-                onClick={() =>
-                  onPatch({ forwards: spec.forwards.filter((entry) => entry.id !== forward.id) })
-                }
-                aria-label={t("common.delete")}
-                className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-              >
-                <Trash2 size={13} />
-              </button>
+              <Tooltip label={t("common.delete")}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onPatch({ forwards: spec.forwards.filter((entry) => entry.id !== forward.id) })
+                  }
+                  aria-label={t("common.delete")}
+                  className={DANGER_ICON_BUTTON}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </Tooltip>
             </div>
 
             {/* Right under the chooser, because the direction is what is being chosen and no
                 wording untangles local from remote — see `ForwardDiagram`. */}
             <ForwardDiagram kind={forward.kind} />
 
-            <div className="grid grid-cols-[110px_1fr_110px] gap-2">
+            {/* In proportion rather than in fixed slots: two 110px port boxes left the target host a
+                sliver — or, at the panel's narrowest, pushed the row out past its edge. */}
+            <div className="grid grid-cols-[minmax(0,5fr)_minmax(0,8fr)_minmax(0,5fr)] gap-2">
               <Field
                 type="number"
                 value={forward.listen_port === 0 ? "" : String(forward.listen_port)}
@@ -1691,7 +1763,7 @@ function ForwardsTab({
                 mono
               />
               {forward.kind === "dynamic" ? (
-                <span className="flex items-center text-[11px] text-[var(--cf-text-muted)]">
+                <span className="col-span-2 flex items-center text-[11px] text-[var(--cf-text-faint)]">
                   {t("remote.dynamicHint")}
                 </span>
               ) : (
@@ -1713,30 +1785,17 @@ function ForwardsTab({
               )}
             </div>
 
-            <label className="flex items-start gap-2">
-              <Checkbox
-                checked={forward.auto}
-                onChange={(auto) => update(forward.id, { auto })}
-                className="mt-px"
-              />
-              <span className="min-w-0">
-                <span className="block text-[12px] text-[var(--cf-text)]">
-                  {t("remote.forwardAuto")}
-                </span>
-                <span className="block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-                  {t("remote.forwardAutoHint")}
-                </span>
-              </span>
-            </label>
+            <FlagRow
+              checked={forward.auto}
+              onChange={(auto) => update(forward.id, { auto })}
+              label={t("remote.forwardAuto")}
+              hint={t("remote.forwardAutoHint")}
+            />
           </div>
         ))
       )}
 
-      <button
-        type="button"
-        onClick={add}
-        className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-      >
+      <button type="button" onClick={add} className={buttonClass({ variant: "secondary", size: "sm" })}>
         <Plus size={13} />
         {t("remote.addForward")}
       </button>
@@ -1828,23 +1887,22 @@ function ScreenTab({
   const via = spec.jump.trim();
 
   return (
-    <div className="space-y-1">
-      <p className="pb-2 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+    <div className="flex flex-col gap-2.5 py-1.5">
+      <p className="text-[11px] leading-relaxed text-[var(--cf-text-faint)]">
         {t("remote.screenHelp")}
       </p>
 
-      <div className="my-2 rounded-md border border-[var(--cf-border)] p-2.5">
-        <label className="flex items-center gap-2">
-          <Checkbox checked={screen.tunnel} onChange={(tunnel) => patchScreen({ tunnel })} />
-          <span className="text-[12px] text-[var(--cf-text)]">{t("remote.screenTunnel")}</span>
-        </label>
-        <p className="mt-1.5 pl-6 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-          {t("remote.screenTunnelHint")}
-        </p>
+      <div className="rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 py-1.5">
+        <FlagRow
+          checked={screen.tunnel}
+          onChange={(tunnel) => patchScreen({ tunnel })}
+          label={t("remote.screenTunnel")}
+          hint={t("remote.screenTunnelHint")}
+        />
         {screen.tunnel && (
           // The command as it will actually run, jump host and all — the one line that answers
           // "so what am I connecting to" without opening a terminal to find out.
-          <p className="mt-1.5 flex items-center gap-1.5 pl-6 font-mono text-[11px] text-[var(--cf-text-muted)]">
+          <p className="flex flex-wrap items-center gap-1.5 pb-1.5 pl-6 font-mono text-[11px] text-[var(--cf-text-muted)]">
             <Pill tone="accent">{via ? `ssh -J ${via} -L` : "ssh -L"}</Pill>
             127.0.0.1:auto → {target}
           </p>
@@ -1852,25 +1910,24 @@ function ScreenTab({
       </div>
 
       {spec.kind === "vnc" && (
-        <div className="my-2 rounded-md border border-[var(--cf-border)] p-2.5">
-          <label className="flex items-center gap-2">
-            <Checkbox checked={screen.embedded} onChange={(embedded) => patchScreen({ embedded })} />
-            <span className="text-[12px] text-[var(--cf-text)]">{t("remote.screenEmbedded")}</span>
-          </label>
-          <p className="mt-1.5 pl-6 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-            {t("remote.screenEmbeddedHint")}
-          </p>
+        <div className="rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 py-1.5">
+          <FlagRow
+            checked={screen.embedded}
+            onChange={(embedded) => patchScreen({ embedded })}
+            label={t("remote.screenEmbedded")}
+            hint={t("remote.screenEmbeddedHint")}
+          />
         </div>
       )}
 
-      <Row label={t("remote.fieldViewer")} hint={t("remote.fieldViewerHint")} wide>
+      <FormRow label={t("remote.fieldViewer")} hint={t("remote.fieldViewerHint")}>
         <Field
           value={screen.viewer}
           onChange={(viewer) => patchScreen({ viewer })}
           mono
           placeholder={t("remote.viewerPlaceholder")}
         />
-      </Row>
+      </FormRow>
     </div>
   );
 }
@@ -1896,18 +1953,18 @@ function AdvancedTab({
   const canShell = capabilities(spec).shell;
 
   return (
-    <div className="space-y-1">
+    <div className="flex flex-col">
       {canShell && (
         <>
-          <Row label={t("remote.fieldCommand")} hint={t("remote.fieldCommandHint")} wide>
+          <FormRow label={t("remote.fieldCommand")} hint={t("remote.fieldCommandHint")}>
             <Field
               value={spec.command}
               onChange={(command) => onPatch({ command })}
               mono
               placeholder="docker compose logs -f"
             />
-          </Row>
-          <Row label={t("remote.fieldStartupSnippet")} hint={t("remote.fieldStartupSnippetHint")} wide>
+          </FormRow>
+          <FormRow label={t("remote.fieldStartupSnippet")} hint={t("remote.fieldStartupSnippetHint")}>
             <Select
               value={spec.startup_snippet_id}
               onChange={(startup_snippet_id) => onPatch({ startup_snippet_id })}
@@ -1916,24 +1973,20 @@ function AdvancedTab({
                 ...snippets.map((snippet) => ({ value: snippet.id, label: snippet.name })),
               ]}
             />
-          </Row>
+          </FormRow>
 
-          <Row label={t("remote.fieldDirectory")} hint={t("remote.fieldDirectoryHint")} wide>
+          <FormRow label={t("remote.fieldDirectory")} hint={t("remote.fieldDirectoryHint")}>
             <Field
               value={spec.directory}
               onChange={(directory) => onPatch({ directory })}
               mono
               placeholder="/srv/app"
             />
-          </Row>
+          </FormRow>
         </>
       )}
 
-      <div className="pt-3">
-        <p className="text-[12px] text-[var(--cf-text)]">{t("remote.fieldOptions")}</p>
-        <p className="pb-1.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-          {t("remote.fieldOptionsHint")}
-        </p>
+      <FormRow label={t("remote.fieldOptions")} hint={t("remote.fieldOptionsHint")}>
         <textarea
           value={spec.options.join("\n")}
           rows={5}
@@ -1941,20 +1994,19 @@ function AdvancedTab({
             onPatch({ options: e.target.value.split("\n").map((line) => line.trim()).filter(Boolean) })
           }
           placeholder={"Compression=yes\nPreferredAuthentications=publickey"}
-          className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[11px] outline-none focus:border-[var(--cf-accent)]"
+          className={`${TEXTAREA} font-mono`}
         />
-      </div>
+      </FormRow>
 
-      <div className="pt-3">
-        <p className="pb-1.5 text-[12px] text-[var(--cf-text)]">{t("remote.fieldNotes")}</p>
+      <FormRow label={t("remote.fieldNotes")}>
         <textarea
           value={spec.notes}
           rows={4}
           onChange={(e) => onPatch({ notes: e.target.value })}
           placeholder={t("remote.notesPlaceholder")}
-          className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          className={TEXTAREA}
         />
-      </div>
+      </FormRow>
     </div>
   );
 }

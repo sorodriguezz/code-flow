@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { KeyRound, LogOut, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, LogOut, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useAccountName, useAiAccountsStore, useProviderAccounts } from "../../state/aiAccountsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -12,7 +12,9 @@ import { ACCOUNT_PROVIDERS, SYSTEM_ACCOUNT, accountKey, loginCommand, logoutComm
 import type { AccountStatus, AiAccount } from "../../lib/tauri/accountCommands";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { AccountTerminalDialog } from "../ai/AccountTerminalDialog";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
+import { chipClass, fieldClass, rowClass } from "../common/recipes";
 import { Select, type SelectOption } from "../common/Select";
 import { Tooltip } from "../common/Tooltip";
 
@@ -32,8 +34,11 @@ type OpenTerminal = (target: Omit<LoginTarget, "command">, kind?: "login" | "log
 /** Only these two have configuration worth copying — the other two move nothing but the login. */
 const COPIES_CONFIG = new Set(["claude", "codex"]);
 
-const ICON_BUTTON =
-  "flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-40 dark:hover:bg-white/[0.08]";
+const ICON_BUTTON = iconButtonClass({ size: "xs" });
+
+/** The one destructive icon button of a row — the recipe has no danger tone, so it is written out. */
+const DANGER_ICON_BUTTON =
+  "inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40";
 
 /**
  * Settings › IA › Cuentas: several accounts per AI CLI.
@@ -146,10 +151,10 @@ function ProviderAccounts({ provider, onLogin }: { provider: string; onLogin: Op
   ];
 
   return (
-    <div className="rounded-lg border border-[var(--cf-border)] p-2.5">
+    <div className="rounded-lg border border-[var(--cf-border)] p-3">
       <div className="mb-1.5 flex items-center gap-2">
         <ProviderGlyph providerId={provider} size={14} />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-[var(--cf-text)]">{name}</span>
+        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">{name}</span>
         {accounts.length > 0 && (
           <Tooltip label={t("accounts.defaultLabel")} description={t("accounts.defaultHint")}>
             {/* Named on screen, not only in the tooltip: a bare select in a card's header read as
@@ -192,11 +197,11 @@ function ProviderAccounts({ provider, onLogin }: { provider: string; onLogin: Op
               if (e.key === "Enter") void submit();
               if (e.key === "Escape") setAdding(false);
             }}
-            className="min-w-[140px] flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12.5px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: "sm", className: "min-w-[140px] flex-1" })}
           />
           {COPIES_CONFIG.has(provider) && (
             <Tooltip label={t("accounts.copyConfig")} description={t("accounts.copyConfigHint")}>
-              <label className="flex cursor-pointer items-center gap-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
+              <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
                 <Checkbox checked={copyConfig} onChange={setCopyConfig} />
                 {t("accounts.copyConfig")}
               </label>
@@ -206,15 +211,11 @@ function ProviderAccounts({ provider, onLogin }: { provider: string; onLogin: Op
             type="button"
             onClick={() => void submit()}
             disabled={!label.trim() || busy}
-            className="rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white hover:brightness-110 disabled:opacity-40"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             {t("accounts.addAndLogin")}
           </button>
-          <button
-            type="button"
-            onClick={() => setAdding(false)}
-            className="rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
+          <button type="button" onClick={() => setAdding(false)} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {t("common.cancel")}
           </button>
         </div>
@@ -222,9 +223,9 @@ function ProviderAccounts({ provider, onLogin }: { provider: string; onLogin: Op
         <button
           type="button"
           onClick={() => setAdding(true)}
-          className="mt-1.5 flex items-center gap-1 rounded-md px-1.5 py-1 text-[11.5px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
+          className={buttonClass({ variant: "ghost", size: "sm", className: "mt-1.5" })}
         >
-          <Plus size={12} />
+          <Plus size={13} />
           {t("accounts.add")}
         </button>
       )}
@@ -291,14 +292,14 @@ function AccountRow({
   };
 
   return (
-    <div className="flex items-center gap-2 rounded-md px-1.5 py-1 hover:bg-black/[0.025] dark:hover:bg-white/[0.03]">
+    <div className={rowClass(false, "min-h-8")}>
       <StatusDot status={status} checking={checking} />
       <Tooltip label={label} description={account ? undefined : t("accounts.systemHint")}>
-        <span className="w-[110px] shrink-0 truncate text-[12px] text-[var(--cf-text)]">{label}</span>
+        <span className="w-[120px] shrink-0 truncate text-[13px] text-[var(--cf-text)]">{label}</span>
       </Tooltip>
       {/* The whole line on hover: an address and a plan, or opencode's list of logins with theirs,
           outgrow the row's width. */}
-      <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]" title={statusLine(status, checking, t)}>
+      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]" title={statusLine(status, checking, t)}>
         {statusLine(status, checking, t)}
       </span>
       <Tooltip label={t("accounts.check")}>
@@ -309,7 +310,7 @@ function AccountRow({
           onClick={() => void check(provider, account?.id ?? null)}
           className={ICON_BUTTON}
         >
-          <RefreshCw size={12} className={checking ? "animate-spin" : undefined} />
+          {checking ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
         </button>
       </Tooltip>
       <Tooltip label={t("accounts.login")} description={t("accounts.loginHint")}>
@@ -325,33 +326,38 @@ function AccountRow({
           }
           className={ICON_BUTTON}
         >
-          <KeyRound size={12} />
+          <KeyRound size={13} />
         </button>
       </Tooltip>
       {status?.signedIn ? (
         <Tooltip label={t("accounts.logout")} description={account ? undefined : t("accounts.logoutSystemHint")}>
           <button type="button" aria-label={t("accounts.logout")} onClick={() => void onLogout()} className={ICON_BUTTON}>
-            <LogOut size={12} />
+            <LogOut size={13} />
           </button>
         </Tooltip>
       ) : (
         // Only offered while signed in; the gap keeps every row's icons in the same columns.
-        <span aria-hidden className="h-6 w-6 shrink-0" />
+        <span aria-hidden className="h-[22px] w-[22px] shrink-0" />
       )}
       <Tooltip label={t("accounts.rename")}>
         <button type="button" aria-label={t("accounts.rename")} onClick={() => void onRename()} className={ICON_BUTTON}>
-          <Pencil size={12} />
+          <Pencil size={13} />
         </button>
       </Tooltip>
       {account ? (
         <Tooltip label={t("accounts.delete")} description={t("accounts.deleteHint")}>
-          <button type="button" aria-label={t("accounts.delete")} onClick={() => void onDelete()} className={ICON_BUTTON}>
-            <Trash2 size={12} />
+          <button
+            type="button"
+            aria-label={t("accounts.delete")}
+            onClick={() => void onDelete()}
+            className={DANGER_ICON_BUTTON}
+          >
+            <Trash2 size={13} />
           </button>
         </Tooltip>
       ) : (
         // Holds the column so the icons of every row line up.
-        <span aria-hidden className="h-6 w-6 shrink-0" />
+        <span aria-hidden className="h-[22px] w-[22px] shrink-0" />
       )}
     </div>
   );
@@ -394,22 +400,18 @@ function GeminiRow({ onSwitch }: { onSwitch: () => void }) {
   }, [check]);
   const who = statusLine(status, checking, t);
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-2">
+    <div className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] px-3 py-2">
       <ProviderGlyph providerId="gemini" size={14} />
-      <span className="text-[12.5px] font-medium text-[var(--cf-text)]">{providerDisplayLabel("gemini", t)}</span>
+      <span className="text-[13px] font-medium text-[var(--cf-text)]">{providerDisplayLabel("gemini", t)}</span>
       <StatusDot status={status} checking={checking} />
-      <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]" title={who}>
+      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]" title={who}>
         {who}
       </span>
       <Tooltip label={t("accounts.geminiSingle")} description={t("accounts.geminiSingleHint")}>
-        <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{t("accounts.geminiSingle")}</span>
+        <span className={chipClass("neutral")}>{t("accounts.geminiSingle")}</span>
       </Tooltip>
-      <button
-        type="button"
-        onClick={onSwitch}
-        className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11.5px] font-medium text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-      >
-        <KeyRound size={12} />
+      <button type="button" onClick={onSwitch} className={buttonClass({ variant: "secondary", size: "sm" })}>
+        <KeyRound size={13} />
         {t("accounts.geminiSwitch")}
       </button>
     </div>
@@ -451,23 +453,23 @@ function WorkspaceDefaults() {
   };
 
   return (
-    <div className="rounded-lg border border-[var(--cf-border)] p-2.5">
+    <div className="rounded-lg border border-[var(--cf-border)] p-3">
       <Tooltip label={t("accounts.byWorkspace")} description={t("accounts.byWorkspaceHint")}>
-        <p className="mb-1.5 text-[12.5px] font-medium text-[var(--cf-text)]">{t("accounts.byWorkspace")}</p>
+        <p className="mb-2 text-[13px] font-medium text-[var(--cf-text)]">{t("accounts.byWorkspace")}</p>
       </Tooltip>
-      <div className="space-y-1">
+      <div className="space-y-1.5">
         {workspaces.map((workspace) => (
           <div key={workspace.id} className="flex flex-wrap items-center gap-2">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: workspace.color }} />
-            <span className="w-[120px] shrink-0 truncate text-[12px] text-[var(--cf-text)]" title={workspace.name}>
+            <span className="w-[120px] shrink-0 truncate text-[13px] text-[var(--cf-text)]" title={workspace.name}>
               {workspace.name}
             </span>
             {providers.map((provider) => {
               const stored =
                 defaults.find((row) => row.workspaceId === workspace.id && row.provider === provider)?.account ?? "";
               return (
-                <div key={provider} className="flex w-[240px] items-center gap-1">
-                  <ProviderGlyph providerId={provider} size={12} />
+                <div key={provider} className="flex w-[240px] items-center gap-1.5">
+                  <ProviderGlyph providerId={provider} size={13} />
                   <div className="min-w-0 flex-1">
                     <Select
                       size="sm"

@@ -34,6 +34,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { fieldClass } from "../common/recipes";
 
 /** How close to an edge of the list the pointer must get before it scrolls, and by how much. */
 const AUTOSCROLL_EDGE = 28;
@@ -642,7 +643,7 @@ export function DiagramExplorer() {
             placeholder={t("diagrams.searchPlaceholder")}
             aria-label={t("diagrams.searchPlaceholder")}
             spellCheck={false}
-            className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] py-1 pl-6 pr-6 text-[11.5px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: "sm", className: "w-full pl-6 pr-6" })}
           />
           {query && (
             <button
@@ -669,7 +670,7 @@ export function DiagramExplorer() {
         onKeyDown={onTreeKeyDown}
       >
         {rows.length === 0 ? (
-          <p className="px-2 py-6 text-center text-[11.5px] text-[var(--cf-text-muted)]">
+          <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">
             {filtering ? t("diagrams.noMatches") : t("diagrams.treeEmpty")}
           </p>
         ) : (

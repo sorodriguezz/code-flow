@@ -81,7 +81,7 @@ export function CavemanChip({
         onClick={() => setOpen((v) => !v)}
         title={t("chat.cavemanOn", { level })}
         aria-expanded={open}
-        className="flex h-7 shrink-0 items-center gap-1 rounded-md border border-[color-mix(in_oklab,var(--cf-accent)_35%,transparent)] bg-[var(--cf-accent-soft)] px-1.5 text-[10.5px] text-[var(--cf-accent)]"
+        className="flex h-[26px] shrink-0 items-center gap-1 rounded-md border border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)] px-2 text-[11px] text-[var(--cf-accent)]"
       >
         <SpellCheck size={11} className="shrink-0" />
         {level}
@@ -97,13 +97,13 @@ export function CavemanChip({
                 onPick(candidate);
                 setOpen(false);
               }}
-              className={`flex w-full flex-col items-start gap-0.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.07] ${
+              className={`flex w-full flex-col items-start gap-0.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[var(--cf-hover)] ${
                 candidate === level ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
               }`}
             >
               {/* The identifier, unstyled and untranslated: it is what you type after the command,
                   so seeing it here is how `/caveman ultra` becomes something you can remember. */}
-              <span className="text-[11.5px]">{candidate}</span>
+              <span className="text-[12px]">{candidate}</span>
               {LEVEL_HINTS[candidate] && (
                 <span className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
                   {t(LEVEL_HINTS[candidate])}
@@ -118,7 +118,7 @@ export function CavemanChip({
               onPick("");
               setOpen(false);
             }}
-            className="w-full rounded-lg px-2 py-1.5 text-left text-[11.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.07]"
+            className="w-full rounded-lg px-2 py-1.5 text-left text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
             {t("chat.cavemanOff")}
           </button>

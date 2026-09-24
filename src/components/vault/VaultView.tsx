@@ -181,13 +181,13 @@ function TrashPanel() {
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {trash.length === 0 ? (
-          <p className="text-[11.5px] italic text-[var(--cf-text-muted)]">{t("vault.noMatches")}</p>
+          <p className="text-[12px] italic text-[var(--cf-text-muted)]">{t("vault.noMatches")}</p>
         ) : (
           <ul className="flex flex-col gap-1">
             {trash.map((item) => (
               <li
                 key={item.id}
-                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                className="flex items-center gap-2 rounded-md px-2 py-1.5 text-[12px] hover:bg-[var(--cf-hover)]"
               >
                 <span className="min-w-0 flex-1 truncate text-[var(--cf-text)]">{item.title}</span>
                 <button

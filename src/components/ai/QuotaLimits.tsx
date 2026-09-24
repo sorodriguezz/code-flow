@@ -127,12 +127,12 @@ function ProviderBlock({
     >
       <div className="mb-1 flex items-center gap-1.5">
         <ProviderGlyph providerId={quota.provider} size={12} />
-        <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold text-[var(--cf-text)]">
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-[var(--cf-text)]">
           {providerDisplayLabel(quota.provider, t)}
           {account && <span className="font-normal text-[var(--cf-text-muted)]"> · {account}</span>}
         </span>
         {quota.plan && (
-          <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <span className="shrink-0 text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
             {quota.plan}
           </span>
         )}
@@ -172,7 +172,7 @@ function LimitRow({ limit, narrowed }: { limit: QuotaLimit; narrowed: Set<string
           {t("quota.used", { percent: formatUsed(used) })}
         </span>
       </div>
-      <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-black/[0.07] dark:bg-white/[0.1]">
+      <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
         <div
           className="h-full rounded-full transition-[width]"
           style={{
@@ -185,7 +185,7 @@ function LimitRow({ limit, narrowed }: { limit: QuotaLimit; narrowed: Set<string
         />
       </div>
       {resetsIn && (
-        <p className="mt-0.5 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+        <p className="mt-0.5 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
           {t("quota.resetsIn", { time: resetsIn })}
         </p>
       )}

@@ -418,12 +418,12 @@ export function VariableInput({
                 <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
                   {item.detail}
                 </span>
-                <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+                <span className="shrink-0 text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
                   {item.badge}
                 </span>
               </button>
             ))}
-            <p className="px-1.5 pb-0.5 pt-1 text-[10px] text-[var(--cf-text-muted)]">{t("api.env.suggestHint")}</p>
+            <p className="px-1.5 pb-0.5 pt-1 text-[10.5px] text-[var(--cf-text-muted)]">{t("api.env.suggestHint")}</p>
           </div>,
           document.body,
         )}
@@ -494,7 +494,7 @@ export function VariableInput({
                     {found ? found.value : dynamic ? dynamic.example : t("api.env.unresolved")}
                   </span>
                   {(found || dynamic) && (
-                    <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+                    <span className="shrink-0 text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
                       {found ? t(SCOPE_LABELS[found.scope]) : t("api.env.dynamicVariables")}
                     </span>
                   )}

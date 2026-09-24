@@ -10,6 +10,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { detectWorkspaceServices } from "../../lib/tauri/services";
 import type { ProjectCandidates, ServiceCandidate, ServiceRow } from "../../types/services";
 import { PortChip } from "./serviceBits";
+import { fieldClass } from "../common/recipes";
 
 /** A candidate's identity within the import: which repository, which folder, which command. */
 const keyOf = (projectId: string, candidate: ServiceCandidate) =>
@@ -154,7 +155,7 @@ export function ServiceImportModal({
                 value={groupName}
                 onChange={(e) => setGroupName(e.target.value)}
                 placeholder={t("services.groupNamePlaceholder")}
-                className="w-36 min-w-0 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-1 text-[11px] outline-none focus:border-[var(--cf-accent)]"
+                className={fieldClass({ size: "sm", className: "w-36 min-w-0" })}
               />
             )}
             <label className="flex min-w-0 cursor-pointer items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
@@ -207,8 +208,8 @@ export function ServiceImportModal({
                     }
                   />
                   <span className="text-[12px] font-semibold text-[var(--cf-text)]">{project.projectName}</span>
-                  <span className="min-w-0 truncate font-mono text-[10px] text-[var(--cf-text-muted)]">{project.path}</span>
-                  <span className="ml-auto shrink-0 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+                  <span className="min-w-0 truncate font-mono text-[10.5px] text-[var(--cf-text-muted)]">{project.path}</span>
+                  <span className="ml-auto shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
                     {picked}/{project.candidates.length}
                   </span>
                 </label>
@@ -241,7 +242,7 @@ export function ServiceImportModal({
                             {candidate.command}
                           </span>
                         </div>
-                        <div className="truncate text-[10px] text-[var(--cf-text-muted)]" title={candidate.detail}>
+                        <div className="truncate text-[10.5px] text-[var(--cf-text-muted)]" title={candidate.detail}>
                           {candidate.source}
                           {candidate.detail ? ` · ${candidate.detail}` : ""}
                         </div>
@@ -251,12 +252,12 @@ export function ServiceImportModal({
                           <PortChip key={port} port={port} dim />
                         ))}
                         {candidate.readyKind === "exit" && (
-                          <span className="rounded bg-black/[0.05] px-1 text-[9px] uppercase tracking-wide text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+                          <span className="rounded bg-[var(--cf-hover)] px-1 text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
                             {t("services.oneShot")}
                           </span>
                         )}
                         {already && (
-                          <span className="rounded bg-black/[0.05] px-1 text-[9px] uppercase tracking-wide text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+                          <span className="rounded bg-[var(--cf-hover)] px-1 text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
                             {t("services.import.exists")}
                           </span>
                         )}

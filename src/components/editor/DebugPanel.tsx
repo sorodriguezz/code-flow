@@ -10,6 +10,9 @@ import {
   Trash2,
 } from "lucide-react";
 import { Select } from "../common/Select";
+import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass } from "../common/Button";
+import { explorerHeadClass, explorerTitleClass, fieldClass, rowClass } from "../common/recipes";
 import { useDebugStore } from "../../state/debugStore";
 import { DEBUG_ADAPTERS, adapterById, adapterForFile } from "../../lib/debugAdapters";
 import type { DebugVariable } from "../../lib/tauri/commands";
@@ -31,19 +34,19 @@ function VariableRow({ variable, depth }: { variable: DebugVariable; depth: numb
       <button
         onClick={() => variable.object_id && void expand(variable.object_id)}
         style={{ paddingLeft: depth * 12 + 6 }}
-        className="flex w-full items-baseline gap-1.5 py-0.5 pr-2 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        className="flex h-6 w-full items-center gap-1.5 rounded-md pr-2 text-left hover:bg-[var(--cf-hover)]"
       >
         {expandable ? (
           expanded ? (
-            <ChevronDown size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
           ) : (
-            <ChevronRight size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
           )
         ) : (
-          <span className="w-2.5 shrink-0" />
+          <span className="w-3 shrink-0" />
         )}
-        <span className="shrink-0 font-mono text-[11px] text-[var(--cf-text)]">{variable.name}</span>
-        <span className="truncate font-mono text-[11px] text-[var(--cf-text-muted)]">{variable.value}</span>
+        <span className="shrink-0 font-mono text-[12px] text-[var(--cf-text)]">{variable.name}</span>
+        <span className="truncate font-mono text-[12px] text-[var(--cf-text-muted)]">{variable.value}</span>
       </button>
       {expanded?.map((child) => (
         <VariableRow key={`${variable.object_id}-${child.name}`} variable={child} depth={depth + 1} />
@@ -112,7 +115,14 @@ export function DebugPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 border-b border-[var(--cf-border)] p-2">
+      {/* The head every panel of the activity rail wears. */}
+      <div className={explorerHeadClass}>
+        <span className={`${explorerTitleClass} mr-auto`}>
+          <span className="truncate">{t("debug.title")}</span>
+        </span>
+      </div>
+
+      <div className="shrink-0 border-b border-[var(--cf-border)] px-3 pb-3">
         <div className="flex items-center gap-1">
           <input
             value={program}
@@ -122,7 +132,7 @@ export function DebugPanel({
             }}
             placeholder={t("debug.programPlaceholder")}
             disabled={running}
-            className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-1 font-mono text-[11px] outline-none disabled:opacity-60"
+            className={fieldClass({ size: "sm", className: "flex-1 font-mono" })}
           />
           {/* Which debugger runs it. Node is built in; the rest drive an installed adapter.
               The shared `Select` rather than a native one, at the same 11px metrics as the field
@@ -145,93 +155,101 @@ export function DebugPanel({
             />
           </div>
           {running ? (
-            <button
-              onClick={() => void store.stop()}
-              title={t("debug.stop")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-danger)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-            >
-              <Square size={12} className="fill-current" />
-            </button>
+            <Tooltip side="bottom" label={t("debug.stop")}>
+              <button onClick={() => void store.stop()} aria-label={t("debug.stop")} className={iconButtonClass({ size: "sm" })}>
+                <Square size={13} className="fill-current text-[var(--cf-danger)]" />
+              </button>
+            </Tooltip>
           ) : (
-            <button
-              onClick={() =>
-                program.trim() &&
-                void store.start(repoPath, program.trim(), adapterById(adapterId), adapterCommand)
-              }
-              disabled={!program.trim()}
-              title={t("debug.start")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-success)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
-            >
-              <Play size={12} className="fill-current" />
-            </button>
+            <Tooltip side="bottom" label={t("debug.start")}>
+              <button
+                onClick={() =>
+                  program.trim() &&
+                  void store.start(repoPath, program.trim(), adapterById(adapterId), adapterCommand)
+                }
+                disabled={!program.trim()}
+                aria-label={t("debug.start")}
+                className={iconButtonClass({ size: "sm" })}
+              >
+                <Play size={14} className="fill-current text-[var(--cf-success)]" />
+              </button>
+            </Tooltip>
           )}
         </div>
 
         {running && (
-          <div className="mt-1.5 flex items-center gap-1">
-            <button
-              onClick={() => (paused ? void store.resume() : void store.pause())}
-              title={paused ? t("debug.continue") : t("debug.pauseRun")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-            >
-              {paused ? <Play size={12} /> : <Square size={11} />}
-            </button>
-            <button
-              onClick={() => void store.step("over")}
-              disabled={!paused}
-              title={t("debug.stepOver")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-30 dark:hover:bg-white/[0.08]"
-            >
-              <Redo2 size={12} />
-            </button>
-            <button
-              onClick={() => void store.step("into")}
-              disabled={!paused}
-              title={t("debug.stepInto")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-30 dark:hover:bg-white/[0.08]"
-            >
-              <CornerDownRight size={12} />
-            </button>
-            <button
-              onClick={() => void store.step("out")}
-              disabled={!paused}
-              title={t("debug.stepOut")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-30 dark:hover:bg-white/[0.08]"
-            >
-              <CornerRightUp size={12} />
-            </button>
-            <span className="ml-auto text-[10px] text-[var(--cf-text-muted)]">
+          <div className="mt-2 flex items-center gap-0.5">
+            <Tooltip side="bottom" label={paused ? t("debug.continue") : t("debug.pauseRun")}>
+              <button
+                onClick={() => (paused ? void store.resume() : void store.pause())}
+                aria-label={paused ? t("debug.continue") : t("debug.pauseRun")}
+                className={iconButtonClass({ size: "sm" })}
+              >
+                {paused ? <Play size={14} /> : <Square size={13} />}
+              </button>
+            </Tooltip>
+            <Tooltip side="bottom" label={t("debug.stepOver")}>
+              <button
+                onClick={() => void store.step("over")}
+                disabled={!paused}
+                aria-label={t("debug.stepOver")}
+                className={iconButtonClass({ size: "sm" })}
+              >
+                <Redo2 size={14} />
+              </button>
+            </Tooltip>
+            <Tooltip side="bottom" label={t("debug.stepInto")}>
+              <button
+                onClick={() => void store.step("into")}
+                disabled={!paused}
+                aria-label={t("debug.stepInto")}
+                className={iconButtonClass({ size: "sm" })}
+              >
+                <CornerDownRight size={14} />
+              </button>
+            </Tooltip>
+            <Tooltip side="bottom" label={t("debug.stepOut")}>
+              <button
+                onClick={() => void store.step("out")}
+                disabled={!paused}
+                aria-label={t("debug.stepOut")}
+                className={iconButtonClass({ size: "sm" })}
+              >
+                <CornerRightUp size={14} />
+              </button>
+            </Tooltip>
+            <span className="ml-auto text-[11px] text-[var(--cf-text-faint)]">
               {paused ? t("debug.paused") : t("debug.runningState")}
             </span>
           </div>
         )}
 
         {!running && adapterById(adapterId).command !== null && (
-          <div className="mt-1.5">
+          <div className="mt-2">
             <input
               value={adapterCommand}
               onChange={(e) => setAdapterCommand(e.target.value)}
               placeholder={t("debug.adapterPlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-1 font-mono text-[11px] outline-none"
+              className={fieldClass({ size: "sm", className: "w-full font-mono" })}
             />
-            <p className="mt-0.5 text-[10px] text-[var(--cf-text-muted)]">
+            <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-faint)]">
               {t("debug.adapterHint", { install: adapterById(adapterId).install })}
             </p>
           </div>
         )}
 
         {!running && (
-          <p className="mt-1.5 text-[10px] text-[var(--cf-text-muted)]">
+          <p className="mt-2 text-[11px] text-[var(--cf-text-faint)]">
             {breakpointCount > 0 ? t("debug.breakpointCount", { n: breakpointCount }) : t("debug.noBreakpoints")}
           </p>
         )}
-        {error && <p className="mt-1.5 text-[10px] text-[var(--cf-danger)]">{error}</p>}
+        {error && <p className="mt-2 text-[11px] text-[var(--cf-danger)]">{error}</p>}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
         {paused && (
           <>
-            <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            <p className="flex items-center px-1.5 pb-1.5 pt-3 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
               {t("debug.callStack")}
             </p>
             {frames.map((frame, index) => (
@@ -241,22 +259,20 @@ export function DebugPanel({
                   void store.selectFrame(index);
                   if (frame.file.includes("/") || frame.file.includes("\\")) onOpenFrame(frame.file, frame.line);
                 }}
-                className={`flex w-full items-baseline gap-1.5 px-2 py-0.5 text-left ${
-                  index === selectedFrame ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                }`}
+                className={rowClass(index === selectedFrame, "h-[26px]")}
               >
-                <span className="shrink-0 font-mono text-[11px] text-[var(--cf-text)]">{frame.name}</span>
-                <span className="truncate text-[10px] text-[var(--cf-text-muted)]">
+                <span className="shrink-0 font-mono text-[12px] text-[var(--cf-text)]">{frame.name}</span>
+                <span className="truncate font-mono text-[11px] text-[var(--cf-text-faint)]">
                   {fileName(frame.file)}:{frame.line}
                 </span>
               </button>
             ))}
 
-            <p className="px-2 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            <p className="flex items-center px-1.5 pb-1.5 pt-3 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
               {t("debug.variables")}
             </p>
             {variables.length === 0 ? (
-              <p className="px-2 py-1 text-[10px] text-[var(--cf-text-muted)]">{t("debug.noVariables")}</p>
+              <p className="px-1.5 py-1 text-[11px] text-[var(--cf-text-faint)]">{t("debug.noVariables")}</p>
             ) : (
               variables.map((variable) => (
                 <VariableRow key={variable.name} variable={variable} depth={0} />
@@ -266,20 +282,23 @@ export function DebugPanel({
         )}
       </div>
 
-      <div className="flex h-[38%] shrink-0 flex-col border-t border-[var(--cf-border)]">
-        <div className="flex items-center gap-1 px-2 py-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+      {/* The console: a log well, sunk a step below the panel it sits in. */}
+      <div className="flex h-[38%] shrink-0 flex-col border-t border-[var(--cf-border)] bg-[var(--cf-sunken)]">
+        <div className="flex h-8 shrink-0 items-center gap-1 pl-3 pr-1.5">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
             {t("debug.console")}
           </span>
-          <button
-            onClick={() => store.clearConsole()}
-            title={t("debug.clearConsole")}
-            className="ml-auto text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          >
-            <Trash2 size={11} />
-          </button>
+          <Tooltip side="bottom" label={t("debug.clearConsole")}>
+            <button
+              onClick={() => store.clearConsole()}
+              aria-label={t("debug.clearConsole")}
+              className={iconButtonClass({ size: "xs", className: "ml-auto" })}
+            >
+              <Trash2 size={13} />
+            </button>
+          </Tooltip>
         </div>
-        <div ref={consoleRef} className="min-h-0 flex-1 overflow-auto px-2 pb-1 font-mono text-[10px]">
+        <div ref={consoleRef} className="min-h-0 flex-1 overflow-auto px-3 pb-1 font-mono text-[11px] leading-[1.55]">
           {consoleLines.map((line, index) => (
             <div
               key={index}
@@ -308,7 +327,8 @@ export function DebugPanel({
           // Only meaningful while paused: an expression needs a frame to be evaluated in.
           disabled={!paused}
           placeholder={paused ? t("debug.evaluatePlaceholder") : t("debug.evaluateDisabled")}
-          className="shrink-0 border-t border-[var(--cf-border)] bg-transparent px-2 py-1 font-mono text-[11px] outline-none disabled:opacity-60"
+          // Flush with the well rather than a boxed field: this is the console's own prompt line.
+          className="h-[30px] shrink-0 border-t border-[var(--cf-border)] bg-transparent px-3 font-mono text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)] disabled:opacity-60"
         />
       </div>
     </div>

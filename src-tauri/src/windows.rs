@@ -248,6 +248,20 @@ pub async fn open_satellite(
             .decorations(true)
             .title_bar_style(tauri::TitleBarStyle::Overlay)
             .hidden_title(true);
+        // The traffic lights where the main window has them — `trafficLightPosition` in
+        // `tauri.macos.conf.json`, read from there so the two cannot drift. A satellite draws the
+        // same 44px title row as the main window now, and at AppKit's default spot the lights sat
+        // above the row's middle and ran straight into the title that followed them.
+        if let Some(position) = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|window| window.label == "main")
+            .and_then(|window| window.traffic_light_position.as_ref())
+        {
+            builder = builder.traffic_light_position(tauri::LogicalPosition::new(position.x, position.y));
+        }
     }
     #[cfg(not(target_os = "macos"))]
     {

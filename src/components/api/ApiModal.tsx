@@ -3,6 +3,7 @@ import { useFocusTrap } from "../../lib/useFocusTrap";
 import { createPortal } from "react-dom";
 import { X, type LucideIcon } from "lucide-react";
 import { useT } from "../../state/languageStore";
+import { buttonClass, iconButtonClass } from "../common/Button";
 
 /**
  * The chrome every API-client modal wears: backdrop, centred panel, titled header with a close
@@ -130,12 +131,12 @@ export function ApiModal({
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        className={`flex max-h-[80vh] w-full min-w-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${width} ${height ?? ""}`}
+        className={`cf-fade-in flex max-h-[80vh] w-full min-w-0 flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)] ${width} ${height ?? ""}`}
       >
-        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-4 py-2.5">
-          <Icon size={14} className="shrink-0 text-[var(--cf-accent)]" />
+        <div className="flex min-h-[52px] shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] py-2 pl-4 pr-3">
+          <Icon size={15} className="shrink-0 text-[var(--cf-accent)]" />
           <div className="min-w-0">
-            <h2 className="truncate text-[13px] font-semibold">{title}</h2>
+            <h2 className="truncate text-[14px] font-semibold">{title}</h2>
             {subtitle && (
               <p className="truncate text-[11px] text-[var(--cf-text-muted)]">{subtitle}</p>
             )}
@@ -147,9 +148,9 @@ export function ApiModal({
                 onClick={onClose}
                 title={t("common.close")}
                 aria-label={t("common.close")}
-                className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                className={iconButtonClass({ size: "sm" })}
               >
-                <X size={14} />
+                <X size={15} />
               </button>
             )}
           </div>
@@ -158,7 +159,7 @@ export function ApiModal({
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">{children}</div>
 
         {footer && (
-          <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-4 py-2.5">
+          <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-4 py-3">
             {footer}
           </div>
         )}
@@ -184,9 +185,7 @@ export function PrimaryButton({
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40 ${
-        danger ? "bg-[var(--cf-danger)]" : "bg-[var(--cf-accent)]"
-      }`}
+      className={buttonClass({ variant: danger ? "danger" : "primary" })}
     >
       {children}
     </button>
@@ -209,7 +208,7 @@ export function GhostButton({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.08]"
+      className={buttonClass({ variant: "ghost" })}
     >
       {children}
     </button>
@@ -241,7 +240,7 @@ export function Field({
       disabled={disabled}
       placeholder={placeholder}
       onChange={(e) => onChange(e.target.value)}
-      className={`w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50 ${
+      className={`h-[30px] w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 text-[13px] outline-none transition-shadow placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] disabled:opacity-50 ${
         mono ? "font-mono" : ""
       } ${className}`}
     />
@@ -269,7 +268,7 @@ export function Row({
   return (
     <label className="flex items-center gap-3 py-1">
       <span className="min-w-0 flex-1">
-        <span className="block text-[12px] text-[var(--cf-text)]">{label}</span>
+        <span className="block text-[13px] text-[var(--cf-text)]">{label}</span>
         {hint && <span className="block text-[11px] text-[var(--cf-text-muted)]">{hint}</span>}
       </span>
       <span className={`flex shrink-0 justify-end ${wide ? "w-[360px] max-w-[62%]" : "w-[180px]"}`}>

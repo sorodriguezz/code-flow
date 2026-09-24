@@ -23,6 +23,9 @@ import { ScreenPanel } from "./ScreenPanel";
 import { HostGallery } from "./HostGallery";
 import { ConnectBar } from "./ConnectBar";
 import { CARD } from "./remoteChrome";
+import { iconButtonClass } from "../common/Button";
+import { docStripClass, docTabClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import {
   ensureRemoteStoreLoaded,
   FORWARD_POLL_MS,
@@ -95,7 +98,7 @@ export function RemoteView() {
 
   if (!workspaceId) {
     return (
-      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
         <EmptyState
           icon={MonitorSmartphone}
           title={t("remote.noWorkspace")}
@@ -111,7 +114,7 @@ export function RemoteView() {
           workspace view a plain block of `h-full`, so a `flex-1` with no flex parent to resolve
           against collapses the whole view to the height of its own content. Every other workspace
           view carries this same wrapper for the same reason. */}
-      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <HostExplorer onImport={() => setImporting(true)} />
 
@@ -232,6 +235,12 @@ function tabIcon(tab: RemoteTab) {
   return Terminal;
 }
 
+/**
+ * The open sessions, as document tabs: the active one melts into the sheet below it.
+ *
+ * The host's colour rides on each tab's glyph — every tab, not only the active one — so a shell on
+ * production is marked as one before it is the tab you are typing into.
+ */
 function RemoteTabStrip() {
   const tabs = useRemoteStore((s) => s.tabs);
   const activeTabId = useRemoteStore((s) => s.activeTabId);
@@ -241,7 +250,7 @@ function RemoteTabStrip() {
   const t = useT();
 
   return (
-    <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--cf-border)] px-1.5 py-1">
+    <div role="tablist" className={docStripClass}>
       {tabs.map((tab) => {
         const Icon = tabIcon(tab);
         const host = hosts.find((entry) => entry.id === tab.hostId);
@@ -270,35 +279,36 @@ function RemoteTabStrip() {
                 void closeTab(tab.id);
               }
             }}
-            className={`group flex shrink-0 cursor-default items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
-              active
-                ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
-            }`}
-            style={host?.color && active ? { color: host.color } : undefined}
+            className={docTabClass(active, "cursor-default")}
           >
-            <Icon size={12} className={exited ? "opacity-50" : undefined} />
-            <span className={`max-w-[160px] truncate ${exited ? "line-through opacity-60" : ""}`}>
+            <Icon
+              size={14}
+              className={`shrink-0 ${exited ? "opacity-50" : ""}`}
+              style={{ color: host?.color?.trim() || "var(--cf-text-faint)" }}
+            />
+            <span className={`min-w-0 truncate ${exited ? "line-through opacity-60" : ""}`}>
               {tab.name}
             </span>
             {tab.kind === "forwards" && (
-              <span className="text-[10px] uppercase tracking-wide opacity-60">
+              <span className="shrink-0 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                 {t("remote.tabForwardsShort")}
               </span>
             )}
-            <button
-              type="button"
-              aria-label={t("common.close")}
-              onClick={(e) => {
-                e.stopPropagation();
-                void closeTab(tab.id);
-              }}
-              className={`rounded p-px transition-opacity hover:bg-black/[0.06] focus-visible:opacity-100 group-hover:opacity-100 dark:hover:bg-white/[0.1] ${
-                active ? "opacity-100" : "opacity-0"
-              }`}
-            >
-              <X size={11} />
-            </button>
+            <Tooltip label={t("common.close")}>
+              <button
+                type="button"
+                aria-label={t("common.close")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void closeTab(tab.id);
+                }}
+                className={`${iconButtonClass({ size: "xs" })} ${
+                  active ? "" : "opacity-0 focus:opacity-100 group-hover/doctab:opacity-100"
+                }`}
+              >
+                <X size={13} />
+              </button>
+            </Tooltip>
           </div>
         );
       })}
@@ -344,44 +354,40 @@ function RemoteStatusBar() {
 
   if (sessions === 0 && forwards.length === 0 && latency === null) return null;
 
+  // Spaced rather than dotted apart: each fact is a word and a number, and the gaps are enough to
+  // keep them separate. The forwards sit at the far edge, because they are the one part you click.
   return (
-    <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-3 py-1 text-[11px] text-[var(--cf-text-muted)]">
+    <div className="flex h-[30px] shrink-0 items-center gap-3.5 border-t border-[var(--cf-border)] px-3 text-[12px] text-[var(--cf-text-muted)]">
       {sessions > 0 && (
-        <span className="flex items-center gap-1.5">
-          <span aria-hidden className="h-[6px] w-[6px] rounded-full bg-[var(--cf-success)]" />
+        <span className="flex shrink-0 items-center gap-1.5">
+          <span aria-hidden className="h-[7px] w-[7px] rounded-full bg-[var(--cf-success)]" />
           {sessions === 1 ? t("remote.statusSessionsOne") : t("remote.statusSessions", { n: String(sessions) })}
         </span>
       )}
       {latency !== null && selected && (
-        <>
-          {sessions > 0 && <span aria-hidden>·</span>}
-          <span
-            className="tabular-nums"
-            title={t("remote.latencyHint", { name: selected.name })}
-          >
+        <Tooltip label={t("remote.latencyHint", { name: selected.name })}>
+          <span className="shrink-0 font-mono tabular-nums">
             {t("remote.latency", { ms: String(latency) })}
           </span>
-        </>
+        </Tooltip>
       )}
       {auth && selected && (
-        <>
-          <span aria-hidden>·</span>
-          <span title={t("remote.statusAuthHint")}>{t(AUTH_LABEL[auth])}</span>
-        </>
+        <Tooltip label={t("remote.statusAuthHint")}>
+          <span className="min-w-0 truncate">{t(AUTH_LABEL[auth])}</span>
+        </Tooltip>
       )}
-      {sessions > 0 && forwards.length > 0 && <span aria-hidden>·</span>}
       {forwards.length > 0 && (
         <>
           <button
             type="button"
             onClick={openAllForwards}
-            className="rounded px-1 underline-offset-2 hover:text-[var(--cf-text)] hover:underline"
+            className="ml-auto shrink-0 rounded px-1 text-[var(--cf-accent)] underline-offset-2 hover:underline"
           >
             {forwards.length === 1
               ? t("remote.statusForwardsOne")
               : t("remote.statusForwards", { n: String(forwards.length) })}
           </button>
-          <span className="min-w-0 truncate font-mono">
+          <span className="min-w-0 truncate font-mono text-[var(--cf-text-faint)]">
             {forwards
               .slice(0, 3)
               .map((forward) =>

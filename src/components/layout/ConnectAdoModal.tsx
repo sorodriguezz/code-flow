@@ -5,6 +5,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
 import type { AdoProject, AdoRepo } from "../../types/domain";
+import { buttonClass } from "../common/Button";
 
 interface ConnectAdoModalProps {
   projectId: string;
@@ -67,10 +68,10 @@ export function ConnectAdoModal({ projectId, orgs, onConnected, onClose }: Conne
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={saving ? undefined : onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[420px] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        className="w-[420px] rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
+          <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
             <Cloud size={14} />
             {t("sidebar.linkAdoTitle")}
           </h3>
@@ -81,7 +82,7 @@ export function ConnectAdoModal({ projectId, orgs, onConnected, onClose }: Conne
           )}
         </div>
 
-        <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
           {t("settings.organization")}
         </label>
         {orgs.length > 1 ? (
@@ -93,12 +94,12 @@ export function ConnectAdoModal({ projectId, orgs, onConnected, onClose }: Conne
             options={orgs.map((o) => ({ value: o, label: o }))}
           />
         ) : (
-          <p className="mb-3 rounded-md border border-[var(--cf-border)] bg-black/[0.02] px-2.5 py-1.5 text-[13px] dark:bg-white/[0.03]">
+          <p className="mb-3 rounded-md border border-[var(--cf-border)] bg-[var(--cf-hover)] px-2.5 py-1.5 text-[13px]">
             {org}
           </p>
         )}
 
-        <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
           {t("sidebar.adoProject")}
         </label>
         <Select
@@ -113,7 +114,7 @@ export function ConnectAdoModal({ projectId, orgs, onConnected, onClose }: Conne
           ]}
         />
 
-        <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
           {t("sidebar.adoRepo")}
         </label>
         <Select
@@ -132,14 +133,14 @@ export function ConnectAdoModal({ projectId, orgs, onConnected, onClose }: Conne
           <button
             disabled={saving}
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost" })}
           >
             {t("common.cancel")}
           </button>
           <button
             disabled={saving || !adoProjectId || !repoId}
             onClick={connect}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {saving ? <Loader2 size={13} className="animate-spin" /> : <Cloud size={13} />}
             {t("sidebar.connect")}

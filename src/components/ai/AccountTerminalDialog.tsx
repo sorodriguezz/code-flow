@@ -5,6 +5,7 @@ import { closeTerminal, openTerminal, writeTerminal } from "../../lib/tauri/comm
 import { startTerminalRouter } from "../../state/terminalStore";
 import { useT } from "../../state/languageStore";
 import { TerminalPane } from "../terminal/TerminalPane";
+import { buttonClass } from "../common/Button";
 
 /**
  * A shell opened *as* one account, with the CLI's own sign-in already typed into it.
@@ -103,7 +104,7 @@ export function AccountTerminalDialog({
           <button
             type="button"
             onClick={onClose}
-            className="shrink-0 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
+            className={buttonClass({ variant: "primary" })}
           >
             {t("accounts.loginDone")}
           </button>

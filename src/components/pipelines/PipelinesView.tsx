@@ -130,7 +130,7 @@ export function PipelinesView() {
   const job = detail?.jobs.find((candidate) => candidate.id === selection?.jobId);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div
           data-tour="pipelines-list"

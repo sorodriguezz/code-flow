@@ -17,6 +17,7 @@ import {
   type DbNodeKind,
 } from "../../types/database";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { buttonClass } from "../common/Button";
 
 /**
  * The filter on one thing.
@@ -150,7 +151,7 @@ export function ObjectFilterModal({
           <GhostButton onClick={onClose}>{t("common.cancel")}</GhostButton>
           <button
             onClick={() => void apply(formatFilterTerms(terms), enabled)}
-            className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
+            className={buttonClass({ variant: "primary" })}
           >
             {t("db.filterApply")}
           </button>
@@ -213,7 +214,7 @@ export function ObjectFilterModal({
                   <button
                     onClick={() => void setFilter(connectionId, entry.target, "", true)}
                     title={t("db.filterRemove")}
-                    className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
+                    className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
                   >
                     <Trash2 size={12} />
                   </button>
@@ -306,7 +307,7 @@ function TermList({
           type="button"
           onClick={add}
           title={t("db.filterAdd")}
-          className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         >
           <Plus size={12} />
         </button>
@@ -315,7 +316,7 @@ function TermList({
           onClick={() => onChange([])}
           disabled={terms.length === 0}
           title={t("db.filterClear")}
-          className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-white/[0.08]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-30 disabled:hover:bg-transparent"
         >
           <Trash2 size={12} />
         </button>
@@ -345,7 +346,7 @@ function TermList({
                 type="button"
                 onClick={() => onChange(terms.filter((_, at) => at !== index))}
                 title={t("db.filterRemove")}
-                className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
+                className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
               >
                 <X size={12} />
               </button>

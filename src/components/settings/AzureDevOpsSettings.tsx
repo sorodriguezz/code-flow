@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { AlertTriangle, Check, KeyRound, Loader2, Trash2 } from "lucide-react";
 import { TokenHowTo } from "./TokenHowTo";
+import { buttonClass } from "../common/Button";
+import { chipClass, fieldClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import { adoCheckOrg, adoVerifyPat, deleteAdoPat, setAdoPat } from "../../lib/tauri/commands";
 import { loadAdoConnections, normalizeAdoOrg, saveAdoConnections } from "../../lib/adoConnections";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -24,6 +27,7 @@ export function AzureDevOpsSettings() {
   const [pat, setPat] = useState("");
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const fieldId = useId();
   /** Why the last attempt didn't connect. Kept on the form rather than pushed as a toast: a
    * rejected token is something you fix in the two fields right here, and a message that has
    * already faded is no help while you're doing it. */
@@ -139,7 +143,7 @@ export function AzureDevOpsSettings() {
                   {state && "account" in state ? (
                     <p className="truncate text-[12px] text-[var(--cf-text-muted)]">{state.account}</p>
                   ) : failed ? (
-                    <p className="select-text break-words text-[11.5px] leading-snug text-[var(--cf-danger)]">
+                    <p className="select-text break-words text-[12px] leading-snug text-[var(--cf-danger)]">
                       {state.error}
                     </p>
                   ) : (
@@ -147,56 +151,75 @@ export function AzureDevOpsSettings() {
                   )}
                 </div>
                 {state === undefined || state === null ? (
-                  <span className="flex shrink-0 items-center gap-1 rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-                    <Loader2 size={11} className="animate-spin" /> {t("settings.adoChecking")}
+                  <span className={chipClass("neutral")}>
+                    <Loader2 size={12} className="animate-spin" /> {t("settings.adoChecking")}
                   </span>
                 ) : failed ? (
-                  <button
-                    onClick={() => checkOrg(conn.org)}
-                    title={t("settings.adoRecheck")}
-                    className="flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-danger)_16%,transparent)] px-2 py-0.5 text-[11px] font-medium text-[var(--cf-danger)]"
-                  >
-                    <AlertTriangle size={11} /> {t("settings.adoNotWorking")}
-                  </button>
+                  // Still the chip that says what is wrong, but pressable — at 22px, a target
+                  // rather than a label — and the tooltip names what pressing it does.
+                  <Tooltip label={t("settings.adoRecheck")}>
+                    <button
+                      type="button"
+                      onClick={() => checkOrg(conn.org)}
+                      aria-description={t("settings.adoRecheck")}
+                      className={chipClass(
+                        "bad",
+                        "h-[22px] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_22%,transparent)]",
+                      )}
+                    >
+                      <AlertTriangle size={12} /> {t("settings.adoNotWorking")}
+                    </button>
+                  </Tooltip>
                 ) : (
-                  <span className="flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-success)_16%,transparent)] px-2 py-0.5 text-[11px] font-medium text-[var(--cf-success)]">
-                    <Check size={11} /> {t("settings.connected")}
+                  <span className={chipClass("ok")}>
+                    <Check size={12} /> {t("settings.connected")}
                   </span>
                 )}
-                <button
-                  title={t("settings.remove")}
-                  onClick={() => handleRemove(conn.org)}
-                  className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                >
-                  <Trash2 size={13} />
-                </button>
+                <Tooltip label={t("settings.remove")}>
+                  <button
+                    type="button"
+                    aria-label={t("settings.remove")}
+                    onClick={() => handleRemove(conn.org)}
+                    className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </Tooltip>
               </div>
             );
           })}
         </div>
       )}
 
-      <div className="space-y-2">
+      <div className="space-y-3">
         <div>
-          <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
+          <label
+            htmlFor={`${fieldId}-org`}
+            className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]"
+          >
             {t("settings.organization")}
           </label>
           <input
+            id={`${fieldId}-org`}
             value={org}
             onChange={(e) => setOrg(e.target.value)}
             placeholder={t("settings.adoOrgPlaceholder")}
-            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full font-mono" })}
           />
         </div>
         <div>
-          <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
+          <label
+            htmlFor={`${fieldId}-pat`}
+            className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]"
+          >
             {t("settings.personalAccessToken")}
           </label>
           <input
+            id={`${fieldId}-pat`}
             type="password"
             value={pat}
             onChange={(e) => setPat(e.target.value)}
-            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full font-mono" })}
           />
         </div>
 
@@ -207,7 +230,7 @@ export function AzureDevOpsSettings() {
               <p className="text-[12px] font-medium text-[var(--cf-danger)]">{t("settings.adoVerifyFailed")}</p>
               {/* Azure's own words, selectable — they name the failure precisely enough to be
                   worth searching for, and nothing here has a copy button. */}
-              <p className="mt-0.5 select-text break-words text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+              <p className="mt-0.5 select-text break-words text-[12px] leading-snug text-[var(--cf-text-muted)]">
                 {error}
               </p>
             </div>
@@ -216,9 +239,10 @@ export function AzureDevOpsSettings() {
 
         <div className="pt-1">
           <button
+            type="button"
             disabled={saving || !org.trim() || !pat.trim()}
             onClick={handleSave}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             {saving ? <Loader2 size={13} className="animate-spin" /> : <KeyRound size={13} />}
             {saving ? t("settings.adoVerifying") : t("settings.saveToken")}

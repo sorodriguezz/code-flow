@@ -43,33 +43,35 @@ export function ChainStrip({ taskId }: { taskId: string }) {
   const owner = { chainId: chain.id, title: chain.title, index: stepIndex, total: chain.step_count };
 
   return (
-    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-black/[0.02] px-3 py-1.5 text-[11px] dark:bg-white/[0.03]">
-      <Link2 size={11} className={`shrink-0 ${color}`} />
+    // A strip inside the sheet, so the sunken tone: it belongs to this task's page, not to the frame.
+    <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-sunken)] pl-4 pr-2 text-[12px]">
+      <Link2 size={13} className={`shrink-0 ${color}`} />
       <span className="min-w-0 truncate text-[var(--cf-text-muted)]">
         {t("agents.chainOf", { name: owner.title })}
       </span>
-      <span className="shrink-0 tabular-nums text-[var(--cf-text-muted)]">
+      <span className="shrink-0 tabular-nums text-[var(--cf-text-faint)]">
         · {t("agents.stepN", { n: owner.index + 1, total: owner.total })}
       </span>
       {/* Dots for the siblings: cheap, and it turns "step 2 of 3" from a number into a shape — one
           that fills in as the plan advances, so a task opened mid-chain says how much of the work
           around it is already behind it without going back to the chain. The dot you are standing
           on is drawn as the current one whatever its state says, because that is the question this
-          strip answers. */}
-      <span className="flex shrink-0 items-center gap-1">
+          strip answers — and it is a ring, larger than the rest, so it is found by shape and not
+          only by colour. Steps not reached yet are hollow; the ones behind are filled. */}
+      <span className="flex shrink-0 items-center gap-1" aria-hidden>
         {Array.from({ length: owner.total }, (_, i) => (
           <span
             key={i}
-            className={`h-1.5 w-1.5 rounded-full ${
+            className={`rounded-full ${
               i === owner.index
-                ? "bg-[var(--cf-accent)]"
+                ? "h-2 w-2 border-2 border-[var(--cf-accent)]"
                 : marks[i] === "d"
-                  ? "bg-[var(--cf-success)]"
+                  ? "h-1.5 w-1.5 bg-[var(--cf-success)]"
                   : marks[i] === "r"
-                    ? "bg-[var(--cf-accent)]/60"
+                    ? "h-1.5 w-1.5 bg-[color-mix(in_oklab,var(--cf-accent)_60%,transparent)]"
                     : marks[i] === "e"
-                      ? "bg-[var(--cf-danger)]"
-                      : "bg-[var(--cf-text-muted)]/30"
+                      ? "h-1.5 w-1.5 bg-[var(--cf-danger)]"
+                      : "h-1.5 w-1.5 border border-[var(--cf-text-faint)]"
             }`}
           />
         ))}
@@ -77,7 +79,7 @@ export function ChainStrip({ taskId }: { taskId: string }) {
       <button
         type="button"
         onClick={() => void useChainStore.getState().select(owner.chainId)}
-        className="ml-auto shrink-0 text-[var(--cf-accent)] hover:underline"
+        className="ml-auto shrink-0 rounded-md px-2 py-1 font-medium text-[var(--cf-accent)] transition-colors hover:bg-[var(--cf-accent-soft)]"
       >
         {t("agents.backToChain")}
       </button>

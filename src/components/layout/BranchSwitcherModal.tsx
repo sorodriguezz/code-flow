@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, Cloud, Download, GitBranch, GitBranchPlus, Loader2, Lock, RefreshCw, X } from "lucide-react";
+import { ChevronRight, Cloud, Download, GitBranch, GitBranchPlus, Loader2, Lock, RefreshCw, Search, X } from "lucide-react";
+import { iconButtonClass } from "../common/Button";
 import { useRepoStore } from "../../state/repoStore";
 import { useT } from "../../state/languageStore";
 import type { BranchInfo } from "../../types/domain";
@@ -75,22 +76,24 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
         aria-modal="true"
         // Every row here is a branch name and nothing else, so the width is the number of
         // characters you can tell apart — narrower, `feature/…` rows all truncate to the same text.
-        className="flex max-h-[70vh] w-[560px] max-w-[90vw] flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+        className="flex max-h-[70vh] w-[560px] max-w-[90vw] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
       >
-        <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+        {/* The palette's search row: the list is a picker of the same kind, so it opens the same way. */}
+        <div className="flex h-[52px] shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] pl-4 pr-3">
+          <Search size={16} className="shrink-0 text-[var(--cf-text-faint)]" />
           <input
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Escape" && onClose()}
             placeholder={t("branchModal.search")}
-            className="flex-1 bg-transparent text-[13px] outline-none"
+            className="min-w-0 flex-1 bg-transparent text-[15px] outline-none placeholder:text-[var(--cf-text-faint)]"
           />
           <button
             onClick={onClose}
             title={t("branchModal.close")}
             aria-label={t("branchModal.close")}
-            className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className={iconButtonClass({ size: "sm" })}
           >
             <X size={15} />
           </button>
@@ -99,7 +102,7 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
         <div className="flex-1 overflow-auto p-1.5">
           {local.length > 0 && (
             <div className="mb-1">
-              <p className="px-2 py-1 text-[11px] font-semibold uppercase text-[var(--cf-text-muted)]">{t("branchModal.local")}</p>
+              <p className="px-2 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">{t("branchModal.local")}</p>
               {local.map((b) => (
                 <LocalRow
                   key={b.name}
@@ -122,7 +125,7 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
                 onClick={() => setRemoteOpen((open) => !open)}
                 aria-expanded={remoteOpen}
                 title={remoteOpen ? t("branchModal.collapseRemote") : t("branchModal.expandRemote")}
-                className="flex w-full items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold uppercase text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                className="flex w-full items-center gap-1 rounded-md px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text-muted)]"
               >
                 <ChevronRight
                   size={12}
@@ -180,7 +183,7 @@ function RowAction({
       aria-label={title}
       disabled={disabled}
       onClick={onClick}
-      className={`shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] transition-opacity hover:text-[var(--cf-accent)] disabled:cursor-default disabled:opacity-30 disabled:hover:text-[var(--cf-text-muted)] ${
+      className={`flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-opacity hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] ${
         running ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
       }`}
     >
@@ -215,7 +218,7 @@ function LocalRow({
   return (
     <div
       className={`group flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] ${
-        branch.is_head ? "font-semibold text-[var(--cf-accent)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        branch.is_head ? "font-semibold text-[var(--cf-accent)]" : "hover:bg-[var(--cf-hover)]"
       }`}
     >
       <button onClick={onChoose} className="flex min-w-0 flex-1 items-center gap-2 text-left">
@@ -250,14 +253,14 @@ function LocalRow({
       )}
 
       <RowAction
-        icon={running === "fetch" ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+        icon={running === "fetch" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
         title={tracked ? t("branchModal.fetch", { remote: remoteName }) : t("branchModal.noUpstreamAction")}
         disabled={locked || !tracked}
         running={running === "fetch"}
         onClick={onFetch}
       />
       <RowAction
-        icon={running === "pull" ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+        icon={running === "pull" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
         title={
           !tracked
             ? t("branchModal.noUpstreamAction")
@@ -290,7 +293,7 @@ function RemoteRow({
 }) {
   const t = useT();
   return (
-    <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+    <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
       <button onClick={onChoose} className="flex min-w-0 flex-1 items-center gap-2 text-left">
         <Cloud size={13} className="shrink-0" />
         {/* `min-w-0 flex-1` as well as `truncate`: without the floor a flex item won't
@@ -314,7 +317,7 @@ function RemoteRow({
       />
       {alreadyLocal && (
         <span
-          className="shrink-0 text-[10px] uppercase opacity-50"
+          className="shrink-0 text-[10.5px] uppercase opacity-50"
           title={t("branchModal.alreadyLocal", { name: localName })}
         >
           {t("branchModal.local")}

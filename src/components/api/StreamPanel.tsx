@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import Editor from "@monaco-editor/react";
 // The only panel in `components/api` that renders an editor without also importing
 // `OVERFLOW_SAFE_OPTIONS`, so it is the only one that has to ask for Monaco's setup by hand. See
@@ -14,6 +14,7 @@ import {
   ChevronRight,
   Copy,
   Info,
+  Loader2,
   Plug,
   Plus,
   Radio,
@@ -23,9 +24,13 @@ import {
   Unplug,
   X,
 } from "lucide-react";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { CollapsibleSection } from "../common/CollapsibleSection";
+import { chipClass, fieldClass, type ChipTone } from "../common/recipes";
+import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
+import { Tooltip } from "../common/Tooltip";
 import { useApiStore } from "../../state/apiStore";
 import { DEFAULT_TAB_VIEW, useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useThemeStore } from "../../state/themeStore";
@@ -71,8 +76,16 @@ const STICK_TO_BOTTOM_PX = 24;
 
 const NO_MESSAGES: StreamMessage[] = [];
 
-const INPUT =
-  "w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50";
+/** The settings and composer fields: the 26px strip size, so they sit level with the `compact`
+ * selects and the `sm` buttons that share their rows. */
+const INPUT = fieldClass({ size: "sm", className: "w-full" });
+
+/** A textarea in the same clothes as `INPUT` — `fieldClass` itself is a fixed-height single line. */
+const TEXTAREA =
+  "w-full resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-1.5 font-mono text-[12px] text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]";
+
+/** The small uppercase caption over a group — the transcript's, the composer's "Format". */
+const CAPTION = "text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
 
 export function StreamPanel({ tabId }: { tabId: string }) {
   const t = useT();
@@ -204,20 +217,16 @@ export function StreamPanel({ tabId }: { tabId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
-        <StatusDot status={status} />
-        <span className="text-[12px] font-medium text-[var(--cf-text)]">{statusLabel(status, t)}</span>
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3.5">
+        <StatusChip status={status} t={t} />
         {connection?.detail && (
-          <span className="min-w-0 truncate text-[11px] text-[var(--cf-text-muted)]">
+          <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-muted)]" title={connection.detail}>
             {connection.detail}
           </span>
         )}
         <div className="flex-1" />
         {connection ? (
-          <button
-            onClick={() => void disconnect()}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-          >
+          <button onClick={() => void disconnect()} className={buttonClass({ variant: "secondary", size: "sm" })}>
             <Unplug size={13} />
             {t("api.disconnect")}
           </button>
@@ -225,7 +234,7 @@ export function StreamPanel({ tabId }: { tabId: string }) {
           <button
             onClick={() => void connect()}
             disabled={mqttOverWebsocket || url.trim() === ""}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             <Plug size={13} />
             {t("api.connect")}
@@ -234,13 +243,13 @@ export function StreamPanel({ tabId }: { tabId: string }) {
       </div>
 
       {mqttOverWebsocket && (
-        <div className="flex shrink-0 items-start gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-warning)]/10 px-3 py-1.5 text-[11px] text-[var(--cf-text)]">
+        <div className="flex shrink-0 items-start gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-3.5 py-2 text-[12px] text-[var(--cf-text)]">
           <AlertTriangle size={13} className="mt-px shrink-0 text-[var(--cf-warning)]" />
           {t("api.mqtt.wsUnsupported")}
         </div>
       )}
 
-      <div className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
+      <div className="shrink-0 border-b border-[var(--cf-border)] px-3.5 py-2">
         <CollapsibleSection icon={Settings2} title={t("api.tab.settings")} defaultOpen>
           {protocol === "websocket" && <WebsocketSettings tabId={tabId} locked={connection !== null} />}
           {protocol === "socketio" && <SocketIoSettings tabId={tabId} locked={connection !== null} />}
@@ -249,7 +258,7 @@ export function StreamPanel({ tabId }: { tabId: string }) {
       </div>
 
       {protocol === "socketio" && (
-        <div className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
+        <div className="shrink-0 border-b border-[var(--cf-border)] px-3.5 py-2">
           <CollapsibleSection icon={Radio} title={t("api.socketio.listeners")} defaultOpen>
             <SocketIoListeners tabId={tabId} />
           </CollapsibleSection>
@@ -257,7 +266,7 @@ export function StreamPanel({ tabId }: { tabId: string }) {
       )}
 
       {protocol === "mqtt" && (
-        <div className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
+        <div className="shrink-0 border-b border-[var(--cf-border)] px-3.5 py-2">
           <CollapsibleSection icon={Radio} title={t("api.tab.subscriptions")} defaultOpen>
             <MqttSubscriptions tabId={tabId} connectionId={open ? (connection?.id ?? null) : null} />
           </CollapsibleSection>
@@ -266,7 +275,7 @@ export function StreamPanel({ tabId }: { tabId: string }) {
 
       <Transcript tabId={tabId} />
 
-      <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-2">
+      <div className="shrink-0 border-t border-[var(--cf-border)] px-3.5 py-2.5">
         {protocol === "websocket" && <WebsocketComposer tabId={tabId} connectionId={open ? (connection?.id ?? null) : null} />}
         {protocol === "socketio" && <SocketIoComposer tabId={tabId} connectionId={open ? (connection?.id ?? null) : null} />}
         {protocol === "mqtt" && <MqttComposer tabId={tabId} connectionId={open ? (connection?.id ?? null) : null} />}
@@ -279,20 +288,33 @@ export function StreamPanel({ tabId }: { tabId: string }) {
 // Connection bar
 // ---------------------------------------------------------------------------
 
-function StatusDot({ status }: { status: "connecting" | "open" | "closed" | "error" }) {
-  const color =
-    status === "open"
-      ? "var(--cf-success)"
-      : status === "connecting"
-        ? "var(--cf-warning)"
-        : status === "error"
-          ? "var(--cf-danger)"
-          : "var(--cf-text-muted)";
+const STATUS_TONE: Record<"connecting" | "open" | "closed" | "error", ChipTone> = {
+  open: "ok",
+  connecting: "warn",
+  error: "bad",
+  closed: "neutral",
+};
+
+/**
+ * The connection's state as a chip: the tone, a shape and the word, so no one of them has to
+ * carry it alone. Open is a filled dot and closed a hollow one; connecting is the machine-work
+ * spinner rather than a pulsing dot, and an error gets the same triangle the transcript uses.
+ */
+function StatusChip({ status, t }: { status: "connecting" | "open" | "closed" | "error"; t: Translate }) {
   return (
-    <span
-      className={`h-2 w-2 shrink-0 rounded-full ${status === "connecting" ? "animate-pulse" : ""}`}
-      style={{ backgroundColor: color }}
-    />
+    <span className={chipClass(STATUS_TONE[status])}>
+      {status === "connecting" ? (
+        <Loader2 size={11} className="animate-spin" />
+      ) : status === "error" ? (
+        <AlertTriangle size={11} />
+      ) : (
+        <span
+          aria-hidden
+          className={`h-1.5 w-1.5 rounded-full ${status === "open" ? "bg-current" : "border border-current"}`}
+        />
+      )}
+      {statusLabel(status, t)}
+    </span>
   );
 }
 
@@ -392,40 +414,42 @@ function Transcript({ tabId }: { tabId: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-2 px-3 py-1.5">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("api.ws.messages")}
-        </span>
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-3.5 pr-2">
+        <span className={CAPTION}>{t("api.ws.messages")}</span>
         <input
           value={filter}
           onChange={(e) => setTabView(tabId, { streamFilter: e.target.value })}
           placeholder={t("api.ws.filterPlaceholder")}
-          className="w-48 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-0.5 text-[11px] outline-none focus:border-[var(--cf-accent)]"
+          className={fieldClass({ size: "sm", className: "w-48" })}
         />
         <div className="flex-1" />
-        <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+        <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
           <Checkbox checked={autoScroll} onChange={(next) => (next ? jumpToLatest() : setAutoScroll(false))} />
           {t("api.ws.autoScroll")}
         </label>
-        <button
-          onClick={() => clearMessages(tabId)}
-          title={t("api.ws.clear")}
-          className="rounded p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
-        >
-          <Trash2 size={13} />
-        </button>
+        <Tooltip label={t("api.ws.clear")}>
+          <button
+            onClick={() => clearMessages(tabId)}
+            aria-label={t("api.ws.clear")}
+            className={iconButtonClass({ size: "sm" })}
+          >
+            <Trash2 size={14} />
+          </button>
+        </Tooltip>
       </div>
 
+      {/* The log is a well in the sheet — sunken, monospaced — the way every other log in the app
+          reads; the notice about the render window belongs to it, so it wears the same tone. */}
       {filtered.length > visible.length && (
-        <div className="shrink-0 px-3 pb-1 text-[10px] text-[var(--cf-text-muted)]">
+        <div className="shrink-0 bg-[var(--cf-sunken)] px-3.5 pt-1.5 text-[11px] text-[var(--cf-text-faint)]">
           {t("api.ws.windowed", { shown: visible.length, total: filtered.length })}
         </div>
       )}
 
-      <div className="relative min-h-0 flex-1">
-        <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto px-1 pb-1">
+      <div className="relative min-h-0 flex-1 bg-[var(--cf-sunken)]">
+        <div ref={scrollRef} onScroll={onScroll} className="h-full overflow-y-auto px-1.5 py-1">
           {visible.length === 0 ? (
-            <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">
+            <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-faint)]">
               {messages.length === 0 ? t("api.ws.noMessages") : t("api.ws.noMatches")}
             </p>
           ) : (
@@ -441,9 +465,9 @@ function Transcript({ tabId }: { tabId: string }) {
         {!autoScroll && visible.length > 0 && (
           <button
             onClick={jumpToLatest}
-            className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-1 text-[11px] text-[var(--cf-text)] shadow-[var(--cf-shadow)] hover:border-[var(--cf-accent)]"
+            className="absolute bottom-3 left-1/2 flex h-7 -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 text-[12px] font-medium text-[var(--cf-text)] shadow-[var(--cf-shadow)] transition-colors duration-100 hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
           >
-            <ArrowDownToLine size={12} />
+            <ArrowDownToLine size={13} />
             {t("api.ws.jumpToLatest")}
           </button>
         )}
@@ -452,10 +476,23 @@ function Transcript({ tabId }: { tabId: string }) {
   );
 }
 
-function MessageRow({ message, t }: { message: StreamMessage; t: Translate }) {
+/**
+ * One frame of the transcript.
+ *
+ * Memoised because every arriving frame re-renders `Transcript`, and without it that meant every
+ * row in the 300-row window again — each one's Hex/Base64 switch included, which is a
+ * `Segmented` whose sliding thumb is a framer-motion layout node that measures itself whenever it
+ * renders. `message` objects are never rewritten by the store (it only appends and trims) and `t`
+ * is stable per language, so a row now renders once, when it arrives, and again only for its own
+ * toggles.
+ */
+const MessageRow = memo(function MessageRow({ message, t }: { message: StreamMessage; t: Translate }) {
   const rendered = useMemo(() => renderPayload(message), [message]);
   const [expanded, setExpanded] = useState(false);
   const [asHex, setAsHex] = useState(true);
+  // One per row: the switch's thumb slides by `layoutId`, and two rows sharing one would send it
+  // flying across the transcript.
+  const encodingId = useId();
 
   const collapsible = rendered.kind === "binary" || rendered.text.length > COLLAPSE_THRESHOLD || rendered.text.includes("\n");
   const showFull = expanded || !collapsible;
@@ -470,57 +507,53 @@ function MessageRow({ message, t }: { message: StreamMessage; t: Translate }) {
         : firstLine(rendered.text);
 
   return (
-    <div className="group flex items-start gap-2 rounded-md px-2 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+    <div className="group flex items-start gap-2 rounded-md px-2 py-1 hover:bg-[var(--cf-hover)]">
       <DirectionIcon direction={message.direction} t={t} />
-      <span className="mt-px shrink-0 font-mono text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+      <span className="mt-px shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
         {formatTime(message.at)}
       </span>
 
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {message.channel && (
-            <span className="rounded bg-[var(--cf-accent-soft)] px-1 py-px font-mono text-[10px] text-[var(--cf-accent)]">
-              {message.channel}
-            </span>
-          )}
-          {rendered.kind === "json" && (
-            <span className="rounded border border-[var(--cf-border)] px-1 py-px text-[9px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("api.ws.formatJson")}
-            </span>
-          )}
-          {rendered.kind === "binary" && (
-            <>
-              <span className="rounded border border-[var(--cf-border)] px-1 py-px text-[9px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-                {t("api.ws.bytes", { n: rendered.size })}
+        {(message.channel || rendered.kind !== "text" || message.qos !== undefined) && (
+          <div className="mb-0.5 flex flex-wrap items-center gap-1.5">
+            {message.channel && <span className={chipClass("accent", "font-mono")}>{message.channel}</span>}
+            {rendered.kind === "json" && <span className={chipClass("neutral")}>{t("api.ws.formatJson")}</span>}
+            {rendered.kind === "binary" && (
+              <>
+                <span className={chipClass("neutral", "tabular-nums")}>{t("api.ws.bytes", { n: rendered.size })}</span>
+                <Segmented
+                  size="sm"
+                  layoutId={`cf-api-stream-encoding-${encodingId}`}
+                  value={asHex ? "hex" : "base64"}
+                  onChange={(next) => setAsHex(next === "hex")}
+                  options={[
+                    { value: "hex", label: t("api.ws.hex") },
+                    { value: "base64", label: t("api.ws.base64") },
+                  ]}
+                />
+              </>
+            )}
+            {message.qos !== undefined && (
+              <span className="text-[11px] text-[var(--cf-text-faint)]">
+                {t("api.mqtt.qos")} {message.qos}
+                {message.retain ? ` · ${t("api.mqtt.retain")}` : ""}
               </span>
-              <button
-                onClick={() => setAsHex((v) => !v)}
-                className="rounded border border-[var(--cf-border)] px-1 py-px text-[9px] uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-              >
-                {asHex ? t("api.ws.hex") : t("api.ws.base64")}
-              </button>
-            </>
-          )}
-          {message.qos !== undefined && (
-            <span className="text-[9px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("api.mqtt.qos")} {message.qos}
-              {message.retain ? ` · ${t("api.mqtt.retain")}` : ""}
-            </span>
-          )}
-        </div>
+            )}
+          </div>
+        )}
 
         {collapsible ? (
           <button
             onClick={() => setExpanded((v) => !v)}
-            className="mt-0.5 flex w-full items-start gap-1 text-left"
+            className="flex w-full items-start gap-1 text-left"
           >
             {expanded ? (
-              <ChevronDown size={12} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+              <ChevronDown size={12} className="mt-[3px] shrink-0 text-[var(--cf-text-faint)]" />
             ) : (
-              <ChevronRight size={12} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+              <ChevronRight size={12} className="mt-[3px] shrink-0 text-[var(--cf-text-faint)]" />
             )}
             <pre
-              className={`min-w-0 flex-1 font-mono text-[11px] leading-snug text-[var(--cf-text)] ${
+              className={`min-w-0 flex-1 font-mono text-[12px] leading-[18px] text-[var(--cf-text)] ${
                 showFull ? "whitespace-pre-wrap break-all" : "truncate"
               }`}
             >
@@ -528,33 +561,38 @@ function MessageRow({ message, t }: { message: StreamMessage; t: Translate }) {
             </pre>
           </button>
         ) : (
-          <pre className="mt-0.5 whitespace-pre-wrap break-all font-mono text-[11px] leading-snug text-[var(--cf-text)]">
+          <pre className="whitespace-pre-wrap break-all font-mono text-[12px] leading-[18px] text-[var(--cf-text)]">
             {body}
           </pre>
         )}
       </div>
 
-      <button
-        onClick={() => void navigator.clipboard.writeText(message.payload)}
-        title={t("api.ws.copyMessage")}
-        className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-accent)] group-hover:opacity-100"
-      >
-        <Copy size={12} />
-      </button>
+      <Tooltip label={t("api.ws.copyMessage")}>
+        <button
+          onClick={() => void navigator.clipboard.writeText(message.payload)}
+          aria-label={t("api.ws.copyMessage")}
+          className={iconButtonClass({
+            size: "xs",
+            className: "opacity-0 focus-visible:opacity-100 group-hover:opacity-100",
+          })}
+        >
+          <Copy size={13} />
+        </button>
+      </Tooltip>
     </div>
   );
-}
+});
 
 function DirectionIcon({ direction, t }: { direction: StreamMessage["direction"]; t: Translate }) {
   switch (direction) {
     case "sent":
-      return <ArrowUp size={13} className="mt-px shrink-0 text-[var(--cf-accent)]" aria-label={t("api.ws.sentAt")} />;
+      return <ArrowUp size={13} className="mt-[3px] shrink-0 text-[var(--cf-accent)]" aria-label={t("api.ws.sentAt")} />;
     case "received":
-      return <ArrowDown size={13} className="mt-px shrink-0 text-[var(--cf-success)]" aria-label={t("api.ws.receivedAt")} />;
+      return <ArrowDown size={13} className="mt-[3px] shrink-0 text-[var(--cf-success)]" aria-label={t("api.ws.receivedAt")} />;
     case "error":
-      return <AlertTriangle size={13} className="mt-px shrink-0 text-[var(--cf-danger)]" aria-label={t("api.ws.error")} />;
+      return <AlertTriangle size={13} className="mt-[3px] shrink-0 text-[var(--cf-danger)]" aria-label={t("api.ws.error")} />;
     case "system":
-      return <Info size={13} className="mt-px shrink-0 text-[var(--cf-text-muted)]" aria-label={t("api.ws.system")} />;
+      return <Info size={13} className="mt-[3px] shrink-0 text-[var(--cf-text-muted)]" aria-label={t("api.ws.system")} />;
   }
 }
 
@@ -569,7 +607,7 @@ function WebsocketSettings({ tabId, locked }: { tabId: string; locked: boolean }
   if (!settings) return <></>;
 
   return (
-    <div className="grid grid-cols-2 gap-2">
+    <div className="grid grid-cols-2 gap-x-3 gap-y-2.5">
       <Field label={t("api.ws.subprotocols")}>
         <input
           value={settings.subprotocols}
@@ -600,6 +638,7 @@ function WebsocketComposer({ tabId, connectionId }: { tabId: string; connectionI
   const settings = useApiStore((s) => s.openTabs.find((tab) => tab.id === tabId)?.draft.websocket);
   const updateDraft = useApiStore((s) => s.updateDraft);
   const appendMessage = useApiRuntimeStore((s) => s.appendMessage);
+  const formatId = useId();
   if (!settings) return <></>;
 
   const jsonError = settings.messageFormat === "json" && !isJson(settings.draftMessage);
@@ -625,38 +664,34 @@ function WebsocketComposer({ tabId, connectionId }: { tabId: string; connectionI
   };
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       <div className="flex items-center gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("api.ws.format")}
-        </span>
-        <div className="w-28 shrink-0">
-          <Select
-            size="sm"
-            value={settings.messageFormat}
-            onChange={(value) =>
-              updateDraft(tabId, {
-                websocket: { ...settings, messageFormat: value as typeof settings.messageFormat },
-              })
-            }
-            options={[
-              { value: "text", label: t("api.ws.formatText") },
-              { value: "json", label: t("api.ws.formatJson") },
-              { value: "binary", label: t("api.ws.formatBinary") },
-            ]}
-          />
-        </div>
+        <span className={CAPTION}>{t("api.ws.format")}</span>
+        {/* Three peer ways of sending the same draft — the segmented control, not a value list.
+            Unique per instance: two sockets on screen must not trade one thumb. */}
+        <Segmented
+          size="sm"
+          layoutId={`cf-api-stream-format-${formatId}`}
+          ariaLabel={t("api.ws.format")}
+          value={settings.messageFormat}
+          onChange={(value) => updateDraft(tabId, { websocket: { ...settings, messageFormat: value } })}
+          options={[
+            { value: "text", label: t("api.ws.formatText") },
+            { value: "json", label: t("api.ws.formatJson") },
+            { value: "binary", label: t("api.ws.formatBinary") },
+          ]}
+        />
         {settings.messageFormat === "binary" && (
-          <span className="text-[11px] text-[var(--cf-text-muted)]">{t("api.ws.binaryHint")}</span>
+          <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-muted)]">{t("api.ws.binaryHint")}</span>
         )}
-        {jsonError && <span className="text-[11px] text-[var(--cf-danger)]">{t("api.ws.invalidJson")}</span>}
+        {jsonError && <InvalidJson t={t} />}
         <div className="flex-1" />
         <button
           onClick={() => void send()}
           disabled={!connectionId || jsonError}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          className={buttonClass({ variant: "primary", size: "sm" })}
         >
-          <Send size={12} />
+          <Send size={13} />
           {t("api.ws.send")}
         </button>
       </div>
@@ -672,7 +707,7 @@ function WebsocketComposer({ tabId, connectionId }: { tabId: string; connectionI
           onChange={(e) => updateDraft(tabId, { websocket: { ...settings, draftMessage: e.target.value } })}
           placeholder={t("api.ws.composePlaceholder")}
           rows={3}
-          className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          className={TEXTAREA}
         />
       )}
     </div>
@@ -690,7 +725,7 @@ function SocketIoSettings({ tabId, locked }: { tabId: string; locked: boolean })
   if (!settings) return <></>;
 
   return (
-    <div className="grid grid-cols-3 gap-2">
+    <div className="grid grid-cols-3 gap-x-3 gap-y-2.5">
       <Field label={t("api.socketio.path")}>
         <input
           value={settings.path}
@@ -709,7 +744,7 @@ function SocketIoSettings({ tabId, locked }: { tabId: string; locked: boolean })
       </Field>
       <Field label={t("api.socketio.version")}>
         <Select
-          size="sm"
+          size="compact"
           disabled={locked}
           value={settings.version}
           onChange={(value) =>
@@ -723,14 +758,16 @@ function SocketIoSettings({ tabId, locked }: { tabId: string; locked: boolean })
       </Field>
       <div className="col-span-3">
         <Field label={t("api.socketio.handshakeAuth")}>
+          {/* Marked through `aria-invalid` rather than a second border colour on the class list: two
+              `border-*` utilities on one element are settled by stylesheet order, not by which was
+              written last, and the variant is what wins over the field's own border reliably. */}
           <input
             value={settings.authJson}
             disabled={locked}
             onChange={(e) => updateDraft(tabId, { socketio: { ...settings, authJson: e.target.value } })}
             placeholder='{"token":"{{authToken}}"}'
-            className={`${INPUT} font-mono ${
-              isJson(settings.authJson) ? "" : "border-[var(--cf-danger)]"
-            }`}
+            aria-invalid={!isJson(settings.authJson)}
+            className={`${INPUT} font-mono aria-[invalid=true]:border-[var(--cf-danger)]`}
           />
         </Field>
       </div>
@@ -755,30 +792,35 @@ function SocketIoListeners({ tabId }: { tabId: string }) {
   };
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       {settings.listeners.length === 0 ? (
-        <p className="text-[11px] text-[var(--cf-text-muted)]">{t("api.socketio.listenAll")}</p>
+        <p className="text-[12px] text-[var(--cf-text-muted)]">{t("api.socketio.listenAll")}</p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
           {settings.listeners.map((name) => (
+            // An accent chip with its remove button as the chip's own right end: at `chipClass`'s
+            // 20px there is no room for a 22px target, so this one is written out at 24px, in the
+            // same tone.
             <span
               key={name}
-              className="flex items-center gap-1 rounded bg-[var(--cf-accent-soft)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--cf-accent)]"
+              className="inline-flex h-6 items-center rounded-md bg-[var(--cf-accent-soft)] pl-2 font-mono text-[12px] text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent-line)]"
             >
               {name}
-              <button
-                onClick={() => setListeners(settings.listeners.filter((other) => other !== name))}
-                title={t("api.socketio.removeListener")}
-                className="hover:text-[var(--cf-danger)]"
-              >
-                <X size={11} />
-              </button>
+              <Tooltip label={t("api.socketio.removeListener")}>
+                <button
+                  onClick={() => setListeners(settings.listeners.filter((other) => other !== name))}
+                  aria-label={t("api.socketio.removeListener")}
+                  className="ml-0.5 inline-flex h-6 w-[22px] items-center justify-center rounded-r-md transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
+                >
+                  <X size={12} />
+                </button>
+              </Tooltip>
             </span>
           ))}
         </div>
       )}
 
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-2">
         <input
           value={draftName}
           onChange={(e) => setDraftName(e.target.value)}
@@ -788,15 +830,12 @@ function SocketIoListeners({ tabId }: { tabId: string }) {
           placeholder={t("api.socketio.event")}
           className={`${INPUT} font-mono`}
         />
-        <button
-          onClick={add}
-          className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-        >
-          <Plus size={12} />
+        <button onClick={add} className={buttonClass({ variant: "secondary", size: "sm" })}>
+          <Plus size={13} />
           {t("api.socketio.addListener")}
         </button>
       </div>
-      <p className="text-[10px] leading-snug text-[var(--cf-text-muted)]">{t("api.socketio.listenerHint")}</p>
+      <p className="text-[11px] leading-snug text-[var(--cf-text-faint)]">{t("api.socketio.listenerHint")}</p>
     </div>
   );
 }
@@ -828,22 +867,22 @@ function SocketIoComposer({ tabId, connectionId }: { tabId: string; connectionId
   };
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       <div className="flex items-center gap-2">
         <input
           value={settings.draftEvent}
           onChange={(e) => updateDraft(tabId, { socketio: { ...settings, draftEvent: e.target.value } })}
           placeholder={t("api.socketio.event")}
-          className={`${INPUT} w-48 font-mono`}
+          className={fieldClass({ size: "sm", className: "w-48 font-mono" })}
         />
-        {jsonError && <span className="text-[11px] text-[var(--cf-danger)]">{t("api.ws.invalidJson")}</span>}
+        {jsonError && <InvalidJson t={t} />}
         <div className="flex-1" />
         <button
           onClick={() => void emit()}
           disabled={!connectionId || jsonError || settings.draftEvent.trim() === ""}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          className={buttonClass({ variant: "primary", size: "sm" })}
         >
-          <Send size={12} />
+          <Send size={13} />
           {t("api.socketio.emit")}
         </button>
       </div>
@@ -878,8 +917,8 @@ function MqttSettings({ tabId, locked }: { tabId: string; locked: boolean }) {
   const patch = (next: Partial<typeof settings>) => updateDraft(tabId, { mqtt: { ...settings, ...next } });
 
   return (
-    <div className="space-y-2">
-      <div className="grid grid-cols-4 gap-2">
+    <div className="space-y-2.5">
+      <div className="grid grid-cols-4 gap-x-3 gap-y-2.5">
         <Field label={t("api.mqtt.clientId")}>
           <input
             value={settings.clientId}
@@ -900,7 +939,7 @@ function MqttSettings({ tabId, locked }: { tabId: string; locked: boolean }) {
         </Field>
         <Field label={t("api.mqtt.version")}>
           <Select
-            size="sm"
+            size="compact"
             disabled={locked}
             value={settings.version}
             onChange={(value) => patch({ version: value as typeof settings.version })}
@@ -910,8 +949,8 @@ function MqttSettings({ tabId, locked }: { tabId: string; locked: boolean }) {
             ]}
           />
         </Field>
-        <div className="flex items-end pb-1">
-          <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
+        <div className="flex items-end">
+          <label className="flex h-[26px] cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
             <Checkbox
               checked={settings.cleanSession}
               disabled={locked}
@@ -922,7 +961,7 @@ function MqttSettings({ tabId, locked }: { tabId: string; locked: boolean }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-2.5">
         <Field label={t("api.auth.username")}>
           <input
             value={settings.username}
@@ -942,11 +981,11 @@ function MqttSettings({ tabId, locked }: { tabId: string; locked: boolean }) {
         </Field>
       </div>
 
-      <div>
-        <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("api.mqtt.lastWill")}
-        </p>
-        <div className="grid grid-cols-4 gap-2">
+      {/* A group of fields rather than a field, so its heading is a step above their captions —
+          sentence case and full text colour — with a hairline to say where the group starts. */}
+      <div className="border-t border-[var(--cf-border)] pt-2.5">
+        <p className="mb-2 text-[12px] font-semibold text-[var(--cf-text)]">{t("api.mqtt.lastWill")}</p>
+        <div className="grid grid-cols-4 gap-x-3 gap-y-2.5">
           <Field label={t("api.mqtt.topic")}>
             <input
               value={settings.lastWill.topic}
@@ -965,17 +1004,17 @@ function MqttSettings({ tabId, locked }: { tabId: string; locked: boolean }) {
               />
             </Field>
           </div>
-          <div className="flex items-end gap-2 pb-0.5">
+          <div className="flex items-end gap-3">
             <Field label={t("api.mqtt.qos")}>
               <Select
-                size="sm"
+                size="compact"
                 disabled={locked}
                 value={String(settings.lastWill.qos)}
                 onChange={(value) => patch({ lastWill: { ...settings.lastWill, qos: toQos(value) } })}
                 options={QOS_OPTIONS}
               />
             </Field>
-            <label className="flex cursor-pointer items-center gap-1.5 pb-1 text-[12px] text-[var(--cf-text)]">
+            <label className="flex h-[26px] cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
               <Checkbox
                 checked={settings.lastWill.retain}
                 disabled={locked}
@@ -1016,13 +1055,13 @@ function MqttSubscriptions({ tabId, connectionId }: { tabId: string; connectionI
   };
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-1.5">
       {settings.subscriptions.length === 0 && (
-        <p className="text-[11px] text-[var(--cf-text-muted)]">{t("api.mqtt.noSubscriptions")}</p>
+        <p className="text-[12px] text-[var(--cf-text-muted)]">{t("api.mqtt.noSubscriptions")}</p>
       )}
 
       {settings.subscriptions.map((row) => (
-        <div key={row.id} className="flex items-center gap-1.5">
+        <div key={row.id} className="flex items-center gap-2">
           <Checkbox checked={row.enabled} onChange={(checked) => void applyEnabled(row, checked)} />
           <input
             value={row.topic}
@@ -1032,7 +1071,7 @@ function MqttSubscriptions({ tabId, connectionId }: { tabId: string; connectionI
           />
           <div className="w-16 shrink-0">
             <Select
-              size="sm"
+              size="compact"
               ariaLabel={t("api.mqtt.qos")}
               value={String(row.qos)}
               onChange={(value) => patchRow(row.id, { qos: toQos(value) })}
@@ -1042,24 +1081,26 @@ function MqttSubscriptions({ tabId, connectionId }: { tabId: string; connectionI
           <button
             onClick={() => void applyEnabled(row, true)}
             disabled={!connectionId || row.topic.trim() === ""}
-            className="shrink-0 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-40"
+            className={buttonClass({ variant: "secondary", size: "sm" })}
           >
             {t("api.mqtt.subscribe")}
           </button>
           <button
             onClick={() => void applyEnabled(row, false)}
             disabled={!connectionId || row.topic.trim() === ""}
-            className="shrink-0 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-40"
+            className={buttonClass({ variant: "secondary", size: "sm" })}
           >
             {t("api.mqtt.unsubscribe")}
           </button>
-          <button
-            onClick={() => setRows(settings.subscriptions.filter((other) => other.id !== row.id))}
-            title={t("api.removeRow")}
-            className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-          >
-            <X size={13} />
-          </button>
+          <Tooltip label={t("api.removeRow")}>
+            <button
+              onClick={() => setRows(settings.subscriptions.filter((other) => other.id !== row.id))}
+              aria-label={t("api.removeRow")}
+              className={iconButtonClass({ size: "xs" })}
+            >
+              <X size={13} />
+            </button>
+          </Tooltip>
         </div>
       ))}
 
@@ -1070,9 +1111,9 @@ function MqttSubscriptions({ tabId, connectionId }: { tabId: string; connectionI
             { id: newRowId(), topic: "", qos: 0, enabled: true },
           ])
         }
-        className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+        className={buttonClass({ variant: "ghost", size: "sm", className: "-ml-2" })}
       >
-        <Plus size={12} />
+        <Plus size={13} />
         {t("api.mqtt.addSubscription")}
       </button>
     </div>
@@ -1114,17 +1155,17 @@ function MqttComposer({ tabId, connectionId }: { tabId: string; connectionId: st
   };
 
   return (
-    <div className="space-y-1.5">
+    <div className="space-y-2">
       <div className="flex items-center gap-2">
         <input
           value={settings.publishTopic}
           onChange={(e) => patch({ publishTopic: e.target.value })}
           placeholder={t("api.mqtt.topic")}
-          className={`${INPUT} w-64 font-mono`}
+          className={fieldClass({ size: "sm", className: "w-64 font-mono" })}
         />
         <div className="w-16 shrink-0">
           <Select
-            size="sm"
+            size="compact"
             ariaLabel={t("api.mqtt.qos")}
             value={String(settings.publishQos)}
             onChange={(value) => patch({ publishQos: toQos(value) })}
@@ -1139,9 +1180,9 @@ function MqttComposer({ tabId, connectionId }: { tabId: string; connectionId: st
         <button
           onClick={() => void publish()}
           disabled={!connectionId || settings.publishTopic.trim() === ""}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          className={buttonClass({ variant: "primary", size: "sm" })}
         >
-          <Send size={12} />
+          <Send size={13} />
           {t("api.mqtt.publish")}
         </button>
       </div>
@@ -1150,7 +1191,7 @@ function MqttComposer({ tabId, connectionId }: { tabId: string; connectionId: st
         onChange={(e) => patch({ publishPayload: e.target.value })}
         placeholder={t("api.mqtt.payload")}
         rows={3}
-        className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
+        className={TEXTAREA}
       />
     </div>
   );
@@ -1163,18 +1204,26 @@ function MqttComposer({ tabId, connectionId }: { tabId: string; connectionId: st
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-0.5 block text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {label}
-      </span>
+      <span className={`mb-1 block ${CAPTION}`}>{label}</span>
       {children}
     </label>
+  );
+}
+
+/** The composer's "this isn't JSON" — a word and a triangle on the danger tone, not red text alone. */
+function InvalidJson({ t }: { t: Translate }) {
+  return (
+    <span className={chipClass("bad")}>
+      <AlertTriangle size={11} />
+      {t("api.ws.invalidJson")}
+    </span>
   );
 }
 
 function JsonEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
   return (
-    <div className="overflow-hidden rounded-md border border-[var(--cf-border)]">
+    <div className="overflow-hidden rounded-md border border-[var(--cf-field-border)]">
       <Editor
         height="110px"
         language="json"

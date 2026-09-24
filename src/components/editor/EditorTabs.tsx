@@ -3,7 +3,11 @@ import { createPortal } from "react-dom";
 import { ClipboardCopy, ListTree, Pin, PinOff, SplitSquareHorizontal, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { FileGlyph } from "../common/FileGlyph";
+import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass, Kbd } from "../common/Button";
+import { docTabClass } from "../common/recipes";
 import { DRAG_THRESHOLD, preventMiddleClickAutoscroll, setDragCursor } from "../../lib/pointerDrag";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { useTabDragStore, type TabDrag, type TabDropTarget } from "../../state/tabDragStore";
 import { useT } from "../../state/languageStore";
@@ -34,6 +38,18 @@ export interface TabMenuActions {
 
 function baseName(path: string): string {
   return path.split("/").pop() ?? path;
+}
+
+/**
+ * The shared document tab, without its `:hover` rules.
+ *
+ * These tabs track hover in JavaScript instead (`rowHoverStore`, drawn as `cf-row-hover` below):
+ * WebKit keeps the hover flag on every tab a hand-rolled drag sweeps across, so the recipe's CSS
+ * hover would light them all up again at the drop. Everything else — the active tab taking the
+ * sheet's colour and covering the strip's hairline, the muted rest state — is the recipe's.
+ */
+function tabClass(active: boolean, extra: string): string {
+  return docTabClass(active, extra).replace(/(^|\s)hover:\S+/g, "$1");
 }
 
 function parentDir(path: string): string {
@@ -144,6 +160,10 @@ export function EditorTabs({
   actions?: ReactNode;
 }) {
   const t = useT();
+  const chord = useShortcutChord();
+  /** From the binding registry rather than a string: ⌘W on a Mac, Ctrl+W elsewhere, and whatever
+   *  the user rebound it to. It closes the *active* tab, which is the one whose × says so loudest. */
+  const closeChord = chord("editor.closeTab");
   /** The tab the context menu was opened on, with the point to draw it at. */
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tab: EditorTabItem } | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -238,17 +258,30 @@ export function EditorTabs({
   ];
 
   return (
-    <div className="flex shrink-0 items-stretch border-b border-[var(--cf-border)] bg-[var(--cf-bg)]">
+    // The strip is the sunken tone with its hairline drawn as an *inset shadow* rather than the
+    // `docStripClass` border, and the scroller below carries one pixel of bottom padding. Both for
+    // the same reason: the active tab melts into the sheet by covering that hairline, and a
+    // scroller clips its children at its padding edge — a border sits outside it, where the tab can
+    // never reach, so with a border the line stayed drawn under the active tab. An inset shadow is
+    // painted under the children, inside the padding box, so the active tab's own fill covers it
+    // while the inactive tabs, which have none, let it through.
+    <div className="flex h-9 shrink-0 items-stretch bg-[var(--cf-sunken)] shadow-[inset_0_-1px_0_var(--cf-border)]">
       <div
         ref={stripRef}
         data-cf-tabstrip={groupId}
         onWheel={onWheel}
-        className="cf-tab-strip flex min-w-0 flex-1 items-stretch overflow-x-auto"
+        role="tablist"
+        // No scrollbar: at three pixels it took its height out of the tabs whenever the strip
+        // overflowed, which broke the melt. The wheel handler above scrolls it, and the active tab
+        // pulls itself into view.
+        className="flex min-w-0 flex-1 items-stretch overflow-x-auto pb-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {tabs.map((tab, index) => {
           const active = tab.path === activePath;
           const hoverKey = `tab:${groupId}:${tab.path}`;
+          const hovered = !active && hoverKey === hoveredKey && !drag;
           const suffix = suffixes.get(tab.path);
+          const closeLabel = tab.pinned ? t("editor.unpinTab") : t("editor.closeTab");
           return (
             <Fragment key={tab.path}>
               {dropAt === index && dropBar}
@@ -292,49 +325,66 @@ export function EditorTabs({
                     onClose(tab.path);
                   }
                 }}
-                className={`group relative flex h-9 max-w-[220px] shrink-0 cursor-pointer select-none items-center gap-1.5 border-r border-[var(--cf-border)] pl-3 pr-2 text-[12px] transition-colors ${
-                  active
-                    ? "bg-[var(--cf-surface)] text-[var(--cf-text)]"
-                    : `text-[var(--cf-text-muted)] ${hoverKey === hoveredKey && !drag ? "cf-row-hover" : ""}`
-                } ${draggingHere && drag?.path === tab.path ? "opacity-40" : ""}`}
-              >
-                {active && <span className="absolute inset-x-0 top-0 h-[2px] bg-[var(--cf-accent)]" />}
-                <FileGlyph path={tab.path} />
-                <span className={`truncate ${tab.preview ? "italic" : ""}`}>{baseName(tab.path)}</span>
-                {suffix && (
-                  <span className="truncate text-[10px] text-[var(--cf-text-muted)] opacity-70">{suffix}</span>
+                className={tabClass(
+                  active,
+                  `cursor-pointer select-none ${hovered ? "cf-row-hover" : ""} ${
+                    draggingHere && drag?.path === tab.path ? "opacity-40" : ""
+                  }`,
                 )}
-                <button
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    // A pinned tab's slot is the pin itself, so the one click it takes to put a
-                    // tab back in the churn is the same click that took it out.
-                    if (tab.pinned) menu.togglePinned(tab.path);
-                    else onClose(tab.path);
-                  }}
-                  title={tab.pinned ? t("editor.unpinTab") : t("editor.closeTab")}
-                  className={`ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.08] ${
-                    active || tab.pinned ? "" : "opacity-0 group-hover:opacity-100"
-                  }`}
+              >
+                <FileGlyph path={tab.path} />
+                {/* Lifted to full text on hover here rather than on the tab: the tab's muted colour
+                    comes from the recipe, and a second colour class on the same element would be a
+                    tie for the stylesheet to break. */}
+                <span className={`truncate ${tab.preview ? "italic" : ""} ${hovered ? "text-[var(--cf-text)]" : ""}`}>
+                  {baseName(tab.path)}
+                </span>
+                {suffix && <span className="truncate text-[11px] text-[var(--cf-text-faint)]">{suffix}</span>}
+                <Tooltip
+                  label={closeLabel}
+                  trailing={!tab.pinned && closeChord ? <Kbd>{closeChord}</Kbd> : undefined}
                 >
-                  {/* The dirty dot lives in the close button's slot, like VS Code: it turns into
-                      an × on hover so a modified tab is still one click from closing. */}
-                  {tab.dirty ? (
-                    <>
-                      <span className="h-2 w-2 rounded-full bg-[var(--cf-text)] group-hover:hidden" />
-                      {tab.pinned ? (
-                        <PinOff size={11} className="hidden group-hover:block" />
-                      ) : (
-                        <X size={12} className="hidden group-hover:block" />
-                      )}
-                    </>
-                  ) : tab.pinned ? (
-                    <Pin size={11} className="fill-current" />
-                  ) : (
-                    <X size={12} />
-                  )}
-                </button>
+                  <button
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // A pinned tab's slot is the pin itself, so the one click it takes to put a
+                      // tab back in the churn is the same click that took it out.
+                      if (tab.pinned) menu.togglePinned(tab.path);
+                      else onClose(tab.path);
+                    }}
+                    // Empty on purpose: without it the tab's own `title` — its path — would pop up
+                    // over this button's tooltip after the platform's delay.
+                    title=""
+                    aria-label={closeLabel}
+                    className={iconButtonClass({
+                      size: "xs",
+                      className: `ml-auto ${
+                        active || tab.pinned || tab.dirty
+                          ? ""
+                          : "opacity-0 focus-visible:opacity-100 group-hover/doctab:opacity-100"
+                      }`,
+                    })}
+                  >
+                    {/* The dirty dot lives in the close button's slot, like VS Code, and it shows on
+                        every modified tab, not only the active one. It turns into an × on hover or
+                        focus, so a modified tab is still one click from closing. */}
+                    {tab.dirty ? (
+                      <>
+                        <span className="h-[7px] w-[7px] rounded-full bg-[var(--cf-accent)] group-focus-within/doctab:hidden group-hover/doctab:hidden" />
+                        {tab.pinned ? (
+                          <PinOff size={12} className="hidden group-focus-within/doctab:block group-hover/doctab:block" />
+                        ) : (
+                          <X size={13} className="hidden group-focus-within/doctab:block group-hover/doctab:block" />
+                        )}
+                      </>
+                    ) : tab.pinned ? (
+                      <Pin size={12} className="fill-current" />
+                    ) : (
+                      <X size={13} />
+                    )}
+                  </button>
+                </Tooltip>
               </div>
             </Fragment>
           );
@@ -342,9 +392,7 @@ export function EditorTabs({
         {/* Dropping past the last tab appends. */}
         {dropAt === tabs.length && dropBar}
       </div>
-      {actions && (
-        <div className="flex shrink-0 items-center gap-2 border-l border-[var(--cf-border)] px-2">{actions}</div>
-      )}
+      {actions && <div className="flex shrink-0 items-center gap-0.5 pl-2 pr-1.5">{actions}</div>}
 
       {tabMenu && (
         <ContextMenu
@@ -364,8 +412,9 @@ export function EditorTabs({
           <div
             ref={ghostRef}
             style={{ transform: `translate(${origin.x + 12}px, ${origin.y + 12}px)` }}
-            className="pointer-events-none fixed left-0 top-0 z-[100] flex items-center gap-1.5 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface)] px-2 py-1 text-[11px] text-[var(--cf-text)] shadow-lg"
+            className="pointer-events-none fixed left-0 top-0 z-[100] flex items-center gap-1.5 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-2 py-1 text-[12px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
           >
+            <FileGlyph path={drag.path} />
             {baseName(drag.path)}
           </div>,
           document.body,

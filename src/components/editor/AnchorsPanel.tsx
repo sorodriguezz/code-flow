@@ -10,6 +10,10 @@ import {
 } from "../../lib/anchors";
 import { searchRepo } from "../../lib/tauri/commands";
 import { FileGlyph } from "../common/FileGlyph";
+import { Tooltip } from "../common/Tooltip";
+import { Segmented } from "../common/Segmented";
+import { iconButtonClass } from "../common/Button";
+import { explorerHeadClass, explorerTitleClass, fieldClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
 
@@ -159,91 +163,96 @@ export function AnchorsPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 space-y-1.5 border-b border-[var(--cf-border)] p-1.5">
-        <div className="flex items-center gap-1">
-          <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
-            {(
-              [
-                { id: "file", icon: FileText, label: t("anchors.scopeFile") },
-                { id: "project", icon: FolderTree, label: t("anchors.scopeProject") },
-              ] as const
-            ).map(({ id, icon: Icon, label }) => (
-              <button
-                key={id}
-                onClick={() => setScope(id)}
-                title={label}
-                aria-label={label}
-                aria-pressed={scope === id}
-                className={`flex h-5 w-5 items-center justify-center rounded ${
-                  scope === id ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-                }`}
-              >
-                <Icon size={12} />
-              </button>
-            ))}
-          </div>
-          <div className="flex min-w-0 flex-1 items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5">
-            <Tag size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+      {/* The head every panel of the activity rail wears: its name, and its one panel-wide action. */}
+      <div className={explorerHeadClass}>
+        <span className={`${explorerTitleClass} mr-auto`}>
+          <span className="truncate">{t("anchors.title")}</span>
+        </span>
+        {scope === "project" && (
+          <Tooltip side="bottom" label={t("anchors.rescan")}>
+            <button
+              onClick={() => void scanProject()}
+              disabled={scanning}
+              aria-label={t("anchors.rescan")}
+              className={iconButtonClass({ size: "sm" })}
+            >
+              {scanning ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+            </button>
+          </Tooltip>
+        )}
+      </div>
+
+      <div className="shrink-0 space-y-2 border-b border-[var(--cf-border)] px-3 pb-3">
+        <div className="flex items-center gap-1.5">
+          {/* Two peer ways of reading the same list — the segmented control. */}
+          <Segmented<Scope>
+            size="sm"
+            layoutId="cf-anchors-scope"
+            value={scope}
+            onChange={setScope}
+            options={[
+              { value: "file", icon: FileText, title: t("anchors.scopeFile") },
+              { value: "project", icon: FolderTree, title: t("anchors.scopeProject") },
+            ]}
+          />
+          <div className="relative min-w-0 flex-1">
+            <Tag
+              size={13}
+              className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
+            />
             <input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
               placeholder={t("anchors.filterPlaceholder")}
-              className="min-w-0 flex-1 bg-transparent py-1 text-[12px] outline-none"
+              className={fieldClass({ size: "sm", className: "w-full pl-7" })}
             />
           </div>
-          {scope === "project" && (
-            <button
-              onClick={() => void scanProject()}
-              disabled={scanning}
-              title={t("anchors.rescan")}
-              aria-label={t("anchors.rescan")}
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
-            >
-              {scanning ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-            </button>
-          )}
         </div>
 
         {/* Legend and filter in one control: each chip says how many of that tag are in scope and
-            toggles it out of the list. */}
-        <div className="flex flex-wrap gap-1">
+            toggles it out of the list. Off is told by shape as well as by fading — the dot empties
+            to a ring — so it does not rest on telling two tints of one colour apart. */}
+        <div className="flex flex-wrap gap-0.5">
           {ANCHOR_TAGS.map((tag) => {
             const count = countsByTag.get(tag.id) ?? 0;
             const on = isTagOn(tag.id);
             return (
-              <button
-                key={tag.id}
-                onClick={() => toggleTag(tag.id)}
-                title={t("anchors.toggleTag", { tag: tag.id })}
-                aria-pressed={on}
-                className={`flex items-center gap-1 rounded px-1 py-0.5 text-[9px] font-medium tracking-wide ${
-                  on ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)] opacity-40"
-                } hover:bg-black/[0.05] dark:hover:bg-white/[0.08]`}
-              >
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: tag.color }} />
-                {tag.id}
-                {count > 0 && <span className="text-[var(--cf-text-muted)]">{count}</span>}
-              </button>
+              <Tooltip key={tag.id} side="bottom" label={t("anchors.toggleTag", { tag: tag.id })}>
+                <button
+                  onClick={() => toggleTag(tag.id)}
+                  aria-pressed={on}
+                  className={`flex h-[22px] items-center gap-1.5 rounded-md px-1.5 text-[11px] font-medium tracking-[0.02em] transition-colors duration-100 hover:bg-[var(--cf-hover)] ${
+                    on ? "text-[var(--cf-text)]" : "text-[var(--cf-text-faint)]"
+                  }`}
+                >
+                  <span
+                    className="h-[7px] w-[7px] shrink-0 rounded-full"
+                    style={on ? { background: tag.color } : { boxShadow: `inset 0 0 0 1.5px ${tag.color}` }}
+                  />
+                  {tag.id}
+                  {count > 0 && <span className="tabular-nums text-[var(--cf-text-faint)]">{count}</span>}
+                </button>
+              </Tooltip>
             );
           })}
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
-        {error && <p className="px-3 py-2 text-[11px] text-[var(--cf-danger)]">{error}</p>}
+      <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-1">
+        {error && <p className="px-1.5 py-2 text-[12px] text-[var(--cf-danger)]">{error}</p>}
         {scanning && (
-          <div className="flex items-center gap-1.5 px-3 py-2 text-[11px] text-[var(--cf-text-muted)]">
-            <Loader2 size={11} className="animate-spin" />
+          <div className="flex items-center gap-1.5 px-1.5 py-2 text-[12px] text-[var(--cf-text-muted)]">
+            <Loader2 size={13} className="animate-spin" />
             {t("anchors.scanning")}
           </div>
         )}
         {!scanning && !error && visible.length === 0 && (
-          <p className="px-3 py-2 text-[11px] text-[var(--cf-text-muted)]">
+          <p className="px-1.5 py-2 text-[12px] text-[var(--cf-text-muted)]">
             {scope === "file" && !activePath ? t("anchors.noFile") : t("anchors.none")}
           </p>
         )}
         {!scanning && visible.length > 0 && (
-          <p className="px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
+          <p className="px-1.5 py-1.5 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
             {t("anchors.count", { n: visible.length, files: grouped.length })}
             {truncated && scope === "project" ? ` · ${t("editor.searchTruncated")}` : ""}
           </p>
@@ -255,10 +264,12 @@ export function AnchorsPanel({
               {/* The current-file scope has exactly one group, and repeating the name of the file
                   already named in the breadcrumb above would be noise. */}
               {scope === "project" && (
-                <div className="flex items-center gap-1.5 px-2 py-0.5">
-                  <FileGlyph path={path} size={12} />
-                  <span className="truncate text-[11px] text-[var(--cf-text)]">{path}</span>
-                  <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{items.length}</span>
+                <div className="flex h-[26px] items-center gap-1.5 px-1.5">
+                  <FileGlyph path={path} size={13} />
+                  <span className="truncate text-[12px] text-[var(--cf-text)]">{path}</span>
+                  <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+                    {items.length}
+                  </span>
                 </div>
               )}
               {items.map((anchor, at) => (
@@ -266,20 +277,22 @@ export function AnchorsPanel({
                   key={`${anchor.path}:${anchor.line}:${anchor.column}`}
                   onClick={() => onOpenAnchor(anchor.path, anchor.line, anchor.column)}
                   style={riseDelay(at)}
-                  className={`cf-rise flex w-full items-baseline gap-1.5 rounded px-2 py-0.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04] ${
-                    scope === "project" ? "pl-6" : ""
+                  className={`cf-rise flex w-full items-baseline gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--cf-hover)] ${
+                    scope === "project" ? "pl-7" : ""
                   }`}
                 >
                   <span
-                    className="shrink-0 text-[9px] font-semibold tracking-wide"
+                    className="shrink-0 text-[11px] font-semibold tracking-[0.02em]"
                     style={{ color: anchorColor(anchor.tag) }}
                   >
                     {anchor.tag}
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--cf-text-muted)]">
-                    {anchor.text || <span className="italic opacity-60">{t("anchors.bare")}</span>}
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]">
+                    {anchor.text || <span className="italic text-[var(--cf-text-faint)]">{t("anchors.bare")}</span>}
                   </span>
-                  <span className="shrink-0 font-mono text-[10px] text-[var(--cf-text-muted)]">{anchor.line}</span>
+                  <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+                    {anchor.line}
+                  </span>
                 </button>
               ))}
             </div>

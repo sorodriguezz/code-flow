@@ -8,6 +8,7 @@ import {
   revealInFileManager,
 } from "../../lib/tauri/commands";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { buttonClass } from "../common/Button";
 
 /**
  * What the app says about its own directories when there is something to say.
@@ -127,11 +128,11 @@ export function DataDirsNotice() {
       aria-modal="true"
       aria-label={title}
       onClick={(e) => e.stopPropagation()}
-      className="flex max-h-[75vh] w-[560px] flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+      className="flex max-h-[75vh] w-[560px] flex-col rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
     >
       <div className="flex shrink-0 items-start justify-between gap-2 border-b border-[var(--cf-border)] p-4">
         <div className="min-w-0">
-          <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
+          <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
             <TriangleAlert
               size={14}
               className={`shrink-0 ${blocking ? "text-[var(--cf-danger)]" : "text-[var(--cf-warning)]"}`}
@@ -151,10 +152,10 @@ export function DataDirsNotice() {
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <p className="text-[12.5px] leading-snug text-[var(--cf-text-muted)]">{body}</p>
+        <p className="text-[13px] leading-snug text-[var(--cf-text-muted)]">{body}</p>
         {paths}
         {status.detail && (
-          <p className="mt-3 select-text break-all rounded-md bg-black/[0.04] px-2 py-1.5 font-mono text-[11px] text-[var(--cf-text-muted)] dark:bg-white/[0.06]">
+          <p className="mt-3 select-text break-all rounded-md bg-[var(--cf-hover)] px-2 py-1.5 font-mono text-[11px] text-[var(--cf-text-muted)]">
             {status.detail}
           </p>
         )}
@@ -163,7 +164,7 @@ export function DataDirsNotice() {
       <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--cf-border)] p-3">
         <button
           onClick={() => void revealInFileManager(status.legacyDir)}
-          className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          className={buttonClass({ variant: "secondary" })}
         >
           <FolderOpen size={13} />
           {t("dataDirs.openOldFolder")}
@@ -202,7 +203,7 @@ export function DataDirsNotice() {
         {!blocking && (
           <button
             onClick={dismissNotice}
-            className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
+            className={buttonClass({ variant: "primary" })}
           >
             {t("dataDirs.dismiss")}
           </button>

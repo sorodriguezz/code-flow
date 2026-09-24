@@ -5,7 +5,6 @@ import * as monaco from "monaco-editor";
 // mounted. Idempotent — see the note in `monacoSetup`.
 import "../../lib/monacoSetup";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { AnimatePresence, motion } from "framer-motion";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   Bookmark,
@@ -64,8 +63,12 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
+import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass, Kbd } from "../common/Button";
+import { explorerClass, inspectorClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
-import { useShortcutHint } from "../../lib/useShortcutHint";
+import { useShortcutChord } from "../../lib/useShortcutHint";
+import type { ShortcutId } from "../../lib/shortcuts";
 import type { FileDiffInfo } from "../../types/domain";
 
 /**
@@ -83,10 +86,20 @@ const TREE_MAX = 480;
  * path and three action buttons, and the commit box under them has to fit a message. */
 const CHANGES_MIN = 240;
 const CHANGES_MAX = 560;
-/** The shut dock: wide enough for one 28px button with a little air. A constant because the close
- * animation interpolates to it, and a `w-9` class the motion value had to agree with by hand is a
- * pair that drifts. */
-const RAIL_W = 36;
+/** The shut dock: one 28px button with a little air — the same width as the activity rail on the
+ * other side of the code, so the two edges of the editor read as a pair. */
+const RAIL_W = 40;
+
+/**
+ * An activity-rail button. At rest it is the shared icon button; the selected one hands its fill to
+ * the `ActivePill` behind it, which is what slides between the five instead of blinking — so it
+ * keeps only the accent ink, and the pill is the whole of its background.
+ */
+function railButtonClass(selected: boolean): string {
+  return selected
+    ? "relative inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-accent)]"
+    : iconButtonClass({ size: "md", className: "relative" });
+}
 const GROUP_MAX = 2000;
 /** Matches the `w-px` on `ResizeHandle`, which the even-split maths has to account for. */
 const HANDLE_WIDTH = 1;
@@ -113,7 +126,12 @@ const ROW_MIN = 140;
 
 export function EditorView() {
   const t = useT();
-  const shortcutHint = useShortcutHint();
+  const chord = useShortcutChord();
+  /** A registry chord as a key cap, for a tooltip's trailing slot — `undefined` when unbound. */
+  const keyCap = (id: ShortcutId) => {
+    const keys = chord(id);
+    return keys ? <Kbd>{keys}</Kbd> : undefined;
+  };
   const project = useWorkspaceStore((s) => s.activeProject());
   const status = useRepoStore((s) => s.status);
   const { changedPaths, changedDirs } = useMemo(() => {
@@ -187,10 +205,6 @@ export function EditorView() {
   /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
    * step into while committing, not a layout preference — the editor's resting state is code. */
   const [changesOpen, setChangesOpen] = useState(false);
-  /** True while the dock's edge is being dragged. The open/close ease has to be off then: the
-   * handle writes a new width on every pointer move, and easing toward each one makes the edge swim
-   * after the cursor instead of tracking it. The same trade `AiPanel` makes for the same reason. */
-  const [resizingChanges, setResizingChanges] = useState(false);
   /** The snapshot being composed, or `null` when the dialog is closed. */
   const [codeSnap, setCodeSnap] = useState<CodeSnapTarget | null>(null);
   /** Which group should jump where. Scoped to a group because "go to this search hit" means the
@@ -1188,13 +1202,15 @@ export function EditorView() {
             way an editor keeps its settings gear there. */}
         <div
           data-tour="editor-rail"
-          className="flex w-9 shrink-0 flex-col items-center gap-1 bg-[var(--cf-surface)] py-1.5"
+          className="flex w-10 shrink-0 flex-col items-center gap-1 border-r border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))] py-2"
         >
-          {/* The chord in each tooltip comes from the binding registry, not from a string next to
-              the label: two of these used to carry a hand-written "(Ctrl+Shift+F)" that said Ctrl
-              on a Mac and went stale the moment anyone rebound it, and the other three said
-              nothing at all. `aria-label` stays the bare name — a screen reader announces the
-              key from the binding, not from the accessible name. */}
+          {/* The chord in each tooltip comes from the binding registry, drawn as a key cap beside
+              the name, never from a string next to the label: two of these used to carry a
+              hand-written "(Ctrl+Shift+F)" that said Ctrl on a Mac and went stale the moment anyone
+              rebound it. All five panels have a binding now, so every tooltip carries one — a rail
+              where some glyphs answer "and the key?" and some don't is the surprise this avoids.
+              `aria-label` stays the bare name — a screen reader announces the key from the
+              binding, not from the accessible name. */}
           {(
             [
               { id: "files", shortcut: "editor.explorer", icon: Files, label: t("editor.explorer") },
@@ -1203,32 +1219,26 @@ export function EditorView() {
               { id: "bookmarks", shortcut: "editor.bookmarks", icon: Bookmark, label: t("bookmarks.title") },
               { id: "debug", shortcut: "editor.debug", icon: Bug, label: t("debug.title") },
             ] as const
-          ).map(({ id, icon: Icon, label, ...entry }) => (
-            // `shortcut` is optional: the icon panel is opened by clicking it, not by a chord. One
-            // more binding for a screen you visit twice a year would be a line in the cheat sheet
-            // that costs everyone reading it more than it saves its user.
-            <button
-              key={id}
-              onClick={() => setSidePanel(id)}
-              title={"shortcut" in entry ? shortcutHint(entry.shortcut, label) : label}
-              aria-label={label}
-              className={`relative flex h-7 w-7 items-center justify-center rounded-md ${
-                sidePanel === id
-                  ? "text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-              }`}
-            >
-              {sidePanel === id && <ActivePill layoutId="cf-editor-rail-pill" />}
-              <Icon size={15} className="relative" />
-              {/* A live session is worth seeing from any panel — it's a running process. */}
-              {id === "debug" && debugStatus !== "idle" && (
-                <span
-                  className={`absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ${
-                    debugStatus === "paused" ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-success)]"
-                  }`}
-                />
-              )}
-            </button>
+          ).map(({ id, icon: Icon, label, shortcut }) => (
+            <Tooltip key={id} side="right" label={label} trailing={keyCap(shortcut)}>
+              <button
+                onClick={() => setSidePanel(id)}
+                aria-label={label}
+                aria-pressed={sidePanel === id}
+                className={railButtonClass(sidePanel === id)}
+              >
+                {sidePanel === id && <ActivePill layoutId="cf-editor-rail-pill" />}
+                <Icon size={16} className="relative" />
+                {/* A live session is worth seeing from any panel — it's a running process. */}
+                {id === "debug" && debugStatus !== "idle" && (
+                  <span
+                    className={`absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ${
+                      debugStatus === "paused" ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-success)]"
+                    }`}
+                  />
+                )}
+              </button>
+            </Tooltip>
           ))}
           {/* The actions, below the panels. `mt-auto` is on the first of them and nowhere else —
               it is what opens the gap that separates them from the five views above, and a second
@@ -1241,31 +1251,35 @@ export function EditorView() {
               It was the one control here that was not about *this* repository — the profiles are
               global (see `iconRulesStore`), so a preference every repo shares was being edited from
               a rail that answers for one. */}
-          <button
-            onClick={() => setPaletteOpen(true)}
-            title={shortcutHint("editor.goToFile", t("editor.goToFile"))}
-            aria-label={t("editor.goToFile")}
-            className="mt-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-          >
-            <FileSearch size={15} />
-          </button>
-          <button
-            // Scoped: this button lives in the editor's own rail, so it answers for the editor.
-            // The whole sheet is still a ⌘⌥K away.
-            onClick={() => useUiStore.getState().toggleShortcutsModal(["editor"])}
-            title={shortcutHint("app.shortcuts", t("shortcuts.title"))}
-            aria-label={t("shortcuts.title")}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-          >
-            <Keyboard size={15} />
-          </button>
+          <Tooltip side="right" label={t("editor.goToFile")} trailing={keyCap("editor.goToFile")}>
+            <button
+              onClick={() => setPaletteOpen(true)}
+              aria-label={t("editor.goToFile")}
+              className={iconButtonClass({ size: "md", className: "mt-auto" })}
+            >
+              <FileSearch size={16} />
+            </button>
+          </Tooltip>
+          <Tooltip side="right" label={t("shortcuts.title")} trailing={keyCap("app.shortcuts")}>
+            <button
+              // Scoped: this button lives in the editor's own rail, so it answers for the editor.
+              // The whole sheet is still a ⌘⌥K away.
+              onClick={() => useUiStore.getState().toggleShortcutsModal(["editor"])}
+              aria-label={t("shortcuts.title")}
+              className={iconButtonClass({ size: "md" })}
+            >
+              <Keyboard size={16} />
+            </button>
+          </Tooltip>
         </div>
         <div
           style={{ width: treeWidth }}
           data-tour="editor-tree"
-          // The tree owns its own scroll area now (below its toolbar), so this wrapper only
-          // clips — scrolling it too would carry the toolbar out of view.
-          className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
+          // The explorer column of the shared anatomy: a half-step into the sunken tone, with its
+          // own hairline on the right — which is why the handle beside it draws none. The tree owns
+          // its own scroll area (below its toolbar), so this wrapper only clips — scrolling it too
+          // would carry the toolbar out of view.
+          className={`${explorerClass} overflow-hidden`}
         >
           {/* Explorer, find-in-project, anchors or the debugger — same column VS Code uses for
               all of them, since each wants the width more than a file tree does. */}
@@ -1320,6 +1334,7 @@ export function EditorView() {
           max={TREE_MAX}
           onChange={(w) => setSize("editorTreeWidth", w)}
           onCommit={(w) => commitSize("editorTreeWidth", w)}
+          seamless
         />
         {/* Every group but the last carries an explicit width; the last takes the remainder, so
             the row fills exactly and a drag only ever moves one boundary. `GROUP_MIN` is a real
@@ -1398,88 +1413,68 @@ export function EditorView() {
             Shut, a narrow rail holds the button instead. One or the other, never both: a rail kept
             up alongside the open panel was a full-height column of empty surface that pushed the
             panel a button's width off the edge it is docked to. */}
-        {/* Both halves animate their width, and both are inside the one `AnimatePresence`, because
-            they trade places rather than appear and disappear. Only the panel sliding shut would
-            leave the rail popping in at full width the instant the close began — the editor beside
-            it would jump a button's width narrower and then ease back. Growing the rail from zero
-            over the same 180ms keeps the pair's total width monotonic, so the code just widens.
-
-            Each animates the *wrapper*, which clips; the content inside keeps its own full width.
-            Animating a width the content had to fit into would reflow it every frame — the header
-            buttons walking left as the panel closed — instead of sliding it out of view. */}
-        <AnimatePresence initial={false}>
-          {changesOpen ? (
-            <motion.div
-              key="changes-dock"
-              initial={{ width: 0 }}
-              animate={{ width: changesWidth }}
-              exit={{ width: 0 }}
-              transition={resizingChanges ? { duration: 0 } : { duration: 0.18, ease: "easeOut" }}
-              className="flex shrink-0 overflow-hidden bg-[var(--cf-surface)]"
-            >
-              <ResizeHandle
-                axis="x"
-                value={changesWidth}
-                min={CHANGES_MIN}
-                max={CHANGES_MAX}
-                // Anchored to the right, so dragging left — toward the code — has to grow it.
-                invert
-                onChange={(w) => setSize("editorChangesWidth", w)}
-                onCommit={(w) => commitSize("editorChangesWidth", w)}
-                onDragChange={setResizingChanges}
-              />
-              <div
-                style={{ width: changesWidth }}
-                className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
-              >
-                <ChangesPanel
-                  onOpenFile={openChangedFile}
-                  onOpenDiff={(path) => void openDiffTab(path)}
-                  headerAction={
+        {/* The two trade places, and neither animates its width: a width tween relaid out the
+            whole window — Monaco included — on every frame of it. The panel appears at its width
+            with its contents fading in (`cf-panel-in`, opacity only), and the rail simply comes
+            back when it shuts. Growing and shrinking by the difference between the two is the one
+            jump left, and it is a single layout rather than a hundred and eighty milliseconds of
+            them. */}
+        {changesOpen ? (
+          <div className="cf-panel-in flex min-h-0 shrink-0">
+            <ResizeHandle
+              axis="x"
+              value={changesWidth}
+              min={CHANGES_MIN}
+              max={CHANGES_MAX}
+              // Anchored to the right, so dragging left — toward the code — has to grow it.
+              invert
+              onChange={(w) => setSize("editorChangesWidth", w)}
+              onCommit={(w) => commitSize("editorChangesWidth", w)}
+              // The inspector draws its own hairline on the left; a second one here, a pixel away,
+              // read as a doubled edge.
+              seamless
+            />
+            <div style={{ width: changesWidth }} className={`${inspectorClass} overflow-hidden`}>
+              <ChangesPanel
+                onOpenFile={openChangedFile}
+                onOpenDiff={(path) => void openDiffTab(path)}
+                headerAction={
+                  <Tooltip side="bottom" label={t("editor.toggleChanges")}>
                     <button
                       onClick={() => setChangesOpen(false)}
-                      title={t("editor.toggleChanges")}
                       aria-label={t("editor.toggleChanges")}
                       aria-expanded
-                      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                      className={iconButtonClass({ size: "xs" })}
                     >
-                      <PanelRightClose size={13} />
+                      <PanelRightClose size={14} />
                     </button>
-                  }
-                />
-              </div>
-            </motion.div>
-          ) : (
-            <motion.div
-              key="changes-rail"
-              initial={{ width: 0 }}
-              animate={{ width: RAIL_W }}
-              exit={{ width: 0 }}
-              transition={{ duration: 0.18, ease: "easeOut" }}
-              className="shrink-0 overflow-hidden bg-[var(--cf-surface)]"
-            >
-              <div
-                style={{ width: RAIL_W }}
-                className="flex flex-col items-center gap-1 py-1.5"
+                  </Tooltip>
+                }
+              />
+            </div>
+          </div>
+        ) : (
+          <div
+            style={{ width: RAIL_W }}
+            className="flex shrink-0 flex-col items-center gap-1 border-l border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))] py-2"
+          >
+            <Tooltip side="left" label={t("editor.toggleChanges")}>
+              <button
+                onClick={() => setChangesOpen(true)}
+                aria-label={t("editor.toggleChanges")}
+                aria-expanded={false}
+                className={iconButtonClass({ size: "md", className: "relative" })}
               >
-                <button
-                  onClick={() => setChangesOpen(true)}
-                  title={t("editor.toggleChanges")}
-                  aria-label={t("editor.toggleChanges")}
-                  aria-expanded={false}
-                  className="relative flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                >
-                  <GitBranch size={15} className="relative" />
-                  {/* Only while shut — which is the only state this rail has. Open, the panel itself
-                      is the count, and a badge over it would be the same number twice. */}
-                  {uncommittedCount > 0 && (
-                    <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />
-                  )}
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                <GitBranch size={16} />
+                {/* Only while shut — which is the only state this rail has. Open, the panel itself
+                    is the count, and a badge over it would be the same number twice. */}
+                {uncommittedCount > 0 && (
+                  <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />
+                )}
+              </button>
+            </Tooltip>
+          </div>
+        )}
       </div>
       {/* The drop affordance: an outline around what will take the files, and a banner naming the
           folder they will land in — named rather than merely lit, because the same gesture lands
@@ -1489,7 +1484,7 @@ export function EditorView() {
           next hit test finds under the cursor. */}
       {dropDir !== null && (
         <div className="pointer-events-none absolute inset-0 z-40 flex items-end justify-center pb-8 ring-2 ring-inset ring-[var(--cf-accent)]">
-          <div className="flex items-center gap-2.5 rounded-xl border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-4 py-2.5 shadow-[var(--cf-shadow)]">
+          <div className="flex items-center gap-2.5 rounded-lg border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-4 py-2.5 shadow-[var(--cf-shadow)]">
             <FolderInput size={16} className="shrink-0 text-[var(--cf-accent)]" />
             <span className="text-[13px] font-medium text-[var(--cf-text)]">
               {t("editor.dropHint", { dir: dropDir || project.name })}

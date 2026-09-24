@@ -143,7 +143,7 @@ function RunRow({
         className={`cf-rise flex w-full items-start gap-2 rounded-md py-1.5 pl-2 pr-7 text-left transition-colors ${
           selected
             ? "bg-[var(--cf-accent-soft)]"
-            : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            : "hover:bg-[var(--cf-hover)]"
         }`}
       >
       <span className="mt-[1px] shrink-0">
@@ -151,7 +151,7 @@ function RunRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-1.5">
-          <span className="truncate text-[12.5px] font-medium">{run.name}</span>
+          <span className="truncate text-[13px] font-medium">{run.name}</span>
           {run.number !== null && (
             <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
               #{run.number}
@@ -196,7 +196,7 @@ function RunRow({
         <button
           type="button"
           onClick={() => void openExternalUrl(run.web_url)}
-          className={`absolute right-1 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[var(--cf-text-muted)] transition-opacity hover:bg-black/[0.06] hover:text-[var(--cf-text)] focus-visible:opacity-100 dark:hover:bg-white/[0.10] ${
+          className={`inline-flex h-[22px] w-[22px] items-center justify-center rounded-md absolute right-1 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)] transition-opacity hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)] focus-visible:opacity-100 ${
             selected ? "opacity-100" : "opacity-0 group-hover/run:opacity-100"
           }`}
         >
@@ -277,14 +277,14 @@ export function RunList({ projectId, currentBranch }: { projectId: string; curre
   return (
     <>
       <div className="flex h-[29px] shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2">
-        <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("pipelines.runs")}
         </span>
         <Tooltip label={t("pipelines.refresh")}>
           <button
             type="button"
             onClick={() => void load(projectId)}
-            className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
             <RefreshCw size={13} className={loading ? "animate-spin" : undefined} />
           </button>
@@ -351,7 +351,7 @@ export function RunList({ projectId, currentBranch }: { projectId: string; curre
           );
         })}
         {visible.length === 0 && statusFilter !== null && (
-          <p className="px-2 py-3 text-[11.5px] text-[var(--cf-text-muted)]">
+          <p className="px-2 py-3 text-[12px] text-[var(--cf-text-muted)]">
             {t("pipelines.noneWithStatus", { status: t(PIPELINE_STATUS[statusFilter].labelKey) })}
           </p>
         )}

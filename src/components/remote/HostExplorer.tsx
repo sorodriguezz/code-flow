@@ -26,9 +26,26 @@ import {
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { Tooltip } from "../common/Tooltip";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import {
+  explorerClass,
+  explorerHeadClass,
+  explorerTitleClass,
+  fieldClass,
+  rowClass,
+} from "../common/recipes";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRemoteDragStore } from "../../state/remoteDragStore";
-import { CARD, HostDot, KindGlyph, OsGlyph, ToolbarButton } from "./remoteChrome";
+import {
+  HostDot,
+  KindGlyph,
+  OsGlyph,
+  SEARCH_INPUT,
+  SEARCH_WRAP,
+  TEXTAREA,
+  ToolbarButton,
+} from "./remoteChrome";
 import { useHostMenu, useNewConnectionMenu, useOpenPrimary } from "./hostMenu";
 import {
   groupHosts,
@@ -83,20 +100,18 @@ export function HostExplorer({ onImport }: { onImport: () => void }) {
 
   return (
     <>
-      <div
-        data-tour="remote-hosts"
-        style={{ width }}
-        className={`flex shrink-0 flex-col overflow-hidden ${CARD}`}
-      >
+      <div data-tour="remote-hosts" style={{ width }} className={`${explorerClass} overflow-hidden`}>
         <HostList onImport={onImport} />
         <HistoryList />
         <SnippetList />
       </div>
+      {/* `seamless`: the explorer draws its own hairline, and a seam a pixel beside it doubled it. */}
       <ResizeHandle
         axis="x"
         value={width}
         min={WIDTH_MIN}
         max={WIDTH_MAX}
+        seamless
         onChange={(value) => setSize("remoteSidebarWidth", value)}
         onCommit={(value) => void commitSize("remoteSidebarWidth", value)}
       />
@@ -186,22 +201,29 @@ function HostList({ onImport }: { onImport: () => void }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1.5">
-        <span className="flex-1 text-[12px] font-medium text-[var(--cf-text)]">
-          {t("remote.hosts")}
+      <div className={explorerHeadClass}>
+        <span className={`${explorerTitleClass} flex-1`}>
+          <span className="truncate">{t("remote.hosts")}</span>
         </span>
         <ToolbarButton
           icon={Waypoints}
           label={t("remote.allForwards")}
           onClick={openAllForwards}
+          size="sm"
         />
-        <ToolbarButton icon={ScrollText} label={t("remote.log")} onClick={openLog} />
-        <ToolbarButton icon={Download} label={t("remote.importSshConfig")} onClick={onImport} />
+        <ToolbarButton icon={ScrollText} label={t("remote.log")} onClick={openLog} size="sm" />
+        <ToolbarButton
+          icon={Download}
+          label={t("remote.importSshConfig")}
+          onClick={onImport}
+          size="sm"
+        />
         <ToolbarButton
           icon={RefreshCw}
           label={t("remote.refresh")}
           onClick={() => void refresh()}
           disabled={loading}
+          size="sm"
         />
         {/* Anchored to the button, not to the pointer: a menu that opened wherever the cursor was
             when it happened to be over a toolbar reads as a right-click that fired by accident. */}
@@ -212,39 +234,40 @@ function HostList({ onImport }: { onImport: () => void }) {
             const rect = event.currentTarget.getBoundingClientRect();
             openNewMenu(rect.left, rect.bottom + 4);
           }}
+          size="sm"
         />
       </div>
 
-      <div className="shrink-0 px-2 py-1.5">
-        <div className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1">
-          <Search size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+      <div className="shrink-0 px-2.5 pb-1.5">
+        <label className={SEARCH_WRAP}>
+          <Search size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("remote.searchHosts")}
-            className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-[var(--cf-text-muted)]"
+            className={SEARCH_INPUT}
           />
           {query && (
             <button
               type="button"
               onClick={() => setQuery("")}
               aria-label={t("remote.clear")}
-              className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              className="-mr-1.5 inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-faint)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
             >
               <X size={12} />
             </button>
           )}
-        </div>
+        </label>
       </div>
 
       <div
         role="tree"
         onContextMenu={treeMenu}
-        className="min-h-0 flex-1 overflow-y-auto px-1 pb-2"
+        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2.5 pt-0.5"
       >
         {creatingGroup && (
-          <div className="flex items-center gap-1 px-1.5 py-[3px]">
-            <FolderPlus size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+          <div className="flex h-[26px] items-center gap-1.5 px-1.5">
+            <FolderPlus size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
             <InlineInput
               value=""
               onCommit={(value) => {
@@ -256,7 +279,7 @@ function HostList({ onImport }: { onImport: () => void }) {
           </div>
         )}
         {groups.length === 0 && !creatingGroup ? (
-          <p className="px-3 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">
+          <p className="px-3 py-6 text-center text-[12px] text-[var(--cf-text-faint)]">
             {hosts.length === 0 ? t("remote.noHostsYet") : t("remote.noHostsMatch")}
           </p>
         ) : (
@@ -388,15 +411,15 @@ function GroupSection({
             ],
           });
         }}
-        className={`group flex w-full cursor-default items-center gap-1 rounded-md px-1.5 py-[3px] text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+        className={`group flex h-[26px] w-full cursor-default items-center gap-1.5 rounded-md px-1.5 text-left text-[var(--cf-text-muted)] outline-none transition-colors duration-100 focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
           isTarget
             ? "bg-[var(--cf-accent-soft)] ring-1 ring-[var(--cf-accent)]"
             : dragging
               ? ""
-              : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              : "hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         }`}
       >
-        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
+        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-faint)]">
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         </span>
         {/* The mark that says this row is a container rather than a machine.
@@ -411,9 +434,9 @@ function GroupSection({
 
             Outside the rename branch, so the row keeps its shape while the name is being typed. */}
         {group ? (
-          <Folder size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+          <Folder size={14} className="shrink-0" />
         ) : (
-          <FolderDot size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+          <FolderDot size={14} className="shrink-0" />
         )}
         {renaming ? (
           <InlineInput
@@ -426,10 +449,8 @@ function GroupSection({
           />
         ) : (
           <>
-            <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--cf-text-muted)]">
-              {label}
-            </span>
-            <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+            <span className="min-w-0 flex-1 truncate text-[12px] font-medium">{label}</span>
+            <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
               {hosts.length}
             </span>
           </>
@@ -562,30 +583,37 @@ function HostRowBase({
           items: hostMenu(host, { onRename: () => setRenamingHost(host.id) }),
         });
       }}
-      style={{
-        ...riseDelay(at),
-        // The host's own colour, always drawn — this is the one the picker sets, and until now it
-        // only reached the state dot (which is grey unless something is *running*) and the active
-        // tab. A colour that appears once you have already connected cannot answer the question it
-        // exists for, which is "is this production?" asked *before* connecting. An inset edge
-        // rather than a fill, the same mark the terminal bench uses for its focused pane: it reads
-        // at a glance and does not fight the selected-row background for the same pixels.
-        boxShadow: host.color?.trim() ? `inset 2px 0 0 ${host.color}` : undefined,
-      }}
-      className={`cf-rise group flex w-full cursor-default items-center gap-1.5 rounded-md py-[3px] pl-5 pr-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
-        beingDragged ? "opacity-40" : ""
-      } ${
-        // A line above the row, not a fill: the drop lands *before* this host, and a filled row
-        // would say "into this one" — which is what a folder tree means by it, and this isn't one.
-        isTarget ? "border-t border-[var(--cf-accent)]" : "border-t border-transparent"
-      } ${selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"}`}
+      style={riseDelay(at)}
+      className={rowClass(
+        selected,
+        `cf-rise group h-[30px] cursor-default pl-5 pr-1 outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+          beingDragged ? "opacity-40" : ""
+        } ${
+          // A line above the row, not a fill: the drop lands *before* this host, and a filled row
+          // would say "into this one" — which is what a folder tree means by it, and this isn't one.
+          isTarget ? "border-t border-[var(--cf-accent)]" : "border-t border-transparent"
+        }`,
+      )}
     >
+      {/* The host's own colour, always drawn — this is the one the picker sets, and until now it
+          only reached the state dot (which is grey unless something is *running*) and the active
+          tab. A colour that appears once you have already connected cannot answer the question it
+          exists for, which is "is this production?" asked *before* connecting. A short bar at the
+          row's edge rather than a fill: it reads at a glance and does not fight the selected-row
+          background for the same pixels. */}
+      {host.color?.trim() && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute bottom-[7px] left-[3px] top-[7px] w-0.5 rounded-full"
+          style={{ background: host.color }}
+        />
+      )}
       <HostDot session={session} active={active} busy={busy} color={host.color} />
       {/* Both glyphs, never one: the OS says what the machine is, the kind says what this app can
           do with it. A Linux box reachable only over FTP is a penguin *and* a globe, and dropping
           either loses whichever half the user was scanning for. */}
-      <OsGlyph os={spec.os} size={13} />
-      <KindGlyph kind={spec.kind} size={13} />
+      <OsGlyph os={spec.os} size={14} />
+      <KindGlyph kind={spec.kind} size={14} />
 
       {renaming ? (
         <InlineInput
@@ -595,18 +623,14 @@ function HostRowBase({
         />
       ) : (
         <>
-          <span
-            className={`min-w-0 flex-1 truncate text-[12px] ${
-              selected ? "font-medium text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
-            }`}
-          >
+          <span className={`min-w-0 flex-1 truncate ${selected ? "font-medium" : ""}`}>
             {host.name}
           </span>
           {/* Said on the row, not discovered by clicking: a host with no address looks exactly
               like a working one otherwise, and the three actions beside it all lead to the same
               editor. Hidden on hover so it doesn't fight the buttons for the same pixels. */}
           {incomplete && (
-            <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)] group-hover:hidden">
+            <span className="shrink-0 text-[11px] text-[var(--cf-text-faint)] group-hover:hidden">
               {t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")}
             </span>
           )}
@@ -701,23 +725,26 @@ function RowAction({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-      // Same reason the db explorer's chevron stops its own press: the host row captures the
-      // pointer on `pointerdown` to tell a click from a drag, and a captured pointer delivers the
-      // `click` to whatever holds the capture. Without this the row swallowed all three of these
-      // buttons — they highlighted on hover and did nothing at all when pressed.
-      onPointerDown={(e) => e.stopPropagation()}
-      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.08]"
-    >
-      <Icon size={12} />
-    </button>
+    // Same reason the db explorer's chevron stops its own press: the host row captures the pointer
+    // on `pointerdown` to tell a click from a drag, and a captured pointer delivers the `click` to
+    // whatever holds the capture. Without this the row swallowed all three of these buttons — they
+    // highlighted on hover and did nothing at all when pressed. Stopped *outside* the tooltip, so
+    // the tooltip still hears the press and puts itself away.
+    <span className="contents" onPointerDown={(e) => e.stopPropagation()}>
+      <Tooltip label={label}>
+        <button
+          type="button"
+          aria-label={label}
+          onClick={(e) => {
+            e.stopPropagation();
+            onClick();
+          }}
+          className={iconButtonClass({ size: "xs" })}
+        >
+          <Icon size={13} />
+        </button>
+      </Tooltip>
+    </span>
   );
 }
 
@@ -760,7 +787,7 @@ function InlineInput({
         }
       }}
       onFocus={(e) => e.currentTarget.select()}
-      className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-transparent px-1 py-px text-[12px] outline-none"
+      className="h-[22px] min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1.5 text-[13px] text-[var(--cf-text)] outline-none shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
     />
   );
 }
@@ -768,6 +795,15 @@ function InlineInput({
 // ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
+
+/** The two sections at the foot of the explorer open from a heading shaped like the tree's own
+ *  group rows, so the column reads as one list of things with the hosts first. */
+const FOOT_HEAD =
+  "flex h-[26px] min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 text-left text-[12px] text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]";
+
+/** A command or a snippet under its heading, indented to the heading's label. */
+const FOOT_ROW =
+  "cf-rise group flex h-7 items-center gap-1 rounded-md pl-[26px] pr-1 transition-colors duration-100 hover:bg-[var(--cf-hover)]";
 
 /**
  * The commands typed in this workspace's sessions, and the two things you do with one.
@@ -790,18 +826,22 @@ function HistoryList() {
   const t = useT();
 
   return (
-    <div className="shrink-0 border-t border-[var(--cf-border)]">
-      <div className="flex items-center gap-1 px-2 py-1">
+    <div className="shrink-0 border-t border-[var(--cf-border)] px-2 py-1">
+      <div className="flex items-center gap-1">
         <button
           type="button"
           onClick={() => setOpen((value) => !value)}
           aria-expanded={open}
-          className="flex flex-1 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className={FOOT_HEAD}
         >
-          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-          <History size={11} />
-          {t("remote.history")}
-          <span className="tabular-nums">({history.length})</span>
+          <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-faint)]">
+            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </span>
+          <History size={14} className="shrink-0" />
+          <span className="min-w-0 truncate">{t("remote.history")}</span>
+          <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+            {history.length}
+          </span>
         </button>
         {open && history.length > 0 && (
           <ToolbarButton icon={Trash2} label={t("remote.clearHistory")} onClick={clearHistory} />
@@ -809,9 +849,9 @@ function HistoryList() {
       </div>
 
       {open && (
-        <div className="max-h-56 overflow-auto border-t border-[var(--cf-border)]">
+        <div className="max-h-56 overflow-auto pb-0.5">
           {history.length === 0 ? (
-            <p className="px-3 py-4 text-center text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+            <p className="px-2 py-3 text-[11px] leading-relaxed text-[var(--cf-text-faint)]">
               {t("remote.noHistory")}
             </p>
           ) : (
@@ -820,9 +860,9 @@ function HistoryList() {
                 key={entry.id}
                 title={`${entry.hostName}: ${entry.body}`}
                 style={riseDelay(at)}
-                className="cf-rise group flex items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
+                className={FOOT_ROW}
               >
-                <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text)]">
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--cf-text)]">
                   {entry.body}
                 </span>
                 <span className="flex shrink-0 gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
@@ -872,18 +912,22 @@ function SnippetList() {
   const t = useT();
 
   return (
-    <div className="shrink-0 border-t border-[var(--cf-border)]">
-      <div className="flex items-center gap-1 px-2 py-1">
+    <div className="shrink-0 border-t border-[var(--cf-border)] px-2 py-1">
+      <div className="flex items-center gap-1">
         <button
           type="button"
           onClick={() => setOpen((value) => !value)}
           aria-expanded={open}
-          className="flex flex-1 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className={FOOT_HEAD}
         >
-          {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-          <FolderTree size={11} />
-          {t("remote.snippets")}
-          <span className="tabular-nums">({snippets.length})</span>
+          <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-faint)]">
+            {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </span>
+          <FolderTree size={14} className="shrink-0" />
+          <span className="min-w-0 truncate">{t("remote.snippets")}</span>
+          <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+            {snippets.length}
+          </span>
         </button>
         <ToolbarButton
           icon={Plus}
@@ -896,51 +940,47 @@ function SnippetList() {
       </div>
 
       {open && (
-        <div className="max-h-56 overflow-auto border-t border-[var(--cf-border)]">
+        <div className="max-h-56 overflow-auto pb-0.5">
           {snippets.length === 0 ? (
-            <p className="px-3 py-4 text-center text-[11px] text-[var(--cf-text-muted)]">
+            <p className="px-2 py-3 text-[11px] text-[var(--cf-text-faint)]">
               {t("remote.noSnippets")}
             </p>
           ) : (
             snippets.map((snippet, at) =>
               editingId === snippet.id ? (
-                <div key={snippet.id} className="space-y-1 border-b border-[var(--cf-border)] p-2 last:border-b-0">
+                <div key={snippet.id} className="space-y-1.5 rounded-md bg-[var(--cf-hover)] p-2">
                   <input
                     value={snippet.name}
                     onChange={(e) => void saveSnippet({ ...snippet, name: e.target.value })}
-                    className="w-full rounded border border-[var(--cf-border)] bg-transparent px-1.5 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                    className={fieldClass({ size: "sm", className: "w-full" })}
                   />
                   <textarea
                     value={snippet.body}
                     rows={3}
                     onChange={(e) => void saveSnippet({ ...snippet, body: e.target.value })}
                     placeholder={t("remote.snippetPlaceholder")}
-                    className="w-full resize-y rounded border border-[var(--cf-border)] bg-transparent px-1.5 py-1 font-mono text-[11px] outline-none focus:border-[var(--cf-accent)]"
+                    className={`${TEXTAREA} font-mono`}
                   />
                   <div className="flex justify-end gap-1">
                     <button
                       type="button"
                       onClick={() => void deleteSnippet(snippet.id)}
-                      className="rounded px-1.5 py-0.5 text-[11px] text-[var(--cf-danger)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                      className={buttonClass({ variant: "danger-ghost", size: "sm" })}
                     >
                       {t("common.delete")}
                     </button>
                     <button
                       type="button"
                       onClick={() => setEditingId(null)}
-                      className="rounded px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                      className={buttonClass({ variant: "secondary", size: "sm" })}
                     >
                       {t("remote.done")}
                     </button>
                   </div>
                 </div>
               ) : (
-                <div
-                  key={snippet.id}
-                  style={riseDelay(at)}
-                  className="cf-rise group flex items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
-                >
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--cf-text)]">
+                <div key={snippet.id} style={riseDelay(at)} className={FOOT_ROW}>
+                  <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
                     {snippet.name}
                   </span>
                   <span className="flex shrink-0 gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">

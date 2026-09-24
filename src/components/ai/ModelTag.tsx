@@ -79,7 +79,7 @@ export function ModelTag({
       title={[`${engine} · ${modelLabel}`, title].filter(Boolean).join("\n")}
       // Capped, because a model id has no length limit — uncapped, a long one pushed the Generate
       // button it sits next to onto a second row. It truncates instead; the tooltip has it whole.
-      className="inline-flex min-w-0 max-w-[10rem] shrink items-center gap-1 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-px text-[10px] text-[var(--cf-text-muted)]"
+      className="inline-flex min-w-0 max-w-[10rem] shrink items-center gap-1 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-px text-[10.5px] text-[var(--cf-text-muted)]"
     >
       {/* The engine's own mark rather than a generic chip: the chip is capped to one fact, and
           which engine it is has to survive that cap even when the model id takes the words. */}

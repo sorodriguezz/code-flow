@@ -9,6 +9,7 @@ import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { ChatGroup } from "../../lib/tauri/chatCommands";
+import { buttonClass } from "../common/Button";
 
 /**
  * A project's own page: ask something new here, or pick up one of its conversations.
@@ -138,7 +139,7 @@ export function GroupView({ group }: { group: ChatGroup }) {
                 type="button"
                 onClick={start}
                 disabled={!draft.trim()}
-                className="rounded-lg bg-[var(--cf-accent)] px-3 py-1 text-[12px] font-medium text-white disabled:opacity-40"
+                className={buttonClass({ variant: "primary", size: "sm" })}
               >
                 {t("chat.groupStart")}
               </button>
@@ -150,7 +151,7 @@ export function GroupView({ group }: { group: ChatGroup }) {
               {t("chat.recentGroup")}
             </p>
             {filed.length === 0 ? (
-              <p className="px-1 text-[12.5px] text-[var(--cf-text-muted)]">{t("chat.groupNoChats")}</p>
+              <p className="px-1 text-[13px] text-[var(--cf-text-muted)]">{t("chat.groupNoChats")}</p>
             ) : (
               filed.map((conversation) => (
                 <button
@@ -160,7 +161,7 @@ export function GroupView({ group }: { group: ChatGroup }) {
                   className="flex w-full items-center gap-2 border-b border-[var(--cf-border)] px-1 py-2.5 text-left last:border-b-0 hover:text-[var(--cf-accent)]"
                 >
                   <ProviderGlyph providerId={conversation.provider} size={12} className="shrink-0 opacity-70" />
-                  <span className="min-w-0 flex-1 truncate text-[13.5px]">
+                  <span className="min-w-0 flex-1 truncate text-[14px]">
                     {conversation.title || t("chat.untitled")}
                   </span>
                   <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">
@@ -196,7 +197,7 @@ export function GroupView({ group }: { group: ChatGroup }) {
               onClick={() => void addContext()}
               title={t("chat.groupContextAdd")}
               aria-label={t("chat.groupContextAdd")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.07]"
+              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
             >
               <Plus size={14} />
             </button>
@@ -206,7 +207,7 @@ export function GroupView({ group }: { group: ChatGroup }) {
             <button
               type="button"
               onClick={() => void addContext()}
-              className="flex w-full flex-col items-center gap-2 rounded-xl border border-dashed border-[var(--cf-border)] px-3 py-6 text-center text-[11.5px] leading-relaxed text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-text)]"
+              className="flex w-full flex-col items-center gap-2 rounded-xl border border-dashed border-[var(--cf-border)] px-3 py-6 text-center text-[12px] leading-relaxed text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-text)]"
             >
               <Paperclip size={16} />
               {t("chat.groupContextEmpty")}

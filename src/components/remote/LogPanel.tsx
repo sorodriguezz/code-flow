@@ -75,7 +75,7 @@ export function LogPanel() {
             onClick={() => void load()}
             title={t("remote.refresh")}
             aria-label={t("remote.refresh")}
-            className="rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
           >
             <RefreshCw size={12} />
           </button>
@@ -88,7 +88,7 @@ export function LogPanel() {
             }}
             title={t("remote.logClear")}
             aria-label={t("remote.logClear")}
-            className="rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] hover:bg-[var(--cf-hover)]"
           >
             <Trash2 size={12} />
           </button>
@@ -125,7 +125,7 @@ export function LogPanel() {
                     <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
                       {entry.detail}
                     </span>
-                    <span className="shrink-0 tabular-nums text-[10px] text-[var(--cf-text-muted)]">
+                    <span className="shrink-0 tabular-nums text-[10.5px] text-[var(--cf-text-muted)]">
                       {formatWhen(entry.at)}
                     </span>
                   </span>

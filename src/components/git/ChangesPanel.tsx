@@ -39,8 +39,9 @@ import { parseClaudeError, type ClaudeErrorInfo } from "../../lib/claudeError";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { ThinkingOrb } from "../common/ThinkingOrb";
 import { FileHistoryModal } from "./FileHistoryModal";
-import { fileStatusLabelKey } from "../../lib/fileStatus";
+import { fileStatusColor, fileStatusLabelKey, fileStatusLetter } from "../../lib/fileStatus";
 import { buildFileTree, type FileTreeNode } from "../../lib/buildFileTree";
 import { splitPath } from "../../lib/splitPath";
 import { useT } from "../../state/languageStore";
@@ -122,10 +123,10 @@ function UnpushedCommitsSection() {
             <div
               key={c.id}
               style={riseDelay(i)}
-              className="cf-rise flex items-center gap-2 rounded-md px-1.5 py-1 text-[12px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              className="cf-rise flex items-center gap-2 rounded-md px-1.5 py-1 text-[12px] hover:bg-[var(--cf-hover)]"
             >
               <span className="flex-1 min-w-0 truncate">{c.summary}</span>
-              <span className="shrink-0 font-mono text-[10px] text-[var(--cf-text-muted)]">{c.short_id}</span>
+              <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">{c.short_id}</span>
               <button
                 disabled={i !== 0 || busy}
                 title={i === 0 ? t("changes.undoThis") : t("changes.undoAboveFirst")}
@@ -215,14 +216,18 @@ function FileRow({
         containIntrinsicSize: "auto 26px",
       }}
       className={`cf-rise group flex items-center gap-2 rounded-md px-2 py-1 text-[13px] cursor-pointer ${
-        selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
       }`}
     >
+      {/* The shared letter and colour (`lib/fileStatus`): `?` untracked, `U` only for a conflict —
+          this list used to take the first letter of the English word, so "U" meant untracked here
+          and conflicted in the commit list one tab away. */}
       <span
         title={t(fileStatusLabelKey(entry.status))}
-        className="w-4 shrink-0 text-center text-[10px] uppercase text-[var(--cf-text-muted)]"
+        className="w-4 shrink-0 text-center font-mono text-[11px] font-bold"
+        style={{ color: fileStatusColor(entry.status) }}
       >
-        {entry.status[0]}
+        {fileStatusLetter(entry.status)}
       </span>
       <FileGlyph path={entry.path} />
       {/* The name at full contrast and the folders behind it dimmed, in that order: the row is read
@@ -315,7 +320,7 @@ function FileTreeSection({
         <div
           onClick={() => toggleDir(node.path)}
           style={{ paddingLeft: depth * 14, ...riseDelay(at) }}
-          className="cf-rise flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          className="cf-rise flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
         >
           {collapsed ? <ChevronRight size={12} className="shrink-0" /> : <ChevronDown size={12} className="shrink-0" />}
           {/* The same glyph the explorer draws for this folder, rather than a plain outline: a
@@ -753,7 +758,7 @@ export function ChangesPanel({
               disabled={refreshing}
               title={`${t("changes.refresh")} — ${t("changes.refreshHint")}`}
               aria-label={t("changes.refresh")}
-              className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+              className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40"
             >
               <RefreshCw size={12} className={refreshing ? "animate-spin" : undefined} />
             </button>
@@ -761,7 +766,7 @@ export function ChangesPanel({
               <button
                 onClick={() => setViewMode("list")}
                 title={t("changes.listView")}
-                className={`flex h-5 w-5 items-center justify-center rounded ${
+                className={`flex h-[22px] w-[22px] items-center justify-center rounded-md ${
                   viewMode === "list"
                     ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
                     : "text-[var(--cf-text-muted)]"
@@ -772,7 +777,7 @@ export function ChangesPanel({
               <button
                 onClick={() => setViewMode("tree")}
                 title={t("changes.treeView")}
-                className={`flex h-5 w-5 items-center justify-center rounded ${
+                className={`flex h-[22px] w-[22px] items-center justify-center rounded-md ${
                   viewMode === "tree"
                     ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
                     : "text-[var(--cf-text-muted)]"
@@ -800,7 +805,7 @@ export function ChangesPanel({
                   onClick={() => runAction("__unstage_all__", "all", () => unstageAll())}
                   disabled={pending !== null && pending.path !== "__unstage_all__"}
                   title={t("changes.unstageAll")}
-                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-30"
+                  className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] disabled:opacity-30"
                 >
                   {pending?.path === "__unstage_all__" ? (
                     <Loader2 size={13} className="animate-spin" />
@@ -848,7 +853,7 @@ export function ChangesPanel({
                     }}
                     data-tour="changes-analyze"
                     title={[t("analyze.button"), analyzeModel].join("\n")}
-                    className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]"
                   >
                     <ShieldCheck size={13} />
                   </button>
@@ -869,7 +874,7 @@ export function ChangesPanel({
                     }}
                     disabled={pending !== null && pending.path !== "__discard_all__"}
                     title={t("changes.discardAll")}
-                    className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-30"
+                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] disabled:opacity-30"
                   >
                     {pending?.path === "__discard_all__" ? (
                       <Loader2 size={13} className="animate-spin" />
@@ -883,7 +888,7 @@ export function ChangesPanel({
                     onClick={() => runAction("__stage_all__", "all", () => stageAll())}
                     disabled={pending !== null && pending.path !== "__stage_all__"}
                     title={t("changes.stageAll")}
-                    className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-30"
+                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] disabled:opacity-30"
                   >
                     {pending?.path === "__stage_all__" ? (
                       <Loader2 size={13} className="animate-spin" />
@@ -939,9 +944,10 @@ export function ChangesPanel({
                 status.staged.length === 0 ? t("changes.stageFirst") : t("changes.generateWithAi"),
                 commitModel,
               ].join("\n")}
-              className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)] disabled:opacity-30"
+              className="absolute right-1 top-1 flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)] disabled:opacity-30"
             >
-              {aiBusy ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+              {/* The orb, not a spinner: this is a model writing the message. */}
+              {aiBusy ? <ThinkingOrb size="sm" /> : <Sparkles size={13} />}
             </button>
           </div>
           {aiError &&
@@ -959,7 +965,7 @@ export function ChangesPanel({
           <button
             disabled={busy || aiBusy || scanning || !message.trim() || status.staged.length === 0}
             onClick={handleCommit}
-            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
+            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] py-1.5 text-[13px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
           >
             {scanning && <Loader2 size={13} className="animate-spin" />}
             {scanning ? t("secrets.scanning") : t("changes.commit")}{" "}

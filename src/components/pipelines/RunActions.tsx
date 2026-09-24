@@ -81,7 +81,7 @@ export function RunActions({ projectId, run }: { projectId: string; run: Pipelin
       type="button"
       onClick={onClick}
       disabled={busy !== null}
-      className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[11.5px] transition-colors disabled:opacity-50 ${
+      className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] transition-colors disabled:opacity-50 ${
         danger
           ? "border-[var(--cf-danger)]/40 text-[var(--cf-danger)] hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)]"
           : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"

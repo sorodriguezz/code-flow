@@ -168,7 +168,7 @@ export function ChatWelcome({
               className="mt-[2px] shrink-0 text-[var(--cf-text-muted)] transition-colors group-hover/starter:text-[var(--cf-accent)]"
             />
             <span className="min-w-0">
-              <span className="block text-[12.5px] text-[var(--cf-text)]">{t(label)}</span>
+              <span className="block text-[13px] text-[var(--cf-text)]">{t(label)}</span>
               <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">
                 {t(hint)}
               </span>

@@ -1,6 +1,8 @@
 import { RotateCcw, Search } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import type { DbQueryOptions } from "../../types/database";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 /**
  * The rest of a MongoDB query: what comes back, in what order, under which index, and how much.
@@ -34,7 +36,7 @@ export function QueryOptionsPanel({
 }) {
   const t = useT();
   return (
-    <div className="border-t border-[var(--cf-border)] bg-black/[0.015] px-2 py-2 dark:bg-white/[0.02]">
+    <div className="border-t border-[var(--cf-border)] bg-[var(--cf-hover)] px-2 py-2">
       <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-x-3 gap-y-1.5">
         <Option
           label={t("db.optionProject")}
@@ -83,7 +85,7 @@ export function QueryOptionsPanel({
         <button
           type="button"
           onClick={onReset}
-          className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11px] font-medium text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className={buttonClass({ variant: "secondary", size: "sm" })}
         >
           <RotateCcw size={11} />
           {t("db.resetQuery")}
@@ -92,7 +94,7 @@ export function QueryOptionsPanel({
             the options and the filter are one question and are asked together. */}
         <button
           type="submit"
-          className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-[3px] text-[11px] font-medium text-white hover:brightness-110"
+          className={buttonClass({ variant: "primary", size: "sm" })}
         >
           <Search size={11} />
           {t("db.runFind")}
@@ -118,7 +120,7 @@ function Option({
 }) {
   return (
     <label className="flex min-w-0 items-center gap-2">
-      <span className="w-[68px] shrink-0 text-right text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+      <span className="w-[68px] shrink-0 text-right text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
         {label}
       </span>
       <input
@@ -126,7 +128,7 @@ function Option({
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         spellCheck={false}
-        className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-[2px] font-mono text-[11.5px] text-[var(--cf-text)] outline-none placeholder:font-sans placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+        className={fieldClass({ className: "min-w-0 flex-1 font-mono" })}
       />
     </label>
   );

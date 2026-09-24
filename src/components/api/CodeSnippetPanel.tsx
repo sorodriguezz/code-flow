@@ -10,8 +10,8 @@ import {
 import { createPortal } from "react-dom";
 import Editor from "@monaco-editor/react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
-import { Check, ChevronDown, Code2, Copy, PanelRightClose, PanelRightOpen, Settings2 } from "lucide-react";
-import { CARD } from "./panelChrome";
+import { Check, ChevronDown, Code2, Copy, PanelRightClose, Settings2 } from "lucide-react";
+import { ensureSnippetPanelLoaded, useSnippetPanelStore } from "./snippetPanelState";
 import { useApiStore } from "../../state/apiStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useThemeStore } from "../../state/themeStore";
@@ -22,11 +22,13 @@ import { SNIPPET_TARGETS, defaultSnippetOptions, generateSnippet } from "../../l
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
+import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass } from "../common/Button";
+import { explorerHeadClass, explorerTitleClass, inspectorClass } from "../common/recipes";
 import type { SnippetOptions, SnippetTarget } from "../../types/api";
 
 const TARGET_KEY = "api_snippet_target";
 const OPTIONS_KEY = "api_snippet_options";
-const COLLAPSED_KEY = "api_snippet_collapsed";
 const DEFAULT_TARGET = "shell-curl";
 
 const MIN_WIDTH = 300;
@@ -56,10 +58,12 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
   const activeEnvironmentId = useApiStore((s) => s.activeEnvironmentId);
   const collections = useApiStore((s) => s.collections);
 
-  // Collapsed until asked for. The snippet is a "now show me how to do this in code" step, not
+  // Closed until asked for. The snippet is a "now show me how to do this in code" step, not
   // something you watch while composing a request — and it costs the builder ~420px of width to
-  // sit open. The choice is remembered, like the target and the options below it.
-  const [collapsed, setCollapsed] = useState(true);
+  // sit open. The switch is the "Code" button beside Save in the request's name row, and the
+  // choice is remembered, like the target and the options below it (see `snippetPanelState`).
+  const open = useSnippetPanelStore((s) => s.open);
+  const setOpen = useSnippetPanelStore((s) => s.setOpen);
   const [targetId, setTargetId] = useState(DEFAULT_TARGET);
   const [options, setOptions] = useState<SnippetOptions>(defaultSnippetOptions);
   /** `null` until the first generation lands — otherwise the panel claims "unsupported" for the
@@ -69,23 +73,17 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const toggleCollapsed = (next: boolean) => {
-    setCollapsed(next);
-    void setSetting(COLLAPSED_KEY, next ? "1" : "0").catch(() => {});
-  };
-
   const target = useMemo(
     () => SNIPPET_TARGETS.find((candidate) => candidate.id === targetId) ?? SNIPPET_TARGETS[0],
     [targetId],
   );
 
   useEffect(() => {
+    ensureSnippetPanelLoaded();
     let cancelled = false;
-    void Promise.all([getSetting(TARGET_KEY), getSetting(OPTIONS_KEY), getSetting(COLLAPSED_KEY)])
-      .then(([storedTarget, storedOptions, storedCollapsed]) => {
+    void Promise.all([getSetting(TARGET_KEY), getSetting(OPTIONS_KEY)])
+      .then(([storedTarget, storedOptions]) => {
         if (cancelled) return;
-        // Only an explicit "0" reopens it: an absent key is a fresh install, which starts closed.
-        if (storedCollapsed === "0") setCollapsed(false);
         if (storedTarget && SNIPPET_TARGETS.some((candidate) => candidate.id === storedTarget)) {
           setTargetId(storedTarget);
         }
@@ -112,7 +110,7 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
   const collectionId = tab?.collectionId ?? null;
 
   useEffect(() => {
-    if (collapsed || !draft) {
+    if (!open || !draft) {
       setCode(null);
       setError(null);
       return;
@@ -139,7 +137,7 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
       clearTimeout(timer);
     };
   }, [
-    collapsed,
+    open,
     draft,
     collectionId,
     tabId,
@@ -171,28 +169,14 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
     copyTimer.current = setTimeout(() => setCopied(false), 1500);
   };
 
-  if (collapsed) {
-    return (
-      <div className={`flex h-full w-9 shrink-0 flex-col items-center gap-2 py-2 ${CARD}`}>
-        <button
-          type="button"
-          title={t("api.snippet.expand")}
-          aria-label={t("api.snippet.expand")}
-          onClick={() => toggleCollapsed(false)}
-          className="rounded p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
-        >
-          <PanelRightOpen size={15} />
-        </button>
-        <Code2 size={14} className="text-[var(--cf-text-muted)]" />
-        <span className="mt-1 whitespace-nowrap text-[11px] text-[var(--cf-text-muted)] [writing-mode:vertical-rl]">
-          {t("api.snippet.title")}
-        </span>
-      </div>
-    );
-  }
+  // Closed is nothing at all — not the 36px rail with its title written sideways that this used to
+  // leave behind. The way back in is the "Code" button in the request's name row.
+  if (!open) return null;
 
   return (
     <>
+      {/* Seamless: the panel draws its own left hairline (the inspector's), and the handle's seam a
+          pixel beside it would read as a doubled edge. */}
       <ResizeHandle
         axis="x"
         value={width}
@@ -201,51 +185,54 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
         onChange={(value) => setSize("apiSnippetWidth", value)}
         onCommit={(value) => commitSize("apiSnippetWidth", value)}
         invert
+        seamless
       />
+      {/* Appears rather than slides: its content fades in over a frame or two, and nothing animates
+          the width, which would relay out the builder beside it on every frame. */}
       <div
         data-tour="api-snippet"
         style={{ width }}
-        className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
+        className={`${inspectorClass} cf-panel-in h-full overflow-hidden`}
       >
-        <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
-          <Code2 size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
-          <span className="flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">
-            {t("api.snippet.title")}
-          </span>
+        <div className={explorerHeadClass}>
+          <h2 className={`${explorerTitleClass} flex-1`}>
+            <Code2 size={15} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <span className="truncate">{t("api.snippet.title")}</span>
+          </h2>
           <OptionsPopover options={options} onChange={patchOptions} />
-          <button
-            type="button"
-            title={t("api.snippet.collapse")}
-            aria-label={t("api.snippet.collapse")}
-            onClick={() => toggleCollapsed(true)}
-            className="rounded p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
-          >
-            <PanelRightClose size={15} />
-          </button>
+          <Tooltip label={t("api.snippet.collapse")}>
+            <button
+              type="button"
+              aria-label={t("api.snippet.collapse")}
+              onClick={() => setOpen(false)}
+              className={iconButtonClass({ size: "sm" })}
+            >
+              <PanelRightClose size={15} />
+            </button>
+          </Tooltip>
         </div>
 
-        <div className="flex shrink-0 items-center gap-1.5 px-2 py-1.5">
+        <div className="flex shrink-0 items-center gap-1.5 px-3 pb-2.5">
           <TargetPicker value={target.id} onChange={chooseTarget} />
-          <button
-            type="button"
-            title={t("api.snippet.copy")}
-            aria-label={t("api.snippet.copy")}
-            disabled={!code}
-            onClick={copy}
-            className={`shrink-0 rounded p-1.5 disabled:cursor-not-allowed disabled:opacity-40 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
-              copied ? "text-[var(--cf-success)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            }`}
-          >
-            {copied ? <Check size={14} /> : <Copy size={14} />}
-          </button>
-          {copied && <span className="shrink-0 text-[11px] text-[var(--cf-success)]">{t("api.snippet.copied")}</span>}
+          <Tooltip label={copied ? t("api.snippet.copied") : t("api.snippet.copy")}>
+            <button
+              type="button"
+              aria-label={t("api.snippet.copy")}
+              disabled={!code}
+              onClick={copy}
+              className={iconButtonClass({ size: "md" })}
+            >
+              {copied ? <Check size={15} className="text-[var(--cf-success)]" /> : <Copy size={15} />}
+            </button>
+          </Tooltip>
+          {copied && <span className="shrink-0 text-[12px] text-[var(--cf-success)]">{t("api.snippet.copied")}</span>}
         </div>
 
-        <div className="min-h-0 flex-1">
+        <div className="min-h-0 flex-1 border-t border-[var(--cf-border)]">
           {error !== null ? (
-            <p className="p-3 text-[12px] text-[var(--cf-danger)]">{t("api.snippet.failed", { error })}</p>
+            <p className="px-3.5 py-3 text-[12px] text-[var(--cf-danger)]">{t("api.snippet.failed", { error })}</p>
           ) : code === null ? null : code === "" ? (
-            <p className="p-3 text-[12px] text-[var(--cf-text-muted)]">{t("api.snippet.unsupported")}</p>
+            <p className="px-3.5 py-3 text-[12px] text-[var(--cf-text-muted)]">{t("api.snippet.unsupported")}</p>
           ) : (
             <Editor
               height="100%"
@@ -304,25 +291,24 @@ function OptionsPopover({
 
   return (
     <div ref={wrapperRef} className="relative shrink-0">
-      <button
-        type="button"
-        title={t("api.snippet.settings")}
-        aria-label={t("api.snippet.settings")}
-        aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
-        className={`rounded p-1 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
-          open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-        }`}
-      >
-        <Settings2 size={15} />
-      </button>
+      <Tooltip label={t("api.snippet.settings")}>
+        <button
+          type="button"
+          aria-label={t("api.snippet.settings")}
+          aria-expanded={open}
+          onClick={() => setOpen((current) => !current)}
+          className={iconButtonClass({ size: "sm", active: open })}
+        >
+          <Settings2 size={15} />
+        </button>
+      </Tooltip>
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 w-56 space-y-2.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2.5 shadow-[var(--cf-shadow)]">
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text)]">
+        <div className="absolute right-0 top-full z-50 mt-1 w-56 space-y-2.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-shadow)]">
+          <label className="flex cursor-pointer items-center gap-2 text-[13px] text-[var(--cf-text)]">
             <Checkbox checked={options.multiline} onChange={(multiline) => onChange({ multiline })} />
             {t("api.snippet.multiline")}
           </label>
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text)]">
+          <label className="flex cursor-pointer items-center gap-2 text-[13px] text-[var(--cf-text)]">
             <Checkbox
               checked={options.includeBoilerplate}
               onChange={(includeBoilerplate) => onChange({ includeBoilerplate })}
@@ -330,9 +316,9 @@ function OptionsPopover({
             {t("api.snippet.boilerplate")}
           </label>
           <div className="space-y-1">
-            <span className="text-[11px] text-[var(--cf-text-muted)]">{t("api.snippet.indent")}</span>
+            <span className="text-[12px] text-[var(--cf-text-muted)]">{t("api.snippet.indent")}</span>
             <Select
-              size="sm"
+              size="compact"
               value={indentId}
               ariaLabel={t("api.snippet.indent")}
               onChange={(id) => onChange({ indentWith: INDENT_VALUES[id] ?? "  " })}
@@ -449,14 +435,18 @@ function TargetPicker({ value, onChange }: { value: string; onChange: (id: strin
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => (open ? setOpen(false) : openMenu())}
-        className={`flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md border bg-[var(--cf-surface)] px-2 py-1 text-left text-[12px] outline-none ${
-          open ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)] focus:border-[var(--cf-accent)]"
+        // The field look `Select` wears at its `field` size, so the language picker and every
+        // other select in the app read as the same control.
+        className={`flex h-[30px] min-w-0 flex-1 items-center justify-between gap-2 rounded-md border bg-[var(--cf-field)] px-2.5 text-left text-[13px] outline-none transition-[border-color,box-shadow] duration-100 ${
+          open
+            ? "border-[var(--cf-accent)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
+            : "border-[var(--cf-field-border)] hover:border-[var(--cf-border-strong)] focus-visible:border-[var(--cf-accent)] focus-visible:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
         }`}
       >
         <span className="truncate text-[var(--cf-text)]">{selected?.label ?? ""}</span>
         <ChevronDown
           size={14}
-          className={`shrink-0 text-[var(--cf-text-muted)] transition-transform ${open ? "rotate-180" : ""}`}
+          className={`shrink-0 text-[var(--cf-text-faint)] transition-transform ${open ? "rotate-180" : ""}`}
         />
       </button>
 
@@ -467,7 +457,7 @@ function TargetPicker({ value, onChange }: { value: string; onChange: (id: strin
             ref={menuRef}
             role="listbox"
             style={{ position: "fixed", left: pos.left, top: pos.top, width: pos.width, maxHeight: pos.maxHeight }}
-            className="z-[9999] flex flex-col overflow-hidden rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+            className="z-[9999] flex flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
           >
             <input
               autoFocus
@@ -479,9 +469,9 @@ function TargetPicker({ value, onChange }: { value: string; onChange: (id: strin
                 setActiveIndex(0);
               }}
               onKeyDown={onKeyDown}
-              className="shrink-0 border-b border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
+              className="h-[34px] shrink-0 border-b border-[var(--cf-border)] bg-transparent px-3 text-[13px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)]"
             />
-            <div className="min-h-0 flex-1 overflow-auto p-1">
+            <div className="min-h-0 flex-1 overflow-auto p-[5px]">
               {matches.length === 0 ? (
                 <p className="px-2 py-3 text-center text-[12px] text-[var(--cf-text-muted)]">
                   {t("api.snippet.noResults")}
@@ -489,7 +479,7 @@ function TargetPicker({ value, onChange }: { value: string; onChange: (id: strin
               ) : (
                 groups.map(([group, targets]) => (
                   <div key={group}>
-                    <div className="px-2 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                    <div className="px-2 pb-1 pt-2.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                       {group}
                     </div>
                     {targets.map((item) => {
@@ -507,7 +497,7 @@ function TargetPicker({ value, onChange }: { value: string; onChange: (id: strin
                           onMouseEnter={() => setActiveIndex(flatIndex)}
                           onMouseDown={(e) => e.preventDefault()}
                           onClick={() => commit(item.id)}
-                          className={`flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1.5 text-[12px] ${
+                          className={`flex cursor-pointer items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[13px] ${
                             isSelected ? "font-medium text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
                           } ${isActive ? "bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]" : ""}`}
                         >

@@ -9,6 +9,7 @@ import type { NoteTemplate } from "../../types/notes";
 import { useNotesStore } from "../../state/notesStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /**
  * Pick a template to start a note from.
@@ -110,7 +111,7 @@ export function TemplatePickerModal({ onClose }: { onClose: () => void }) {
                     {selected.name}
                   </h3>
                   {selected.description && (
-                    <p className="mt-0.5 text-[11.5px] text-[var(--cf-text-muted)]">
+                    <p className="mt-0.5 text-[12px] text-[var(--cf-text-muted)]">
                       {selected.description}
                     </p>
                   )}
@@ -174,7 +175,7 @@ export function TemplatePickerModal({ onClose }: { onClose: () => void }) {
             type="button"
             disabled={!selected}
             onClick={() => selected && void use(selected)}
-            className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {t("notes.useTemplate")}
           </button>
@@ -203,7 +204,7 @@ function TemplateRow({
       className={`flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[12px] transition-colors ${
         active
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+          : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
       }`}
     >
       <Icon size={13} className="shrink-0" />

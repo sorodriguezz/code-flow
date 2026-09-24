@@ -4,6 +4,10 @@ import { createPortal } from "react-dom";
 import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
 import { preventMiddleClickAutoscroll } from "../../lib/pointerDrag";
 import { ContextMenu, type MenuItem} from "../common/ContextMenu";
+import { Tooltip } from "../common/Tooltip";
+import { Kbd, iconButtonClass } from "../common/Button";
+import { chipClass, docTabClass, popoverClass } from "../common/recipes";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useApiStore, type ApiEntityTab, type ApiTab } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore } from "../../state/collabStore";
@@ -26,7 +30,8 @@ import { API_PROTOCOLS, type ApiProtocol } from "../../types/api";
  * wheel handler and a `scrollIntoView` on activation to go with it. Letting tabs shrink instead
  * would trade those for tabs that get unreadable exactly when there are the most of them.
  *
- * Matches the editor strip's `max-w-[220px]`, so the two rows of tabs in the same window agree.
+ * Matches the document tab's `max-w-[220px]` (`docTabClass`), so every strip of open things in the
+ * window — the editor's files, these requests, a database's queries — agrees.
  */
 const TAB_W = 220;
 
@@ -50,6 +55,7 @@ export function RequestTabs() {
   const hoveredKey = useRowHoverStore((s) => s.key);
   const conflicts = useCollabStore((s) => s.conflicts);
   const openModal = useApiModalStore((s) => s.openApiModal);
+  const chord = useShortcutChord();
 
   // Only requests can be open in a tab, so only those conflicts can be painted on one.
   const conflicted = useMemo(
@@ -135,13 +141,18 @@ export function RequestTabs() {
     return items;
   };
 
+  // The document-tab strip (`docStripClass`'s tone and height), built in two parts because the new-
+  // request buttons stay put while the tabs scroll. The hairline is an inset shadow on the outer
+  // row rather than a border, and the scroller keeps a pixel of bottom padding: that is what lets
+  // the active tab (`docTabClass`, `-mb-px`) reach down over the line and melt into the sheet below
+  // instead of being clipped a pixel short of it by the scroller's own overflow.
   return (
-    <div className="flex shrink-0 items-stretch border-b border-[var(--cf-border)] bg-[var(--cf-bg)]">
+    <div className="flex h-9 shrink-0 items-stretch bg-[var(--cf-sunken)] shadow-[inset_0_-1px_0_var(--cf-border)]">
       <div
         ref={stripRef}
         onWheel={onWheel}
         role="tablist"
-        className="cf-tab-strip flex min-w-0 flex-1 items-stretch overflow-x-auto"
+        className="flex min-w-0 flex-1 items-stretch overflow-x-auto pb-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         {strip.map(({ kind, tab }) => {
           const active = tab.id === activeTabId;
@@ -190,71 +201,84 @@ export function RequestTabs() {
                 void requestClose(tab);
               }}
               style={{ width: TAB_W }}
-              className={`group relative flex h-9 shrink-0 cursor-pointer select-none items-center gap-2 border-r border-[var(--cf-border)] pl-3 pr-2 text-[12px] transition-colors ${
-                active
-                  ? "bg-[var(--cf-surface)] text-[var(--cf-text)]"
-                  : `text-[var(--cf-text-muted)] ${hoverKey === hoveredKey ? "cf-row-hover" : ""}`
-              } ${inConflict ? "bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)]" : ""}`}
+              // The active tab takes the sheet's colour and melts into the page below it; there is no
+              // accent bar over it any more. A tab owing a conflict decision keeps its warning wash
+              // whichever tab is active, and the active one of those also keeps a warning rule on
+              // top — it outranks everything else on the strip for attention.
+              className={docTabClass(
+                active,
+                `cursor-pointer select-none ${
+                  !active && hoverKey === hoveredKey ? "cf-row-hover" : ""
+                } ${inConflict && !active ? "bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)]" : ""}`,
+              )}
             >
-              {active && (
-                <span
-                  className={`absolute inset-x-0 top-0 h-[2px] ${
-                    inConflict ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-accent)]"
-                  }`}
-                />
+              {active && inConflict && (
+                <span aria-hidden className="absolute inset-x-0 top-0 h-[2px] bg-[var(--cf-warning)]" />
               )}
               {kind === "request" ? (
                 <span
-                  className="shrink-0 font-mono text-[10px] font-semibold"
+                  className="shrink-0 font-mono text-[10.5px] font-bold"
                   style={{ color: badgeColor(tab.draft.protocol, tab.draft.method) }}
                 >
                   {badgeLabel(tab.draft.protocol, tab.draft.method)}
                 </span>
               ) : tab.kind === "collection" ? (
-                <Boxes size={12} className="shrink-0 text-[var(--cf-accent)]" />
+                <Boxes size={14} className="shrink-0 text-[var(--cf-accent)]" />
               ) : (
-                <Folder size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                <Folder size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
               )}
               <span className={`truncate ${tab.dirty ? "italic" : ""}`}>
                 {tab.name || t(kind === "request" ? "api.untitledRequest" : "api.untitledCollection")}
               </span>
               {inConflict && (
+                <Tooltip label={t("api.conflict.badge")} description={t("api.conflict.tabHint")} side="bottom">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // A stale tab is resolved in the tab itself, where both versions are; only the
+                      // sync layer's frozen records have anything to show in the modal.
+                      if (tab.staleAgainst !== undefined) setActiveTab(tab.id);
+                      else openModal({ kind: "conflicts" });
+                    }}
+                    className={chipClass("warn", "hover:bg-[color-mix(in_oklab,var(--cf-warning)_24%,transparent)]")}
+                  >
+                    <ShieldAlert size={12} />
+                    {t("api.conflict.badge")}
+                  </button>
+                </Tooltip>
+              )}
+              <Tooltip
+                label={tab.dirty ? t("api.unsaved") : t("common.close")}
+                trailing={chord("editor.closeTab") ? <Kbd>{chord("editor.closeTab")}</Kbd> : undefined}
+                side="bottom"
+              >
                 <button
+                  type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    // A stale tab is resolved in the tab itself, where both versions are; only the
-                    // sync layer's frozen records have anything to show in the modal.
-                    if (tab.staleAgainst !== undefined) setActiveTab(tab.id);
-                    else openModal({ kind: "conflicts" });
+                    void requestClose(tab);
                   }}
-                  title={t("api.conflict.tabHint")}
-                  className="flex shrink-0 items-center gap-1 rounded bg-[color-mix(in_oklab,var(--cf-warning)_22%,transparent)] px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide text-[var(--cf-warning)]"
+                  aria-label={t("common.close")}
+                  className={iconButtonClass({
+                    size: "xs",
+                    className: `ml-auto ${
+                      active || tab.dirty ? "" : "opacity-0 group-hover/doctab:opacity-100 focus-visible:opacity-100"
+                    }`,
+                  })}
                 >
-                  <ShieldAlert size={9} />
-                  {t("api.conflict.badge")}
+                  {/* The unsaved dot lives in the close slot and turns into an × on hover, so a
+                      modified tab is still one click from closing. */}
+                  {tab.dirty ? (
+                    <>
+                      <span className="h-2 w-2 rounded-full bg-[var(--cf-accent)] group-hover/doctab:hidden" />
+                      <X size={13} className="hidden group-hover/doctab:block" />
+                    </>
+                  ) : (
+                    <X size={13} />
+                  )}
                 </button>
-              )}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  void requestClose(tab);
-                }}
-                title={tab.dirty ? t("api.unsaved") : t("common.close")}
-                className={`ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.08] ${
-                  active || tab.dirty ? "" : "opacity-0 group-hover:opacity-100"
-                }`}
-              >
-                {/* The unsaved dot lives in the close slot and turns into an × on hover, so a
-                    modified tab is still one click from closing. */}
-                {tab.dirty ? (
-                  <>
-                    <span className="h-2 w-2 rounded-full bg-[var(--cf-accent)] group-hover:hidden" />
-                    <X size={12} className="hidden group-hover:block" />
-                  </>
-                ) : (
-                  <X size={12} />
-                )}
-              </button>
+              </Tooltip>
             </div>
           );
         })}
@@ -262,26 +286,33 @@ export function RequestTabs() {
 
       {/* Split control: the plus is the common case (a plain HTTP request, one click), the caret
           is for the five protocols you'd otherwise have to create-then-convert to reach. */}
-      <div className="flex shrink-0 items-stretch border-l border-[var(--cf-border)]">
-        <button
-          onClick={() => openScratchTab()}
-          title={t("api.newRequest")}
-          className="flex w-8 items-center justify-center text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-        >
-          <Plus size={14} />
-        </button>
-        <button
-          ref={plusRef}
-          onClick={() => {
-            const rect = plusRef.current?.getBoundingClientRect();
-            if (rect) setProtocolMenu({ left: rect.right, top: rect.bottom + 4 });
-          }}
-          title={t("api.protocol")}
-          aria-label={t("api.protocol")}
-          className="flex w-5 items-center justify-center text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-        >
-          <ChevronDown size={12} />
-        </button>
+      <div className="flex shrink-0 items-center gap-px px-1.5">
+        <Tooltip label={t("api.newRequest")} side="bottom">
+          <button
+            type="button"
+            onClick={() => openScratchTab()}
+            aria-label={t("api.newRequest")}
+            className={iconButtonClass({ size: "sm" })}
+          >
+            <Plus size={16} />
+          </button>
+        </Tooltip>
+        <Tooltip label={t("api.protocol")} side="bottom">
+          <button
+            type="button"
+            ref={plusRef}
+            onClick={() => {
+              const rect = plusRef.current?.getBoundingClientRect();
+              if (rect) setProtocolMenu({ left: rect.right, top: rect.bottom + 4 });
+            }}
+            aria-label={t("api.protocol")}
+            aria-haspopup="menu"
+            aria-expanded={protocolMenu !== null}
+            className={iconButtonClass({ size: "sm", active: protocolMenu !== null, className: "!w-[18px]" })}
+          >
+            <ChevronDown size={13} />
+          </button>
+        </Tooltip>
       </div>
 
       {tabMenu && (
@@ -302,33 +333,35 @@ export function RequestTabs() {
             <div
               role="menu"
               style={{ position: "fixed", left: protocolMenu.left, top: protocolMenu.top }}
-              className="z-[9999] w-[230px] -translate-x-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
+              className={`z-[9999] w-[250px] -translate-x-full ${popoverClass}`}
             >
               {API_PROTOCOLS.map((protocol: ApiProtocol) => {
                 const Icon = protocolIcon(protocol);
                 return (
                   <button
                     key={protocol}
+                    type="button"
                     role="menuitem"
                     onClick={() => {
                       setProtocolMenu(null);
                       openScratchTab(protocol);
                     }}
-                    className="flex w-full items-start gap-2 rounded px-2 py-1 text-left hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
+                    // `menuItemClass`'s row, grown to two lines for the hint under each name.
+                    className="flex w-full items-start gap-2.5 rounded-md px-2.5 py-1.5 text-left transition-colors duration-100 hover:bg-[var(--cf-hover)]"
                   >
                     {/* Nudged onto the title's baseline rather than centred on the whole item: the
                         hint below wraps to two lines for half of these, and an icon centred on the
                         pair drifts down the list as the wrapping changes. */}
                     <Icon
-                      size={14}
+                      size={15}
                       className="mt-[2px] shrink-0"
                       style={{ color: badgeColor(protocol, "") }}
                     />
                     <span className="flex min-w-0 flex-col">
-                      <span className="text-[12px] font-medium text-[var(--cf-text)]">
+                      <span className="text-[13px] text-[var(--cf-text)]">
                         {t("api.newRequestOf", { protocol: PROTOCOL_NAMES[protocol] })}
                       </span>
-                      <span className="text-[11px] text-[var(--cf-text-muted)]">
+                      <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
                         {t(`api.protocolHint.${protocol}` as const)}
                       </span>
                     </span>

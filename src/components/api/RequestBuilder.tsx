@@ -1,7 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Download, FileQuestion, Loader2, Save, Send, ShieldAlert, X } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Code2,
+  Download,
+  FileQuestion,
+  Loader2,
+  Save,
+  Send,
+  ShieldAlert,
+  X,
+} from "lucide-react";
 import { Select } from "../common/Select";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { Tooltip } from "../common/Tooltip";
+import { ActiveUnderline } from "../common/ActivePill";
+import { Kbd, buttonClass, iconButtonClass } from "../common/Button";
+import {
+  chipClass,
+  menuItemClass,
+  popoverClass,
+  tabCountClass,
+  underlineStripClass,
+  underlineTabClass,
+} from "../common/recipes";
+import { useShortcutChord } from "../../lib/useShortcutHint";
+import { ensureSnippetPanelLoaded, useSnippetPanelStore } from "./snippetPanelState";
 import { KeyValueTable } from "./KeyValueTable";
 import { VariableInput } from "./VariableInput";
 import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
@@ -58,8 +82,27 @@ const IMPLICIT_HEADER_DEBOUNCE_MS = 250;
 /** How much of a body the history snapshot keeps. */
 const HISTORY_BODY_LIMIT = 200_000;
 
+/** The URL field wears the text-field recipe (`fieldClass`): the field fill, its hairline, and the
+ *  accent edge with a soft halo while the caret is in it. Spelled out rather than imported because
+ *  the box is `VariableInput`'s wrapper, not the `<input>` — so the ring answers `focus-within`. */
 const INPUT_SHELL =
-  "rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] focus-within:border-[var(--cf-accent)]";
+  "rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] transition-[border-color,box-shadow] duration-100 focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]";
+
+/** The in-panel heading ("QUERY PARAMETERS"): the app's section label, set in a panel's own inset. */
+const PANE_TITLE = "text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
+
+/**
+ * The verb's own colour as a tinted field — wash, ink and a ring out of one hue — so the method reads
+ * as the first word of the URL rather than as a separate control beside it. Inline because the hue
+ * is data (`badgeColor`), and it must be the *same* hue the tab strip and the tree give that verb.
+ */
+function methodTint(color: string): React.CSSProperties {
+  return {
+    color,
+    backgroundColor: `color-mix(in oklab, ${color} 12%, var(--cf-field))`,
+    borderColor: `color-mix(in oklab, ${color} 35%, transparent)`,
+  };
+}
 
 function newId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -301,6 +344,12 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const pushToast = useToastStore((s) => s.pushToast);
+  const chord = useShortcutChord();
+  // The code-snippet panel's switch lives here, beside Save; the panel itself is `ApiView`'s right
+  // column. Both read the one remembered flag.
+  const snippetOpen = useSnippetPanelStore((s) => s.open);
+  const setSnippetOpen = useSnippetPanelStore((s) => s.setOpen);
+  useEffect(() => ensureSnippetPanelLoaded(), []);
 
   /**
    * Which sub-panel this *tab* is on, and whether its hidden-header list is unfolded.
@@ -721,20 +770,22 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
       {/* Only ever shown for a tab with unsaved edits: a clean tab has already taken the incoming
           version, silently and correctly, because it had nothing of its own to lose. */}
       {tab.staleAgainst !== undefined && (
-        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-3 py-1.5">
-          <ShieldAlert size={13} className="shrink-0 text-[var(--cf-warning)]" />
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] py-1.5 pl-3.5 pr-3">
+          <ShieldAlert size={14} className="shrink-0 text-[var(--cf-warning)]" />
           <span className="min-w-0 flex-1 text-[12px] text-[var(--cf-text)]">
             {t("api.stale.message")}
           </span>
           <button
+            type="button"
             onClick={() => useApiStore.getState().takeRemoteVersion(tab.id)}
-            className="shrink-0 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost", size: "sm" })}
           >
             {t("api.stale.takeTheirs")}
           </button>
           <button
+            type="button"
             onClick={() => useApiStore.getState().keepLocalVersion(tab.id)}
-            className="shrink-0 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[12px] font-medium text-white"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             {t("api.stale.keepMine")}
           </button>
@@ -744,32 +795,37 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
       {/* ---------- name row ---------- */}
       {/* Reads as one line — what kind of request, where it lives, what it's called — with only
           the last part editable. The protocol leads because it's the thing that decides what
-          everything below the row even means. */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
+          everything below the row even means. No rule under it: the name, the URL bar and the
+          section tabs are one header, and the tabs' hairline is where the request's body starts. */}
+      <div className="flex h-[46px] shrink-0 items-center gap-2 pl-3 pr-3">
         <div className="relative shrink-0">
           {/* Locked once the request has a row of its own: the protocol shapes the whole request —
               a body, a subscription, a service call — so changing it on something already saved is
               less "adjust a setting" than "replace this with a different request". While it's
               still a scratch tab there's nothing to betray, so it stays editable. */}
           {protocolLocked ? (
-            <span
-              title={`${PROTOCOL_NAMES[spec.protocol]} — ${t("api.protocolLocked")}`}
-              className="flex h-6 w-6 items-center justify-center"
-            >
-              <ProtocolIcon size={15} style={{ color: badgeColor(spec.protocol, "") }} />
-            </span>
+            <Tooltip label={PROTOCOL_NAMES[spec.protocol]} description={t("api.protocolLocked")} side="bottom">
+              <span
+                role="img"
+                aria-label={`${PROTOCOL_NAMES[spec.protocol]} — ${t("api.protocolLocked")}`}
+                className="flex h-7 w-7 items-center justify-center rounded-md"
+              >
+                <ProtocolIcon size={16} style={{ color: badgeColor(spec.protocol, "") }} />
+              </span>
+            </Tooltip>
           ) : (
-            <button
-              type="button"
-              onClick={() => setProtocolMenu((open) => !open)}
-              title={t("api.changeProtocol")}
-              aria-label={t("api.changeProtocol")}
-              aria-haspopup="menu"
-              aria-expanded={protocolMenu}
-              className="flex h-6 w-6 items-center justify-center rounded hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-            >
-              <ProtocolIcon size={15} style={{ color: badgeColor(spec.protocol, "") }} />
-            </button>
+            <Tooltip label={t("api.changeProtocol")} side="bottom">
+              <button
+                type="button"
+                onClick={() => setProtocolMenu((open) => !open)}
+                aria-label={t("api.changeProtocol")}
+                aria-haspopup="menu"
+                aria-expanded={protocolMenu}
+                className={iconButtonClass({ size: "md", active: protocolMenu })}
+              >
+                <ProtocolIcon size={16} style={{ color: badgeColor(spec.protocol, "") }} />
+              </button>
+            </Tooltip>
           )}
 
           {protocolMenu && !protocolLocked && (
@@ -777,26 +833,23 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
               {/* Full-viewport catcher, so the click that dismisses doesn't also press whatever
                   is underneath it. */}
               <div className="fixed inset-0 z-[9998]" onMouseDown={() => setProtocolMenu(false)} />
-              <div
-                role="menu"
-                className="absolute left-0 top-full z-[9999] mt-1 w-[180px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
-              >
+              <div role="menu" className={`absolute left-0 top-full z-[9999] mt-1 w-[200px] ${popoverClass}`}>
                 {API_PROTOCOLS.map((id) => {
                   const Icon = protocolIcon(id);
+                  const current = id === spec.protocol;
                   return (
                     <button
                       key={id}
+                      type="button"
                       role="menuitem"
                       onClick={() => {
                         setProtocolMenu(false);
                         if (id !== spec.protocol) update(switchProtocol(spec, id));
                       }}
-                      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)] ${
-                        id === spec.protocol ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
-                      }`}
+                      className={menuItemClass(current, current ? "font-medium" : "")}
                     >
-                      <Icon size={14} className="shrink-0" style={{ color: badgeColor(id, "") }} />
-                      {PROTOCOL_NAMES[id]}
+                      <Icon size={15} className="shrink-0" style={{ color: badgeColor(id, "") }} />
+                      <span className="min-w-0 flex-1 truncate">{PROTOCOL_NAMES[id]}</span>
                     </button>
                   );
                 })}
@@ -812,19 +865,23 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
             a button because saying so is only half the job; the other half is the way out, and this
             is the same picker ⌘S opens. */}
         {crumbs.length === 0 && (
-          <button
-            type="button"
-            onClick={() => {
-              const first = collections[0];
-              setSavePicker({ collectionId: first?.id ?? "", folderId: "" });
-            }}
-            title={t("api.scratchHint")}
-            className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--cf-warning)] transition-colors hover:bg-[var(--cf-warning)]/10"
-          >
-            <FileQuestion size={11} className="shrink-0" />
-            {t("api.scratchBadge")}
-            <ChevronRight size={12} className="shrink-0 opacity-60" />
-          </button>
+          <Tooltip label={t("api.scratchBadge")} description={t("api.scratchHint")} side="bottom">
+            <button
+              type="button"
+              onClick={() => {
+                const first = collections[0];
+                setSavePicker({ collectionId: first?.id ?? "", folderId: "" });
+              }}
+              className={chipClass(
+                "warn",
+                "transition-colors hover:bg-[color-mix(in_oklab,var(--cf-warning)_24%,transparent)]",
+              )}
+            >
+              <FileQuestion size={12} className="shrink-0" />
+              {t("api.scratchBadge")}
+              <ChevronRight size={12} className="-mr-0.5 shrink-0 opacity-60" />
+            </button>
+          </Tooltip>
         )}
 
         {/* The path, then the name as its last segment — the same trail the explorer shows, with
@@ -832,10 +889,10 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
         {crumbs.map((crumb, index) => (
           <span
             key={`${crumb}-${index}`}
-            className="flex min-w-0 shrink items-center gap-2 text-[12px] text-[var(--cf-text-muted)]"
+            className="flex min-w-0 shrink items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]"
           >
             <span className="truncate">{crumb}</span>
-            <ChevronRight size={12} className="shrink-0 opacity-60" />
+            <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
           </span>
         ))}
         <input
@@ -845,41 +902,67 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
           placeholder={t("api.untitledRequest")}
           aria-label={t("api.untitledRequest")}
           onChange={(e) => useApiStore.getState().renameTab(tabId, e.target.value)}
-          className="min-w-[80px] flex-1 rounded bg-transparent px-1 py-0.5 text-[13px] font-semibold text-[var(--cf-text)] outline-none placeholder:font-normal placeholder:text-[var(--cf-text-muted)] hover:bg-black/[0.04] focus:bg-[var(--cf-surface)] dark:hover:bg-white/[0.05]"
+          className="h-7 min-w-[80px] flex-1 rounded-md bg-transparent px-1.5 text-[14px] font-semibold text-[var(--cf-text)] outline-none transition-[background-color,box-shadow] duration-100 placeholder:font-normal placeholder:text-[var(--cf-text-faint)] hover:bg-[var(--cf-hover)] focus:bg-[var(--cf-field)] focus:shadow-[inset_0_0_0_1px_var(--cf-accent)]"
         />
         {tab.dirty && (
-          <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]" title={t("api.unsaved")}>
-            {t("api.unsaved")}
-          </span>
+          <span className="shrink-0 text-[12px] text-[var(--cf-text-faint)]">{t("api.unsaved")}</span>
         )}
+        {/* The code snippet's switch. It used to be a 36px rail down the right edge with its title
+            written sideways — a whole column spent on a closed panel. Pressed while the panel is
+            open, and remembered either way (`snippetPanelState`). */}
+        <Tooltip label={snippetOpen ? t("api.snippet.collapse") : t("api.snippet.expand")} side="bottom">
+          <button
+            type="button"
+            onClick={() => setSnippetOpen(!snippetOpen)}
+            aria-pressed={snippetOpen}
+            className={buttonClass({
+              variant: "ghost",
+              size: "md",
+              className:
+                "aria-pressed:bg-[var(--cf-accent-soft)] aria-pressed:text-[var(--cf-accent)]",
+            })}
+          >
+            <Code2 size={14} />
+            {t("api.snippet.button")}
+          </button>
+        </Tooltip>
         <div className="relative shrink-0">
           {/* Live only when there's something to save. A button that looks the same whether or
               not it would do anything makes "is my work in?" a question you have to answer some
               other way — here the button itself is the answer, and the "unsaved" tag beside it
-              says the same thing twice on purpose. */}
-          <button
-            onClick={() => void save()}
-            disabled={!tab.dirty}
-            title={tab.dirty ? t("api.save") : t("api.noChangesToSave")}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:cursor-default disabled:border-[var(--cf-border)] disabled:text-[var(--cf-text-muted)] disabled:opacity-50 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text-muted)]"
+              says the same thing twice on purpose. The span is what the tooltip hangs on: a
+              disabled button takes no pointer events, and "no changes to save" is exactly the
+              line worth reading on the disabled one. */}
+          <Tooltip
+            label={t("api.save")}
+            description={tab.dirty ? undefined : t("api.noChangesToSave")}
+            trailing={chord("editor.save") ? <Kbd>{chord("editor.save")}</Kbd> : undefined}
+            side="bottom"
           >
-            <Save size={13} />
-            {t("api.save")}
-          </button>
+            <span className="inline-flex">
+              <button
+                type="button"
+                onClick={() => void save()}
+                disabled={!tab.dirty}
+                className={buttonClass({ variant: "secondary", size: "md" })}
+              >
+                <Save size={14} />
+                {t("api.save")}
+              </button>
+            </span>
+          </Tooltip>
 
           {savePicker && (
-            <div className="absolute right-0 top-full z-50 mt-1 w-[320px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-shadow)]">
-              <p className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                {t("api.saveTo")}
-              </p>
+            <div className="absolute right-0 top-full z-50 mt-1 w-[320px] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-shadow)]">
+              <p className={`mb-2.5 ${PANE_TITLE}`}>{t("api.saveTo")}</p>
               {collections.length === 0 ? (
                 <p className="text-[12px] text-[var(--cf-text-muted)]">{t("api.noCollections")}</p>
               ) : (
-                <div className="flex flex-col gap-2">
+                <div className="flex flex-col gap-2.5">
                   <label className="flex flex-col gap-1">
-                    <span className="text-[11px] text-[var(--cf-text-muted)]">{t("api.scope.collection")}</span>
+                    <span className="text-[12px] text-[var(--cf-text-muted)]">{t("api.scope.collection")}</span>
                     <Select
-                      size="sm"
+                      size="compact"
                       value={savePicker.collectionId}
                       onChange={(value) => setSavePicker({ collectionId: value, folderId: "" })}
                       options={collections.map((item) => ({ value: item.id, label: item.name }))}
@@ -887,9 +970,9 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                     />
                   </label>
                   <label className="flex flex-col gap-1">
-                    <span className="text-[11px] text-[var(--cf-text-muted)]">{t("api.folder")}</span>
+                    <span className="text-[12px] text-[var(--cf-text-muted)]">{t("api.folder")}</span>
                     <Select
-                      size="sm"
+                      size="compact"
                       value={savePicker.folderId}
                       onChange={(value) => setSavePicker({ ...savePicker, folderId: value })}
                       options={[
@@ -901,17 +984,19 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                   </label>
                 </div>
               )}
-              <div className="mt-3 flex justify-end gap-2">
+              <div className="mt-3 flex justify-end gap-1.5">
                 <button
+                  type="button"
                   onClick={() => setSavePicker(null)}
-                  className="rounded-md px-2.5 py-1 text-[12px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                  className={buttonClass({ variant: "ghost", size: "sm" })}
                 >
                   {t("common.cancel")}
                 </button>
                 <button
+                  type="button"
                   onClick={() => void saveToTarget()}
                   disabled={collections.length === 0}
-                  className="rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-40"
+                  className={buttonClass({ variant: "primary", size: "sm" })}
                 >
                   {t("api.save")}
                 </button>
@@ -922,109 +1007,135 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
       </div>
 
       {/* ---------- URL bar ---------- */}
-      <div className="flex shrink-0 items-stretch gap-2 px-3 py-2">
-        {protocol === "http" ? (
-          // The colour lives on the wrapper because `Select` renders its own label span with no
-          // colour of its own — it inherits, which is exactly what makes a themed verb possible.
-          <div className="w-[104px] shrink-0" style={{ color: badgeColor(protocol, spec.method) }}>
-            <Select
-              size="sm"
-              value={spec.method}
-              onChange={(method) => update({ method })}
-              options={HTTP_METHODS.map((method) => ({ value: method, label: method }))}
-              ariaLabel={t("api.method")}
-              // `h-full` rather than a matching padding: the row is `items-stretch`, so the
-              // height to match is whatever the URL field resolves to, and hard-coding a padding
-              // that happens to agree today would drift the moment either side is restyled.
-              className="h-full font-mono font-semibold"
-            />
-          </div>
-        ) : (
-          <span
-            className="flex shrink-0 items-center rounded-md border border-[var(--cf-border)] px-2.5 font-mono text-[11px] font-semibold"
-            style={{ color: badgeColor(protocol, spec.method) }}
-          >
-            {badgeLabel(protocol, spec.method)}
-          </span>
-        )}
+      {/* Method, URL and Send as one line, all three 32px: the verb in its own colour, the address
+          in the monospace every other path in the app is set in, and the action at the end. */}
+      <div className="shrink-0 px-3.5 pb-2.5">
+        <div className="flex h-8 items-stretch gap-2">
+          {protocol === "http" ? (
+            <div className="w-[104px] shrink-0">
+              <Select
+                size="field"
+                value={spec.method}
+                onChange={(method) => update({ method })}
+                options={HTTP_METHODS.map((method) => ({ value: method, label: method }))}
+                ariaLabel={t("api.method")}
+                className="font-mono font-bold"
+                // Inline because the hue is the verb's own (`badgeColor`) and `Select` paints its
+                // trigger in the field colours. `height` rather than a size class: the row is 32px
+                // and `items-stretch`, so the trigger takes whatever the URL field beside it is.
+                style={{ ...methodTint(badgeColor(protocol, spec.method)), height: "100%" }}
+              />
+            </div>
+          ) : (
+            <span
+              className="flex shrink-0 items-center rounded-md border px-2.5 font-mono text-[12px] font-bold"
+              style={methodTint(badgeColor(protocol, spec.method))}
+            >
+              {badgeLabel(protocol, spec.method)}
+            </span>
+          )}
 
-        <VariableInput
-          value={spec.url}
-          onChange={onUrlChange}
-          variableContext={variableContext}
-          placeholder={t(URL_PLACEHOLDERS[protocol])}
-          ariaLabel={t("api.urlPlaceholder")}
-          className={`flex-1 ${INPUT_SHELL}`}
-          fieldClassName="px-2.5 py-1.5 text-[12px]"
-          onPaste={(e) => {
-            const text = e.clipboardData.getData("text");
-            if (!looksLikeCurl(text)) return;
-            // `preventDefault` only *after* the import succeeds. Doing it up front on the strength
-            // of `looksLikeCurl` alone would swallow the paste whenever the parse then failed —
-            // the field would sit there looking like paste was broken.
-            if (importCurl(text)) e.preventDefault();
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !isStreaming && !isGrpc && spec.url.trim() !== "") {
-              void runSend(false);
-            }
-          }}
-        />
+          <VariableInput
+            value={spec.url}
+            onChange={onUrlChange}
+            variableContext={variableContext}
+            placeholder={t(URL_PLACEHOLDERS[protocol])}
+            ariaLabel={t("api.urlPlaceholder")}
+            className={`flex-1 ${INPUT_SHELL}`}
+            // 20px of line plus 5px either side inside the 1px hairlines: the 32px the row is.
+            fieldClassName="px-2.5 py-[5px] font-mono text-[12px]"
+            onPaste={(e) => {
+              const text = e.clipboardData.getData("text");
+              if (!looksLikeCurl(text)) return;
+              // `preventDefault` only *after* the import succeeds. Doing it up front on the strength
+              // of `looksLikeCurl` alone would swallow the paste whenever the parse then failed —
+              // the field would sit there looking like paste was broken.
+              if (importCurl(text)) e.preventDefault();
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !isStreaming && !isGrpc && spec.url.trim() !== "") {
+                void runSend(false);
+              }
+            }}
+          />
 
-        {/* Streaming and gRPC transports are driven from their own panels, which own the
-            connection lifecycle and the status they report — a second Connect button here would
-            be a second source of truth for the same socket. */}
-        {!isStreaming && !isGrpc && (
-          <div ref={menuRef} className="relative flex shrink-0 items-stretch">
-            {sending ? (
-              <button
-                onClick={cancelSend}
-                className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-              >
-                <X size={13} />
-                {t("api.cancel")}
-              </button>
-            ) : (
-              <>
+          {/* Streaming and gRPC transports are driven from their own panels, which own the
+              connection lifecycle and the status they report — a second Connect button here would
+              be a second source of truth for the same socket. */}
+          {!isStreaming && !isGrpc && (
+            <div ref={menuRef} className="relative flex shrink-0 items-stretch">
+              {sending ? (
                 <button
-                  onClick={() => void runSend(false)}
-                  disabled={spec.url.trim() === ""}
-                  className="flex items-center gap-1.5 rounded-l-md bg-[var(--cf-accent)] px-3 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+                  type="button"
+                  onClick={cancelSend}
+                  className={buttonClass({
+                    variant: "secondary",
+                    size: "lg",
+                    className: "hover:text-[var(--cf-danger)]",
+                  })}
                 >
-                  <Send size={13} />
-                  {t("api.send")}
+                  <X size={14} />
+                  {t("api.cancel")}
                 </button>
-                <button
-                  onClick={() => setMenuOpen((open) => !open)}
-                  aria-label={t("api.sendAndDownload")}
-                  disabled={spec.url.trim() === ""}
-                  className="flex items-center rounded-r-md border-l border-white/25 bg-[var(--cf-accent)] px-1.5 text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <ChevronDown size={13} />
-                </button>
-              </>
-            )}
+              ) : (
+                <>
+                  {/* One split button: Send, and a caret for the variant that also saves the body to
+                      a file. The seam between them is a line of the ink colour at a quarter, so it
+                      reads on every accent in both themes. */}
+                  <Tooltip
+                    label={t("api.send")}
+                    trailing={chord("api.send") ? <Kbd>{chord("api.send")}</Kbd> : undefined}
+                    side="bottom"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => void runSend(false)}
+                      disabled={spec.url.trim() === ""}
+                      className={buttonClass({ variant: "primary", size: "lg", className: "rounded-r-none" })}
+                    >
+                      <Send size={14} />
+                      {t("api.send")}
+                    </button>
+                  </Tooltip>
+                  <Tooltip label={t("api.sendAndDownload")} side="bottom">
+                    <button
+                      type="button"
+                      onClick={() => setMenuOpen((open) => !open)}
+                      aria-label={t("api.sendAndDownload")}
+                      aria-haspopup="menu"
+                      aria-expanded={menuOpen}
+                      disabled={spec.url.trim() === ""}
+                      className="inline-flex w-7 shrink-0 items-center justify-center rounded-r-md bg-[var(--cf-accent)] text-[var(--cf-on-accent)] shadow-[inset_1px_0_0_color-mix(in_oklab,var(--cf-on-accent)_25%,transparent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:pointer-events-none disabled:opacity-45"
+                    >
+                      <ChevronDown size={14} />
+                    </button>
+                  </Tooltip>
+                </>
+              )}
 
-            {menuOpen && !sending && (
-              <div className="absolute right-0 top-full z-50 mt-1 w-[200px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
-                <button
-                  onClick={() => {
-                    setMenuOpen(false);
-                    void runSend(true);
-                  }}
-                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-[var(--cf-text)] hover:bg-[var(--cf-accent-soft)]"
-                >
-                  <Download size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-                  {t("api.sendAndDownload")}
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+              {menuOpen && !sending && (
+                <div role="menu" className={`absolute right-0 top-full z-50 mt-1 w-[220px] ${popoverClass}`}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      void runSend(true);
+                    }}
+                    className={menuItemClass()}
+                  >
+                    <Download size={15} className="shrink-0 text-[var(--cf-text-muted)]" />
+                    {t("api.sendAndDownload")}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
 
-        {sending && (isStreaming || isGrpc) && (
-          <Loader2 size={14} className="shrink-0 animate-spin self-center text-[var(--cf-text-muted)]" />
-        )}
+          {sending && (isStreaming || isGrpc) && (
+            <Loader2 size={14} className="shrink-0 animate-spin self-center text-[var(--cf-text-muted)]" />
+          )}
+        </div>
       </div>
 
       {/* ---------- editor + response ---------- */}
@@ -1042,28 +1153,29 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
               response below it — the panels inside are sized by their own content and would
               otherwise keep painting at full height once this box shrinks past them. */}
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <div className="cf-tab-strip flex shrink-0 items-stretch gap-1 overflow-x-auto border-y border-[var(--cf-border)] px-3">
+            {/* The request's sections: underlined tabs, the level below the request tabs above the
+                builder and above the body's own format picker — one kind of control per level, so
+                what depends on what reads off the shapes. A count says how many rows are on; a dot
+                says the section holds something without a number to give. */}
+            <div role="tablist" className={underlineStripClass}>
               {PANEL_ORDER.map((id) => {
                 const count = badgeCount(id);
                 const active = panel === id;
                 return (
                   <button
                     key={id}
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
                     onClick={() => setPanel(id)}
-                    className={`relative flex shrink-0 items-center gap-1 whitespace-nowrap px-2 py-2 text-[12px] transition-colors ${
-                      active
-                        ? "text-[var(--cf-text)]"
-                        : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                    }`}
+                    className={underlineTabClass(active)}
                   >
                     {panelLabel(id)}
-                    {count !== null && (
-                      <span className="text-[11px] text-[var(--cf-success)]">({count})</span>
-                    )}
+                    {count !== null && <span className={tabCountClass}>{count}</span>}
                     {count === null && badgeDot(id) && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-[var(--cf-success)]" />
+                      <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-[var(--cf-success)]" />
                     )}
-                    {active && <span className="absolute inset-x-1 bottom-0 h-[2px] bg-[var(--cf-accent)]" />}
+                    {active && <ActiveUnderline layoutId="cf-api-request-panel" />}
                   </button>
                 );
               })}
@@ -1074,11 +1186,9 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                 the panels rendered inline below bring their own scroll container instead. */}
             <div className="min-h-0 flex-1">
               {panel === "params" && (
-                <div className="flex h-full flex-col gap-4 overflow-auto p-3">
-                  <section className="flex flex-col gap-1.5">
-                    <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                      {t("api.queryParams")}
-                    </h3>
+                <div className="flex h-full flex-col gap-4 overflow-auto px-3.5 py-3">
+                  <section className="flex flex-col gap-2">
+                    <h3 className={PANE_TITLE}>{t("api.queryParams")}</h3>
                     {/* Scoped by tab: `KeyValueTable` keeps the bulk-edit textarea, its snapshot of
                         the rows it was opened over, and a half-typed new row in local state. This
                         is the one place a React key is the right tool — that snapshot is only
@@ -1093,10 +1203,8 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                     />
                   </section>
                   {spec.pathVars.length > 0 && (
-                    <section className="flex flex-col gap-1.5">
-                      <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                        {t("api.pathVariables")}
-                      </h3>
+                    <section className="flex flex-col gap-2">
+                      <h3 className={PANE_TITLE}>{t("api.pathVariables")}</h3>
                       <KeyValueTable
                         key={`${tabId}:pathVars`}
                         rows={spec.pathVars}
@@ -1114,7 +1222,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
               {panel === "auth" && <AuthPanel key={tabId} tabId={tabId} />}
 
               {panel === "headers" && (
-                <div className="flex h-full flex-col gap-3 overflow-auto p-3">
+                <div className="flex h-full flex-col gap-3 overflow-auto px-3.5 py-3">
                   <KeyValueTable
                     key={`${tabId}:headers`}
                     rows={spec.headers}
@@ -1124,17 +1232,20 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                   />
                   {implicitHeaders.length > 0 && (
                     <div className="flex flex-col gap-1.5">
-                      <button
-                        onClick={() => setTabView(tabId, { showImplicit: !showImplicit })}
-                        title={showImplicit ? t("api.hideHiddenHeaders") : t("api.showHiddenHeaders")}
-                        className="flex items-center gap-1 self-start text-[11px] text-[var(--cf-accent)]"
-                      >
-                        <ChevronRight
-                          size={12}
-                          className={`transition-transform ${showImplicit ? "rotate-90" : ""}`}
-                        />
-                        {t("api.hiddenHeaders", { n: implicitHeaders.length })}
-                      </button>
+                      <Tooltip label={showImplicit ? t("api.hideHiddenHeaders") : t("api.showHiddenHeaders")}>
+                        <button
+                          type="button"
+                          onClick={() => setTabView(tabId, { showImplicit: !showImplicit })}
+                          aria-expanded={showImplicit}
+                          className={buttonClass({ variant: "ghost", size: "sm", className: "-ml-2 self-start" })}
+                        >
+                          <ChevronRight
+                            size={13}
+                            className={`transition-transform ${showImplicit ? "rotate-90" : ""}`}
+                          />
+                          {t("api.hiddenHeaders", { n: implicitHeaders.length })}
+                        </button>
+                      </Tooltip>
                       {/* Read-only on purpose: these are supplied by the transport, and the
                           backend offers no way to suppress them — an editable row here would be a
                           control that quietly does nothing. */}
@@ -1154,14 +1265,14 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
               {panel === "settings" && <RequestSettingsPanel tabId={tabId} />}
 
               {panel === "docs" && (
-                <div className="h-full overflow-auto p-3">
+                <div className="h-full overflow-auto px-3.5 py-3">
                   <textarea
                     value={spec.description}
                     spellCheck={false}
                     placeholder={t("api.description")}
                     aria-label={t("api.description")}
                     onChange={(e) => update({ description: e.target.value })}
-                    className="min-h-[200px] w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent p-2 text-[12px] leading-5 text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+                    className="min-h-[200px] w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-2 text-[13px] leading-5 text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
                   />
                 </div>
               )}

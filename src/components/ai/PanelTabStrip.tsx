@@ -5,6 +5,7 @@ import {
   GitPullRequest,
   Inbox,
   Link2,
+  Loader2,
   Maximize2,
   MessageSquare,
   Minimize2,
@@ -15,11 +16,15 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
+import { Kbd, buttonClass, iconButtonClass } from "../common/Button";
+import { popoverClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import { jobPrUrl } from "../../lib/activityEntries";
 import { workspaceActivityKey } from "../../lib/prTarget";
 import { openAnalysis, openNewChat, useChangesToAnalyze } from "../../lib/aiPanelNav";
 import { useRepoQueueStore } from "../../lib/repoQueue";
-import { useDismiss, useElementWidth } from "./docParts";
+import { useShortcutChord } from "../../lib/useShortcutHint";
+import { menuRowClass, useDismiss, useElementWidth } from "./docParts";
 import { EMPTY_JOBS, useJobsStore } from "../../state/jobsStore";
 import { useChatStore } from "../../state/chatStore";
 import { useChatHistoryStore } from "../../state/activityStore";
@@ -37,10 +42,11 @@ const EMPTY_PRS: PullRequestSummary[] = [];
  * The top of the assistant: the Inbox, one tab per open thing, and the three controls that act on
  * the panel itself (open something new, wide mode, close).
  *
- * A tab says what it is (its kind's icon), where it is at (the orb while a model works on it, a
- * clock while it waits for its repository, a dot when a result landed that you have not looked at)
- * and — when it belongs to another repository of the workspace — which one. Tabs other than the one
- * on screen shrink to that icon once the strip would overflow; the name is in the tooltip.
+ * A tab says what it is (its kind's icon), where it is at (the orb while a model works on it — and
+ * only there — a clock while it waits for its repository, a dot when a result landed that you have
+ * not looked at, a ring when that result is a failure) and — when it belongs to another repository
+ * of the workspace — which one. Tabs other than the one on screen shrink to that icon once the
+ * strip would overflow; the name is in the tooltip.
  *
  * "Would overflow" is measured, not counted: wide mode is half the window, so no tab count holds
  * for every screen, and a count let the last tab end up cut in half at the strip's edge.
@@ -57,6 +63,7 @@ export function PanelTabStrip({
   onOpenCheckpoints: (() => void) | null;
 }) {
   const t = useT();
+  const chord = useShortcutChord();
   const wide = useAiPanelStore((s) => s.wide);
   const toggleWide = useAiPanelStore((s) => s.toggleWide);
   const closePanel = useUiStore((s) => s.toggleAiPanel);
@@ -76,11 +83,13 @@ export function PanelTabStrip({
       setCompact(true);
       return;
     }
-    // A name can also grow on its own — a conversation's title arriving from disk.
+    // A name can also grow on its own — a conversation's title arriving from disk. The tabs
+    // themselves, not the strip's children: each sits inside its tooltip's `display: contents`
+    // wrapper, which has no box to observe.
     const observer = new ResizeObserver(() => {
       if (overflows()) setCompact(true);
     });
-    for (const tab of Array.from(strip.children)) observer.observe(tab);
+    for (const tab of Array.from(strip.querySelectorAll('[role="tab"]'))) observer.observe(tab);
     return () => observer.disconnect();
   }, [compact, holds, stripWidth]);
 
@@ -96,7 +105,7 @@ export function PanelTabStrip({
   }, [activeKey, tabs.length]);
 
   return (
-    <div className="flex h-10 shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] pl-1.5 pr-1">
+    <div className="flex h-10 shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-1.5">
       <div
         ref={stripRef}
         role="tablist"
@@ -114,21 +123,31 @@ export function PanelTabStrip({
         label={wide ? t("assistant.narrow") : t("assistant.wide")}
         onClick={toggleWide}
       />
-      <HeaderButton icon={X} label={t("assistant.closePanel")} onClick={closePanel} />
+      <HeaderButton icon={X} label={t("assistant.closePanel")} onClick={closePanel} chord={chord("panel.ai")} />
     </div>
   );
 }
 
-function HeaderButton({ icon: Icon, label, onClick }: { icon: LucideIcon; label: string; onClick: () => void }) {
+/** One of the three controls that act on the panel itself. Tooltips open downward: above the strip
+ *  is the window's title row. */
+function HeaderButton({
+  icon: Icon,
+  label,
+  onClick,
+  chord,
+}: {
+  icon: LucideIcon;
+  label: string;
+  onClick: () => void;
+  /** The key combination that does the same, shown as a key cap in the tooltip. */
+  chord?: string | null;
+}) {
   return (
-    <button
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-    >
-      <Icon size={13} />
-    </button>
+    <Tooltip label={label} side="bottom" trailing={chord ? <Kbd>{chord}</Kbd> : undefined}>
+      <button onClick={onClick} aria-label={label} className={iconButtonClass({ size: "sm" })}>
+        <Icon size={15} />
+      </button>
+    </Tooltip>
   );
 }
 
@@ -158,11 +177,11 @@ function InboxTab({ workspaceId, active, compact }: { workspaceId: string; activ
       active={active}
       title={t("assistant.inbox")}
       onSelect={() => focus(INBOX_KEY, workspaceId)}
-      icon={<Inbox size={13} className="shrink-0" />}
+      icon={<Inbox size={14} className="shrink-0" />}
       label={compact ? null : t("assistant.inbox")}
       trailing={
         count > 0 ? (
-          <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--cf-accent)] px-1 text-[9.5px] font-bold text-white">
+          <span className="flex h-[17px] min-w-[17px] items-center justify-center rounded-[5px] bg-[var(--cf-accent-soft)] px-[5px] text-[11px] font-semibold tabular-nums text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent-line)]">
             {count}
           </span>
         ) : null
@@ -192,63 +211,74 @@ function TabShell({
 }) {
   const t = useT();
   return (
-    <div
-      role="tab"
-      tabIndex={0}
-      aria-selected={active}
-      title={title}
-      onClick={onSelect}
-      onAuxClick={(e: ReactMouseEvent) => {
-        // Middle click closes, the way it does in every tabbed thing.
-        if (e.button === 1 && onClose) {
-          e.preventDefault();
-          onClose();
-        }
-      }}
-      onKeyDown={(e) => {
-        if (e.target !== e.currentTarget) return;
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        } else if ((e.key === "Delete" || e.key === "Backspace") && onClose) {
-          e.preventDefault();
-          onClose();
-        }
-      }}
-      className={`group relative flex h-7 max-w-[190px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] font-medium outline-none focus-visible:ring-2 focus-visible:ring-[var(--cf-accent)] ${
-        active
-          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.05]"
-      }`}
-    >
-      <span className="relative flex shrink-0 items-center">
-        {icon}
-        {dot && (
-          <span
-            className={`absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full ring-2 ring-[var(--cf-surface)] ${
-              dot === "error" ? "bg-[var(--cf-danger)]" : "bg-[var(--cf-accent)]"
-            }`}
-          />
-        )}
-      </span>
-      {label && <span className="min-w-0 truncate">{label}</span>}
-      {trailing}
-      {onClose && (
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
+    <Tooltip label={title} side="bottom">
+      <div
+        role="tab"
+        tabIndex={0}
+        aria-selected={active}
+        aria-label={title}
+        onClick={onSelect}
+        onAuxClick={(e: ReactMouseEvent) => {
+          // Middle click closes, the way it does in every tabbed thing.
+          if (e.button === 1 && onClose) {
+            e.preventDefault();
             onClose();
-          }}
-          title={t("assistant.closeTab")}
-          aria-label={t("assistant.closeTab")}
-          className={`-mr-1 flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.08] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.1] ${
-            active ? "" : "hidden group-hover:flex"
-          }`}
-        >
-          <X size={10} />
-        </button>
-      )}
-    </div>
+          }
+        }}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect();
+          } else if ((e.key === "Delete" || e.key === "Backspace") && onClose) {
+            e.preventDefault();
+            onClose();
+          }
+        }}
+        className={`group relative flex h-[30px] max-w-[190px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-[12px] font-medium transition-colors duration-100 ${
+          active
+            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
+            : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        }`}
+      >
+        <span className="relative flex shrink-0 items-center">
+          {icon}
+          {/* Told apart by shape, not by colour — a rose accent and the danger red are one colour
+              to most eyes: a filled dot for a result nobody has looked at, a ring for a failure. */}
+          {dot === "unread" && (
+            <span
+              role="img"
+              aria-label={t("assistant.unread")}
+              className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-surface)]"
+            />
+          )}
+          {dot === "error" && (
+            <span
+              role="img"
+              aria-label={t("assistant.failed")}
+              className="absolute -right-[5px] -top-[5px] h-[9px] w-[9px] rounded-full border-[1.5px] border-[var(--cf-danger)] bg-[var(--cf-surface)]"
+            />
+          )}
+        </span>
+        {label && <span className="min-w-0 truncate">{label}</span>}
+        {trailing}
+        {onClose && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose();
+            }}
+            title={t("assistant.closeTab")}
+            aria-label={t("assistant.closeTab")}
+            className={`-mr-1.5 h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)] ${
+              active ? "flex" : "hidden group-hover:flex"
+            }`}
+          >
+            <X size={13} />
+          </button>
+        )}
+      </div>
+    </Tooltip>
   );
 }
 
@@ -269,13 +299,14 @@ function TabButton({ tab, workspaceId, active, compact }: { tab: PanelTab; works
   const title = foreign ? `${projectName} · ${base}` : base;
   const Icon: LucideIcon =
     tab.kind === "chat" ? MessageSquare : tab.kind === "pr" ? GitPullRequest : tab.kind === "prLink" ? Link2 : ShieldCheck;
+  // The orb is the tab's icon while a model works on what it shows — the one tab that carries it.
   const icon =
     status === "running" ? (
       <ThinkingOrb size="sm" />
     ) : status === "queued" ? (
-      <Clock size={13} className="shrink-0 text-[var(--cf-warning)]" />
+      <Clock size={14} className="shrink-0 text-[var(--cf-warning)]" />
     ) : (
-      <Icon size={13} className="shrink-0" />
+      <Icon size={14} className="shrink-0" />
     );
   const short = tab.kind === "pr" ? `#${tab.prId}` : tab.kind === "prLink" ? `#${tab.session.pr.id}` : null;
   const label = compact ? null : active ? title : (short ?? base);
@@ -350,21 +381,19 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
   const changes = useChangesToAnalyze(projectId);
   return (
     <div ref={ref} className="relative shrink-0">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        title={t("assistant.openNew")}
-        aria-label={t("assistant.openNew")}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-      >
-        <Plus size={14} />
-      </button>
-      {open && (
-        <div
-          role="menu"
-          className="absolute right-0 top-full z-40 mt-1 w-72 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
+      <Tooltip label={t("assistant.openNew")} side="bottom" disabled={open}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          aria-label={t("assistant.openNew")}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          className={iconButtonClass({ size: "sm", active: open })}
         >
+          <Plus size={16} />
+        </button>
+      </Tooltip>
+      {open && (
+        <div role="menu" className={`absolute right-0 top-full z-40 mt-1 w-72 ${popoverClass}`}>
           <MenuItem
             icon={MessageSquare}
             label={t("assistant.newChat")}
@@ -386,7 +415,7 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
               if (projectId) openAnalysis(projectId, { run: true });
             }}
           />
-          <div className="mx-1 my-1 h-px bg-[var(--cf-border)]" />
+          <div className="mx-1 my-[5px] h-px bg-[var(--cf-border)]" />
           {projectId && <PrPicker projectId={projectId} onPicked={() => setOpen(false)} />}
           <MenuItem
             icon={Link2}
@@ -398,7 +427,7 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
           />
           {onOpenCheckpoints && (
             <>
-              <div className="mx-1 my-1 h-px bg-[var(--cf-border)]" />
+              <div className="mx-1 my-[5px] h-px bg-[var(--cf-border)]" />
               <MenuItem
                 icon={RotateCcw}
                 label={t("assistant.restorePoints")}
@@ -429,16 +458,11 @@ function MenuItem({
   onClick: () => void;
 }) {
   return (
-    <button
-      role="menuitem"
-      onClick={onClick}
-      disabled={disabled}
-      className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-black/[0.04] disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.05]"
-    >
-      <Icon size={14} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+    <button role="menuitem" onClick={onClick} disabled={disabled} className={menuRowClass()}>
+      <Icon size={15} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
       <span className="min-w-0">
-        <span className="block truncate text-[12px] text-[var(--cf-text)]">{label}</span>
-        {detail && <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">{detail}</span>}
+        <span className="block truncate text-[13px] text-[var(--cf-text)]">{label}</span>
+        {detail && <span className="block truncate text-[12px] text-[var(--cf-text-muted)]">{detail}</span>}
       </span>
     </button>
   );
@@ -457,11 +481,16 @@ function PrPicker({ projectId, onPicked }: { projectId: string; onPicked: () => 
   const open = prs.filter((pr) => pr.status === "open" || pr.status === "draft").slice(0, 8);
   return (
     <div>
-      <p className="px-2 pb-0.5 pt-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+      <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
         {t("assistant.reviewPr")}
       </p>
-      {loading && open.length === 0 && <p className="px-2 py-1 text-[11px] text-[var(--cf-text-muted)]">{t("assistant.loadingPrs")}</p>}
-      {!loading && open.length === 0 && <p className="px-2 py-1 text-[11px] text-[var(--cf-text-muted)]">{t("assistant.noOpenPrs")}</p>}
+      {loading && open.length === 0 && (
+        <p className="flex items-center gap-1.5 px-2.5 py-1.5 text-[12px] text-[var(--cf-text-muted)]">
+          <Loader2 size={13} className="animate-spin" />
+          {t("assistant.loadingPrs")}
+        </p>
+      )}
+      {!loading && open.length === 0 && <p className="px-2.5 py-1.5 text-[12px] text-[var(--cf-text-faint)]">{t("assistant.noOpenPrs")}</p>}
       {open.map((pr) => (
         <MenuItem
           key={pr.id}
@@ -490,17 +519,14 @@ export function ReviewPrMenu({ projectId }: { projectId: string; variant?: "butt
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        className={buttonClass({ variant: "secondary", size: "md" })}
       >
-        <GitPullRequest size={12} />
+        <GitPullRequest size={14} />
         {t("assistant.reviewPr")}
-        <ChevronDown size={11} className="text-[var(--cf-text-muted)]" />
+        <ChevronDown size={13} className="text-[var(--cf-text-muted)]" />
       </button>
       {open && (
-        <div
-          role="menu"
-          className="absolute left-0 top-full z-40 mt-1 w-72 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
-        >
+        <div role="menu" className={`absolute left-0 top-full z-40 mt-1 w-72 ${popoverClass}`}>
           <PrPicker projectId={projectId} onPicked={() => setOpen(false)} />
           <MenuItem
             icon={Link2}

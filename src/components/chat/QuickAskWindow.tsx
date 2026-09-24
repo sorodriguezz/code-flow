@@ -263,7 +263,7 @@ export function QuickAskWindow() {
           onClick={() => void getCurrentWindow().hide()}
           title={t("chat.quickAskClose")}
           aria-label={t("chat.quickAskClose")}
-          className="rounded-md p-1 text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.07]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         >
           <X size={14} />
         </button>

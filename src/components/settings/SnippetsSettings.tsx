@@ -7,6 +7,7 @@ import { ASSIGNABLE_LANGUAGES, isAssignableLanguage } from "../../lib/monacoLang
 import { EmptyState } from "../common/EmptyState";
 import { Tooltip } from "../common/Tooltip";
 import { Status } from "../api/settingsChrome";
+import { buttonClass } from "../common/Button";
 
 /**
  * The snippet list, edited in place.
@@ -58,10 +59,10 @@ const SUMMARY_GRID = "18px 104px minmax(0,1fr)";
  *  painted with it has no fill at all. See the comment on the tokens in index.css. */
 const FIELD =
   "w-full min-w-0 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]";
-const LABEL = "mb-1 block text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]";
-const HEAD = "text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]";
+const LABEL = "mb-1 block text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]";
+const HEAD = "text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]";
 const ICON_BUTTON =
-  "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]";
+  "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]";
 
 interface Token {
   text: string;
@@ -144,7 +145,7 @@ function LanguageChips({ value, onChange }: { value: string[]; onChange: (next: 
             title={isAssignableLanguage(lang) ? undefined : t("snippets.languageUnknownOne", { name: lang })}
             className={`flex shrink-0 items-center gap-1 rounded py-px pl-1.5 pr-1 font-mono text-[11px] ${
               isAssignableLanguage(lang)
-                ? "bg-black/[0.05] text-[var(--cf-text-muted)] dark:bg-white/[0.07]"
+                ? "bg-[var(--cf-hover)] text-[var(--cf-text-muted)]"
                 : "bg-[var(--cf-warning)]/15 text-[var(--cf-warning)]"
             }`}
           >
@@ -259,7 +260,7 @@ function SnippetRow({
   return (
     <div
       ref={cardRef}
-      className="min-w-0 rounded-lg border border-[var(--cf-border)] px-2 py-1.5 transition-colors hover:bg-black/[0.02] focus-within:border-[var(--cf-accent)] dark:hover:bg-white/[0.03]"
+      className="min-w-0 rounded-lg border border-[var(--cf-border)] px-2 py-1.5 transition-colors hover:bg-[var(--cf-hover)] focus-within:border-[var(--cf-accent)]"
     >
       <div className="flex min-w-0 items-start gap-1">
         {/* One button over the first three tracks: expanding is one tab stop, not three. */}
@@ -287,7 +288,7 @@ function SnippetRow({
             </span>
             <span
               title={snippet.languages.join(", ") || undefined}
-              className="truncate text-[10px] leading-tight text-[var(--cf-text-muted)]"
+              className="truncate text-[10.5px] leading-tight text-[var(--cf-text-muted)]"
             >
               {snippet.languages.length === 0
                 ? t("snippets.everywhere")
@@ -390,7 +391,7 @@ function SnippetRow({
           {snippet.body.trim() !== "" && (
             <div className="mt-2">
               <span className={LABEL}>{t("snippets.preview")}</span>
-              <pre className="max-h-[120px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-2 py-1.5 font-mono text-[11px] leading-snug text-[var(--cf-text)]">
+              <pre className="max-h-[120px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 py-1.5 font-mono text-[11px] leading-snug text-[var(--cf-text)]">
                 {renderExpansion(snippet.body).map((token, at) =>
                   token.stop === null ? (
                     <span key={at}>{token.text}</span>
@@ -532,7 +533,7 @@ export function SnippetsSettings() {
           <div className="flex justify-center pb-6">
             <button
               onClick={onAdd}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-2 text-[13px] font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              className={buttonClass({ variant: "secondary" })}
             >
               <Plus size={13} /> {t("snippets.addFirst")}
             </button>
@@ -571,7 +572,7 @@ export function SnippetsSettings() {
               under the list where a new row belongs. */}
           <button
             onClick={onAdd}
-            className="mt-2 flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost", size: "sm", className: "mt-2" })}
           >
             <Plus size={12} /> {t("snippets.add")}
           </button>

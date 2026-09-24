@@ -1,6 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  ChevronDown,
   ChevronRight,
   CircleCheck,
   Copy,
@@ -23,7 +22,10 @@ import { chainRollup } from "./chainStatus";
 import { RenameRow, Row, menuBlocks } from "./TreeRow";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { relativeTime } from "../api/settingsChrome";
+import { iconButtonClass } from "../common/Button";
+import { sectionLabelClass, tabCountClass } from "../common/recipes";
 import { ThinkingOrb } from "../common/ThinkingOrb";
+import { Tooltip } from "../common/Tooltip";
 import { OPEN_BY_DEFAULT, useAgentsStore } from "../../state/agentsStore";
 import { useChainStore } from "../../state/chainStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -296,24 +298,21 @@ export function TaskTree({
       : templates;
     return (
       <>
-        <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <div className={`${sectionLabelClass} pr-0`}>
           <span className="truncate">{t("agents.sectionTemplates")}</span>
-          {matches.length > 0 && (
-            <span className="shrink-0 rounded-full bg-black/[0.06] px-1.5 text-[10px] font-semibold dark:bg-white/[0.1]">
-              {matches.length}
-            </span>
-          )}
-          <button
-            type="button"
-            onClick={() => onNewChain("")}
-            title={t("agents.newTemplate")}
-            aria-label={t("agents.newTemplate")}
-            className="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.06] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.1]"
-          >
-            <Plus size={12} />
-          </button>
+          {matches.length > 0 && <span className={`${tabCountClass} tracking-normal`}>{matches.length}</span>}
+          <Tooltip label={t("agents.newTemplate")}>
+            <button
+              type="button"
+              onClick={() => onNewChain("")}
+              aria-label={t("agents.newTemplate")}
+              className={iconButtonClass({ size: "xs", className: "ml-auto" })}
+            >
+              <Plus size={14} />
+            </button>
+          </Tooltip>
         </div>
-        <div className="px-1.5 pb-1">
+        <div className="pb-1">
           {matches.length === 0 ? (
             <Hint>{t(needle ? "agents.noMatches" : "agents.templatesEmptyHint")}</Hint>
           ) : (
@@ -348,7 +347,7 @@ export function TaskTree({
   // A search that found nothing says so once, rather than drawing three headings and a row of empty
   // hints that each look like an answer.
   if (needle !== "" && items.length === 0) {
-    return <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">{t("agents.noMatches")}</p>;
+    return <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-faint)]">{t("agents.noMatches")}</p>;
   }
 
   return (
@@ -401,9 +400,9 @@ export function TaskTree({
                     }
                     glyph={
                       expanded ? (
-                        <FolderOpen size={13} style={{ color: project.color }} />
+                        <FolderOpen size={14} style={{ color: project.color }} />
                       ) : (
-                        <Folder size={13} style={{ color: project.color }} />
+                        <Folder size={14} style={{ color: project.color }} />
                       )
                     }
                     leading={<Chevron expanded={expanded} onClick={() => toggleOpen(`proj:${project.id}`)} />}
@@ -506,7 +505,8 @@ function fileUnder(target: MoveTarget, agentProjectId: string) {
   else void useChainStore.getState().setGroup(target.id, agentProjectId);
 }
 
-/** A collapsible heading with a count and, for the two sections you add to, one action. */
+/** A collapsible heading with a count and, for the two sections you add to, one action. The shared
+ * section label, so "PROYECTOS" here reads the way every other explorer's group headings do. */
 function Section({
   label,
   count,
@@ -524,34 +524,37 @@ function Section({
 }) {
   return (
     <section>
-      <div className="group/section flex items-center gap-1 px-2 py-1">
+      <div className={`group/section ${sectionLabelClass} pr-0`}>
         <button
           type="button"
           onClick={onToggle}
           aria-expanded={expanded}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className="flex min-h-[22px] min-w-0 flex-1 items-center gap-1.5 text-left uppercase transition-colors hover:text-[var(--cf-text-muted)]"
         >
-          {expanded ? <ChevronDown size={11} className="shrink-0" /> : <ChevronRight size={11} className="shrink-0" />}
+          <ChevronRight
+            size={12}
+            className={`shrink-0 transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
+          />
           <span className="truncate">{label}</span>
-          {count > 0 && (
-            <span className="shrink-0 rounded-full bg-black/[0.06] px-1.5 text-[10px] font-semibold dark:bg-white/[0.1]">
-              {count}
-            </span>
-          )}
+          {count > 0 && <span className={`${tabCountClass} tracking-normal`}>{count}</span>}
         </button>
         {action && (
-          <button
-            type="button"
-            onClick={action.onClick}
-            title={action.label}
-            aria-label={action.label}
-            className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:bg-black/[0.06] hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover/section:opacity-100 dark:hover:bg-white/[0.1]"
-          >
-            <action.icon size={12} />
-          </button>
+          <Tooltip label={action.label}>
+            <button
+              type="button"
+              onClick={action.onClick}
+              aria-label={action.label}
+              className={iconButtonClass({
+                size: "xs",
+                className: "opacity-0 focus-visible:opacity-100 group-hover/section:opacity-100",
+              })}
+            >
+              <action.icon size={14} />
+            </button>
+          </Tooltip>
         )}
       </div>
-      {expanded && <div className="px-1.5 pb-1">{children}</div>}
+      {expanded && <div className="pb-1">{children}</div>}
     </section>
   );
 }
@@ -560,7 +563,10 @@ function Section({
  * those stacked down a 320px rail would be the whole list. */
 function Hint({ children, depth = 0 }: { children: React.ReactNode; depth?: number }) {
   return (
-    <p style={{ paddingLeft: depth * 14 }} className="px-2 py-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+    <p
+      style={{ paddingLeft: 8 + depth * 14 }}
+      className="py-1 pr-2 text-[12px] leading-snug text-[var(--cf-text-faint)]"
+    >
       {children}
     </p>
   );
@@ -577,9 +583,11 @@ function Chevron({ expanded, onClick }: { expanded: boolean; onClick: () => void
         e.stopPropagation();
         onClick();
       }}
-      className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+      // A 22px target that only takes 16px of the row: the negative margin gives the width back, so
+      // the glyphs beside it stay where they were while the pointer gets the room it needs.
+      className="-mx-[3px] -my-[3px] flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-faint)] hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)]"
     >
-      {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+      <ChevronRight size={13} className={`transition-transform duration-150 ${expanded ? "rotate-90" : ""}`} />
     </button>
   );
 }
@@ -629,7 +637,7 @@ function ChainGroup({
         title={chain.goal || chain.title}
         label={goal || chain.title}
         meta={[t(labelKey), t("agents.chainProgress", { done, total }), repoName].filter(Boolean).join(" · ")}
-        glyph={spinner ? <ThinkingOrb size="sm" /> : <Icon size={13} className={color} />}
+        glyph={spinner ? <ThinkingOrb size="sm" /> : <Icon size={14} className={color} />}
         leading={<Chevron expanded={expanded} onClick={onToggle} />}
         menuLabel={t("api.moreActions")}
         onClick={() => void useChainStore.getState().select(chain.id)}
@@ -647,6 +655,9 @@ function ChainGroup({
                   task={task}
                   depth={depth + 1}
                   at={step}
+                  // One orb per run: the chain's own row above already wears it while any of its
+                  // steps is running, so the step it is running shows the static "running" mark.
+                  orb={false}
                   // Passed straight through rather than wrapped: `onTaskMenu` already carries the
                   // task's id, and a wrapper here would be a new function per render — which is
                   // exactly what the memo on `TaskRow` cannot survive.
@@ -666,7 +677,7 @@ function ChainGroup({
                 title={brief.instruction}
                 label={brief.agent_name || t("settings.sddNewAgent")}
                 meta={brief.task_id ? t("agents.stepTaskGone") : t("agents.stepGone")}
-                glyph={<span className="h-1.5 w-1.5 rounded-full bg-[var(--cf-text-muted)]/50" />}
+                glyph={<span className="h-1.5 w-1.5 rounded-full bg-[var(--cf-text-faint)]" />}
                 menuLabel={t("api.moreActions")}
                 onClick={() => undefined}
                 onMenu={onMenu}
@@ -685,18 +696,23 @@ function ChainGroup({
  * function every time and never hold. It earns that: the tree above re-renders whenever *any* task's
  * live state moves, and a workspace mid-run has a task streaming several times a second, while each
  * row already subscribes narrowly to its own `live[task.id].sending`.
+ *
+ * `orb` is off for a step drawn inside its chain: one run wears one orb in the tree, and the chain's
+ * row is the one that carries it — collapsed or open, so the mark does not jump when it is opened.
  */
 function TaskRowBase({
   task,
   depth,
   at,
   chip,
+  orb = true,
   onMenu,
 }: {
   task: AgentTask;
   depth: number;
   at: number;
   chip?: string;
+  orb?: boolean;
   onMenu: (x: number, y: number, taskId: string) => void;
 }) {
   const t = useT();
@@ -726,7 +742,7 @@ function TaskRowBase({
       title={task.goal || task.title}
       label={task.title || t("agents.newTask")}
       meta={[task.agent_name, repoName, when].filter(Boolean).join(" · ")}
-      glyph={status === "running" ? <ThinkingOrb size="sm" /> : <Icon size={13} className={color} />}
+      glyph={status === "running" && orb ? <ThinkingOrb size="sm" /> : <Icon size={14} className={color} />}
       menuLabel={t("api.moreActions")}
       onClick={() => {
         // The middle column holds one thing: opening a task puts away whatever chain or template
@@ -765,7 +781,7 @@ function TemplateRow({
       title={description || name}
       label={name}
       meta={t("agents.templateStepsN", { n: steps })}
-      glyph={<Link2 size={13} className="text-[var(--cf-text-muted)]" />}
+      glyph={<Link2 size={14} className="text-[var(--cf-text-faint)]" />}
       menuLabel={t("api.moreActions")}
       onClick={() => useChainStore.getState().selectTemplate(templateId)}
       onMenu={onMenu}

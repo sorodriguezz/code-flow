@@ -135,11 +135,13 @@ export function AgentActivity() {
         aria-expanded={open}
         data-tour="agent-activity"
         title={t("agents.liveTitle")}
-        className={`flex h-6 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-[11px] hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
+        className={`flex h-[22px] shrink-0 items-center gap-1.5 rounded-full px-2 text-[12px] font-medium ${
+          running.length > 0 ? "bg-[var(--cf-accent-soft)] " : "hover:bg-[var(--cf-hover)] "
+        }${
           // Amber only when *nothing* is moving and the app is waiting on the user: a plan that is
           // running has no call on their attention, and a bar that asks for it anyway is one they
           // learn to stop looking at.
-          running.length === 0 ? "text-[#f59e0b]" : open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+          running.length === 0 ? "text-[var(--cf-warning)]" : open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
         }`}
       >
         {/* The app's own "an engine is burning" mark when one is, and a still glyph when the only
@@ -191,7 +193,7 @@ function shortModel(model: string): string {
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="mb-0.5">
-      <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+      <p className="px-3 py-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
         {label}
       </p>
       {children}
@@ -216,7 +218,7 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
         ) : (
           <span
             className={`h-1.5 w-1.5 rounded-full ${
-              run.attention ? "bg-[#f59e0b]" : "bg-[var(--cf-accent)]"
+              run.attention ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-accent)]"
             }`}
           />
         )}
@@ -233,7 +235,7 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
             ambiguous between "here" and "we didn't record it". Both states are drawn, so the line
             always answers the question it exists to answer. The dot is the workspace's own identity
             colour, the same one the switcher and the sidebar draw it with. */}
-        <span className="mt-[1px] flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
+        <span className="mt-[1px] flex items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)]">
           {run.workspace ? (
             <>
               <span
@@ -248,7 +250,7 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
                 // The one thing the name alone cannot say: this is not where you are standing. It
                 // is what turns the row from a label into a warning that following it will move
                 // the whole window.
-                <span className="shrink-0 rounded-full bg-[color-mix(in_oklab,var(--cf-text)_10%,transparent)] px-1 text-[9px] font-semibold uppercase tracking-wide">
+                <span className="shrink-0 rounded-full bg-[color-mix(in_oklab,var(--cf-text)_10%,transparent)] px-1 text-[10.5px] font-semibold uppercase tracking-wide">
                   {t("agents.liveElsewhere")}
                 </span>
               )}
@@ -286,7 +288,7 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
             }`
           : run.engineLabel || undefined
       }
-      className="flex w-full items-start gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+      className="flex w-full items-start gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)]"
     >
       {body}
       <ArrowUpRight size={12} className="mt-[3px] shrink-0 text-[var(--cf-text-muted)]" />

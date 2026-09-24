@@ -10,6 +10,8 @@ import { useRepoStore } from "../../state/repoStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { EffectiveIdentity } from "../../types/domain";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 /**
  * Per-workspace git identity: who each workspace commits as, and what that resolves to right now.
@@ -58,7 +60,7 @@ function SourceBadge({ source }: { source: EffectiveIdentity["source"] }) {
   return (
     <span
       title={hint}
-      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+      className={`shrink-0 rounded-full px-2 py-0.5 text-[10.5px] font-medium ${
         source === "workspace"
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
           : "border border-[var(--cf-border)] text-[var(--cf-text-muted)]"
@@ -161,7 +163,7 @@ function WorkspaceRow({
               onClick={() => setEditing(true)}
               title={identity ? t("settings.identityEdit") : t("settings.identitySet")}
               aria-label={identity ? t("settings.identityEdit") : t("settings.identitySet")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
             >
               <Pencil size={12} />
             </button>
@@ -172,7 +174,7 @@ function WorkspaceRow({
                 disabled={busy}
                 title={t("settings.identityReset")}
                 aria-label={t("settings.identityReset")}
-                className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+                className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40"
               >
                 <RotateCcw size={12} />
               </button>
@@ -189,7 +191,7 @@ function WorkspaceRow({
               value={draftName}
               onChange={(e) => setDraftName(e.target.value)}
               placeholder={t("settings.name")}
-              className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+              className={fieldClass({ className: "min-w-0 flex-1" })}
             />
             <input
               value={draftEmail}
@@ -205,7 +207,7 @@ function WorkspaceRow({
               type="button"
               onClick={() => void apply({ name: draftName.trim(), email: draftEmail.trim() })}
               disabled={!canSave}
-              className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
+              className={buttonClass({ variant: "primary" })}
             >
               <Check size={13} />
               {t("common.save")}

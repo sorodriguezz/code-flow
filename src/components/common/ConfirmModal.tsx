@@ -1,9 +1,10 @@
 import { useEffect, useRef } from "react";
-import { TriangleAlert } from "lucide-react";
+import { CircleHelp, TriangleAlert } from "lucide-react";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 import { useConfirmStore } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { ConfirmFlowDiagram } from "./ConfirmFlowDiagram";
+import { buttonClass } from "./Button";
 
 export function ConfirmModal() {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -36,7 +37,7 @@ export function ConfirmModal() {
         // Wider with a diagram than without: the two branch pills split the width between them,
         // so each one only ever gets half of it — and a name that wraps to three lines in a pill
         // is harder to read than the same name on one.
-        className={`cf-fade-in max-h-[calc(100vh-2rem)] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)] ${
+        className={`cf-fade-in max-h-[calc(100vh-2rem)] max-w-[90vw] overflow-y-auto rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)] ${
           request.flow ? "w-[560px]" : "w-[380px]"
         }`}
       >
@@ -48,25 +49,20 @@ export function ConfirmModal() {
                 : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
             }`}
           >
-            <TriangleAlert size={16} />
+            {request.danger ? <TriangleAlert size={16} /> : <CircleHelp size={16} />}
           </span>
           <p className="flex-1 pt-1 text-[13px] leading-snug text-[var(--cf-text)]">{request.message}</p>
         </div>
 
         {request.flow && <ConfirmFlowDiagram flow={request.flow} />}
         <div className="flex justify-end gap-2">
-          <button
-            onClick={() => respond(false)}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
+          <button onClick={() => respond(false)} className={buttonClass({ variant: "ghost" })}>
             {t("common.cancel")}
           </button>
           <button
             onClick={() => respond(true)}
             autoFocus
-            className={`rounded-md px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110 ${
-              request.danger ? "bg-[var(--cf-danger)]" : "bg-[var(--cf-accent)]"
-            }`}
+            className={buttonClass({ variant: request.danger ? "danger" : "primary" })}
           >
             {request.confirmLabel ?? t("common.confirm")}
           </button>

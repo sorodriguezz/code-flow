@@ -18,11 +18,20 @@ import {
 } from "lucide-react";
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { Tooltip } from "../common/Tooltip";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import {
+  explorerClass,
+  fieldClass,
+  rowClass,
+  sectionLabelClass,
+  segItemClass,
+  segTrackClass,
+} from "../common/recipes";
 import { CollectionTree, MethodBadge } from "./CollectionTree";
 import { ContextMenu, type MenuItem} from "../common/ContextMenu";
 import { EnvironmentBar } from "./EnvironmentBar";
 import { HistoryList } from "./HistoryList";
-import { CARD } from "./panelChrome";
 import { useApiStore } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore } from "../../state/collabStore";
@@ -40,6 +49,7 @@ const MAX_RESULTS = 100;
 
 type Section = "collections" | "environments" | "history";
 
+/** The explorer's icon buttons: 26px targets (they were 20px), named by the app's own tooltip. */
 function ToolbarButton({
   onClick,
   title,
@@ -52,15 +62,17 @@ function ToolbarButton({
   children: React.ReactNode;
 }) {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-      disabled={disabled}
-      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] dark:hover:bg-white/[0.08]"
-    >
-      {children}
-    </button>
+    <Tooltip label={title}>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={title}
+        disabled={disabled}
+        className={iconButtonClass({ size: "sm" })}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -111,19 +123,20 @@ function SearchResults({ query }: { query: string }) {
 
   if (hits.length === 0) {
     return (
-      <p className="px-3 py-4 text-center text-[12px] text-[var(--cf-text-muted)]">
+      <p className="px-4 py-4 text-center text-[12px] text-[var(--cf-text-muted)]">
         {t("api.searchNoResults", { query: query.trim() })}
       </p>
     );
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto py-1">
+    <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-1">
       {hits.map((request) => (
         <button
           key={request.id}
+          type="button"
           onClick={() => openRequest(request.id)}
-          className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          className={rowClass(false, "py-1.5")}
         >
           <MethodBadge protocol={request.protocol} method={request.method} />
           <span className="min-w-0 flex-1">
@@ -160,30 +173,26 @@ function EnvironmentsSection({ onManage }: { onManage: () => void }) {
   ) => (
     <button
       key={key}
+      type="button"
       onClick={onClick}
-      className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-[13px] ${
-        active
-          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-      }`}
+      aria-pressed={active}
+      className={rowClass(active, "h-[30px]")}
     >
       {icon ?? <span className="w-3.5 shrink-0" />}
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {active && <Check size={13} className="shrink-0" />}
+      {active && <Check size={14} className="shrink-0 text-[var(--cf-accent)]" />}
     </button>
   );
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1">
-        <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("api.environments")}
-        </span>
+      <div className={`${sectionLabelClass} shrink-0 pl-3.5 pr-2 pt-1`}>
+        <span className="min-w-0 flex-1 truncate">{t("api.environments")}</span>
         <ToolbarButton onClick={onManage} title={t("api.env.manage")}>
-          <Settings2 size={13} />
+          <Settings2 size={15} />
         </ToolbarButton>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto p-1">
+      <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5">
         {row("none", t("api.env.noEnvironment"), activeEnvironmentId === null, () =>
           setActiveEnvironment(null),
         )}
@@ -200,13 +209,15 @@ function EnvironmentsSection({ onManage }: { onManage: () => void }) {
             t("api.env.globals"),
             false,
             onManage,
-            <Globe size={13} className="shrink-0 text-[var(--cf-text-muted)]" />,
+            <Globe size={14} className="shrink-0 text-[var(--cf-text-faint)]" />,
           )}
         {selectable.length === 0 && (
           <button
+            type="button"
             onClick={onManage}
-            className="mt-1 w-full rounded-md border border-dashed border-[var(--cf-border)] px-2 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+            className={buttonClass({ variant: "ghost", size: "sm", className: "mt-1 w-full" })}
           >
+            <Plus size={13} />
             {t("api.env.new")}
           </button>
         )}
@@ -275,132 +286,143 @@ export function ApiSidebar() {
 
   return (
     <>
-      <div
-        data-tour="api-sidebar"
-        style={{ width }}
-        className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
-      >
-        <div
-          data-tour="api-sidebar-actions"
-          className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1"
-        >
-          <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {t("api.title")}
-          </span>
-          {/* Two things can be created here and the button used to assume one of them.
-              A collection is the container; a request is the thing you actually came to make — and
-              needing a collection before you can try a URL is the friction scratch requests exist to
-              remove. So it asks, with the request first because that is the common errand. */}
-          <ToolbarButton
-            onClick={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect();
-              setMenu({
-                x: rect.left,
-                y: rect.bottom + 2,
-                items: [
-                  {
-                    label: t("api.newRequest"),
-                    icon: FileCode2,
-                    onClick: () => useApiStore.getState().openScratchTab(),
-                  },
-                  {
-                    label: t("api.newCollection"),
-                    icon: Boxes,
-                    onClick: () => void newCollection(),
-                  },
-                ],
-              });
-            }}
-            title={t("api.newLabel")}
-          >
-            <Plus size={13} />
-          </ToolbarButton>
-          <ToolbarButton
-            onClick={() =>
-              runnerCollectionId &&
-              openModal({ kind: "runner", collectionId: runnerCollectionId, folderId: null })
-            }
-            disabled={runnerCollectionId === null}
-            title={t("api.runner.title")}
-          >
-            <Play size={13} />
-          </ToolbarButton>
-          <ToolbarButton onClick={() => openModal({ kind: "import" })} title={t("api.import.title")}>
-            <Download size={13} />
-          </ToolbarButton>
-          {/* Collaboration gets its own button rather than a line in the overflow menu: pasting an
-              invitation code is the first thing a new team member does in this app, and it should
-              not be two clicks behind a "…". */}
-          <ToolbarButton
-            onClick={() => openModal({ kind: "collab" })}
-            title={t("api.collab.importCollaborative")}
-          >
-            <Users size={13} />
-          </ToolbarButton>
-          {conflicts.length > 0 && (
-            <ToolbarButton
-              onClick={() => openModal({ kind: "conflicts" })}
-              title={t("api.conflict.subtitle", { n: String(conflicts.length) })}
-            >
-              <span className="relative flex items-center justify-center text-[var(--cf-warning)]">
-                <ShieldAlert size={13} />
-                <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-warning)]" />
-              </span>
-            </ToolbarButton>
-          )}
-          <ToolbarButton
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              setMenu({ x: rect.left, y: rect.bottom + 2 });
-            }}
-            title={t("api.moreActions")}
-          >
-            <MoreHorizontal size={13} />
-          </ToolbarButton>
-        </div>
-
-        <div className="flex shrink-0 gap-0.5 px-1.5 pt-1.5">
-          {sections.map((entry) => (
-            <button
-              key={entry.id}
-              onClick={() => setSection(entry.id)}
-              title={entry.label}
-              className={`relative min-w-0 flex-1 rounded-md px-1.5 py-1 text-[11px] font-medium ${
-                section === entry.id
-                  ? "text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-              }`}
-            >
-              {section === entry.id && <ActivePill layoutId="cf-api-section-pill" />}
-              <span className="relative block truncate">{entry.label}</span>
-            </button>
-          ))}
-        </div>
-
-        {section === "collections" && (
-          <div className="relative shrink-0 px-1.5 py-1.5">
-            <Search
-              size={12}
-              className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
-            />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t("api.searchPlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-1 pl-6 pr-6 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
-            />
-            {query && (
-              <button
-                onClick={() => setQuery("")}
-                title={t("api.clearSearch")}
-                aria-label={t("api.clearSearch")}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-              >
-                <X size={12} />
-              </button>
-            )}
+      <div data-tour="api-sidebar" style={{ width }} className={`${explorerClass} h-full overflow-hidden`}>
+        {/* The explorer's head is its three sections — one segmented control rather than a title
+            over a row of pills: the title row of the window already says "API client". */}
+        <div className="flex h-11 shrink-0 items-center px-2.5">
+          <div role="group" aria-label={t("api.title")} className={segTrackClass({ full: true, className: "min-w-0 flex-1" })}>
+            {sections.map((entry) => {
+              const active = section === entry.id;
+              return (
+                <button
+                  key={entry.id}
+                  type="button"
+                  onClick={() => setSection(entry.id)}
+                  aria-pressed={active}
+                  // Truncated in a narrow explorer, so the native title is the fallback that reads
+                  // the whole word.
+                  title={entry.label}
+                  // Sized by its word, not an equal third: "Colecciones" is half again as long as
+                  // the other two, and equal thirds cut it off at the explorer's default width.
+                  className={segItemClass(active, { className: "min-w-0 flex-auto" })}
+                >
+                  {active && <ActivePill layoutId="cf-api-section-pill" variant="raised" />}
+                  <span className="relative truncate">{entry.label}</span>
+                </button>
+              );
+            })}
           </div>
-        )}
+        </div>
+
+        {/* The tools: the search box over the tree, then everything that creates, runs, imports or
+            joins something. On the other two sections the search has nothing to search, so the
+            buttons simply keep their place at the right. */}
+        <div className="flex shrink-0 items-center gap-1.5 pb-2 pl-2.5 pr-2">
+          {section === "collections" ? (
+            <label
+              className={fieldClass({
+                size: "sm",
+                className:
+                  "flex flex-1 cursor-text items-center gap-1.5 pl-2 pr-0.5 focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]",
+              })}
+            >
+              <Search size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={t("api.searchPlaceholder")}
+                aria-label={t("api.searchPlaceholder")}
+                className="h-full min-w-0 flex-1 bg-transparent text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)]"
+              />
+              {query && (
+                <Tooltip label={t("api.clearSearch")}>
+                  <button
+                    type="button"
+                    onClick={() => setQuery("")}
+                    aria-label={t("api.clearSearch")}
+                    className={iconButtonClass({ size: "xs" })}
+                  >
+                    <X size={13} />
+                  </button>
+                </Tooltip>
+              )}
+            </label>
+          ) : (
+            <span className="flex-1" />
+          )}
+          <div data-tour="api-sidebar-actions" className="flex shrink-0 items-center gap-0.5">
+            {/* Two things can be created here and the button used to assume one of them.
+                A collection is the container; a request is the thing you actually came to make — and
+                needing a collection before you can try a URL is the friction scratch requests exist to
+                remove. So it asks, with the request first because that is the common errand. */}
+            <ToolbarButton
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setMenu({
+                  x: rect.left,
+                  y: rect.bottom + 2,
+                  items: [
+                    {
+                      label: t("api.newRequest"),
+                      icon: FileCode2,
+                      onClick: () => useApiStore.getState().openScratchTab(),
+                    },
+                    {
+                      label: t("api.newCollection"),
+                      icon: Boxes,
+                      onClick: () => void newCollection(),
+                    },
+                  ],
+                });
+              }}
+              title={t("api.newLabel")}
+            >
+              <Plus size={15} />
+            </ToolbarButton>
+            <ToolbarButton
+              onClick={() =>
+                runnerCollectionId &&
+                openModal({ kind: "runner", collectionId: runnerCollectionId, folderId: null })
+              }
+              disabled={runnerCollectionId === null}
+              title={t("api.runner.title")}
+            >
+              <Play size={15} />
+            </ToolbarButton>
+            <ToolbarButton onClick={() => openModal({ kind: "import" })} title={t("api.import.title")}>
+              <Download size={15} />
+            </ToolbarButton>
+            {/* Collaboration gets its own button rather than a line in the overflow menu: pasting an
+                invitation code is the first thing a new team member does in this app, and it should
+                not be two clicks behind a "…". */}
+            <ToolbarButton
+              onClick={() => openModal({ kind: "collab" })}
+              title={t("api.collab.importCollaborative")}
+            >
+              <Users size={15} />
+            </ToolbarButton>
+            {conflicts.length > 0 && (
+              <ToolbarButton
+                onClick={() => openModal({ kind: "conflicts" })}
+                title={t("api.conflict.subtitle", { n: String(conflicts.length) })}
+              >
+                <span className="relative flex items-center justify-center text-[var(--cf-warning)]">
+                  <ShieldAlert size={15} />
+                  <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-warning)]" />
+                </span>
+              </ToolbarButton>
+            )}
+            <ToolbarButton
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                setMenu({ x: rect.left, y: rect.bottom + 2 });
+              }}
+              title={t("api.moreActions")}
+            >
+              <MoreHorizontal size={15} />
+            </ToolbarButton>
+          </div>
+        </div>
 
         <div className="flex min-h-0 flex-1 flex-col">
           {section === "collections" ? (
@@ -416,11 +438,12 @@ export function ApiSidebar() {
           )}
         </div>
 
-        {/* Docked to the foot of the card: the environment is a property of the whole client, not
-            of the section on screen, so it stays put while the tabs above it change. */}
+        {/* Docked to the foot of the explorer: the environment is a property of the whole client,
+            not of the section on screen, so it stays put while the sections above it change. */}
         <EnvironmentBar />
       </div>
 
+      {/* Seamless: the explorer draws its own right hairline. */}
       <ResizeHandle
         axis="x"
         value={width}
@@ -428,6 +451,7 @@ export function ApiSidebar() {
         max={WIDTH_MAX}
         onChange={(value) => setSize("apiSidebarWidth", value)}
         onCommit={(value) => commitSize("apiSidebarWidth", value)}
+        seamless
       />
 
       {menu && (

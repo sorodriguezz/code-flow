@@ -232,7 +232,7 @@ export function EntityEditorModal({
 
         <div className="rounded-md border border-[var(--cf-border)]">
           <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-2.5 py-1.5">
-            <span className="mr-auto text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            <span className="mr-auto text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("remote.entityProperties")}
             </span>
             <GhostButton
@@ -289,7 +289,7 @@ export function EntityEditorModal({
                     }
                     title={t("remote.entityRemoveProperty")}
                     aria-label={t("remote.entityRemoveProperty")}
-                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
                   >
                     <Trash2 size={12} />
                   </button>

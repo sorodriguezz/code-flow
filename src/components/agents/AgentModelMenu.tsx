@@ -4,6 +4,8 @@ import { Check, ChevronDown, Loader2, Lock, Settings2 } from "lucide-react";
 import { modelOptionsFor } from "../settings/modelPicker";
 import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
+import { menuItemClass, popoverClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import { useAgentsStore } from "../../state/agentsStore";
 import { MODELS_MAX_AGE_MS, useAiModelsStore } from "../../state/aiModelsStore";
 import { useUiStore } from "../../state/uiStore";
@@ -131,17 +133,25 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
 
   return (
     <>
-      <button
-        ref={triggerRef}
-        type="button"
-        onClick={() => (open ? setOpen(false) : openMenu())}
-        title={t("agents.agentLocked")}
-        className="flex min-w-0 max-w-[60%] items-center gap-1 rounded-md border border-transparent px-1.5 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] hover:border-[var(--cf-border)] hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
-      >
-        {provider && <ProviderGlyph providerId={provider} size={11} />}
+      {/* The engine chip: a pill with a hairline, the shape the chat's composer gives the same
+          question, so "who answers, on what" reads alike in both places. */}
+      <Tooltip label={t("agents.agentLocked")} disabled={open}>
+        <button
+          ref={triggerRef}
+          type="button"
+          onClick={() => (open ? setOpen(false) : openMenu())}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          className={`flex h-[26px] min-w-0 max-w-[60%] items-center gap-1.5 rounded-full px-2.5 text-[12px] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] transition-colors duration-100 ${
+            open
+              ? "bg-[var(--cf-press)] text-[var(--cf-text)]"
+              : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+          }`}
+        >
+        {provider && <ProviderGlyph providerId={provider} size={12} />}
         <span className="shrink-0">{task.agent_name || t("settings.sddNewAgent")}</span>
-        <span className="text-[var(--cf-text-muted)]/50">·</span>
-        <span className="truncate font-medium text-[var(--cf-text)]/70">
+        <span className="text-[var(--cf-text-faint)]">·</span>
+        <span className="truncate font-medium text-[var(--cf-text)]">
           {modelDisplayLabel(provider, task.model, t)}
           {/* The account the next turn runs as: the agent's own, else the workspace's — named only
               where the provider has more than one. */}
@@ -157,32 +167,33 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
               ),
             )}`}
         </span>
-        <ChevronDown size={10} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
+        <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+      </Tooltip>
 
       {open &&
         createPortal(
           <div
             ref={menuRef}
             style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, width: WIDTH, visibility: pos ? "visible" : "hidden" }}
-            className="fixed z-[9999] flex max-h-[60vh] flex-col rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+            className={`${popoverClass} fixed z-[9999] flex max-h-[60vh] flex-col`}
           >
-            <p className="flex shrink-0 items-center gap-1.5 px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
-              <Lock size={10} className="shrink-0" />
+            <p className="flex shrink-0 items-center gap-1.5 px-2.5 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+              <Lock size={11} className="shrink-0" />
               <span className="truncate">
                 {task.agent_name || t("settings.sddNewAgent")}
                 {provider ? ` · ${providerDisplayLabel(provider, t)}` : ""}
               </span>
             </p>
 
-            <div className="min-h-0 flex-1 overflow-auto p-1 pt-0">
+            <div className="min-h-0 flex-1 overflow-auto">
               {models === undefined ? (
-                <p className="flex items-center gap-1.5 px-2 py-2 text-[11px] text-[var(--cf-text-muted)]">
-                  <Loader2 size={11} className="animate-spin" />
+                <p className="flex items-center gap-2 px-2.5 py-2 text-[12px] text-[var(--cf-text-muted)]">
+                  <Loader2 size={13} className="animate-spin" />
                   {t("chat.loadingModels")}
                 </p>
               ) : models.length === 0 ? (
-                <p className="px-2 py-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("chat.noModels")}</p>
+                <p className="px-2.5 py-2 text-[12px] leading-snug text-[var(--cf-text-muted)]">{t("chat.noModels")}</p>
               ) : (
                 models.map((id) => (
                   <ModelItem
@@ -195,15 +206,16 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
               )}
             </div>
 
+            <div className="my-1 h-px shrink-0 bg-[var(--cf-border)]" />
             <button
               type="button"
               onClick={() => {
                 setOpen(false);
                 openSettings("claude");
               }}
-              className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-1.5 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+              className={menuItemClass(false, "shrink-0 text-[var(--cf-text-muted)]")}
             >
-              <Settings2 size={11} />
+              <Settings2 size={15} className="shrink-0 opacity-70" />
               {t("chat.configureModels")}
             </button>
           </div>,
@@ -215,18 +227,10 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
 
 function ModelItem({ label, selected, onClick }: { label: string; selected: boolean; onClick: () => void }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12px] ${
-        selected
-          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-      }`}
-    >
+    <button type="button" role="menuitemradio" aria-checked={selected} onClick={onClick} className={menuItemClass(false)}>
       {/* Kept in the layout when unselected so picking a model doesn't shift every label. */}
-      <Check size={11} className={`shrink-0 ${selected ? "" : "opacity-0"}`} />
-      <span className="truncate">{label}</span>
+      <Check size={15} className={`shrink-0 text-[var(--cf-accent)] ${selected ? "" : "opacity-0"}`} />
+      <span className={`truncate ${selected ? "font-medium" : ""}`}>{label}</span>
     </button>
   );
 }

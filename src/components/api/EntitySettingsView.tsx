@@ -12,14 +12,20 @@
  */
 
 import { useState } from "react";
-import { Boxes, FileText, Folder, Play, Save, Share2 } from "lucide-react";
+import { Boxes, ChevronRight, FileText, Folder, Play, Save, Share2 } from "lucide-react";
 import { AuthEditor, ROOT_AUTH_TYPES, authAncestors } from "./AuthPanel";
 import { ScriptEditor } from "./ScriptsPanel";
 import { VariableTable } from "./VariableTable";
+import { buttonClass, Kbd } from "../common/Button";
+import { ActiveUnderline } from "../common/ActivePill";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
+import { underlineStripClass, underlineTabClass } from "../common/recipes";
 import { useApiStore, type ApiEntityTab } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 type PanelId = "overview" | "auth" | "variables" | "scripts";
@@ -50,21 +56,23 @@ export function EntitySettingsView({ tabId }: { tabId: string }) {
     <div className="flex h-full min-h-0 flex-col">
       <Header tab={tab} />
 
-      <div className="cf-tab-strip flex shrink-0 items-stretch gap-1 overflow-x-auto border-b border-[var(--cf-border)] px-3">
-        {panels.map((id) => (
-          <button
-            key={id}
-            onClick={() => setPanel(id)}
-            className={`relative flex shrink-0 items-center gap-1 whitespace-nowrap px-2 py-2 text-[12px] transition-colors ${
-              active === id
-                ? "text-[var(--cf-text)]"
-                : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            }`}
-          >
-            {t(PANEL_LABELS[id])}
-            {active === id && <span className="absolute inset-x-1 bottom-0 h-[2px] bg-[var(--cf-accent)]" />}
-          </button>
-        ))}
+      <div role="tablist" className={underlineStripClass}>
+        {panels.map((id) => {
+          const selected = active === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              onClick={() => setPanel(id)}
+              className={underlineTabClass(selected)}
+            >
+              {t(PANEL_LABELS[id])}
+              {selected && <ActiveUnderline layoutId="cf-api-entity-panel" />}
+            </button>
+          );
+        })}
       </div>
 
       <div className="min-h-0 flex-1">
@@ -83,10 +91,14 @@ export function EntitySettingsView({ tabId }: { tabId: string }) {
 
 function Header({ tab }: { tab: ApiEntityTab }) {
   const t = useT();
+  const chord = useShortcutChord();
   const saveEntityTab = useApiStore((s) => s.saveEntityTab);
   const openModal = useApiModalStore((s) => s.openApiModal);
   const pushToast = useToastStore((s) => s.pushToast);
   const Icon = tab.kind === "collection" ? Boxes : Folder;
+  // ⌘S reaches a settings tab through the same "save" command a request's does (see `ApiView`),
+  // and that command is bound under the editor's id — so the key cap is read from there.
+  const saveChord = chord("editor.save");
 
   const save = async () => {
     await saveEntityTab(tab.id);
@@ -94,47 +106,57 @@ function Header({ tab }: { tab: ApiEntityTab }) {
   };
 
   return (
-    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
-      <Icon size={14} className="shrink-0 text-[var(--cf-accent)]" />
-      <span className="truncate text-[13px] font-semibold text-[var(--cf-text)]">{tab.name}</span>
-      <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">
+    // The builder's name row, so switching between a request and its collection's settings keeps
+    // the page still: the glyph, what kind of thing this is where the builder puts the path, then
+    // the name — here not editable, since renaming happens in the sidebar.
+    <div className="flex h-[46px] shrink-0 items-center gap-2 pl-3.5 pr-3">
+      <span className="flex h-[26px] w-[26px] shrink-0 items-center justify-center">
+        <Icon size={15} className="text-[var(--cf-accent)]" />
+      </span>
+      <span className="flex shrink-0 items-center gap-1 text-[12px] text-[var(--cf-text-muted)]">
         {t(tab.kind === "collection" ? "api.scope.collection" : "api.folder")}
+        <ChevronRight size={12} className="shrink-0 opacity-60" />
+      </span>
+      <span className="min-w-0 truncate text-[14px] font-semibold text-[var(--cf-text)]" title={tab.name}>
+        {tab.name}
       </span>
 
       <div className="ml-auto flex shrink-0 items-center gap-1">
-        <button
-          onClick={() =>
-            openModal({
-              kind: "runner",
-              collectionId: tab.kind === "collection" ? tab.entityId : tab.collectionId,
-              folderId: tab.kind === "folder" ? tab.entityId : null,
-            })
-          }
-          title={t("api.runner.title")}
-          className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-        >
-          <Play size={12} />
-          {t("api.runner.run")}
-        </button>
+        <Tooltip label={t("api.runner.title")}>
+          <button
+            type="button"
+            onClick={() =>
+              openModal({
+                kind: "runner",
+                collectionId: tab.kind === "collection" ? tab.entityId : tab.collectionId,
+                folderId: tab.kind === "folder" ? tab.entityId : null,
+              })
+            }
+            className={buttonClass({ variant: "ghost" })}
+          >
+            <Play size={14} />
+            {t("api.runner.run")}
+          </button>
+        </Tooltip>
 
         {tab.kind === "collection" && (
           <>
             <button
+              type="button"
               onClick={() => openModal({ kind: "export", collectionId: tab.entityId })}
-              title={t("api.export.title")}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+              className={buttonClass({ variant: "ghost" })}
             >
-              <Share2 size={12} />
+              <Share2 size={14} />
               {t("api.export.title")}
             </button>
             {/* Next to Export because the two are asked in the same breath, and this is the screen
                 where the descriptions the document is made of are actually written. */}
             <button
+              type="button"
               onClick={() => openModal({ kind: "docs", collectionId: tab.entityId })}
-              title={t("api.docs.generate")}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+              className={buttonClass({ variant: "ghost" })}
             >
-              <FileText size={12} />
+              <FileText size={14} />
               {t("api.docs.generate")}
             </button>
           </>
@@ -143,15 +165,20 @@ function Header({ tab }: { tab: ApiEntityTab }) {
         {/* Disabled while clean rather than hidden: the button is where the ⌘S it mirrors is
             discoverable, and a control that appears only once you have already typed teaches
             nothing about when the edits actually land. */}
-        <button
-          onClick={() => void save()}
-          disabled={!tab.dirty}
-          title={tab.dirty ? t("api.unsaved") : t("api.saved")}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-default disabled:opacity-40 disabled:hover:brightness-100"
+        <Tooltip
+          label={tab.dirty ? t("api.unsaved") : t("api.saved")}
+          trailing={saveChord ? <Kbd>{saveChord}</Kbd> : undefined}
         >
-          <Save size={12} />
-          {t("api.save")}
-        </button>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={!tab.dirty}
+            className={buttonClass({ variant: "secondary", className: "ml-1" })}
+          >
+            <Save size={14} />
+            {t("api.save")}
+          </button>
+        </Tooltip>
       </div>
     </div>
   );
@@ -179,21 +206,23 @@ function OverviewPanel({ tab }: { tab: ApiEntityTab }) {
         };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto p-3">
-      <p className="text-[11px] text-[var(--cf-text-muted)]">
-        {t("api.entity.contents", { folders: String(inside.folders), requests: String(inside.requests) })}
-      </p>
-      <p className="text-[11px] text-[var(--cf-text-muted)]">{t("api.entity.renameHint")}</p>
+    <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto px-3.5 py-3">
+      <div className="flex flex-col gap-1">
+        <p className="text-[12px] tabular-nums text-[var(--cf-text-muted)]">
+          {t("api.entity.contents", { folders: String(inside.folders), requests: String(inside.requests) })}
+        </p>
+        <p className="text-[12px] text-[var(--cf-text-faint)]">{t("api.entity.renameHint")}</p>
+      </div>
 
-      <label className="flex flex-col gap-1.5">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+      <label className="flex min-h-0 flex-1 flex-col gap-1.5">
+        <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
           {t("api.description")}
         </span>
         <textarea
           value={tab.draft.description}
           onChange={(e) => updateEntityDraft(tab.id, { description: e.target.value })}
           placeholder={t("api.entity.descriptionPlaceholder")}
-          className="min-h-[160px] flex-1 resize-none rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1.5 text-[12px] leading-5 text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+          className="min-h-[160px] flex-1 resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-2 text-[13px] leading-5 text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
         />
       </label>
     </div>
@@ -220,7 +249,7 @@ function AuthTab({ tab }: { tab: ApiEntityTab }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <p className="shrink-0 px-3 pt-3 text-[11px] text-[var(--cf-text-muted)]">
+      <p className="shrink-0 px-3.5 pt-3 text-[12px] text-[var(--cf-text-muted)]">
         {t(tab.kind === "collection" ? "api.entity.authIntro" : "api.entity.authIntroFolder")}
       </p>
       <div className="min-h-0 flex-1">
@@ -242,8 +271,8 @@ function VariablesPanel({ tab }: { tab: ApiEntityTab }) {
   const updateEntityDraft = useApiStore((s) => s.updateEntityDraft);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-2 overflow-auto p-3">
-      <p className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{t("api.entity.variablesIntro")}</p>
+    <div className="flex h-full min-h-0 flex-col gap-2.5 overflow-auto px-3.5 py-3">
+      <p className="shrink-0 text-[12px] text-[var(--cf-text-muted)]">{t("api.entity.variablesIntro")}</p>
       <VariableTable
         rows={tab.draft.variables}
         onChange={(variables) => updateEntityDraft(tab.id, { variables })}
@@ -258,24 +287,24 @@ function ScriptsTab({ tab }: { tab: ApiEntityTab }) {
   const updateEntityDraft = useApiStore((s) => s.updateEntityDraft);
   const [kind, setKind] = useState<"pre" | "post">("pre");
 
+  const intro = t(tab.kind === "collection" ? "api.entity.scriptsIntro" : "api.entity.scriptsIntroFolder");
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-3 py-1.5">
-        {(["pre", "post"] as const).map((id) => (
-          <button
-            key={id}
-            onClick={() => setKind(id)}
-            className={`rounded px-2 py-0.5 text-[11px] transition-colors ${
-              kind === id
-                ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            }`}
-          >
-            {t(id === "pre" ? "api.entity.preRequest" : "api.entity.postResponse")}
-          </button>
-        ))}
-        <span className="ml-2 truncate text-[11px] text-[var(--cf-text-muted)]">
-          {t(tab.kind === "collection" ? "api.entity.scriptsIntro" : "api.entity.scriptsIntroFolder")}
+      <div className="flex h-10 shrink-0 items-center gap-3 border-b border-[var(--cf-border)] px-3.5">
+        <Segmented
+          size="sm"
+          layoutId="cf-api-entity-script"
+          ariaLabel={t("api.entity.scripts")}
+          value={kind}
+          onChange={setKind}
+          options={[
+            { value: "pre", label: t("api.entity.preRequest") },
+            { value: "post", label: t("api.entity.postResponse") },
+          ]}
+        />
+        <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-muted)]" title={intro}>
+          {intro}
         </span>
       </div>
       <div className="min-h-0 flex-1">

@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -45,21 +47,28 @@ export function CopyButton({
   };
 
   const title = copied ? t("dbml.convert.copied") : (label ?? t("dbml.convert.copy"));
-  return (
+  // The icon-only form is labelled by the app's tooltip; the worded one keeps `title`, which on a
+  // button that already says what it does is only the fallback for a truncated word.
+  const button = (
     <button
       type="button"
       onClick={copy}
-      title={title}
+      title={compact ? undefined : title}
       aria-label={title}
       className={
         className ??
-        `flex items-center gap-1 rounded-md border border-[var(--cf-border)] text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)] ${
-          compact ? "p-[3px]" : "px-1.5 py-[2px]"
-        }`
+        (compact
+          ? iconButtonClass({ size: "xs" })
+          : buttonClass({ variant: "secondary", size: "sm" }))
       }
     >
-      {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} />}
+      {copied ? (
+        <Check size={compact ? 13 : 14} className="text-[var(--cf-success)]" />
+      ) : (
+        <Copy size={compact ? 13 : 14} />
+      )}
       {!compact && (copied ? t("dbml.convert.copied") : (label ?? t("dbml.convert.copy")))}
     </button>
   );
+  return compact ? <Tooltip label={title}>{button}</Tooltip> : button;
 }

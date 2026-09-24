@@ -25,6 +25,11 @@ import {
   X,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { Kbd, buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import { recordModel } from "../../lib/db/engineModel";
 import { documentWithoutId } from "../../lib/db/mongoDocument";
 import { DocumentList, type DocumentActions, type DocumentState } from "./DocumentList";
@@ -33,7 +38,14 @@ import { RecordGrid } from "./RecordGrid";
 import { ResultGrid, type GridRowAction } from "./ResultGrid";
 import { cellMenuItems } from "./cellMenu";
 import { nodeLabel } from "./SqlConsolePanel";
-import { EngineBadge, ToolbarButton, ToolbarSeparator, formatCount, formatDuration } from "./dbChrome";
+import {
+  EngineBadge,
+  ToolbarButton,
+  ToolbarSeparator,
+  dangerIconButtonClass,
+  formatCount,
+  formatDuration,
+} from "./dbChrome";
 import {
   buildEdits,
   displayCell,
@@ -94,6 +106,7 @@ type PanelMenu =
  */
 export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   const t = useT();
+  const chord = useShortcutChord();
   const connection = useDbStore((s) => s.connections.find((c) => c.id === tab.connectionId));
   const openModal = useDbModalStore((s) => s.openDbModal);
   const store = useDbStore.getState();
@@ -764,22 +777,29 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {/* Toolbar */}
-      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
-        {connection && <EngineBadge kind={connection.kind} label={engine?.label ?? ""} />}
+      {/* Toolbar. 44px like every surface's, and allowed to wrap: on a narrow panel the Discard and
+          Apply pair drops to a second line rather than being clipped off the right edge. */}
+      <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-b border-[var(--cf-border)] py-[7px] pl-3.5 pr-3">
+        {connection && <EngineBadge kind={connection.kind} label={engine?.label ?? ""} size={18} />}
         {/* Which connection these rows came from, in words. The engine badge says *what kind* of
             server it is, which is not the same question — two of the three connections in a
             workspace are usually the same engine, and the one you must not confuse is production
             with staging. The console has always said it; the grid used to leave it to the tab. */}
-        <span
-          className="max-w-[150px] shrink truncate text-[12px] text-[var(--cf-text-muted)]"
-          title={connection?.name ?? t("db.connectionGone")}
-        >
-          {connection?.name ?? t("db.connectionGone")}
-        </span>
-        <span className="text-[var(--cf-text-muted)]">/</span>
-        <span className="max-w-[240px] truncate text-[12px] font-medium text-[var(--cf-text)]">
-          {nodeLabel(tab.node)}
+        <span className="mx-1.5 flex min-w-0 items-baseline gap-1 text-[13px]">
+          <span
+            className="max-w-[160px] shrink truncate font-semibold text-[var(--cf-text)]"
+            title={connection?.name ?? t("db.connectionGone")}
+          >
+            {connection?.name ?? t("db.connectionGone")}
+          </span>
+          <span className="shrink-0 text-[var(--cf-text-faint)]">/</span>
+          {/* The schema faint, the relation in full: the name you opened is the one to read. */}
+          <span className="min-w-0 max-w-[280px] truncate" title={nodeLabel(tab.node)}>
+            {tab.node.schema && (
+              <span className="text-[var(--cf-text-faint)]">{tab.node.schema}.</span>
+            )}
+            <span className="font-semibold text-[var(--cf-text)]">{tab.node.name ?? ""}</span>
+          </span>
         </span>
 
         {/*
@@ -789,58 +809,53 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           The last group is the reason for the grouping. Discard used to be an icon three buttons to
           the left of Apply, which put the two halves of one decision at opposite ends of a strip
           with the layout toggle between them — so "undo what I just did" had to be hunted for, next
-          to controls that do nothing to the data at all. The pair now reads as one question.
+          to controls that do nothing to the data at all. The pair now reads as one question, at the
+          far end of the bar, where the eye finishes reading it.
         */}
-        <div className="ml-auto flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
           {tab.loading ? (
-            <ToolbarButton onClick={() => void store.cancelRun(tab.id)} title={t("db.cancel")}>
-              <Square size={12} className="text-[var(--cf-danger)]" />
+            <ToolbarButton size="sm" onClick={() => void store.cancelRun(tab.id)} title={t("db.cancel")}>
+              <Square size={14} className="text-[var(--cf-danger)]" />
             </ToolbarButton>
           ) : (
-            <ToolbarButton onClick={() => void reload()} title={t("db.refresh")}>
-              <RefreshCw size={12} />
+            <ToolbarButton
+              size="sm"
+              onClick={() => void reload()}
+              title={t("db.refresh")}
+              shortcut={chord("db.refresh")}
+            >
+              <RefreshCw size={15} />
             </ToolbarButton>
           )}
-
-          <ToolbarSeparator />
 
           {/* On a collection this writes a document, not a row of nulls: there is no column list to
               make one from, and a schemaless store's "add" has always meant "write one". */}
           <ToolbarButton
+            size="sm"
             onClick={() => (documentStore ? addDocument() : store.addRow(tab.id))}
             title={documentStore ? t("db.addDocument") : t("db.addRow")}
           >
-            <Plus size={13} />
+            <Plus size={15} />
           </ToolbarButton>
 
           <ToolbarSeparator />
 
           {/* Three ways to read documents, in Compass's own order: the list, the raw text, the
-              grid. A switcher rather than the two-state toggle beside it, because these are three
-              alternatives and a toggle can only ever say "the other one". */}
+              grid. A segmented control rather than the two-state toggle beside it, because these
+              are three alternatives and a toggle can only ever say "the other one". */}
           {hasDocuments && (
             <>
-              <ToolbarButton
-                onClick={() => setUi(tab.id, { docView: "documents" })}
-                active={docView === "documents"}
-                title={t("db.documentList")}
-              >
-                <List size={12} />
-              </ToolbarButton>
-              <ToolbarButton
-                onClick={() => setUi(tab.id, { docView: "json" })}
-                active={docView === "json"}
-                title={t("db.showJson")}
-              >
-                <Braces size={12} />
-              </ToolbarButton>
-              <ToolbarButton
-                onClick={() => setUi(tab.id, { docView: "grid" })}
-                active={docView === "grid"}
-                title={t("db.showGrid")}
-              >
-                <TableIcon size={12} />
-              </ToolbarButton>
+              <Segmented
+                size="sm"
+                layoutId={`cf-db-docview-${tab.id}`}
+                value={docView}
+                onChange={(next) => setUi(tab.id, { docView: next })}
+                options={[
+                  { value: "documents", icon: List, title: t("db.documentList") },
+                  { value: "json", icon: Braces, title: t("db.showJson") },
+                  { value: "grid", icon: TableIcon, title: t("db.showGrid") },
+                ]}
+              />
               <ToolbarSeparator />
             </>
           )}
@@ -850,15 +865,17 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               while documents are up: transposing a grid is a question about a grid. */}
           {(!hasDocuments || docView === "grid") && (
             <ToolbarButton
+              size="sm"
               onClick={() => setUi(tab.id, { layout: layout === "grid" ? "record" : "grid" })}
               active={layout === "record"}
               disabled={!tab.result}
               title={layout === "grid" ? t("db.recordLayout") : t("db.gridLayout")}
             >
-              {layout === "grid" ? <Columns3 size={12} /> : <Rows3 size={12} />}
+              {layout === "grid" ? <Columns3 size={15} /> : <Rows3 size={15} />}
             </ToolbarButton>
           )}
           <ToolbarButton
+            size="sm"
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               setMenu({ x: rect.right - 180, y: rect.bottom + 2, kind: "export", rows: selectedRows });
@@ -870,40 +887,48 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
                 : t("db.export")
             }
           >
-            <Download size={12} />
+            <Download size={15} />
           </ToolbarButton>
+        </div>
 
-          <ToolbarSeparator />
-
+        <div className="ml-auto flex items-center gap-1.5 pl-2">
           {/* Worded, not an icon: it is the other answer to the question Apply asks, and an icon
               beside a labelled button reads as a lesser control rather than as the alternative.
               `CircleX` and not a bin — nothing is deleted here. The staged edits are dropped and the
               rows go back to what the server last said, which is a cancel, not a destruction. */}
-          <button
-            type="button"
-            onClick={() => store.revertEdits(tab.id)}
-            disabled={staged === 0}
-            title={t("db.revert")}
-            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[12px] font-medium text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text-muted)]"
+          <Tooltip label={t("db.revert")}>
+            <button
+              type="button"
+              onClick={() => store.revertEdits(tab.id)}
+              disabled={staged === 0}
+              className={buttonClass({ variant: "secondary" })}
+            >
+              <CircleX size={14} />
+              {t("db.discard")}
+            </button>
+          </Tooltip>
+          <Tooltip
+            label={staged > 0 ? t("db.applyTitle", { n: String(staged) }) : t("db.apply")}
+            description={t("db.applySubtitle")}
+            trailing={chord("db.apply") ? <Kbd>{chord("db.apply")}</Kbd> : undefined}
           >
-            <CircleX size={11} />
-            {t("db.discard")}
-          </button>
-          <button
-            onClick={apply}
-            disabled={staged === 0}
-            className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-[3px] text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            <Save size={11} />
-            {staged > 0 ? t("db.applyN", { n: String(staged) }) : t("db.apply")}
-          </button>
+            <button
+              type="button"
+              onClick={apply}
+              disabled={staged === 0}
+              className={buttonClass({ variant: "primary" })}
+            >
+              <Save size={14} />
+              {staged > 0 ? t("db.applyN", { n: String(staged) }) : t("db.apply")}
+            </button>
+          </Tooltip>
         </div>
       </div>
 
       {/* The warning that matters: without a primary key, an edit is matched by every column. */}
       {tab.result && tab.columns.length > 0 && !identified && (
-        <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-[var(--cf-warning)]/[0.08] px-2 py-1 text-[11px] text-[var(--cf-text)]">
-          <AlertTriangle size={12} className="mt-[1px] shrink-0 text-[var(--cf-warning)]" />
+        <p className="flex shrink-0 items-start gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_9%,transparent)] py-1.5 pl-3.5 pr-3 text-[12px] leading-snug text-[var(--cf-text)]">
+          <AlertTriangle size={14} className="mt-px shrink-0 text-[var(--cf-warning)]" />
           {t("db.noPrimaryKeyWarning")}
         </p>
       )}
@@ -912,8 +937,8 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           that write a document back are gone until it is cleared. Said rather than left to be
           discovered by noticing two buttons missing. */}
       {!wholeDocuments && (
-        <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-[var(--cf-warning)]/[0.08] px-2 py-1 text-[11px] text-[var(--cf-text)]">
-          <AlertTriangle size={12} className="mt-[1px] shrink-0 text-[var(--cf-warning)]" />
+        <p className="flex shrink-0 items-start gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_9%,transparent)] py-1.5 pl-3.5 pr-3 text-[12px] leading-snug text-[var(--cf-text)]">
+          <AlertTriangle size={14} className="mt-px shrink-0 text-[var(--cf-warning)]" />
           {t("db.projectionWarning")}
         </p>
       )}
@@ -921,9 +946,9 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
       {/* Grid. Isolated so the selection bar below floats over the grid and nothing else. */}
       <div className="relative isolate min-h-0 flex-1">
         {tab.error ? (
-          <div className="p-3">
-            <p className="flex items-start gap-2 rounded-md border border-[var(--cf-danger)]/40 bg-[var(--cf-danger)]/[0.06] p-2 font-mono text-[12px] text-[var(--cf-danger)]">
-              <AlertTriangle size={13} className="mt-[2px] shrink-0" />
+          <div className="p-4">
+            <p className="flex items-start gap-2 rounded-lg border border-[color-mix(in_oklab,var(--cf-danger)_40%,transparent)] bg-[color-mix(in_oklab,var(--cf-danger)_7%,transparent)] px-3 py-2.5 font-mono text-[12px] text-[var(--cf-danger)]">
+              <AlertTriangle size={14} className="mt-[2px] shrink-0" />
               <span className="min-w-0 whitespace-pre-wrap break-words">{tab.error}</span>
             </p>
           </div>
@@ -1030,34 +1055,46 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
             "nothing is selected". */}
         {selectedRows.length > 0 && (
           <div className="pointer-events-none absolute inset-x-0 bottom-2 z-20 flex justify-center px-2">
-            <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-1.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1 shadow-[var(--cf-shadow)]">
-              <span className="text-[11px] font-medium text-[var(--cf-text)]">
+            {/* What acts on the selection, and only that: Apply and Discard stay together in the
+                toolbar above, where they act on every staged change, not on these rows. */}
+            <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-1 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-1 pl-3 pr-1 shadow-[var(--cf-shadow)]">
+              <span className="mr-1 text-[12px] font-medium tabular-nums text-[var(--cf-text)]">
                 {t(counts.selected, { n: String(selectedRows.length) })}
               </span>
               <ToolbarButton
+                size="sm"
                 onClick={() => openRecords(selectedRows)}
                 title={t("db.viewRecordsSelected")}
               >
-                <Rows3 size={12} />
+                <Rows3 size={14} />
               </ToolbarButton>
               <ToolbarButton
+                size="sm"
                 onClick={(e) => {
                   const rect = e.currentTarget.getBoundingClientRect();
                   setMenu({ x: rect.left, y: rect.top - 4, kind: "export", rows: selectedRows });
                 }}
                 title={t("db.exportSelectedN", { n: String(selectedRows.length) })}
               >
-                <Download size={12} />
+                <Download size={14} />
               </ToolbarButton>
-              <ToolbarButton onClick={deleteSelected} title={t("db.deleteSelectedHint")}>
-                <Trash2 size={12} className="text-[var(--cf-danger)]" />
-              </ToolbarButton>
+              <Tooltip label={t("db.deleteSelectedHint")}>
+                <button
+                  type="button"
+                  onClick={deleteSelected}
+                  aria-label={t("db.deleteSelectedHint")}
+                  className={dangerIconButtonClass({ size: "sm", tone: "danger" })}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </Tooltip>
+              <span aria-hidden className="mx-1 h-4 w-px bg-[var(--cf-border)]" />
               <button
                 type="button"
                 onClick={() => selectAll(false)}
-                className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                className={buttonClass({ variant: "ghost", size: "sm" })}
               >
-                <X size={11} />
+                <X size={13} />
                 {t("db.clearSelection")}
               </button>
             </div>
@@ -1156,7 +1193,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               the pager's middle was empty — and it is the one control on this bar that should take
               whatever width is left over, so it grows while everything else stays its own size. */}
           <div className="flex min-w-[140px] flex-1 items-center gap-1">
-            <span className="shrink-0 text-[10px] uppercase tracking-wide">
+            <span className="shrink-0 font-mono text-[11px] font-semibold text-[var(--cf-text-faint)]">
               {engine?.sql ? "WHERE" : engine?.consoleLanguage === "redis" ? "MATCH" : t("db.filter")}
             </span>
             <input
@@ -1171,7 +1208,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
                     : t("db.filterPlaceholder")
               }
               spellCheck={false}
-              className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-[2px] font-mono text-[12px] text-[var(--cf-text)] outline-none placeholder:font-sans focus:border-[var(--cf-accent)]"
+              className={fieldClass({ size: "sm", className: "flex-1 font-mono placeholder:font-sans" })}
             />
             {/* Only on the engines that have more to ask than a predicate. The dot says an option is
                 set while the panel is shut, so a page narrowed by a projection or a limit can never

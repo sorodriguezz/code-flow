@@ -1,7 +1,50 @@
 import { Eraser } from "lucide-react";
 import type { MenuItem } from "../common/ContextMenu";
-import type { DbmlMarkKind } from "../../lib/dbml/layout";
+import type { DbmlBadge, DbmlMarkKind } from "../../lib/dbml/layout";
 import type { Translate } from "../../state/languageStore";
+
+/**
+ * The badge legend — what a column *is* — in the one place the three surfaces that draw it read it:
+ * the canvas's rows, the inspector's columns and the Datos grid's headers.
+ *
+ * Five fixed hues that are never the accent, for the reason the canvas spells out where it applies
+ * them: the badges sit side by side on one row, so the one property they must have is being distinct
+ * from *each other*. PK amber, NN green, AI teal, U violet, FK blue. It used to be restated per
+ * surface, and the grid had drifted to drawing its `FK` in the accent — which on the default indigo
+ * is the colour of `U` everywhere else, so the same column read as unique in the grid and as a key
+ * reference on the diagram.
+ *
+ * The keys are in the order the canvas draws them (`columnBadges`: what a column is, then what it
+ * is constrained to, then what it points at), and every surface that shows more than one of them
+ * shows them in that order.
+ *
+ * Bare `var(--…)` tokens, like the mark colours below: the SVG export resolver substitutes those and
+ * nothing else.
+ */
+export const LEGEND: Record<DbmlBadge["label"], string> = {
+  PK: "var(--cf-warning)",
+  NN: "var(--cf-success)",
+  AI: "var(--cf-teal)",
+  U: "var(--cf-violet)",
+  FK: "var(--cf-blue)",
+};
+
+/**
+ * One legend badge in HTML — the canvas's chip at the size of a line of text: tinted rather than
+ * flooded, the full hue carrying the letters, so three of them on a row annotate the column instead
+ * of shouting over it. 16px tall at the 10.5px floor.
+ */
+export function LegendBadge({ label }: { label: DbmlBadge["label"] }) {
+  const hue = LEGEND[label];
+  return (
+    <span
+      className="inline-flex h-4 shrink-0 items-center rounded-[4px] px-1 text-[10.5px] font-bold leading-none tracking-[0.03em]"
+      style={{ color: hue, background: `color-mix(in oklab, ${hue} 15%, transparent)` }}
+    >
+      {label}
+    </span>
+  );
+}
 
 /**
  * The review vocabulary — the colours and the four rows — in the one place three surfaces read it.
@@ -11,7 +54,7 @@ import type { Translate } from "../../state/languageStore";
  * two copies of the colour table and one copy of the menu; a fourth caller is what turns "restated
  * so the panel and the diagram agree" into two things that agree until somebody edits one of them.
  *
- * The colours are a fourth family, distinct from the badge legend next door, and they are the three
+ * The colours are a fourth family, distinct from the badge legend above, and they are the three
  * semantic tokens a reader of this app already knows: danger, warning, success. They can be reused
  * here — where the badge legend could not reuse the accent — because a mark is never drawn *inside*
  * the badge strip, so it is never read against a `PK` chip. Each is a token with a light and a dark

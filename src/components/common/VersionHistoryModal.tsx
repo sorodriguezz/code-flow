@@ -217,7 +217,7 @@ export function VersionHistoryModal({
               ))}
             </div>
           ) : versions.length === 0 ? (
-            <p className="px-1 py-2 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+            <p className="px-1 py-2 text-[12px] leading-snug text-[var(--cf-text-muted)]">
               {t("versions.empty")}
             </p>
           ) : (
@@ -235,7 +235,7 @@ export function VersionHistoryModal({
                       className={`w-full rounded-md py-1.5 pl-2 pr-7 text-left transition-colors ${
                         active
                           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                          : "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+                          : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
                       }`}
                     >
                       {/* Date and time in full — a list of versions from one afternoon differs only
@@ -260,9 +260,9 @@ export function VersionHistoryModal({
                       onClick={() => void removeOne(version)}
                       title={t("versions.delete")}
                       aria-label={t("versions.delete")}
-                      className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
+                      className="absolute right-1 top-1 flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
                     >
-                      <Trash2 size={11} />
+                      <Trash2 size={13} />
                     </button>
                   </li>
                 );
@@ -284,7 +284,7 @@ export function VersionHistoryModal({
               ))}
             </div>
           ) : (
-            <pre className="whitespace-pre-wrap break-words p-4 font-mono text-[11.5px] leading-relaxed text-[var(--cf-text)]">
+            <pre className="whitespace-pre-wrap break-words p-4 font-mono text-[12px] leading-relaxed text-[var(--cf-text)]">
               {content}
             </pre>
           )}

@@ -139,7 +139,7 @@ export function AgentsView() {
 
   if (!workspaceId) {
     return (
-      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
         <EmptyState icon={Bot} title={t("agents.noWorkspace")} subtitle={t("agents.noWorkspaceHint")} />
       </div>
     );
@@ -154,9 +154,11 @@ export function AgentsView() {
 
   return (
     <>
-      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
-        {/* Flush: no padding, no gaps — the only thing between two columns is a `ResizeHandle`'s
-            one-pixel seam, the same as everywhere else in the app. */}
+      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
+        {/* Flush: no padding, no gaps. The task list and the roster are the explorer and the
+            inspector of the shared anatomy, and each draws its own hairline on the side that faces
+            the work — so the handles between them are `seamless`, or the edge would be drawn twice
+            a pixel apart. */}
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <AgentTaskList
             width={listWidth}
@@ -174,6 +176,7 @@ export function AgentsView() {
             value={listWidth}
             min={LIST_MIN}
             max={LIST_MAX}
+            seamless
             onChange={(value) => setSize("agentsListWidth", value)}
             onCommit={(value) => commitSize("agentsListWidth", value)}
           />
@@ -214,6 +217,7 @@ export function AgentsView() {
                 min={ROSTER_MIN}
                 max={ROSTER_MAX}
                 invert
+                seamless
                 onChange={(value) => setSize("agentsRosterWidth", value)}
                 onCommit={(value) => commitSize("agentsRosterWidth", value)}
               />

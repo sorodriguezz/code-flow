@@ -767,7 +767,7 @@ export function TerminalPane({
       {renderer === "dom" && (
         <div
           title={t("terminal.softwareRendererHint")}
-          className="pointer-events-none absolute right-3 top-3 z-10 flex items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-1.5 py-0.5 text-[10px] text-[var(--cf-text-muted)] opacity-70"
+          className="pointer-events-none absolute right-3 top-3 z-10 flex items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-1.5 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] opacity-70"
         >
           <TriangleAlert size={10} className="text-[var(--cf-warning)]" />
           {t("terminal.softwareRenderer")}

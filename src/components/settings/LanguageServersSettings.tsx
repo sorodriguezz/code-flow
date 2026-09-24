@@ -130,7 +130,7 @@ export function LanguageServersSettings() {
           </div>
           {groups.map(({ tier, titleKey }) => (
             <div key={tier}>
-              <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              <h3 className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
                 {t(titleKey)}
               </h3>
               <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">

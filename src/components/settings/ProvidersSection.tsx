@@ -23,7 +23,9 @@ import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
+import { chipClass, fieldClass } from "../common/recipes";
 import { Skeleton } from "../common/Skeleton";
 import {
   CUSTOM_MODEL,
@@ -75,7 +77,7 @@ function customModelHint(providerId: string, t: (key: TranslationKey) => string)
     return (
       <>
         {t("settings.modelIdHintRun")}{" "}
-        <code className="rounded bg-black/[0.06] px-1 py-0.5 font-mono text-[10.5px] dark:bg-white/[0.1]">
+        <code className="rounded bg-[var(--cf-press)] px-1 py-0.5 font-mono text-[11px]">
           {command}
         </code>
       </>
@@ -99,13 +101,16 @@ function CommandLine({ command }: { command: string }) {
         setCopied(true);
         setTimeout(() => setCopied(false), 1400);
       }}
-      className="group flex w-full items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-black/[0.03] px-2 py-1 text-left font-mono text-[11px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] dark:bg-white/[0.05]"
+      className="group flex h-7 w-full items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 text-left font-mono text-[12px] text-[var(--cf-text)] transition-colors duration-100 hover:border-[var(--cf-border-strong)]"
     >
       <span className="min-w-0 flex-1 truncate">{command}</span>
       {copied ? (
-        <Check size={11} className="shrink-0 text-[var(--cf-success)]" />
+        <Check size={13} className="shrink-0 text-[var(--cf-success)]" />
       ) : (
-        <Copy size={11} className="shrink-0 text-[var(--cf-text-muted)] opacity-0 group-hover:opacity-100" />
+        <Copy
+          size={13}
+          className="shrink-0 text-[var(--cf-text-muted)] opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100"
+        />
       )}
     </button>
   );
@@ -118,18 +123,18 @@ function SetupHelp({ provider }: { provider: AiProviderOption }) {
   if (!provider.setup) return null;
   const { url, command, postCommand } = provider.setup;
   return (
-    <div className="space-y-1.5 rounded-lg border border-[var(--cf-border)] p-2.5">
-      <p className="text-[11.5px] font-medium text-[var(--cf-text)]">{t("settings.setupTitle")}</p>
+    <div className="space-y-1.5 rounded-lg border border-[var(--cf-border)] p-3">
+      <p className="text-[13px] font-medium text-[var(--cf-text)]">{t("settings.setupTitle")}</p>
       {command && <CommandLine command={command} />}
       {postCommand && <CommandLine command={postCommand} />}
       <button
         onClick={() => void openExternalUrl(url)}
-        className="flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
+        className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline"
       >
-        <ExternalLink size={11} />
+        <ExternalLink size={12} />
         {t("settings.setupDocs")}
       </button>
-      {command && <p className="text-[10.5px] text-[var(--cf-text-muted)]">{t("settings.setupRestartHint")}</p>}
+      {command && <p className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.setupRestartHint")}</p>}
     </div>
   );
 }
@@ -142,16 +147,16 @@ function StatusBadge({ providerId }: { providerId: string }) {
   const checking = useProviderStatusStore((s) => s.checking);
 
   if (!status) {
-    return checking ? <Loader2 size={11} className="animate-spin text-[var(--cf-text-muted)]" /> : null;
+    return checking ? <Loader2 size={13} className="shrink-0 animate-spin text-[var(--cf-text-muted)]" /> : null;
   }
   return status.available ? (
-    <span className="flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-success)_14%,transparent)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--cf-success)]">
-      <CircleCheck size={10} />
+    <span className={chipClass("ok")}>
+      <CircleCheck size={11} />
       {t("settings.providerReady")}
     </span>
   ) : (
-    <span className="flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_16%,transparent)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--cf-warning)]">
-      <CircleAlert size={10} />
+    <span className={chipClass("warn")}>
+      <CircleAlert size={11} />
       {t("settings.providerMissing")}
     </span>
   );
@@ -279,12 +284,15 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
 
   const options = modelOptionsFor(provider.id, dynamicModels);
   const modelLabel = resolvedModel ? modelDisplayLabel(provider.id, resolvedModel, t) : t("settings.modelDefault");
-  const inputClass =
-    "w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]";
+  const inputClass = fieldClass({ className: "w-full flex-1 font-mono" });
 
   return (
-    <div className="rounded-lg border border-[var(--cf-border)]">
-      <div className="flex items-center gap-2 p-2.5">
+    <div
+      className={`rounded-lg border border-[var(--cf-border)] transition-colors duration-100 ${
+        expanded ? "" : "hover:border-[var(--cf-border-strong)]"
+      }`}
+    >
+      <div className="flex items-center gap-2 px-3 py-2.5">
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
@@ -292,29 +300,23 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
         >
           <ChevronDown
             size={14}
-            className={`shrink-0 text-[var(--cf-text-muted)] transition-transform ${expanded ? "" : "-rotate-90"}`}
+            className={`shrink-0 text-[var(--cf-text-faint)] transition-transform ${expanded ? "" : "-rotate-90"}`}
           />
           {/* The brand mark where the provider has one — see `ProviderGlyph`. Untinted on
               purpose: a logo whose colour is muted grey is a logo nobody recognises. */}
           <ProviderGlyph providerId={provider.id} size={14} />
           <span className="shrink-0 text-[13px] font-medium">{label}</span>
           <StatusBadge providerId={provider.id} />
-          {loaded && <span className="min-w-0 truncate text-[11px] text-[var(--cf-text-muted)]">{modelLabel}</span>}
+          {loaded && <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-muted)]">{modelLabel}</span>}
         </button>
 
         {isDefault ? (
-          <span
-            title={t("settings.providerDefaultTitle")}
-            className="flex shrink-0 items-center gap-1 rounded-full bg-[var(--cf-accent-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--cf-accent)]"
-          >
-            <Star size={10} />
+          <span title={t("settings.providerDefaultTitle")} className={chipClass("accent")}>
+            <Star size={11} />
             {t("settings.providerDefault")}
           </span>
         ) : (
-          <button
-            onClick={makeDefault}
-            className="shrink-0 rounded-md px-2 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-          >
+          <button onClick={makeDefault} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {t("settings.providerMakeDefault")}
           </button>
         )}
@@ -330,13 +332,13 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
           ) : (
             <>
               {status && !status.available && (
-                <p className="rounded-md border border-[color-mix(in_oklab,var(--cf-warning)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-2 text-[11.5px] leading-snug text-[var(--cf-text)]">
+                <p className="rounded-md border border-[color-mix(in_oklab,var(--cf-warning)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-2 text-[12px] leading-snug text-[var(--cf-text)]">
                   {t("settings.providerMissingBinary", { binary: status.binary })}
                 </p>
               )}
 
               {!agentic && (
-                <p className="rounded-md border border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-accent)_8%,transparent)] px-2.5 py-2 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+                <p className="rounded-md border border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-accent)_8%,transparent)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
                   {t("settings.localProviderNote")}
                 </p>
               )}
@@ -346,19 +348,19 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
               {status && !status.available && <SetupHelp provider={provider} />}
 
               <Field label={t("settings.binaryLabel")} hint={t("settings.binaryHint")}>
-                <div className="flex gap-1.5">
+                <div className="flex items-center gap-1.5">
                   <input
                     value={binaryPath}
                     onChange={(e) => setBinaryPath(e.target.value)}
                     onBlur={(e) => void saveBinary(e.target.value)}
-                    className={`${inputClass} flex-1 font-mono`}
+                    className={inputClass}
                   />
                   <button
                     onClick={browseBinary}
                     title={t("settings.selectClaudeBinaryTitle")}
-                    className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                    className={buttonClass({ variant: "secondary", size: "md" })}
                   >
-                    <FolderOpen size={13} />
+                    <FolderOpen size={14} />
                     {t("settings.browse")}
                   </button>
                 </div>
@@ -374,9 +376,9 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                     onClick={() => invalidateModels(provider.id)}
                     disabled={!modelsLoaded}
                     title={t("settings.refreshModels")}
-                    className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-50"
+                    className={buttonClass({ variant: "ghost", size: "sm" })}
                   >
-                    <RotateCw size={11} className={modelsLoaded ? "" : "animate-spin"} />
+                    {modelsLoaded ? <RotateCw size={13} /> : <Loader2 size={13} className="animate-spin" />}
                     {t("settings.refreshModels")}
                   </button>
                 }
@@ -404,7 +406,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                   setting would be inert, so they get an explanation of what actually governs
                   their access instead of a control that does nothing. */}
               {agentic && !provider.usesToolAllowlist && (
-                <p className="rounded-md border border-[var(--cf-border)] px-2.5 py-2 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+                <p className="rounded-md border border-[var(--cf-border)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
                   {t("settings.toolsSandboxNote")}
                 </p>
               )}
@@ -429,7 +431,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                       it would be noise. */}
                   {(tools.length === 0 || !tools.includes("Read")) && (
                     <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-[var(--cf-warning)]/40 bg-[color-mix(in_oklab,var(--cf-warning)_8%,transparent)] px-2.5 py-2">
-                      <span className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+                      <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
                         {t(tools.length === 0 ? "settings.toolsUnrestricted" : "settings.toolsNoRead")}
                       </span>
                       <button
@@ -444,7 +446,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                                 [...new Set([...defaultToolsFor(provider.id), ...tools])],
                           )
                         }
-                        className="shrink-0 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                        className={buttonClass({ variant: "secondary", size: "sm" })}
                       >
                         {t(tools.length === 0 ? "settings.toolsUseRecommended" : "settings.toolsAddRecommended")}
                       </button>
@@ -466,7 +468,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                       {TOOL_OPTIONS.map((tool) => (
                         <label
                           key={tool.id}
-                          className="flex cursor-pointer items-start gap-2 rounded-md px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                          className="flex cursor-pointer items-start gap-2 rounded-md px-1.5 py-1 hover:bg-[var(--cf-hover)]"
                         >
                           <Checkbox
                             checked={tools.includes(tool.id)}
@@ -493,20 +495,23 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                       {tools
                         .filter((tool) => !KNOWN_TOOL_IDS.has(tool))
                         .map((tool) => (
-                          <span
-                            key={tool}
-                            className="flex items-center gap-1 rounded-md bg-[var(--cf-accent-soft)] px-2 py-0.5 text-[11px] text-[var(--cf-accent)]"
-                          >
+                          // 22px rather than the chip's 20, so the remove button inside it can
+                          // take the whole height and still be a 22px target.
+                          <span key={tool} className={chipClass("accent", "h-[22px] pr-0 font-mono")}>
                             {tool}
-                            <button onClick={() => void saveTools(tools.filter((x) => x !== tool))}>
-                              <X size={11} />
+                            <button
+                              onClick={() => void saveTools(tools.filter((x) => x !== tool))}
+                              aria-label={t("settings.remove")}
+                              className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-[5px] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
+                            >
+                              <X size={12} />
                             </button>
                           </span>
                         ))}
                     </div>
                   )}
 
-                  <div className="mt-2 flex gap-1.5">
+                  <div className="mt-2 flex items-center gap-1.5">
                     <input
                       value={customTool}
                       onChange={(e) => setCustomTool(e.target.value)}
@@ -519,7 +524,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                         setCustomTool("");
                       }}
                       placeholder={t("settings.addCustomTool")}
-                      className={`${inputClass} flex-1 font-mono`}
+                      className={inputClass}
                     />
                     <button
                       onClick={() => {
@@ -528,7 +533,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                         void saveTools([...tools, name]);
                         setCustomTool("");
                       }}
-                      className="rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                      className={buttonClass({ variant: "secondary", size: "md" })}
                     >
                       {t("settings.add")}
                     </button>
@@ -562,9 +567,9 @@ export function ProvidersSection() {
         <button
           onClick={() => void checkAll()}
           disabled={checking}
-          className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-50"
+          className={buttonClass({ variant: "ghost", size: "sm" })}
         >
-          {checking ? <Loader2 size={11} className="animate-spin" /> : <Check size={11} />}
+          {checking ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
           {t("settings.providerRecheck")}
         </button>
       </div>

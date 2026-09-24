@@ -22,6 +22,7 @@ import { DEFAULT_PIPELINE_POLL, PIPELINE_POLL_CHOICES } from "../../state/ciStor
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { useT } from "../../state/languageStore";
 import { Note, Panel, SettingsHeader } from "../api/settingsChrome";
+import { Segmented } from "../common/Segmented";
 import { SettingsRail, useSectionTab } from "./settingsNav";
 import { tabsFor } from "../../lib/settingsCatalog";
 
@@ -32,24 +33,19 @@ function PollingPane() {
 
   return (
     <>
-      <div className="flex flex-wrap gap-1.5">
-        {PIPELINE_POLL_CHOICES.map((choice) => (
-          <button
-            key={choice}
-            type="button"
-            onClick={() => void setSeconds(choice)}
-            className={`rounded-md border px-2.5 py-1 text-[11.5px] transition-colors ${
-              seconds === choice
-                ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                : "border-[var(--cf-border)] text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
-            }`}
-          >
-            {/* Never truncated, and each option reads as a full phrase rather than a bare
-                number — "5" beside "10" beside "60" makes the unit somebody's guess. */}
-            {t("pipelines.pollSeconds", { n: choice })}
-          </button>
-        ))}
-      </div>
+      {/* One choice among five peers: the segmented control. Each option reads as a full phrase
+          rather than a bare number — "5" beside "10" beside "60" makes the unit somebody's guess.
+          The values travel as strings, which is all the control speaks, and are read back here. */}
+      <Segmented
+        options={PIPELINE_POLL_CHOICES.map((choice) => ({
+          value: String(choice),
+          label: <span className="tabular-nums">{t("pipelines.pollSeconds", { n: choice })}</span>,
+        }))}
+        value={String(seconds)}
+        onChange={(value) => void setSeconds(Number(value))}
+        layoutId="cf-set-pipeline-poll"
+        ariaLabel={t("pipelines.pollLabel")}
+      />
       {seconds === DEFAULT_PIPELINE_POLL && (
         <div className="mt-2">
           <Note>{t("pipelines.pollDefaultNote")}</Note>
@@ -63,7 +59,7 @@ function AvailabilityPane() {
   const t = useT();
   return (
     <>
-      <p className="mb-2 text-[11.5px] leading-snug text-[var(--cf-text)]">
+      <p className="mb-2 text-[12px] leading-snug text-[var(--cf-text)]">
         {t("pipelines.availabilityBody")}
       </p>
       <Note>{t("pipelines.availabilityHosts")}</Note>
@@ -99,7 +95,7 @@ export function PipelinesSettings() {
             {/* The rail names the pane, so no heading is repeated here — but the hint says what the
                 label cannot, so it stays. Same call as the editor and AI sections. */}
             {active?.hintKey && (
-              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+              <p className="mb-3 text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
             )}
 
             {tab === "polling" && <PollingPane />}

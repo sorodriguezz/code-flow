@@ -17,6 +17,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
+import { Kbd, iconButtonClass, type IconButtonSize } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
+import { monogramStyle } from "../../lib/monogram";
 import type { DbKind, DbNodeKind } from "../../types/database";
 
 /**
@@ -38,13 +41,21 @@ import type { DbKind, DbNodeKind } from "../../types/database";
  */
 export const CARD = "bg-[var(--cf-surface)]";
 
-/** Every text input in this workspace's dialogs. Shared with `Field` in `ApiModal`, so a box styled
- * here can't drift from the rest of the app's. */
+/**
+ * Every text input in this workspace's dialogs: the same field `fieldClass` and `ApiModal`'s `Field`
+ * draw — the field fill, the darker field hairline, the accent halo on focus — so a box styled here
+ * can't drift from the rest of the app's.
+ *
+ * Not `fieldClass` itself, because that one fixes the height at 30px, and this string also dresses
+ * textareas (the startup script here, two DBML panels elsewhere) whose height is their row count.
+ * The padding and the line height are what add up to the same 30px on a single-line input.
+ */
 export const INPUT =
-  "w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:opacity-50";
+  "w-full min-w-0 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-[5px] text-[13px] leading-[18px] text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] disabled:opacity-50";
 
 /** A labelled control with an optional line of explanation under it — the density the connection
- * dialogs use. Here rather than in one of them because two of them need it. */
+ * dialogs use. Here rather than in one of them because two of them need it. The label is the app's
+ * form label: 11px, uppercase, the faint ink section headings use. */
 export function Row({
   label,
   hint,
@@ -56,7 +67,7 @@ export function Row({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+      <span className="mb-[5px] block text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
         {label}
       </span>
       {children}
@@ -125,8 +136,8 @@ export function engineColor(kind: DbKind): string {
  * for IRIS's multi-model store, a key for Redis. Six distinct silhouettes is all a list of six
  * rows needs.
  *
- * Tinted with `engineColor` wherever they are drawn, so the glyph in the picker and the dot beside a
- * connection in the explorer are the same colour for the same engine.
+ * Drawn in `engineInk` wherever they appear, so the glyph in the picker, the tile on a tab and the
+ * dot beside a connection in the explorer are the same hue for the same engine.
  */
 const ENGINE_ICONS: Record<DbKind, LucideIcon> = {
   postgres: Database,
@@ -143,10 +154,22 @@ export function engineIcon(kind: DbKind): LucideIcon {
   return ENGINE_ICONS[kind] ?? Database;
 }
 
-/** The engine's glyph in the engine's own colour. */
+/**
+ * The engine's colour as *ink*: the brand hue pulled toward the theme's text, which is what
+ * `monogramStyle` gives a tile's letters.
+ *
+ * The raw brand colours are tuned to be told apart, not to be read — Supabase's green and Mongo's
+ * leaf green sat under 2:1 on the light sheet as a 14px glyph. Mixed toward the text they keep their
+ * hue on both themes and gain the contrast.
+ */
+export function engineInk(kind: DbKind): string {
+  return String(monogramStyle(engineColor(kind)).color);
+}
+
+/** The engine's glyph in the engine's own ink. */
 export function EngineGlyph({ kind, size = 14 }: { kind: DbKind; size?: number }) {
   const Icon = engineIcon(kind);
-  return <Icon size={size} className="shrink-0" style={{ color: engineColor(kind) }} />;
+  return <Icon size={size} className="shrink-0" style={{ color: engineInk(kind) }} />;
 }
 
 /**
@@ -196,20 +219,56 @@ export function ConnectionDot({
   );
 }
 
-/** A small square of the engine's colour with its initial — the connection's identity in a tab. */
-export function EngineBadge({ kind, label }: { kind: DbKind; label: string }) {
+/**
+ * The engine's tile — the connection's identity on a tab, a toolbar and a tree row.
+ *
+ * It used to be a 16px square of the raw brand colour with the engine's initial in white, which
+ * failed contrast on half the engines (white on Supabase's light green measured under 2:1) and put a
+ * letter where every other place in the workspace draws the engine's glyph. Now it is the glyph on a
+ * wash of the brand colour, in the brand colour's ink, with a ring of it — the same mix the projects'
+ * monograms use, so a tinted tile means "this thing's own colour" everywhere in the app.
+ */
+export function EngineBadge({
+  kind,
+  label,
+  size = 16,
+}: {
+  kind: DbKind;
+  label: string;
+  /** 16 on a tab, 18 on a toolbar or a tree row. */
+  size?: number;
+}) {
+  const Icon = engineIcon(kind);
   return (
     <span
       title={label}
-      className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold uppercase text-white"
-      style={{ backgroundColor: engineColor(kind) }}
+      role="img"
+      aria-label={label}
+      className="inline-flex shrink-0 items-center justify-center rounded-[5px]"
+      style={{ width: size, height: size, ...monogramStyle(engineColor(kind)) }}
     >
-      {label.slice(0, 1)}
+      <Icon size={size >= 18 ? 12 : 11} aria-hidden />
     </span>
   );
 }
 
-/** Toolbar button, sized to sit in a 20px-tall header row like the API client's. */
+/**
+ * The mark on the field a record is identified by — `PK`, IRIS's `ID`, Mongo's `_id` — as the legend
+ * chip the schema canvas badges a primary key with: amber, a fixed legend hue, not the accent. One
+ * component because three places draw it (the grid's header, the record layout, the records dialog)
+ * and a key that looked different in each would read as three different facts.
+ */
+export function IdentityBadge({ badge, title }: { badge: string; title: string }) {
+  return (
+    <span
+      title={title}
+      className="shrink-0 rounded-[3px] bg-[color-mix(in_oklab,var(--cf-warning)_15%,transparent)] px-1 py-[3px] text-[10.5px] font-bold leading-none tracking-[0.03em] text-[var(--cf-warning)]"
+    >
+      {badge}
+    </span>
+  );
+}
+
 /**
  * The hairline between two groups of controls on a toolbar.
  *
@@ -222,21 +281,37 @@ export function EngineBadge({ kind, label }: { kind: DbKind; label: string }) {
  * strength would read as the edge of a panel and cut the bar into two bars.
  */
 export function ToolbarSeparator() {
-  return <span aria-hidden className="mx-0.5 h-3.5 w-px shrink-0 bg-[var(--cf-border)]" />;
+  return <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" />;
 }
 
+/**
+ * An icon-only button with its name in the app's tooltip.
+ *
+ * `iconButtonClass` underneath, so it is the same control the rest of the app draws: 22px by default
+ * (the floor — this used to be a 20px square that had to be aimed at), 26px (`size="sm"`) on the
+ * 44px toolbars. `active` is for toggles and is announced as `aria-pressed`. The name moved from
+ * `title` into `Tooltip`, which is the only way to show a shortcut beside it as a key cap.
+ */
 export function ToolbarButton({
   onClick,
   title,
+  description,
+  shortcut,
   disabled,
   active,
+  size = "xs",
   dataTour,
   children,
 }: {
   onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   title: string;
+  /** A second, quieter line in the tooltip — what the button is for, when its name doesn't say. */
+  description?: string;
+  /** The chord that also does this, as `useShortcutChord` formats it — never a literal. */
+  shortcut?: string | null;
   disabled?: boolean;
   active?: boolean;
+  size?: IconButtonSize;
   /** Marks this button as a guided-tour anchor. Opt-in per call site rather than derived from the
    *  title, because the tour points at a handful of controls and every other one of these should
    *  stay out of its selector list. */
@@ -244,22 +319,44 @@ export function ToolbarButton({
   children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      data-tour={dataTour}
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-      disabled={disabled}
-      className={`flex h-5 w-5 items-center justify-center rounded disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent ${
-        active
-          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-      }`}
+    <Tooltip
+      label={title}
+      description={description}
+      trailing={shortcut ? <Kbd>{shortcut}</Kbd> : undefined}
     >
-      {children}
-    </button>
+      <button
+        type="button"
+        data-tour={dataTour}
+        onClick={onClick}
+        aria-label={title}
+        aria-pressed={active}
+        disabled={disabled}
+        className={iconButtonClass({ size, active })}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
+}
+
+/**
+ * The icon button that takes something away — a row, a pattern, a saved password.
+ *
+ * `iconButtonClass`'s shape with the danger hue on hover (or at rest, `tone="danger"`, for the one
+ * that stages a deletion). Written out rather than passed to `iconButtonClass` as a className,
+ * because two `hover:text-*` utilities on one element have no defined winner.
+ */
+export function dangerIconButtonClass({
+  size = "xs",
+  tone = "quiet",
+}: { size?: "xs" | "sm"; tone?: "quiet" | "danger" } = {}): string {
+  return `inline-flex shrink-0 items-center justify-center rounded-md transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] disabled:pointer-events-none disabled:opacity-40 ${
+    size === "xs" ? "h-[22px] w-[22px]" : "h-[26px] w-[26px]"
+  } ${
+    tone === "danger"
+      ? "text-[var(--cf-danger)]"
+      : "text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+  }`;
 }
 
 /** `1.2 s` / `840 ms` — a duration at the precision that is actually informative. */

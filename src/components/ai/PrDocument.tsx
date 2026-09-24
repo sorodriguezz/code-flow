@@ -3,7 +3,7 @@ import {
   Ban,
   Check,
   CheckCheck,
-  ChevronDown,
+  ChevronUp,
   Copy,
   ExternalLink,
   Link2,
@@ -17,6 +17,9 @@ import {
   ThumbsUp,
   type LucideIcon,
 } from "lucide-react";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { chipClass, popoverClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import { CONFIRM_POST_KEYS, POSTED_KEYS, VIEW_ON_KEYS } from "../../lib/providerLabels";
 import { discardPrFinding, getReviewRun, notifyStateChange, REVIEW_SKIPPED } from "../../lib/tauri/commands";
 import {
@@ -63,6 +66,7 @@ import {
   RunMenu,
   SegmentBar,
   SPLIT_MIN_WIDTH,
+  menuRowClass,
   relativeTime,
   useCopy,
   useDismiss,
@@ -577,12 +581,12 @@ export function PrDocument({
   const findingsBody = (() => {
     if (!displayJob) {
       if (runningJob) return null;
-      return <p className="px-1 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">{t("doc.noReviewYet")}</p>;
+      return <p className="px-1 py-6 text-center text-[12px] text-[var(--cf-text-faint)]">{t("doc.noReviewYet")}</p>;
     }
     if (hydrating) {
       return (
         <p className="flex items-center justify-center gap-1.5 py-6 text-[12px] text-[var(--cf-text-muted)]">
-          <Loader2 size={12} className="animate-spin" />
+          <Loader2 size={13} className="animate-spin" />
           {t("doc.loadingReview")}
         </p>
       );
@@ -592,14 +596,14 @@ export function PrDocument({
         <div className="space-y-2">
           {(runMemory?.resolved.length ?? 0) > 0 && (
             <p className="flex items-center gap-2 rounded-lg border border-[color-mix(in_oklab,var(--cf-success)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_9%,transparent)] px-3 py-2 text-[12px] text-[var(--cf-text)]">
-              <CheckCheck size={13} className="shrink-0 text-[var(--cf-success)]" />
+              <CheckCheck size={14} className="shrink-0 text-[var(--cf-success)]" />
               {t("pr.allResolved", { n: runMemory?.resolved.length ?? 0 })}
             </p>
           )}
           {summary.length > SHORT_SUMMARY_MAX ? (
             <Markdown source={summary} className="cf-markdown-preview rounded-lg border border-[var(--cf-border)] p-3.5" />
           ) : (
-            <p className="select-text rounded-lg border border-[var(--cf-border)] p-3 text-[12px] leading-relaxed text-[var(--cf-text)]">
+            <p className="select-text rounded-lg border border-[var(--cf-border)] p-3 text-[13px] leading-relaxed text-[var(--cf-text)]">
               {summary || t("analyze.noFindings")}
             </p>
           )}
@@ -651,42 +655,57 @@ export function PrDocument({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
-        <DocHeader>
-          <div className="flex items-start gap-2">
-            <p className="min-w-0 flex-1 text-[13px] font-semibold leading-snug">
-              <span className="mr-1 font-mono text-[12px] font-medium text-[var(--cf-text-muted)]">#{pr.id}</span>
+        <DocHeader
+          tabs={
+            <SegmentBar
+              layoutId={`doc-segment-${tabKey}`}
+              value={segment}
+              onChange={(next) => setView({ segment: next })}
+              segments={[
+                { id: "findings", label: t("doc.findings"), count: displayJob && !hydrating ? activeFindings.length : null },
+                { id: "comments", label: t("doc.comments"), count: threadsLoading ? null : threads.length },
+                { id: "summary", label: t("doc.summary") },
+              ]}
+            />
+          }
+        >
+          <div className="flex items-start gap-1">
+            <p className="min-w-0 flex-1 pt-0.5 text-[14px] font-semibold leading-snug">
+              <span className="mr-1.5 font-mono text-[12px] font-medium tabular-nums text-[var(--cf-text-faint)]">#{pr.id}</span>
               <span className="select-text">{pr.title}</span>
             </p>
-            <button
-              onClick={() => void refreshAll()}
-              disabled={refreshing}
-              title={t("pr.refreshAllHint")}
-              aria-label={t("pr.refreshAllHint")}
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-50 dark:hover:bg-white/[0.08]"
-            >
-              <RefreshCw size={13} className={refreshing ? "animate-spin" : undefined} />
-            </button>
-            <a
-              href={pr.url}
-              target="_blank"
-              rel="noreferrer"
-              title={t(VIEW_ON_KEYS[pr.provider])}
-              aria-label={t(VIEW_ON_KEYS[pr.provider])}
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-            >
-              <ExternalLink size={13} />
-            </a>
+            <Tooltip label={t("pr.refreshAllHint")}>
+              <button
+                onClick={() => void refreshAll()}
+                disabled={refreshing}
+                aria-label={t("pr.refreshAllHint")}
+                className={iconButtonClass({ size: "sm" })}
+              >
+                <RefreshCw size={15} className={refreshing ? "animate-spin" : undefined} />
+              </button>
+            </Tooltip>
+            <Tooltip label={t(VIEW_ON_KEYS[pr.provider])}>
+              <a
+                href={pr.url}
+                target="_blank"
+                rel="noreferrer"
+                aria-label={t(VIEW_ON_KEYS[pr.provider])}
+                className={iconButtonClass({ size: "sm" })}
+              >
+                <ExternalLink size={15} />
+              </a>
+            </Tooltip>
           </div>
-          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-[var(--cf-text-muted)]">
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-[var(--cf-text-faint)]">
             <PrStateChip status={pr.status} decision={decision} />
             <span>@{pr.author}</span>
             <span aria-hidden>·</span>
-            <span className="min-w-0 truncate font-mono text-[10.5px]">
+            <span className="min-w-0 truncate font-mono text-[11px]">
               {pr.source_branch} → {pr.target_branch}
             </span>
             {session && (
-              <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-black/[0.05] px-1.5 py-px text-[10px] dark:bg-white/[0.07]">
-                <Link2 size={9} className="shrink-0" />
+              <span className={chipClass("neutral", "min-w-0")}>
+                <Link2 size={12} className="shrink-0" />
                 <span className="truncate">{session.repoLabel}</span>
               </span>
             )}
@@ -703,27 +722,15 @@ export function PrDocument({
               />
             </div>
           )}
-          <SegmentBar
-            value={segment}
-            onChange={(next) => setView({ segment: next })}
-            segments={[
-              { id: "findings", label: t("doc.findings"), count: displayJob && !hydrating ? activeFindings.length : null },
-              { id: "comments", label: t("doc.comments"), count: threadsLoading ? null : threads.length },
-              { id: "summary", label: t("doc.summary") },
-            ]}
-          />
         </DocHeader>
 
         <div className="space-y-2.5 p-3">
           {linkOnly && session && <LinkReviewNotice session={session} />}
 
           {pinned && (
-            <div className="flex items-center gap-2 rounded-lg bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-2.5 py-1.5 text-[11.5px] text-[var(--cf-text)]">
+            <div className="flex items-center gap-2 rounded-lg bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] py-1.5 pl-3 pr-1.5 text-[12px] text-[var(--cf-text)]">
               <span className="min-w-0 flex-1">{t("doc.readOnlyReview", { n: displayNumber })}</span>
-              <button
-                onClick={() => setView({ runId: null })}
-                className="shrink-0 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-0.5 text-[11px] font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-              >
+              <button onClick={() => setView({ runId: null })} className={buttonClass({ variant: "secondary", size: "sm" })}>
                 {t("doc.backToLatest")}
               </button>
             </div>
@@ -733,7 +740,7 @@ export function PrDocument({
             <div className="space-y-1.5">
               {queued && (
                 <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-warning)]">
-                  <Loader2 size={11} className="animate-spin" />
+                  <Loader2 size={12} className="animate-spin" />
                   {queued.holder ? t("assistant.queuedBehind", { holder: queued.holder }) : t("assistant.queuedUnknown")}
                 </p>
               )}
@@ -745,26 +752,26 @@ export function PrDocument({
                 onToggle={() => setLogExpanded((v) => !v)}
               />
               {displayJob && segment === "findings" && (
-                <p className="px-0.5 text-[11px] text-[var(--cf-text-muted)]">{t("doc.whileRunning", { n: displayNumber })}</p>
+                <p className="px-0.5 text-[11px] text-[var(--cf-text-faint)]">{t("doc.whileRunning", { n: displayNumber })}</p>
               )}
             </div>
           )}
 
           {!runningJob && settledAfter?.status === "cancelled" && (
-            <p className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--cf-border)] px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">
-              <Square size={11} className="shrink-0 fill-current" />
+            <p className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">
+              <Square size={12} className="shrink-0 fill-current" />
               {t("ai.runStopped")}
             </p>
           )}
           {!runningJob && settledAfter?.status === "error" && settledAfter.error && (
             <div className="space-y-1">
               <AiErrorBanner error={settledAfter.error} compact />
-              {displayJob && <p className="px-0.5 text-[11px] text-[var(--cf-text-muted)]">{t("doc.showingEarlier")}</p>}
+              {displayJob && <p className="px-0.5 text-[11px] text-[var(--cf-text-faint)]">{t("doc.showingEarlier")}</p>}
             </div>
           )}
           {!runningJob && settledNote && (
             <div className="flex items-start gap-2 rounded-lg border border-[color-mix(in_oklab,var(--cf-warning)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_9%,transparent)] px-3 py-2 text-[12px] text-[var(--cf-text)]">
-              <SkipForward size={13} className="mt-0.5 shrink-0 text-[var(--cf-warning)]" />
+              <SkipForward size={14} className="mt-0.5 shrink-0 text-[var(--cf-warning)]" />
               <div className="min-w-0 flex-1">
                 <p className="select-text break-words">{settledNote.text}</p>
                 {settledNote.kind === "confirm" && !prClosed && (
@@ -779,22 +786,10 @@ export function PrDocument({
           {segment === "findings" && (
             <>
               {diff && !runningJob && (
-                <div className="flex flex-wrap items-center gap-1.5 text-[10.5px] font-semibold">
-                  {diff.added > 0 && (
-                    <span className="rounded-full bg-[var(--cf-accent-soft)] px-1.5 py-px text-[var(--cf-accent)]">
-                      {t("doc.diffNew", { n: diff.added })}
-                    </span>
-                  )}
-                  {diff.resolved > 0 && (
-                    <span className="rounded-full bg-[color-mix(in_oklab,var(--cf-success)_14%,transparent)] px-1.5 py-px text-[var(--cf-success)]">
-                      {t("doc.diffResolved", { n: diff.resolved })}
-                    </span>
-                  )}
-                  {diff.kept > 0 && (
-                    <span className="rounded-full bg-black/[0.06] px-1.5 py-px text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-                      {t("doc.diffKept", { n: diff.kept })}
-                    </span>
-                  )}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {diff.added > 0 && <span className={chipClass("accent")}>{t("doc.diffNew", { n: diff.added })}</span>}
+                  {diff.resolved > 0 && <span className={chipClass("ok")}>{t("doc.diffResolved", { n: diff.resolved })}</span>}
+                  {diff.kept > 0 && <span className={chipClass("neutral")}>{t("doc.diffKept", { n: diff.kept })}</span>}
                 </div>
               )}
               {findingsBody}
@@ -806,16 +801,17 @@ export function PrDocument({
               <PrCommentsSkeleton label={t("pr.loadingComments")} />
             ) : (
               <div className="space-y-2">
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1">
                   <GroupLabel>{threads.length > 0 ? t("pr.openComments", { n: threads.length }) : t("pr.noComments")}</GroupLabel>
-                  <button
-                    onClick={() => void loadThreads()}
-                    title={t("pr.refreshComments")}
-                    aria-label={t("pr.refreshComments")}
-                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-                  >
-                    <RefreshCw size={11} />
-                  </button>
+                  <Tooltip label={t("pr.refreshComments")}>
+                    <button
+                      onClick={() => void loadThreads()}
+                      aria-label={t("pr.refreshComments")}
+                      className={iconButtonClass({ size: "xs" })}
+                    >
+                      <RefreshCw size={13} />
+                    </button>
+                  </Tooltip>
                 </div>
                 {threads.map((thread) => (
                   <PrCommentCard
@@ -836,7 +832,7 @@ export function PrDocument({
           {segment === "summary" && (
             <div className="space-y-2.5">
               {!displayJob ? (
-                <p className="px-1 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">{t("doc.noReviewYet")}</p>
+                <p className="px-1 py-6 text-center text-[12px] text-[var(--cf-text-faint)]">{t("doc.noReviewYet")}</p>
               ) : (
                 <>
                   {summary ? (
@@ -845,8 +841,8 @@ export function PrDocument({
                     <p className="text-[12px] text-[var(--cf-text-muted)]">{t("analyze.noFindings")}</p>
                   )}
                   {(runMemory?.resolved.length ?? 0) > 0 && (
-                    <p className="flex items-center gap-2 text-[11.5px] text-[var(--cf-success)]">
-                      <CheckCheck size={12} className="shrink-0" />
+                    <p className="flex items-center gap-2 text-[12px] text-[var(--cf-success)]">
+                      <CheckCheck size={14} className="shrink-0" />
                       {t("pr.allResolved", { n: runMemory?.resolved.length ?? 0 })}
                     </p>
                   )}
@@ -854,9 +850,9 @@ export function PrDocument({
                     <button
                       onClick={() => copyFixpack(buildFixpack(activeParsed, pr.id))}
                       title={t("pr.fixpackHint")}
-                      className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11.5px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                      className={buttonClass({ variant: "secondary", size: "sm" })}
                     >
-                      {fixpackCopied ? <Check size={12} className="text-[var(--cf-success)]" /> : <Copy size={12} />}
+                      {fixpackCopied ? <Check size={13} className="text-[var(--cf-success)]" /> : <Copy size={13} />}
                       {t("pr.fixpack")}
                     </button>
                   )}
@@ -867,79 +863,83 @@ export function PrDocument({
         </div>
       </div>
 
+      {/* One layout for every step — see `ActionBar`: what qualifies the step on the left, its
+          primary at the right edge. */}
       <ActionBar>
         {pinned ? (
           <div className="flex items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]">{t("doc.readOnly")}</span>
-            <button
-              onClick={() => setView({ runId: null })}
-              className="shrink-0 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-            >
+            <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]">{t("doc.readOnly")}</span>
+            <button onClick={() => setView({ runId: null })} className={buttonClass({ variant: "primary", size: "md" })}>
               {t("doc.backToLatest")}
             </button>
           </div>
         ) : prClosed ? (
-          <PrDecisionState status={pr.status} decision={decision} />
+          // Nothing left to decide, for anyone: the settled state stands where the decision was.
+          <div className="flex justify-end">
+            <PrDecisionState status={pr.status} decision={decision} />
+          </div>
         ) : selecting ? (
           <div className="flex items-center gap-2">
-            <span className="shrink-0 text-[11.5px] font-semibold tabular-nums">
+            <span className="shrink-0 text-[12px] font-semibold tabular-nums">
               {t("doc.selectedOf", { n: chosen.length, total: activeFindings.length })}
             </span>
-            <label className="flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]" title={t("pr.postSummaryHint")}>
+            <label className="flex min-w-0 items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]" title={t("pr.postSummaryHint")}>
               <Checkbox checked={includeSummary} onChange={(value) => setView({ includeSummary: value })} />
               <span className="truncate">{t("pr.postSummary")}</span>
             </label>
             <span className="flex-1" />
-            <button
-              onClick={() => setView({ selecting: false })}
-              className="shrink-0 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            >
+            <button onClick={() => setView({ selecting: false })} className={buttonClass({ variant: "ghost", size: "md" })}>
               {t("common.cancel")}
             </button>
             <button
               onClick={() => void publish()}
               disabled={posting || (chosen.length === 0 && !includeSummary)}
-              className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-50"
+              className={buttonClass({ variant: "primary", size: "md" })}
             >
-              {posting && <Loader2 size={12} className="animate-spin" />}
+              {posting && <Loader2 size={14} className="animate-spin" />}
               {posting ? t("chat.posting") : t("chat.postToPr")}
             </button>
           </div>
         ) : !displayJob ? (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
-            <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{t("pr.levelLabel")}</span>
+            <span className="shrink-0 text-[12px] text-[var(--cf-text-muted)]">{t("pr.levelLabel")}</span>
             <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={Boolean(runningJob)} />
             <ReviewEngineTag />
+            {/* `ml-auto` keeps it at the right edge when a narrow panel wraps it onto a line of
+                its own, instead of letting it fall back under the selector. */}
             <button
               onClick={() => runReview()}
               disabled={Boolean(runningJob)}
-              className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
+              className={buttonClass({ variant: "primary", size: "md", className: "ml-auto" })}
             >
-              {runningJob ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+              {runningJob ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
               {runningJob ? t("chat.reviewing") : t("chat.reviewWithClaude")}
             </button>
           </div>
         ) : (
           <div className="flex items-center gap-1.5">
             <ReReviewButton disabled={Boolean(runningJob)} level={reviewLevel} onRun={(level) => runReview(level)} />
-            <button
-              onClick={() => setView({ selecting: true, segment: "findings" })}
-              disabled={Boolean(runningJob) || posting || nothingLeft}
-              title={nothingLeft ? t(POSTED_KEYS[pr.provider]) : t("doc.publishHint")}
-              className="flex min-w-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
-            >
-              {posting ? (
-                <Loader2 size={12} className="shrink-0 animate-spin" />
-              ) : nothingLeft ? (
-                <Check size={12} className="shrink-0 text-[var(--cf-success)]" />
-              ) : (
-                <MessageSquareShare size={12} className="shrink-0" />
-              )}
-              <span className="truncate">
-                {unpublished > 0 ? t("doc.publishN", { n: unpublished }) : nothingLeft ? t("doc.published") : t("doc.publish")}
-              </span>
-            </button>
             <span className="flex-1" />
+            {/* The title rides on a wrapper: a disabled recipe button takes no pointer events, and
+                "already on the pull request" is exactly what the disabled one has to say. */}
+            <span className="flex min-w-0" title={nothingLeft ? t(POSTED_KEYS[pr.provider]) : t("doc.publishHint")}>
+              <button
+                onClick={() => setView({ selecting: true, segment: "findings" })}
+                disabled={Boolean(runningJob) || posting || nothingLeft}
+                className={buttonClass({ variant: "secondary", size: "md", className: "min-w-0" })}
+              >
+                {posting ? (
+                  <Loader2 size={14} className="shrink-0 animate-spin" />
+                ) : nothingLeft ? (
+                  <Check size={14} className="shrink-0 text-[var(--cf-success)]" />
+                ) : (
+                  <MessageSquareShare size={14} className="shrink-0" />
+                )}
+                <span className="truncate">
+                  {unpublished > 0 ? t("doc.publishN", { n: unpublished }) : nothingLeft ? t("doc.published") : t("doc.publish")}
+                </span>
+              </button>
+            </span>
             {decision === "approved" ? (
               <PrDecisionState status={pr.status} decision={decision} />
             ) : (
@@ -959,7 +959,14 @@ export function PrDocument({
   );
 }
 
-/** Re-runs the review at the current depth; the chevron picks another depth for this run. */
+/** The secondary button's surface, for the two halves of the split button below. */
+const SPLIT_HALF =
+  "inline-flex h-7 items-center bg-[var(--cf-surface)] text-[var(--cf-text)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-text)_4%,var(--cf-surface))] disabled:pointer-events-none disabled:opacity-45";
+
+/**
+ * Re-runs the review at the current depth; the chevron picks another depth for this run. Its words
+ * show once the bar has room for them — a panel at its narrowest keeps the glyph and the tooltip.
+ */
 function ReReviewButton({
   disabled,
   level,
@@ -980,9 +987,10 @@ function ReReviewButton({
         disabled={disabled}
         title={`${t("pr.reviewAgain")} · ${t(`pr.level.${level}` as never)}`}
         aria-label={t("pr.reviewAgain")}
-        className="flex h-7 items-center rounded-l-md border border-[var(--cf-border)] px-1.5 text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+        className={`${SPLIT_HALF} gap-1.5 rounded-l-md px-2.5 text-[13px] font-medium`}
       >
-        <RefreshCw size={13} />
+        <RefreshCw size={14} className="shrink-0" />
+        <span className="hidden @[28rem]:inline">{t("pr.reviewAgain")}</span>
       </button>
       <button
         onClick={() => setOpen((v) => !v)}
@@ -990,16 +998,13 @@ function ReReviewButton({
         aria-haspopup="menu"
         aria-expanded={open}
         title={t("pr.levelLabel")}
-        className="flex h-7 items-center rounded-r-md border border-l-0 border-[var(--cf-border)] px-0.5 text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+        className={`${SPLIT_HALF} -ml-px w-6 justify-center rounded-r-md text-[var(--cf-text-muted)]`}
       >
-        <ChevronDown size={11} />
+        <ChevronUp size={13} />
       </button>
       {open && (
-        <div
-          role="menu"
-          className="absolute bottom-full left-0 z-30 mb-1 w-48 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
-        >
-          <p className="px-2 pb-1 pt-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <div role="menu" className={`absolute bottom-full left-0 z-30 mb-1.5 w-52 ${popoverClass}`}>
+          <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
             {t("pr.reviewAgain")}
           </p>
           {LEVELS.map((choice) => (
@@ -1010,9 +1015,9 @@ function ReReviewButton({
                 setOpen(false);
                 onRun(choice);
               }}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+              className="flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-[var(--cf-text)] transition-colors duration-100 hover:bg-[var(--cf-hover)]"
             >
-              <span className="w-3 shrink-0 text-[var(--cf-accent)]">{choice === level && <Check size={12} />}</span>
+              <span className="w-3.5 shrink-0 text-[var(--cf-accent)]">{choice === level && <Check size={14} />}</span>
               {t(`pr.level.${choice}` as never)}
             </button>
           ))}
@@ -1032,9 +1037,14 @@ const ACTION_TONES = {
  * Approve · request changes · close, as one menu — confirmed inside it.
  *
  * Three buttons sat in the footer at all times, each behind a modal confirm. The decision is the
- * last step, not a permanent strip of chrome, and a second click on the same item is confirmation
+ * last step, not a permanent strip of chrome, and a second step inside the menu is confirmation
  * enough without covering the review with a dialog. What rides along — the summary comment — is a
  * toggle right there, so publishing to someone else's PR is never a surprise.
+ *
+ * The first click arms the option; the armed option opens into a block that says what is about to
+ * happen — what the host will record, and whether the summary goes with it — with its own Confirm.
+ * It used to arm by rewording the item in place and wait for a second click on the same spot, which
+ * looked like nothing had happened until the words were read.
  */
 function DecideMenu({
   decision,
@@ -1076,47 +1086,66 @@ function DecideMenu({
         disabled={busy !== null}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-50"
+        className={buttonClass({ variant: "primary", size: "md" })}
       >
-        {busy ? <Loader2 size={12} className="animate-spin" /> : null}
+        {busy ? <Loader2 size={14} className="animate-spin" /> : null}
         {t("doc.decide")}
-        <ChevronDown size={12} />
+        {/* Up, because that is where the menu opens: the bar is at the bottom of the panel. */}
+        <ChevronUp size={13} />
       </button>
       {open && (
-        <div
-          role="menu"
-          className="absolute bottom-full right-0 z-30 mb-1 w-64 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
-        >
+        <div role="menu" className={`absolute bottom-full right-0 z-30 mb-1.5 w-[280px] ${popoverClass}`}>
           {decision === "changes_requested" && (
-            <p className="px-2 pb-1 pt-0.5 text-[10.5px] text-[var(--cf-warning)]">{t("pr.stateChangesRequested")}</p>
+            <p className="flex items-center gap-1.5 px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-[var(--cf-warning)]">
+              <ThumbsDown size={12} className="shrink-0" />
+              {t("pr.stateChangesRequested")}
+            </p>
           )}
           {items.map((item) => {
             const Icon = item.icon;
-            const armed = confirming === item.action;
+            if (confirming === item.action) {
+              return (
+                <div
+                  key={item.action}
+                  role="group"
+                  aria-label={item.label}
+                  className="my-0.5 rounded-md bg-[var(--cf-accent-soft)] px-2.5 py-2"
+                >
+                  <p className="flex items-center gap-2.5 text-[13px] font-semibold text-[var(--cf-text)]">
+                    <Icon size={15} className={`shrink-0 ${ACTION_TONES[item.tone]}`} />
+                    {item.label}
+                  </p>
+                  <p className="ml-[25px] mt-1 text-[12px] leading-snug text-[var(--cf-text-muted)]">
+                    {item.hint}
+                    {willComment && canComment && ` · ${t("doc.confirmWithComment")}`}
+                  </p>
+                  <div className="ml-[25px] mt-2 flex items-center gap-1.5">
+                    {/* Focus lands here, so the keyboard path is what it always was: Enter to
+                        arm, Enter again to act. */}
+                    <button
+                      autoFocus
+                      onClick={() => {
+                        close();
+                        onAct(item.action);
+                      }}
+                      aria-label={t("doc.confirmAction", { action: item.label.toLowerCase() })}
+                      className={buttonClass({ variant: "primary", size: "sm" })}
+                    >
+                      {t("common.confirm")}
+                    </button>
+                    <button onClick={() => setConfirming(null)} className={buttonClass({ variant: "ghost", size: "sm" })}>
+                      {t("common.cancel")}
+                    </button>
+                  </div>
+                </div>
+              );
+            }
             return (
-              <button
-                key={item.action}
-                role="menuitem"
-                onClick={() => {
-                  if (!armed) {
-                    setConfirming(item.action);
-                    return;
-                  }
-                  close();
-                  onAct(item.action);
-                }}
-                className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.05] ${
-                  armed ? "bg-[var(--cf-accent-soft)]" : ""
-                }`}
-              >
-                <Icon size={14} className={`mt-0.5 shrink-0 ${ACTION_TONES[item.tone]}`} />
+              <button key={item.action} role="menuitem" onClick={() => setConfirming(item.action)} className={menuRowClass()}>
+                <Icon size={15} className={`mt-0.5 shrink-0 ${ACTION_TONES[item.tone]}`} />
                 <span className="min-w-0">
-                  <span className="block text-[12px] font-medium text-[var(--cf-text)]">
-                    {armed ? t("doc.confirmAction", { action: item.label.toLowerCase() }) : item.label}
-                  </span>
-                  <span className="block text-[10.5px] text-[var(--cf-text-muted)]">
-                    {armed ? (willComment && canComment ? t("doc.confirmWithComment") : t("doc.confirmHint")) : item.hint}
-                  </span>
+                  <span className="block text-[13px] text-[var(--cf-text)]">{item.label}</span>
+                  <span className="block text-[12px] text-[var(--cf-text-muted)]">{item.hint}</span>
                 </span>
               </button>
             );
@@ -1125,7 +1154,7 @@ function DecideMenu({
             <>
               <div className="mx-1 my-1 h-px bg-[var(--cf-border)]" />
               <label
-                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[11.5px] text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+                className="flex h-[30px] cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-[12px] text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                 title={t("pr.commentOnDecisionHint")}
               >
                 <Checkbox checked={willComment} onChange={onToggleComment} />
@@ -1147,12 +1176,15 @@ function LinkReviewNotice({ session }: { session: LinkPrSession }) {
   const t = useT();
   const openCloneOffer = useUiStore((s) => s.openPrLinkModal);
   return (
-    <div className="flex items-start gap-2 rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-1.5">
-      <Link2 size={12} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
-      <p className="min-w-0 flex-1 text-[11px] leading-relaxed text-[var(--cf-text-muted)]" title={t("prLink.quickNote")}>
+    <div className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--cf-border-strong)] py-1.5 pl-3 pr-1.5">
+      <Link2 size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
+      <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-[var(--cf-text-muted)]" title={t("prLink.quickNote")}>
         <span className="font-medium text-[var(--cf-text)]">{session.repoLabel}</span> · {t("doc.noLocalClone")}
       </p>
-      <button onClick={openCloneOffer} className="shrink-0 text-[11px] font-medium text-[var(--cf-accent)] hover:underline">
+      <button
+        onClick={openCloneOffer}
+        className="inline-flex h-6 shrink-0 items-center whitespace-nowrap rounded-md px-2 text-[12px] font-medium text-[var(--cf-accent)] transition-colors duration-100 hover:bg-[var(--cf-accent-soft)]"
+      >
         {t("prLink.cloneInstead")}
       </button>
     </div>

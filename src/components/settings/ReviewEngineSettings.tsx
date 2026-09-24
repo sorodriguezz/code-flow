@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Layers, RotateCcw, Ruler, ScanSearch, ShieldAlert, Users } from "lucide-react";
+import { Check, Layers, Loader2, RotateCcw, Ruler, ScanSearch, ShieldAlert, Users } from "lucide-react";
 import {
   getReviewEngineConfig,
   resetReviewEngineConfig,
@@ -13,6 +13,8 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
 import { Skeleton } from "../common/Skeleton";
+import { buttonClass } from "../common/Button";
+import { chipClass, fieldClass } from "../common/recipes";
 import { Group } from "../api/settingsChrome";
 
 /** The five severities, in report order. Matches `review::contract::Severity` — the backend parses
@@ -62,7 +64,7 @@ function NumberField({
           // never make it onto the screen looking as if it took.
           if (Number.isFinite(next)) onChange(Math.min(max, Math.max(min, Math.round(next))));
         }}
-        className="w-20 shrink-0 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-right text-[12px] outline-none focus:border-[var(--cf-accent)]"
+        className={fieldClass({ size: "sm", className: "w-20 shrink-0 text-right tabular-nums" })}
       />
     </label>
   );
@@ -92,7 +94,11 @@ function ToggleField({
   );
 }
 
-/** A row of on/off chips — how severities and lenses are picked. */
+/**
+ * A row of on/off chips — how severities and lenses are picked. Several can be on at once, so it is
+ * a row of chips rather than a segmented control, and an "on" chip carries a tick as well as the
+ * accent: which ones are in force should not rest on telling two tints apart.
+ */
 function ChipPicker({
   options,
   selected,
@@ -111,14 +117,15 @@ function ChipPicker({
             key={option.value}
             type="button"
             title={option.title}
+            aria-pressed={on}
             onClick={() => onToggle(option.value)}
-            className={`max-w-full rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${
-              on
-                ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            }`}
+            className={chipClass(
+              on ? "accent" : "neutral",
+              `max-w-full transition-colors duration-100 ${on ? "" : "hover:text-[var(--cf-text)]"}`,
+            )}
           >
-            {option.label}
+            {on && <Check size={11} className="shrink-0" />}
+            <span className="min-w-0 truncate">{option.label}</span>
           </button>
         );
       })}
@@ -147,7 +154,7 @@ function GlobList({
         onChange={(e) => onChange(e.target.value.split("\n").map((l) => l.trim()).filter(Boolean))}
         rows={6}
         spellCheck={false}
-        className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[11.5px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+        className={fieldClass({ size: "sm", className: "h-auto w-full resize-y py-1.5 font-mono leading-relaxed" })}
       />
     </div>
   );
@@ -247,12 +254,9 @@ export function ReviewEngineSettings() {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("settings.engineHint")}</p>
-        <button
-          onClick={() => void restore()}
-          className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-        >
-          <RotateCcw size={11} />
+        <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">{t("settings.engineHint")}</p>
+        <button type="button" onClick={() => void restore()} className={buttonClass({ variant: "ghost", size: "sm" })}>
+          <RotateCcw size={13} />
           {t("settings.templateReset")}
         </button>
       </div>
@@ -345,8 +349,8 @@ export function ReviewEngineSettings() {
 
       <div className="rounded-lg border border-[var(--cf-border)] px-3 py-2">
         <Group title={t("settings.engineGate")} collapsible defaultOpen={false}>
-          <p className="mb-1 flex items-center gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-            <ShieldAlert size={12} className="shrink-0" />
+          <p className="mb-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+            <ShieldAlert size={12} className="mt-px shrink-0" />
             {t("settings.engineGateHint")}
           </p>
           <ChipPicker
@@ -363,8 +367,8 @@ export function ReviewEngineSettings() {
         </Group>
 
         <Group title={t("settings.engineScope")} collapsible defaultOpen={false}>
-          <p className="mb-1 flex items-center gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-            <ScanSearch size={12} className="shrink-0" />
+          <p className="mb-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+            <ScanSearch size={12} className="mt-px shrink-0" />
             {t("settings.engineScopeHint")}
           </p>
           <GlobList
@@ -382,8 +386,8 @@ export function ReviewEngineSettings() {
         </Group>
 
         <Group title={t("settings.engineContext")} collapsible defaultOpen={false}>
-          <p className="mb-1 flex items-center gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-            <Ruler size={12} className="shrink-0" />
+          <p className="mb-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+            <Ruler size={12} className="mt-px shrink-0" />
             {t("settings.engineContextHint")}
           </p>
           <NumberField
@@ -415,8 +419,8 @@ export function ReviewEngineSettings() {
         </Group>
 
         <Group title={t("settings.engineWorkers")} collapsible defaultOpen={false}>
-          <p className="mb-1 flex items-center gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-            <Users size={12} className="shrink-0" />
+          <p className="mb-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+            <Users size={12} className="mt-px shrink-0" />
             {t("settings.engineWorkersHint")}
           </p>
           <NumberField
@@ -430,8 +434,8 @@ export function ReviewEngineSettings() {
         </Group>
 
         <Group title={t("settings.engineGraph")} collapsible defaultOpen={false}>
-          <p className="mb-1 flex items-center gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-            <Layers size={12} className="shrink-0" />
+          <p className="mb-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+            <Layers size={12} className="mt-px shrink-0" />
             {t("settings.engineGraphHint")}
           </p>
           <ToggleField
@@ -457,7 +461,8 @@ export function ReviewEngineSettings() {
         </Group>
       </div>
 
-      <p className="text-[10.5px] text-[var(--cf-text-muted)]">
+      <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+        {saving && <Loader2 size={12} className="shrink-0 animate-spin" />}
         {saving ? t("settings.engineSaving") : t("settings.templateAutosave")}
       </p>
     </div>

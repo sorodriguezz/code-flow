@@ -1,6 +1,6 @@
 import { useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Copy, Glasses, MessageCircle, Minus, Sparkles, Square, X, Zap } from "lucide-react";
+import { ChevronDown, Copy, Glasses, MessageCircle, Minus, Sparkles, Square, X, Zap } from "lucide-react";
 import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -8,6 +8,7 @@ import { usePrStore } from "../../state/prStore";
 import { EMPTY_TABS, INBOX_KEY, NO_WORKSPACE, useAiPanelStore } from "../../state/aiPanelStore";
 import { useT } from "../../state/languageStore";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
+import { ChromeScope } from "./TabBar";
 
 const win = getCurrentWindow();
 
@@ -66,12 +67,15 @@ function WindowsControls() {
     // app, and a modal backdrop or the tour's veil laid over them hands their presses back instead
     // of swallowing them. See `overlayDragRegion` — on macOS the traffic lights are AppKit's and
     // need none of this.
-    <div className="flex items-center">
+    // Full height and flush with the corner, the way Windows draws its own caption buttons: the
+    // close button is aimed at by throwing the pointer into the top-right corner, and a 36px button
+    // floating 4px inside the row turned that throw into a miss.
+    <div className="flex self-stretch">
       <button
         aria-label="Minimize"
         data-window-control="minimize"
         onClick={() => win.minimize()}
-        className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-black/10"
+        className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-[var(--cf-press)]"
       >
         <Minus size={14} />
       </button>
@@ -82,7 +86,7 @@ function WindowsControls() {
         // capability file, and a missing one fails as a rejected promise with nothing on screen
         // to show for it — which is exactly how this button shipped doing nothing at all.
         onClick={() => void toggleMaximize().catch((e) => console.error("toggleMaximize", e))}
-        className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-black/10"
+        className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-[var(--cf-press)]"
       >
         {maximized ? <Copy size={11} className="-scale-x-100" /> : <Square size={12} />}
       </button>
@@ -90,7 +94,7 @@ function WindowsControls() {
         aria-label="Close"
         data-window-control="close"
         onClick={() => win.close()}
-        className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-red-500 hover:text-white"
+        className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-red-500 hover:text-white"
       >
         <X size={14} />
       </button>
@@ -142,21 +146,21 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
   return (
     <>
       <div className="fixed inset-0 z-10" onClick={onClose} />
-      <div className="absolute right-0 top-full z-20 mt-1 w-60 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
+      <div className="cf-fade-in absolute right-0 top-full z-20 mt-1.5 w-72 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)]">
         <button
           onClick={openChat}
-          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          className="flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
         >
-          <MessageCircle size={13} />
+          <MessageCircle size={15} className="text-[var(--cf-text-muted)]" />
           {t("titlebar.openChat")}
         </button>
         <button
           onClick={reviewCurrentPr}
           disabled={!selectedPr || prSettled}
           title={prSettled ? t("pr.stateLockedHint") : undefined}
-          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.04]"
+          className="flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)] disabled:opacity-40 disabled:hover:bg-transparent"
         >
-          <Sparkles size={13} />
+          <Sparkles size={15} className="text-[var(--cf-text-muted)]" />
           <span className="min-w-0 flex-1 truncate">
             {selectedPr ? t("titlebar.reviewCurrentPr", { title: selectedPr.title }) : t("titlebar.noPrSelected")}
           </span>
@@ -165,9 +169,9 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
             only input needed. */}
         <button
           onClick={reviewFromLink}
-          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          className="flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
         >
-          <Glasses size={13} />
+          <Glasses size={15} className="text-[var(--cf-text-muted)]" />
           {t("prLink.menuItem")}
         </button>
       </div>
@@ -195,8 +199,10 @@ export function TitleBar() {
       // comes later in the DOM, so the button was painting through the open menu. Lifting the bar
       // rather than each popover keeps the rule in one place, and stays under the modals (`z-50`)
       // and the tour's veil, which have to cover the title bar in turn.
-      className="relative z-30 flex h-11 shrink-0 items-center justify-between px-3"
-      style={{ background: "var(--cf-titlebar-gradient)" }}
+      //
+      // No background: the row is part of the frame now (see the note atop `index.css`). The brand
+      // wash it wore was the loudest thing on screen at all times, and it framed nothing.
+      className={`relative z-30 flex h-11 shrink-0 items-center gap-2 pl-3 ${isMac ? "pr-2" : ""}`}
     >
       {/* Nothing but the room the traffic lights need.
 
@@ -206,11 +212,18 @@ export function TitleBar() {
           Search and history keep their keyboard shortcuts — `app.commandPalette`, `nav.back`,
           `nav.forward` — and the palette is also reachable from every place that opens it; three
           buttons in the corner were three permanent pixels for what a chord already does. */}
-      <div className="flex items-center gap-3">
-        {isMac ? <MacControlsSpacer fullscreen={fullscreen} /> : <div className="w-2" />}
+      <div className="flex shrink-0 items-center">
+        {isMac ? <MacControlsSpacer fullscreen={fullscreen} /> : <div className="w-1" />}
       </div>
 
-      <div className="flex items-center gap-2">
+      {/* The title bar and the repository tab bar used to be two rows: 44px holding one button and
+          40px holding the tabs. One row now, and 40px handed back to the work on every screen. The
+          stretch after the scope is the window's drag handle — `deep` reaches it, and Tauri's
+          handler still stops at every button. */}
+      <ChromeScope />
+      <div className="min-w-0 flex-1 self-stretch" />
+
+      <div className="flex shrink-0 items-center gap-2 self-stretch">
         {/* The graduation cap that used to sit here is at the foot of the app rail now, merged with
             the launcher the five workspace apps already had. Two buttons with the same glyph, one
             in this corner and one in the rail, meaning "the tour" and "a different tour" — the
@@ -222,10 +235,17 @@ export function TitleBar() {
         <div data-tauri-drag-region="false" className="relative">
           <button
             onClick={() => setShowAiMenu((v) => !v)}
-            className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-black/60 hover:bg-black/10 dark:text-white/70"
+            aria-haspopup="menu"
+            aria-expanded={showAiMenu}
+            className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium transition-colors ${
+              showAiMenu
+                ? "bg-[var(--cf-hover)] text-[var(--cf-text)]"
+                : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            }`}
           >
-            <Zap size={13} />
+            <Zap size={14} />
             {t("titlebar.aiActions")}
+            <ChevronDown size={12} className="opacity-70" />
           </button>
           {showAiMenu && <AiActionsMenu onClose={() => setShowAiMenu(false)} />}
         </div>

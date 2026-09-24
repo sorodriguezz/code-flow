@@ -61,7 +61,7 @@ export function ThinkingBlock({ text, live }: { text: string; live: boolean }) {
           <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
         )}
         {live && <ThinkingOrb size="sm" />}
-        <span className="text-[11.5px] text-[var(--cf-text-muted)]">
+        <span className="text-[12px] text-[var(--cf-text-muted)]">
           {live ? t("chat.thinkingLive") : t("chat.thinkingDone")}
         </span>
       </button>

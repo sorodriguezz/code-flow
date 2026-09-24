@@ -53,8 +53,10 @@ import { useProviderStatusStore } from "../../state/providerStatusStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT, type Translate } from "../../state/languageStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { modelRouteLabel } from "../ai/ModelTag";
+import { chipClass, fieldClass } from "../common/recipes";
 import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { CUSTOM_MODEL, ModelField, customModelPlaceholder, modelOptionsFor, parseModel } from "./modelPicker";
@@ -65,6 +67,18 @@ import { SYSTEM_ACCOUNT, resolveAccount, validPreference } from "../../lib/aiAcc
 interface PromptState {
   value: string;
   fallback: string;
+}
+
+/** The small uppercase heading over a group — an area of tasks, or the engine / prompts of one. */
+const SECTION_LABEL = "text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
+
+/** An accordion card: an accent hairline while open, a stronger one on hover while closed. */
+function accordionClass(open: boolean): string {
+  return `rounded-lg border transition-colors duration-100 ${
+    open
+      ? "border-[var(--cf-accent-line)] bg-[var(--cf-hover)]"
+      : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"
+  }`;
 }
 
 /** Accent-and-case-insensitive, so "revision" finds "Revisión". Same fold as the settings search. */
@@ -280,45 +294,47 @@ export function AiTasksSettings() {
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="relative min-w-[200px] flex-1">
           <Search
-            size={13}
-            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+            size={14}
+            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
           />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("settings.tasksSearchPlaceholder")}
             aria-label={t("settings.tasksSearchPlaceholder")}
-            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent py-1.5 pl-8 pr-7 text-[12.5px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full pl-8 pr-7" })}
           />
           {query && (
             <button
               type="button"
               onClick={() => setQuery("")}
               aria-label={t("common.clear")}
-              className="absolute right-1.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              className={iconButtonClass({ size: "xs", className: "absolute right-1 top-1/2 -translate-y-1/2" })}
             >
-              <X size={12} />
+              <X size={13} />
             </button>
           )}
         </div>
+        {/* A filter that stays on, so it wears the pressed look while it does — written out because
+            the button recipe has no "on" variant, and at the field's 30px so the toolbar is one line. */}
         <button
           type="button"
           onClick={() => setOnlyCustom((was) => !was)}
           aria-pressed={onlyCustom}
-          className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] transition-colors ${
+          className={`inline-flex h-[30px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-[12px] font-medium transition-[background-color,color,box-shadow] duration-100 ${
             onlyCustom
-              ? "border-[var(--cf-accent)] text-[var(--cf-accent)]"
-              : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent-line)]"
+              : "bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           }`}
         >
-          <SlidersHorizontal size={12} />
+          <SlidersHorizontal size={13} />
           {t("settings.tasksOnlyCustom")}
           <span className="tabular-nums opacity-70">{customCount}</span>
         </button>
       </div>
 
       {visible.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-[var(--cf-border)] px-3 py-6 text-center text-[12.5px] text-[var(--cf-text-muted)]">
+        <p className="px-3 py-6 text-center text-[13px] text-[var(--cf-text-muted)]">
           {onlyCustom && !query ? t("settings.tasksNoCustom") : t("settings.tasksNoMatch", { query })}
         </p>
       ) : (
@@ -327,9 +343,7 @@ export function AiTasksSettings() {
           if (rows.length === 0) return null;
           return (
             <section key={area.id} className="mb-4 last:mb-0">
-              <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                {t(area.labelKey)}
-              </h4>
+              <h4 className={`mb-1.5 ${SECTION_LABEL}`}>{t(area.labelKey)}</h4>
               <div className="space-y-1.5">
                 {rows.map(({ task, prompts: taskPrompts, matched }) => (
                   <TaskRow
@@ -422,11 +436,7 @@ function FreeChatOptions({ query, t }: { query: string; t: Translate }) {
   const on = options.filter((option) => option.on);
 
   return (
-    <div
-      className={`mb-3 rounded-lg border transition-colors ${
-        open ? "border-[var(--cf-accent)]/40 bg-black/[0.015] dark:bg-white/[0.02]" : "border-[var(--cf-border)]"
-      }`}
-    >
+    <div className={`mb-3 ${accordionClass(open)}`}>
       <button
         type="button"
         onClick={() => setExpanded((was) => !was)}
@@ -439,18 +449,15 @@ function FreeChatOptions({ query, t }: { query: string; t: Translate }) {
           <ChevronRight size={13} className="mt-[3px] shrink-0 text-[var(--cf-text-muted)]" />
         )}
         <span className="min-w-0 flex-1">
-          <span className="block text-[12.5px] font-medium leading-snug text-[var(--cf-text)]">{t("settings.freeChatTitle")}</span>
+          <span className="block text-[13px] font-medium leading-snug text-[var(--cf-text)]">{t("settings.freeChatTitle")}</span>
           <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("settings.freeChatHint")}</span>
         </span>
         <span className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
           {on.length === 0 ? (
-            <span className="text-[10.5px] text-[var(--cf-text-muted)]">{t("settings.freeChatNoneOn")}</span>
+            <span className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.freeChatNoneOn")}</span>
           ) : (
             on.map((option) => (
-              <span
-                key={option.id}
-                className="rounded bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)] px-1.5 py-[1px] text-[10px] font-medium text-[var(--cf-accent)]"
-              >
+              <span key={option.id} className={chipClass("accent")}>
                 {option.short}
               </span>
             ))
@@ -564,11 +571,7 @@ function TaskRow({
   };
 
   return (
-    <div
-      className={`rounded-lg border transition-colors ${
-        open ? "border-[var(--cf-accent)]/40 bg-black/[0.015] dark:bg-white/[0.02]" : "border-[var(--cf-border)]"
-      }`}
-    >
+    <div className={accordionClass(open)}>
       <button
         type="button"
         onClick={onToggle}
@@ -583,7 +586,7 @@ function TaskRow({
 
         <span className="min-w-0 flex-1">
           {/* Wraps. A task name is the only thing telling you whether this is the row you want. */}
-          <span className="block text-[12.5px] font-medium leading-snug text-[var(--cf-text)]">
+          <span className="block text-[13px] font-medium leading-snug text-[var(--cf-text)]">
             {t(task.labelKey)}
           </span>
           <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
@@ -595,28 +598,25 @@ function TaskRow({
             settings pane these stack under each other rather than being cut. */}
         <span className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
           {brokenContract && (
-            <span
-              title={t("prompts.contractBrokenShort")}
-              className="flex items-center gap-1 rounded bg-[color-mix(in_oklab,var(--cf-warning)_16%,transparent)] px-1.5 py-[1px] text-[10px] font-medium text-[var(--cf-warning)]"
-            >
-              <AlertTriangle size={9} />
+            <span title={t("prompts.contractBrokenShort")} className={chipClass("warn")}>
+              <AlertTriangle size={11} />
               {t("prompts.contractBrokenShort")}
             </span>
           )}
           {editedCount > 0 && (
-            <span className="rounded bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)] px-1.5 py-[1px] text-[10px] font-medium text-[var(--cf-accent)]">
-              {t("settings.tasksEditedCount", { n: editedCount })}
-            </span>
+            <span className={chipClass("accent")}>{t("settings.tasksEditedCount", { n: editedCount })}</span>
           )}
           {prompts.length === 0 && (
-            <span className="text-[10.5px] text-[var(--cf-text-muted)]">{t("settings.tasksNoPrompt")}</span>
+            <span className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.tasksNoPrompt")}</span>
           )}
+          {/* Misrouted reads in red *and* with the triangle — never by colour alone. */}
           <span
             className={`flex items-center gap-1 text-[11px] ${
               broken ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-muted)]"
             }`}
           >
-            <ProviderGlyph providerId={provider} size={12} />
+            {broken && <AlertTriangle size={11} className="shrink-0" />}
+            <ProviderGlyph providerId={provider} size={13} />
             {engineLabel}
           </span>
         </span>
@@ -625,9 +625,7 @@ function TaskRow({
       {open && (
         <div className="border-t border-[var(--cf-border)] px-2.5 py-2.5">
           {/* ---------- engine ---------- */}
-          <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {t("settings.tasksEngineGroup")}
-          </p>
+          <p className={`mb-1.5 ${SECTION_LABEL}`}>{t("settings.tasksEngineGroup")}</p>
           <div className="flex flex-wrap gap-1.5">
             <div className="min-w-[180px] flex-1">
               <Select
@@ -694,9 +692,7 @@ function TaskRow({
           {/* ---------- prompts ---------- */}
           {prompts.length > 0 && (
             <>
-              <p className="mb-1.5 mt-3 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                {t("settings.tasksPromptGroup")}
-              </p>
+              <p className={`mb-1.5 mt-3 ${SECTION_LABEL}`}>{t("settings.tasksPromptGroup")}</p>
               <div className="space-y-1">
                 {prompts.map((prompt) => (
                   <PromptRow
@@ -759,7 +755,11 @@ function PromptRow({
   }, [showDiff, state]);
 
   return (
-    <div className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)]">
+    <div
+      className={`rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] transition-colors duration-100 ${
+        open || unavailable ? "" : "hover:border-[var(--cf-border-strong)]"
+      }`}
+    >
       <button
         type="button"
         onClick={onToggle}
@@ -767,21 +767,23 @@ function PromptRow({
         disabled={unavailable}
         className={`flex w-full items-start gap-2 px-2 py-1.5 text-left ${unavailable ? "opacity-50" : ""}`}
       >
-        <Icon size={12} className="mt-[3px] shrink-0 text-[var(--cf-text-muted)]" />
-        <span className="min-w-0 flex-1">
+        {/* Top-aligned, so a name that wraps keeps its icon on the first line; the nudges centre
+            that first line on the 20px chips beside it. */}
+        <Icon size={13} className="mt-1 shrink-0 text-[var(--cf-text-muted)]" />
+        <span className="min-w-0 flex-1 py-0.5">
           <span className="block text-[12px] leading-snug text-[var(--cf-text)]">{t(prompt.labelKey)}</span>
         </span>
         <span className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           {/* Which scope a prompt lives in changes who it affects, so it is on the closed row
               rather than inside. */}
-          <span className="rounded bg-black/[0.05] px-1.5 py-[1px] text-[9.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)] dark:bg-white/[0.07]">
+          <span className={chipClass("neutral")}>
             {t(prompt.scope === "global" ? "prompts.scopeGlobal" : "prompts.scopeWorkspace")}
           </span>
-          {contractBroken && <AlertTriangle size={11} className="text-[var(--cf-warning)]" />}
+          {contractBroken && <AlertTriangle size={12} className="text-[var(--cf-warning)]" />}
           {saved ? (
-            <Check size={11} className="text-[var(--cf-success)]" />
+            <Check size={13} className="text-[var(--cf-success)]" />
           ) : custom ? (
-            <span className="text-[10px] font-medium text-[var(--cf-accent)]">{t("settings.templateCustom")}</span>
+            <span className={chipClass("accent")}>{t("settings.templateCustom")}</span>
           ) : null}
         </span>
       </button>
@@ -806,13 +808,13 @@ function PromptRow({
           )}
 
           {showDiff && diff ? (
-            <div className="overflow-x-auto rounded-md border border-[var(--cf-border)]">
-              <div className="min-w-full font-mono text-[11.5px] leading-relaxed">
+            <div className="overflow-x-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)]">
+              <div className="min-w-full font-mono text-[12px] leading-relaxed">
                 {diff.lines.map((line, index) =>
                   line === null ? (
                     <div
                       key={`gap-${index}`}
-                      className="border-y border-[var(--cf-border)] bg-black/[0.02] px-2 py-0.5 text-center text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.03]"
+                      className="border-y border-[var(--cf-border)] bg-[var(--cf-hover)] px-2 py-0.5 text-center text-[11px] text-[var(--cf-text-muted)]"
                     >
                       ⋯
                     </div>
@@ -841,22 +843,28 @@ function PromptRow({
               rows={16}
               spellCheck={false}
               aria-label={t(prompt.labelKey)}
-              className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+              className={fieldClass({
+                size: "sm",
+                className: "h-auto w-full resize-y py-1.5 font-mono leading-relaxed",
+              })}
             />
           )}
 
           <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[10.5px] text-[var(--cf-text-muted)]">{t("settings.templateAutosave")}</span>
-            <div className="flex items-center gap-3">
+            <span className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.templateAutosave")}</span>
+            <div className="flex items-center gap-1">
               {custom && (
+                // Tinted while the diff stands in for the editor; the label already says which way it goes.
                 <button
                   type="button"
                   onClick={() => setShowDiff((was) => !was)}
-                  className={`flex items-center gap-1 text-[11px] ${
-                    showDiff ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                  className={`inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] font-medium transition-colors duration-100 ${
+                    showDiff
+                      ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                      : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                   }`}
                 >
-                  <FileDiff size={11} />
+                  <FileDiff size={13} />
                   {showDiff
                     ? t("prompts.diffHide")
                     : t("prompts.diffShow", {
@@ -871,9 +879,9 @@ function PromptRow({
                     setShowDiff(false);
                     onReset();
                   }}
-                  className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                  className={buttonClass({ variant: "ghost", size: "sm" })}
                 >
-                  <RotateCcw size={11} />
+                  <RotateCcw size={13} />
                   {t("settings.templateReset")}
                 </button>
               )}

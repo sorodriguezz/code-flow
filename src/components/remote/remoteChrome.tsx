@@ -21,6 +21,9 @@ import { KIND_LABEL, type AzureService, type RemoteKind, type RemoteOs } from ".
 import { useT } from "../../state/languageStore";
 import type { RemoteTransferEvent } from "../../lib/tauri/events";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { iconButtonClass, type IconButtonSize } from "../common/Button";
+import { chipClass, fieldClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 
 /**
  * The Remote workspace's shared visual vocabulary, the counterpart of `dbChrome`.
@@ -32,6 +35,28 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 
 /** The panel fill, matching the database workspace's so the two views read as one app. */
 export const CARD = "bg-[var(--cf-surface)]";
+
+/**
+ * A search box with its glyph inside it — the text field recipe worn by a wrapper, so the icon sits
+ * in the field rather than beside it. `focus-within` rather than `focus`, because the element that
+ * takes focus is the `<input>` inside; the input itself is `SEARCH_INPUT`.
+ */
+export const SEARCH_WRAP = fieldClass({
+  size: "sm",
+  className:
+    "flex items-center gap-1.5 focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]",
+});
+
+export const SEARCH_INPUT =
+  "min-w-0 flex-1 bg-transparent outline-none placeholder:text-[var(--cf-text-faint)]";
+
+/** An icon button whose act is a deletion: the muted glyph turns danger under the pointer. */
+export const DANGER_ICON_BUTTON =
+  "inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40";
+
+/** A multi-line field: the text field recipe's fill, hairline and focus halo, at its own height. */
+export const TEXTAREA =
+  "block w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] disabled:opacity-50";
 
 /**
  * The glyph for what a host *speaks*, which is a different question from what it runs.
@@ -74,16 +99,18 @@ export function kindIcon(kind: RemoteKind): LucideIcon {
 }
 
 /**
- * A tint per kind, on the same "quiet enough not to compete with the host's own colour" budget as
- * [`osColor`] — with one deliberate exception. Plain FTP is amber because it is the one kind whose
- * defining property is that it is *unencrypted*, and that is worth a glance costing something.
+ * A tint per kind, on a "quiet enough not to compete with the host's own colour" budget — with one
+ * deliberate exception. Plain FTP is drawn in the theme's warning ink because it is the one kind
+ * whose defining property is that it is *unencrypted*, and that is worth a glance costing something.
+ * The token rather than a hex, so it is the same amber every other warning in the app wears, in
+ * every theme — and the glyph carries a tooltip saying why, so the colour is never the only word.
  */
 export function kindColor(kind: RemoteKind): string {
   switch (kind) {
     case "sftp":
       return "#2a9071";
     case "ftp":
-      return "#c46720";
+      return "var(--cf-warning)";
     case "ftps":
       return "#2d86c2";
     // The two screen kinds share a hue and differ only in glyph: they are the same family, and a
@@ -129,9 +156,18 @@ export const AZURE_SERVICE_ICON: Record<AzureService, LucideIcon> = {
 };
 
 export function KindGlyph({ kind, size = 14 }: { kind: RemoteKind; size?: number }) {
+  const t = useT();
   const Icon = kindIcon(kind);
-  return (
+  const glyph = (
     <Icon size={size} style={{ color: kindColor(kind) }} aria-label={KIND_LABEL[kind] ?? "SSH"} />
+  );
+  // The amber says "careful"; the tooltip says what about. Only FTP gets one: it is the only kind
+  // whose tint is a warning rather than a category.
+  if (kind !== "ftp") return glyph;
+  return (
+    <Tooltip label={KIND_LABEL.ftp} description={t("remote.kindFtpHint")}>
+      {glyph}
+    </Tooltip>
   );
 }
 
@@ -149,23 +185,16 @@ export function osIcon(os: RemoteOs): LucideIcon {
 }
 
 /**
- * A tint per operating system, kept deliberately quiet.
+ * The ink an operating-system glyph is drawn in: the theme's faint one, whatever the OS.
  *
  * The colour that carries meaning in this tree is the *host's own* — the one the user sets to mark
- * production — so the OS glyph must not compete with it. These are muted enough to read as a
- * category and not as a warning.
+ * production — so the OS glyph must not compete with it. It used to be a tint per OS on a "muted
+ * enough" budget, and one of them did not survive the FTP rule in [`kindColor`]: Linux was amber, so
+ * every Linux box wore the same colour that says "this connection is not encrypted", and the one
+ * warning in the tree turned into wallpaper. The glyph's *shape* already says which OS it is.
  */
-export function osColor(os: RemoteOs): string {
-  switch (os) {
-    case "macos":
-      return "#a1a1aa";
-    case "windows":
-      return "#3b82f6";
-    case "other":
-      return "#94a3b8";
-    default:
-      return "#f59e0b";
-  }
+export function osColor(_os: RemoteOs): string {
+  return "var(--cf-text-faint)";
 }
 
 export function OsGlyph({ os, size = 14 }: { os: RemoteOs; size?: number }) {
@@ -177,10 +206,11 @@ export function OsGlyph({ os, size = 14 }: { os: RemoteOs; size?: number }) {
  * The colours a host may be tinted with.
  *
  * A fixed set rather than a colour wheel, because this tint is not decoration: it is drawn as the
- * *label* of the active tab, over `--cf-accent-soft`, and as a dot on the surface — in both themes,
- * from the one hex that was stored. A free picker offers thousands of values that fail at least one
- * of those four backgrounds, and the failure is invisible at the moment of choosing: a yellow picked
- * while the light theme is on is an unreadable tab label the next time the user opens the dark one.
+ * glyph of the host's session tabs, as the edge of its row over `--cf-accent-soft` when selected,
+ * and as a dot on the surface — in both themes, from the one hex that was stored. A free picker
+ * offers thousands of values that fail at least one of those four backgrounds, and the failure is
+ * invisible at the moment of choosing: a yellow picked while the light theme is on is an unreadable
+ * tab glyph the next time the user opens the dark one.
  *
  * Twenty hues around the wheel, each with its lightness solved so its relative luminance lands near
  * 0.215 — the narrow band where a single colour clears 3:1 against white *and* against `#1e1e27`.
@@ -229,9 +259,13 @@ export const HOST_COLORS = [
  * registered.
  *
  * Drawn as a halo pulsing out of the dot rather than as a spinner, the same way `ConnectionDot` does
- * it: at seven pixels a spinner is a grey smudge, and the halo keeps the dot itself — which carries
+ * it: at eight pixels a spinner is a grey smudge, and the halo keeps the dot itself — which carries
  * the host's colour and the actual state — legible underneath. It sits in an overlay, so nothing in
  * the row moves when it appears.
+ *
+ * The three resting states differ by *shape* before colour — full, a 2px ring, a hairline ring in
+ * the faint ink — so the state still reads on a host with no colour of its own, and to anyone who
+ * cannot tell the host's tint from the accent.
  */
 export function HostDot({
   session,
@@ -246,26 +280,22 @@ export function HostDot({
 }) {
   const tint = color?.trim() || "var(--cf-accent)";
   const dot = session ? (
-    <span
-      aria-hidden
-      className="h-[7px] w-[7px] shrink-0 rounded-full"
-      style={{ background: tint }}
-    />
+    <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: tint }} />
   ) : active ? (
     <span
       aria-hidden
-      className="h-[7px] w-[7px] shrink-0 rounded-full border"
-      style={{ borderColor: tint }}
+      className="h-2 w-2 shrink-0 rounded-full"
+      style={{ boxShadow: `inset 0 0 0 2px ${tint}` }}
     />
   ) : (
     <span
       aria-hidden
-      className="h-[7px] w-[7px] shrink-0 rounded-full border border-[var(--cf-text-muted)]/40"
+      className="h-2 w-2 shrink-0 rounded-full shadow-[inset_0_0_0_1.5px_var(--cf-text-faint)]"
     />
   );
   if (!busy) return dot;
   return (
-    <span className="relative flex h-[7px] w-[7px] shrink-0 items-center justify-center">
+    <span className="relative flex h-2 w-2 shrink-0 items-center justify-center">
       <span
         aria-hidden
         className="absolute inset-0 animate-ping rounded-full opacity-75 motion-reduce:animate-none motion-reduce:animate-pulse"
@@ -276,7 +306,14 @@ export function HostDot({
   );
 }
 
-/** The toolbar button shape the database explorer uses, so both sidebars' headers match. */
+/**
+ * An icon-only toolbar button: the shared recipe, labelled by the app's own tooltip rather than the
+ * browser's `title` — so the name lands before the click, in the theme, and a consequence can ride
+ * under it as a second line instead of being folded into one string.
+ *
+ * `xs` (22px) for the dense strips over a grid, where a dozen of these share a row; `sm` (26px) for
+ * an explorer's head, where there are four or five and the target can afford to be the easy one.
+ */
 export function ToolbarButton({
   icon: Icon,
   label,
@@ -284,6 +321,7 @@ export function ToolbarButton({
   disabled,
   active,
   title,
+  size = "xs",
 }: {
   icon: LucideIcon;
   label: string;
@@ -299,25 +337,24 @@ export function ToolbarButton({
    * takes messages off a live queue for a visibility window, and that is what a tooltip is for, while
    * "Receive" is what a screen reader should say. Collapsing the two would make the accessible name a
    * paragraph, which is how an icon-only toolbar becomes unusable to the people who need the label
-   * most. Defaults to the label, which is what every other button wants.
+   * most. Shown under the label in the tooltip; without it the label is the whole tooltip, which is
+   * what every other button wants.
    */
   title?: string;
+  size?: IconButtonSize;
 }) {
   return (
-    <button
-      type="button"
-      title={title ?? label}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onClick}
-      className={`flex h-6 w-6 items-center justify-center rounded-md transition-colors disabled:opacity-40 ${
-        active
-          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
-      }`}
-    >
-      <Icon size={13} />
-    </button>
+    <Tooltip label={label} description={title && title !== label ? title : undefined} side="bottom">
+      <button
+        type="button"
+        aria-label={label}
+        disabled={disabled}
+        onClick={onClick}
+        className={iconButtonClass({ size, active })}
+      >
+        <Icon size={size === "xs" ? 13 : 14} />
+      </button>
+    </Tooltip>
   );
 }
 
@@ -329,6 +366,10 @@ export function ToolbarButton({
  * group is where the host lives — one of them, structural, the folder in the tree. A tag is the
  * crossing axis the one-level tree deliberately doesn't have — several of them, and a filter. Two
  * identical grey capsules said neither, so the group takes a glyph and both take a title.
+ *
+ * The shared chip recipe, and in the case it was typed in: it used to force capitals, which turned a
+ * tunnel's `ssh -L` into `SSH -L` — a command nobody can paste — and a tag into a spelling its owner
+ * never chose.
  */
 export function Pill({
   children,
@@ -342,15 +383,8 @@ export function Pill({
   title?: string;
 }) {
   return (
-    <span
-      title={title}
-      className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide ${
-        tone === "accent"
-          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "bg-black/[0.05] text-[var(--cf-text-muted)] dark:bg-white/[0.07]"
-      }`}
-    >
-      {Icon && <Icon size={9} className="shrink-0 opacity-70" />}
+    <span title={title} className={chipClass(tone === "accent" ? "accent" : "neutral")}>
+      {Icon && <Icon size={11} className="shrink-0 opacity-70" />}
       {children}
     </span>
   );
@@ -378,7 +412,7 @@ export function TransferBar({ progress }: { progress: RemoteTransferEvent }) {
         )}
         <span className="shrink-0 tabular-nums">{Math.round(percent)}%</span>
       </div>
-      <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.08]">
+      <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-[var(--cf-press)]">
         <div
           className="h-full rounded-full bg-[var(--cf-accent)] transition-[width] duration-150"
           style={{ width: `${percent}%` }}
@@ -424,7 +458,7 @@ export function WorkBar({
     >
       <div
         className={`flex items-center text-[var(--cf-text-muted)] ${
-          compact ? "gap-1.5 text-[10px]" : "gap-2 text-[11px]"
+          compact ? "gap-1.5 text-[10.5px]" : "gap-2 text-[11px]"
         }`}
       >
         <Loader2 size={compact ? 10 : 11} className="shrink-0 animate-spin" />
@@ -435,18 +469,19 @@ export function WorkBar({
           {total > 0 ? (compact ? `${done}/${total}` : `${done} / ${total}`) : done}
         </span>
         {onStop && (
-          <button
-            type="button"
-            onClick={onStop}
-            title={t("remote.gridStop")}
-            aria-label={t("remote.gridStop")}
-            className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
-          >
-            <X size={12} />
-          </button>
+          <Tooltip label={t("remote.gridStop")}>
+            <button
+              type="button"
+              onClick={onStop}
+              aria-label={t("remote.gridStop")}
+              className={DANGER_ICON_BUTTON}
+            >
+              <X size={12} />
+            </button>
+          </Tooltip>
         )}
       </div>
-      <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.08]">
+      <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-[var(--cf-press)]">
         <div
           className={`h-full rounded-full bg-[var(--cf-accent)] ${
             total > 0 ? "transition-[width] duration-150" : "animate-pulse"

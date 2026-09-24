@@ -88,7 +88,7 @@ export function FileHistoryModal({ path, onClose }: { path: string; onClose: () 
                     void selectCommit(commit.id);
                     onClose();
                   }}
-                  className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+                  className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[var(--cf-hover)]"
                 >
                   <span className="mt-[2px] shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
                     {commit.short_id}
@@ -96,7 +96,7 @@ export function FileHistoryModal({ path, onClose }: { path: string; onClose: () 
                   <span className="min-w-0 flex-1">
                     {/* Wraps rather than truncating: a commit summary is the whole reason a row is
                         in this list, and half of one names nothing. */}
-                    <span className="block break-words text-[12.5px] leading-snug text-[var(--cf-text)]">
+                    <span className="block break-words text-[13px] leading-snug text-[var(--cf-text)]">
                       {commit.summary}
                     </span>
                     <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">

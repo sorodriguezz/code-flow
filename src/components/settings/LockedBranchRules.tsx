@@ -8,6 +8,9 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
 import { Note, Tag } from "../api/settingsChrome";
+import { buttonClass } from "../common/Button";
+import { chipClass, fieldClass, tabCountClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import {
   lockRuleCoverage,
   matchesLockPattern,
@@ -149,16 +152,16 @@ export function LockedBranchRules({ bare = false }: { bare?: boolean }) {
     return (
       <Frame bare={bare}>
         <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
-          <div className="flex items-start justify-between gap-3 bg-black/[0.02] px-3 py-2 dark:bg-white/[0.03]">
-            <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          <div className="flex items-center justify-between gap-3 bg-[var(--cf-sunken)] py-2 pl-3 pr-2">
+            <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">
               {t("settings.lockedBranchesUnavailable")}
             </p>
             <button
               type="button"
               onClick={() => void reload().catch((e) => pushErrorToast(String(e)))}
-              className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
             >
-              <RotateCcw size={11} />
+              <RotateCcw size={13} />
               {t("settings.lockedBranchesReload")}
             </button>
           </div>
@@ -170,16 +173,15 @@ export function LockedBranchRules({ bare = false }: { bare?: boolean }) {
   return (
     <Frame bare={bare}>
       <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
-        {/* A literal tint rather than --cf-surface-raised: that var equals --cf-surface in the light
-            theme, so the band would only be visible in dark mode. */}
-        <div className="border-b border-[var(--cf-border)] bg-black/[0.02] px-3 py-2 dark:bg-white/[0.03]">
+        {/* The sunken tone every strip inside a sheet wears, rather than --cf-surface-raised: that
+            var equals --cf-surface in the light theme, so the band would only be visible in dark
+            mode. */}
+        <div className="border-b border-[var(--cf-border)] bg-[var(--cf-sunken)] py-2 pl-3 pr-2">
           <div className="flex items-center justify-between gap-3">
-            <p className="flex min-w-0 items-center gap-1.5 text-[12.5px] font-medium">
-              <Lock size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <p className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-[var(--cf-text)]">
+              <Lock size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
               {t("settings.lockedBranchesRulesLabel")}
-              <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal tabular-nums text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-                {rules.length}
-              </span>
+              <span className={`shrink-0 ${tabCountClass}`}>{rules.length}</span>
             </p>
             {/* Asked first, like the review engine's reset and unlike the prompt templates': this one
                 discards a list the user typed, and there is nothing to undo it with. The confirm
@@ -201,13 +203,13 @@ export function LockedBranchRules({ bare = false }: { bare?: boolean }) {
                 if (!confirmed) return;
                 await restore().catch((e) => pushErrorToast(String(e)));
               }}
-              className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
             >
-              <RotateCcw size={11} />
+              <RotateCcw size={13} />
               {t("settings.lockedBranchesRestore")}
             </button>
           </div>
-          <p className="mt-0.5 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+          <p className="mt-0.5 pr-1 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
             {hasRepo
               ? t("settings.lockedBranchesCovered", {
                   n: coveredCount,
@@ -236,8 +238,8 @@ export function LockedBranchRules({ bare = false }: { bare?: boolean }) {
           // Worth saying out loud: an empty list is a supported answer that survives a restart, and
           // "no rows" on its own is indistinguishable from a list that failed to load.
           <div className="px-3 py-2.5">
-            <p className="flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-              <LockOpen size={12} className="mt-[1px] shrink-0" />
+            <p className="flex items-start gap-1.5 text-[12px] leading-snug text-[var(--cf-text-muted)]">
+              <LockOpen size={13} className="mt-[1px] shrink-0" />
               {t("settings.lockedBranchesEmpty")}
             </p>
             {missingDefaults.length > 0 && (
@@ -262,8 +264,8 @@ export function LockedBranchRules({ bare = false }: { bare?: boolean }) {
 
         {/* The composer, in a band of its own: on a list of rows a bare input floating underneath
             read as another row rather than as the way to add one. */}
-        <div className="border-t border-[var(--cf-border)] bg-black/[0.02] px-3 py-2 dark:bg-white/[0.03]">
-          <div className="flex gap-1.5">
+        <div className="border-t border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 pb-1.5 pt-2.5">
+          <div className="flex items-center gap-2">
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -274,14 +276,15 @@ export function LockedBranchRules({ bare = false }: { bare?: boolean }) {
               }}
               aria-label={t("settings.lockedBranchesInputLabel")}
               placeholder={t("settings.lockedBranchesPlaceholder")}
-              className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[13px] outline-none focus:border-[var(--cf-accent)]"
+              className={fieldClass({ className: "flex-1 font-mono" })}
             />
             <button
               type="button"
               onClick={add}
               disabled={!addable}
-              className="rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
+              className={buttonClass({ variant: "secondary", size: "md" })}
             >
+              <Plus size={14} />
               {t("settings.add")}
             </button>
           </div>
@@ -323,8 +326,8 @@ function Frame({ bare, children }: { bare: boolean; children: ReactNode }) {
   if (bare) return <div>{children}</div>;
   return (
     <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
-      <h4 className="text-[13px] font-medium">{t("settings.lockedBranchesTitle")}</h4>
-      <p className="mb-2 mt-0.5 text-[13px] text-[var(--cf-text-muted)]">
+      <h4 className="text-[13px] font-semibold text-[var(--cf-text)]">{t("settings.lockedBranchesTitle")}</h4>
+      <p className="mb-2.5 mt-0.5 max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">
         {t("settings.lockedBranchesDescription")}
       </p>
       {children}
@@ -360,9 +363,9 @@ function RuleRow({
   const names = (list: BranchInfo[]) => list.map((b) => b.name).join(", ");
 
   return (
-    <li style={riseDelay(at)} className="cf-rise flex items-center gap-2 px-3 py-2">
-      <Lock size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
-      <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={rule}>
+    <li style={riseDelay(at)} className="cf-rise flex min-h-9 items-center gap-2 py-1.5 pl-3 pr-2">
+      <Lock size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+      <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--cf-text)]" title={rule}>
         {rule}
       </span>
       {kind !== null && (
@@ -389,19 +392,20 @@ function RuleRow({
           className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums text-[var(--cf-warning)]"
           title={t("settings.lockedBranchesRowExemptList", { names: names(exempt) })}
         >
-          <TriangleAlert size={11} />
+          <TriangleAlert size={12} />
           {t("settings.lockedBranchesRowExempt", { n: exempt.length })}
         </span>
       )}
-      <button
-        type="button"
-        title={t("settings.lockedBranchesRemove", { pattern: rule })}
-        aria-label={t("settings.lockedBranchesRemove", { pattern: rule })}
-        onClick={onRemove}
-        className="-mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.06]"
-      >
-        <X size={12} />
-      </button>
+      <Tooltip label={t("settings.lockedBranchesRemove", { pattern: rule })}>
+        <button
+          type="button"
+          aria-label={t("settings.lockedBranchesRemove", { pattern: rule })}
+          onClick={onRemove}
+          className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)]"
+        >
+          <X size={13} />
+        </button>
+      </Tooltip>
     </li>
   );
 }
@@ -471,10 +475,14 @@ function QuickAdd({
       title={label}
       aria-label={label}
       onClick={onClick}
-      className="flex max-w-full items-center gap-1 truncate rounded-full border border-[var(--cf-border)] px-2.5 py-1 font-mono text-[11px] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+      // A chip that adds itself: the neutral chip, lit in the accent under the pointer.
+      className={chipClass(
+        "neutral",
+        "h-[22px] max-w-full font-mono transition-colors duration-100 hover:bg-[var(--cf-accent-soft)] hover:text-[var(--cf-accent)]",
+      )}
     >
-      <Plus size={10} className="shrink-0" />
-      {pattern}
+      <Plus size={11} className="shrink-0" />
+      <span className="truncate">{pattern}</span>
     </button>
   );
 }
@@ -483,7 +491,7 @@ function QuickAdd({
 function LegendItem({ token, text }: { token: string; text: string }) {
   return (
     <span className="flex items-baseline gap-1.5">
-      <code className="shrink-0 rounded bg-black/[0.05] px-1 font-mono text-[10px] text-[var(--cf-text)] dark:bg-white/[0.08]">
+      <code className="shrink-0 rounded-[4px] bg-[var(--cf-sunken)] px-1 font-mono text-[10.5px] text-[var(--cf-text)] shadow-[inset_0_0_0_1px_var(--cf-border)]">
         {token}
       </code>
       <span>{text}</span>

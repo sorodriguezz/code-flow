@@ -18,11 +18,13 @@ import {
   AlertTriangle,
   Clock,
   Copy,
+  Loader2,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
+import { buttonClass } from "../common/Button";
 import { keyvaultPasswordHealth } from "../../lib/tauri/keyvaultCommands";
 import { useT, type Translate } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
@@ -103,7 +105,7 @@ function HealthReport() {
   return (
     <>
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <p className="min-w-0 flex-1 text-[12px] leading-snug text-[var(--cf-text)]">
+        <p className="min-w-0 flex-1 text-[13px] leading-snug tabular-nums text-[var(--cf-text)]">
           {flagged.length === 0
             ? t("vault.healthAllGood", { n: health.checked })
             : t("vault.healthSummary", { flagged: flagged.length, checked: health.checked })}
@@ -112,16 +114,16 @@ function HealthReport() {
           type="button"
           onClick={() => void run()}
           disabled={running}
-          className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)] disabled:opacity-50"
+          className={buttonClass({ variant: "secondary", size: "sm" })}
         >
-          <RefreshCw size={11} className={running ? "animate-spin" : ""} />
+          {running ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
           {t("vault.healthRecheck")}
         </button>
       </div>
 
       {flagged.length === 0 ? (
-        <p className="flex items-center gap-1.5 rounded-md bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] px-2.5 py-2 text-[11.5px] text-[var(--cf-success)]">
-          <ShieldCheck size={12} className="shrink-0" />
+        <p className="flex items-center gap-1.5 rounded-md bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] px-2.5 py-2 text-[12px] text-[var(--cf-success)]">
+          <ShieldCheck size={13} className="shrink-0" />
           {t("vault.healthNothingToDo")}
         </p>
       ) : (
@@ -136,19 +138,19 @@ function HealthReport() {
                   setActiveView("vault");
                   closeSettings();
                 }}
-                className="flex w-full items-start gap-2 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-left transition-colors hover:border-[var(--cf-accent)]/50"
+                className="flex w-full items-start gap-2 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-left transition-colors duration-100 hover:border-[var(--cf-border-strong)] hover:bg-[var(--cf-hover)]"
               >
-                <AlertTriangle size={12} className="mt-[3px] shrink-0 text-[var(--cf-warning)]" />
+                <AlertTriangle size={13} className="mt-[3px] shrink-0 text-[var(--cf-warning)]" />
                 <span className="min-w-0 flex-1">
                   {/* Wraps: an entry title is what identifies the row, and half of one identifies
                       nothing. */}
-                  <span className="block break-words text-[12px] leading-snug text-[var(--cf-text)]">
+                  <span className="block break-words text-[13px] leading-snug text-[var(--cf-text)]">
                     {verdict.title}
                   </span>
                   <span className="mt-px flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
                     {problemsOf(verdict, t).map(({ icon: ProblemIcon, text }) => (
                       <span key={text} className="flex items-center gap-1">
-                        <ProblemIcon size={10} className="shrink-0" />
+                        <ProblemIcon size={11} className="shrink-0" />
                         {text}
                       </span>
                     ))}
@@ -160,7 +162,7 @@ function HealthReport() {
         </ul>
       )}
 
-      <p className="mt-2 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+      <p className="mt-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">
         {t("vault.healthPrivacyNote")}
       </p>
     </>
@@ -198,7 +200,7 @@ export function VaultSettings() {
             {/* The rail names the pane, so no heading is repeated here — but the hint says what the
                 label cannot, so it stays. Same call as the editor and AI sections. */}
             {active?.hintKey && (
-              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+              <p className="mb-3 text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
             )}
 
             {tab === "settings" && (

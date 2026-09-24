@@ -108,7 +108,7 @@ export function VaultImportModal({ onClose }: { onClose: () => void }) {
             {reading ? t("vault.import.reading") : t("vault.import.chooseFile")}
           </button>
           {fileName && (
-            <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]">
+            <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]">
               {fileName}
             </span>
           )}
@@ -116,7 +116,7 @@ export function VaultImportModal({ onClose }: { onClose: () => void }) {
 
         {result && (
           <>
-            <dl className="flex flex-col gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-3 py-2 text-[12px]">
+            <dl className="flex flex-col gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 py-2 text-[12px]">
               <div className="flex justify-between gap-4">
                 <dt className="text-[var(--cf-text-muted)]">{t("vault.import.format")}</dt>
                 <dd className="text-[var(--cf-text)]">{t(FORMAT_LABELS[result.format] as never)}</dd>
@@ -148,7 +148,7 @@ export function VaultImportModal({ onClose }: { onClose: () => void }) {
                   {result.warnings.map((warning, at) => (
                     <li
                       key={`${warning.key}-${at}`}
-                      className="flex items-start gap-1.5 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]"
+                      className="flex items-start gap-1.5 text-[12px] leading-relaxed text-[var(--cf-text-muted)]"
                     >
                       <ShieldAlert size={12} className="mt-[2px] shrink-0 text-[var(--cf-warning)]" />
                       <span>{t(warning.key, warning.params)}</span>
@@ -161,7 +161,7 @@ export function VaultImportModal({ onClose }: { onClose: () => void }) {
             {/* Only once there is something to delete. Said at the end because that is when it is
                 actionable — and it is the step people skip. */}
             {done && (
-              <p className="flex items-start gap-2 rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/10 px-3 py-2 text-[11.5px] leading-relaxed text-[var(--cf-text)]">
+              <p className="flex items-start gap-2 rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/10 px-3 py-2 text-[12px] leading-relaxed text-[var(--cf-text)]">
                 <ShieldAlert size={14} className="mt-[1px] shrink-0 text-[var(--cf-warning)]" />
                 <span>{t("vault.import.deleteTheFile")}</span>
               </p>

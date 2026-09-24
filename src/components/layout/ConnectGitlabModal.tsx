@@ -5,6 +5,8 @@ import { gitlabHostLabel } from "../../lib/gitlabConnections";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 interface ConnectGitlabModalProps {
   projectId: string;
@@ -50,10 +52,10 @@ export function ConnectGitlabModal({ projectId, hosts, onConnected, onClose }: C
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={saving ? undefined : onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[420px] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        className="w-[420px] rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
+          <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
             <GitMerge size={14} />
             {t("sidebar.linkGitlabTitle")}
           </h3>
@@ -66,7 +68,7 @@ export function ConnectGitlabModal({ projectId, hosts, onConnected, onClose }: C
 
         {hosts.length > 1 && (
           <>
-            <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+            <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
               {t("settings.gitlabHostLabel")}
             </label>
             <Select
@@ -79,14 +81,14 @@ export function ConnectGitlabModal({ projectId, hosts, onConnected, onClose }: C
           </>
         )}
 
-        <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
           {t("sidebar.gitlabProjectPath")}
         </label>
         <input
           value={path}
           onChange={(e) => setPath(e.target.value)}
           placeholder={t("sidebar.gitlabProjectPathPlaceholder")}
-          className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 font-mono text-[13px] outline-none focus:border-[var(--cf-accent)]"
+          className={fieldClass({ className: "w-full font-mono" })}
         />
         <p className="mb-4 mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
           {t("sidebar.gitlabProjectPathHint")}
@@ -96,14 +98,14 @@ export function ConnectGitlabModal({ projectId, hosts, onConnected, onClose }: C
           <button
             disabled={saving}
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost" })}
           >
             {t("common.cancel")}
           </button>
           <button
             disabled={saving || !valid}
             onClick={connect}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {saving ? <Loader2 size={13} className="animate-spin" /> : <GitMerge size={13} />}
             {t("sidebar.connect")}

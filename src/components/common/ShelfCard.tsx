@@ -60,7 +60,7 @@ export function ShelfCard({ icon: Icon, name, tint, meta, label, onOpen }: Shelf
       type="button"
       onClick={onOpen}
       aria-label={label}
-      className="group flex min-h-[92px] cursor-pointer flex-col justify-between gap-3 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] p-3 text-left transition-colors hover:border-[var(--cf-accent)]"
+      className="group flex min-h-[92px] cursor-pointer flex-col justify-between gap-3 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-3 text-left transition-[border-color,box-shadow] duration-150 hover:border-[var(--cf-border-strong)] hover:shadow-[var(--cf-shadow-lift)]"
     >
       {/* A `<span>` around a `<span>` where this used to be a `<div>` around an `<h3>`, and not for
           tidiness: a `<button>` may only contain phrasing content, so the old nesting was invalid
@@ -70,7 +70,7 @@ export function ShelfCard({ icon: Icon, name, tint, meta, label, onOpen }: Shelf
           flex item a span blockifies exactly as the h3 did, so not a pixel moves. */}
       <span className="flex items-start gap-2">
         <Icon size={15} className="mt-px shrink-0" style={tint ? { color: tint } : undefined} />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">
+        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-[var(--cf-text)]">
           {name}
         </span>
         <ChevronRight
@@ -81,7 +81,7 @@ export function ShelfCard({ icon: Icon, name, tint, meta, label, onOpen }: Shelf
       </span>
       <Meta
         parts={meta}
-        className="flex items-center gap-2 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]"
+        className="flex items-center gap-2 text-[11px] tabular-nums text-[var(--cf-text-faint)]"
       />
     </button>
   );
@@ -93,15 +93,15 @@ export function ShelfRow({ icon: Icon, name, tint, meta, label, onOpen }: ShelfI
       type="button"
       onClick={onOpen}
       aria-label={label}
-      className="group flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      className="group flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--cf-hover)]"
     >
       <Icon size={14} className="shrink-0" style={tint ? { color: tint } : undefined} />
-      <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-[var(--cf-text)]">
+      <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">
         {name}
       </span>
       <Meta
         parts={meta}
-        className="flex shrink-0 items-center gap-2 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]"
+        className="flex shrink-0 items-center gap-2 text-[11px] tabular-nums text-[var(--cf-text-faint)]"
       />
       <ChevronRight
         size={13}

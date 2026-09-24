@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   KeyRound,
@@ -37,6 +37,13 @@ import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { Search } from "lucide-react";
+import { Kbd } from "../common/Button";
+
+/** Folded for matching: case and accents both ignored, so "configuracion" finds "Configuración". */
+function fold(text: string): string {
+  return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
 
 type PaletteGroup = "workspaces" | "projects" | "branches" | "views" | "actions" | "api" | "settings";
 
@@ -339,12 +346,23 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
 
   const groups = SCOPE_GROUPS[scope];
 
+  // Every word has to appear, in any order and without regard to case or accents. Laid out in group
+  // order, because that is the order the rows are drawn in and the arrow keys walk.
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const words = fold(query.trim()).split(/\s+/).filter(Boolean);
     const inScope = items.filter((item) => groups.includes(item.group));
-    if (!q) return inScope;
-    return inScope.filter((item) => item.label.toLowerCase().includes(q));
+    const hits = words.length === 0 ? inScope : inScope.filter((item) => words.every((w) => fold(item.label).includes(w)));
+    return groups.flatMap((group) => hits.filter((item) => item.group === group));
   }, [items, groups, query]);
+
+  // The row Enter would pick, moved by ↑/↓ and by the pointer. Back to the top whenever the list
+  // changes under it.
+  const [active, setActive] = useState(0);
+  useEffect(() => setActive(0), [query, scope]);
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>(`[data-row="${active}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [active]);
 
   const choose = (item: PaletteItem) => {
     item.onSelect();
@@ -352,43 +370,63 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[12vh]" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[60vh] w-[420px] flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+        className="cf-fade-in flex max-h-[64vh] w-[600px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
       >
-        <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+        <div className="flex h-[52px] shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] px-4">
+          <Search size={17} className="shrink-0 text-[var(--cf-text-faint)]" />
           <input
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") onClose();
-              if (e.key === "Enter" && filtered[0]) choose(filtered[0]);
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setActive((i) => (filtered.length ? (i + 1) % filtered.length : 0));
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setActive((i) => (filtered.length ? (i - 1 + filtered.length) % filtered.length : 0));
+              }
+              if (e.key === "Enter" && filtered[active]) choose(filtered[active]);
             }}
             placeholder={scope === "all" ? t("titlebar.searchPlaceholder") : t(GROUP_LABEL_KEY[groups[0]])}
-            className="flex-1 bg-transparent text-[13px] outline-none"
+            className="min-w-0 flex-1 bg-transparent text-[15px] outline-none placeholder:text-[var(--cf-text-faint)]"
           />
+          <Kbd>esc</Kbd>
         </div>
 
-        <div className="flex-1 overflow-auto p-1.5">
+        <div ref={listRef} className="flex-1 overflow-auto p-1.5">
           {groups.map((group) => {
             const groupItems = filtered.filter((item) => item.group === group);
             if (groupItems.length === 0) return null;
             return (
               <div key={group} className="mb-1">
-                <p className="px-2 py-1 text-[11px] font-semibold uppercase text-[var(--cf-text-muted)]">
+                <p className="px-2.5 pb-1 pt-2.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                   {t(GROUP_LABEL_KEY[group])}
                 </p>
                 {groupItems.map((item) => {
                   const Icon = item.icon;
+                  const index = filtered.indexOf(item);
+                  const on = index === active;
                   return (
                     <button
                       key={item.key}
+                      data-row={index}
                       onClick={() => choose(item)}
-                      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                      onMouseMove={() => !on && setActive(index)}
+                      aria-selected={on}
+                      className={`flex h-[34px] w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] ${
+                        on ? "bg-[var(--cf-accent-soft)]" : ""
+                      }`}
                     >
-                      <Icon size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+                      <Icon
+                        size={15}
+                        className={`shrink-0 ${on ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`}
+                      />
                       <span className="truncate">{item.label}</span>
                     </button>
                   );
@@ -397,8 +435,14 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
             );
           })}
           {filtered.length === 0 && (
-            <p className="px-2 py-3 text-center text-[12px] text-[var(--cf-text-muted)]">{t("titlebar.noResults")}</p>
+            <p className="px-2 py-6 text-center text-[13px] text-[var(--cf-text-muted)]">{t("titlebar.noResults")}</p>
           )}
+        </div>
+        {/* The keys, always in view: this is a keyboard surface, and the keys are its controls. */}
+        <div className="flex shrink-0 items-center gap-4 border-t border-[var(--cf-border)] px-3.5 py-2 text-[12px] text-[var(--cf-text-faint)]">
+          <span className="flex items-center gap-1.5"><Kbd>↑</Kbd><Kbd>↓</Kbd></span>
+          <span className="flex items-center gap-1.5"><Kbd>↵</Kbd></span>
+          <span className="ml-auto tabular-nums">{filtered.length}</span>
         </div>
       </div>
     </div>

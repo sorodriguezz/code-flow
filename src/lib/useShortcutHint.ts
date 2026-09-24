@@ -14,3 +14,15 @@ export function useShortcutHint(): (id: ShortcutId, label: string) => string {
     return chord ? `${label} (${chordLabel(chord)})` : label;
   };
 }
+
+/**
+ * The same lookup as `useShortcutHint`, returning the chord alone — for a tooltip that shows it as a
+ * key cap beside the label rather than in parentheses after it. `null` when the command is unbound.
+ */
+export function useShortcutChord(): (id: ShortcutId) => string | null {
+  const overrides = useShortcutsStore((s) => s.overrides);
+  return (id) => {
+    const chord = bindingFor(id, overrides);
+    return chord ? chordLabel(chord) : null;
+  };
+}

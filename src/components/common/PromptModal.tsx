@@ -3,6 +3,8 @@ import { Pencil } from "lucide-react";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 import { usePromptStore } from "../../state/promptStore";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "./Button";
+import { fieldClass } from "./recipes";
 
 /**
  * The one-field dialog, `ConfirmModal`'s twin.
@@ -61,7 +63,7 @@ export function PromptModal() {
         role="dialog"
         aria-modal="true"
         tabIndex={-1}
-        className="cf-fade-in max-h-[calc(100vh-2rem)] w-[380px] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        className="cf-fade-in max-h-[calc(100vh-2rem)] w-[380px] max-w-[90vw] overflow-y-auto rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-3 flex items-start gap-3">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">
@@ -83,7 +85,7 @@ export function PromptModal() {
             if (e.key === "Enter" && ready) respond(trimmed);
             if (e.key === "Escape") respond(null);
           }}
-          className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          className={fieldClass({ className: "w-full font-mono" })}
         />
         {problem && (
           <p className="pt-1.5 text-[11px] leading-relaxed text-[var(--cf-danger)]">{problem}</p>
@@ -92,14 +94,14 @@ export function PromptModal() {
         <div className="mt-4 flex justify-end gap-2">
           <button
             onClick={() => respond(null)}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost" })}
           >
             {t("common.cancel")}
           </button>
           <button
             onClick={() => ready && respond(trimmed)}
             disabled={!ready}
-            className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:opacity-40 disabled:hover:brightness-100"
+            className={buttonClass({ variant: "primary" })}
           >
             {request.confirmLabel ?? t("common.confirm")}
           </button>

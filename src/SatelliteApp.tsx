@@ -1,10 +1,11 @@
 import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
-import { AnimatePresence } from "framer-motion";
 import { FolderGit2, Unlink } from "lucide-react";
+import { ActivePill } from "./components/common/ActivePill";
 import { EmptyState } from "./components/common/EmptyState";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SatelliteTitleBar } from "./components/layout/SatelliteTitleBar";
 import { ToastContainer } from "./components/common/Toast";
+import { TitleTooltips } from "./components/common/TitleTooltips";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
 import { ViewSkeleton } from "./components/common/ViewSkeleton";
@@ -293,46 +294,55 @@ function RepoWindow({ projectId }: { projectId: string }) {
   // removed. Waiting rather than closing: the window is cheap and the row may come back.
   if (workspaceId && projects && !project) {
     return (
-      <EmptyState
-        icon={FolderGit2}
-        title={t("windows.repoElsewhereTitle")}
-        subtitle={t("windows.repoElsewhereBody")}
-      />
+      <div className="cf-sheet min-h-0 flex-1">
+        <EmptyState
+          icon={FolderGit2}
+          title={t("windows.repoElsewhereTitle")}
+          subtitle={t("windows.repoElsewhereBody")}
+        />
+      </div>
     );
   }
 
-  if (!project) return <ViewSkeleton />;
+  if (!project)
+    return (
+      <div className="cf-sheet min-h-0 flex-1">
+        <ViewSkeleton />
+      </div>
+    );
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 border-b border-[var(--cf-border)] bg-[var(--cf-bg-elevated)] text-[12px]">
+    <div className="flex h-full min-h-0 flex-col gap-1.5">
+      {/* On the frame, above the sheet, in the main window's tab recipe: the same lifted sheet marks
+          the open tab in both windows. */}
+      <div className="-mt-1 flex shrink-0 items-center gap-0.5">
         {REPO_TABS.map(({ id, labelKey }) => (
           <button
             key={id}
             onClick={() => setTab(id)}
-            className={`border-r border-[var(--cf-border)] px-3 py-1.5 transition-colors ${
+            aria-current={tab === id ? "page" : undefined}
+            className={`relative flex h-7 items-center rounded-md px-2.5 text-[13px] font-medium transition-colors ${
               tab === id
-                ? "bg-[var(--cf-bg)] text-[var(--cf-text)] shadow-[inset_0_-1px_0_var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                ? "text-[var(--cf-text)]"
+                : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
             }`}
           >
-            {t(labelKey)}
+            {tab === id && <ActivePill layoutId="cf-satellite-tab" variant="raised" />}
+            <span className="relative">{t(labelKey)}</span>
           </button>
         ))}
       </div>
       {/* Same rule as the main window: a tab that has been opened stays mounted so switching away
           does not kill what is running in it — the editor's models, a pipeline's polling. Never
           visited, never mounted. */}
-      <div className="cf-ambient-bg min-h-[120px] flex-1 overflow-hidden">
+      <div className="cf-sheet cf-ambient-bg min-h-[120px] flex-1">
         <RepoTabs tab={tab} />
       </div>
-      <AnimatePresence initial={false}>
-        {terminalPanelOpen && (
-          <Suspense key="terminal-dock" fallback={null}>
-            <ServicesDock />
-          </Suspense>
-        )}
-      </AnimatePresence>
+      {terminalPanelOpen && (
+        <Suspense key="terminal-dock" fallback={null}>
+          <ServicesDock />
+        </Suspense>
+      )}
     </div>
   );
 }
@@ -407,18 +417,26 @@ export default function SatelliteApp() {
     return (
       <div className="flex h-screen flex-col overflow-hidden">
         <QuickWindow refId={spec.refId} />
+        <TitleTooltips />
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden">
+    // The frame and its sheets, as in the main window: the title row sits on the frame's tone and
+    // what the window holds is a sheet inset from its edges. A repository window adds its tab row
+    // on the frame and the terminal dock as a second sheet, both inside `RepoWindow`.
+    <div className="flex h-screen flex-col overflow-hidden bg-[var(--cf-bg)]">
       <SatelliteTitleBar />
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col px-1.5 pb-1.5">
         {!ready || !spec ? (
-          <ViewSkeleton />
+          <div className="cf-sheet min-h-0 flex-1">
+            <ViewSkeleton />
+          </div>
         ) : kind === "app" ? (
-          <AppWindow refId={spec.refId} />
+          <div className="cf-sheet min-h-0 flex-1">
+            <AppWindow refId={spec.refId} />
+          </div>
         ) : (
           <RepoWindow projectId={spec.refId} />
         )}
@@ -429,6 +447,7 @@ export default function SatelliteApp() {
       <ToastContainer />
       <ConfirmModal />
       <PromptModal />
+      <TitleTooltips />
     </div>
   );
 }

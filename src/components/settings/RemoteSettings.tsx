@@ -4,7 +4,10 @@ import qrcode from "qrcode-generator";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { usePlatform } from "../../lib/platform";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
+import { fieldClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import { Actions, Note, Status } from "../api/settingsChrome";
 import { RailSection } from "./settingsNav";
 import {
@@ -35,7 +38,8 @@ import type { RemoteDevice, RemoteStatus, RemoteTerminal } from "../../types/dom
  * a dark-on-light grid with a light margin around it, and a QR painted in `--cf-text` on
  * `--cf-surface` is a mid-grey on a near-black that phones refuse at anything but point-blank. The
  * card is what keeps it scannable in both themes; it reads as a printed label sitting on the panel,
- * which is what it is.
+ * which is what it is. Its one themed part is the hairline around it, so the white card still has an
+ * edge on a white panel.
  *
  * Error correction `M` rather than `L`: the extra redundancy costs a slightly denser grid and buys
  * tolerance for a phone camera at an angle across a desk, which is exactly how this gets used.
@@ -65,7 +69,7 @@ function AddressQr({ url }: { url: string }) {
   return (
     <svg
       viewBox={`0 0 ${size} ${size}`}
-      className="h-40 w-40 shrink-0 rounded-lg"
+      className="h-40 w-40 shrink-0 rounded-lg shadow-[0_0_0_1px_var(--cf-border)]"
       role="img"
       aria-label={url}
     >
@@ -83,6 +87,11 @@ function AddressQr({ url }: { url: string }) {
     </svg>
   );
 }
+
+/** An icon button whose act cuts something off: muted at rest, red on hover, and the same 28px as
+ * the neutral icon buttons beside it in these lists. */
+const DANGER_ICON_BUTTON =
+  "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40";
 
 /** A timestamp as something a person reads, falling back to the raw value rather than to nothing. */
 function whenLabel(iso: string | null): string {
@@ -254,7 +263,7 @@ export function RemoteSettings() {
                   }}
                   disabled={busy}
                   inputMode="numeric"
-                  className="w-20 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[13px] tabular-nums outline-none focus:border-[var(--cf-accent)]"
+                  className={fieldClass({ className: "w-20 font-mono tabular-nums" })}
                 />
                 <span className="min-w-0 flex-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
                   {t("remote.portHint")}
@@ -275,7 +284,7 @@ export function RemoteSettings() {
           {tab === "pairing" &&
             (live ? (
               <>
-                <p className="mb-2 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                <p className="mb-2 text-[12px] leading-snug text-[var(--cf-text-muted)]">
                   {t("remote.openOnPhone")}
                 </p>
                 {status?.url ? (
@@ -285,7 +294,7 @@ export function RemoteSettings() {
                       {/* `inline-block`, so the box is the width of the address rather than of the
                           pane: a 25-character LAN URL stretched across a full-width panel reads as an
                           empty field somebody forgot to fill in. */}
-                      <code className="inline-block max-w-full break-all rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] text-[var(--cf-text)]">
+                      <code className="inline-block max-w-full break-all rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 py-1.5 font-mono text-[12px] text-[var(--cf-text)]">
                         {status.url}
                       </code>
                       <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
@@ -295,17 +304,18 @@ export function RemoteSettings() {
                       {code ? (
                         <div className="mt-3">
                           <p className="text-[11px] text-[var(--cf-text-muted)]">{t("remote.pairCodeLabel")}</p>
-                          <p className="mt-0.5 font-mono text-[26px] font-semibold tracking-[0.18em] text-[var(--cf-accent)]">
+                          <p className="mt-0.5 font-mono text-[26px] font-semibold tabular-nums tracking-[0.18em] text-[var(--cf-accent)]">
                             {code}
                           </p>
                           <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
                             {t("remote.pairCodeHint")}
                           </p>
+                          {/* `-ml-2` puts the label, not the button's padding, under the code. */}
                           <button
                             type="button"
                             onClick={() => void cancelPairing()}
                             disabled={busy}
-                            className="mt-2 text-[11.5px] text-[var(--cf-text-muted)] hover:underline"
+                            className={buttonClass({ variant: "ghost", size: "sm", className: "-ml-2 mt-2" })}
                           >
                             {t("remote.pairCancel")}
                           </button>
@@ -317,7 +327,7 @@ export function RemoteSettings() {
                               type="button"
                               onClick={() => void startPairing()}
                               disabled={busy}
-                              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] disabled:opacity-40"
+                              className={buttonClass({ variant: "secondary" })}
                             >
                               <Smartphone size={13} />
                               {active.length ? t("remote.pairAgain") : t("remote.pair")}
@@ -328,19 +338,19 @@ export function RemoteSettings() {
                     </div>
                   </div>
                 ) : (
-                  <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                  <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">
                     {t("remote.noAddress")}
                   </p>
                 )}
                 </>
             ) : (
-              <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("remote.pairingNeedsServer")}</p>
+              <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">{t("remote.pairingNeedsServer")}</p>
             ))}
 
           {tab === "devices" && (
             <>
               {devices.length === 0 ? (
-                <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">
                   {t("remote.devicesEmpty")}
                 </p>
               ) : (
@@ -385,33 +395,37 @@ export function RemoteSettings() {
                         {/* A live device gets a cut-off button; a revoked one gets a remove-from-list
                             button. The same slot, because a row only ever has one next step. */}
                         {device.revoked ? (
-                          <button
-                            type="button"
-                            title={t("remote.forget")}
-                            onClick={() =>
-                              void guard(async () => {
-                                setDevices(await remotectlForgetDevice(device.id));
-                              })
-                            }
-                            disabled={busy}
-                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                          >
-                            <X size={13} />
-                          </button>
+                          <Tooltip label={t("remote.forget")}>
+                            <button
+                              type="button"
+                              aria-label={t("remote.forget")}
+                              onClick={() =>
+                                void guard(async () => {
+                                  setDevices(await remotectlForgetDevice(device.id));
+                                })
+                              }
+                              disabled={busy}
+                              className={iconButtonClass({ size: "md" })}
+                            >
+                              <X size={14} />
+                            </button>
+                          </Tooltip>
                         ) : (
-                          <button
-                            type="button"
-                            title={t("remote.revoke")}
-                            onClick={() =>
-                              void guard(async () => {
-                                setDevices(await remotectlRevokeDevice(device.id));
-                              })
-                            }
-                            disabled={busy}
-                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                          >
-                            <Trash2 size={13} />
-                          </button>
+                          <Tooltip label={t("remote.revoke")}>
+                            <button
+                              type="button"
+                              aria-label={t("remote.revoke")}
+                              onClick={() =>
+                                void guard(async () => {
+                                  setDevices(await remotectlRevokeDevice(device.id));
+                                })
+                              }
+                              disabled={busy}
+                              className={DANGER_ICON_BUTTON}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </Tooltip>
                         )}
                       </li>
                     ))}
@@ -419,9 +433,10 @@ export function RemoteSettings() {
 
                   {/* Under the list rather than beside the heading, which a `Group` has no slot for —
                       and it is the better place anyway: both act on everything above them. Clearing
-                      revoked rows and revoking live ones stay different verbs and different hovers,
-                      because one tidies a list and the other cuts somebody off. */}
-                  <div className="mt-2">
+                      revoked rows and revoking live ones stay different verbs and different colours,
+                      because one tidies a list and the other cuts somebody off. `-ml-2` lines the
+                      first label, not its button's padding, up with the list. */}
+                  <div className="-ml-2 mt-2">
                     <Actions>
                       {devices.some((device) => device.revoked) && (
                         <button
@@ -432,7 +447,7 @@ export function RemoteSettings() {
                             })
                           }
                           disabled={busy}
-                          className="text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] disabled:opacity-40"
+                          className={buttonClass({ variant: "ghost", size: "sm" })}
                         >
                           {t("remote.forgetAllRevoked")}
                         </button>
@@ -446,7 +461,7 @@ export function RemoteSettings() {
                             })
                           }
                           disabled={busy}
-                          className="text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-40"
+                          className={buttonClass({ variant: "danger-ghost", size: "sm" })}
                         >
                           {t("remote.revokeAll")}
                         </button>
@@ -498,14 +513,14 @@ export function RemoteSettings() {
                   A stale poll can still catch one mid-flight.) */}
               {(status?.allow_terminal || terminals.length > 0) && (
                 <div className="mt-3">
-                  <p className="text-[11.5px] font-medium text-[var(--cf-text)]">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                     {t("remote.liveTerminals")}
                   </p>
                   <p className="mt-0.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
                     {t("remote.liveTerminalsHint")}
                   </p>
                   {terminals.length === 0 ? (
-                    <p className="mt-1.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                    <p className="mt-1.5 text-[12px] leading-snug text-[var(--cf-text-muted)]">
                       {t("remote.liveTerminalsNone")}
                     </p>
                   ) : (
@@ -514,30 +529,37 @@ export function RemoteSettings() {
                         <li key={shell.id} className="flex items-center gap-2 py-2">
                           <TerminalSquare size={14} className="shrink-0 text-[var(--cf-accent)]" />
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[13px] text-[var(--cf-text)]">
+                            {/* Mono when it is the raw device id — a name is a name, an id is a key. */}
+                            <span
+                              className={`block truncate text-[13px] text-[var(--cf-text)] ${
+                                devices.some((d) => d.id === shell.owner) ? "" : "font-mono"
+                              }`}
+                            >
                               {ownerLabel(shell.owner)}
                             </span>
                             {/* The shell and where it is. Joined rather than templated because a
                                 session opened with no directory has none to name, and " · " with
                                 nothing after it reads as a value that failed to load. */}
-                            <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
+                            <span className="block truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
                               {[shell.profile, shell.cwd].filter(Boolean).join(" · ")}
                             </span>
                           </span>
-                          <button
-                            type="button"
-                            title={t("remote.killTerminal")}
-                            onClick={() =>
-                              void guard(async () => {
-                                await closeTerminal(shell.id);
-                                await reload();
-                              })
-                            }
-                            disabled={busy}
-                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                          >
-                            <Trash2 size={13} />
-                          </button>
+                          <Tooltip label={t("remote.killTerminal")}>
+                            <button
+                              type="button"
+                              aria-label={t("remote.killTerminal")}
+                              onClick={() =>
+                                void guard(async () => {
+                                  await closeTerminal(shell.id);
+                                  await reload();
+                                })
+                              }
+                              disabled={busy}
+                              className={DANGER_ICON_BUTTON}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </Tooltip>
                         </li>
                       ))}
                     </ul>
@@ -553,7 +575,7 @@ export function RemoteSettings() {
               gets turned on by someone who would not have, had they known. */}
           {tab === "access" && (
             <>
-              <p className="mb-2 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+              <p className="mb-2 text-[12px] leading-snug text-[var(--cf-text-muted)]">
                 {t("remote.safety")}
               </p>
               <p className="flex gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">

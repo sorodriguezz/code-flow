@@ -6,6 +6,8 @@ import { tourLength, tourStep, useTourStore } from "../../state/tourStore";
 import { chordLabel } from "../../lib/keys";
 import { pressBelongsToWindow } from "../../lib/overlayDragRegion";
 import type { TourPlacement } from "../../lib/tour/steps";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { chipClass } from "../common/recipes";
 import { Confetti } from "./Confetti";
 
 interface Box {
@@ -293,7 +295,7 @@ export function TourOverlay() {
 
   const placement = placeCard(box, step.placement ?? "auto", card, vp);
   const radius = step.radius ?? 10;
-  const progress = ((index + 1) / total) * 100;
+  const progress = (index + 1) / total;
 
   return createPortal(
     <>
@@ -353,27 +355,32 @@ export function TourOverlay() {
           <div className="cf-tour-veil absolute inset-0" />
         )}
 
+        {/* The card is a raised surface in the modal shape — 14px corners, the modal shadow — since
+            for as long as the tour is up it *is* the dialog. Solid, never frosted: the spotlight
+            behind it repaints every time a step moves, and a blur would repaint with it. */}
         <div
           ref={cardRef}
-          className="cf-tour-card absolute w-[384px] max-w-[calc(100vw-32px)] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+          className="cf-tour-card absolute w-[384px] max-w-[calc(100vw-32px)] rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow-modal)]"
           style={{ top: placement.top, left: placement.left }}
         >
           {placement.side && <Arrow side={placement.side} at={placement.arrowAt} />}
 
           <div className="mb-2.5 flex items-center gap-2">
-            <span className="rounded-full bg-[var(--cf-accent-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-accent)]">
+            <span className={chipClass("accent", "font-semibold uppercase tracking-[0.06em]")}>
               {t(step.chapterKey)}
             </span>
             <span className="ml-auto text-[11px] tabular-nums text-[var(--cf-text-muted)]">
               {t("tour.stepOf", { n: index + 1, total })}
             </span>
+            {/* `title` rather than the app's tooltip: that one is drawn beneath this layer. */}
             <button
+              type="button"
               onClick={skip}
               title={t("tour.skip")}
               aria-label={t("tour.skip")}
-              className="-mr-1 flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+              className={iconButtonClass({ size: "xs", className: "-mr-1" })}
             >
-              <X size={13} />
+              <X size={14} />
             </button>
           </div>
 
@@ -394,10 +401,11 @@ export function TourOverlay() {
             {t(step.bodyKey, step.chord ? { key: chordLabel(step.chord) } : undefined)}
           </p>
 
-          <div className="mt-3.5 h-[3px] w-full overflow-hidden rounded-full bg-[color-mix(in_oklab,var(--cf-text)_10%,transparent)]">
+          {/* Scaled, not sized: stepping moves the fill with a transform, so the bar costs no layout. */}
+          <div className="mt-3.5 h-[3px] w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
             <div
-              className="h-full rounded-full bg-[var(--cf-accent)] transition-[width] duration-300 ease-out"
-              style={{ width: `${progress}%` }}
+              className="h-full w-full origin-left rounded-full bg-[var(--cf-accent)] transition-transform duration-300 ease-out"
+              style={{ transform: `scaleX(${progress})` }}
             />
           </div>
 
@@ -406,10 +414,7 @@ export function TourOverlay() {
                 beside a Finish button only invites people to take the one without the confetti.
                 The × in the corner is still there for anyone who wants out without the send-off. */}
             {!isLast && (
-              <button
-                onClick={skip}
-                className="rounded-md px-2 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-              >
+              <button type="button" onClick={skip} className={buttonClass({ variant: "ghost", size: "md", className: "-ml-1.5" })}>
                 {t("tour.skip")}
               </button>
             )}
@@ -417,21 +422,19 @@ export function TourOverlay() {
               {/* Rendered from the second step on, rather than disabled on the first: a control
                   that is permanently dead on the screen where you meet it is just noise. */}
               {!isFirst && (
-                <button
-                  onClick={back}
-                  className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                >
-                  <ArrowLeft size={13} />
+                <button type="button" onClick={back} className={buttonClass({ variant: "secondary", size: "md" })}>
+                  <ArrowLeft size={14} />
                   {t("tour.back")}
                 </button>
               )}
               <button
+                type="button"
                 onClick={advance}
                 autoFocus
-                className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
+                className={buttonClass({ variant: "primary", size: "md" })}
               >
                 {isLast ? t("tour.finish") : t("tour.next")}
-                {!isLast && <ArrowRight size={13} />}
+                {!isLast && <ArrowRight size={14} />}
               </button>
             </span>
           </div>

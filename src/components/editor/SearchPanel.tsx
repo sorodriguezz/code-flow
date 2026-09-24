@@ -13,6 +13,10 @@ import {
 } from "lucide-react";
 import { replaceInRepo, searchRepo, type SearchHit, type SearchOptions } from "../../lib/tauri/commands";
 import { FileGlyph } from "../common/FileGlyph";
+import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass, Kbd } from "../common/Button";
+import { explorerHeadClass, explorerTitleClass, fieldClass } from "../common/recipes";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useRepoStore } from "../../state/repoStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -130,19 +134,16 @@ function Toggle({
   children: React.ReactNode;
 }) {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-      aria-pressed={active}
-      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded ${
-        active
-          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-      }`}
-    >
-      {children}
-    </button>
+    <Tooltip side="bottom" label={title}>
+      <button
+        onClick={onClick}
+        aria-label={title}
+        aria-pressed={active}
+        className={iconButtonClass({ size: "xs", active })}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -179,6 +180,8 @@ export function SearchPanel({
   onClose: () => void;
 }) {
   const t = useT();
+  /** The key that opens this panel — shown by its title, where the placeholder used to spell it. */
+  const openChord = useShortcutChord()("editor.findInProject");
   const [query, setQuery] = useState("");
   const [replacement, setReplacement] = useState("");
   const [showReplace, setShowReplace] = useState(false);
@@ -411,114 +414,140 @@ export function SearchPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 border-b border-[var(--cf-border)] p-1.5">
-        <div className="flex items-start gap-1">
-          {/* The chevron that folds the replace row open, exactly where editors put it. */}
-          <button
-            onClick={() => setShowReplace((v) => !v)}
-            title={t("editor.toggleReplace")}
-            className="mt-1 flex h-5 w-4 shrink-0 items-center justify-center text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          >
-            {showReplace ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          </button>
+      {/* The panel's head, the same one every panel of the activity rail wears. The filters toggle
+          is the one panel-wide action, so it rides here.
 
-          <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5">
-              <Search size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+          No close button. The panel is a sidebar section reached from the activity bar, and the
+          icon that opens it is the icon that closes it — an X inside as well made "closed" two
+          controls in two places disagreeing about one piece of state. Escape still closes it,
+          which is what the input's own keydown is for. */}
+      <div className={explorerHeadClass}>
+        <span className={`${explorerTitleClass} mr-auto`}>
+          <span className="truncate">{t("editor.searchInProject")}</span>
+          {openChord && <Kbd>{openChord}</Kbd>}
+        </span>
+        <Tooltip side="bottom" label={t("editor.toggleFilters")}>
+          <button
+            onClick={() => setShowFilters((v) => !v)}
+            aria-label={t("editor.toggleFilters")}
+            aria-pressed={showFilters || Boolean(include || exclude)}
+            className={iconButtonClass({ size: "sm", active: showFilters || Boolean(include || exclude) })}
+          >
+            <MoreHorizontal size={14} />
+          </button>
+        </Tooltip>
+      </div>
+
+      <div className="shrink-0 border-b border-[var(--cf-border)] pb-3 pl-1.5 pr-3">
+        <div className="flex items-start gap-0.5">
+          {/* The chevron that folds the replace row open, exactly where editors put it. */}
+          <Tooltip side="bottom" label={t("editor.toggleReplace")}>
+            <button
+              onClick={() => setShowReplace((v) => !v)}
+              aria-label={t("editor.toggleReplace")}
+              aria-expanded={showReplace}
+              className={iconButtonClass({ size: "xs", className: "mt-1" })}
+            >
+              {showReplace ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            </button>
+          </Tooltip>
+
+          <div className="min-w-0 flex-1 space-y-1.5">
+            {/* The shared field, with its glyph laid over the left padding and the three match
+                toggles over the right — so the focus ring is the field's own. */}
+            <div className="relative">
+              <Search
+                size={13}
+                className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
+              />
               <input
                 autoFocus
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Escape" && onClose()}
                 placeholder={t("editor.searchPlaceholder")}
-                className="min-w-0 flex-1 bg-transparent py-1 text-[12px] outline-none"
+                className={fieldClass({ className: "w-full pl-7 pr-[76px]" })}
               />
-              <Toggle active={caseSensitive} onClick={() => setCaseSensitive((v) => !v)} title={t("editor.matchCase")}>
-                <CaseSensitive size={12} />
-              </Toggle>
-              <Toggle active={wholeWord} onClick={() => setWholeWord((v) => !v)} title={t("editor.wholeWord")}>
-                <WholeWord size={12} />
-              </Toggle>
-              <Toggle active={useRegex} onClick={() => setUseRegex((v) => !v)} title={t("editor.useRegex")}>
-                <Regex size={12} />
-              </Toggle>
+              <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
+                <Toggle active={caseSensitive} onClick={() => setCaseSensitive((v) => !v)} title={t("editor.matchCase")}>
+                  <CaseSensitive size={14} />
+                </Toggle>
+                <Toggle active={wholeWord} onClick={() => setWholeWord((v) => !v)} title={t("editor.wholeWord")}>
+                  <WholeWord size={14} />
+                </Toggle>
+                <Toggle active={useRegex} onClick={() => setUseRegex((v) => !v)} title={t("editor.useRegex")}>
+                  <Regex size={14} />
+                </Toggle>
+              </div>
             </div>
 
             {showReplace && (
-              <div className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5">
-                <Replace size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+              <div className="relative">
+                <Replace
+                  size={13}
+                  className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
+                />
                 <input
                   value={replacement}
                   onChange={(e) => setReplacement(e.target.value)}
                   placeholder={useRegex ? t("editor.replacePlaceholderRegex") : t("editor.replacePlaceholder")}
-                  className="min-w-0 flex-1 bg-transparent py-1 text-[12px] outline-none"
+                  className={fieldClass({ className: "w-full pl-7 pr-8" })}
                 />
-                <button
-                  onClick={() => void replace()}
-                  disabled={hits.length === 0 || replacing}
-                  title={t("editor.replaceAll")}
-                  aria-label={t("editor.replaceAll")}
-                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-30 dark:hover:bg-white/[0.08]"
-                >
-                  {replacing ? <Loader2 size={12} className="animate-spin" /> : <ReplaceAll size={12} />}
-                </button>
+                <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center">
+                  <Tooltip side="bottom" label={t("editor.replaceAll")}>
+                    <button
+                      onClick={() => void replace()}
+                      disabled={hits.length === 0 || replacing}
+                      aria-label={t("editor.replaceAll")}
+                      className={iconButtonClass({ size: "xs" })}
+                    >
+                      {replacing ? <Loader2 size={14} className="animate-spin" /> : <ReplaceAll size={14} />}
+                    </button>
+                  </Tooltip>
+                </div>
               </div>
             )}
 
             {showFilters && (
-              <div className="space-y-1">
+              <>
                 <input
                   value={include}
                   onChange={(e) => setInclude(e.target.value)}
                   placeholder={t("editor.filesToInclude")}
-                  className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-1 font-mono text-[11px] outline-none"
+                  className={fieldClass({ size: "sm", className: "w-full font-mono" })}
                 />
                 <input
                   value={exclude}
                   onChange={(e) => setExclude(e.target.value)}
                   placeholder={t("editor.filesToExclude")}
-                  className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-1 font-mono text-[11px] outline-none"
+                  className={fieldClass({ size: "sm", className: "w-full font-mono" })}
                 />
-              </div>
+              </>
             )}
-          </div>
-
-          {/* No close button. The panel is a sidebar section reached from the activity bar, and the
-              icon that opens it is the icon that closes it — an X inside as well made "closed" two
-              controls in two places disagreeing about one piece of state. Escape still closes it,
-              which is what the input's own keydown is for. */}
-          <div className="mt-0.5 flex shrink-0 flex-col items-center gap-0.5">
-            <Toggle
-              active={showFilters || Boolean(include || exclude)}
-              onClick={() => setShowFilters((v) => !v)}
-              title={t("editor.toggleFilters")}
-            >
-              <MoreHorizontal size={12} />
-            </Toggle>
           </div>
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
-        {error && <p className="px-3 py-2 text-[11px] text-[var(--cf-danger)]">{error}</p>}
+      <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-1">
+        {error && <p className="px-1.5 py-2 text-[12px] text-[var(--cf-danger)]">{error}</p>}
         {/* The standalone spinner only when there is nothing on screen yet. Shown during every
             re-run it pushed the whole list down and back on each save — a re-run is the panel
             agreeing with the repo, not the user asking a new question, so once there are rows the
             spinner rides on the count line below instead. */}
         {searching && shownCount === 0 && (
-          <div className="flex items-center gap-1.5 px-3 py-2 text-[11px] text-[var(--cf-text-muted)]">
-            <Loader2 size={11} className="animate-spin" />
+          <div className="flex items-center gap-1.5 px-1.5 py-2 text-[12px] text-[var(--cf-text-muted)]">
+            <Loader2 size={13} className="animate-spin" />
             {t("editor.searching")}
           </div>
         )}
         {/* Gated on `stale` as well, so "No matches" can't flash in the window between an edit and
             the re-grep that will find the match the user just typed. */}
         {!busy && !stale && !error && query.trim() && shownCount === 0 && (
-          <p className="px-3 py-2 text-[11px] text-[var(--cf-text-muted)]">{t("editor.noMatches")}</p>
+          <p className="px-1.5 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("editor.noMatches")}</p>
         )}
         {shownCount > 0 && (
-          <p className="flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
-            <span>
+          <p className="flex items-center gap-1.5 px-1.5 py-1.5 text-[11px] text-[var(--cf-text-faint)]">
+            <span className="tabular-nums">
               {t("editor.matchCount", { hits: shownCount, files: grouped.length })}
               {truncated ? ` · ${t("editor.searchTruncated")}` : ""}
             </span>
@@ -526,7 +555,7 @@ export function SearchPanel({
                 off and on again between the two. */}
             {(busy || stale) && (
               <span className="flex items-center gap-1">
-                <Loader2 size={10} className="animate-spin" />
+                <Loader2 size={12} className="animate-spin" />
                 {t("editor.searchUpdating")}
               </span>
             )}
@@ -536,18 +565,19 @@ export function SearchPanel({
           const isCollapsed = collapsed[path];
           return (
             <div key={path} className="group/file pb-1">
-              <div className="flex items-center gap-1 px-1.5 py-0.5">
+              <div className="flex h-[26px] items-center gap-1 rounded-md pl-1.5 pr-0.5 hover:bg-[var(--cf-hover)]">
                 <button
                   onClick={() => setCollapsed((c) => ({ ...c, [path]: !c[path] }))}
-                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                  aria-expanded={!isCollapsed}
+                  className="flex h-full min-w-0 flex-1 items-center gap-1.5 text-left"
                 >
                   {isCollapsed ? (
-                    <ChevronRight size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+                    <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
                   ) : (
-                    <ChevronDown size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+                    <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
                   )}
-                  <FileGlyph path={path} size={12} />
-                  <span className="truncate text-[11px] text-[var(--cf-text)]">{path}</span>
+                  <FileGlyph path={path} size={13} />
+                  <span className="truncate text-[12px] text-[var(--cf-text)]">{path}</span>
                   {/* These hits came from the buffer, not from disk — so a line number that
                       disagrees with a colleague's checkout is explained rather than mysterious. */}
                   {bufferHits?.has(path) && (
@@ -556,18 +586,27 @@ export function SearchPanel({
                       className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent)]"
                     />
                   )}
-                  <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{fileHits.length}</span>
+                  <span className="ml-auto shrink-0 pr-1 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+                    {fileHits.length}
+                  </span>
                 </button>
                 {showReplace && (
-                  <button
-                    onClick={() => void replace(path)}
-                    disabled={replacing || Boolean(bufferHits?.has(path))}
-                    title={bufferHits?.has(path) ? t("editor.replaceNeedsSave") : t("editor.replaceInFile")}
-                    aria-label={t("editor.replaceInFile")}
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:bg-black/[0.05] group-hover/file:opacity-100 disabled:opacity-30 dark:hover:bg-white/[0.08]"
+                  <Tooltip
+                    side="right"
+                    label={bufferHits?.has(path) ? t("editor.replaceNeedsSave") : t("editor.replaceInFile")}
                   >
-                    <Replace size={11} />
-                  </button>
+                    <button
+                      onClick={() => void replace(path)}
+                      disabled={replacing || Boolean(bufferHits?.has(path))}
+                      aria-label={t("editor.replaceInFile")}
+                      className={iconButtonClass({
+                        size: "xs",
+                        className: "opacity-0 focus-visible:opacity-100 group-hover/file:opacity-100",
+                      })}
+                    >
+                      <Replace size={13} />
+                    </button>
+                  </Tooltip>
                 )}
               </div>
               {!isCollapsed &&
@@ -579,10 +618,12 @@ export function SearchPanel({
                     key={`${hit.path}:${at}`}
                     onClick={() => onOpenHit(hit.path, hit.line_no)}
                     style={riseDelay(at)}
-                    className="cf-rise flex w-full items-start gap-2 rounded px-2 py-0.5 pl-7 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                    className="cf-rise flex w-full items-baseline gap-2 rounded-md py-1 pl-7 pr-2 text-left hover:bg-[var(--cf-hover)]"
                   >
-                    <span className="shrink-0 font-mono text-[10px] text-[var(--cf-text-muted)]">{hit.line_no}</span>
-                    <span className="truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
+                    <span className="min-w-6 shrink-0 text-right font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+                      {hit.line_no}
+                    </span>
+                    <span className="truncate font-mono text-[12px] text-[var(--cf-text-muted)]">
                       {hit.line.trim()}
                     </span>
                   </button>

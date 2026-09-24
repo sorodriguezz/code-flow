@@ -28,16 +28,16 @@ export const COLUMN_GUTTER = "px-6";
 /** A row in the conversation sidebar: hit area, hover and selection in one place, because a pinned
  *  row and an ordinary one have to read as the same list. Mirrors `notesChrome.ROW`. */
 export const ROW =
-  "group/row flex w-full items-center gap-2 rounded-lg px-2 py-[7px] text-left text-[12.5px] transition-colors";
+  "group/row flex w-full items-center gap-2 rounded-lg px-2 py-[7px] text-left text-[13px] transition-colors";
 
-export const ROW_IDLE = "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]";
+export const ROW_IDLE = "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]";
 
 export const ROW_ACTIVE = "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]";
 
 /** An icon button in a header or toolbar — shape and hover only, no colour of its own, so a button
  *  that carries one does not have to out-specify the muted default in the cascade. */
 export const ICON_BUTTON =
-  "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-white/[0.07]";
+  "flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30";
 
 /** The app's own language decides how timestamps read, not the OS locale — otherwise a chat in a
  *  Spanish UI would print English dates. Lifted verbatim from `AiPanel` so the two transcripts
@@ -98,7 +98,7 @@ export function CostChip({ turns, title }: { turns: number; title: string }) {
   return (
     <span
       title={title}
-      className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-[var(--cf-border)] px-1.5 text-[9.5px] leading-[15px] text-[var(--cf-text-muted)]"
+      className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-[var(--cf-border)] px-1.5 text-[10.5px] leading-[15px] text-[var(--cf-text-muted)]"
     >
       <Coins size={9} />
       {turns}

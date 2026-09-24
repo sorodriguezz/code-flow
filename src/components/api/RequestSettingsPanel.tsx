@@ -5,6 +5,7 @@ import { useApiStore } from "../../state/apiStore";
 import { useT } from "../../state/languageStore";
 import { defaultRequestSettings } from "../../types/api";
 import type { RequestSettings } from "../../types/api";
+import { buttonClass } from "../common/Button";
 
 /** Mirrors `DEFAULT_ENCODE_URL` in `lib/api/send.ts`: `encodeUrl` is the one override with no
  * counterpart in `ApiSettings`, so `null` falls back to a constant rather than to a global. */
@@ -56,7 +57,7 @@ function SettingRow({
             type="button"
             onClick={onReset}
             title={t("api.settings.useGlobal")}
-            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className={buttonClass({ variant: "secondary", size: "sm" })}
           >
             <RotateCcw size={10} />
             {t("api.settings.useGlobal")}

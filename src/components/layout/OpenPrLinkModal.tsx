@@ -22,6 +22,8 @@ import { useT } from "../../state/languageStore";
 import { ReviewLevelSelector } from "../ai/ReviewLevelSelector";
 import { CloneRepoModal } from "./CloneRepoModal";
 import type { PrLinkResolution, PullRequestSummary } from "../../types/domain";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 /** Cheap "is this worth auto-resolving?" test for whatever happens to be on the clipboard — the
  * backend is the real parser, this only decides whether to spend a round-trip on open. */
@@ -41,7 +43,7 @@ function looksLikePrLink(text: string): boolean {
 function PrPreview({ pr }: { pr: PullRequestSummary }) {
   const t = useT();
   return (
-    <div className="rounded-lg border border-[var(--cf-border)] bg-black/[0.02] p-2.5 dark:bg-white/[0.03]">
+    <div className="rounded-lg border border-[var(--cf-border)] bg-[var(--cf-hover)] p-2.5">
       <p className="flex items-start gap-1.5 text-[12px] font-semibold">
         <GitPullRequest size={12} className="mt-0.5 shrink-0 text-[var(--cf-accent)]" />
         <span className="min-w-0 flex-1">
@@ -184,12 +186,12 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
             if (e.key === "Enter") void resolve(url);
           }}
           placeholder={t("prLink.placeholder")}
-          className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          className={fieldClass({ className: "min-w-0 flex-1 font-mono" })}
         />
         <button
           onClick={() => void resolve(url)}
           disabled={!url.trim() || resolving}
-          className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] font-medium hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
+          className={buttonClass({ variant: "secondary" })}
         >
           {resolving ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
           {resolving ? t("prLink.searching") : t("prLink.find")}
@@ -251,13 +253,13 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
             <div className="flex-1" />
             <button
               onClick={() => void openPr(resolution, false)}
-              className="rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              className={buttonClass({ variant: "secondary" })}
             >
               {t("prLink.open")}
             </button>
             <button
               onClick={() => void openPr(resolution, true)}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
+              className={buttonClass({ variant: "primary" })}
             >
               <Sparkles size={13} />
               {t("prLink.review")}
@@ -272,7 +274,7 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
             <button
               onClick={() => setShowClone(true)}
               disabled={!activeWorkspaceId}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
+              className={buttonClass({ variant: "secondary" })}
             >
               <GitBranchPlus size={13} />
               {t("prLink.cloneAndReview")}
@@ -280,7 +282,7 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
             <button
               onClick={() => openWithoutCloning(resolution)}
               disabled={!activeWorkspaceId}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+              className={buttonClass({ variant: "primary" })}
             >
               <Sparkles size={13} />
               {t("prLink.quickReview")}
@@ -291,7 +293,7 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
         {resolution?.status !== "Ready" && resolution?.status !== "NoLocalRepo" && (
           <button
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost" })}
           >
             {t("common.cancel")}
           </button>
@@ -308,10 +310,10 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
           onKeyDown={(e) => {
             if (e.key === "Escape") onClose();
           }}
-          className="flex w-[480px] flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+          className="flex w-[480px] flex-col rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
         >
           <div className="mb-3 flex shrink-0 items-center justify-between">
-            <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
+            <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
               <Link2 size={14} />
               {t("prLink.title")}
             </h3>

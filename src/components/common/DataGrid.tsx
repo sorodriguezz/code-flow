@@ -41,14 +41,16 @@ export const DEFAULT_COLUMN_WIDTH = 160;
  *  a 26px row is unreadable and laying it out costs more than reading it. */
 const CELL_PREVIEW_LIMIT = 300;
 
-/** The font the cells are drawn in, as a canvas font string — see `autoFitWidths`. */
-const CELL_FONT = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
+/** The font the cells are drawn in, as a canvas font string — see `autoFitWidths`. These name the
+ *  same faces as `--font-mono` / `--font-sans` in `index.css`: a width fitted in one face and drawn
+ *  in another is a column that is either cut or padded. */
+const CELL_FONT = '12px "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
 /** The same size in the page's own face, for a column that isn't `mono`. Measuring a proportional
  *  column against the monospace stack fits it to a width its text never uses — every glyph in the
  *  mono face is as wide as the widest one, so an `Inserted` column of dates comes out a third too
  *  wide and pushes the columns after it off the window. */
-const CELL_SANS_FONT = "12px ui-sans-serif, system-ui, sans-serif";
-const HEADER_FONT = "600 11px ui-sans-serif, system-ui, sans-serif";
+const CELL_SANS_FONT = '12px "Instrument Sans Variable", "Instrument Sans", ui-sans-serif, system-ui, sans-serif';
+const HEADER_FONT = '600 11px "Instrument Sans Variable", "Instrument Sans", ui-sans-serif, system-ui, sans-serif';
 
 /** Long values are shown as one line: a newline inside a 26px row would be invisible anyway, and
  *  seeing `\n` is how you know it's there. */
@@ -392,13 +394,13 @@ export function DataGrid<T>({
                   className={`border-b border-[var(--cf-border)] ${
                     isSelected
                       ? "bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)]"
-                      : "hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                      : "hover:bg-[var(--cf-hover)]"
                   } ${bodyClass ?? ""}`}
                 >
                   {/* The row number, pinned: the anchor for "the third row" in any conversation
                       about a result, and the handle you click to build a selection. */}
                   <div
-                    className={`sticky left-0 z-[5] flex shrink-0 items-stretch justify-end border-r border-[var(--cf-border)] text-[10px] tabular-nums ${
+                    className={`sticky left-0 z-[5] flex shrink-0 items-stretch justify-end border-r border-[var(--cf-border)] text-[10.5px] tabular-nums ${
                       isSelected
                         ? "bg-[color-mix(in_oklab,var(--cf-accent)_22%,var(--cf-surface))] font-semibold text-[var(--cf-text)]"
                         : "bg-[var(--cf-surface)] text-[var(--cf-text-muted)]"

@@ -8,6 +8,7 @@ import {
   FolderOpen,
   FolderSync,
   HardDrive,
+  Loader2,
   Pencil,
   RefreshCw,
   RotateCcw,
@@ -15,6 +16,7 @@ import {
 } from "lucide-react";
 import { Field, GhostButton, PrimaryButton, Row } from "../api/ApiModal";
 import { Actions, Note, Status, type Tone } from "../api/settingsChrome";
+import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { confirmAction } from "../../state/confirmStore";
@@ -118,13 +120,19 @@ const STEPS: { id: Step; labelKey: TranslationKey; hintKey?: TranslationKey }[] 
   { id: "schedule", labelKey: "backup.stepSchedule", hintKey: "backup.stepScheduleHint" },
 ];
 
-/** A value the user reads rather than edits, and can click to open where it points. */
+/** A value the user reads rather than edits, and can click to open where it points. A code well:
+ * the sunken tone, in mono. */
 function PathReadout({ value, onReveal }: { value: string; onReveal?: () => void }) {
   const shared =
-    "mb-1.5 block w-full truncate rounded border border-[var(--cf-border)] bg-black/[0.02] px-1.5 py-1 text-left font-mono text-[11px] text-[var(--cf-text-muted)] dark:bg-white/[0.03]";
+    "mb-1.5 block w-full truncate rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 py-1 text-left font-mono text-[11px] text-[var(--cf-text-muted)]";
   if (!onReveal) return <p className={shared} title={value}>{value}</p>;
   return (
-    <button type="button" onClick={onReveal} title={value} className={`${shared} hover:text-[var(--cf-text)]`}>
+    <button
+      type="button"
+      onClick={onReveal}
+      title={value}
+      className={`${shared} transition-colors duration-100 hover:border-[var(--cf-border-strong)] hover:text-[var(--cf-text)]`}
+    >
       {value}
     </button>
   );
@@ -213,7 +221,13 @@ function DriveConnection({
             <Status tone="success">
               {account === "" ? t("backup.driveConnected") : t("backup.driveConnectedAs", { email: account })}
             </Status>
-            <GhostButton onClick={() => void disconnect()}>{t("backup.driveDisconnect")}</GhostButton>
+            <button
+              type="button"
+              onClick={() => void disconnect()}
+              className={buttonClass({ variant: "danger-ghost" })}
+            >
+              {t("backup.driveDisconnect")}
+            </button>
           </>
         ) : (
           <>
@@ -222,7 +236,7 @@ function DriveConnection({
               onClick={() => void connect()}
               disabled={connecting || clientId.trim() === "" || !status.has_secret}
             >
-              <Cloud size={12} />
+              {connecting ? <Loader2 size={13} className="animate-spin" /> : <Cloud size={13} />}
               {connecting ? t("backup.driveWaiting") : t("backup.driveConnect")}
             </GhostButton>
           </>
@@ -306,15 +320,19 @@ function OneDriveConnection({
                 ? t("backup.onedriveConnected")
                 : t("backup.onedriveConnectedAs", { email: account })}
             </Status>
-            <GhostButton onClick={() => void disconnect()}>
+            <button
+              type="button"
+              onClick={() => void disconnect()}
+              className={buttonClass({ variant: "danger-ghost" })}
+            >
               {t("backup.onedriveDisconnect")}
-            </GhostButton>
+            </button>
           </>
         ) : (
           <>
             <Status tone="muted">{t("backup.onedriveNotConnected")}</Status>
             <GhostButton onClick={() => void connect()} disabled={connecting || clientId.trim() === ""}>
-              <Cloud size={12} />
+              {connecting ? <Loader2 size={13} className="animate-spin" /> : <Cloud size={13} />}
               {connecting ? t("backup.driveWaiting") : t("backup.onedriveConnect")}
             </GhostButton>
           </>
@@ -347,10 +365,10 @@ function TargetCard({
       type="button"
       onClick={onClick}
       aria-pressed={selected}
-      className={`relative flex items-start gap-2 rounded-lg border p-3 text-left transition-colors ${
+      className={`relative flex items-start gap-2 rounded-lg border p-3 text-left transition-colors duration-100 ${
         selected
           ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]"
-          : "border-[var(--cf-border)] hover:border-[color-mix(in_oklab,var(--cf-accent)_50%,transparent)]"
+          : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)] hover:bg-[var(--cf-hover)]"
       }`}
     >
       <Icon
@@ -358,7 +376,7 @@ function TargetCard({
         className={`mt-[1px] shrink-0 ${selected ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`}
       />
       <span className="min-w-0 pr-4">
-        <span className="block text-[12.5px] text-[var(--cf-text)]">{label}</span>
+        <span className="block text-[13px] text-[var(--cf-text)]">{label}</span>
         <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">{hint}</span>
       </span>
       {selected && <Check size={13} className="absolute right-2 top-2.5 text-[var(--cf-accent)]" />}
@@ -372,8 +390,8 @@ function SummaryRow({ label, value, mono = false }: { label: string; value: stri
     <div className="flex items-baseline gap-3 py-[3px]">
       <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{label}</span>
       <span
-        className={`min-w-0 flex-1 truncate text-right text-[12px] text-[var(--cf-text)] ${
-          mono ? "font-mono text-[11px]" : ""
+        className={`min-w-0 flex-1 truncate text-right text-[12px] tabular-nums text-[var(--cf-text)] ${
+          mono ? "font-mono" : ""
         }`}
         title={value}
       >
@@ -645,25 +663,31 @@ export function BackupAutomatic({
 
         {/* Reset is pushed to its own end of the row rather than lined up with the other three:
             it is the only one here that throws away an answer, and a button that undoes the setup
-            should not sit shoulder to shoulder with the one that edits it. */}
+            should not sit shoulder to shoulder with the one that edits it. Red for the same reason. */}
         <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
           {/* `state.running` covers the scheduler's runs as well as this button's, so a backup that
               started on the ticker while settings were open shows here rather than leaving a
               pressable button in front of a run already under way. */}
           <Actions>
             <PrimaryButton onClick={() => void onRunNow()} disabled={busy || running || !runnable}>
-              <RefreshCw size={12} className={running ? "animate-spin" : ""} />
+              {running ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
               {running ? t("backup.runningNow") : t("backup.runNow")}
             </PrimaryButton>
             <GhostButton onClick={openWizard}>
-              <Pencil size={12} />
+              <Pencil size={13} />
               {t("backup.edit")}
             </GhostButton>
           </Actions>
-          <GhostButton onClick={() => void reset()} disabled={running} title={t("backup.resetHint")}>
-            <RotateCcw size={12} />
+          <button
+            type="button"
+            onClick={() => void reset()}
+            disabled={running}
+            title={t("backup.resetHint")}
+            className={buttonClass({ variant: "danger-ghost" })}
+          >
+            <RotateCcw size={13} />
             {t("backup.reset")}
-          </GhostButton>
+          </button>
         </div>
       </>
     );
@@ -692,19 +716,21 @@ export function BackupAutomatic({
                 disabled={!reachable}
                 onClick={() => setStep(id)}
                 aria-current={active ? "step" : undefined}
-                className={`flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1 text-[12px] transition-colors ${
+                className={`flex min-h-[30px] w-full items-center justify-center gap-[7px] rounded-md px-2.5 py-1 text-[13px] font-medium transition-colors duration-100 ${
                   active
-                    ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                    ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
                     : reachable
-                      ? "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                      : "text-[var(--cf-text-muted)]/50"
+                      ? "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+                      : "text-[var(--cf-text-faint)]"
                 }`}
               >
+                {/* The number takes the step's own colour unless it is the current one, which is
+                    the only place the accent is spent. */}
                 <span
-                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-medium ${
+                  className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums ${
                     active
-                      ? "bg-[var(--cf-accent)] text-white"
-                      : "border border-[var(--cf-border)] text-[var(--cf-text-muted)]"
+                      ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]"
+                      : "shadow-[inset_0_0_0_1.5px_var(--cf-border-strong)]"
                   }`}
                 >
                   {index + 1}
@@ -717,7 +743,7 @@ export function BackupAutomatic({
       </ol>
 
       {activeStep.hintKey && (
-        <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+        <p className="mb-3 text-[12px] leading-snug text-[var(--cf-text-muted)]">
           {t(activeStep.hintKey)}
         </p>
       )}
@@ -735,7 +761,7 @@ export function BackupAutomatic({
         <>
           {detected.length > 0 && (
             <>
-              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                 {t("backup.foundHere")}
               </p>
               <div className="mb-3 grid grid-cols-2 gap-2">
@@ -750,7 +776,7 @@ export function BackupAutomatic({
                   />
                 ))}
               </div>
-              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                 {t("backup.otherPlaces")}
               </p>
             </>
@@ -779,7 +805,7 @@ export function BackupAutomatic({
             <>
               <Row label={t("backup.folder")} wide>
                 <GhostButton onClick={() => void browse()}>
-                  <FolderOpen size={12} />
+                  <FolderOpen size={13} />
                   {t("backup.browse")}
                 </GhostButton>
               </Row>
@@ -820,7 +846,7 @@ export function BackupAutomatic({
         <>
           <Row label={t("backup.interval")} wide>
             <Select
-              size="sm"
+              size="field"
               value={String(working.intervalMinutes)}
               onChange={(value) => edit({ intervalMinutes: Number(value) })}
               options={INTERVALS.map(({ value, labelKey }) => ({ value, label: t(labelKey) }))}
@@ -838,6 +864,7 @@ export function BackupAutomatic({
             <span className="block w-full">
               <Field
                 type="number"
+                className="tabular-nums"
                 value={String(working.keepCopies)}
                 onChange={(value) => {
                   const parsed = Number(value);
@@ -860,7 +887,7 @@ export function BackupAutomatic({
           onClick={() => setStep(STEPS[Math.max(0, stepIndex - 1)].id)}
           disabled={stepIndex === 0}
         >
-          <ArrowLeft size={12} />
+          <ArrowLeft size={13} />
           {t("backup.back")}
         </GhostButton>
 
@@ -887,11 +914,11 @@ export function BackupAutomatic({
               disabled={(step === "where" && !targetPicked) || (step === "destination" && !ready)}
             >
               {t("backup.next")}
-              <ArrowRight size={12} />
+              <ArrowRight size={13} />
             </PrimaryButton>
           ) : (
             <PrimaryButton onClick={() => void save()} disabled={saving || !ready}>
-              <Check size={12} />
+              <Check size={13} />
               {configured ? t("common.save") : t("backup.finish")}
             </PrimaryButton>
           )}
@@ -899,7 +926,7 @@ export function BackupAutomatic({
               and then having to walk to the end to keep it is the thing Edit exists to avoid. */}
           {configured && stepIndex < STEPS.length - 1 && (
             <GhostButton onClick={() => void save()} disabled={saving || !ready}>
-              <Check size={12} />
+              <Check size={13} />
               {t("common.save")}
             </GhostButton>
           )}

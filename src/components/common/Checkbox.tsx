@@ -47,15 +47,15 @@ export function Checkbox({
         aria-hidden
         className="pointer-events-none flex h-4 w-4 items-center justify-center rounded-[4px] border transition-colors duration-100 peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--cf-accent)] peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-[var(--cf-surface)]"
         style={{
-          borderColor: filled ? "var(--cf-accent)" : "var(--cf-border)",
+          borderColor: filled ? "var(--cf-accent)" : "var(--cf-field-border)",
           backgroundColor: filled ? "var(--cf-accent)" : "transparent",
           opacity: disabled ? 0.4 : 1,
         }}
       >
         {checked ? (
-          <Check size={11} strokeWidth={3} className="text-white" />
+          <Check size={11} strokeWidth={3} className="text-[var(--cf-on-accent)]" />
         ) : indeterminate ? (
-          <Minus size={11} strokeWidth={3} className="text-white" />
+          <Minus size={11} strokeWidth={3} className="text-[var(--cf-on-accent)]" />
         ) : null}
       </span>
     </span>

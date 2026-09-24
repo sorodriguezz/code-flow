@@ -107,7 +107,7 @@ export function VaultLockScreen() {
         {/* Only on setup. This is the one thing about the design a user must know *before* choosing
             a password, and it is the reason the app cannot help them later. */}
         {!initialised && (
-          <p className="mb-4 flex items-start gap-2 rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/10 px-3 py-2 text-[11.5px] leading-relaxed text-[var(--cf-text)]">
+          <p className="mb-4 flex items-start gap-2 rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/10 px-3 py-2 text-[12px] leading-relaxed text-[var(--cf-text)]">
             <ShieldAlert size={14} className="mt-[1px] shrink-0 text-[var(--cf-warning)]" />
             <span>{t("vault.setupWarning")}</span>
           </p>
@@ -168,7 +168,7 @@ export function VaultLockScreen() {
             </>
           )}
 
-          <label className="flex items-start gap-2 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+          <label className="flex items-start gap-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
             <input
               type="checkbox"
               checked={remember}
@@ -183,17 +183,17 @@ export function VaultLockScreen() {
           </label>
 
           {tooShort && (
-            <p className="text-[11.5px] text-[var(--cf-danger)]">
+            <p className="text-[12px] text-[var(--cf-danger)]">
               {t("vault.tooShort", { n: MIN_LENGTH })}
             </p>
           )}
           {mismatch && (
-            <p className="text-[11.5px] text-[var(--cf-danger)]">{t("vault.passwordsDiffer")}</p>
+            <p className="text-[12px] text-[var(--cf-danger)]">{t("vault.passwordsDiffer")}</p>
           )}
           {/* The backend's own message, shown beside the box it is about rather than as a toast:
               a wrong password is an answer to what was just typed. */}
           {unlockError && !tooShort && !mismatch && (
-            <p className="text-[11.5px] text-[var(--cf-danger)]">{unlockError}</p>
+            <p className="text-[12px] text-[var(--cf-danger)]">{unlockError}</p>
           )}
 
           <button type="submit" disabled={!canSubmit} className={`${BUTTON} mt-1`}>
@@ -291,7 +291,7 @@ function VaultBooting({ resuming }: { resuming: boolean }) {
           <>
             {/* The backend's own words, kept: "it did not work" without saying what happened is not
                 something anyone can act on, and this is the one failure with no door behind it. */}
-            <p className="mt-2 max-w-xs break-words text-[11.5px] leading-relaxed text-[var(--cf-danger)]">
+            <p className="mt-2 max-w-xs break-words text-[12px] leading-relaxed text-[var(--cf-danger)]">
               {statusError}
             </p>
             <button

@@ -10,16 +10,18 @@ export interface AccentOption {
   dark: string;
 }
 
-// Curated, not freeform: each pairs a light-theme shade with a lighter dark-theme shade
-// of the same hue, following the same 500/400 pattern already used for the default indigo,
-// so every option keeps solid contrast against both --cf-bg values.
+// Curated, not freeform, and each option is a *pair* chosen for contrast rather than one hue at two
+// brightnesses. The light shade carries white text at ≥ 4.5:1 on Papel (six of the old 500s did
+// not — cyan was 2.4:1); the dark shade is the lifted 400 and carries the dark ink `--cf-on-accent`
+// switches to on Nocturno, since white on every one of these measured under 3:1. Names are shown
+// through `t("accent.<id>")`; `label` stays as the fallback.
 export const ACCENT_OPTIONS: AccentOption[] = [
-  { id: "indigo", label: "Indigo", light: "#6366f1", dark: "#818cf8" },
-  { id: "blue", label: "Blue", light: "#3b82f6", dark: "#60a5fa" },
-  { id: "cyan", label: "Cyan", light: "#06b6d4", dark: "#22d3ee" },
-  { id: "teal", label: "Teal", light: "#0d9488", dark: "#2dd4bf" },
-  { id: "green", label: "Green", light: "#16a34a", dark: "#4ade80" },
-  { id: "amber", label: "Amber", light: "#d97706", dark: "#fbbf24" },
+  { id: "indigo", label: "Indigo", light: "#5457e0", dark: "#818cf8" },
+  { id: "blue", label: "Blue", light: "#2563d9", dark: "#60a5fa" },
+  { id: "cyan", label: "Cyan", light: "#0e7490", dark: "#22d3ee" },
+  { id: "teal", label: "Teal", light: "#0f766e", dark: "#2dd4bf" },
+  { id: "green", label: "Green", light: "#15803d", dark: "#4ade80" },
+  { id: "amber", label: "Amber", light: "#b45309", dark: "#fbbf24" },
   { id: "rose", label: "Rose", light: "#e11d48", dark: "#fb7185" },
   { id: "purple", label: "Purple", light: "#9333ea", dark: "#c084fc" },
   // The hue the first eight left out: everything between purple and rose. Fuchsia is the one warm

@@ -76,7 +76,7 @@ export function AzureAccountPanel({ tab }: { tab: RemoteAzureTab }) {
               className={`flex shrink-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition-colors ${
                 active
                   ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.05]"
+                  : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
               }`}
             >
               <Icon size={13} className="shrink-0" />

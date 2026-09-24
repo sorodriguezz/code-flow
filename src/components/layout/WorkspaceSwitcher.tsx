@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Briefcase, Check, ChevronDown, Plus } from "lucide-react";
+import { Briefcase, Check, ChevronsUpDown, Plus } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import { Tooltip } from "../common/Tooltip";
+import { monogramStyle } from "../../lib/monogram";
+import { fieldClass } from "../common/recipes";
 
 /** Fixed, so the list doesn't change width with whatever the workspaces happen to be called — and
  *  so it can be positioned before it has been measured. */
@@ -106,10 +108,10 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
    *  same square the project chips below it are — a rail reads as a column of one kind of thing. */
   const tile = (
     <span
-      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white"
-      style={{ background: color }}
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px]"
+      style={monogramStyle(color)}
     >
-      <Briefcase size={13} />
+      <Briefcase size={14} />
     </span>
   );
 
@@ -133,11 +135,11 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
         <button
           onClick={toggle}
           aria-expanded={open}
-          className="flex h-8 w-full items-center gap-2 rounded-lg py-1 pl-1 pr-1.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          className="flex h-9 w-full items-center gap-2.5 rounded-lg py-1 pl-1 pr-2 hover:bg-[var(--cf-hover)]"
         >
           {tile}
           <span className="min-w-0 flex-1 truncate text-left text-[14px] font-semibold">{name}</span>
-          <ChevronDown size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
+          <ChevronsUpDown size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
         </button>
       )}
 
@@ -159,7 +161,7 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
                 className={`flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] ${
                   ws.id === activeWorkspaceId
                     ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                    : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                    : "hover:bg-[var(--cf-hover)]"
                 }`}
               >
                 <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: ws.color }} />
@@ -178,7 +180,7 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
                     else if (e.key === "Escape") setCreating(false);
                   }}
                   placeholder={t("sidebar.workspaceName")}
-                  className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+                  className={fieldClass({ size: "sm", className: "flex-1" })}
                 />
                 <button onClick={create} className="text-[var(--cf-accent)]">
                   <Check size={15} />
@@ -187,7 +189,7 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
             ) : (
               <button
                 onClick={() => setCreating(true)}
-                className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
               >
                 {/* Boxed to the same 10px the colour dots occupy, so this row's label starts on the
                     same column as the workspace names above it instead of half a character to their

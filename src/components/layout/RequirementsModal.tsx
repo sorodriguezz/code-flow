@@ -3,6 +3,7 @@ import { TriangleAlert, X } from "lucide-react";
 import { useRequirementsStore } from "../../state/requirementsStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { buttonClass } from "../common/Button";
 
 /**
  * The first-launch report, shown only when something is actually wrong.
@@ -46,11 +47,11 @@ export function RequirementsModal() {
     <div className="fixed inset-0 z-[60] flex items-start justify-center bg-black/30 pt-20" onClick={dismiss}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[70vh] w-[540px] flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+        className="flex max-h-[70vh] w-[540px] flex-col rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
       >
         <div className="flex shrink-0 items-start justify-between gap-2 border-b border-[var(--cf-border)] p-4">
           <div className="min-w-0">
-            <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
+            <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
               <TriangleAlert size={14} className="shrink-0 text-[var(--cf-warning)]" />
               {t("requirements.title")}
             </h3>
@@ -70,17 +71,17 @@ export function RequirementsModal() {
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
           {problems.map((problem) => (
             <div key={problem.id} className="rounded-lg border border-[var(--cf-border)] p-3">
-              <p className="text-[12.5px] font-medium text-[var(--cf-text)]">
+              <p className="text-[13px] font-medium text-[var(--cf-text)]">
                 {t(`requirements.${problem.id}` as TranslationKey)}
               </p>
-              <p className="mt-1 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+              <p className="mt-1 text-[12px] leading-snug text-[var(--cf-text-muted)]">
                 {t(`requirements.${problem.id}Hint` as TranslationKey)}
               </p>
               {/* The machine's own words, and the one part of this box that is not ours to
                   translate. Monospace and selectable, because the next thing somebody does with an
                   unfamiliar error is search for it. */}
               {problem.detail && (
-                <p className="mt-2 select-text break-all rounded-md bg-black/[0.04] px-2 py-1.5 font-mono text-[11px] text-[var(--cf-text-muted)] dark:bg-white/[0.06]">
+                <p className="mt-2 select-text break-all rounded-md bg-[var(--cf-hover)] px-2 py-1.5 font-mono text-[11px] text-[var(--cf-text-muted)]">
                   {problem.detail}
                 </p>
               )}
@@ -91,7 +92,7 @@ export function RequirementsModal() {
         <div className="flex shrink-0 justify-end border-t border-[var(--cf-border)] p-3">
           <button
             onClick={dismiss}
-            className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12.5px] font-medium text-white"
+            className={buttonClass({ variant: "primary" })}
           >
             {t("requirements.dismiss")}
           </button>

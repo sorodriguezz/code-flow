@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Cpu, Square } from "lucide-react";
 import { useAiRunStore, type AiRunLine } from "../../state/aiRunStore";
+import { buttonClass } from "../common/Button";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { useT } from "../../state/languageStore";
 
@@ -89,17 +90,18 @@ export function AiRunLog({
   const quiet = running && !cancelling && quietFor >= QUIET_AFTER_SECONDS;
 
   const chevron = expanded ? (
-    <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+    <ChevronDown size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
   ) : (
-    <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+    <ChevronRight size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
   );
 
   const body = expanded && lines.length > 0 && (
     <div
       ref={scrollRef}
       // Selectable: this is the run's own output, and the reason anyone expands it is to take a
-      // stack trace or a path out of it and go look.
-      className="max-h-48 select-text overflow-auto border-t border-[var(--cf-border)] px-2.5 py-1.5 font-mono text-[10px] leading-[1.5]"
+      // stack trace or a path out of it and go look. The sunken well is where every log in the app
+      // sits, so the raw output reads as output rather than as more of the card.
+      className="max-h-48 select-text overflow-auto border-t border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 py-2 font-mono text-[11px] leading-[1.5]"
     >
       {lines.map((line, i) => (
         <div
@@ -117,13 +119,14 @@ export function AiRunLog({
   // A finished trace is a record: one quiet row that opens. Nothing to time, nothing to stop.
   if (!running) {
     return (
-      <div className="overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]">
+      <div className="overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)]">
         <button
           onClick={onToggle}
-          className="flex w-full items-center gap-1.5 px-2 py-1 text-left"
+          aria-expanded={expanded}
+          className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left transition-colors duration-100 hover:bg-[var(--cf-hover)]"
         >
           {chevron}
-          <span className="truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
+          <span className="truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
             {label ?? lastLine ?? t("ai.runOutput")}
           </span>
         </button>
@@ -133,18 +136,19 @@ export function AiRunLog({
   }
 
   return (
-    <div className="cf-fade-in overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]">
-      <div className="flex items-center gap-2.5 px-2.5 py-2">
+    <div className="cf-fade-in overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)]">
+      <div className="flex items-center gap-2.5 px-3 py-2.5">
         <ThinkingOrb size="sm" />
 
         <button
           onClick={onToggle}
           title={quiet ? t("ai.quietHint") : undefined}
+          aria-expanded={expanded}
           className="min-w-0 flex-1 text-left"
         >
           <span className="flex items-center gap-1.5">
             <span
-              className={`shrink-0 text-[12px] font-medium ${
+              className={`shrink-0 text-[13px] font-semibold ${
                 quiet ? "text-[var(--cf-warning)]" : "text-[var(--cf-text)]"
               }`}
             >
@@ -167,14 +171,14 @@ export function AiRunLog({
               taken, and the newest thing the CLI printed. One dim monospace line, because all
               three are the detail behind the headline — and the counters are kept in front of the
               text so the part that truncates is the part that can afford to. */}
-          <span className="mt-0.5 flex items-baseline gap-1.5 font-mono text-[10px] text-[var(--cf-text-muted)]">
+          <span className="mt-0.5 flex items-baseline gap-1.5 font-mono text-[11px] text-[var(--cf-text-muted)]">
             <span className="shrink-0 tabular-nums">
               {formatElapsed(elapsed)}
               {lines.length > 0 && ` · ${t("ai.stepsN", { n: String(lines.length) })}`}
             </span>
             {/* A visible seam between the counters and the CLI's words — without it they read as
                 one sentence, and "12 pasos Read src/…" is not one. */}
-            <span className="shrink-0 opacity-50">|</span>
+            <span className="shrink-0 text-[var(--cf-text-faint)]">|</span>
             <span className="min-w-0 flex-1 truncate">
               {lastLine ?? t("ai.waitingForOutput")}
             </span>
@@ -186,9 +190,9 @@ export function AiRunLog({
             onClick={() => void cancel(runId)}
             disabled={cancelling}
             title={t("ai.stopRun")}
-            className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-1.5 py-0.5 text-[10px] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-50"
+            className={buttonClass({ variant: "secondary", size: "sm" })}
           >
-            <Square size={9} className="fill-current" />
+            <Square size={10} className="fill-current" />
             {cancelling ? t("ai.stopping") : t("ai.stop")}
           </button>
         )}
@@ -224,11 +228,13 @@ export function RunEngineChip({ runId }: { runId?: string }) {
   const { engine: name, model } = engine;
   const short = model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
   return (
+    // The composer's engine chip at run size: the same pill and hairline, so "what answers" reads
+    // the same before the run and during it.
     <span
       title={model ? `${name} · ${model}` : t("ai.engineDefaultModel", { engine: name })}
-      className="flex min-w-0 shrink items-center gap-1 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-medium text-[var(--cf-text-muted)] dark:bg-white/[0.08]"
+      className="inline-flex h-5 min-w-0 shrink items-center gap-1 rounded-full px-2 text-[11px] font-medium text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)]"
     >
-      <Cpu size={9} className="shrink-0" />
+      <Cpu size={11} className="shrink-0" />
       <span className="truncate">{short ? `${name} · ${short}` : name}</span>
     </span>
   );

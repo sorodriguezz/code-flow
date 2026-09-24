@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { AssistantInbox } from "./AssistantInbox";
 import { AnalysisDocument } from "./AnalysisDocument";
@@ -103,17 +102,12 @@ export function AiPanel() {
   const commitSize = useLayoutStore((s) => s.commitSize);
   // The easing that opens and closes the panel is off while dragging, or the edge would swim after
   // the pointer instead of tracking it.
-  const [resizing, setResizing] = useState(false);
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
 
   return (
-    <motion.div
-      initial={{ width: 0, opacity: 0 }}
-      animate={{ width, opacity: 1 }}
-      exit={{ width: 0, opacity: 0 }}
-      transition={resizing ? { duration: 0 } : { duration: 0.18, ease: "easeOut" }}
-      className="flex shrink-0 overflow-hidden"
-    >
+    // A sheet beside the rail. It appears at its width and its contents fade in: the width tween it
+    // used to open with relaid out the whole window on every frame.
+    <div className="cf-panel-in flex shrink-0 overflow-hidden pb-1.5 pr-1.5">
       <ResizeHandle
         axis="x"
         value={width}
@@ -126,13 +120,13 @@ export function AiPanel() {
           setSize("aiPanelWidth", w);
         }}
         onCommit={(w) => commitSize("aiPanelWidth", w)}
-        onDragChange={setResizing}
+        seamless
       />
       <aside
         style={{ width }}
         data-tour="ai-panel"
         // No `border-l`: the handle to its left is already the seam.
-        className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
+        className="cf-sheet ml-1.5 flex shrink-0 flex-col"
       >
         <PanelTabStrip
           workspaceId={workspaceId}
@@ -151,7 +145,7 @@ export function AiPanel() {
       {checkpointsOpen && activeProject && (
         <CheckpointsModal repoPath={activeProject.local_path} onClose={() => setCheckpointsOpen(false)} />
       )}
-    </motion.div>
+    </div>
   );
 }
 

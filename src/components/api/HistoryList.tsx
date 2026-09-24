@@ -1,6 +1,8 @@
 import { useMemo } from "react";
 import { History, Trash2, X } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
+import { Tooltip } from "../common/Tooltip";
+import { rowClass, sectionLabelClass } from "../common/recipes";
 import { MethodBadge } from "./CollectionTree";
 import { apiGetHistorySnapshot } from "../../lib/tauri/apiCommands";
 import { useApiStore } from "../../state/apiStore";
@@ -101,28 +103,30 @@ export function HistoryList() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1">
-        <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("api.history")}
-        </span>
-        <button
-          onClick={() => void clearAll()}
-          disabled={history.length === 0}
-          title={t("api.settings.clearHistory")}
-          aria-label={t("api.settings.clearHistory")}
-          className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] dark:hover:bg-white/[0.08]"
-        >
-          <Trash2 size={13} />
-        </button>
+      <div className={`${sectionLabelClass} shrink-0 pl-3.5 pr-2 pt-1`}>
+        <span className="min-w-0 flex-1 truncate">{t("api.history")}</span>
+        <Tooltip label={t("api.settings.clearHistory")}>
+          <button
+            type="button"
+            onClick={() => void clearAll()}
+            disabled={history.length === 0}
+            aria-label={t("api.settings.clearHistory")}
+            // `iconButtonClass` with a danger hover, spelled out: its own hover ink would win a tie.
+            className="inline-flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Trash2 size={15} />
+          </button>
+        </Tooltip>
       </div>
 
       {history.length === 0 ? (
         <EmptyState icon={History} title={t("api.noHistory")} />
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto pb-1">
+        <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5">
           {groups.map((group) => (
             <div key={group.key}>
-              <div className="sticky top-0 z-10 bg-[var(--cf-surface)] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              {/* Sticky, so it has to be opaque — in the explorer's own tone, not the sheet's. */}
+              <div className={`${sectionLabelClass} sticky top-0 z-10 bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))]`}>
                 {dayLabel(group.key, group.when)}
               </div>
               {group.items.map((entry, at) => (
@@ -131,30 +135,38 @@ export function HistoryList() {
                   onClick={() => void restore(entry)}
                   title={entry.name ? `${entry.name}\n${entry.url}` : entry.url}
                   style={riseDelay(at)}
-                  className="cf-rise group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  className={rowClass(false, "cf-rise group h-[30px] cursor-pointer pr-1")}
                 >
                   <MethodBadge protocol={entry.protocol} method={entry.method} />
-                  <span className="min-w-0 flex-1 truncate text-[var(--cf-text)]">{entry.url}</span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--cf-text)]">
+                    {entry.url}
+                  </span>
+                  {/* The code is the word; the tint only helps it be found down the column. */}
                   <span
-                    className="shrink-0 font-mono text-[10px] font-bold"
-                    style={{ color: statusColor(entry.status) }}
+                    className="inline-flex h-[18px] shrink-0 items-center rounded-[5px] px-1.5 font-mono text-[11px] font-semibold tabular-nums"
+                    style={{
+                      color: statusColor(entry.status),
+                      backgroundColor: `color-mix(in oklab, ${statusColor(entry.status)} 14%, transparent)`,
+                    }}
                   >
                     {entry.status ?? "ERR"}
                   </span>
-                  <span className="w-12 shrink-0 truncate text-right font-mono text-[10px] text-[var(--cf-text-muted)]">
+                  <span className="w-12 shrink-0 truncate text-right font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
                     {formatDuration(entry.duration_ms)}
                   </span>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void deleteHistory(entry.id);
-                    }}
-                    title={t("api.delete")}
-                    aria-label={t("api.delete")}
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-danger)] group-hover:opacity-100"
-                  >
-                    <X size={12} />
-                  </button>
+                  <Tooltip label={t("api.delete")}>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void deleteHistory(entry.id);
+                      }}
+                      aria-label={t("api.delete")}
+                      className="hidden h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] group-hover:inline-flex"
+                    >
+                      <X size={13} />
+                    </button>
+                  </Tooltip>
                 </div>
               ))}
             </div>

@@ -5,8 +5,9 @@ import type { editor as MonacoEditorNS } from "monaco-editor";
 // This is the one editor in the app that does not spread `OVERFLOW_SAFE_OPTIONS` (see the note at
 // the `fixedOverflowWidgets` line far below), so it is also the one that would otherwise never
 // reach `monacoSetup` — which since `main.tsx` stopped importing it is what points the loader at
-// the bundled editor, wires the language workers and defines the themes.
-import "../../lib/monacoSetup";
+// the bundled editor, wires the language workers and defines the themes. The one name taken from it
+// is the code face, which both editors below draw in.
+import { CODE_FONT_FAMILY } from "../../lib/monacoSetup";
 import {
   Camera,
   ChevronRight,
@@ -47,11 +48,14 @@ import { usePreferencesStore } from "../../state/preferencesStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useTabDragStore, type TabDrag, type TabDropTarget } from "../../state/tabDragStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import { useShortcutHint } from "../../lib/useShortcutHint";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import { installEditorShortcuts } from "../../lib/editorKeybindings";
 import { useShortcutsStore } from "../../state/shortcutsStore";
 import { BouncingDots } from "../common/BouncingDots";
 import { EmptyState } from "../common/EmptyState";
+import { Tooltip } from "../common/Tooltip";
+import { Segmented } from "../common/Segmented";
+import { buttonClass, iconButtonClass, Kbd } from "../common/Button";
 import type { BlameHunkInfo, FileDiffInfo, Project } from "../../types/domain";
 import { usePackageJsonLens } from "./usePackageJsonLens";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
@@ -492,24 +496,25 @@ function Breadcrumb({
   const segments = path.split("/");
   const name = segments.pop()!;
   return (
-    <div className="flex h-6 shrink-0 items-center gap-0.5 overflow-hidden border-b border-[var(--cf-border)] px-3 text-[11px] text-[var(--cf-text-muted)]">
+    <div className="flex h-[30px] shrink-0 items-center gap-1 overflow-hidden border-b border-[var(--cf-border)] px-3.5 text-[12px] text-[var(--cf-text-faint)]">
       {segments.map((segment, i) => (
-        <span key={`${segment}-${i}`} className="flex shrink-0 items-center gap-0.5">
+        <span key={`${segment}-${i}`} className="flex shrink-0 items-center gap-1">
           <span className="truncate">{segment}</span>
-          <ChevronRight size={11} className="opacity-60" />
+          <ChevronRight size={12} className="shrink-0" />
         </span>
       ))}
-      <span className="mr-1 flex shrink-0 items-center">
-        <FileGlyph path={path} size={11} />
+      <span className="flex shrink-0 items-center">
+        <FileGlyph path={path} size={12} />
       </span>
       <span className="truncate text-[var(--cf-text)]">{name}</span>
-      {dirty && <span className="ml-1 shrink-0 text-[var(--cf-warning)]">•</span>}
-      {loading && <Loader2 size={11} className="ml-1 shrink-0 animate-spin" />}
+      {/* The same dot the tab wears in its × slot, so "unsaved" is one mark wherever it shows. */}
+      {dirty && <span aria-hidden className="ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent)]" />}
+      {loading && <Loader2 size={12} className="ml-0.5 shrink-0 animate-spin" />}
       {compare && (
-        <span className="ml-1.5 flex min-w-0 items-center gap-1">
-          <GitCompare size={10} className="shrink-0 opacity-70" />
-          <span className="shrink-0 font-mono">{compare.short_id}</span>
-          <span className="truncate opacity-80">{compare.summary}</span>
+        <span className="ml-1.5 flex min-w-0 items-center gap-1.5">
+          <GitCompare size={12} className="shrink-0" />
+          <span className="shrink-0 font-mono text-[11px] text-[var(--cf-text-muted)]">{compare.short_id}</span>
+          <span className="truncate">{compare.summary}</span>
         </span>
       )}
     </div>
@@ -621,7 +626,13 @@ export function EditorPane({
   tabMenu: TabMenuActions;
 }) {
   const t = useT();
-  const shortcutHint = useShortcutHint();
+  const chord = useShortcutChord();
+  /** A shortcut as a key cap for a tooltip's trailing slot, from the binding registry — never a
+   *  hand-written chord, which says Ctrl on a Mac and goes stale the moment anyone rebinds it. */
+  const keyCap = (id: Parameters<typeof chord>[0]) => {
+    const keys = chord(id);
+    return keys ? <Kbd>{keys}</Kbd> : undefined;
+  };
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   /**
@@ -2267,6 +2278,7 @@ export function EditorPane({
         options={{
           minimap: { enabled: true },
           fontSize: 13,
+          fontFamily: CODE_FONT_FAMILY,
           automaticLayout: true,
           /**
            * Ghost text. On for every editor, because the provider — not this flag — is what decides
@@ -2354,28 +2366,22 @@ export function EditorPane({
                   />
                 )}
                 {previewKind && (
-                  <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
-                    {(
-                      [
-                        { mode: "code", icon: Code2, label: t("editor.viewCode") },
-                        { mode: "split", icon: Columns2, label: t("editor.viewSplit") },
-                        { mode: "preview", icon: Eye, label: t("editor.viewPreview") },
-                      ] as const
-                    ).map(({ mode, icon: Icon, label }) => (
-                      <button
-                        key={mode}
-                        onClick={() => onViewMode(activeTab.path, mode)}
-                        title={label}
-                        className={`flex h-5 w-5 items-center justify-center rounded ${
-                          viewMode === mode
-                            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                            : "text-[var(--cf-text-muted)]"
-                        }`}
-                      >
-                        <Icon size={12} />
-                      </button>
-                    ))}
-                  </div>
+                  // The segmented control: three peer ways of showing the same file. While the diff
+                  // is up its value matches none of them, which is right — the diff is the toggle
+                  // beside it, not a fourth view. One `layoutId` per group, or two splits' thumbs
+                  // would fly between each other.
+                  <Segmented<ViewMode>
+                    size="sm"
+                    layoutId={`cf-editor-view-${groupId}`}
+                    value={viewMode}
+                    onChange={(mode) => onViewMode(activeTab.path, mode)}
+                    options={[
+                      { value: "code", icon: Code2, title: t("editor.viewCode") },
+                      { value: "split", icon: Columns2, title: t("editor.viewSplit") },
+                      { value: "preview", icon: Eye, title: t("editor.viewPreview") },
+                    ]}
+                    className="mr-1"
+                  />
                 )}
                 {/* A schema's one-way door into the Diagrams app — and only for a schema, which
                     is what `onOpenInDiagrams` being null covers. Next to the preview toggles
@@ -2387,15 +2393,16 @@ export function EditorPane({
                     diagram is a view of what is on disk, so handing it a stale one would be the
                     surprise. The tooltip says so. */}
                 {onOpenInDiagrams && (
-                  <button
-                    onClick={onOpenInDiagrams}
-                    title={t("dbml.openInDiagrams")}
-                    aria-label={t("dbml.openInDiagrams")}
-                    data-tour="dbml-open-in-diagrams"
-                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-                  >
-                    <Workflow size={12} />
-                  </button>
+                  <Tooltip side="bottom" label={t("dbml.openInDiagrams")}>
+                    <button
+                      onClick={onOpenInDiagrams}
+                      aria-label={t("dbml.openInDiagrams")}
+                      data-tour="dbml-open-in-diagrams"
+                      className={iconButtonClass({ size: "sm" })}
+                    >
+                      <Workflow size={14} />
+                    </button>
+                  </Tooltip>
                 )}
                 {/* Only for a file that has something to compare. A toggle rather than a mode in
                     the group above it: the answer to "and back to what?" is always the code, so
@@ -2407,56 +2414,58 @@ export function EditorPane({
                     pressing this twice from a commit diff lands on the ordinary working diff rather than
                     on the same commit for the rest of the tab's life. */}
                 {(activeDiff || compare) && (
-                  <button
-                    onClick={() => onViewMode(activeTab.path, viewMode === "diff" ? "code" : "diff")}
-                    title={t("editor.viewDiff")}
-                    aria-label={t("editor.viewDiff")}
-                    className={`flex h-5 w-5 items-center justify-center rounded-md ${
-                      viewMode === "diff"
-                        ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                        : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-                    }`}
-                  >
-                    <GitCompare size={12} />
-                  </button>
+                  <Tooltip side="bottom" label={t("editor.viewDiff")}>
+                    <button
+                      onClick={() => onViewMode(activeTab.path, viewMode === "diff" ? "code" : "diff")}
+                      aria-label={t("editor.viewDiff")}
+                      aria-pressed={viewMode === "diff"}
+                      className={iconButtonClass({ size: "sm", active: viewMode === "diff" })}
+                    >
+                      <GitCompare size={14} />
+                    </button>
+                  </Tooltip>
                 )}
-                <button
-                  onClick={captureSnapshot}
-                  disabled={activeTab.loading}
-                  title={shortcutHint("editor.codeSnap", t("codesnap.action"))}
-                  aria-label={t("codesnap.action")}
-                  className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
-                >
-                  <Camera size={12} />
-                </button>
-                {onSplit && (
+                <Tooltip side="bottom" label={t("codesnap.action")} trailing={keyCap("editor.codeSnap")}>
                   <button
-                    onClick={onSplit}
-                    title={shortcutHint("editor.splitRight", t("editor.splitRight"))}
-                    aria-label={t("editor.splitRight")}
-                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                    onClick={captureSnapshot}
+                    disabled={activeTab.loading}
+                    aria-label={t("codesnap.action")}
+                    className={iconButtonClass({ size: "sm" })}
                   >
-                    <SplitSquareHorizontal size={12} />
+                    <Camera size={14} />
                   </button>
+                </Tooltip>
+                {onSplit && (
+                  <Tooltip side="bottom" label={t("editor.splitRight")} trailing={keyCap("editor.splitRight")}>
+                    <button onClick={onSplit} aria-label={t("editor.splitRight")} className={iconButtonClass({ size: "sm" })}>
+                      <SplitSquareHorizontal size={14} />
+                    </button>
+                  </Tooltip>
                 )}
                 {onCloseGroup && (
-                  <button
-                    onClick={onCloseGroup}
-                    title={t("editor.closeGroup")}
-                    aria-label={t("editor.closeGroup")}
-                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-                  >
-                    <X size={12} />
-                  </button>
+                  <Tooltip side="bottom" label={t("editor.closeGroup")}>
+                    <button
+                      onClick={onCloseGroup}
+                      aria-label={t("editor.closeGroup")}
+                      className={iconButtonClass({ size: "sm" })}
+                    >
+                      <X size={14} />
+                    </button>
+                  </Tooltip>
                 )}
-                <button
-                  onClick={onSave}
-                  disabled={!dirty || saving}
-                  className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-0.5 text-[12px] text-white disabled:opacity-40"
-                >
-                  {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                  {t("editor.save")}
-                </button>
+                {/* A secondary button, not an accent one: ⌘S is how a file is saved, and the tab's
+                    dot already says there is something to save. A filled button that is on screen
+                    for every file would be the loudest thing in the editor for the least reason. */}
+                <Tooltip side="bottom" label={t("editor.save")} trailing={keyCap("editor.save")}>
+                  <button
+                    onClick={onSave}
+                    disabled={!dirty || saving}
+                    className={buttonClass({ variant: "secondary", size: "sm", className: "ml-1" })}
+                  >
+                    {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
+                    {t("editor.save")}
+                  </button>
+                </Tooltip>
               </>
             }
           />
@@ -2492,6 +2501,7 @@ export function EditorPane({
                   options={{
                     readOnly: true,
                     fontSize: 13,
+                    fontFamily: CODE_FONT_FAMILY,
                     renderSideBySide: true,
                     useInlineViewWhenSpaceIsLimited: false,
                     automaticLayout: true,

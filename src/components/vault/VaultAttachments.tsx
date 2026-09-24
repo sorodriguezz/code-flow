@@ -57,7 +57,7 @@ export function VaultAttachments({ itemId }: { itemId: string }) {
           {blobs.map((blob) => {
             const isImage = blob.mime.startsWith("image/");
             return (
-              <li key={blob.id} className="flex items-center gap-2 text-[11.5px]">
+              <li key={blob.id} className="flex items-center gap-2 text-[12px]">
                 {isImage ? (
                   <ImageIcon size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
                 ) : (

@@ -25,6 +25,7 @@ import { deriveRunning, isActive, useServicesStore, type RunningService } from "
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { runsContainers, serviceDetectedPorts, type ServiceRow, type ServiceRuntime } from "../../types/services";
 import { PortChip, StatusGlyph, portsFor, rowHint, shortDuration, statusLabel, useElapsed } from "./serviceBits";
+import { buttonClass } from "../common/Button";
 
 /**
  * A menu glyph that holds still.
@@ -131,7 +132,7 @@ export function ServiceList({
           <Tooltip side="top" label={t("services.detect")} description={t("services.detectHint")}>
             <button
               onClick={onImport}
-              className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[11px] font-medium text-white hover:brightness-110"
+              className={buttonClass({ variant: "primary", size: "sm" })}
             >
               <Radar size={11} />
               {t("services.detect")}
@@ -139,7 +140,7 @@ export function ServiceList({
           </Tooltip>
           <button
             onClick={() => onNew(null)}
-            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text)] hover:border-[var(--cf-accent)]"
+            className={buttonClass({ variant: "secondary", size: "sm" })}
           >
             <Plus size={11} />
             {t("services.createByHand")}
@@ -171,7 +172,7 @@ export function ServiceList({
           className={`mx-1 mt-1 flex items-center gap-1.5 rounded-md px-2 py-[3px] text-left text-[12px] ${
             portsSelected
               ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
-              : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+              : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           }`}
         >
           <Network size={11} className="shrink-0" />
@@ -208,7 +209,7 @@ export function SectionHeader({
     // pushing, and the list is short enough that scrolling past a heading is not a way to get lost.
     <div className="mt-1 flex items-center gap-1 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1 first:mt-0 first:border-t-0">
       <Icon size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
-      <span className="min-w-0 flex-1 truncate text-[10px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+      <span className="min-w-0 flex-1 truncate text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
         {label}
       </span>
       {actions}
@@ -235,7 +236,7 @@ export function HeaderButton({
         onClick={onClick}
         disabled={disabled}
         aria-label={label}
-        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+        className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40"
       >
         {children}
       </button>
@@ -337,7 +338,7 @@ function GroupSection({
           )}
           <span className="truncate">{name}</span>
           <span
-            className="shrink-0 text-[10px] font-normal tabular-nums"
+            className="shrink-0 text-[10.5px] font-normal tabular-nums"
             style={{ color: summaryTone }}
             title={
               activeCount > 0 || upCount > 0
@@ -368,7 +369,7 @@ function GroupSection({
             setMenu({ x: rect.left, y: rect.bottom, anchor: rect });
           }}
           aria-label={t("services.moreActions")}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:bg-black/[0.05] hover:text-[var(--cf-text)] focus:opacity-100 group-hover/section:opacity-100 dark:hover:bg-white/[0.08]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] focus:opacity-100 group-hover/section:opacity-100"
         >
           <MoreHorizontal size={12} />
         </button>
@@ -455,23 +456,23 @@ function ServiceRowItem({
   let meta: ReactNode = null;
   if (status === "waiting") {
     meta = (
-      <span className="min-w-0 shrink truncate text-[10px] text-[var(--cf-text-muted)]">
+      <span className="min-w-0 shrink truncate text-[10.5px] text-[var(--cf-text-muted)]">
         {blocker ? `↳ ${blocker}` : statusLabel(status, t)}
       </span>
     );
   } else if (status === "starting") {
     meta = (
-      <span className="shrink-0 text-[10px] tabular-nums text-[var(--cf-warning)]">
+      <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-warning)]">
         {elapsed !== null ? shortDuration(elapsed) : ""}
       </span>
     );
   } else if (status === "restarting") {
-    meta = <span className="shrink-0 text-[10px] tabular-nums text-[var(--cf-warning)]">↻ {runtime?.restarts}/3</span>;
+    meta = <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-warning)]">↻ {runtime?.restarts}/3</span>;
   } else if (status === "stopping") {
-    meta = <span className="shrink-0 text-[10px] text-[var(--cf-warning)]">{statusLabel(status, t)}</span>;
+    meta = <span className="shrink-0 text-[10.5px] text-[var(--cf-warning)]">{statusLabel(status, t)}</span>;
   } else if (status === "failed") {
     meta = (
-      <span className="shrink-0 text-[10px] text-[var(--cf-danger)]">
+      <span className="shrink-0 text-[10.5px] text-[var(--cf-danger)]">
         {runtime?.error === "dependencyFailed" || runtime?.error === "dependencyStopped"
           ? `↳ ${blocker ?? "?"}`
           : runtime?.exitCode !== null && runtime?.exitCode !== undefined
@@ -496,7 +497,7 @@ function ServiceRowItem({
       className={`group/row mx-1 flex cursor-pointer select-none items-center gap-1.5 rounded-md py-[3px] pl-4 pr-1 text-[12px] ${
         selected
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+          : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       }`}
     >
       <StatusGlyph status={status} />
@@ -509,7 +510,7 @@ function ServiceRowItem({
       {!meta && ports.length > 0 && (
         <span className="flex shrink-0 items-center gap-0.5">
           <PortChip port={ports[0]} dim={!live} />
-          {ports.length > 1 && <span className="text-[10px] tabular-nums opacity-60">+{ports.length - 1}</span>}
+          {ports.length > 1 && <span className="text-[10.5px] tabular-nums opacity-60">+{ports.length - 1}</span>}
         </span>
       )}
 
@@ -569,14 +570,14 @@ function ElsewhereRow({ run }: { run: RunningService }) {
   const workspace = workspaces.find((w) => w.id === run.workspaceId) ?? null;
 
   return (
-    <div className="group/row mx-1 flex select-none items-center gap-1.5 rounded-md py-[3px] pl-4 pr-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+    <div className="group/row mx-1 flex select-none items-center gap-1.5 rounded-md py-[3px] pl-4 pr-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
       <StatusGlyph status={run.status} />
       <span className="min-w-0 flex-1 truncate">{run.name}</span>
       {workspace && (
         <button
           onClick={() => setActiveWorkspace(workspace.id)}
           title={t("services.goToWorkspace", { name: workspace.name })}
-          className="flex shrink-0 items-center gap-1 rounded border border-[var(--cf-border)] px-1 text-[10px] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+          className="flex shrink-0 items-center gap-1 rounded border border-[var(--cf-border)] px-1 text-[10.5px] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
         >
           <span className="h-1.5 w-1.5 rounded-full" style={{ background: workspace.color }} />
           <span className="max-w-[70px] truncate">{workspace.name}</span>
@@ -611,7 +612,7 @@ function RowButton({
       onDoubleClick={(e) => e.stopPropagation()}
       title={label}
       aria-label={label}
-      className={`flex h-[18px] w-[18px] items-center justify-center rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.1] ${
+      className={`flex h-[18px] w-[18px] items-center justify-center rounded hover:bg-[var(--cf-press)] ${
         danger ? "hover:text-[var(--cf-danger)]" : "hover:text-[var(--cf-text)]"
       }`}
     >

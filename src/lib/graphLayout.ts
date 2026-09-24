@@ -19,15 +19,26 @@ export interface GraphLayout {
   laneCount: number;
 }
 
+/**
+ * The lane palette.
+ *
+ * **Lane 0 follows the accent.** It is the first-parent line of whatever sits on top of the history
+ * — almost always the branch being worked on — so the line you are standing on wears the app's own
+ * colour, and changes with it when the accent does. A CSS variable rather than a hex, which the SVG
+ * strokes and the ref chips' `color-mix` washes both resolve at paint time.
+ *
+ * **The rest avoid red and green.** Everywhere else in this app those two already mean state — an
+ * added line, a deleted file, a failed job — and a lane that happened to come out green read as
+ * "this branch is fine", one that came out red as "this one is broken". What is left is the
+ * mid-lightness band that reads on both themes: teal, amber, pink, sky, violet.
+ */
 export const LANE_COLORS = [
-  "#6366f1", // indigo
-  "#22c55e", // green
+  "var(--cf-accent)",
+  "#14b8a6", // teal
   "#f59e0b", // amber
   "#ec4899", // pink
-  "#06b6d4", // cyan
-  "#a855f7", // purple
-  "#ef4444", // red
-  "#14b8a6", // teal
+  "#38bdf8", // sky
+  "#a78bfa", // violet
 ];
 
 /**

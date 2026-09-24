@@ -51,7 +51,7 @@ export function AttachmentBar({
           <span
             key={file.id}
             title={blind ? t("chat.attachImageBlind") : file.path}
-            className={`group flex max-w-[240px] items-center gap-1.5 rounded-md border px-2 py-1 text-[11.5px] ${
+            className={`group flex max-w-[240px] items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] ${
               blind
                 ? "border-[var(--cf-warning)]/40 bg-[color-mix(in_oklab,var(--cf-warning)_8%,transparent)]"
                 : "border-[var(--cf-border)] bg-[var(--cf-surface-2)]"

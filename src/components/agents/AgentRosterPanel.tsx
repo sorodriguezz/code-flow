@@ -90,7 +90,7 @@ export function AgentRosterPanel({
       className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
     >
       <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1">
-        <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("agents.roster")}
         </span>
         <ToolbarButton onClick={() => onEdit("new")} title={t("agents.newAgent")}>
@@ -179,7 +179,7 @@ export function AgentRosterPanel({
                       onClick={() => void remove(agent)}
                       title={t("common.delete")}
                       aria-label={t("common.delete")}
-                      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
+                      className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
                     >
                       <Trash2 size={12} />
                     </button>

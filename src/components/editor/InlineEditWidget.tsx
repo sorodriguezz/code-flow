@@ -7,6 +7,7 @@ import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { notify } from "../../state/notificationStore";
 import { useT } from "../../state/languageStore";
 import type { InlineEditOutcome } from "./EditorPane";
+import { buttonClass } from "../common/Button";
 
 /** Ctrl+I: describe the change in words, and the selected code is rewritten in place.
  *
@@ -178,7 +179,7 @@ export function InlineEditWidget({
           <button
             onClick={() => void submit()}
             disabled={!instruction.trim()}
-            className="shrink-0 rounded-md bg-[var(--cf-accent)] px-2 py-0.5 text-[11px] text-white disabled:opacity-40"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             {t("editor.inlineEditApply")}
           </button>

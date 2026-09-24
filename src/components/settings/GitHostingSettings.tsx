@@ -6,6 +6,7 @@ import { GitLabSettings } from "./GitLabSettings";
 import { JiraSettings } from "./JiraSettings";
 import { MondaySettings } from "./MondaySettings";
 import { ActivePill } from "../common/ActivePill";
+import { chipClass } from "../common/recipes";
 import { HOSTING_PROVIDERS, type HostingProvider } from "../../lib/vcsProviders";
 import { BrandGlyph } from "../ai/ProviderGlyph";
 import { useUiStore } from "../../state/uiStore";
@@ -72,21 +73,25 @@ export function GitHostingSettings() {
           layoutRoot
           style={{ width: RAIL_WIDTH }}
           className="sticky top-0 shrink-0 self-start"
+          aria-label={t("settings.sectionNavLabel")}
         >
           {HOSTING_PROVIDERS.map(({ id, label, icon: Icon, available }) => (
             <button
               key={id}
+              type="button"
               disabled={!available}
               onClick={() => setProvider(id)}
               aria-current={provider === id ? "page" : undefined}
               title={label}
-              // Colour and the pill carry the selection; no weight change, which would re-measure
+              // Row for row `SettingsRail`'s look, which this rail can't be (brand marks, untranslated
+              // names, a "coming soon" chip): the pill carries the selection, the label turns full
+              // text and only the glyph takes the accent; no weight change, which would re-measure
               // the label and reflow the row.
-              className={`relative mb-0.5 flex w-full items-start rounded-md px-2.5 py-1.5 text-left text-[12.5px] leading-[1.35] transition-colors ${
+              className={`relative mb-0.5 flex min-h-8 w-full items-start rounded-md px-2.5 py-1.5 text-left text-[13px] leading-[1.35] transition-colors duration-100 ${
                 provider === id
-                  ? "text-[var(--cf-accent)]"
+                  ? "text-[var(--cf-text)]"
                   : available
-                    ? "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+                    ? "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                     : "cursor-not-allowed text-[var(--cf-text-muted)] opacity-45 grayscale"
               }`}
             >
@@ -94,19 +99,16 @@ export function GitHostingSettings() {
                   between the two the moment both are on screen. */}
               {provider === id && <ActivePill layoutId="cf-vcs-provider-pill" />}
               {/* Above the pill, which covers the whole button. */}
-              <span className="relative flex min-w-0 flex-1 items-start gap-1.5">
-                {/* The platform's own mark where one exists, and the registry's Lucide glyph
-                    where it does not — see `brandLogos.ts` on why Azure DevOps has none. */}
-                <span className="mt-[2px] shrink-0">
-                  <BrandGlyph id={id} size={13} fallback={<Icon size={13} className="shrink-0" />} />
+              <span className="relative flex min-w-0 flex-1 items-start gap-2">
+                {/* The platform's own mark, and the registry's Lucide glyph for any provider
+                    `brandLogos.ts` has none for. The accent reaches only a monochrome mark
+                    (GitHub's); the others keep their brand colours. */}
+                <span className={`mt-[2px] shrink-0 ${provider === id ? "text-[var(--cf-accent)]" : ""}`}>
+                  <BrandGlyph id={id} size={14} fallback={<Icon size={14} className="shrink-0" />} />
                 </span>
                 {/* Wraps rather than truncates — see `settingsNav`, whose rail this one mirrors. */}
                 <span className="min-w-0 flex-1 break-words">{label}</span>
-                {!available && (
-                  <span className="mt-[1px] shrink-0 rounded bg-black/10 px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide dark:bg-white/10">
-                    {t("settings.comingSoon")}
-                  </span>
-                )}
+                {!available && <span className={chipClass("neutral", "-mt-px")}>{t("settings.comingSoon")}</span>}
               </span>
             </button>
           ))}
@@ -119,7 +121,7 @@ export function GitHostingSettings() {
             {/* The rail names the provider, so its form no longer repeats it as a heading — but the
                 hint says what the label can't (which host a token is for, that a PAT is stored in
                 the keychain), so it stays. */}
-            <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(hintKey)}</p>
+            <p className="mb-3 text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(hintKey)}</p>
 
             {provider === "github" && <GitHubSettings />}
             {provider === "gitlab" && <GitLabSettings />}

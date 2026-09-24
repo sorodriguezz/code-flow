@@ -130,7 +130,7 @@ export function WorkItemPicker({
                 className="flex max-w-full items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-0.5 text-[11px] text-[var(--cf-text)]"
               >
                 <Icon size={10} style={{ color: colourFor(item.work_item_type) }} className="shrink-0" />
-                <span className="shrink-0 font-mono text-[10px] text-[var(--cf-text-muted)]">
+                <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
                   {item.id}
                 </span>
                 <span className="truncate">{item.title}</span>
@@ -148,7 +148,7 @@ export function WorkItemPicker({
         </div>
       )}
 
-      <div className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-2">
+      <div className="flex h-[30px] items-center gap-1.5 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 focus-within:border-[var(--cf-accent)]">
         <Search size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
         <input
           value={query}
@@ -187,16 +187,16 @@ export function WorkItemPicker({
                 key={item.id}
                 type="button"
                 onClick={() => add(item)}
-                className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left hover:bg-[var(--cf-hover)]"
               >
                 <Icon size={11} style={{ color: colourFor(item.work_item_type) }} className="shrink-0" />
-                <span className="shrink-0 font-mono text-[10px] text-[var(--cf-text-muted)]">{item.id}</span>
+                <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">{item.id}</span>
                 <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
                   {item.title}
                 </span>
-                <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{item.state}</span>
+                <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{item.state}</span>
                 {item.assigned_to && (
-                  <span className="shrink-0 truncate text-[10px] text-[var(--cf-text-muted)] opacity-70">
+                  <span className="shrink-0 truncate text-[10.5px] text-[var(--cf-text-muted)] opacity-70">
                     {item.assigned_to}
                   </span>
                 )}

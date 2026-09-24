@@ -48,7 +48,7 @@ export function ViewSkeleton() {
 export function SettingsSkeleton() {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
-      <div className="flex h-[640px] max-h-[85vh] w-[1040px] max-w-[92vw] flex-col gap-3 overflow-hidden rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface)] p-4 shadow-[var(--cf-shadow)]">
+      <div className="flex h-[640px] max-h-[85vh] w-[1040px] max-w-[92vw] flex-col gap-3 overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-5 shadow-[var(--cf-shadow-modal)]">
         <Skeleton className="h-5 w-40" />
         <div className="flex min-h-0 flex-1 gap-4">
           <div className="flex w-52 shrink-0 flex-col gap-2">
@@ -76,7 +76,7 @@ export function SettingsSkeleton() {
 export function PaletteSkeleton() {
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24">
-      <div className="flex w-[440px] max-w-[92vw] flex-col gap-2 overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-shadow)]">
+      <div className="flex w-[440px] max-w-[92vw] flex-col gap-2 overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-shadow-modal)]">
         <Skeleton className="h-7 w-full" />
         {Array.from({ length: 6 }).map((_, i) => (
           <Skeleton key={i} className="h-5" style={{ width: `${50 + ((i * 21) % 45)}%` }} />

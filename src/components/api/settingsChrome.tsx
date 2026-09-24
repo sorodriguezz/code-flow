@@ -211,7 +211,7 @@ export function Tag({
   children: ReactNode;
 }) {
   const background = {
-    muted: "bg-black/[0.05] dark:bg-white/[0.07]",
+    muted: "bg-[var(--cf-hover)]",
     warning: "bg-[color-mix(in_oklab,var(--cf-warning)_16%,transparent)]",
     success: "bg-[color-mix(in_oklab,var(--cf-success)_16%,transparent)]",
     accent: "bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]",
@@ -219,7 +219,7 @@ export function Tag({
   return (
     <span
       title={title}
-      className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-[1px] text-[10px] font-medium ${background} ${TONE_TEXT[tone]}`}
+      className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-[1px] text-[10.5px] font-medium ${background} ${TONE_TEXT[tone]}`}
     >
       {Icon && <Icon size={9} />}
       {children}

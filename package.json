@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "1.20.9",
+  "version": "2.0.0",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -22,6 +22,8 @@
   },
   "dependencies": {
     "@dbml/core": "^8.3.1",
+    "@fontsource-variable/instrument-sans": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
     "@iconify-json/logos": "^1.2.12",
     "@iconify-json/vscode-icons": "^1.2.69",
     "@monaco-editor/react": "^4.7.0",

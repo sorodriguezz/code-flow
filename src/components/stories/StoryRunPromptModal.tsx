@@ -23,7 +23,7 @@ function PromptBlock({ label, hint, text }: { label: string; hint: string; text:
         <h4 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {label}
         </h4>
-        <span className="ml-auto text-[10px] text-[var(--cf-text-muted)]">
+        <span className="ml-auto text-[10.5px] text-[var(--cf-text-muted)]">
           {t("stories.usedPromptChars", { n: text.length.toLocaleString() })}
         </span>
         <button
@@ -37,7 +37,7 @@ function PromptBlock({ label, hint, text }: { label: string; hint: string; text:
         </button>
       </div>
       <Note>{hint}</Note>
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-2 font-mono text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-2 font-mono text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
         {text}
       </pre>
     </section>

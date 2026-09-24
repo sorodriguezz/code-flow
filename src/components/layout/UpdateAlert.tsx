@@ -2,6 +2,7 @@ import { motion, useReducedMotion } from "framer-motion";
 import { ArrowUp, Loader2, RotateCw, TriangleAlert, X } from "lucide-react";
 import { useUpdateStore } from "../../state/updateStore";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /**
  * The whole update flow, in a card parked above the status bar's left corner.
@@ -90,8 +91,8 @@ export function UpdateAlert() {
             </p>
             <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-[var(--cf-border)]">
               <div
-                className="h-full rounded-full bg-[var(--cf-accent)] transition-all"
-                style={{ width: `${progress}%` }}
+                className="h-full origin-left rounded-full bg-[var(--cf-accent)] transition-transform duration-200"
+                style={{ transform: `scaleX(${Math.min(100, Math.max(0, progress)) / 100})` }}
               />
             </div>
           </>
@@ -108,7 +109,7 @@ export function UpdateAlert() {
             <div className="mt-1.5 flex items-center gap-1.5">
               <button
                 onClick={ready ? () => void restart() : () => void install()}
-                className="rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[11px] font-medium text-white hover:brightness-110"
+                className={buttonClass({ variant: "primary", size: "sm" })}
               >
                 {ready ? t("settings.restartNow") : failed ? t("update.retry") : t("update.installNow")}
               </button>
@@ -117,7 +118,7 @@ export function UpdateAlert() {
               {!ready && !failed && (
                 <button
                   onClick={openNotes}
-                  className="rounded-md px-1.5 py-1 text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                  className={buttonClass({ variant: "ghost", size: "sm" })}
                 >
                   {t("update.seeWhatsNew")}
                 </button>
@@ -136,9 +137,9 @@ export function UpdateAlert() {
           onClick={dismiss}
           title={t("update.dismiss")}
           aria-label={t("update.dismiss")}
-          className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+          className="absolute right-1 top-1 flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         >
-          <X size={12} />
+          <X size={14} />
         </button>
       )}
     </motion.div>

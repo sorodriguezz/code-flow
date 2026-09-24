@@ -9,6 +9,7 @@ import type { AccountNamer } from "../../lib/aiAccounts";
 import type { AccountStat, ModelStat, ProviderStat, TaskStat, UsageStats } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Select, type SelectOption } from "../common/Select";
+import { Segmented } from "../common/Segmented";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 
 /** The windows the picker offers, in hours. Mirrors nothing on the backend — it takes whatever it
@@ -31,6 +32,9 @@ const SERIES_COLOURS = [
   "#ef4444",
   "#14b8a6",
 ];
+
+/** The small uppercase heading over each card. */
+const SECTION_LABEL = "text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
 
 function colourFor(provider: string): string {
   const at = AI_PROVIDERS.findIndex((candidate) => candidate.id === provider);
@@ -141,22 +145,14 @@ export function UsageStatsSection() {
 
   return (
     <section className="space-y-4">
-      <div className="flex flex-wrap items-center gap-1">
-        {WINDOWS.map((window) => (
-          <button
-            key={window.hours}
-            type="button"
-            onClick={() => setHours(window.hours)}
-            className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${
-              hours === window.hours
-                ? "bg-[var(--cf-accent)] text-white"
-                : "border border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-            }`}
-          >
-            {t(window.labelKey)}
-          </button>
-        ))}
-        {loading && <Loader2 size={13} className="ml-1 animate-spin text-[var(--cf-text-muted)]" />}
+      <div className="flex flex-wrap items-center gap-2">
+        <Segmented
+          options={WINDOWS.map((window) => ({ value: String(window.hours), label: t(window.labelKey) }))}
+          value={String(hours)}
+          onChange={(value) => setHours(Number(value))}
+          layoutId="cf-set-usage-window"
+        />
+        {loading && <Loader2 size={13} className="animate-spin text-[var(--cf-text-muted)]" />}
         {showAccounts && (
           <div className="ml-auto w-[210px]">
             <Select
@@ -171,7 +167,7 @@ export function UsageStatsSection() {
       </div>
 
       {!stats || totals.runs === 0 ? (
-        <p className="rounded-lg border border-dashed border-[var(--cf-border)] px-3 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">
+        <p className="px-3 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">
           {t(loading ? "usage.statsLoading" : "usage.quietWindow")}
         </p>
       ) : (
@@ -234,11 +230,11 @@ function Tile({
   return (
     <div className="rounded-lg border border-[var(--cf-border)] px-3 py-2">
       <div className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
-        <Icon size={11} className="shrink-0" />
+        <Icon size={12} className="shrink-0" />
         <span className="min-w-0 break-words leading-snug">{label}</span>
       </div>
       <p className="mt-0.5 text-[17px] font-semibold tabular-nums">{value}</p>
-      {note && <p className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]">{note}</p>}
+      {note && <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{note}</p>}
     </div>
   );
 }
@@ -275,9 +271,7 @@ function Chart({ stats, locale }: { stats: UsageStats; locale: string }) {
   return (
     <div className="rounded-lg border border-[var(--cf-border)] p-3">
       <div className="mb-1.5 flex items-baseline gap-2">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("usage.overTime")}
-        </span>
+        <span className={SECTION_LABEL}>{t("usage.overTime")}</span>
         <span className="ml-auto min-w-0 truncate text-[11px] tabular-nums text-[var(--cf-text-muted)]">
           {at
             ? `${tick(at.start)} · ${compactTokens(at.tokens)} · ${t("usage.runsN", { n: at.runs })}`
@@ -312,7 +306,7 @@ function Chart({ stats, locale }: { stats: UsageStats; locale: string }) {
         })}
       </svg>
 
-      <div className="mt-1 flex justify-between text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+      <div className="mt-1 flex justify-between text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
         <span>{stats.series[0] ? tick(stats.series[0].start) : ""}</span>
         <span>{stats.series.length > 0 ? tick(stats.series[stats.series.length - 1].start) : ""}</span>
       </div>
@@ -327,11 +321,9 @@ function ProviderSplit({ providers, total }: { providers: ProviderStat[]; total:
 
   return (
     <div className="rounded-lg border border-[var(--cf-border)] p-3">
-      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {t("usage.byProvider")}
-      </p>
+      <p className={`mb-1.5 ${SECTION_LABEL}`}>{t("usage.byProvider")}</p>
 
-      <div className="flex h-2 w-full overflow-hidden rounded-full bg-black/[0.07] dark:bg-white/[0.1]">
+      <div className="flex h-2 w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
         {providers.map((provider) => (
           <div
             key={provider.provider}
@@ -379,9 +371,7 @@ function AccountTable({ rows, nameOf }: { rows: AccountStat[]; nameOf: AccountNa
 
   return (
     <div className="rounded-lg border border-[var(--cf-border)] p-3">
-      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {t("usage.byAccount")}
-      </p>
+      <p className={`mb-1.5 ${SECTION_LABEL}`}>{t("usage.byAccount")}</p>
       <div className="space-y-1.5">
         {rows.map((row) => (
           <div key={usageKey(row)}>
@@ -396,7 +386,7 @@ function AccountTable({ rows, nameOf }: { rows: AccountStat[]; nameOf: AccountNa
                 {row.costed_runs > 0 ? formatCost(row.cost_usd) : t("usage.noCost")}
               </span>
             </div>
-            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-black/[0.07] dark:bg-white/[0.1]">
+            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
               <div
                 className="h-full rounded-full"
                 style={{ width: `${Math.max((row.tokens / peak) * 100, 2)}%`, background: colourFor(row.provider) }}
@@ -424,9 +414,7 @@ function TaskTable({ tasks }: { tasks: TaskStat[] }) {
 
   return (
     <div className="rounded-lg border border-[var(--cf-border)] p-3">
-      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {t("usage.byTask")}
-      </p>
+      <p className={`mb-1.5 ${SECTION_LABEL}`}>{t("usage.byTask")}</p>
       <div className="space-y-1.5">
         {tasks.map((task) => (
           <div key={task.task || "unknown"}>
@@ -440,7 +428,7 @@ function TaskTable({ tasks }: { tasks: TaskStat[] }) {
                 {task.costed_runs > 0 ? formatCost(task.cost_usd) : t("usage.noCost")}
               </span>
             </div>
-            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-black/[0.07] dark:bg-white/[0.1]">
+            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
               <div
                 className="h-full rounded-full bg-[var(--cf-accent)]"
                 style={{ width: `${Math.max((task.tokens / peak) * 100, 2)}%` }}
@@ -490,9 +478,7 @@ function ModelTable({ models }: { models: ModelStat[] }) {
 
   return (
     <div className="rounded-lg border border-[var(--cf-border)] p-3">
-      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {t("usage.byModel")}
-      </p>
+      <p className={`mb-1.5 ${SECTION_LABEL}`}>{t("usage.byModel")}</p>
       <div className="space-y-1.5">
         {models.map((model) => (
           <div key={`${model.provider}/${model.model}`}>
@@ -500,7 +486,7 @@ function ModelTable({ models }: { models: ModelStat[] }) {
               <span className="min-w-0 flex-1 truncate">
                 {/* The model is the row; the engine is the qualifier, because two engines can be
                     pointed at the same model id and the pair is what identifies a row. */}
-                {model.model || t("usage.modelUnnamed")}
+                {model.model ? <span className="font-mono">{model.model}</span> : t("usage.modelUnnamed")}
                 <span className="ml-1.5 text-[11px] text-[var(--cf-text-muted)]">
                   {providerLabel(model.provider)}
                 </span>
@@ -513,7 +499,7 @@ function ModelTable({ models }: { models: ModelStat[] }) {
                 {model.costed_runs > 0 ? formatCost(model.cost_usd) : t("usage.noCost")}
               </span>
             </div>
-            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-black/[0.07] dark:bg-white/[0.1]">
+            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
               <div
                 className="h-full rounded-full"
                 style={{

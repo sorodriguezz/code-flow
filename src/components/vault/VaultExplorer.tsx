@@ -36,6 +36,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { filterVaultItems, useVaultStore } from "../../state/vaultStore";
 import type { VaultFolderRow, VaultItem, VaultItemKind } from "../../types/vault";
 import { ICON_BUTTON, ROW, ROW_ACTIVE, ROW_IDLE, kindIcon } from "./vaultChrome";
+import { fieldClass } from "../common/recipes";
 
 /** What the "new entry" menu offers, in the order it offers it: the three everyday ones, then the
  *  three that describe a piece of infrastructure, then the two documents and the file drawer. */
@@ -369,7 +370,7 @@ export function VaultExplorer() {
             onChange={(event) => useVaultStore.getState().setQuery(event.target.value)}
             placeholder={t("vault.searchPlaceholder")}
             data-tour="vault-search"
-            className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-1 pl-7 pr-2 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: "sm", className: "w-full pl-7 pr-2" })}
           />
         </div>
         <button
@@ -452,7 +453,7 @@ export function VaultExplorer() {
 
         <div className="mt-2 border-t border-[var(--cf-border)] pt-2">
           {visible.length === 0 ? (
-            <p className="px-2 py-3 text-[11.5px] italic text-[var(--cf-text-muted)]">
+            <p className="px-2 py-3 text-[12px] italic text-[var(--cf-text-muted)]">
               {t(query ? "vault.noMatches" : "vault.empty")}
             </p>
           ) : (

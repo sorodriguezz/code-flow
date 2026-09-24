@@ -23,6 +23,7 @@ import { PaneTree } from "./PaneTree";
 import { ContextMenu } from "../common/ContextMenu";
 import { listShellProfiles } from "../../lib/tauri/commands";
 import type { BenchTerminal, ShellProfile } from "../../types/domain";
+import { buttonClass } from "../common/Button";
 
 /**
  * The shell picker behind an action.
@@ -62,7 +63,7 @@ function ShellMenu({ onPick, disabled, label }: { onPick: (profileId?: string) =
         aria-expanded={open}
         title={label}
         aria-label={label}
-        className="flex h-6 w-4 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+        className="flex h-6 w-4 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40"
       >
         <ChevronDown size={11} />
       </button>
@@ -78,7 +79,7 @@ function ShellMenu({ onPick, disabled, label }: { onPick: (profileId?: string) =
                   setOpen(false);
                   onPick(profile.id);
                 }}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-[var(--cf-hover)]"
               >
                 <TerminalSquare size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
                 <span className="truncate">{profile.name}</span>
@@ -112,7 +113,7 @@ function ToolButton({
       disabled={disabled}
       title={title}
       aria-label={title}
-      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-30 dark:hover:bg-white/[0.08] ${
+      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-30 ${
         danger ? "hover:text-[var(--cf-danger)]" : "hover:text-[var(--cf-text)]"
       }`}
     >
@@ -166,7 +167,7 @@ function BenchTabButton({
       className={`group flex min-w-0 shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[12px] ${
         active
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+          : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
       }`}
     >
       {/* Alive or not, as a dot — the one thing about a tab that is not in its name, and the one
@@ -311,7 +312,7 @@ export function TerminalBench() {
     <div data-tour="agents-bench" className="flex h-full min-h-0 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1">
         <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-        <span className="mr-1 shrink-0 truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <span className="mr-1 shrink-0 truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("bench.title")}
         </span>
 
@@ -554,7 +555,7 @@ function Pane({
             <p className="text-[12px] text-[var(--cf-text-muted)]">{t("bench.stoppedHint")}</p>
             <button
               onClick={() => void useBenchStore.getState().resume(terminal.id).catch((e: unknown) => pushErrorToast(String(e)))}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
+              className={buttonClass({ variant: "primary" })}
             >
               <Play size={12} />
               {t("bench.resume")}

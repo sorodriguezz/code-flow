@@ -125,11 +125,11 @@ export function ColumnsModal({
           {order.map((key, index) => (
             <div
               key={key}
-              className="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              className="flex min-h-[30px] items-center gap-2 rounded-md px-2 hover:bg-[var(--cf-hover)]"
             >
               <Checkbox checked={!off.has(key)} onChange={(on) => toggle(key, on)} />
               <span
-                className={`min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)] ${
+                className={`min-w-0 flex-1 truncate text-[13px] text-[var(--cf-text)] ${
                   addable ? "font-mono" : ""
                 }`}
               >
@@ -141,9 +141,9 @@ export function ColumnsModal({
                 disabled={index === 0}
                 aria-label={t("remote.gridColumnUp")}
                 title={t("remote.gridColumnUp")}
-                className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-25 dark:hover:bg-white/[0.08]"
+                className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-25"
               >
-                <ChevronUp size={12} />
+                <ChevronUp size={14} />
               </button>
               <button
                 type="button"
@@ -151,9 +151,9 @@ export function ColumnsModal({
                 disabled={index === order.length - 1}
                 aria-label={t("remote.gridColumnDown")}
                 title={t("remote.gridColumnDown")}
-                className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-25 dark:hover:bg-white/[0.08]"
+                className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-25"
               >
-                <ChevronDown size={12} />
+                <ChevronDown size={14} />
               </button>
             </div>
           ))}

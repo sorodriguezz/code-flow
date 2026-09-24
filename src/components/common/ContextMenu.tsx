@@ -14,7 +14,7 @@
 
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ChevronRight, type LucideIcon } from "lucide-react";
+import { ChevronRight, Loader2, type LucideIcon } from "lucide-react";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 
 export interface MenuItem {
@@ -199,10 +199,10 @@ export function ContextMenu({
         event.stopPropagation();
       }}
       style={{ position: "fixed", left: pos.left, top: pos.top }}
-      className="z-[9999] min-w-[172px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
+      className="z-[9999] min-w-[172px] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)]"
     >
       {heading && (
-        <p className="px-2 pb-1 pt-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <p className="px-2.5 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
           {heading}
         </p>
       )}
@@ -228,24 +228,26 @@ export function ContextMenu({
               onClose();
               item.onClick();
             }}
-            className={`flex w-full items-start gap-2 rounded px-2 py-1 text-left text-[12px] leading-snug disabled:opacity-50 ${
-              item.disabled ? "cursor-default" : "hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
+            className={`flex w-full items-start gap-2.5 rounded-md px-2.5 py-[6px] text-left text-[13px] leading-snug disabled:opacity-50 ${
+              item.disabled ? "cursor-default" : "hover:bg-[var(--cf-hover)]"
             } ${item.danger ? "text-[var(--cf-danger)]" : "text-[var(--cf-text)]"} ${
-              submenu === i ? "bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]" : ""
+              submenu === i ? "bg-[var(--cf-hover)]" : ""
             }`}
           >
             {item.leading ??
               (item.icon && (
+                // Only the loading glyph turns. Spinning every disabled icon made a menu's
+                // unavailable entries (a revert blocked by local changes) look like work in progress.
                 <item.icon
-                  size={13}
-                  className={`mt-[2px] shrink-0 opacity-70 ${item.disabled ? "animate-spin" : ""}`}
+                  size={15}
+                  className={`mt-[1px] shrink-0 opacity-70 ${item.icon === Loader2 ? "animate-spin" : ""}`}
                 />
               ))}
             {/* Wraps. See the header: a menu entry you can only half-read is one you have
                 to click to identify. */}
             <span className="min-w-0 flex-1 break-words">{item.label}</span>
             {item.children && (
-              <ChevronRight size={12} className="mt-[2px] shrink-0 opacity-60" />
+              <ChevronRight size={13} className="mt-[2px] shrink-0 opacity-60" />
             )}
           </button>
           {item.children && submenu === i && (
@@ -335,12 +337,12 @@ function Submenu({
         top: pos?.top ?? 0,
         visibility: pos ? "visible" : "hidden",
       }}
-      className="z-[10000] max-h-[60vh] min-w-[160px] overflow-y-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
+      className="z-[10000] max-h-[60vh] min-w-[160px] overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)]"
     >
       {items.length === 0 ? (
         // A verb with nothing to apply it to still has to say so: an empty box that opens and
         // shows nothing reads as a bug rather than as an answer.
-        <p className="px-2 py-1 text-[11.5px] text-[var(--cf-text-muted)]">—</p>
+        <p className="px-2.5 py-1.5 text-[13px] text-[var(--cf-text-muted)]">—</p>
       ) : (
         items.map((item, i) => (
           <button
@@ -351,12 +353,12 @@ function Submenu({
               onPick();
               item.onClick();
             }}
-            className={`flex w-full items-start gap-2 rounded px-2 py-1 text-left text-[12px] leading-snug disabled:opacity-50 ${
-              item.disabled ? "cursor-default" : "hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
+            className={`flex w-full items-start gap-2.5 rounded-md px-2.5 py-[6px] text-left text-[13px] leading-snug disabled:opacity-50 ${
+              item.disabled ? "cursor-default" : "hover:bg-[var(--cf-hover)]"
             } ${item.danger ? "text-[var(--cf-danger)]" : "text-[var(--cf-text)]"}`}
           >
             {item.leading ??
-              (item.icon && <item.icon size={13} className="mt-[2px] shrink-0 opacity-70" />)}
+              (item.icon && <item.icon size={15} className="mt-[1px] shrink-0 opacity-70" />)}
             <span className="min-w-0 flex-1 break-words">{item.label}</span>
           </button>
         ))

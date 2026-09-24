@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { computeGraphLayout, laneColor } from "../../lib/graphLayout";
 import { useRepoStore } from "../../state/repoStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -9,9 +9,11 @@ import * as api from "../../lib/tauri/commands";
 import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { Tooltip } from "../common/Tooltip";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { fieldClass, toolbarClass } from "../common/recipes";
 import {
-  ChevronDown,
-  ChevronRight,
+  ChevronsDown,
   Cloud,
   GitBranch,
   History,
@@ -28,32 +30,59 @@ import { matchesCommit } from "../../lib/gitActions";
 import { commitMenuItems } from "./commitMenu";
 import type { CommitInfo } from "../../types/domain";
 import { Skeleton, SkeletonRows } from "../common/Skeleton";
-import { fileStatusColor, fileStatusLabelKey, fileStatusLetter } from "../../lib/fileStatus";
+import {
+  FILE_STATUS_LETTER_CLASS,
+  fileStatusColor,
+  fileStatusLabelKey,
+  fileStatusLetter,
+} from "../../lib/fileStatus";
 import type { CommitRef, FileDiffInfo, RefKind } from "../../types/domain";
 import { useFrameThrottle } from "../../lib/frameThrottle";
 
 const ROW_HEIGHT = 30;
 const LANE_WIDTH = 16;
 const DOT_RADIUS = 4;
+/** HEAD's dot: a ring, a step larger than the discs around it. "Where am I" is then answered by the
+ *  graph itself and not only by a chip naming the checked-out branch — which on a detached HEAD no
+ *  chip does. */
+const HEAD_RADIUS = 5;
 const DIFF_MIN = 280;
 const DIFF_MAX = 900;
 const COL_MIN = 50;
 const COL_MAX = 600;
-const COLUMN_GAP = 8; // matches Tailwind gap-2
+const COLUMN_GAP = 10; // matches Tailwind gap-2.5
 
-/** The disclosure triangle's column, left of the hash. Fixed, and part of `fixedColumnsWidth`, so
- *  the lane graph's offset stays a subtraction rather than a measurement. */
-const CHEVRON_WIDTH = 14;
+/** Where lane 0 sits in from the table's left edge. The graph is the first column now, and a dot
+ *  flush against the edge of the pane reads as clipped. */
+const GRAPH_PAD = 10;
+/** The narrowest the graph column gets: its own heading's width. A single-lane history needs about
+ *  thirty pixels of lanes, and the heading squeezed into that spilled over the message's. */
+const GRAPH_MIN = 44;
+/** The rows' right padding (`pr-3`). Part of the fixed width, so the slack stays a subtraction. */
+const ROW_PAD_RIGHT = 12;
 /** One file inside an expanded commit — shorter than a commit row, because it carries one line of
  *  monospace and no chips. */
 const FILE_ROW_HEIGHT = 22;
 /** Breathing room above and below an expanded commit's file list, so the first path doesn't sit
  *  flush against the row that owns it. */
 const FILE_LIST_PAD = 4;
-/** Where a file row's status letter starts: one step further in than the hash above it (`px-3` +
- *  the chevron + its gap), which is what makes the list read as *belonging to* that commit rather
- *  than as more rows in the same table. */
-const FILE_INDENT = 12 + CHEVRON_WIDTH + COLUMN_GAP + 14;
+/** Where a file row's status letter starts: one small step in from the message column it hangs
+ *  under, which is what makes the list read as *belonging to* that commit rather than as more rows
+ *  in the same table. */
+const FILE_INDENT = 8;
+/**
+ * Below this much message, the tags step aside — see `RefChips`.
+ *
+ * About the width of a summary and its two chips with the summary still readable. Measured against
+ * the message column rather than the window, because what it protects is the message: widening the
+ * author column or opening the diff beside the table eats the same room a small window does.
+ */
+const NARROW_MESSAGE = 420;
+
+/** A column heading: the app's section-label voice — 11px uppercase, faint — left-aligned over the
+ *  cells it heads, where centred labels sat over left-aligned text and named the middle of nothing. */
+const COLUMN_HEADING =
+  "min-w-0 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
 
 /** Rows kept rendered above and below the viewport, so a fast scroll never lands on empty space.
  *  Same idea, same number as the result grid's — see `db/ResultGrid`. */
@@ -83,8 +112,8 @@ function formatFullDateTime(ts: number): string {
   return FULL_DATE_TIME.format(new Date(ts * 1000));
 }
 
-/** How many chips a row shows before the rest become a counter. The column is ~200px and a chip
- *  with a glyph and a branch name in it is most of a hundred. */
+/** How many chips a row shows before the rest become a counter. They share the message's cell, and
+ *  every chip past two is width the summary gives up for a name a hover can supply. */
 const MAX_REF_CHIPS = 2;
 
 /**
@@ -102,16 +131,16 @@ const REF_GLYPH: Record<RefKind, LucideIcon> = { branch: GitBranch, remote: Clou
 /**
  * One ref, as a chip, in the colour of the lane its commit sits on.
  *
- * **That is the whole point.** The refs column is inches away from the graph and was telling you
+ * **That is the whole point.** The refs used to be a column inches away from the graph that told you
  * nothing about it: `feat/thing` came out indigo whether its commit was the tip of the indigo line,
- * the green one or the orange one, so matching a name to a line meant tracing the row across by eye
+ * the teal one or the amber one, so matching a name to a line meant tracing the row across by eye
  * and counting lanes. Painted in `laneColor(lane)` the chip *is* the line — the same hue as the dot
- * beside it and the stroke running out of it — and the match is made before you have finished
- * reading the name.
+ * at the start of the row and the stroke running out of it — and the match is made before you have
+ * finished reading the name.
  *
- * The palette is safe to read as text: the eight lane colours sit in the same 55–70% lightness band
- * as the workspace colours, which is the band chosen precisely because one hex has to work on both
- * themes (see `lib/workspaceColors`).
+ * The palette is safe to read as text: lane 0 is the accent, which already carries text everywhere
+ * in the app, and the other five sit in the same 55–70% lightness band as the workspace colours —
+ * the band chosen precisely because one hex has to work on both themes (see `lib/workspaceColors`).
  *
  * **Three channels, three questions, no overlap.**
  * - *Hue* — which line. From the graph, never from the kind.
@@ -123,21 +152,35 @@ const REF_GLYPH: Record<RefKind, LucideIcon> = { branch: GitBranch, remote: Clou
  *   on one row.
  *
  * Tags take the pill shape as well as the tag glyph. Cheap, and shape is the one channel that
- * survives both colour-blindness and 10px type, which is where two 9px icons start to converge.
+ * survives both colour-blindness and small type, which is where two small icons start to converge.
  *
  * `title` rather than the app's own `Tooltip`: the name is *truncated*, not missing, so this is the
  * fallback case that `Tooltip`'s own note reserves for the platform's — and it is per-row in a list
  * that can run to a thousand commits, where a portalled component per chip is a cost with nothing
  * to show for it.
+ *
+ * `display` is the caller's, and it is the only display utility on the element: whether a chip is
+ * drawn at all depends on how much room the message has (see [`RefChips`]), and two display classes
+ * on one element are resolved by stylesheet order rather than by which one was meant.
  */
-function RefChip({ commitRef, lane, isCurrent }: { commitRef: CommitRef; lane: string; isCurrent: boolean }) {
+function RefChip({
+  commitRef,
+  lane,
+  isCurrent,
+  display,
+}: {
+  commitRef: CommitRef;
+  lane: string;
+  isCurrent: boolean;
+  display: string;
+}) {
   const Icon = REF_GLYPH[commitRef.kind];
   const outline = commitRef.kind === "remote";
   return (
     <span
       title={commitRef.name}
-      className={`flex min-w-0 shrink items-center gap-1 border px-1.5 py-0.5 text-[10px] ${
-        commitRef.kind === "tag" ? "rounded-full" : "rounded"
+      className={`${display} h-[19px] min-w-0 max-w-[160px] shrink items-center gap-1 border px-1.5 font-mono text-[11px] ${
+        commitRef.kind === "tag" ? "rounded-full" : "rounded-[4px]"
       } ${isCurrent ? "font-semibold" : "font-medium"}`}
       style={{
         // The lane's own hue for the text, and washes of it for the box. Not a solid fill with
@@ -149,8 +192,90 @@ function RefChip({ commitRef, lane, isCurrent }: { commitRef: CommitRef; lane: s
         borderColor: `color-mix(in oklab, ${lane} ${outline || isCurrent ? 55 : 28}%, transparent)`,
       }}
     >
-      <Icon size={9} className="shrink-0" />
+      <Icon size={11} className="shrink-0" />
       <span className="truncate">{commitRef.name}</span>
+    </span>
+  );
+}
+
+/** "+2", for the refs a row had no room to draw — named in its `title`. */
+function RefOverflow({ refs, display }: { refs: CommitRef[]; display: string }) {
+  return (
+    <span
+      title={refs.map((ref) => ref.name).join("\n")}
+      className={`${display} shrink-0 items-center text-[11px] font-medium tabular-nums text-[var(--cf-text-faint)]`}
+    >
+      +{refs.length}
+    </span>
+  );
+}
+
+/**
+ * A commit's refs, as chips at the end of its message.
+ *
+ * They used to have a column of their own: two hundred pixels on every row, empty on all but the
+ * handful of commits that carry a branch or a tag, and taking that width from the one column with
+ * something to say on every row. In the message's cell they cost nothing where there is nothing,
+ * and where there is something they sit beside the words they label.
+ *
+ * **Tags step aside when the message runs short of room** — `data-narrow` on the scroll container,
+ * set by the same observer that sizes the message (`NARROW_MESSAGE`). A branch is where work is
+ * going on and a remote is where it was pushed; a tag is a milestone you already know about, and
+ * of the three it is the one a cramped row can drop without hiding anything current. Nothing is
+ * lost: the counter then includes them and its `title` names them.
+ *
+ * Both arrangements are rendered and CSS picks one, rather than the width being read into React:
+ * the table is memoised precisely so that a drag of the pane beside it re-renders nothing, and a
+ * width in state would hand every row a re-render per pointermove. Each chip carries the display
+ * for its own case — drawn in both, drawn only while roomy, drawn only while narrow — and each
+ * layout gets its own counter, so "+N" is always the number actually hidden.
+ */
+function RefChips({
+  refs,
+  lane,
+  currentBranch,
+}: {
+  refs: CommitRef[];
+  lane: string;
+  currentBranch: string | null;
+}) {
+  if (refs.length === 0) return null;
+  const narrowShown = refs.filter((ref) => ref.kind !== "tag").slice(0, MAX_REF_CHIPS);
+  const roomyHidden = refs.slice(MAX_REF_CHIPS);
+  const narrowHidden = refs.filter((ref) => !narrowShown.includes(ref));
+  return (
+    <span className="flex min-w-0 max-w-[60%] shrink items-center gap-1 overflow-hidden">
+      {refs.map((ref, index) => {
+        const roomy = index < MAX_REF_CHIPS;
+        const narrow = narrowShown.includes(ref);
+        if (!roomy && !narrow) return null;
+        return (
+          <RefChip
+            key={`${ref.kind}:${ref.name}`}
+            commitRef={ref}
+            // The same call the dot at the start of the row makes, so chip and dot cannot disagree.
+            lane={lane}
+            isCurrent={ref.kind === "branch" && ref.name === currentBranch}
+            display={
+              roomy && narrow
+                ? "inline-flex"
+                : roomy
+                  ? "inline-flex group-data-[narrow]/graph:hidden"
+                  : "hidden group-data-[narrow]/graph:inline-flex"
+            }
+          />
+        );
+      })}
+      {/* The overflow used to be silent: a commit with a branch, its remote and two tags on it
+          showed two chips and no sign that it had four. A counter is smaller than a third chip and
+          says the one thing the missing chips were there to say — that there is more here — with
+          the names themselves a hover away. */}
+      {roomyHidden.length > 0 && (
+        <RefOverflow refs={roomyHidden} display="inline-flex group-data-[narrow]/graph:hidden" />
+      )}
+      {narrowHidden.length > 0 && (
+        <RefOverflow refs={narrowHidden} display="hidden group-data-[narrow]/graph:inline-flex" />
+      )}
     </span>
   );
 }
@@ -160,9 +285,9 @@ function RefChip({ commitRef, lane, isCurrent }: { commitRef: CommitRef; lane: s
  * file.
  *
  * The letter carries the status on its own — colour *and* glyph, `fileStatusColor` and
- * `fileStatusLetter` — rather than the pill of translated text the diff panel puts above each file.
- * That pill is right where one file is the subject and has a header to itself; here the path is the
- * subject and there can be four hundred of them, and four hundred "Modificado" pills would push
+ * `fileStatusLetter` — rather than the chip of translated text the diff panel puts above the file.
+ * That chip is right where one file is the subject and has a header to itself; here the path is the
+ * subject and there can be four hundred of them, and four hundred "Modificado" chips would push
  * every filename they annotate past the right edge. The word is still there, in the `title`.
  *
  * A rename shows both halves with an arrow between them, because "R" beside the new path alone is
@@ -171,6 +296,7 @@ function RefChip({ commitRef, lane, isCurrent }: { commitRef: CommitRef; lane: s
 function CommitFileRow({
   file,
   top,
+  left,
   width,
   selected,
   onSelect,
@@ -178,13 +304,11 @@ function CommitFileRow({
 }: {
   file: FileDiffInfo;
   top: number;
-  /**
-   * Where the path stops truncating — the same place the message column above it stops.
-   *
-   * Without it the row ran the full width of the table and a deep path went straight on under the
-   * lane graph, which is a strip this list has no business drawing into: the lanes are painted over
-   * the rows (`z-[1]`, so selection can't erase them), so the two would simply overlap.
-   */
+  /** The message column's left edge: the list hangs under the summary of the commit it belongs to,
+   *  clear of the lanes, which run on through the block to the commits below. */
+  left: number;
+  /** From there to the end of the table. The lanes are the first column now, so a deep path has
+   *  nothing to run into on its right and can take the width the author and date leave. */
   width: string;
   selected: boolean;
   /** Opens this file in the diff panel. Passed the path the backend can find it by — see the note
@@ -206,23 +330,16 @@ function CommitFileRow({
       onClick={() => onSelect(path)}
       aria-current={selected ? "page" : undefined}
       title={`${t(fileStatusLabelKey(file.status))} — ${label}`}
-      style={{ position: "absolute", left: 0, top, width, height: FILE_ROW_HEIGHT, paddingLeft: FILE_INDENT }}
-      className={`flex items-center gap-2 rounded-[5px] text-left text-[12px] transition-colors ${
-        selected
-          ? "bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)]"
-          : "hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+      style={{ position: "absolute", left, top, width, height: FILE_ROW_HEIGHT, paddingLeft: FILE_INDENT }}
+      // The list-row selection every other list in the app wears: the accent wash, text unchanged.
+      className={`flex items-center gap-2 rounded-md pr-2 text-left text-[12px] transition-colors duration-100 ${
+        selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
       }`}
     >
-      <span style={{ color }} className="w-3 shrink-0 text-center font-mono text-[11px] font-bold">
+      <span style={{ color }} className={FILE_STATUS_LETTER_CLASS}>
         {fileStatusLetter(file.status)}
       </span>
-      <span
-        className={`truncate font-mono ${
-          selected ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
-        }`}
-      >
-        {label}
-      </span>
+      <span className="truncate font-mono text-[var(--cf-text)]">{label}</span>
     </button>
   );
 }
@@ -253,7 +370,9 @@ const CommitTable = memo(function CommitTable() {
   const colDate = useLayoutStore((s) => s.sizes.graphColDate);
   const colAuthor = useLayoutStore((s) => s.sizes.graphColAuthor);
   const colMessage = useLayoutStore((s) => s.sizes.graphColMessage);
-  const colRefs = useLayoutStore((s) => s.sizes.graphColRefs);
+  // `graphColRefs` is still in `layoutStore` and is simply no longer read: the refs are chips in the
+  // message's cell now, not a column. A width saved for it by an older build sits there unused and
+  // harmless — nothing else is keyed on it, so there is nothing to migrate.
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const t = useT();
@@ -436,19 +555,28 @@ const CommitTable = memo(function CommitTable() {
   // checked out, so no chip should be claiming to be the one you are on.
   const currentBranch = status?.is_detached ? null : (status?.current_branch ?? null);
 
-  const svgWidth = layout.laneCount * LANE_WIDTH + 12;
+  /**
+   * The lane graph's column — the *first* column now, and the reason for most of this geometry.
+   *
+   * It used to be the last: the text columns ran left to right and the lanes came after the refs,
+   * a message's width away from the summary they belong to — so reading "which line is this commit
+   * on" meant carrying a row across the whole table by eye. Put first, lane and message read as one
+   * thing, which is how every graph client people already know draws it. It also means the SVG sits
+   * at a fixed `left: 0` instead of an offset `calc` that moved whenever a column was dragged.
+   */
+  const graphWidth = Math.max(GRAPH_MIN, GRAPH_PAD + layout.laneCount * LANE_WIDTH + 6);
   /** Every row plus whatever the open one added — the scroll height, and the height the lane graph
    *  has to span so an edge crossing the open row stretches over its files instead of stopping at
    *  them. */
   const contentHeight = layout.rows.length * ROW_HEIGHT + expandedHeight;
-  // The chevron, four fixed text columns (message is the fifth and takes the slack), and six
-  // `gap-2` seams: one between each pair of the seven children, the last of them before the graph.
-  const fixedColumnsWidth = CHEVRON_WIDTH + colHash + colDate + colAuthor + colRefs + COLUMN_GAP * 6;
+  // The graph, three fixed text columns to the right of the message (which takes the slack), four
+  // `gap-2.5` seams between the five, and the rows' right padding.
+  const fixedWidth = graphWidth + colAuthor + colDate + colHash + COLUMN_GAP * 4 + ROW_PAD_RIGHT;
 
   /**
-   * Message takes whatever the other five columns and the lane graph don't.
+   * Message takes whatever the lane graph and the other three columns don't.
    *
-   * A single-lane repository needs about 28px of graph, and the table used to end at the sum of its
+   * A single-lane repository needs about 30px of graph, and the table used to end at the sum of its
    * fixed columns and leave the rest of the panel as background — four hundred pixels of nothing to
    * the right of one line of dots, while every message was cut off with an ellipsis. The one column
    * with something to do with more room is the message, so it gets the slack.
@@ -456,29 +584,33 @@ const CommitTable = memo(function CommitTable() {
    * Published as a CSS variable rather than held in state. This table is memoized precisely so that
    * dragging the diff panel beside it doesn't re-render several hundred rows on every pointermove
    * tick, and re-rendering just to announce a width would hand that back; `calc` reads it instead.
+   * `data-narrow` rides along for the same reason — it is what lets the tags step aside (see
+   * `RefChips`) with a CSS selector rather than a render.
    *
    * Declared up here, above the empty-state returns, because it is a hook: below them it ran on a
    * repository with commits and not on one without, which is a different number of hooks per render
-   * and the one thing React cannot survive.
+   * and the one thing React cannot survive. Re-run on `hasRows` for the reason the viewport observer
+   * below gives: the table mounts behind a skeleton, and on a single-lane history nothing else in the
+   * dependency list changes when the rows arrive — the message stayed at its base width, short of the
+   * pane, until the first column drag.
    */
   const scrollRef = useRef<HTMLDivElement>(null);
+  const hasRows = commits.length > 0;
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const publish = (available: number) => {
-      // `- 24` for the rows' own `px-3`. Floored, so the content can equal the viewport but never
-      // exceed it by a fraction and summon a scrollbar that would change the width again.
-      const slack = Math.max(
-        0,
-        Math.floor(available - 24 - fixedColumnsWidth - svgWidth - colMessage),
-      );
+      // Floored, so the content can equal the viewport but never exceed it by a fraction and
+      // summon a scrollbar that would change the width again.
+      const slack = Math.max(0, Math.floor(available - fixedWidth - colMessage));
       el.style.setProperty("--cf-graph-msg", `${colMessage + slack}px`);
+      el.toggleAttribute("data-narrow", colMessage + slack < NARROW_MESSAGE);
     };
     publish(el.clientWidth);
     const observer = new ResizeObserver(([entry]) => publish(entry.contentRect.width));
     observer.observe(el);
     return () => observer.disconnect();
-  }, [fixedColumnsWidth, svgWidth, colMessage]);
+  }, [fixedWidth, colMessage, hasRows]);
 
   /**
    * The window: which slice of the 500 rows is actually built.
@@ -499,7 +631,6 @@ const CommitTable = memo(function CommitTable() {
   // container exists, so on the first pass there is no element for the ref to have caught and an
   // observer created then would be observing nothing for the rest of the session — the window
   // would be stuck at the fallback height on a tall monitor and leave the bottom of the list blank.
-  const hasRows = commits.length > 0;
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -574,24 +705,21 @@ const CommitTable = memo(function CommitTable() {
     );
   }
 
-  // Left-to-right order: Commit, Date, Author, Message, Refs, then the lane graph —
-  // keeping the graph fixed-width and last avoids it colliding with the sticky header
-  // when the row is very wide, and every text column has a known pixel width so the
-  // graph's offset can be computed exactly instead of relying on flex measurement.
-  const columns = [
-    { key: "graphColHash" as const, width: colHash, label: t("graph.colCommit") },
-    { key: "graphColDate" as const, width: colDate, label: t("graph.colDate") },
+  // Left-to-right order: the lane graph, Message (with the refs as chips at its end), then Author,
+  // Date and Commit. The graph leads so that a commit's line and its summary read together; the
+  // three columns after the message are the ones you look up rather than read, and each has a known
+  // pixel width, so the message's share stays a subtraction instead of a flex measurement.
+  const trailingColumns = [
     { key: "graphColAuthor" as const, width: colAuthor, label: t("graph.colAuthor") },
-    // The one that takes up the slack, and so the one with no handle of its own — see below.
-    { key: "graphColMessage" as const, width: colMessage, label: t("graph.colMessage"), fills: true },
-    { key: "graphColRefs" as const, width: colRefs, label: t("graph.colRefs") },
+    { key: "graphColDate" as const, width: colDate, label: t("graph.colDate") },
+    { key: "graphColHash" as const, width: colHash, label: t("graph.colCommit") },
   ];
 
-  // Coordinates local to the graph SVG itself, which is offset past the text columns via `left`.
+  // Coordinates local to the graph SVG, which is the table's first column and sits at `left: 0`.
   // `rowY` goes through `rowTop`, so an open row's files push the lanes below it down with the rows
   // they belong to and the line into the parent simply grows longer across the gap — rather than
   // the dots drifting off their rows the moment anything expands.
-  const laneX = (lane: number) => lane * LANE_WIDTH + LANE_WIDTH / 2;
+  const laneX = (lane: number) => GRAPH_PAD + lane * LANE_WIDTH + LANE_WIDTH / 2;
   const rowY = (row: number) => rowTop(row) + ROW_HEIGHT / 2;
 
   /**
@@ -611,58 +739,58 @@ const CommitTable = memo(function CommitTable() {
 
   /** The fallback keeps the first paint honest, before the observer has run once. */
   const messageWidth = `var(--cf-graph-msg, ${colMessage}px)`;
-  const textColumnsWidth = `calc(${fixedColumnsWidth}px + ${messageWidth})`;
-  const totalWidth = `calc(${fixedColumnsWidth + svgWidth + 24}px + ${messageWidth})`;
+  const tableWidth = `calc(${fixedWidth}px + ${messageWidth})`;
+  /** Where the message column starts — and so where an expanded commit's files hang from. */
+  const messageLeft = graphWidth + COLUMN_GAP;
 
   return (
     <div
       ref={scrollRef}
-      className="flex-1 overflow-auto"
+      // `group/graph` is what the ref chips' `group-data-[narrow]/graph:` classes key on; the
+      // attribute itself is set by the width observer above.
+      className="group/graph flex-1 overflow-auto"
       // One state write per painted frame rather than one per scroll event. `scrollTop` drives the
       // row windowing below, so an unthrottled fling asked React for two or three renders per frame
       // and threw all but the last away before anything reached the screen.
       onScroll={(e) => onScrollTop(e.currentTarget.scrollTop)}
     >
       <div
-        className="sticky top-0 z-10 flex h-6 min-w-full items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[10px]"
-        style={{ width: totalWidth, willChange: "transform", contain: "paint" }}
+        className="sticky top-0 z-10 flex h-[30px] min-w-full items-center gap-2.5 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] pr-3"
+        style={{ width: tableWidth, willChange: "transform", contain: "paint" }}
       >
-        {/* The chevron's column has no label — a header over a column of disclosure triangles names
-            nothing — but it has to exist here, or every heading sits fourteen pixels left of the
-            column it heads. */}
-        <div style={{ width: CHEVRON_WIDTH }} className="shrink-0" />
-        {columns.map((col) => (
-          <div
-            key={col.key}
-            style={{ width: col.fills ? messageWidth : col.width }}
-            className="flex shrink-0 items-center"
-          >
-            <span className="min-w-0 flex-1 truncate text-center text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {col.label}
-            </span>
-            {/* No handle on the column that fills: dragging it would change a base width that the
-                slack immediately gives back, so the grip would move and nothing else would. Its
-                width is set by the other four — widen Author and Message narrows to match.
+        {/* Allowed to run past its column rather than truncate: on a one-lane history the column is
+            narrower than the word, and the gap after it is empty by construction. */}
+        <div style={{ width: graphWidth }} className="shrink-0 pl-2">
+          <span className={`${COLUMN_HEADING} whitespace-nowrap`}>{t("graph.colGraph")}</span>
+        </div>
+        {/* No handle on the column that fills: dragging it would change a base width that the slack
+            immediately gives back, so the grip would move and nothing else would. Its width is set by
+            the other three — widen Author and Message narrows to match. */}
+        <div style={{ width: messageWidth }} className="flex min-w-0 shrink-0 items-center">
+          <span className={`${COLUMN_HEADING} truncate`}>{t("graph.colMessage")}</span>
+        </div>
+        {trailingColumns.map((col) => (
+          <div key={col.key} style={{ width: col.width }} className="flex min-w-0 shrink-0 items-center">
+            {/* On the column's *left* edge, and inverted: these three are anchored to the right of
+                the table, so the seam you pull is the one between a column and the message — drag
+                it left and the column grows while the message gives the room back.
 
-                `quiet` on the rest: these divide columns of a table, not panes of a layout. The
-                default seam and grip are sized for the side of a panel, and in a 24px header they
-                came out as full-height bars heavier than the labels they sat between. */}
-            {!col.fills && (
-              <ResizeHandle
-                quiet
-                axis="x"
-                value={col.width}
-                min={COL_MIN}
-                max={COL_MAX}
-                onChange={(w) => setSize(col.key, w)}
-                onCommit={(w) => commitSize(col.key, w)}
-              />
-            )}
+                `quiet`: these divide columns of a table, not panes of a layout. The default seam
+                and grip are sized for the side of a panel, and in a header this short they came out
+                as full-height bars heavier than the labels they sat between. */}
+            <ResizeHandle
+              quiet
+              invert
+              axis="x"
+              value={col.width}
+              min={COL_MIN}
+              max={COL_MAX}
+              onChange={(w) => setSize(col.key, w)}
+              onCommit={(w) => commitSize(col.key, w)}
+            />
+            <span className={`${COLUMN_HEADING} truncate`}>{col.label}</span>
           </div>
         ))}
-        <span className="flex-1 text-center text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("graph.colGraph")}
-        </span>
       </div>
 
       {/* The graph rises as one block rather than row by row: the lanes and the dots are a single
@@ -670,7 +798,7 @@ const CommitTable = memo(function CommitTable() {
           own commit dot on the way in. */}
       <div
         className="cf-rise relative min-w-full"
-        style={{ width: totalWidth, minHeight: contentHeight }}
+        style={{ width: tableWidth, minHeight: contentHeight }}
       >
         {/* Above the rows, which is not where it was.
             Both layers are absolutely positioned at `z-index: auto`, so they painted in DOM order —
@@ -685,9 +813,9 @@ const CommitTable = memo(function CommitTable() {
             strokes — the row underneath is still the click target across its whole width, including
             the part of it this covers. */}
         <svg
-          width={svgWidth}
+          width={graphWidth}
           height={contentHeight}
-          style={{ left: textColumnsWidth, top: 0 }}
+          style={{ left: 0, top: 0 }}
           className="pointer-events-none absolute z-[1]"
         >
           {visibleEdges.map((edge) => {
@@ -710,13 +838,28 @@ const CommitTable = memo(function CommitTable() {
                 d={`M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`}
                 stroke={color}
                 strokeWidth={2}
+                strokeLinecap="round"
                 fill="none"
               />
             );
           })}
-          {visibleRows.map((r) => (
-            <circle key={r.commit.id} cx={laneX(r.lane)} cy={rowY(r.row)} r={DOT_RADIUS} fill={laneColor(r.lane)} />
-          ))}
+          {visibleRows.map((r) =>
+            // HEAD as a ring filled with the sheet, so it reads as "you are here" rather than as one
+            // more commit — and it stays a ring on a selected row, where the wash shows around it.
+            r.commit.id === headCommitId ? (
+              <circle
+                key={r.commit.id}
+                cx={laneX(r.lane)}
+                cy={rowY(r.row)}
+                r={HEAD_RADIUS}
+                fill="var(--cf-surface)"
+                stroke={laneColor(r.lane)}
+                strokeWidth={2.5}
+              />
+            ) : (
+              <circle key={r.commit.id} cx={laneX(r.lane)} cy={rowY(r.row)} r={DOT_RADIUS} fill={laneColor(r.lane)} />
+            ),
+          )}
         </svg>
 
         <div>
@@ -729,120 +872,73 @@ const CommitTable = memo(function CommitTable() {
                 // Absolutely placed at its own row offset rather than stacked in flow, because the
                 // rows either side of the window are not built at all — the parent already reserves
                 // the full `contentHeight`, so the scrollbar is the same length it has always been
-                // and the row lands under its own dot in the SVG layer above.
-                style={{
-                  position: "absolute",
-                  left: 0,
-                  right: 0,
-                  top: rowTop(r.row),
-                  height: ROW_HEIGHT,
-                  // The selected row is *outlined*, not just washed. The wash alone had to carry
-                  // both "this is the open commit" and "this is the row under the pointer", and on
-                  // the dark theme those two are a few percent of lightness apart; the ring says it
-                  // in a channel hover has no claim on. An inset shadow rather than a border,
-                  // because a border would be a pixel of layout and shift every column in the row
-                  // by it the moment you clicked.
-                  //
-                  // The fill is mixed from `--cf-accent` rather than taken from `--cf-accent-soft`
-                  // so that it agrees with the ring around it. On the light theme that changes
-                  // nothing worth seeing — `--cf-accent-soft` is the same 14% mix, against the
-                  // surface instead of against transparent. On the dark theme it is a hardcoded
-                  // navy: it happens to land on the *default* indigo and does not follow
-                  // `accentStore`, so a user on teal would have got a teal ring around a blue fill.
-                  ...(isSelected
-                    ? {
-                        background: "color-mix(in oklab, var(--cf-accent) 14%, transparent)",
-                        boxShadow: "inset 0 0 0 1px var(--cf-accent)",
-                      }
-                    : null),
-                }}
+                // and the row lands on its own dot in the SVG layer above.
+                style={{ position: "absolute", left: 0, right: 0, top: rowTop(r.row), height: ROW_HEIGHT }}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   setMenu({ commit: r.commit, x: event.clientX, y: event.clientY });
                 }}
-                className={`group flex w-full items-center gap-2 px-3 text-[13px] ${
-                  isSelected ? "rounded-md" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                // The open commit wears the selection every list in the app wears — the accent wash,
+                // full bleed. It used to carry an accent ring as well, because the wash was a fixed
+                // navy on the dark theme that could sit a few percent of lightness from the hover
+                // tint; `--cf-accent-soft` follows the accent on both themes now, and a coloured
+                // wash next to the neutral hover tint needs no second channel to be told apart.
+                className={`group transition-colors duration-100 ${
+                  isSelected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
                 }`}
               >
-                {/* The hit area is the row, not the text. It used to be exactly `textColumnsWidth`
-                    wide and only as tall as its own content, so the highlight said "this whole
-                    strip is one commit" while the click target was the words alone — aiming a few
-                    pixels below a line, or to the right of the last column, hit nothing. `h-full`
-                    claims the row's height; `flex-1` over a `minWidth` claims whatever the columns
-                    don't use, without letting them be squeezed when the graph is wider than the
-                    pane and the row is already at its minimum. */}
+                {/* The hit area is the row, not the text: the highlight says "this whole strip is
+                    one commit", so the whole strip is the target — a few pixels below a line, or
+                    past the last column, still lands on it. The graph's column is part of it too,
+                    under the lanes (`pointer-events-none`), so clicking a dot opens its commit. */}
                 <button
                   onClick={() => selectCommit(isSelected ? null : r.commit.id)}
-                  style={{ minWidth: textColumnsWidth }}
                   // The row *is* the disclosure control, so it is the thing that has to announce
-                  // itself as one: the triangle beside the hash is a glyph inside this button, not a
-                  // second button with its own tab stop and its own 14px hit area next to a target
-                  // that already does the same job across the full width of the row.
+                  // itself as one — not a second button with its own tab stop and its own small hit
+                  // area beside a target that already does the same job across the whole row.
                   aria-expanded={isSelected}
-                  className="flex h-full flex-1 items-center gap-2 text-left"
+                  className="flex h-full w-full items-center gap-2.5 pr-3 text-left text-[13px]"
                 >
-                  <span
-                    style={{ width: CHEVRON_WIDTH }}
-                    className={`flex shrink-0 items-center justify-center ${
-                      isSelected ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-                    }`}
-                  >
-                    {isSelected ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  <span style={{ width: graphWidth }} className="shrink-0" aria-hidden />
+                  <span style={{ width: messageWidth }} className="flex min-w-0 shrink-0 items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[var(--cf-text)]">{r.commit.summary}</span>
+                    <RefChips refs={r.commit.refs} lane={laneColor(r.lane)} currentBranch={currentBranch} />
                   </span>
-                  <span style={{ width: colHash }} className="shrink-0 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
-                    {r.commit.short_id}
+                  <span style={{ width: colAuthor }} className="shrink-0 truncate text-[12px] text-[var(--cf-text-muted)]">
+                    {r.commit.author_name}
                   </span>
                   <span
                     style={{ width: colDate }}
-                    className="shrink-0 truncate text-[var(--cf-text-muted)]"
+                    className="shrink-0 truncate text-[12px] tabular-nums text-[var(--cf-text-faint)]"
                     title={formatFullDateTime(r.commit.timestamp)}
                   >
                     {formatDate(r.commit.timestamp)}
                   </span>
-                  <span style={{ width: colAuthor }} className="shrink-0 truncate text-[var(--cf-text-muted)]">
-                    {r.commit.author_name}
-                  </span>
-                  <span style={{ width: messageWidth }} className="shrink-0 truncate text-[var(--cf-text)]">
-                    {r.commit.summary}
-                  </span>
-                  <span style={{ width: colRefs }} className="flex shrink-0 items-center gap-1 overflow-hidden">
-                    {r.commit.refs.slice(0, MAX_REF_CHIPS).map((ref) => (
-                      <RefChip
-                        key={`${ref.kind}:${ref.name}`}
-                        commitRef={ref}
-                        // The same call the dot beside it makes, so chip and dot cannot disagree.
-                        lane={laneColor(r.lane)}
-                        isCurrent={ref.kind === "branch" && ref.name === currentBranch}
-                      />
-                    ))}
-                    {/* The overflow used to be silent: a commit with a branch, its remote and two
-                        tags on it showed two chips and no sign that it had four. A counter is
-                        smaller than a third chip and says the one thing the missing chips were
-                        there to say — that there is more here — with the names themselves a hover
-                        away. */}
-                    {r.commit.refs.length > MAX_REF_CHIPS && (
-                      <span
-                        title={r.commit.refs.slice(MAX_REF_CHIPS).map((ref) => ref.name).join("\n")}
-                        className="shrink-0 rounded px-1 py-0.5 text-[10px] font-medium text-[var(--cf-text-muted)]"
-                      >
-                        +{r.commit.refs.length - MAX_REF_CHIPS}
-                      </span>
-                    )}
+                  <span style={{ width: colHash }} className="shrink-0 truncate font-mono text-[12px] text-[var(--cf-text-faint)]">
+                    {r.commit.short_id}
                   </span>
                 </button>
+                {/* Over the end of the row rather than beside it: the columns fill the table exactly,
+                    so there is no spare width for it to take, and a control that appeared on hover
+                    and *pushed* the hash would move the thing you were reading. The hash is left
+                    aligned in its column, so the tail this sits over is empty. Revealed on hover and
+                    on keyboard focus alike, which `hidden` could not do. */}
                 {isHead && r.commit.parent_ids.length > 0 && (
-                  <button
-                    title={t("graph.undoCommit")}
-                    onClick={async (e) => {
-                      e.stopPropagation();
-                      if (await confirmAction(t("graph.undoConfirm"))) {
-                        void undoCommit(r.commit.id);
-                      }
-                    }}
-                    className="hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] group-hover:block"
-                  >
-                    <RotateCcw size={13} />
-                  </button>
+                  <Tooltip label={t("graph.undoCommit")}>
+                    <button
+                      type="button"
+                      aria-label={t("graph.undoCommit")}
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (await confirmAction(t("graph.undoConfirm"))) {
+                          void undoCommit(r.commit.id);
+                        }
+                      }}
+                      className="absolute right-1.5 top-1/2 inline-flex h-[22px] w-[22px] -translate-y-1/2 items-center justify-center rounded-md bg-[var(--cf-surface-raised)] text-[var(--cf-text-muted)] opacity-0 shadow-[0_0_0_1px_var(--cf-border)] transition-opacity duration-100 hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
+                    >
+                      <RotateCcw size={13} />
+                    </button>
+                  </Tooltip>
                 )}
               </div>
             );
@@ -857,7 +953,12 @@ const CommitTable = memo(function CommitTable() {
           <div style={{ position: "absolute", left: 0, right: 0, top: blockTop, height: expandedHeight }}>
             {commitDiffLoading ? (
               <div
-                style={{ height: FILE_ROW_HEIGHT, marginTop: FILE_LIST_PAD, paddingLeft: FILE_INDENT }}
+                style={{
+                  height: FILE_ROW_HEIGHT,
+                  marginTop: FILE_LIST_PAD,
+                  marginLeft: messageLeft,
+                  paddingLeft: FILE_INDENT,
+                }}
                 className="flex items-center"
               >
                 <Skeleton className="h-3 w-48 rounded" />
@@ -866,7 +967,12 @@ const CommitTable = memo(function CommitTable() {
               // Reachable, and not a fallback for a slow fetch — `commitDiffLoading` above owns that
               // case. This is `git commit --allow-empty`, and a merge that resolved to no change.
               <div
-                style={{ height: FILE_ROW_HEIGHT, marginTop: FILE_LIST_PAD, paddingLeft: FILE_INDENT }}
+                style={{
+                  height: FILE_ROW_HEIGHT,
+                  marginTop: FILE_LIST_PAD,
+                  marginLeft: messageLeft,
+                  paddingLeft: FILE_INDENT,
+                }}
                 className="flex items-center text-[12px] text-[var(--cf-text-muted)]"
               >
                 {t("graph.noFilesChanged")}
@@ -879,7 +985,8 @@ const CommitTable = memo(function CommitTable() {
                   key={`${file.old_path ?? ""}>${file.new_path ?? ""}`}
                   file={file}
                   top={FILE_LIST_PAD + (firstFile + i) * FILE_ROW_HEIGHT}
-                  width={`calc(12px + ${textColumnsWidth})`}
+                  left={messageLeft}
+                  width={`calc(${tableWidth} - ${messageLeft + ROW_PAD_RIGHT}px)`}
                   selected={(file.new_path ?? file.old_path) === selectedCommitPath}
                   // Clicking the open file again closes the panel, the same toggle the commit row
                   // itself has — otherwise the only way out of a diff is the panel's × button,
@@ -908,9 +1015,9 @@ const CommitTable = memo(function CommitTable() {
               type="button"
               onClick={() => void loadMoreCommits()}
               disabled={commitsLoadingMore}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)] disabled:opacity-60"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
             >
-              {commitsLoadingMore && <Loader2 size={12} className="animate-spin" />}
+              {commitsLoadingMore ? <Loader2 size={13} className="animate-spin" /> : <ChevronsDown size={13} />}
               {commitsLoadingMore ? t("graph.loadingMore") : t("graph.loadMore")}
             </button>
           </div>
@@ -971,11 +1078,13 @@ function GraphToolbar() {
   );
 
   return (
-    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
-      <div className="relative min-w-0 flex-1">
+    <div className={toolbarClass}>
+      {/* Capped rather than full width: a filter box that runs the width of a wide pane is a long
+          way to travel back from with the eye, and nothing typed into it is that long. */}
+      <div className="relative w-full min-w-0 max-w-[460px]">
         <Search
-          size={12}
-          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+          size={13}
+          className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
         />
         <input
           value={query}
@@ -990,23 +1099,24 @@ function GraphToolbar() {
           }}
           placeholder={t("graph.searchPlaceholder")}
           aria-label={t("graph.searchPlaceholder")}
-          className="w-full rounded-md border border-[var(--cf-border)] bg-transparent py-1 pl-7 pr-6 text-[12px] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+          className={fieldClass({ size: "sm", className: "w-full pl-8 pr-7" })}
         />
         {query && (
           <button
             type="button"
             onClick={() => setQuery("")}
             aria-label={t("common.clear")}
-            className="absolute right-1 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            title={t("common.clear")}
+            className="absolute right-0.5 top-1/2 flex h-[22px] w-[22px] -translate-y-1/2 items-center justify-center rounded-[5px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
-            <X size={11} />
+            <X size={12} />
           </button>
         )}
       </div>
       {/* Only while filtering, and it says both numbers: "12" alone leaves you wondering whether
           that is all the history or all the matches. */}
       {query.trim() && (
-        <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+        <span className="shrink-0 text-[12px] tabular-nums text-[var(--cf-text-faint)]">
           {t("graph.searchCount", { shown, total })}
         </span>
       )}
@@ -1028,6 +1138,22 @@ export function GraphView() {
 
   const selectedCommit = commits.find((c) => c.id === selectedCommitId) ?? null;
   const open = selectedCommit !== null && selectedCommitPath !== null;
+
+  // Both handed to the memoised `DiffView`, so both have to keep their identity across the renders
+  // this component makes on every tick of a drag of the panel's seam — a fresh arrow or a fresh
+  // element there would rebuild the whole diff per pointermove, which is what the memo is for.
+  const closeFile = useCallback(() => void selectCommitFile(null), [selectCommitFile]);
+  const shortId = selectedCommit?.short_id;
+  const summary = selectedCommit?.summary;
+  const commitContext = useMemo(
+    () =>
+      shortId === undefined ? undefined : (
+        <>
+          <span className="font-mono text-[var(--cf-text-muted)]">{shortId}</span> — {summary}
+        </>
+      ),
+    [shortId, summary],
+  );
 
   return (
     <div className="flex h-full min-h-0">
@@ -1051,40 +1177,47 @@ export function GraphView() {
             style={{ width: diffWidth }}
             className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
           >
-            <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
-              {/* The path leads and the commit follows it, because the path is what changed when
-                  you clicked and the commit is the context you already have on screen. `dir="rtl"`
-                  on a truncating path so it loses the *front* — a column of
-                  `src/components/git/Gra…` names nothing, `…/git/GraphView.tsx` names the file. */}
-              <span className="min-w-0 flex-1" title={selectedCommitPath}>
-                <span
-                  dir="rtl"
-                  className="block truncate text-left font-mono text-[12px] text-[var(--cf-text)]"
-                >
-                  {selectedCommitPath}
-                </span>
-                <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">
-                  <span className="font-mono">{selectedCommit.short_id}</span> — {selectedCommit.summary}
-                </span>
-              </span>
-              <button
-                onClick={() => void selectCommitFile(null)}
-                title={t("graph.close")}
-                className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-              >
-                <X size={14} />
-              </button>
-            </div>
-            <div className="min-h-0 flex-1">
-              {commitFileDiffLoading ? (
+            {commitFileDiffLoading ? (
+              <>
+                {/* While the file is on its way, a bar the height of the diff's own toolbar, holding
+                    what is already known — the path and the way out — so the close button is where
+                    it will be once the diff lands, and the path doesn't blink out for a round trip.
+                    `dir="rtl"` on a truncating path so it loses the *front*: a column of
+                    `src/components/git/Gra…` names nothing, `…/git/GraphView.tsx` names the file. */}
+                <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-3 pr-2">
+                  <span className="min-w-0 flex-1" title={selectedCommitPath}>
+                    <span dir="rtl" className="block truncate text-left font-mono text-[12px] text-[var(--cf-text)]">
+                      {`\u200e${selectedCommitPath}\u200e`}
+                    </span>
+                  </span>
+                  <Tooltip label={t("graph.close")}>
+                    <button
+                      type="button"
+                      onClick={closeFile}
+                      aria-label={t("graph.close")}
+                      className={iconButtonClass({ size: "xs" })}
+                    >
+                      <X size={14} />
+                    </button>
+                  </Tooltip>
+                </div>
                 <SkeletonRows count={10} className="cf-fade-in" />
-              ) : (
-                // `[]` and not "the file is missing": `DiffView`'s own empty state ("no changes")
-                // is the honest reading of a delta with nothing in it, which is what a mode-only
-                // change or a file the pathspec no longer matches comes back as.
-                <DiffView files={commitFileDiff ? [commitFileDiff] : []} />
-              )}
-            </div>
+              </>
+            ) : (
+              // `[]` and not "the file is missing": `DiffView`'s own empty state ("no changes") is
+              // the honest reading of a delta with nothing in it, which is what a mode-only change
+              // or a file the pathspec no longer matches comes back as.
+              //
+              // The diff's own toolbar carries the path, the view switch and the close button, and
+              // the commit it came from rides on the line under it — one bar where there used to be
+              // this panel's header, the diff's toolbar and a sticky file header, all three naming
+              // the same file.
+              <DiffView
+                files={commitFileDiff ? [commitFileDiff] : []}
+                onClose={closeFile}
+                context={commitContext}
+              />
+            )}
           </div>
         </>
       )}

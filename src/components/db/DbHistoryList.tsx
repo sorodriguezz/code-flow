@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { AlertTriangle, Search, Trash2, X } from "lucide-react";
-import { EmptyState } from "../common/EmptyState";
-import { History } from "lucide-react";
-import { ToolbarButton, formatCount, formatDuration } from "./dbChrome";
+import { iconButtonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
+import { dangerIconButtonClass, formatCount, formatDuration } from "./dbChrome";
 import { recordModel } from "../../lib/db/engineModel";
 import { useDbStore } from "../../state/dbStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -16,6 +17,10 @@ import { riseDelay } from "../../lib/rise";
  * finding again, because it is about to be fixed and re-run. Clicking an entry drops it into a new
  * console on the connection it came from rather than running it: re-running a `DELETE` on click
  * would be the worst possible interpretation of "I want to look at this again".
+ *
+ * It sits under the explorer's own head, whose switch already says "History", so it has no heading
+ * of its own: the search box is its first row, with the one action that is about the whole list —
+ * clearing it — beside the box.
  */
 export function DbHistoryList() {
   const t = useT();
@@ -36,57 +41,63 @@ export function DbHistoryList() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1">
-        <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("db.history")}
-        </span>
-        <ToolbarButton
-          onClick={async () => {
-            if (await confirmAction(t("db.clearHistoryConfirm"))) void store.clearHistory();
-          }}
-          disabled={history.length === 0}
-          title={t("db.clearHistory")}
-        >
-          <Trash2 size={13} />
-        </ToolbarButton>
-      </div>
-
-      <div className="relative shrink-0 px-1.5 py-1.5">
-        <Search
-          size={12}
-          className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
-        />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={t("db.searchHistory")}
-          className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-1 pl-6 pr-6 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
-        />
-        {query && (
+      <div className="flex shrink-0 items-center gap-1 pb-2 pl-3.5 pr-2">
+        <div className="relative min-w-0 flex-1">
+          <Search
+            size={13}
+            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
+          />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("db.searchHistory")}
+            aria-label={t("db.searchHistory")}
+            className={fieldClass({ size: "sm", className: "w-full select-text pl-7 pr-7" })}
+          />
+          {query && (
+            <button
+              onClick={() => setQuery("")}
+              title={t("db.clearSearch")}
+              aria-label={t("db.clearSearch")}
+              className={iconButtonClass({
+                size: "xs",
+                className: "absolute right-0.5 top-1/2 -translate-y-1/2",
+              })}
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
+        <Tooltip label={t("db.clearHistory")}>
           <button
-            onClick={() => setQuery("")}
-            title={t("db.clearSearch")}
-            aria-label={t("db.clearSearch")}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            type="button"
+            onClick={async () => {
+              if (await confirmAction(t("db.clearHistoryConfirm"))) void store.clearHistory();
+            }}
+            disabled={history.length === 0}
+            aria-label={t("db.clearHistory")}
+            className={dangerIconButtonClass({ size: "sm" })}
           >
-            <X size={12} />
+            <Trash2 size={15} />
           </button>
-        )}
+        </Tooltip>
       </div>
 
       {entries.length === 0 ? (
-        <div className="min-h-0 flex-1">
-          <EmptyState icon={History} title={t("db.noHistory")} />
-        </div>
+        // The state in one faint line — there is nothing to do about an empty history but run
+        // something, which happens elsewhere.
+        <p className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[12px] text-[var(--cf-text-faint)]">
+          {t("db.noHistory")}
+        </p>
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto p-1">
+        <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5">
           {entries.map((entry, at) => {
             const stillExists = connections.some((c) => c.id === entry.connection_id);
             return (
               <div
                 key={entry.id}
                 style={riseDelay(at)}
-                className="cf-rise group rounded-md px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                className="cf-rise group relative rounded-md px-2 py-1.5 hover:bg-[var(--cf-hover)]"
               >
                 <button
                   onClick={() =>
@@ -102,17 +113,19 @@ export function DbHistoryList() {
                   // record to read rather than one to reopen.
                   disabled={!stillExists}
                   title={stillExists ? t("db.openInConsole") : t("db.connectionGone")}
-                  className="w-full text-left disabled:cursor-default"
+                  // Room on the right for the delete button, which floats over the entry's corner
+                  // rather than taking a line of its own under every statement.
+                  className="w-full pr-6 text-left disabled:cursor-default"
                 >
                   <span className="flex items-center gap-1.5">
                     {entry.error && (
-                      <AlertTriangle size={11} className="shrink-0 text-[var(--cf-danger)]" />
+                      <AlertTriangle size={13} className="shrink-0 text-[var(--cf-danger)]" />
                     )}
                     <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--cf-text)]">
                       {entry.statement.replace(/\s+/g, " ").trim()}
                     </span>
                   </span>
-                  <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+                  <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-faint)]">
                     <span className="truncate">{entry.connection_name || "—"}</span>
                     {entry.database_name && <span className="truncate">· {entry.database_name}</span>}
                     <span className="ml-auto shrink-0 tabular-nums">
@@ -140,14 +153,18 @@ export function DbHistoryList() {
                     {entry.error}
                   </p>
                 )}
-                <div className="mt-0.5 flex justify-end opacity-0 transition-opacity group-hover:opacity-100">
-                  <ToolbarButton
-                    onClick={() => void store.deleteHistory(entry.id)}
-                    title={t("db.deleteEntry")}
-                  >
-                    <Trash2 size={11} />
-                  </ToolbarButton>
-                </div>
+                <span className="absolute right-1 top-1 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                  <Tooltip label={t("db.deleteEntry")}>
+                    <button
+                      type="button"
+                      onClick={() => void store.deleteHistory(entry.id)}
+                      aria-label={t("db.deleteEntry")}
+                      className={dangerIconButtonClass()}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </Tooltip>
+                </span>
               </div>
             );
           })}

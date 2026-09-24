@@ -31,6 +31,7 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { NoteToolbar } from "./NoteToolbar";
 import { NoteBacklinks } from "./NoteBacklinks";
 import { VersionHistoryModal } from "../common/VersionHistoryModal";
+import { Segmented } from "../common/Segmented";
 import {
   notesClearVersions,
   notesDeleteVersion,
@@ -298,7 +299,7 @@ export function NoteEditor() {
       <div className="shrink-0 border-b border-[var(--cf-border)] px-3 pb-2 pt-2">
         <div className="flex items-center gap-1">
           <nav
-            className="flex min-w-0 flex-1 items-center gap-0.5 text-[10.5px] text-[var(--cf-text-muted)]"
+            className="flex min-w-0 flex-1 items-center gap-0.5 text-[11px] text-[var(--cf-text-muted)]"
             aria-label={t("notes.location")}
           >
             {breadcrumb.length === 0 ? (
@@ -313,25 +314,15 @@ export function NoteEditor() {
             )}
           </nav>
 
-          <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-black/[0.04] p-0.5 dark:bg-white/[0.05]">
-            {MODES.map(({ mode, icon: Icon, labelKey }) => (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => setViewMode(mode)}
-                aria-pressed={viewMode === mode}
-                title={t(labelKey)}
-                aria-label={t(labelKey)}
-                className={`flex h-5 w-6 items-center justify-center rounded transition-colors ${
-                  viewMode === mode
-                    ? "bg-[var(--cf-surface-raised)] text-[var(--cf-accent)] shadow-sm"
-                    : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                }`}
-              >
-                <Icon size={12} />
-              </button>
-            ))}
-          </div>
+          {/* The app's segmented control, icon-only: the three are views of the same note, and the
+              names are on the tooltips. */}
+          <Segmented
+            size="sm"
+            layoutId="cf-note-view-mode"
+            value={viewMode}
+            onChange={setViewMode}
+            options={MODES.map(({ mode, icon, labelKey }) => ({ value: mode, icon, title: t(labelKey) }))}
+          />
 
           <button
             type="button"
@@ -503,7 +494,7 @@ export function NoteEditor() {
               // parsed and re-highlighted once per settled edit rather than once per keystroke.
               <NotePreview source={settled} className="cf-markdown-preview mx-auto max-w-[760px]" />
             ) : (
-              <p className="mx-auto max-w-[760px] text-[12.5px] italic text-[var(--cf-text-muted)]">
+              <p className="mx-auto max-w-[760px] text-[13px] italic text-[var(--cf-text-muted)]">
                 {t("notes.previewEmpty")}
               </p>
             )}
@@ -559,7 +550,7 @@ export function NoteEditor() {
       </div>
 
       {/* ---------- status bar ---------- */}
-      <div className="flex shrink-0 items-center gap-3 border-t border-[var(--cf-border)] px-3 py-1 text-[10.5px] text-[var(--cf-text-muted)]">
+      <div className="flex h-7 shrink-0 items-center gap-3 border-t border-[var(--cf-border)] px-3 text-[11px] text-[var(--cf-text-muted)]">
         <span className="tabular-nums">{t("notes.wordCount", { n: words })}</span>
         <span className="tabular-nums">{t("notes.charCount", { n: settled.length })}</span>
         <span className="tabular-nums">{t("notes.readingTime", { n: readingMinutes(words) })}</span>

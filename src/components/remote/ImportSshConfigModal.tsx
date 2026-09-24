@@ -168,7 +168,7 @@ export function ImportSshConfigModal({ onClose }: { onClose: () => void }) {
                 <label
                   key={host.name}
                   className={`flex items-center gap-2.5 rounded-md px-2 py-1.5 ${
-                    taken ? "opacity-50" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                    taken ? "opacity-50" : "hover:bg-[var(--cf-hover)]"
                   }`}
                 >
                   <Checkbox

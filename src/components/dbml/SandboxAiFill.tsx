@@ -232,7 +232,7 @@ export function SandboxAiFill({
               <p className="truncate text-[11px] font-semibold text-[var(--cf-text)]">
                 {t("dbml.sandbox.aiFillTitle")}
               </p>
-              <p className="truncate text-[10px] text-[var(--cf-text-muted)]">
+              <p className="truncate text-[10.5px] text-[var(--cf-text-muted)]">
                 {providerName}
                 {routedModel?.trim() ? ` · ${routedModel.trim()}` : ` · ${t("dbml.sandbox.aiFillDefaultModel")}`}
               </p>
@@ -241,14 +241,14 @@ export function SandboxAiFill({
               type="button"
               onClick={() => setOpen(false)}
               title={t("common.close")}
-              className="rounded-md p-1 text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-field)] hover:text-[var(--cf-text)]"
+              className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-field)] hover:text-[var(--cf-text)]"
             >
               <X size={12} />
             </button>
           </div>
 
           <div className="p-3">
-            <label className="mb-1 block text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
+            <label className="mb-1 block text-[10.5px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
               {t("dbml.sandbox.aiFillLabel")}
             </label>
             <textarea
@@ -309,7 +309,7 @@ export function SandboxAiFill({
             {/* What it is about to do, in numbers, before it is asked to do it. Fifteen tables in
                 four passes is the difference between "it is thinking" and "it is a third of the
                 way through", and it is also what explains the several calls on the bill. */}
-            <p className="mt-2 text-[10px] leading-snug text-[var(--cf-text-muted)]">
+            <p className="mt-2 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
               {runId && pass
                 ? t("dbml.sandbox.aiFillProgress", {
                     done: String(pass.done + 1),

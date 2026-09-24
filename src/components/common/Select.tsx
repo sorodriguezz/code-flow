@@ -57,22 +57,22 @@ function flatten(items: SelectItems): SelectOption[] {
 const EDGE = 8;
 
 const SIZE = {
-  sm: "px-1.5 py-0.5 text-[12px]",
-  md: "px-2.5 py-1.5 text-[13px]",
+  sm: "h-6 px-2 text-[12px]",
+  md: "h-[30px] px-2.5 text-[13px]",
   /**
-   * `md`'s metrics rebuilt on the 12px text every form `<input>` in the app uses. The page's
-   * line-height is unitless, so a 13px trigger next to a 12px input is 1.5px taller and their
-   * bottom edges visibly miss each other — this is the size to reach for whenever a select shares
-   * a row, or a stack of rows, with text fields.
+   * The metrics of every form text field — `fieldClass()` in `recipes.ts`: 30px tall, 13px text.
+   * This is the size to reach for whenever a select shares a row, or a stack of rows, with text
+   * fields. It used to be built from padding and the page's unitless line-height, which left a
+   * select and an input of the "same" size 1.5px apart; both carry an explicit height now.
    */
-  field: "px-2 py-1.5 text-[12px]",
+  field: "h-[30px] px-2.5 text-[13px]",
   /**
-   * The 11px metrics of the app's densest strips — a select sharing a row with a text `<input>`
-   * rather than sitting in a form. Same padding and text size as those inputs, which is the whole
-   * point: a native `<select>` adds its own height on macOS whatever you pad it with, so the two
-   * controls arrived visibly different and only one of them could be fixed with CSS.
+   * The dense strips' size — `fieldClass({ size: "sm" })`: 26px, 12px text. For a select sharing a
+   * row with a text `<input>` rather than sitting in a form. A native `<select>` adds its own height
+   * on macOS whatever you pad it with, so the two controls arrived visibly different and only one
+   * of them could be fixed with CSS; this one is ours, so it matches exactly.
    */
-  compact: "px-1.5 py-1 text-[11px]",
+  compact: "h-[26px] px-2 text-[12px]",
 } as const;
 
 /**
@@ -276,7 +276,7 @@ export function Select({
         onMouseEnter={() => !opt.disabled && setActiveIndex(i)}
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => commit(opt)}
-        className={`flex items-center justify-between gap-2 rounded px-2 py-1.5 text-[13px] ${
+        className={`flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[13px] ${
           opt.disabled
             ? "cursor-not-allowed text-[var(--cf-text-muted)] opacity-50"
             : `cursor-pointer ${isSelected ? "font-medium text-[var(--cf-accent)]" : "text-[var(--cf-text)]"} ${
@@ -300,7 +300,7 @@ export function Select({
       rows.push(
         <div
           key={`g-${item.label}`}
-          className="px-2 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
+          className="px-2 pb-0.5 pt-2 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
         >
           {item.label}
         </div>,
@@ -327,9 +327,13 @@ export function Select({
         onClick={() => (open ? setOpen(false) : openMenu())}
         onKeyDown={onKeyDown}
         style={style}
-        className={`flex w-full items-center justify-between gap-2 rounded-md border bg-[var(--cf-surface)] text-left outline-none disabled:cursor-not-allowed disabled:opacity-50 ${
+        className={`flex w-full items-center justify-between gap-2 rounded-md border bg-[var(--cf-field)] text-left text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 disabled:cursor-not-allowed disabled:opacity-50 ${
           SIZE[size]
-        } ${open ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)] focus:border-[var(--cf-accent)]"} ${className}`}
+        } ${
+          open
+            ? "border-[var(--cf-accent)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
+            : "border-[var(--cf-field-border)] hover:border-[var(--cf-border-strong)] focus-visible:border-[var(--cf-accent)] focus-visible:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
+        } ${className}`}
       >
         <span
           className={`flex min-w-0 flex-1 items-center gap-1.5 ${selected ? "" : "text-[var(--cf-text-muted)]"}`}
@@ -339,8 +343,8 @@ export function Select({
           <span className="truncate">{label}</span>
         </span>
         <ChevronDown
-          size={15}
-          className={`shrink-0 text-[var(--cf-text-muted)] transition-transform ${open ? "rotate-180" : ""}`}
+          size={14}
+          className={`shrink-0 text-[var(--cf-text-faint)] transition-transform ${open ? "rotate-180" : ""}`}
         />
       </button>
 
@@ -363,7 +367,7 @@ export function Select({
               bottom: pos.bottom,
               maxHeight: pos.maxHeight,
             }}
-            className="z-[9999] overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
+            className="z-[9999] overflow-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)]"
           >
             {rows}
           </div>,

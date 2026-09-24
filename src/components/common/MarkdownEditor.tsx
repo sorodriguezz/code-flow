@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import {
   Bold,
   Code,
@@ -18,6 +18,8 @@ import { Markdown } from "./Markdown";
 import { isMac } from "../../lib/platform";
 import { useTextHistory } from "../../lib/useTextHistory";
 import { useT } from "../../state/languageStore";
+import { ActivePill } from "./ActivePill";
+import { segItemClass, segTrackClass } from "./recipes";
 
 /**
  * A Markdown field that looks like somewhere you write Markdown.
@@ -57,6 +59,9 @@ export function MarkdownEditor({
 }) {
   const t = useT();
   const area = useRef<HTMLTextAreaElement>(null);
+  /** The mode pill's `layoutId` has to be unique per editor: two editors on screen sharing one id
+   *  would send the pill flying from one to the other. */
+  const pillId = useId();
   const [wanted, setPreview] = useState(readOnly);
   // Derived rather than only seeded, because `readOnly` can turn on while the field is open — a
   // review closes and every editor on screen has to become a reader, not merely lose its toolbar.
@@ -145,7 +150,7 @@ export function MarkdownEditor({
   ];
 
   const tool =
-    "flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.07]";
+    "flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]";
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)]">
@@ -188,30 +193,37 @@ export function MarkdownEditor({
             <span className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" aria-hidden />
           </>
         )}
-        <button
-          type="button"
-          onClick={() => setPreview(false)}
-          aria-pressed={!preview}
-          disabled={readOnly}
-          className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors disabled:hidden ${
-            preview ? "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]" : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          }`}
-        >
-          <PenLine size={11} />
-          {t("md.write")}
-        </button>
-        <button
-          type="button"
-          onClick={() => setPreview(true)}
-          aria-pressed={preview}
-          className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors ${
-            preview ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          }`}
-        >
-          <Eye size={11} />
-          {t("md.preview")}
-        </button>
-        <span className="ml-auto shrink-0 pr-1 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+        {/* The shared segmented control: writing and reading are two views of the same text. Built
+            from the recipe's classes rather than `Segmented` because "Write" disappears — not greys
+            out — on a read-only document. */}
+        <div className={segTrackClass()}>
+          <button
+            type="button"
+            onClick={() => setPreview(false)}
+            aria-pressed={!preview}
+            disabled={readOnly}
+            className={segItemClass(!preview, { size: "sm", className: "disabled:hidden" })}
+          >
+            {!preview && <ActivePill layoutId={`cf-md-mode-${pillId}`} variant="raised" />}
+            <span className="relative inline-flex items-center gap-1">
+              <PenLine size={12} />
+              {t("md.write")}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setPreview(true)}
+            aria-pressed={preview}
+            className={segItemClass(preview, { size: "sm" })}
+          >
+            {preview && <ActivePill layoutId={`cf-md-mode-${pillId}`} variant="raised" />}
+            <span className="relative inline-flex items-center gap-1">
+              <Eye size={12} />
+              {t("md.preview")}
+            </span>
+          </button>
+        </div>
+        <span className="ml-auto shrink-0 pr-1 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
           {t("md.chars").replace("{n}", String(value.length))}
         </span>
       </div>
@@ -222,9 +234,9 @@ export function MarkdownEditor({
             // Memoised on `value`: this pane re-renders with every parent update and with every
             // toolbar/undo-state change, but the text itself only moves when the user types. Same
             // HTML as before — `Markdown` runs the same `renderMarkdown`, just not on every render.
-            <Markdown source={value} className="cf-markdown-preview text-[12.5px]" />
+            <Markdown source={value} className="cf-markdown-preview text-[13px]" />
           ) : (
-            <p className="text-[11.5px] italic text-[var(--cf-text-muted)]">{placeholder}</p>
+            <p className="text-[12px] italic text-[var(--cf-text-muted)]">{placeholder}</p>
           )}
         </div>
       ) : (

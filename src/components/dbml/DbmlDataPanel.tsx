@@ -112,7 +112,7 @@ export function DbmlDataPanel({
           <p className="text-[13px] font-medium text-[var(--cf-text)]">
             {t("dbml.sandbox.buildTitle")}
           </p>
-          <p className="mt-1 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+          <p className="mt-1 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
             {t("dbml.sandbox.buildSubtitle", { count: String(schema.tables.length) })}
           </p>
         </div>
@@ -183,7 +183,7 @@ export function DbmlDataPanel({
       <div className="flex min-h-0 flex-1">
         {/* The rail. Parents first, so you land on the table you can actually fill. */}
         <div className="flex w-[186px] shrink-0 flex-col gap-[2px] overflow-y-auto border-r border-[var(--cf-border)] p-1.5">
-          <span className="px-1.5 pb-1 text-[9.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <span className="px-1.5 pb-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("dbml.sandbox.tables")}
           </span>
           {tables.map((table) => {
@@ -195,7 +195,7 @@ export function DbmlDataPanel({
                 onClick={() => void store().select(diagramId, table.id)}
                 onDoubleClick={() => onFocusTable(table.id)}
                 title={cyclic ? t("dbml.sandbox.cycleShort") : undefined}
-                className={`flex items-center gap-1.5 rounded-md px-2 py-[4px] text-left text-[11.5px] transition-colors ${
+                className={`flex items-center gap-1.5 rounded-md px-2 py-[4px] text-left text-[12px] transition-colors ${
                   state.table === table.id
                     ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
                     : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
@@ -205,7 +205,7 @@ export function DbmlDataPanel({
                 {cyclic && (
                   <AlertTriangle size={10} className="shrink-0 text-[var(--cf-warning)]" />
                 )}
-                <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums opacity-70">
+                <span className="ml-auto shrink-0 font-mono text-[10.5px] tabular-nums opacity-70">
                   {state.status?.counts[table.id] ?? 0}
                 </span>
               </button>
@@ -359,7 +359,7 @@ export function DbmlDataPanel({
               title={t("dbml.sandbox.exportSql")}
             >
               <Download size={12} />
-              <span className="font-mono text-[10px]">.sql</span>
+              <span className="font-mono text-[10.5px]">.sql</span>
             </IconAction>
             <IconAction
               onClick={async () => {
@@ -375,7 +375,7 @@ export function DbmlDataPanel({
               title={t("dbml.sandbox.exportFile")}
             >
               <Download size={12} />
-              <span className="font-mono text-[10px]">.db</span>
+              <span className="font-mono text-[10.5px]">.db</span>
             </IconAction>
             <IconAction
               onClick={() => void store().build(diagramId, schema)}
@@ -500,7 +500,7 @@ function DriftBar({
   const blocking = drift.addedColumns.filter((entry) => entry.notNull && !entry.hasDefault);
 
   return (
-    <div className="flex shrink-0 flex-wrap items-start gap-2 border-b border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/[0.10] px-2.5 py-2 text-[11.5px]">
+    <div className="flex shrink-0 flex-wrap items-start gap-2 border-b border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/[0.10] px-2.5 py-2 text-[12px]">
       <AlertTriangle size={13} className="mt-[2px] shrink-0 text-[var(--cf-warning)]" />
       <div className="min-w-[260px] flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">

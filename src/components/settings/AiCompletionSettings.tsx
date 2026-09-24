@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import { Check, CircleStop, Download, FolderOpen, HardDrive, Loader2, Trash2, TriangleAlert, X } from "lucide-react";
+import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
+import { chipClass } from "../common/recipes";
 import { Skeleton } from "../common/Skeleton";
 import { useT } from "../../state/languageStore";
 import { useLocalAiStore } from "../../state/localAiStore";
@@ -38,6 +40,10 @@ const TIER_KEY: Record<LocalAiTier, "localai.tierLight" | "localai.tierBalanced"
   balanced: "localai.tierBalanced",
   large: "localai.tierLarge",
 };
+
+/** A row action that deletes: the button recipe has no danger icon tone, so it is written out. */
+const DANGER_ICON_BUTTON =
+  "inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40";
 
 /** The bar. Deliberately a plain div rather than anything animated — it is driven by an event four
  *  times a second, and a transition on top of that reads as lag rather than as smoothness. */
@@ -84,12 +90,8 @@ function Row({
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <span className="min-w-0 break-words text-[12.5px] leading-snug text-[var(--cf-text)]">{model.label}</span>
-            {active && (
-              <span className="shrink-0 rounded bg-[var(--cf-accent)]/15 px-1.5 py-px text-[10px] font-medium text-[var(--cf-accent)]">
-                {t("localai.active")}
-              </span>
-            )}
+            <span className="min-w-0 break-words text-[13px] leading-snug text-[var(--cf-text)]">{model.label}</span>
+            {active && <span className={chipClass("accent")}>{t("localai.active")}</span>}
           </div>
           {/* The model's own description, the size it costs, the memory it wants and its licence.
               All four are things somebody decides on before spending twenty minutes downloading. */}
@@ -108,36 +110,23 @@ function Row({
 
         <div className="flex shrink-0 items-center gap-1">
           {busy ? (
-            <button
-              onClick={onCancel}
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11.5px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-surface-raised)] hover:text-[var(--cf-text)]"
-            >
-              <X size={12} /> {t("localai.cancel")}
+            <button onClick={onCancel} className={buttonClass({ variant: "ghost", size: "sm" })}>
+              <X size={13} /> {t("localai.cancel")}
             </button>
           ) : model.installed ? (
             <>
               {!active && (
-                <button
-                  onClick={onUse}
-                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11.5px] text-[var(--cf-accent)] hover:bg-[var(--cf-surface-raised)]"
-                >
-                  <Check size={12} /> {t("localai.use")}
+                <button onClick={onUse} className={buttonClass({ variant: "secondary", size: "sm" })}>
+                  <Check size={13} /> {t("localai.use")}
                 </button>
               )}
-              <button
-                onClick={onDelete}
-                title={t("localai.delete")}
-                className="rounded p-1 text-[var(--cf-text-muted)] hover:bg-[var(--cf-surface-raised)] hover:text-[var(--cf-warning)]"
-              >
-                <Trash2 size={12} />
+              <button onClick={onDelete} title={t("localai.delete")} className={DANGER_ICON_BUTTON}>
+                <Trash2 size={13} />
               </button>
             </>
           ) : (
-            <button
-              onClick={onDownload}
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11.5px] text-[var(--cf-accent)] hover:bg-[var(--cf-surface-raised)]"
-            >
-              <Download size={12} />
+            <button onClick={onDownload} className={buttonClass({ variant: "secondary", size: "sm" })}>
+              <Download size={13} />
               {/* "Resume" rather than "Download" when there is a part file, because offering a
                   fresh download of something that is 80% there reads as losing the 80%. */}
               {model.partial_bytes ? t("localai.resume") : t("localai.download")}
@@ -149,7 +138,7 @@ function Row({
       {busy && progress && (
         <div className="mt-2 flex flex-col gap-1">
           <Bar done={progress.done} total={progress.total} />
-          <div className="flex items-center justify-between text-[10.5px] text-[var(--cf-text-muted)]">
+          <div className="flex items-center justify-between text-[11px] tabular-nums text-[var(--cf-text-muted)]">
             <span>
               {progress.phase === "verifying"
                 ? t("localai.verifying")
@@ -206,7 +195,7 @@ export function AiCompletionSettings() {
           className="mt-0.5"
         />
         <span className="min-w-0">
-          <span className="block text-[12.5px] text-[var(--cf-text)]">{t("localai.enable")}</span>
+          <span className="block text-[13px] text-[var(--cf-text)]">{t("localai.enable")}</span>
           <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">
             {t("localai.enableHint")}
           </span>
@@ -216,7 +205,7 @@ export function AiCompletionSettings() {
       {/* A broken install, not a choice the user made. Said before anything else, because every
           other control on this pane is pointless until it is fixed. */}
       {!state.engine_available && (
-        <p className="flex items-start gap-1.5 rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/5 px-2.5 py-2 text-[11.5px] leading-snug text-[var(--cf-warning)]">
+        <p className="flex items-start gap-1.5 rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/5 px-2.5 py-2 text-[12px] leading-snug text-[var(--cf-warning)]">
           <TriangleAlert size={13} className="mt-px shrink-0" />
           <span>{t("localai.engineMissing")}</span>
         </p>
@@ -233,7 +222,7 @@ export function AiCompletionSettings() {
           `model_id` defaults to the catalogue's recommendation rather than to whatever happens to
           be on disk — see the `active` prop below. */}
       {state.enabled && state.engine_available && !state.model_installed && !anyDownloading && (
-        <p className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-2 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+        <p className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2.5 py-2 text-[12px] leading-snug text-[var(--cf-text-muted)]">
           {state.models.some((model) => model.installed)
             ? t("localai.selectedNotInstalled", {
                 model: state.models.find((model) => model.id === state.model_id)?.label ?? state.model_id,
@@ -243,14 +232,14 @@ export function AiCompletionSettings() {
       )}
 
       {!state.model_known && (
-        <p className="flex items-start gap-1.5 text-[11.5px] leading-snug text-[var(--cf-warning)]">
+        <p className="flex items-start gap-1.5 text-[12px] leading-snug text-[var(--cf-warning)]">
           <TriangleAlert size={13} className="mt-px shrink-0" />
           <span>{t("localai.unknownModel", { id: state.model_id })}</span>
         </p>
       )}
 
       <div>
-        <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
           {t("localai.models")}
         </h3>
         <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
@@ -300,9 +289,9 @@ export function AiCompletionSettings() {
                 );
               }}
               title={state.models_dir}
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-[var(--cf-surface-raised)] hover:text-[var(--cf-text)]"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
             >
-              <FolderOpen size={12} />
+              <FolderOpen size={13} />
               {t("localai.showInFolder")}
             </button>
           )}
@@ -311,14 +300,11 @@ export function AiCompletionSettings() {
         {/* Only while something is actually running. An always-visible "stop" for a process that is
             not there is a control that teaches the user it does nothing. */}
         {engineRunning && (
-          <button
-            onClick={() => void stopEngine()}
-            className="flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-[var(--cf-surface-raised)] hover:text-[var(--cf-text)]"
-          >
+          <button onClick={() => void stopEngine()} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {state.engine.kind === "starting" ? (
-              <Loader2 size={12} className="animate-spin" />
+              <Loader2 size={13} className="animate-spin" />
             ) : (
-              <CircleStop size={12} />
+              <CircleStop size={13} />
             )}
             {state.engine.kind === "starting" ? t("localai.warmingUp") : t("localai.stopEngine")}
           </button>

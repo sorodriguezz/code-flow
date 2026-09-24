@@ -4,6 +4,7 @@ import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { fieldClass } from "../common/recipes";
 
 /**
  * Lazy, and this banner is the reason it has to be.
@@ -93,12 +94,12 @@ export function ConflictsBanner() {
         <input
           value={message}
           onChange={(e) => setMessage(e.target.value)}
-          className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          className={fieldClass({ size: "sm", className: "flex-1" })}
         />
         <button
           disabled={busy || conflicts.length > 0 || !message.trim()}
           onClick={() => completeMerge(message.trim())}
-          className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-40"
+          className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
         >
           <GitMerge size={12} />
           {t("conflicts.completeMerge")}
@@ -108,7 +109,7 @@ export function ConflictsBanner() {
           onClick={async () => {
             if (await confirmAction(t("conflicts.abortConfirm"))) void abortMerge();
           }}
-          className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] text-[var(--cf-danger)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] text-[var(--cf-danger)] hover:bg-[var(--cf-hover)]"
         >
           <X size={12} />
           {t("conflicts.abortMerge")}

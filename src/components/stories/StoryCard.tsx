@@ -17,6 +17,7 @@ import { useT } from "../../state/languageStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
 import type { StoryDraft } from "../../types/domain";
+import { fieldClass } from "../common/recipes";
 
 function sameEdits(a: StoryEdits, b: StoryEdits): boolean {
   return (
@@ -117,7 +118,7 @@ export function StoryCard({
       // `index` is the story's place in the batch, which is also its place in the list — so the
       // stagger comes free, without the card having to be told twice where it is.
       style={riseDelay(index)}
-      className={`cf-rise rounded-md border border-l-2 bg-[var(--cf-bg)] transition-colors ${
+      className={`cf-rise rounded-md border border-l-2 bg-[var(--cf-surface)] transition-colors ${
         selected
           ? "border-[var(--cf-border)] border-l-[var(--cf-accent)]"
           : "border-[var(--cf-border)] border-l-[var(--cf-border)]"
@@ -165,11 +166,11 @@ export function StoryCard({
         <span className="flex shrink-0 items-center gap-1.5 pt-[2px]">
           <VerdictBadge status={story.verify_status} at={story.verified_at} />
           <QualityBadge quality={quality} />
-          <span className="rounded-full bg-black/[0.06] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-text-muted)] dark:bg-white/[0.1]">
+          <span className="rounded-full bg-[var(--cf-press)] px-1.5 py-0.5 text-[10.5px] font-semibold text-[var(--cf-text-muted)]">
             {t("stories.criteriaCount", { n: draft.acceptanceCriteria.length })}
           </span>
           {draft.storyPoints > 0 && (
-            <span className="rounded-full bg-black/[0.06] px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)] dark:bg-white/[0.1]">
+            <span className="rounded-full bg-[var(--cf-press)] px-1.5 py-0.5 text-[10.5px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
               {t("stories.pointsShort", { n: draft.storyPoints })}
             </span>
           )}
@@ -178,7 +179,7 @@ export function StoryCard({
               type="button"
               onClick={() => void openExternalUrl(story.work_item_url).catch((e) => pushErrorToast(String(e)))}
               title={t("stories.openWorkItem", { id: publishedLabel })}
-              className="flex items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-success)_14%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-success)] hover:brightness-110"
+              className="flex items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-success)_14%,transparent)] px-1.5 py-0.5 text-[10.5px] font-semibold text-[var(--cf-success)] hover:brightness-110"
             >
               <ExternalLink size={9} />
               {publishedLabel}
@@ -219,7 +220,7 @@ export function StoryCard({
               onChange={(e) => patch({ title: e.target.value })}
               onBlur={commit}
               placeholder={t("stories.fieldTitlePlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+              className={fieldClass({ className: "w-full" })}
             />
           </CardField>
 
@@ -229,7 +230,7 @@ export function StoryCard({
               onChange={(e) => patch({ narrative: e.target.value })}
               onBlur={commit}
               placeholder={t("stories.fieldNarrativePlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+              className={fieldClass({ className: "w-full" })}
             />
           </CardField>
 
@@ -353,7 +354,7 @@ export function StoryCard({
                 value={draft.tags}
                 onChange={(e) => patch({ tags: e.target.value })}
                 onBlur={commit}
-                className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                className={fieldClass({ className: "w-full" })}
               />
             </CardField>
           </div>

@@ -143,7 +143,7 @@ export function ScopePicker({
     // A span rather than a label: what it captions is a button, and a label wrapping a button
     // labels nothing — the caption is decoration, the button carries its own accessible name.
     <span className="flex items-center gap-1">
-      <span className="text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</span>
+      <span className="text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</span>
       <button
         type="button"
         ref={triggerRef}
@@ -153,7 +153,7 @@ export function ScopePicker({
         aria-expanded={open}
         onClick={() => (open ? setOpen(false) : openMenu())}
         style={{ width }}
-        className={`flex items-center gap-1 rounded-md border bg-[var(--cf-bg)] px-1.5 py-[3px] text-left text-[12px] outline-none disabled:cursor-not-allowed disabled:opacity-50 ${
+        className={`flex items-center gap-1 rounded-md border bg-[var(--cf-field)] px-1.5 py-[3px] text-left text-[12px] outline-none disabled:cursor-not-allowed disabled:opacity-50 ${
           open ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)] hover:border-[var(--cf-accent)]"
         }`}
       >

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, GraduationCap, LogOut, Trash2 } from "lucide-react";
-import { ActivePill } from "../common/ActivePill";
+import { FolderOpen, GraduationCap, Loader2, LogOut, Trash2 } from "lucide-react";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
 import { APP_TOURS, type TourId } from "../../lib/tour/steps";
 import { tourLength, useTourStore } from "../../state/tourStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -18,10 +20,17 @@ import { PaneBlock, RailSection } from "./settingsNav";
 
 // Language names stay in their own language (endonyms) — "English"/"Español" don't change
 // depending on the currently selected UI language, same as any language picker.
-const OPTIONS: { id: Language; label: string }[] = [
-  { id: "en", label: "English" },
-  { id: "es", label: "Español" },
+const OPTIONS: { value: Language; label: string }[] = [
+  { value: "en", label: "English" },
+  { value: "es", label: "Español" },
 ];
+
+/** The satellite-window limits on offer — see the note where they are drawn. */
+const WINDOW_LIMITS = [0, 1, 2, 3, 4, 5, 6, 8];
+
+/** A destructive action drawn as an outline: the danger text on a thin danger rule, filled only
+ *  under the pointer. Quieter than a red slab for buttons that still ask for confirmation. */
+const DANGER_OUTLINE = "shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-danger)_35%,transparent)]";
 
 export function GeneralSettings() {
   const t = useT();
@@ -72,22 +81,14 @@ export function GeneralSettings() {
           {tab === "language" && (
             <>
               <PaneBlock title={t("settings.tabLanguage")} hint={t("settings.languageHint")}>
-                <div className="flex gap-2">
-                  {OPTIONS.map((opt) => (
-                    <button
-                      key={opt.id}
-                      onClick={() => setLanguage(opt.id)}
-                      className={`relative flex-1 rounded-lg border px-3 py-2.5 text-[13px] font-medium ${
-                        language === opt.id
-                          ? "border-transparent text-[var(--cf-accent)]"
-                          : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                      }`}
-                    >
-                      {language === opt.id && <ActivePill layoutId="cf-language-pill" inset="-inset-px" radius="rounded-lg" />}
-                      <span className="relative">{opt.label}</span>
-                    </button>
-                  ))}
-                </div>
+                {/* Two peers that change how the same app is written: the segmented control. */}
+                <Segmented
+                  options={OPTIONS}
+                  value={language}
+                  onChange={(value) => setLanguage(value)}
+                  layoutId="cf-set-language"
+                  ariaLabel={t("settings.tabLanguage")}
+                />
                 <p className="mt-2 text-[11px] text-[var(--cf-text-muted)]">{t("settings.translationNote")}</p>
               </PaneBlock>
 
@@ -104,26 +105,18 @@ export function GeneralSettings() {
             <>
               {/* Buttons rather than a number field: the useful range is 0–8 and every value in it is one
                   press away, which is faster to set and impossible to mistype. Zero is a real choice —
-                  "never open a second window" — so it is offered rather than clamped away. */}
-              <div className="flex flex-wrap gap-1.5">
-                {[0, 1, 2, 3, 4, 5, 6, 8].map((n) => (
-                  <button
-                    key={n}
-                    onClick={() => void setSatelliteLimit(n)}
-                    aria-pressed={satelliteLimit === n}
-                    className={`relative min-w-9 rounded-md border px-2.5 py-1.5 text-[13px] tabular-nums ${
-                      satelliteLimit === n
-                        ? "border-transparent font-medium text-[var(--cf-accent)]"
-                        : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                    }`}
-                  >
-                    {satelliteLimit === n && (
-                      <ActivePill layoutId="cf-window-limit-pill" inset="-inset-px" radius="rounded-md" />
-                    )}
-                    <span className="relative">{n}</span>
-                  </button>
-                ))}
-              </div>
+                  "never open a second window" — so it is offered rather than clamped away. One
+                  segmented track rather than eight loose buttons: it is one choice among peers. */}
+              <Segmented
+                options={WINDOW_LIMITS.map((n) => ({
+                  value: String(n),
+                  label: <span className="min-w-3 tabular-nums">{n}</span>,
+                }))}
+                value={String(satelliteLimit)}
+                onChange={(value) => void setSatelliteLimit(Number(value))}
+                layoutId="cf-set-window-limit"
+                ariaLabel={t("windows.limitLabel")}
+              />
               {/* What is open right now, so raising or lowering the limit is a decision with the current
                   state in front of it rather than an abstract number. */}
               <p className="mt-2 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
@@ -138,17 +131,18 @@ export function GeneralSettings() {
                   design — the cap in the tab bar only offers the app you already have open — which is
                   right when you are working and wrong when you are looking for one. This is the list. */}
               <button
+                type="button"
                 onClick={() => launch()}
-                className="flex w-full items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-left text-[13px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                className={buttonClass({ variant: "secondary", size: "lg", className: "w-full justify-start" })}
               >
                 <GraduationCap size={14} className="shrink-0 text-[var(--cf-accent)]" />
                 {t("tour.restart")}
-                <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+                <span className="ml-auto shrink-0 text-[11px] font-normal tabular-nums text-[var(--cf-text-muted)]">
                   {t("tour.stepCount", { n: tourLength("main") })}
                 </span>
               </button>
 
-              <p className="mb-2 mt-4 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              <p className="mb-2 mt-5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                 {t("tour.settingsApps")}
               </p>
               {/* Two columns: one row per app in a single column is a long thin list for a handful of
@@ -157,11 +151,18 @@ export function GeneralSettings() {
                 {APP_TOURS.map(({ tour, labelKey, icon: Icon }) => (
                   <button
                     key={tour}
+                    type="button"
                     onClick={() => launch(tour)}
-                    className="flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-left text-[13px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                    // The secondary button, let grow past its 32px so a long name wraps (`h-auto`;
+                    // the label span takes back the wrapping the recipe's `nowrap` takes away).
+                    className={buttonClass({
+                      variant: "secondary",
+                      size: "lg",
+                      className: "h-auto min-h-8 justify-start py-1.5 text-left font-normal",
+                    })}
                   >
                     <Icon size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
-                    <span className="min-w-0 break-words leading-snug">{t(labelKey)}</span>
+                    <span className="min-w-0 whitespace-normal break-words leading-snug">{t(labelKey)}</span>
                     <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
                       {t("tour.stepCount", { n: tourLength(tour) })}
                     </span>
@@ -177,10 +178,11 @@ export function GeneralSettings() {
               <PaneBlock title={t("settings.appLifecycle")} hint={t("settings.appLifecycleHint")}>
                 <div className="flex flex-wrap gap-2">
                   <button
+                    type="button"
                     onClick={async () => {
                       if (await confirmAction(t("settings.quitConfirm"))) void quitApp();
                     }}
-                    className="flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-[13px] font-medium text-[var(--cf-danger)] hover:bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)]"
+                    className={buttonClass({ variant: "danger-ghost", size: "md", className: DANGER_OUTLINE })}
                   >
                     <LogOut size={14} />
                     {t("settings.quitApp")}
@@ -203,21 +205,23 @@ export function GeneralSettings() {
                   ).map(([key, path]) => (
                     <div
                       key={key}
-                      className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2 last:border-b-0"
+                      className="flex min-h-10 items-center gap-2 border-b border-[var(--cf-border)] py-1.5 pl-3 pr-2 last:border-b-0"
                     >
-                      <span className="w-[150px] shrink-0 text-[12.5px] text-[var(--cf-text-muted)]">{t(key)}</span>
-                      <span className="min-w-0 flex-1 select-text truncate font-mono text-[11.5px]" title={path ?? ""}>
+                      <span className="w-[150px] shrink-0 text-[13px] text-[var(--cf-text-muted)]">{t(key)}</span>
+                      <span className="min-w-0 flex-1 select-text truncate font-mono text-[12px]" title={path ?? ""}>
                         {path ?? "…"}
                       </span>
-                      <button
-                        disabled={!path}
-                        onClick={() => path && void revealInFileManager(path)}
-                        aria-label={t("settings.dataReveal")}
-                        title={t("settings.dataReveal")}
-                        className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] disabled:opacity-40 dark:hover:bg-white/[0.06]"
-                      >
-                        <FolderOpen size={14} />
-                      </button>
+                      <Tooltip label={t("settings.dataReveal")}>
+                        <button
+                          type="button"
+                          disabled={!path}
+                          onClick={() => path && void revealInFileManager(path)}
+                          aria-label={t("settings.dataReveal")}
+                          className={iconButtonClass({ size: "sm" })}
+                        >
+                          <FolderOpen size={14} />
+                        </button>
+                      </Tooltip>
                     </div>
                   ))}
                 </div>
@@ -226,7 +230,7 @@ export function GeneralSettings() {
                     on every clean install would be a permanent question with no answer. */}
                 {layout && layout.legacyCopies.length > 0 && (
                   <div className="mt-3 rounded-lg border border-[var(--cf-border)] p-3">
-                    <p className="text-[12.5px] font-medium">{t("settings.legacyCopy")}</p>
+                    <p className="text-[13px] font-medium text-[var(--cf-text)]">{t("settings.legacyCopy")}</p>
                     <p className="mt-1 text-[12px] leading-snug text-[var(--cf-text-muted)]">
                       {t("settings.legacyCopyHint", {
                         path: layout.legacyDir,
@@ -234,6 +238,7 @@ export function GeneralSettings() {
                       })}
                     </p>
                     <button
+                      type="button"
                       disabled={deleting}
                       onClick={async () => {
                         if (!(await confirmAction(t("settings.legacyCopyConfirm")))) return;
@@ -248,9 +253,9 @@ export function GeneralSettings() {
                           setDeleting(false);
                         }
                       }}
-                      className="mt-2 flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12.5px] font-medium text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)]/40 hover:text-[var(--cf-danger)] disabled:opacity-50"
+                      className={buttonClass({ variant: "danger-ghost", size: "sm", className: `mt-2.5 ${DANGER_OUTLINE}` })}
                     >
-                      <Trash2 size={13} />
+                      {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
                       {t("settings.legacyCopyButton")}
                     </button>
                   </div>
@@ -262,10 +267,11 @@ export function GeneralSettings() {
                 hint={t("settings.resetDataHint", { path: dataPath, userPath: layout?.userDir ?? "…" })}
               >
                 <button
+                  type="button"
                   onClick={async () => {
                     if (await confirmAction(t("settings.resetDataConfirm", { path: dataPath }))) void resetAppData();
                   }}
-                  className="flex items-center gap-2 rounded-md border border-[var(--cf-danger)]/40 px-3 py-2 text-[13px] font-medium text-[var(--cf-danger)] hover:bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)]"
+                  className={buttonClass({ variant: "danger-ghost", size: "md", className: DANGER_OUTLINE })}
                 >
                   <Trash2 size={14} />
                   {t("settings.resetDataButton")}

@@ -14,6 +14,7 @@ import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ALL_REPOS, blankChainStep, type NewChainStep } from "../../types/domain";
+import { fieldClass } from "../common/recipes";
 
 /** Mirrors `queries::MAX_CHAIN_STEPS`. The backend refuses past it too — a cap enforced only here
  * is a cap a stale window can walk through. */
@@ -366,7 +367,7 @@ export function NewChainModal({
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder={t("agents.chainNamePlaceholder")}
-            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full" })}
           />
         </Field>
 
@@ -394,7 +395,7 @@ export function NewChainModal({
                   {/* Only the first one is called out, and only once there is more than one: it is
                       the repository an unassigned step runs in, which is otherwise invisible. */}
                   {at === 0 && projectIds.length > 1 && (
-                    <span className="shrink-0 rounded bg-black/[0.05] px-1.5 py-[1px] text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.07]">
+                    <span className="shrink-0 rounded bg-[var(--cf-hover)] px-1.5 py-[1px] text-[10.5px] text-[var(--cf-text-muted)]">
                       {t("agents.repoPrimary")}
                     </span>
                   )}
@@ -459,7 +460,7 @@ export function NewChainModal({
             {steps.map((step, index) => (
               <div key={step.key} className="rounded-lg border border-[var(--cf-border)] p-2">
                 <div className="mb-1.5 flex items-center gap-1.5">
-                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black/[0.06] text-[10px] font-semibold tabular-nums dark:bg-white/[0.1]">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--cf-press)] text-[10.5px] font-semibold tabular-nums">
                     {index + 1}
                   </span>
                   <span className="min-w-0 flex-1">
@@ -486,7 +487,7 @@ export function NewChainModal({
                     onClick={() => move(index, -1)}
                     disabled={index === 0}
                     title={t("agents.chainSteps")}
-                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-30 dark:hover:bg-white/[0.08]"
+                    className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-30"
                   >
                     <ArrowUp size={12} />
                   </button>
@@ -495,7 +496,7 @@ export function NewChainModal({
                     onClick={() => move(index, 1)}
                     disabled={index === steps.length - 1}
                     title={t("agents.chainSteps")}
-                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-30 dark:hover:bg-white/[0.08]"
+                    className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-30"
                   >
                     <ArrowDown size={12} />
                   </button>
@@ -504,7 +505,7 @@ export function NewChainModal({
                     onClick={() => removeStep(step.key)}
                     disabled={steps.length === 1}
                     title={t("common.delete")}
-                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-30 dark:hover:bg-white/[0.08]"
+                    className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] disabled:opacity-30"
                   >
                     <Trash2 size={12} />
                   </button>
@@ -564,7 +565,7 @@ export function NewChainModal({
                     onChange={(e) => patch(step.key, { check_command: e.target.value })}
                     placeholder={t("agents.stepCheckPlaceholder")}
                     title={t("agents.stepCheckHint")}
-                    className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 font-mono text-[11px] outline-none focus:border-[var(--cf-accent)]"
+                    className={fieldClass({ size: "sm", className: "min-w-0 flex-1 font-mono" })}
                   />
                 </div>
                 {/* Only with a check: without one there is no failure to route, and a "where does

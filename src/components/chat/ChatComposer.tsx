@@ -254,7 +254,7 @@ export function ChatComposer({
         )}
 
         {imageNotice && (
-          <div className="cf-fade-in mb-1.5 flex items-start gap-2 rounded-lg border border-[var(--cf-warning)]/40 bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-3 py-1.5 text-[11.5px] leading-relaxed text-[var(--cf-text)]">
+          <div className="cf-fade-in mb-1.5 flex items-start gap-2 rounded-lg border border-[var(--cf-warning)]/40 bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-3 py-1.5 text-[12px] leading-relaxed text-[var(--cf-text)]">
             <span className="flex-1">{imageNotice}</span>
             <button
               type="button"
@@ -350,9 +350,9 @@ export function ChatComposer({
                     : t("chat.attachTextOnly", { provider: providerDisplayLabel(provider, t) })
                 }
                 aria-label={t("chat.attach")}
-                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-white/[0.07]"
+                className="flex h-[26px] w-[26px] items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30"
               >
-                <Paperclip size={14} />
+                <Paperclip size={15} />
               </button>
             )}
 
@@ -361,7 +361,7 @@ export function ChatComposer({
                 type="button"
                 onClick={onStop}
                 disabled={stopping}
-                className="ml-auto flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--cf-border)] px-2.5 py-1 text-[11.5px] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-50"
+                className="ml-auto flex h-[26px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] transition-colors hover:text-[var(--cf-danger)] hover:shadow-[inset_0_0_0_1px_var(--cf-danger)] disabled:opacity-50"
               >
                 <Square size={9} className="fill-current" />
                 {stopping ? t("ai.stopping") : t("chat.stop")}
@@ -373,9 +373,9 @@ export function ChatComposer({
                 disabled={!draft.trim() || disabled}
                 title={t("chat.send")}
                 aria-label={t("chat.send")}
-                className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent)] text-white transition-[filter] hover:brightness-110 disabled:opacity-40"
+                className="ml-auto flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent)] text-[var(--cf-on-accent)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:opacity-40"
               >
-                <ArrowUp size={14} />
+                <ArrowUp size={15} />
               </button>
             )}
           </div>

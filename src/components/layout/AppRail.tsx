@@ -20,9 +20,14 @@ import { useWindowStore } from "../../state/windowStore";
 import { useT } from "../../state/languageStore";
 import { Tooltip } from "../common/Tooltip";
 import { TourLauncher } from "../tour/TourLauncher";
-import type { TranslationKey } from "../../lib/i18n/translations";
+import { useAiRunStore } from "../../state/aiRunStore";
 
-interface WorkspaceApp {
+/** The runs the Agentes app owns: a task's turn and a chain's step. See `aiRunStore`. */
+const AGENT_RUN_KINDS = new Set<string>(["agents.liveKindAgent", "agents.liveKindChain"]);
+import type { TranslationKey } from "../../lib/i18n/translations";
+import { ReturnBurst } from "./ReturnBurst";
+
+export interface WorkspaceApp {
   id: MainView;
   /**
    * Which workspace *inside* that view, for a view that holds more than one.
@@ -51,7 +56,7 @@ interface WorkspaceApp {
  * This is the order the rail *starts* in, and the comments below are the argument for it. It is no
  * longer the order it necessarily stays in: an icon held down can be moved, and [`ordered`] lays
  * this list out against what the user chose. It remains the source of truth for which apps exist. */
-const APPS: WorkspaceApp[] = [
+export const APPS: WorkspaceApp[] = [
   {
     id: "api",
     workspace: "requests",
@@ -143,7 +148,7 @@ const APPS: WorkspaceApp[] = [
 /** Buttons are keyed by view *and* workspace, since two of them share a view. This key is also what
  * the stored order is written in, so it has to stay stable across releases — renaming one silently
  * drops that app to the bottom of a rail somebody had already arranged. */
-function appKey(app: WorkspaceApp): string {
+export function appKey(app: WorkspaceApp): string {
   return app.workspace ? `${app.id}:${app.workspace}` : app.id;
 }
 
@@ -234,9 +239,14 @@ export function AppRail() {
   // hook per button: this is six buttons rendered together, and six subscriptions for one answer
   // they share would re-render all of them on every change anyway.
   const satellites = useWindowStore((s) => s.satellites);
+  // Islands that just came back, to point at where each one landed — see `ReturnBurst`.
+  const returns = useWindowStore((s) => s.returns);
   const detach = useWindowStore((s) => s.detach);
   const focusWindow = useWindowStore((s) => s.focus);
   const t = useT();
+  const agentsBusy = useAiRunStore((s) =>
+    Object.keys(s.active).some((id) => s.active[id] && AGENT_RUN_KINDS.has(s.aboutByRun[id]?.kindKey ?? "")),
+  );
 
   const apps = ordered(railOrder);
   // The gesture is shared with the sidebar's repositories; the preview below is not. This rail is
@@ -291,10 +301,11 @@ export function AppRail() {
       // something is being dragged; only the z-index does, and only while it has to out-stack the
       // scrim. The accent edge replaces the border for the same moment: the rail stops being a
       // divider between two columns and becomes the one surface still taking input.
-      className={`group/rail relative flex w-11 shrink-0 flex-col items-center border-l bg-[var(--cf-surface)] py-2 ${
-        drag
-          ? "z-[9999] border-[var(--cf-accent)] shadow-[-10px_0_28px_rgba(0,0,0,0.35)]"
-          : "border-[var(--cf-border)]"
+      // On the frame, like the projects panel across the window: no fill and no rule of its own —
+      // the sheets on either side draw the edges. Lit while an icon is lifted, since it is then the
+      // one thing left above the scrim.
+      className={`group/rail relative flex w-12 shrink-0 flex-col items-center pb-2 pt-0.5 ${
+        drag ? "z-[9999] rounded-lg bg-[var(--cf-bg)] shadow-[-10px_0_28px_rgba(0,0,0,0.35)]" : ""
       }`}
     >
       {/* The rest of the window, dimmed, for as long as an icon is off the ground. It is the whole
@@ -317,10 +328,10 @@ export function AppRail() {
             data-tour="workspace-menu"
             onClick={() => setActiveView("graph")}
             aria-label={`${workspace?.name ?? t("tabbar.scopeWorkspace")} — ${t("tabbar.scopeWorkspaceReset")}`}
-            className="flex h-6 w-6 shrink-0 select-none items-center justify-center rounded-md border transition-[filter,transform] hover:brightness-105 active:scale-95"
+            className="mb-0.5 flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-[8px] border transition-[filter,transform] hover:brightness-105 active:scale-95"
             style={{ backgroundColor: wash(wsColor, 16), borderColor: wash(wsColor, 40) }}
           >
-            <Layers size={12} style={{ color: ink(wsColor) }} />
+            <Layers size={14} style={{ color: ink(wsColor) }} />
           </button>
         </Tooltip>
 
@@ -351,6 +362,7 @@ export function AppRail() {
             !detachedTo && app.id === activeView && (app.workspace ?? apiWorkspace) === apiWorkspace;
           const lifted = drag?.key === key;
           const name = t(app.labelKey);
+          const returning = returns.find((r) => r.kind === "app" && r.refId === key) ?? null;
           // The lifted icon follows the pointer; the ones it has passed step aside by a slot. Both
           // are the same property, so both are written here rather than one of them in a class.
           const offset = drag
@@ -380,7 +392,7 @@ export function AppRail() {
               }
               trailing={
                 app.beta ? (
-                  <span className="shrink-0 rounded-[4px] bg-[color-mix(in_oklab,var(--cf-warning)_18%,transparent)] px-1 py-px text-[9px] font-bold uppercase leading-none tracking-[0.06em] text-[var(--cf-warning)]">
+                  <span className="shrink-0 rounded-[4px] bg-[color-mix(in_oklab,var(--cf-warning)_18%,transparent)] px-1 py-px text-[10.5px] font-bold uppercase leading-none tracking-[0.06em] text-[var(--cf-warning)]">
                     {t("common.beta")}
                   </span>
                 ) : undefined
@@ -403,7 +415,7 @@ export function AppRail() {
                   ? { transform: `translateY(${offset}px)${lifted ? " scale(1.12)" : ""}` }
                   : undefined
               }
-              className={`relative flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-md ${
+              className={`relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg ${
                 // The lifted icon is pinned to the pointer, so it must not ease anywhere; its
                 // neighbours are the ones sliding out of the way, so they must. Idle, the only
                 // thing that moves is colour — and dropping the transform transition on the way out
@@ -415,22 +427,38 @@ export function AppRail() {
                     : "transition-colors"
               } ${
                 isActive
-                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  ? "bg-[var(--cf-surface)] text-[var(--cf-accent)] shadow-[var(--cf-shadow-lift),0_0_0_1px_var(--cf-border)]"
                   : detachedTo
                     ? "border border-dashed border-[var(--cf-accent)]/55 text-[var(--cf-accent)]"
                     : `text-[var(--cf-text-muted)] ${
                       lifted
                         ? "bg-[var(--cf-surface-raised)] text-[var(--cf-text)]"
-                        : "hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+                        : "hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                       }`
               }`}
             >
-              {/* Pushed out of the button and onto the rail's own left edge, so the mark points at
-                  the view it is driving rather than floating in the middle of the strip. */}
-              {isActive && (
-                <span className="absolute inset-y-1.5 -left-1.5 w-[2.5px] rounded-r-full bg-[var(--cf-accent)]" />
+              {/* The active app wears the same lifted sheet as the active tab and the active project —
+                  one way to say "selected" across the frame. */}
+              {/* Keyed by the return, so an app that comes back twice in a row drops in twice. */}
+              <span key={returning?.id ?? "rest"} className={`flex ${returning ? "cf-return-land" : ""}`}>
+                <Icon size={18} />
+              </span>
+              {returning && (
+                <ReturnBurst
+                  side="left"
+                  label={t("windows.returned", { name })}
+                  leading={<Icon size={14} className="shrink-0 text-[var(--cf-accent)]" />}
+                />
               )}
-              <Icon size={15} />
+              {/* Something of this app's is running right now — an agent turn or a chain step — so a
+                  glance at the rail finds work in flight without opening the app. A plain dot, not
+                  the orb: the orb is for the row that *is* the run. */}
+              {app.id === "agents" && agentsBusy && !detachedTo && (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute bottom-1 right-1 h-[7px] w-[7px] rounded-full bg-[var(--cf-success)] shadow-[0_0_0_2px_var(--cf-bg)]"
+                />
+              )}
               {reorder.arming === key && <HoldProgress shape="ring" />}
               {/* The corner mark, and the one control on this rail that is not the app itself.
                   Always drawn rather than revealed on hover: this rail is reachable by touch and by

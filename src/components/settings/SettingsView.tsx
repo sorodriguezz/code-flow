@@ -17,6 +17,8 @@ import { NotificationSettings } from "./NotificationSettings";
 import { PipelinesSettings } from "./PipelinesSettings";
 import { ApiSettingsBody } from "../api/ApiSettingsPanel";
 import { ActivePill } from "../common/ActivePill";
+import { Kbd, iconButtonClass } from "../common/Button";
+import { chipClass, fieldClass } from "../common/recipes";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Tooltip } from "../common/Tooltip";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -82,66 +84,75 @@ function SectionButton({
   const t = useT();
   const label = t(labelKey);
   return (
-    <button
-      onClick={() => onSelect(id)}
-      aria-current={active ? "page" : undefined}
-      // Collapsed, the tooltip is the only place the name exists — and the only place the alpha
-      // mark can be spelled out, since what fits beside a 14px icon is a dot and a dot cannot say
-      // which word it stands for.
-      title={collapsed ? (alpha ? `${label} · ${t("settings.alpha")}` : label) : undefined}
-      // Selection changes colour and nothing else — no weight change, exactly like the tabs.
-      // Bolding on select re-measures the text and made the row jump every time it was picked.
-      // Colour plus the pill is already the whole signal.
-      // Folded, a fixed 36px centred in the 50px rail rather than the rail's full width: the pill was
-      // drawn edge to edge and read as a band across the rail, not as a mark on one icon. The 7px
-      // either side and the extra 2px between rows are the breathing room the user asked for.
-      className={`relative flex items-start rounded-md py-1.5 text-left text-[13px] leading-[1.35] transition-colors ${
-        collapsed ? "mx-auto mb-1 w-9 justify-center px-0" : "mb-0.5 w-full px-2.5"
-      } ${
-        active
-          ? "text-[var(--cf-accent)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
-      }`}
+    // Collapsed, the tooltip is the only place the name exists — and the only place the alpha mark
+    // can be spelled out, since what fits beside a 16px icon is a dot and a dot cannot say which
+    // word it stands for. The app's own tooltip rather than `title`, to the right of the rail and
+    // without the platform's second-and-a-half wait; unfolded, the row says it all itself.
+    <Tooltip
+      side="right"
+      label={label}
+      disabled={!collapsed}
+      trailing={alpha ? <span className={chipClass("warn", "uppercase")}>{t("settings.alpha")}</span> : undefined}
     >
-      {active && <ActivePill layoutId="cf-settings-pill" />}
-      {/* Above the pill, which is absolutely positioned over the whole button.
-          `flex-1` only while there is a label to stretch. It is what lets the name take the row and
-          push the alpha badge to the end — and it is exactly what breaks the folded rail, because
-          a sole child that grows leaves the button's `justify-center` no free space to distribute,
-          so the icon lands hard against the left edge instead of in the middle. Measured: 7px from
-          the rail's left edge rather than 25. Without it the span shrinks to its content and the
-          centring works. */}
-      <span
-        className={`relative flex min-w-0 items-start gap-1.5 ${collapsed ? "" : "flex-1"}`}
+      <button
+        onClick={() => onSelect(id)}
+        aria-current={active ? "page" : undefined}
+        aria-label={collapsed ? label : undefined}
+        // Selection changes colour and nothing else — no weight change, exactly like the tabs.
+        // Bolding on select re-measures the text and made the row jump every time it was picked.
+        // Colour plus the pill is already the whole signal.
+        // Folded, a fixed 36×36 centred in the 50px rail rather than the rail's full width: the pill
+        // was drawn edge to edge and read as a band across the rail, not as a mark on one icon. The
+        // 7px either side and the 4px between rows are the breathing room the user asked for.
+        // Unfolded, 32px at least — one line or, for a long name, two.
+        className={`relative flex rounded-md text-left text-[13px] leading-[1.35] transition-colors duration-100 ${
+          collapsed
+            ? "mx-auto mb-1 h-9 w-9 items-center justify-center"
+            : "mb-0.5 min-h-8 w-full items-start px-2.5 py-1.5"
+        } ${
+          active
+            ? "text-[var(--cf-accent)]"
+            : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        }`}
       >
-        <Icon size={14} className="mt-[2px] shrink-0" />
-        {collapsed
-          ? alpha && (
-              // The badge, shrunk to the only thing that survives at rail width: a dot on the
-              // corner of the icon, in the same warning hue the full badge is written in, so the
-              // two read as one mark seen at two sizes rather than as two different signals.
-              <span
-                aria-hidden
-                className="absolute -right-1 -top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-warning)]"
-              />
-            )
-          : (
-              <>
-                {/* Wraps. It used to truncate, which kept every row one line tall at any nav width
-                    — but the nav can be dragged down to 160px and a section whose name is cut in
-                    half there is a section you cannot identify. Two lines is the cost; the name in
-                    full is the point. `break-words` so one long word gives way rather than
-                    widening the rail. */}
-                <span className="min-w-0 flex-1 break-words">{label}</span>
-                {alpha && (
-                  <span className="mt-[1px] shrink-0 rounded-sm bg-[var(--cf-warning)]/15 px-1 py-px text-[9px] font-semibold uppercase leading-tight tracking-wide text-[var(--cf-warning)]">
-                    {t("settings.alpha")}
-                  </span>
-                )}
-              </>
-            )}
-      </span>
-    </button>
+        {active && <ActivePill layoutId="cf-settings-pill" />}
+        {/* Above the pill, which is absolutely positioned over the whole button.
+            `flex-1` only while there is a label to stretch. It is what lets the name take the row
+            and push the alpha badge to the end — and it is exactly what breaks the folded rail,
+            because a sole child that grows leaves the button's `justify-center` no free space to
+            distribute, so the icon lands hard against the left edge instead of in the middle.
+            Measured: 7px from the rail's left edge rather than 25. Without it the span shrinks to
+            its content and the centring works. */}
+        <span className={`relative flex min-w-0 items-start gap-2 ${collapsed ? "" : "flex-1"}`}>
+          {/* 16px folded, where the glyph is the whole row — the size the app rail's icons read at
+              — and 14px beside a label, on the cap height of its first line. */}
+          <Icon size={collapsed ? 16 : 14} className={`shrink-0 ${collapsed ? "" : "mt-[2px]"}`} />
+          {collapsed
+            ? alpha && (
+                // The badge, shrunk to the only thing that survives at rail width: a dot on the
+                // corner of the icon, in the same warning hue the full badge is written in, so the
+                // two read as one mark seen at two sizes rather than as two different signals.
+                <span
+                  aria-hidden
+                  className="absolute -right-1 -top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-warning)]"
+                />
+              )
+            : (
+                <>
+                  {/* Wraps. It used to truncate, which kept every row one line tall at any nav
+                      width — but the nav can be dragged down to 160px and a section whose name is
+                      cut in half there is a section you cannot identify. Two lines is the cost; the
+                      name in full is the point. `break-words` so one long word gives way rather
+                      than widening the rail. */}
+                  <span className="min-w-0 flex-1 break-words">{label}</span>
+                  {alpha && (
+                    <span className={chipClass("warn", "uppercase")}>{t("settings.alpha")}</span>
+                  )}
+                </>
+              )}
+        </span>
+      </button>
+    </Tooltip>
   );
 }
 
@@ -173,10 +184,10 @@ function SearchResults({
     // list it replaced stood, so a 6px step in the indent is visible.
     return (
       <div className="px-2.5 py-4">
-        <p className="text-[12.5px] font-medium text-[var(--cf-text)]">
+        <p className="text-[13px] font-medium text-[var(--cf-text)]">
           {t("settings.searchNoResults", { query })}
         </p>
-        <p className="mt-1 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+        <p className="mt-1 text-[12px] leading-snug text-[var(--cf-text-muted)]">
           {t("settings.searchNoResultsHint")}
         </p>
       </div>
@@ -196,15 +207,17 @@ function SearchResults({
               aria-selected={selected}
               onMouseEnter={() => onHover(index)}
               onClick={() => onPick(hit)}
-              className={`flex w-full items-start gap-1.5 rounded-md px-2.5 py-1.5 text-left transition-colors ${
-                selected ? "bg-[var(--cf-accent)]/12 text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
+              // The highlighted hit wears the selected-row fill every list in the app uses, with its
+              // glyph in the accent — the cursor *is* the selection here, so they look alike.
+              className={`flex min-h-8 w-full items-start gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors duration-100 ${
+                selected ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
               }`}
             >
-              <Icon size={14} className="mt-[2px] shrink-0" />
+              <Icon size={14} className={`mt-[2px] shrink-0 ${selected ? "text-[var(--cf-accent)]" : ""}`} />
               <span className="min-w-0 flex-1">
                 {/* Nothing truncates here either: a result you can only half-read is a result you
                     have to open to identify. */}
-                <span className="block break-words text-[12.5px] leading-snug text-[var(--cf-text)]">
+                <span className="block break-words text-[13px] leading-snug text-[var(--cf-text)]">
                   {hit.label}
                 </span>
                 {/* The section it lives in, always — "Proxy" alone doesn't say where to find it
@@ -215,7 +228,7 @@ function SearchResults({
                   </span>
                 )}
               </span>
-              {selected && <CornerDownLeft size={12} className="mt-[3px] shrink-0 opacity-60" />}
+              {selected && <CornerDownLeft size={13} className="mt-[2px] shrink-0 text-[var(--cf-text-faint)]" />}
             </button>
           </li>
         );
@@ -332,17 +345,21 @@ export function SettingsView() {
         // used to leave the API client's section about 430px once its rail was in — narrow enough
         // that a project URL showed a dozen characters and a truncation, which is the wrong end of
         // a value anyone is trying to check. `max-w-[92vw]` still gives way on a small screen.
-        className="flex h-[640px] max-h-[85vh] w-[1040px] max-w-[92vw] flex-col overflow-hidden rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+        // The modal shape every dialog in the app shares: 14px corners and the modal shadow.
+        className="flex h-[640px] max-h-[85vh] w-[1040px] max-w-[92vw] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)]"
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-[var(--cf-border)] px-4 py-2.5">
-          <p className="text-[13px] font-semibold">{t("statusbar.settings")}</p>
-          <button
-            onClick={closeSettings}
-            title={t("common.close")}
-            className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
-            <X size={14} />
-          </button>
+        <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-[var(--cf-border)] pl-4 pr-3">
+          <h2 className="truncate text-[14px] font-semibold text-[var(--cf-text)]">{t("statusbar.settings")}</h2>
+          <Tooltip label={t("common.close")} trailing={<Kbd>esc</Kbd>} side="bottom">
+            <button
+              type="button"
+              onClick={closeSettings}
+              aria-label={t("common.close")}
+              className={iconButtonClass({ size: "sm" })}
+            >
+              <X size={15} />
+            </button>
+          </Tooltip>
         </div>
 
         <div className="relative flex min-h-0 flex-1">
@@ -352,12 +369,17 @@ export function SettingsView() {
           <nav
             style={{ width: railWidth }}
             // `py-3` and no horizontal padding: the horizontal padding lives on the two children
-            // instead, so the folded rail is 50px of pure content and a 14px icon centres on 25
+            // instead, so the folded rail is 50px of pure content and a 16px icon centres on 25
             // rather than in the middle of whatever the padding left over.
+            //
+            // Tinted half a step into the sunken tone, like every explorer beside a sheet: the nav
+            // is where you pick, the pane beside it is the page.
             //
             // Nothing about the scrollbar is decided here — this element is `overflow-hidden` and
             // never scrolls. That is the scroller below, which says why it is painted as it is.
-            className={`flex shrink-0 flex-col overflow-hidden py-3 ${collapsed ? "cf-fold-zone" : ""}`}
+            className={`flex shrink-0 flex-col overflow-hidden bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))] py-3 ${
+              collapsed ? "cf-fold-zone" : ""
+            }`}
           >
             {/* The search box, above everything.
                 Fifteen sections and two dozen panes behind them is more than a list you scan —
@@ -371,19 +393,21 @@ export function SettingsView() {
                 edge ran 10px past every row under it, into the scrollbar's lane. */}
             {collapsed && (
               // Folded is how the window opens now, so the search cannot simply vanish with the
-              // field: this unfolds the rail and puts the caret in it.
-              <button
-                type="button"
-                onClick={() => {
-                  focusSearchOnUnfold.current = true;
-                  setCollapsed(false);
-                }}
-                title={t("settings.searchPlaceholder")}
-                aria-label={t("settings.searchPlaceholder")}
-                className="mx-auto mb-2 flex w-9 shrink-0 justify-center rounded-md py-1.5 text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
-              >
-                <Search size={14} />
-              </button>
+              // field: this unfolds the rail and puts the caret in it. Same 36×32 as the rows under
+              // it, so the column of glyphs reads as one.
+              <Tooltip side="right" label={t("settings.searchPlaceholder")}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    focusSearchOnUnfold.current = true;
+                    setCollapsed(false);
+                  }}
+                  aria-label={t("settings.searchPlaceholder")}
+                  className="mx-auto mb-2 flex h-8 w-9 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+                >
+                  <Search size={16} />
+                </button>
+              </Tooltip>
             )}
             {!collapsed && (
               <div className="relative mb-2 shrink-0 pl-3 pr-[22px]">
@@ -393,7 +417,7 @@ export function SettingsView() {
                   // against the wrapper's *padding box* (x=0), not against the padded content, so
                   // at `left-2` the 13px glyph sat at 8..21 with the input's border drawn at 12 —
                   // straight through it. 20 puts it 8px inside the field; `pl-7` still clears it.
-                  className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+                  className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
                 />
                 <input
                   ref={searchRef}
@@ -414,7 +438,8 @@ export function SettingsView() {
                   }}
                   placeholder={t("settings.searchPlaceholder")}
                   aria-label={t("settings.searchPlaceholder")}
-                  className="w-full rounded-md border border-[var(--cf-border)] bg-transparent py-1.5 pl-7 pr-6 text-[12.5px] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+                  // The 26px strip field: this sits in a nav of 32px rows, not in a form.
+                  className={fieldClass({ size: "sm", className: "w-full pl-7 pr-8" })}
                 />
                 {query && (
                   <button
@@ -425,14 +450,17 @@ export function SettingsView() {
                     }}
                     aria-label={t("settings.searchClear")}
                     // Same padding-box origin as the magnifier above, and here it collided with
-                    // something: at `right-1` the 20px button spanned W-24..W-4, hanging outside
-                    // the input and overlapping the fold toggle (`left: railWidth - 10`, `z-20`,
-                    // opaque) — which painted over the × and swallowed the clicks aimed at it.
-                    // 26 = the wrapper's new 22px plus 4, so it sits inside the field and clear of
-                    // the toggle. Tied to the `pr-[22px]` above; the two move together.
-                    className="absolute right-[26px] top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                    // something: at `right-1` the button hung outside the input and overlapped the
+                    // fold toggle (`left: railWidth - 10`, `z-20`, opaque) — which painted over the
+                    // × and swallowed the clicks aimed at it. 24 = the wrapper's 22px plus 2, so the
+                    // 22px button sits inside the field (whose `pr-8` keeps the text clear of it)
+                    // and clear of the toggle. Tied to the `pr-[22px]` above; the two move together.
+                    className={iconButtonClass({
+                      size: "xs",
+                      className: "absolute right-[24px] top-1/2 -translate-y-1/2",
+                    })}
                   >
-                    <X size={11} />
+                    <X size={12} />
                   </button>
                 )}
               </div>
@@ -461,9 +489,11 @@ export function SettingsView() {
                   {collapsed ? (
                     // The group headings are the one thing with no icon to fall back on. A rule in
                     // their place keeps the two groups visibly separate without inventing a glyph.
+                    // 15px, the heading's own fixed line (`leading-[15px]`), so unfolding does not
+                    // move a single icon down the rail.
                     <div className="mb-1 h-[15px]" />
                   ) : (
-                    <p className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                    <p className="mb-1 px-2.5 text-[11px] font-semibold uppercase leading-[15px] tracking-[0.06em] text-[var(--cf-text-faint)]">
                       {t("settings.globalGroup")}
                     </p>
                   )}
@@ -488,7 +518,7 @@ export function SettingsView() {
                     // list rather than as the break between two groups.
                     <div className="mx-[15px] mb-1 mt-4 h-[15px] border-t border-[var(--cf-border)]" />
                   ) : (
-                    <p className="mb-1 mt-4 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                    <p className="mb-1 mt-4 break-words px-2.5 text-[11px] font-semibold uppercase leading-[15px] tracking-[0.06em] text-[var(--cf-text-faint)]">
                       {activeWorkspaceName
                         ? t("settings.workspaceGroup", { name: activeWorkspaceName })
                         : t("settings.workspaceGroupGeneric")}
@@ -538,7 +568,7 @@ export function SettingsView() {
               it. That is the alignment worth keeping, and it is why this did not move when the
               search box arrived: on *this* side the button now sits beside the field rather than on
               a group heading, which looks like a reason to nudge it down and is not one. The
-              clearance it needs from the field is bought by the clear button's `right-[26px]`
+              clearance it needs from the field is bought by the clear button's `right-[24px]`
               instead. */}
           <Tooltip side="right" label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}>
             <button

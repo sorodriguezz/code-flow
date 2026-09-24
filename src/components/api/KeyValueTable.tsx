@@ -2,6 +2,8 @@ import { useRef, useState } from "react";
 import { FileUp, Trash2 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
 import { VariableInput } from "./VariableInput";
 import { apiPickFile } from "../../lib/tauri/apiCommands";
 import { pushErrorToast } from "../../state/toastStore";
@@ -23,8 +25,16 @@ import type { VariableContext } from "../../lib/api/variables";
  *   tables silently move the user's typing into the wrong row.
  */
 
+/**
+ * A cell's text field. The cell *is* the field, so it has no border or fill of its own: a 32px row
+ * (a 20px line and 6px either side) with an accent hairline inside the cell while it has focus.
+ * `VariableInput` applies this to its mirror as well as its input, which is harmless — the `focus:`
+ * part can only ever match the input.
+ */
 const CELL =
-  "w-full rounded bg-transparent px-2 py-1.5 text-[12px] leading-5 outline-none placeholder:text-[var(--cf-text-muted)]";
+  "w-full rounded-[4px] bg-transparent px-2.5 py-1.5 text-[12px] leading-5 outline-none transition-shadow duration-100 placeholder:text-[var(--cf-text-faint)] focus:shadow-[inset_0_0_0_1px_var(--cf-accent)]";
+/** Keys and values are what goes on the wire, so they are set in the code face. */
+const CODE_CELL = `${CELL} font-mono`;
 
 function newRowId(): string {
   return `kv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -100,10 +110,10 @@ export function KeyValueTable({
   const [draft, setDraft] = useState<KeyValue>(() => emptyKeyValue(newRowId()));
 
   const columns = readOnlyKeys
-    ? "24px minmax(0,1fr) minmax(0,1.3fr) minmax(0,1fr)"
+    ? "30px minmax(0,1fr) minmax(0,1.4fr) minmax(0,1fr)"
     : fileRows
-      ? "24px minmax(0,1fr) 84px minmax(0,1.3fr) minmax(0,1fr) 26px"
-      : "24px minmax(0,1fr) minmax(0,1.3fr) minmax(0,1fr) 26px";
+      ? "30px minmax(0,1fr) 88px minmax(0,1.4fr) minmax(0,1fr) 30px"
+      : "30px minmax(0,1fr) minmax(0,1.4fr) minmax(0,1fr) 30px";
 
   const patch = (row: KeyValue, isDraft: boolean, changes: Partial<KeyValue>) => {
     const next = { ...row, ...changes };
@@ -134,12 +144,9 @@ export function KeyValueTable({
 
   if (bulk) {
     return (
-      <div className="flex min-h-0 flex-col gap-2">
+      <div className="flex min-h-0 flex-col gap-1.5">
         <div className="flex justify-end">
-          <button
-            onClick={() => setBulk(false)}
-            className="rounded px-1.5 py-0.5 text-[11px] text-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)]"
-          >
+          <button type="button" onClick={() => setBulk(false)} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {t("api.keyValueEdit")}
           </button>
         </div>
@@ -152,7 +159,7 @@ export function KeyValueTable({
             setBulkText(e.target.value);
             onChange(fromBulkText(e.target.value, bulkBase.current));
           }}
-          className="min-h-[160px] w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent p-2 font-mono text-[12px] leading-5 text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+          className="min-h-[160px] w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-2 font-mono text-[12px] leading-5 text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]"
         />
       </div>
     );
@@ -162,28 +169,25 @@ export function KeyValueTable({
   if (!readOnlyKeys) displayed.push({ row: draft, isDraft: true });
 
   return (
-    <div className="flex min-w-0 flex-col">
+    <div className="flex min-w-0 flex-col gap-1.5">
       {allowBulkEdit && (
         <div className="flex justify-end">
-          <button
-            onClick={openBulk}
-            className="rounded px-1.5 py-0.5 text-[11px] text-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)]"
-          >
+          <button type="button" onClick={openBulk} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {t("api.bulkEdit")}
           </button>
         </div>
       )}
 
-      <div className="min-w-0 overflow-hidden rounded-md border border-[var(--cf-border)]">
+      <div className="min-w-0 overflow-hidden rounded-lg border border-[var(--cf-border)]">
         <div
           style={{ gridTemplateColumns: columns }}
-          className="grid items-center border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-1 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
+          className="grid h-[30px] items-center border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_60%,var(--cf-surface))] text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]"
         >
           <span />
-          <span className="px-2">{t("api.key")}</span>
-          {fileRows && !readOnlyKeys && <span className="px-2">{t("api.env.type")}</span>}
-          <span className="px-2">{t("api.value")}</span>
-          <span className="px-2">{t("api.description")}</span>
+          <span className="truncate px-2.5">{t("api.key")}</span>
+          {fileRows && !readOnlyKeys && <span className="truncate px-2.5">{t("api.env.type")}</span>}
+          <span className="truncate px-2.5">{t("api.value")}</span>
+          <span className="truncate px-2.5">{t("api.description")}</span>
           {!readOnlyKeys && <span />}
         </div>
 
@@ -193,7 +197,7 @@ export function KeyValueTable({
             <div
               key={row.id}
               style={{ gridTemplateColumns: columns }}
-              className="grid items-center border-b border-[var(--cf-border)] px-1 last:border-b-0 hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+              className="grid min-h-8 items-center border-b border-[var(--cf-border)] transition-colors duration-100 last:border-b-0 hover:bg-[var(--cf-hover)]"
             >
               <span className="flex justify-center">
                 <Checkbox
@@ -206,7 +210,7 @@ export function KeyValueTable({
               </span>
 
               {readOnlyKeys ? (
-                <span className="truncate px-2 py-1.5 text-[12px] leading-5 text-[var(--cf-text-muted)]">
+                <span className="truncate px-2.5 font-mono text-[12px] leading-5 text-[var(--cf-text-muted)]">
                   {row.key}
                 </span>
               ) : (
@@ -216,38 +220,43 @@ export function KeyValueTable({
                   variableContext={variableContext}
                   placeholder={keyPlaceholder ?? t("api.key")}
                   ariaLabel={t("api.key")}
-                  fieldClassName={CELL}
+                  fieldClassName={CODE_CELL}
                 />
               )}
 
               {fileRows && !readOnlyKeys && (
-                <Select
-                  size="sm"
-                  value={row.type === "file" ? "file" : "text"}
-                  onChange={(value) =>
-                    patch(row, isDraft, { type: value === "file" ? "file" : "text" })
-                  }
-                  options={[
-                    { value: "text", label: t("api.body.text") },
-                    { value: "file", label: t("api.body.file") },
-                  ]}
-                  ariaLabel={t("api.env.type")}
-                  className="mx-1 border-transparent"
-                />
+                // Wrapped rather than given a margin: `Select`'s trigger is `w-full`, so a margin on
+                // it pushed the trigger past the edge of its column.
+                <span className="flex min-w-0 px-0.5">
+                  <Select
+                    size="sm"
+                    value={row.type === "file" ? "file" : "text"}
+                    onChange={(value) =>
+                      patch(row, isDraft, { type: value === "file" ? "file" : "text" })
+                    }
+                    options={[
+                      { value: "text", label: t("api.body.text") },
+                      { value: "file", label: t("api.body.file") },
+                    ]}
+                    ariaLabel={t("api.env.type")}
+                    className="border-transparent"
+                  />
+                </span>
               )}
 
               {readOnlyKeys ? (
-                <span className="truncate px-2 py-1.5 text-[12px] leading-5 text-[var(--cf-text-muted)]">
+                <span className="truncate px-2.5 font-mono text-[12px] leading-5 text-[var(--cf-text-muted)]">
                   {row.value}
                 </span>
               ) : isFile ? (
                 <button
+                  type="button"
                   onClick={() => void pickFile(row, isDraft)}
                   title={row.src || t("api.body.chooseFile")}
-                  className="mx-1 flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-[12px] text-[var(--cf-text)] hover:bg-[var(--cf-accent-soft)]"
+                  className="mx-1 flex h-6 min-w-0 items-center gap-1.5 rounded-md px-1.5 text-left text-[12px] text-[var(--cf-text)] transition-colors duration-100 hover:bg-[var(--cf-hover)]"
                 >
-                  <FileUp size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-                  <span className={`truncate ${row.src ? "" : "text-[var(--cf-text-muted)]"}`}>
+                  <FileUp size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  <span className={`truncate ${row.src ? "font-mono" : "text-[var(--cf-text-faint)]"}`}>
                     {row.src ? baseName(row.src) : t("api.body.chooseFile")}
                   </span>
                 </button>
@@ -258,12 +267,12 @@ export function KeyValueTable({
                   variableContext={variableContext}
                   placeholder={valuePlaceholder ?? t("api.value")}
                   ariaLabel={t("api.value")}
-                  fieldClassName={CELL}
+                  fieldClassName={CODE_CELL}
                 />
               )}
 
               {readOnlyKeys ? (
-                <span className="px-2 py-1.5 text-[12px] leading-5 text-[var(--cf-text-muted)]" />
+                <span />
               ) : (
                 <input
                   type="text"
@@ -279,13 +288,16 @@ export function KeyValueTable({
               {!readOnlyKeys && (
                 <span className="flex justify-center">
                   {!isDraft && (
-                    <button
-                      onClick={() => remove(row.id)}
-                      title={t("api.removeRow")}
-                      className="rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                    >
-                      <Trash2 size={12} />
-                    </button>
+                    <Tooltip label={t("api.removeRow")}>
+                      <button
+                        type="button"
+                        onClick={() => remove(row.id)}
+                        aria-label={t("api.removeRow")}
+                        className={iconButtonClass({ size: "xs" })}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </Tooltip>
                   )}
                 </span>
               )}

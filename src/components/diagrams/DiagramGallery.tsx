@@ -259,7 +259,7 @@ export function DiagramGallery() {
             A toggle wearing the icon of the view you are *not* in has to be read twice — the list
             glyph meaning "you are in grid" is the same picture as "you are in list" — and it never
             says which of the two is current. Two buttons, one of them lit, answer that by looking. */}
-        <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
+        <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-[var(--cf-hover)] p-0.5">
           <ViewButton
             icon={LayoutGrid}
             label={t("diagrams.viewGrid")}
@@ -482,7 +482,7 @@ function Crumb({
     <button
       type="button"
       onClick={onClick}
-      className="min-w-0 truncate rounded px-1 py-0.5 text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.05]"
+      className="min-w-0 truncate rounded px-1 py-0.5 text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
     >
       {label}
     </button>
@@ -566,7 +566,7 @@ function Card({
             <Pin size={10} className="shrink-0 text-[var(--cf-accent)]" fill="currentColor" />
           )}
         </span>
-        <span className="flex items-center gap-2 text-[10px] text-[var(--cf-text-muted)]">
+        <span className="flex items-center gap-2 text-[10.5px] text-[var(--cf-text-muted)]">
           <span className="tabular-nums">{relativeTime(diagram.updated_at, locale)}</span>
           {/* Hidden at zero rather than shown as "0 shapes": a new diagram is empty by definition,
               and a count that only ever says nothing is a line of noise on every card. */}
@@ -593,7 +593,7 @@ function Row({ diagram, active, locale, untitled, shapesLabel, onSelect, onMenu 
       className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] transition-colors ${
         active
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+          : "hover:bg-[var(--cf-hover)]"
       }`}
     >
       {(() => {
@@ -612,11 +612,11 @@ function Row({ diagram, active, locale, untitled, shapesLabel, onSelect, onMenu 
         <Pin size={10} className="shrink-0 text-[var(--cf-accent)]" fill="currentColor" />
       )}
       {diagram.shape_count > 0 && (
-        <span className="shrink-0 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+        <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
           {shapesLabel}
         </span>
       )}
-      <span className="shrink-0 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+      <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
         {relativeTime(diagram.updated_at, locale)}
       </span>
     </button>

@@ -145,7 +145,7 @@ function Popup({
       transition={{ type: "spring", stiffness: 420, damping: 34 }}
       onPointerEnter={() => setHeld(true)}
       onPointerLeave={() => setHeld(false)}
-      className="pointer-events-auto w-[300px] overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+      className="pointer-events-auto w-[320px] overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
     >
       <button
         type="button"
@@ -169,11 +169,11 @@ function Popup({
       >
         <Icon size={14} className="mt-0.5 shrink-0" style={{ color: STATUS_COLOR[item.status] }} />
         <span className="min-w-0 flex-1">
-          <span className="block text-[12.5px] font-medium leading-snug text-[var(--cf-text)]">
+          <span className="block text-[13px] font-medium leading-snug text-[var(--cf-text)]">
             {t(item.titleKey, item.params)}
           </span>
           {item.detail && (
-            <span className="mt-0.5 block truncate text-[11px] text-[var(--cf-text-muted)]">
+            <span className="mt-0.5 block truncate text-[12px] text-[var(--cf-text-muted)]">
               {item.detail}
             </span>
           )}
@@ -187,7 +187,7 @@ function Popup({
               row: unlike a *live* row in the status bar, a card that is gone in four seconds has
               nothing to disambiguate itself against, and an italic "No workspace" on a phone-driven
               run would be the longest thing on the line. */}
-          <span className="mt-0.5 flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
+          <span className="mt-0.5 flex items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)]">
             <span className="shrink-0 uppercase tracking-wide">
               {t(NOTIFICATION_SOURCE_LABEL[item.source])}
             </span>
@@ -203,7 +203,7 @@ function Popup({
                 </span>
                 {foreign && (
                   // The one thing the name alone cannot say: this is not where you are standing.
-                  <span className="shrink-0 rounded-full bg-[color-mix(in_oklab,var(--cf-text)_10%,transparent)] px-1 text-[9px] font-semibold uppercase tracking-wide">
+                  <span className="shrink-0 rounded-full bg-[color-mix(in_oklab,var(--cf-text)_10%,transparent)] px-1 text-[10.5px] font-semibold uppercase tracking-wide">
                     {t("agents.liveElsewhere")}
                   </span>
                 )}

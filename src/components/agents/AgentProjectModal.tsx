@@ -8,6 +8,7 @@ import { useAgentsStore } from "../../state/agentsStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { AgentProject } from "../../types/domain";
+import { fieldClass } from "../common/recipes";
 
 /** The accent palette rather than a second list of hexes: those shades are already checked against
  * both themes, and a folder's colour is drawn as a glyph in the same rail the accent tints. */
@@ -89,7 +90,7 @@ export function AgentProjectModal({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder={t("agents.projectNamePlaceholder")}
-            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[13px] font-medium outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full" })}
           />
         </Field>
 

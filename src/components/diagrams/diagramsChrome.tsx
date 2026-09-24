@@ -1,13 +1,16 @@
+import { iconButtonClass } from "../common/Button";
+
 /**
  * The Diagrams workspace's shared visual vocabulary, the counterpart of `notesChrome`.
  *
- * Same job and same reasoning: a row, a folder tint and a tag get *one* definition, so the tree,
- * the gallery and the header agree about all three. Three files each choosing their own is how
- * those three drift apart.
+ * Same job and same reasoning: a folder tint and a pane heading get *one* definition, so the tree,
+ * the gallery, the schema workbench and its side panels agree about them. Several files each
+ * choosing their own is how those drift apart.
  *
- * These deliberately match the notes equivalents value for value. The two workspaces sit next to
- * each other on the rail and are the same shape of thing — a tree of documents — so a row that is
- * three pixels taller in one of them reads as a bug rather than as a distinction.
+ * The row and the icon button deliberately match `notesChrome` value for value: the two workspaces
+ * sit next to each other on the rail and are the same shape of thing — a tree of documents — so a
+ * row that is three pixels taller in one of them reads as a bug rather than as a distinction. Both
+ * are on the Trazo metrics now: 28px rows at 13px, and the shared 26px icon button.
  */
 
 /** The panel fill, matching the other workspaces' so the views read as one app. */
@@ -16,19 +19,28 @@ export const CARD = "bg-[var(--cf-surface)]";
 /** A row in the explorer: the hit area, the hover, and the selected state, in one place because
  *  folders and diagrams have to agree about all three or the tree looks like two lists. */
 export const ROW =
-  "group/row flex w-full items-center gap-1.5 rounded-md py-[3px] pr-1.5 text-left text-[12px] transition-colors";
+  "group/row flex min-h-[28px] w-full items-center gap-1.5 rounded-md pr-1.5 text-left text-[13px] transition-colors";
 
-export const ROW_IDLE = "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]";
+export const ROW_IDLE = "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]";
 
 export const ROW_ACTIVE = "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]";
 
-/** The shape of an icon button — size, hit area, hover wash — with no colour of its own, so a
- *  button that carries one doesn't have to out-specify the muted default in the cascade. */
-const ICON_BUTTON_SHELL =
-  "flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-black/[0.05] disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-white/[0.07]";
+/** An icon button in a header or toolbar — the app's own, at its 26px size. */
+export const ICON_BUTTON = iconButtonClass({ size: "sm", className: "disabled:cursor-not-allowed" });
 
-/** An icon button in a header or toolbar. */
-export const ICON_BUTTON = `${ICON_BUTTON_SHELL} text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]`;
+/**
+ * The name of a side pane or a floating panel — INSPECTOR, HISTORY, REFERENCE. The section-label
+ * type (11px, uppercase, faint) on a line of its own, taking the room its head row has to give.
+ */
+export const PANE_TITLE =
+  "min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
+
+/**
+ * The head row of a floating panel: its title and one or two 22px icon buttons, over a hairline.
+ * 40px rather than a toolbar's 44 — it is the top of a popover, not of a surface.
+ */
+export const PANE_HEAD =
+  "flex h-10 shrink-0 items-center gap-1 border-b border-[var(--cf-border)] pl-3 pr-2";
 
 /**
  * A folder's colour, pulled toward the theme's text colour so it stays legible on both.
@@ -41,4 +53,3 @@ export function folderInk(color: string): string {
   if (!color) return "var(--cf-text-muted)";
   return `color-mix(in oklab, ${color} 62%, var(--cf-text))`;
 }
-

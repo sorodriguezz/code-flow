@@ -13,7 +13,6 @@ import {
   Cloud,
   Code2,
   Eye,
-  Folder,
   FolderInput,
   FolderX,
   GitBranch,
@@ -80,6 +79,7 @@ import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
+import { monogram, monogramStyle } from "../../lib/monogram";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ImportReposModal } from "./ImportReposModal";
 import { CreateBranchModal } from "./CreateBranchModal";
@@ -99,6 +99,9 @@ import { riseDelay } from "../../lib/rise";
 import { PAGE, pageDelay, useIncremental } from "../../lib/useIncremental";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
+import { ReturnBurst, useWindowReturn } from "./ReturnBurst";
 
 // The hover-revealed actions on a project row: the same square chip the "clone"/"add repository"
 // buttons above the list wear, so every icon-only control in the sidebar answers the pointer the
@@ -106,7 +109,7 @@ import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 // `relative` so the action sits above the selected row's sliding fill, which is absolutely
 // positioned over the whole row — see `ActivePill`.
 const ROW_ACTION_CLASS =
-  "relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-black/[0.05] hover:text-[var(--cf-text)] group-hover:opacity-100 dark:hover:bg-white/[0.08]";
+  "relative flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover:opacity-100";
 
 /**
  * The last row of a capped list: reveals the next page, and says how much list is left behind it.
@@ -128,7 +131,7 @@ function ShowMoreRow({ hidden, onClick }: { hidden: number; onClick: () => void 
   return (
     <button
       onClick={onClick}
-      className="w-full rounded-md px-2 py-1 text-center text-[11px] font-medium text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      className="w-full rounded-md px-2 py-1 text-center text-[11px] font-medium text-[var(--cf-accent)] hover:bg-[var(--cf-hover)]"
     >
       {t("sidebar.showMore", { n: next })}
       {hidden > next && (
@@ -152,7 +155,7 @@ const SIDEBAR_MAX = 440;
  * scroll gutter entirely (`cf-no-scrollbar`), because it holds a fixed set of sections in a
  * fixed-height dialog and cannot realistically overflow. This panel keeps its bar and budgets for
  * it — a project list has no bound — which is what `px-0.5` below is paying for. */
-const SIDEBAR_COLLAPSED = 50;
+const SIDEBAR_COLLAPSED = 56;
 
 /** `defaultOpen` is the open one and only the open one: it's the group with work still in it, and
  * the reason the others fold is that merged and closed grow without bound (see `openGroups`). */
@@ -290,6 +293,7 @@ function CollapsedProjectChip({
   // the way to that window. There is no room here for a second control, so the rail offers only the
   // focus — detaching is done from the unfolded row, and re-attaching from the window itself.
   const detachedTo = useDetachedLabel("repo", project.id);
+  const returning = useWindowReturn("repo", project.id);
   const focusWindow = useWindowStore((s) => s.focus);
   const { initializing, init } = useInitRepo(project);
   const [removing, setRemoving] = useState(false);
@@ -396,12 +400,12 @@ function CollapsedProjectChip({
               aria-current={!detachedTo && project.id === activeProjectId ? "true" : undefined}
               style={{
                 ...riseDelay(at),
-                background: project.color,
+                ...monogramStyle(project.color),
                 ...(drag && {
                   transform: `translateY(${offset}px)${held ? " scale(1.12)" : ""}`,
                 }),
               }}
-              className={`cf-rise relative flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white ${
+              className={`cf-rise relative flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-[11px] font-bold tracking-[0.02em] ${
                 // The held chip is pinned to the pointer and must not ease anywhere; the ones
                 // sliding aside must. See the same split in `AppRail`.
                 held
@@ -411,13 +415,25 @@ function CollapsedProjectChip({
                     : "transition-[box-shadow,opacity]"
               } ${
                 !detachedTo && project.id === activeProjectId && !held
-                  ? "ring-2 ring-[var(--cf-accent)] ring-offset-2 ring-offset-[var(--cf-surface)]"
+                  ? "ring-2 ring-[var(--cf-accent)] ring-offset-2 ring-offset-[var(--cf-bg)]"
                   : held
                     ? ""
                     : "opacity-70 hover:opacity-100"
               }`}
             >
-              <Folder size={12} />
+              {/* Keyed by the return, so a repository that comes back twice in a row drops in
+                  twice — see `ReturnBurst`. */}
+              <span key={returning?.id ?? "rest"} className={returning ? "cf-return-land" : undefined}>
+                {monogram(project.name)}
+              </span>
+              {returning && (
+                <ReturnBurst
+                  side="right"
+                  tone={project.color}
+                  label={t("windows.returned", { name: project.name })}
+                  leading={<RepoMark project={project} />}
+                />
+              )}
               {reorder.arming === project.id && <HoldProgress shape="ring" />}
               {/* The rail is one chip wide, so the mark has to sit on the chip itself. A statement,
                   not a control: the chip underneath already goes to that window. */}
@@ -472,10 +488,10 @@ function StashesSection() {
             expand();
             setShowInput(open ? !showInput : true);
           }}
-          className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           title={t("sidebar.stashCurrentChanges")}
         >
-          <Plus size={12} />
+          <Plus size={14} />
         </button>
       )}
     >
@@ -532,7 +548,7 @@ function StashesSection() {
               key={s.index}
               onClick={() => setViewingStash(s)}
               style={pageDelay(at)}
-              className="cf-rise group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              className="cf-rise group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] hover:bg-[var(--cf-hover)]"
             >
               <span className="flex-1 truncate text-[var(--cf-text-muted)]">{s.message}</span>
               <button
@@ -686,18 +702,18 @@ function RemoteUrlEditModal({
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[420px] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        className="w-[420px] rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
-        <h3 className="mb-3 text-[13px] font-semibold">
+        <h3 className="mb-3 text-[15px] font-semibold">
           {t("sidebar.changeRemoteUrl")} — {name}
         </h3>
 
-        <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">{t("sidebar.current")}</label>
-        <div className="mb-3 overflow-x-auto rounded-md bg-black/[0.04] px-2 py-1.5 dark:bg-white/[0.06]">
+        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">{t("sidebar.current")}</label>
+        <div className="mb-3 overflow-x-auto rounded-md bg-[var(--cf-hover)] px-2 py-1.5">
           <p className="whitespace-nowrap font-mono text-[12px] text-[var(--cf-text-muted)]">{currentUrl}</p>
         </div>
 
-        <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">{t("sidebar.newUrl")}</label>
+        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">{t("sidebar.newUrl")}</label>
         <input
           autoFocus
           value={draft}
@@ -706,20 +722,20 @@ function RemoteUrlEditModal({
             if (e.key === "Enter") void confirm();
             if (e.key === "Escape") onClose();
           }}
-          className="mb-4 w-full overflow-x-auto rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          className={fieldClass({ className: "mb-4 w-full overflow-x-auto font-mono" })}
         />
 
         <div className="flex justify-end gap-2">
           <button
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost" })}
           >
             {t("common.cancel")}
           </button>
           <button
             onClick={confirm}
             disabled={saving || !draft.trim()}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {saving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
             {t("common.confirm")}
@@ -746,7 +762,7 @@ function RemoteUrlSection() {
           <div
             key={r.name}
             style={riseDelay(at)}
-            className="cf-rise group flex items-center gap-1.5 rounded-md px-1.5 py-1 leading-none text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            className="cf-rise group flex items-center gap-1.5 rounded-md px-1.5 py-1 leading-none text-[13px] hover:bg-[var(--cf-hover)]"
           >
             <span className="shrink-0 font-medium leading-none text-[var(--cf-text-muted)]">{r.name}</span>
             <span className="flex-1 truncate font-mono text-[12px] leading-none text-[var(--cf-text-muted)]">
@@ -1101,7 +1117,7 @@ function PullRequestsSection({ project }: { project: Project }) {
         {hosting.github.length > 0 && (
           <button
             onClick={() => setShowConnect("github")}
-            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-[var(--cf-hover)]"
           >
             <GitFork size={12} />
             {t("sidebar.linkGithubRepo")}
@@ -1110,7 +1126,7 @@ function PullRequestsSection({ project }: { project: Project }) {
         {hosting.gitlab.length > 0 && (
           <button
             onClick={() => setShowConnect("gitlab")}
-            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-[var(--cf-hover)]"
           >
             <GitMerge size={12} />
             {t("sidebar.linkGitlabRepo")}
@@ -1119,7 +1135,7 @@ function PullRequestsSection({ project }: { project: Project }) {
         {hosting.ado.length > 0 && (
           <button
             onClick={() => setShowConnect("azure")}
-            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-[var(--cf-hover)]"
           >
             <Cloud size={12} />
             {t("sidebar.linkAdoRepo")}
@@ -1199,7 +1215,7 @@ function PullRequestsSection({ project }: { project: Project }) {
                 <button
                   onClick={() => toggleGroup(section.key, open)}
                   aria-expanded={open}
-                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                 >
                   <span className="min-w-0 flex-1 truncate">
                     {t(section.labelKey)} ({items.length})
@@ -1222,7 +1238,7 @@ function PullRequestsSection({ project }: { project: Project }) {
                         className={`cf-rise flex w-full items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[12px] ${
                           shownPrId === pr.id
                             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                            : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                            : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
                         }`}
                       >
                         <Icon size={11} className="shrink-0" />
@@ -1283,6 +1299,7 @@ function ProjectRow({
   // opening the repo a second time. Two windows on one working copy would mean two editors over the
   // same files and two filesystem watchers on the same folder.
   const detachedTo = useDetachedLabel("repo", project.id);
+  const returning = useWindowReturn("repo", project.id);
   const detachRepo = useWindowStore((s) => s.detach);
   const focusWindow = useWindowStore((s) => s.focus);
   const { initializing, init } = useInitRepo(project);
@@ -1384,7 +1401,7 @@ function ProjectRow({
     : `${held ? "cursor-grabbing opacity-40" : "cursor-pointer"} ${
         isActive
           ? "text-[var(--cf-text)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
       }`;
 
   return (
@@ -1433,7 +1450,7 @@ function ProjectRow({
             Not drawn on a missing repository even while it is still the active one: the folder
             disappearing under an open project is exactly the case where "this is the repo
             everything else on screen is about" has stopped being true. */}
-        {isActive && !broken && !detachedTo && <ActivePill layoutId="cf-project-pill" radius="rounded-lg" />}
+        {isActive && !broken && !detachedTo && <ActivePill layoutId="cf-project-pill" radius="rounded-lg" variant="raised" />}
         {/* After the pill, so the hold reads on the open repository too — which is the one most
             likely to be dragged, and the one whose selection fill would otherwise cover it. */}
         {!broken && reorder.arming === project.id && <HoldProgress shape="bar" />}
@@ -1482,12 +1499,27 @@ function ProjectRow({
             // the chip is the most saturated thing in the whole column, and four of them at full
             // strength drowned both. On hover it comes back, so pointing at a row still shows its
             // colour as it really is.
-            className={`cf-chip-button relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-white transition-opacity ${
-              isActive || detachedTo ? "" : "opacity-60 group-hover:opacity-100"
+            className={`cf-chip-button relative flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] text-[10.5px] font-bold tracking-[0.02em] transition-opacity ${
+              isActive || detachedTo ? "" : "opacity-75 group-hover:opacity-100"
             }`}
-            style={{ background: project.color }}
+            style={monogramStyle(project.color)}
           >
-            {revealing ? <Loader2 size={12} className="animate-spin" /> : <Folder size={12} />}
+            {revealing ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <span key={returning?.id ?? "rest"} className={returning ? "cf-return-land" : undefined}>
+                {monogram(project.name)}
+              </span>
+            )}
+            {returning && (
+              <ReturnBurst
+                side="right"
+                besideOf='[data-tour="projects-panel"]'
+                tone={project.color}
+                label={t("windows.returned", { name: project.name })}
+                leading={<RepoMark project={project} />}
+              />
+            )}
             {/* The one mark that says this repository is not in this window. On the chip rather
                 than beside the name, because the chip is the row's anchor and the name is the part
                 that has to stay readable. */}
@@ -1564,7 +1596,7 @@ function ProjectRow({
                   void init();
                 }}
                 disabled={initializing}
-                className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-accent)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+                className="relative flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] disabled:opacity-40"
               >
                 {initializing ? (
                   <Loader2 size={13} className="animate-spin" />
@@ -1582,7 +1614,7 @@ function ProjectRow({
                 void removeMissing();
               }}
               disabled={removing}
-              className="relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+              className="relative flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] disabled:opacity-40"
             >
               {removing ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
             </button>
@@ -1590,7 +1622,7 @@ function ProjectRow({
         ) : (
           <>
             {/* Both row actions wear the same square as the "clone" and "add repository" chips above
-                the list — `h-5 w-5`, rounded, with a hover fill — so a control that only appears on
+                the list — 22px, rounded, with a hover fill — so a control that only appears on
                 row hover still says it is one once it's there. They were bare icons, which lit up
                 nothing at all under the pointer. */}
             {/* First in the strip, because it is the one action here that changes where the
@@ -1661,9 +1693,9 @@ function ProjectRow({
         {isActive && !broken && !detachedTo && (
           <motion.div
             key="project-tree"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
+            initial={{ opacity: 0, y: -3 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
             transition={reduceMotion ? { duration: 0 } : UNFOLD}
             className="overflow-hidden"
           >
@@ -1686,10 +1718,10 @@ function ProjectRow({
                   expand();
                   setShowCreateBranch(true);
                 }}
-                className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                 title={t("sidebar.newBranch")}
               >
-                <Plus size={12} />
+                <Plus size={14} />
               </button>
             )}
           >
@@ -1726,7 +1758,7 @@ function ProjectRow({
                         } ${
                           b.is_head
                             ? "font-semibold text-[var(--cf-accent)]"
-                            : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                            : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
                         }`}
                       >
                         {isCheckingOut ? (
@@ -1736,7 +1768,7 @@ function ProjectRow({
                         )}
                         <span className="flex-1 min-w-0 truncate">{b.name}</span>
                         {(b.ahead > 0 || b.behind > 0) && (
-                          <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">
+                          <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">
                             {b.ahead > 0 && `↑${b.ahead}`}
                             {b.behind > 0 && `↓${b.behind}`}
                           </span>
@@ -1917,18 +1949,6 @@ export function Sidebar() {
   // onto the panel's own seam. See `SIDEBAR_COLLAPSED`.
   const railWidth = collapsed ? SIDEBAR_COLLAPSED : sidebarWidth;
 
-  /**
-   * The easing has to be off while the seam is being dragged — the AI panel's note in full.
-   *
-   * `animate` treats every width it is handed as a target to ease toward, and a drag hands it a new
-   * one on every pointer move, so the edge would spend 180ms easing toward a width the pointer had
-   * already left. Zero duration while dragging lands the width in the same frame as the pointer;
-   * the easing is back for the fold and unfold, which is the only place it was meant to apply.
-   */
-  const [resizing, setResizing] = useState(false);
-  /** One object, shared by the panel and by the button riding its seam. They animate the same fold
-   *  and have to arrive together — two transitions that merely *look* alike would drift. */
-  const fold = resizing ? { duration: 0 } : { duration: 0.18, ease: "easeOut" as const };
 
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
 
@@ -2102,13 +2122,10 @@ export function Sidebar() {
     // `relative` so the fold button below can be positioned against the seam rather than against
     // the window.
     <div className="relative flex shrink-0">
-      <motion.aside
-        // `initial={false}`: the fold is animated, the app's first paint is not. Without it the
-        // sidebar unrolls from nothing every time the window opens, which turns a state the user
-        // never changed into an event.
-        initial={false}
-        animate={{ width: railWidth }}
-        transition={fold}
+      <aside
+        // The fold is instant: a width tween relaid out the whole window on every frame of it, for a
+        // gesture whose result is the only thing anyone looks at. Its contents fade in instead.
+        style={{ width: railWidth }}
         // No `border-r`. The `ResizeHandle` after this draws the seam already, and the border put a
         // second line hard against the sidebar's edge — so the pair read as one thick divider whose
         // live half sat off to the right, against the panel it isn't part of. Dropping it leaves one
@@ -2118,7 +2135,7 @@ export function Sidebar() {
         // is the only way a control that small gets found by someone not already looking for it.
         // Unfolded it is absent, so brushing a 300px panel on the way somewhere else lights nothing
         // — there the handle is a live control with its own hover and needs no help. See `index.css`.
-        className={`flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)] ${
+        className={`flex shrink-0 flex-col overflow-hidden ${
           collapsed ? "cf-fold-zone" : ""
         }`}
       >
@@ -2188,7 +2205,7 @@ export function Sidebar() {
                   <button
                     onClick={openPrLinkModal}
                     data-tour="pr-link"
-                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                     title={t("prLink.menuItem")}
                   >
                     <Glasses size={13} />
@@ -2196,7 +2213,7 @@ export function Sidebar() {
                   <button
                     onClick={openCloneModal}
                     data-tour="clone-repo"
-                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                     title={t("sidebar.cloneRepo")}
                   >
                     <GitBranchPlus size={13} />
@@ -2204,7 +2221,7 @@ export function Sidebar() {
                   <button
                     onClick={handleAddProject}
                     data-tour="add-project"
-                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                    className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                     title={t("sidebar.addProject")}
                   >
                     <Plus size={14} />
@@ -2242,7 +2259,7 @@ export function Sidebar() {
         {cloneModalOpen && activeWorkspaceId && (
           <CloneRepoModal workspaceId={activeWorkspaceId} onClose={closeCloneModal} />
         )}
-      </motion.aside>
+      </aside>
       {/* Folded, there is nothing to drag: the panel is exactly one chip wide by definition, and a
           live handle there would let someone drag it to a width the names are still hidden at. The
           stored width is untouched, so unfolding returns to it. */}
@@ -2250,7 +2267,7 @@ export function Sidebar() {
         // Part of the fold button's hover zone, along with the rail itself — `cf-seam-collapsed`
         // is what gives this hairline four pixels of reach so the approach from the *content* side
         // answers too, which the rail on the other side cannot cover. See `index.css`.
-        <div className="cf-fold-zone cf-seam-collapsed w-px shrink-0 bg-[var(--cf-border)]" />
+        <div className="cf-fold-zone cf-seam-collapsed w-px shrink-0" />
       ) : (
         <ResizeHandle
           axis="x"
@@ -2259,7 +2276,7 @@ export function Sidebar() {
           max={SIDEBAR_MAX}
           onChange={(w) => setSize("sidebarWidth", w)}
           onCommit={(w) => commitSize("sidebarWidth", w)}
-          onDragChange={setResizing}
+          seamless
         />
       )}
 
@@ -2293,14 +2310,11 @@ export function Sidebar() {
             it teleported to the folded position and then waited there for the panel to catch up.
             The vertical centring moves into framer's own `translateY` rather than staying a
             Tailwind transform — this element's transform is framer's to write now. */}
-        <motion.button
+        <button
           onClick={() => toggleFlag("sidebarCollapsed")}
           aria-label={collapsed ? t("sidebar.expandProjects") : t("sidebar.collapseProjects")}
           aria-expanded={!collapsed}
-          initial={false}
-          animate={{ left: railWidth - 10 }}
-          transition={fold}
-          style={{ translateY: "-50%" }}
+          style={{ left: railWidth - 10, transform: "translateY(-50%)" }}
           // `cf-fold-toggle` in both states, not just folded. It used to be conditional on the
           // theory that an unfolded seam has a live `ResizeHandle` to speak for itself — but that
           // reasoning only ever applied to the half of the class driven by the *seam*, and it left
@@ -2313,8 +2327,21 @@ export function Sidebar() {
           className="cf-fold-toggle absolute top-1/2 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors"
         >
           {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
-        </motion.button>
+        </button>
       </Tooltip>
     </div>
+  );
+}
+
+/** A repository's monogram at pill size, for the "it came back" pill — see `ReturnBurst`. */
+function RepoMark({ project }: { project: Project }) {
+  return (
+    <span
+      aria-hidden
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] text-[10.5px] font-bold"
+      style={monogramStyle(project.color)}
+    >
+      {monogram(project.name)}
+    </span>
   );
 }

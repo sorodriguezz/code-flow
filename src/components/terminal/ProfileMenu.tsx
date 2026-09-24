@@ -101,7 +101,7 @@ export function ProfileMenu({
         title={t("terminal.selectProfile")}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="flex h-5 w-4 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+        className="flex h-5 w-4 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-40"
       >
         {/* Down, as every "more ways to do this" caret beside a button is. Up read as "collapse
             this section", which is what an up-chevron at the end of a heading means everywhere
@@ -117,7 +117,7 @@ export function ProfileMenu({
             style={{ position: "fixed", right: pos.right, top: pos.top, bottom: pos.bottom, maxHeight: pos.maxHeight }}
             className="z-[9999] min-w-[200px] overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
           >
-            <p className="px-2 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            <p className="px-2 pb-0.5 pt-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("terminal.profilesHeading")}
             </p>
             {profiles.map((profile) => (
@@ -137,7 +137,7 @@ export function ProfileMenu({
             {onPickAccount && accounts.length > 0 && (
               <>
                 <div className="my-1 border-t border-[var(--cf-border)]" />
-                <p className="px-2 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                <p className="px-2 pb-0.5 pt-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
                   {t("accounts.terminalHeading")}
                 </p>
                 {accounts.map((account) => {

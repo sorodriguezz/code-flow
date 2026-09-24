@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "framer-motion";
 import { ArrowRight, Bell, CircleAlert, CircleCheck, Info, Trash2, Volume2, VolumeX, X } from "lucide-react";
+import { iconButtonClass } from "../common/Button";
+import { chipClass } from "../common/recipes";
 import {
   followNotification,
   NOTIFICATION_SOURCE_LABEL,
@@ -73,8 +75,10 @@ function UnreadDot({ burst }: { burst: number }) {
           run for as long as *anything* is unread, which is the resting state here. Driving them
           from JS meant a rAF loop that never quiesced, and scaling this blurred layer from the
           main thread re-rasterized the blur every frame. `cf-bell-halo`/`cf-bell-breath` in
-          `index.css` are the same keyframes at the same 2.2s ease-in-out, composited. */}
-      <span className="cf-bell-halo absolute -inset-[3px] rounded-full bg-[var(--cf-accent)] blur-[3px]" />
+          `index.css` are the same keyframes at the same 2.2s ease-in-out, composited. The soft edge
+          is a radial gradient now rather than a `blur()` filter: the same falloff, drawn once, with
+          no filter layer for the compositor to keep. */}
+      <span className="cf-bell-halo absolute -inset-[3px] rounded-full bg-[radial-gradient(circle,var(--cf-accent)_0%,var(--cf-accent)_35%,transparent_72%)]" />
 
       {/* Two nested spans rather than one: the outer one breathes forever, the inner one springs in
           once per arrival. Keyframes that did both would have to re-derive the resting loop from
@@ -83,7 +87,7 @@ function UnreadDot({ burst }: { burst: number }) {
       <span className="cf-bell-breath absolute inset-0">
         <motion.span
           key={burst}
-          className="block h-full w-full rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-surface)]"
+          className="block h-full w-full rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-bg)]"
           initial={{ scale: 0.2 }}
           animate={{ scale: 1 }}
           transition={{ type: "spring", stiffness: 700, damping: 14 }}
@@ -231,8 +235,8 @@ export function NotificationBell() {
         data-tour="notification-bell"
         title={label}
         onClick={() => (open ? close() : setOpen(true))}
-        className={`relative flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
-          open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+        className={`relative flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
+          open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
         }`}
       >
         {/* The bell swings from its crown, the way one actually rung would. Keyed by the burst so
@@ -244,13 +248,13 @@ export function NotificationBell() {
           animate={bursting ? { rotate: [0, -16, 12, -8, 5, -2, 0] } : { rotate: 0 }}
           transition={bursting ? { duration: 0.8, ease: "easeInOut" } : { duration: 0 }}
         >
-          <Bell size={13} />
+          <Bell size={14} />
         </motion.span>
         {/* Just a dot: the count is in the tooltip and the panel header. A number this small in a
             24px button is unreadable, and the question the bell answers is yes/no. */}
         {unseen > 0 &&
           (reduceMotion ? (
-            <span className="absolute right-0.5 top-0.5 h-[6px] w-[6px] rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-surface)]" />
+            <span className="absolute right-0.5 top-0.5 h-[6px] w-[6px] rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-bg)]" />
           ) : (
             <UnreadDot burst={burst} />
           ))}
@@ -291,18 +295,14 @@ export function NotificationBell() {
               maxHeight: pos.maxHeight,
               transformOrigin: "bottom right",
             }}
-            className="z-[9999] flex flex-col overflow-hidden rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+            className="z-[9999] flex flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
           >
-            <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
-              <Bell size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-              <span className="text-[12px] font-semibold text-[var(--cf-text)]">
+            <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-3 pr-2">
+              <Bell size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
+              <span className="text-[13px] font-semibold text-[var(--cf-text)]">
                 {t("notifications.title")}
               </span>
-              {unseen > 0 && (
-                <span className="rounded-full bg-[var(--cf-accent-soft)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-accent)]">
-                  {t("notifications.unseen", { n: unseen })}
-                </span>
-              )}
+              {unseen > 0 && <span className={chipClass("accent")}>{t("notifications.unseen", { n: unseen })}</span>}
               <div className="ml-auto flex items-center gap-0.5">
                 {/* Outside the `items.length` guard the clear button sits behind: an empty panel is
                     exactly where someone goes to turn the sound on *before* the next run finishes,
@@ -322,19 +322,17 @@ export function NotificationBell() {
                   }}
                   title={soundEnabled ? t("notifications.soundDisable") : t("notifications.soundEnable")}
                   aria-label={soundEnabled ? t("notifications.soundDisable") : t("notifications.soundEnable")}
-                  className={`flex items-center rounded-md p-1 hover:bg-black/[0.05] dark:hover:bg-white/[0.06] ${
-                    soundEnabled ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-                  }`}
+                  className={iconButtonClass({ size: "xs", active: soundEnabled })}
                 >
-                  {soundEnabled ? <Volume2 size={12} /> : <VolumeX size={12} />}
+                  {soundEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />}
                 </button>
                 {items.length > 0 && (
                   <button
                     type="button"
                     onClick={clear}
-                    className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.06]"
+                    className="flex h-[22px] items-center gap-1.5 rounded-md px-2 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
                   >
-                    <Trash2 size={11} />
+                    <Trash2 size={13} />
                     {t("notifications.clearAll")}
                   </button>
                 )}
@@ -342,14 +340,14 @@ export function NotificationBell() {
             </div>
 
             {items.length === 0 ? (
-              <div className="px-4 py-8 text-center">
-                <p className="text-[12px] font-medium text-[var(--cf-text)]">
-                  {t("notifications.empty")}
-                </p>
-                <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                  {t("notifications.emptyHint")}
-                </p>
-              </div>
+              // One line, the hint behind it: an empty list says so and nothing more. What the panel
+              // collects is what the tooltip on the line is for.
+              <p
+                title={t("notifications.emptyHint")}
+                className="px-4 py-7 text-center text-[12px] text-[var(--cf-text-faint)]"
+              >
+                {t("notifications.empty")}
+              </p>
             ) : (
               <div className="min-h-0 flex-1 overflow-y-auto">
                 {items.map((item, at) => (
@@ -417,7 +415,7 @@ function Row({
   return (
     <div
       style={riseDelay(at)}
-      className={`cf-rise group relative flex items-start gap-2 border-b border-[var(--cf-border)] px-3 py-2 last:border-b-0 ${
+      className={`cf-rise group relative flex items-start gap-2.5 border-b border-[var(--cf-border)] py-2.5 pl-3 pr-2 last:border-b-0 ${
         item.seen ? "" : "bg-[color-mix(in_oklab,var(--cf-accent)_6%,transparent)]"
       }`}
     >
@@ -426,19 +424,19 @@ function Row({
       {!item.seen && (
         <span className="absolute inset-y-1.5 left-0 w-[2.5px] rounded-r-full bg-[var(--cf-accent)]" />
       )}
-      <Icon size={13} className="mt-[2px] shrink-0" style={{ color: STATUS_COLOR[item.status] }} />
+      <Icon size={15} className="mt-px shrink-0" style={{ color: STATUS_COLOR[item.status] }} />
 
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="shrink-0 rounded-full bg-[color-mix(in_oklab,var(--cf-text)_8%,transparent)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <span className={chipClass("neutral", "h-[18px] px-1.5 text-[10.5px] font-semibold uppercase tracking-wide")}>
             {t(NOTIFICATION_SOURCE_LABEL[item.source])}
           </span>
-          <span className="min-w-0 truncate text-[12px] font-medium text-[var(--cf-text)]">
+          <span className="min-w-0 truncate text-[13px] font-medium text-[var(--cf-text)]">
             {t(item.titleKey, item.params)}
           </span>
         </div>
         {item.detail && (
-          <p className="mt-0.5 truncate text-[11px] text-[var(--cf-text-muted)]" title={item.detail}>
+          <p className="mt-0.5 truncate text-[12px] text-[var(--cf-text-muted)]" title={item.detail}>
             {item.detail}
           </p>
         )}
@@ -448,7 +446,7 @@ function Row({
             finished" rows are indistinguishable, and the button under them goes to different
             places. Truncated rather than wrapped: a long workspace name should cost the name, not
             the timestamp, which is why the name is the flexible half of the row. */}
-        <p className="mt-0.5 flex items-baseline gap-1 text-[10px] text-[var(--cf-text-muted)]">
+        <p className="mt-1 flex items-baseline gap-1 text-[11px] text-[var(--cf-text-faint)]">
           <span className="shrink-0 tabular-nums">
             {finished.toLocaleDateString(locale, { day: "2-digit", month: "short" })}
             {" · "}
@@ -475,9 +473,9 @@ function Row({
             }}
             title={goLabel}
             aria-label={goLabel}
-            className="rounded p-0.5 text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]"
           >
-            <ArrowRight size={12} />
+            <ArrowRight size={14} />
           </button>
         )}
         <button
@@ -485,9 +483,9 @@ function Row({
           onClick={onRemove}
           title={t("notifications.remove")}
           aria-label={t("notifications.remove")}
-          className="rounded p-0.5 text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
         >
-          <X size={12} />
+          <X size={14} />
         </button>
       </div>
     </div>

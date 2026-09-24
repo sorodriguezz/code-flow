@@ -128,7 +128,7 @@ export function SplitFileDiff({ file, height }: { file: FileDiffInfo; height: nu
           }}
         />
       ) : (
-        <div className="h-full bg-[var(--cf-bg)]" />
+        <div className="h-full bg-[var(--cf-sunken)]" />
       )}
     </div>
   );

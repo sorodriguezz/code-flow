@@ -5,6 +5,7 @@ import { useT } from "../../state/languageStore";
 import { ActivePill } from "../common/ActivePill";
 import { ConfirmFlowDiagram } from "../common/ConfirmFlowDiagram";
 import type { Project } from "../../types/domain";
+import { buttonClass } from "../common/Button";
 
 /**
  * Moving a project to another workspace, in the same shape as the branch dialogs: one centred
@@ -64,15 +65,15 @@ export function MoveProjectModal({ project, onClose }: { project: Project; onClo
         onClick={(e) => e.stopPropagation()}
         // Matched to the other dialogs that draw the flow diagram — its two pills carry workspace
         // names here, which run as long as branch names do.
-        className="cf-fade-in max-h-[calc(100vh-2rem)] w-[520px] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        className="cf-fade-in max-h-[calc(100vh-2rem)] w-[520px] max-w-[90vw] overflow-y-auto rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-3 flex items-start gap-3">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">
             <FolderInput size={16} />
           </span>
           <div className="min-w-0 flex-1">
-            <h3 className="text-[13px] font-semibold">{t("sidebar.moveToWorkspace")}</h3>
-            <p className="mt-0.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+            <h3 className="text-[15px] font-semibold">{t("sidebar.moveToWorkspace")}</h3>
+            <p className="mt-0.5 text-[12px] leading-snug text-[var(--cf-text-muted)]">
               {t("sidebar.moveProjectHint", { name: project.name })}
             </p>
           </div>
@@ -102,7 +103,7 @@ export function MoveProjectModal({ project, onClose }: { project: Project; onClo
               className={`relative flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] transition-colors ${
                 targetId === ws.id
                   ? "text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+                  : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
               }`}
             >
               {targetId === ws.id && <ActivePill layoutId="cf-move-project-pill" radius="rounded-lg" />}
@@ -122,14 +123,14 @@ export function MoveProjectModal({ project, onClose }: { project: Project; onClo
           <button
             onClick={onClose}
             disabled={moving}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost" })}
           >
             {t("common.cancel")}
           </button>
           <button
             onClick={submit}
             disabled={!targetId || moving}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {moving ? <Loader2 size={13} className="animate-spin" /> : <FolderInput size={13} />}
             {t("sidebar.moveProjectConfirm")}

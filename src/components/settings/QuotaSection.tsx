@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Gauge, RefreshCw } from "lucide-react";
+import { Gauge, Loader2, RefreshCw } from "lucide-react";
+import { buttonClass } from "../common/Button";
 import { useT } from "../../state/languageStore";
 import { ageOf, limitKey, useQuotaStore } from "../../state/quotaStore";
 import { QuotaLimits, limitLabel, limitTitle, quotaAccountLabel } from "../ai/QuotaLimits";
@@ -88,8 +89,8 @@ function PillPicker() {
   }
 
   return (
-    <div className="rounded-lg border border-[var(--cf-border)] p-2.5">
-      <p className="text-[12.5px] font-medium text-[var(--cf-text)]">{t("quota.pillLabel")}</p>
+    <div className="rounded-lg border border-[var(--cf-border)] p-3">
+      <p className="text-[13px] font-medium text-[var(--cf-text)]">{t("quota.pillLabel")}</p>
       <p className="mb-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("quota.pillHint")}</p>
       <Select
         size="sm"
@@ -136,9 +137,9 @@ export function QuotaSection() {
           type="button"
           onClick={() => void refresh("refresh")}
           disabled={loading}
-          className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11.5px] font-medium text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:cursor-default disabled:opacity-60 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text-muted)]"
+          className={buttonClass({ variant: "secondary", size: "sm" })}
         >
-          <RefreshCw size={12} className={loading ? "animate-spin" : undefined} />
+          {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
           {t("quota.refresh")}
         </button>
       </div>

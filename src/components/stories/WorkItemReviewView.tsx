@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleAlert,
   ClipboardCheck,
+  Clock,
   Copy,
   Cpu,
   Eraser,
@@ -14,11 +15,11 @@ import {
   FileText,
   FlaskConical,
   FolderGit2,
-  Clock,
   Gauge,
   History,
   Layers,
   ListChecks,
+  Loader2,
   Lock,
   Pencil,
   Play,
@@ -81,6 +82,7 @@ import type {
   CriterionFormat,
   WorkItemReviewStage,
 } from "../../types/domain";
+import { buttonClass } from "../common/Button";
 
 /**
  * Deliberately carries no width. A `w-full` baked in here loses to — or beats, depending on which
@@ -116,7 +118,7 @@ const PRIMARY_ACTION =
   "flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-0.5 text-[11px] font-medium text-[var(--cf-accent)] transition-colors hover:border-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-40";
 
 const ICON_ACTION =
-  "flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]";
+  "flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)]";
 
 /**
  * How a child task's state is coloured. Azure states are free strings per process template — and
@@ -161,7 +163,7 @@ function IconChip({ icon: Icon, tone = "accent" }: { icon: typeof ScanSearch; to
 function RepoChip({ repo }: { repo: string }) {
   if (!repo) return null;
   return (
-    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-1.5 text-[10px] text-[var(--cf-text-muted)]">
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
       <FolderGit2 size={9} />
       {repo}
     </span>
@@ -324,7 +326,7 @@ function CriterionText({ text, format }: { text: string; format: CriterionFormat
     );
   }
   return (
-    <p className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-[var(--cf-text)]">
+    <p className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-[var(--cf-text)]">
       <GherkinText text={text} />
     </p>
   );
@@ -368,7 +370,7 @@ function Pane({
     <section
       className={`flex min-h-0 min-w-0 flex-col overflow-hidden border-[var(--cf-border)] ${
         width ?? "flex-1"
-      } ${tinted ? "bg-[var(--cf-bg)]" : "bg-[var(--cf-surface)]"}`}
+      } ${tinted ? "bg-[var(--cf-sunken)]" : "bg-[var(--cf-surface)]"}`}
     >
       {/* A fixed height, not `py-2`. What a header carries differs per pane — a count here, a
           padlock there, a bin only once something is staged — and the tallest of those (a 24px
@@ -377,9 +379,9 @@ function Pane({
           both sat off the line they share. */}
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
         <IconChip icon={icon} />
-        <h3 className="min-w-0 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">{label}</h3>
+        <h3 className="min-w-0 truncate text-[13px] font-semibold text-[var(--cf-text)]">{label}</h3>
         {(count ?? 0) > 0 && (
-          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
+          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10.5px] font-semibold tabular-nums text-[var(--cf-accent)]">
             {count}
           </span>
         )}
@@ -401,7 +403,7 @@ function PaneEmpty({ icon: Icon, children }: { icon: typeof ScanSearch; children
   return (
     <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
       <Icon size={20} className="text-[var(--cf-border)]" />
-      <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{children}</p>
+      <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">{children}</p>
     </div>
   );
 }
@@ -491,10 +493,10 @@ function RunStage({ stage, label }: { stage: WorkItemReviewStage; label: string 
       disabled={!ready && !running}
       title={running ? t("huReview.stopHint") : label}
       onClick={() => void (running ? store().stop(stage) : store().run(stage))}
-      className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-medium transition-[filter,border-color,color] disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium transition-[filter,border-color,color] disabled:cursor-not-allowed disabled:opacity-40 ${
         running
           ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-          : "bg-[var(--cf-accent)] text-white hover:brightness-110"
+          : "bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))]"
       }`}
     >
       {running ? <Square size={10} /> : <Play size={10} />}
@@ -526,7 +528,7 @@ function RunTasksMenu() {
           void store().stop("tasksqa");
         }}
         title={t("huReview.stopHint")}
-        className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11.5px] font-medium text-[var(--cf-text)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
+        className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[12px] font-medium text-[var(--cf-text)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
       >
         <Square size={10} />
         {t("huReview.stop")}
@@ -548,7 +550,7 @@ function RunTasksMenu() {
         onClick={() => setOpen((was) => !was)}
         aria-expanded={open}
         title={t("huReview.generateTasksHint")}
-        className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[11.5px] font-medium text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+        className={buttonClass({ variant: "primary", size: "sm" })}
       >
         <Play size={10} />
         {t("huReview.generateTasks")}
@@ -566,7 +568,7 @@ function RunTasksMenu() {
                   setOpen(false);
                   void store().runTasks(scope);
                 }}
-                className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-[var(--cf-hover)]"
               >
                 <Icon size={12} className="mt-[3px] shrink-0 text-[var(--cf-accent)]" />
                 <span className="min-w-0">
@@ -588,7 +590,7 @@ function Thinking() {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-2">
       <ThinkingOrb size="lg" />
-      <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("huReview.running")}</p>
+      <p className="text-[12px] text-[var(--cf-text-muted)]">{t("huReview.running")}</p>
     </div>
   );
 }
@@ -628,7 +630,7 @@ function Collapsible({
           type="button"
           onClick={() => setOpen((was) => !was)}
           aria-expanded={open}
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-[var(--cf-hover)]"
         >
           <ChevronRight
             size={12}
@@ -707,7 +709,7 @@ function StoryBlock({ label, text, empty }: { label: string; text: string; empty
 
   return (
     <div>
-      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
+      <p className="mb-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
       {/* The border says "there is something here and it goes on past the fold". Faint on purpose:
           it is a mark, not a field — nothing inside it can be typed into. */}
       <div
@@ -724,7 +726,7 @@ function StoryBlock({ label, text, empty }: { label: string; text: string; empty
             dangerouslySetInnerHTML={{ __html: html }}
           />
         ) : (
-          <p className="text-[11.5px] italic text-[var(--cf-text-muted)]">{empty}</p>
+          <p className="text-[12px] italic text-[var(--cf-text-muted)]">{empty}</p>
         )}
       </div>
       {/* Only under a box that is actually cutting text off. A block shorter than the cap sits at
@@ -768,7 +770,7 @@ function ChildTaskRow({ child, at }: { child: BoardWorkItemChild; at: number }) 
           </span>
           <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">#{child.id}</span>
           <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">{child.title}</span>
-          <span className={`shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium ${stateTone(child.state)}`}>
+          <span className={`shrink-0 rounded-full border px-1.5 py-px text-[10.5px] font-medium ${stateTone(child.state)}`}>
             {child.state}
           </span>
         </>
@@ -794,7 +796,7 @@ function ChildTaskRow({ child, at }: { child: BoardWorkItemChild; at: number }) 
           {content}
         </p>
       ) : (
-        <p className="mt-1.5 text-[11.5px] italic text-[var(--cf-text-muted)]">{t("huReview.taskNoContent")}</p>
+        <p className="mt-1.5 text-[12px] italic text-[var(--cf-text-muted)]">{t("huReview.taskNoContent")}</p>
       )}
     </Collapsible>
   );
@@ -821,16 +823,16 @@ function StorySection({
         type="button"
         onClick={() => setOpen((was) => !was)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded-md px-1 py-1.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        className="flex w-full items-center gap-2 rounded-md px-1 py-1.5 text-left hover:bg-[var(--cf-hover)]"
       >
         <ChevronRight
           size={12}
           className={`shrink-0 text-[var(--cf-text-muted)] transition-transform duration-200 ${open ? "rotate-90" : ""}`}
         />
         <IconChip icon={icon} />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">{label}</span>
+        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-[var(--cf-text)]">{label}</span>
         {count !== undefined && (
-          <span className="shrink-0 rounded-full bg-[var(--cf-border)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
+          <span className="shrink-0 rounded-full bg-[var(--cf-border)] px-1.5 text-[10.5px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
             {count}
           </span>
         )}
@@ -869,7 +871,7 @@ function StoryTab() {
       badge={
         <span
           title={t("huReview.readOnlyHint")}
-          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10px] font-medium text-[var(--cf-text-muted)]"
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10.5px] font-medium text-[var(--cf-text-muted)]"
         >
           <Lock size={9} />
           {t("huReview.readOnly")}
@@ -902,7 +904,7 @@ function StoryTab() {
 
         <StorySection icon={ListChecks} label={t("stories.fieldCriteria")} count={criteria.length}>
           {criteria.length === 0 ? (
-            <p className="px-1 text-[11.5px] italic text-[var(--cf-text-muted)]">{t("huReview.noCriteria")}</p>
+            <p className="px-1 text-[12px] italic text-[var(--cf-text-muted)]">{t("huReview.noCriteria")}</p>
           ) : (
             <div className="space-y-1.5">
               {criteria.map((criterion, at) => (
@@ -938,7 +940,7 @@ function StoryTab() {
 
         <StorySection icon={ClipboardCheck} label={t("huReview.existingTasks")} count={item.children.length}>
           {item.children.length === 0 ? (
-            <p className="px-1 text-[11.5px] italic text-[var(--cf-text-muted)]">{t("huReview.noTasks")}</p>
+            <p className="px-1 text-[12px] italic text-[var(--cf-text-muted)]">{t("huReview.noTasks")}</p>
           ) : (
             <div className="space-y-1.5">
               {item.children.map((child, at) => (
@@ -949,7 +951,7 @@ function StoryTab() {
         </StorySection>
 
         <StorySection icon={Tag} label={t("huReview.fieldDetails")}>
-          <dl className="space-y-1 px-1 text-[11.5px]">
+          <dl className="space-y-1 px-1 text-[12px]">
             {[
               [t("huReview.fieldState"), item.state],
               [t("huReview.fieldType"), item.work_item_type],
@@ -999,7 +1001,7 @@ function DescriptionTab({ width, seam }: { width: string; seam: React.ReactNode 
     return (
       <div className="flex h-full min-h-0 flex-col gap-2">
         {proposal.rationale && (
-          <p className="shrink-0 rounded-md border border-dashed border-[var(--cf-border)] px-2 py-1.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+          <p className="shrink-0 rounded-md border border-dashed border-[var(--cf-border)] px-2 py-1.5 text-[12px] leading-snug text-[var(--cf-text-muted)]">
             {proposal.rationale}
           </p>
         )}
@@ -1022,7 +1024,7 @@ function DescriptionTab({ width, seam }: { width: string; seam: React.ReactNode 
             disabled={!open}
             onClick={() => store().sendDescriptionToDraft()}
             title={t("huReview.sendToDraftHint")}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            className={buttonClass({ variant: "primary", className: "flex-1" })}
           >
             <Send size={12} />
             {t("huReview.sendToDraft")}
@@ -1136,7 +1138,7 @@ function CriterionCard({ proposal, at }: { proposal: CriterionProposal; at: numb
       head={
         <>
           <span
-            className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold ${
+            className={`shrink-0 rounded-full px-1.5 py-px text-[10.5px] font-semibold ${
               rewrite
                 ? "bg-[color-mix(in_oklab,var(--cf-warning)_16%,transparent)] text-[var(--cf-warning)]"
                 : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
@@ -1144,7 +1146,7 @@ function CriterionCard({ proposal, at }: { proposal: CriterionProposal; at: numb
           >
             {rewrite ? t("huReview.rewriteOf").replace("{n}", String(proposal.replaces)) : t("huReview.newCriterion")}
           </span>
-          <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10px] text-[var(--cf-text-muted)]">
+          <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10.5px] text-[var(--cf-text-muted)]">
             {proposal.format === "ambos" ? t("huReview.formatBoth") : FORMAT_LABEL[proposal.format]}
           </span>
           <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{criterionSummary(text)}</span>
@@ -1207,14 +1209,14 @@ function CriterionCard({ proposal, at }: { proposal: CriterionProposal; at: numb
             store().editCriterionProposal(proposal.id, { [shown]: e.target.value } as Partial<CriterionProposal>)
           }
           onBlur={() => setEditing(false)}
-          className="w-full resize-y rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-2.5 py-2 font-mono text-[11.5px] leading-relaxed outline-none"
+          className="w-full resize-y rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-2.5 py-2 font-mono text-[12px] leading-relaxed outline-none"
         />
       ) : (
         <CriterionText text={text} format={shown} />
       )}
 
       {proposal.rationale && (
-        <p className="mt-1.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{proposal.rationale}</p>
+        <p className="mt-1.5 text-[12px] leading-snug text-[var(--cf-text-muted)]">{proposal.rationale}</p>
       )}
       {proposal.evidence.length > 0 && (
         <p className="mt-1 break-words font-mono text-[10.5px] text-[var(--cf-text-muted)]">
@@ -1381,16 +1383,16 @@ function TaskField({
   if (!editing && !value.trim()) return null;
   return (
     <div className="mt-1.5">
-      <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
+      <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
       {editing ? (
         <textarea
           value={value}
           rows={Math.max(2, value.split("\n").length)}
           onChange={(e) => onChange(e.target.value)}
-          className="mt-0.5 w-full resize-y rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-2 py-1.5 text-[11.5px] leading-relaxed outline-none"
+          className="mt-0.5 w-full resize-y rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] leading-relaxed outline-none"
         />
       ) : (
-        <p className="mt-0.5 whitespace-pre-wrap break-words text-[11.5px] leading-snug text-[var(--cf-text)]">
+        <p className="mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-snug text-[var(--cf-text)]">
           {value}
         </p>
       )}
@@ -1431,7 +1433,7 @@ function TaskCard({ proposal, at }: { proposal: TaskProposal; at: number }) {
       head={
         <>
           <KindChip kind={proposal.kind} />
-          <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] font-medium text-[var(--cf-text)]">
+          <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-[var(--cf-text)]">
             {proposal.title}
           </span>
           <RepoChip repo={proposal.repo} />
@@ -1463,7 +1465,7 @@ function TaskCard({ proposal, at }: { proposal: TaskProposal; at: number }) {
     >
       {editing && (
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("stories.fieldTitle")}
           </p>
           <input
@@ -1479,7 +1481,7 @@ function TaskCard({ proposal, at }: { proposal: TaskProposal; at: number }) {
       {/* A customised prompt is allowed to answer in one block rather than in three parts; when it
           does, that block is the whole content of the task and has to be shown. */}
       {!proposal.what && !proposal.how && !proposal.why && proposal.detail && (
-        <p className="mt-1.5 whitespace-pre-wrap break-words text-[11.5px] leading-snug text-[var(--cf-text)]">
+        <p className="mt-1.5 whitespace-pre-wrap break-words text-[12px] leading-snug text-[var(--cf-text)]">
           {proposal.detail}
         </p>
       )}
@@ -1518,7 +1520,7 @@ function TaskCard({ proposal, at }: { proposal: TaskProposal; at: number }) {
 function TaskGroup({ kind, label, children }: { kind: "dev" | "qa"; label: string; children: React.ReactNode }) {
   return (
     <section className="space-y-1.5">
-      <p className="flex items-center gap-1.5 px-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+      <p className="flex items-center gap-1.5 px-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
         <KindChip kind={kind} />
         {label}
       </p>
@@ -1711,9 +1713,9 @@ function DraftPane({
                 if (ok) void store().publish(part);
               });
             }}
-            className="ml-auto flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11.5px] font-medium text-white transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            className={buttonClass({ variant: "primary", size: "sm", className: "ml-auto" })}
           >
-            {busy ? <ThinkingOrb size="sm" /> : <UploadCloud size={11} />}
+            {busy ? <Loader2 size={13} className="animate-spin" /> : <UploadCloud size={13} />}
             {t(`huReview.publish_${part}` as "huReview.publish_description")}
           </button>
         </div>
@@ -1753,13 +1755,13 @@ function SaveState() {
       disabled={saving || !dirty}
       onClick={() => void store().saveNow()}
       title={hint}
-      className={`flex h-[30px] shrink-0 items-center gap-1.5 rounded-md border px-2 text-[11.5px] font-medium transition-colors ${
+      className={`flex h-[30px] shrink-0 items-center gap-1.5 rounded-md border px-2 text-[12px] font-medium transition-colors ${
         dirty && !saving
           ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))] text-[var(--cf-accent)] hover:border-[var(--cf-accent)]"
           : "border-[var(--cf-border)] text-[var(--cf-text-muted)] disabled:cursor-default"
       }`}
     >
-      {saving ? <ThinkingOrb size="sm" /> : dirty ? <Save size={12} /> : <Check size={12} />}
+      {saving ? <Loader2 size={13} className="animate-spin" /> : dirty ? <Save size={13} /> : <Check size={13} />}
       {label}
     </button>
   );
@@ -1851,7 +1853,7 @@ function EffortChip({ item, editable }: { item: BoardWorkItem; editable: boolean
         onClick={commit}
         title={t("huReview.effortConfirm")}
         aria-label={t("huReview.effortConfirm")}
-        className="flex h-4 w-4 items-center justify-center rounded hover:text-[var(--cf-success)]"
+        className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md hover:text-[var(--cf-success)] hover:bg-[var(--cf-hover)]"
       >
         <Check size={11} />
       </button>
@@ -1860,7 +1862,7 @@ function EffortChip({ item, editable }: { item: BoardWorkItem; editable: boolean
         onClick={() => setDraft(null)}
         title={t("huReview.effortCancel")}
         aria-label={t("huReview.effortCancel")}
-        className="flex h-4 w-4 items-center justify-center rounded hover:text-[var(--cf-danger)]"
+        className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md hover:text-[var(--cf-danger)] hover:bg-[var(--cf-hover)]"
       >
         <X size={11} />
       </button>
@@ -1927,7 +1929,7 @@ function PlanningRow({
 
       <span
         title={t("huReview.activityHint")}
-        className="ml-auto shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 py-px font-mono text-[10px]"
+        className="ml-auto shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 py-px font-mono text-[10.5px]"
       >
         {kind === "qa" ? "Testing · QA" : "Development · DEV"}
       </span>
@@ -2029,11 +2031,11 @@ function DraftCriterion({
           onClick={() => setExpanded((was) => !was)}
           aria-expanded={expanded}
           title={t(expanded ? "huReview.collapseCriterion" : "huReview.expandCriterion")}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
         >
           <ChevronRight size={12} className={`transition-transform duration-200 ${expanded ? "rotate-90" : ""}`} />
         </button>
-        <span className="shrink-0 text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
+        <span className="shrink-0 text-[10.5px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
           #{at + 1}
         </span>
         {/* The title is the row when collapsed, so it is editable in place rather than behind the
@@ -2044,7 +2046,7 @@ function DraftCriterion({
           onChange={(e) => onChange(joinCriterion(e.target.value, body))}
           placeholder={t("huReview.criterionTitlePlaceholder")}
           aria-label={t("huReview.criterionTitle")}
-          className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-[11.5px] font-medium text-[var(--cf-text)] outline-none placeholder:font-normal placeholder:italic placeholder:text-[var(--cf-text-muted)] hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
+          className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-[12px] font-medium text-[var(--cf-text)] outline-none placeholder:font-normal placeholder:italic placeholder:text-[var(--cf-text-muted)] hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
         />
         {open && (
           <button
@@ -2052,7 +2054,7 @@ function DraftCriterion({
             onClick={onRemove}
             title={t("stories.removeCriterion")}
             aria-label={t("stories.removeCriterion")}
-            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100 hover:bg-[var(--cf-hover)]"
           >
             <Trash2 size={11} />
           </button>
@@ -2064,7 +2066,7 @@ function DraftCriterion({
           readOnly={!open}
           rows={Math.max(3, body.split("\n").length)}
           onChange={(e) => onChange(joinCriterion(title, e.target.value))}
-          className="cf-fade-in w-full resize-y bg-transparent px-2.5 py-2 font-mono text-[11.5px] leading-relaxed outline-none read-only:cursor-default"
+          className="cf-fade-in w-full resize-y bg-transparent px-2.5 py-2 font-mono text-[12px] leading-relaxed outline-none read-only:cursor-default"
         />
       )}
     </article>
@@ -2112,7 +2114,7 @@ function DraftTaskCard({
           onClick={() => setExpanded((was) => !was)}
           aria-expanded={expanded}
           title={t(expanded ? "huReview.collapseTask" : "huReview.expandTask")}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
         >
           <ChevronRight size={12} className={`transition-transform duration-200 ${expanded ? "rotate-90" : ""}`} />
         </button>
@@ -2125,11 +2127,11 @@ function DraftTaskCard({
           onChange={(e) => onChange({ title: e.target.value })}
           placeholder={t("huReview.taskTitlePlaceholder")}
           aria-label={t("stories.fieldTitle")}
-          className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[11.5px] font-medium text-[var(--cf-text)] outline-none placeholder:font-sans placeholder:font-normal placeholder:italic placeholder:text-[var(--cf-text-muted)] hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
+          className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[12px] font-medium text-[var(--cf-text)] outline-none placeholder:font-sans placeholder:font-normal placeholder:italic placeholder:text-[var(--cf-text-muted)] hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
         />
         {/* Read-only here on purpose — see the note on the component. Unset values say nothing
             rather than showing a zero, which is the same rule `PlanField` follows. */}
-        <span className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+        <span className="flex shrink-0 items-center gap-1.5 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
           {task.estimateHours > 0 && (
             <span title={t("huReview.estimate")}>
               {task.estimateHours}
@@ -2150,7 +2152,7 @@ function DraftTaskCard({
             onClick={onRemove}
             title={t("huReview.unstage")}
             aria-label={t("huReview.unstage")}
-            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100 hover:bg-[var(--cf-hover)]"
           >
             <Trash2 size={11} />
           </button>
@@ -2208,7 +2210,7 @@ function AddTaskButton() {
           const box = e.currentTarget.getBoundingClientRect();
           setMenu({ x: box.left, y: box.bottom + 4 });
         }}
-        className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] py-1.5 text-[11.5px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+        className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
       >
         <Plus size={12} />
         {t("huReview.addTask")}
@@ -2316,7 +2318,7 @@ function DraftTab() {
             <button
               type="button"
               onClick={() => store().addDraftCriterion()}
-              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] py-1.5 text-[11.5px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
             >
               <Plus size={12} />
               {t("stories.addCriterion")}
@@ -2410,10 +2412,10 @@ function TabBar() {
               disabled={disabled}
               onClick={() => store().setTab(at)}
               aria-current={active ? "page" : undefined}
-              className={`relative flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+              className={`relative flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                 active
                   ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+                  : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
               }`}
             >
               <span className={`tabular-nums text-[11px] ${active ? "opacity-70" : "opacity-50"}`}>{index + 1}</span>
@@ -2427,8 +2429,8 @@ function TabBar() {
               {t(`huReview.tab_${at}` as "huReview.tab_story")}
               {counts[at] > 0 && (
                 <span
-                  className={`rounded-full px-1.5 text-[10px] font-semibold tabular-nums ${
-                    active ? "bg-[var(--cf-accent)] text-white" : "bg-[var(--cf-border)] text-[var(--cf-text-muted)]"
+                  className={`rounded-full px-1.5 text-[10.5px] font-semibold tabular-nums ${
+                    active ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]" : "bg-[var(--cf-border)] text-[var(--cf-text-muted)]"
                   }`}
                 >
                   {counts[at]}
@@ -2449,7 +2451,7 @@ function StatusChip({ status }: { status: string }) {
   const t = useT();
   if (status === "published") {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[color-mix(in_oklab,var(--cf-success)_45%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] px-1.5 py-px text-[10px] font-medium text-[var(--cf-success)]">
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[color-mix(in_oklab,var(--cf-success)_45%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] px-1.5 py-px text-[10.5px] font-medium text-[var(--cf-success)]">
         <UploadCloud size={9} />
         {t("huReview.statusPublished")}
       </span>
@@ -2457,14 +2459,14 @@ function StatusChip({ status }: { status: string }) {
   }
   if (status === "closed") {
     return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10px] font-medium text-[var(--cf-text-muted)]">
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10.5px] font-medium text-[var(--cf-text-muted)]">
         <Lock size={9} />
         {t("huReview.statusClosed")}
       </span>
     );
   }
   return (
-    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] px-1.5 py-px text-[10px] font-medium text-[var(--cf-accent)]">
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] px-1.5 py-px text-[10.5px] font-medium text-[var(--cf-accent)]">
       {t("huReview.statusOpen")}
     </span>
   );
@@ -2547,7 +2549,7 @@ function HistoryModal({ onClose }: { onClose: () => void }) {
                   }}
                   className="min-w-0 flex-1 px-2.5 py-2 text-left"
                 >
-                  <p className="flex flex-wrap items-center gap-1.5 text-[12.5px] text-[var(--cf-text)]">
+                  <p className="flex flex-wrap items-center gap-1.5 text-[13px] text-[var(--cf-text)]">
                     <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
                       {/* The board's own label when the saved session carries one — a Jira row's
                           numeric id is real but nobody recognises it. */}
@@ -2649,7 +2651,7 @@ function RepoPicker() {
           {chosen.length === 0 ? t("huReview.noReposPicked") : chosen.map((repo) => repo.name).join(" · ")}
         </span>
         {chosen.length > 1 && (
-          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
+          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10.5px] font-semibold tabular-nums text-[var(--cf-accent)]">
             {chosen.length}
           </span>
         )}
@@ -2664,12 +2666,12 @@ function RepoPicker() {
               {t("huReview.reposOptional")}
             </p>
             {repos.length === 0 && (
-              <p className="px-2 py-1.5 text-[11.5px] text-[var(--cf-text-muted)]">{t("huReview.noRepos")}</p>
+              <p className="px-2 py-1.5 text-[12px] text-[var(--cf-text-muted)]">{t("huReview.noRepos")}</p>
             )}
             {repos.map((repo) => (
               <label
                 key={repo.id}
-                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
               >
                 <Checkbox checked={picked.includes(repo.id)} onChange={() => store().toggleProject(repo.id)} />
                 <span className="min-w-0 truncate">{repo.name}</span>
@@ -2848,7 +2850,7 @@ export function WorkItemReviewView() {
           disabled={loading || !input.trim()}
           title={t("huReview.loadHint")}
           onClick={() => void store().load()}
-          className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          className={buttonClass({ variant: "primary" })}
         >
           {loading ? t("huReview.loading") : t("huReview.load")}
         </button>
@@ -2865,7 +2867,7 @@ export function WorkItemReviewView() {
           <History size={12} className="shrink-0" />
           {t("huReview.history")}
           {historyCount > 0 && (
-            <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
+            <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10.5px] font-semibold tabular-nums text-[var(--cf-accent)]">
               {historyCount}
             </span>
           )}
@@ -2882,7 +2884,7 @@ export function WorkItemReviewView() {
       )}
 
       {item && !open && (
-        <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-black/[0.03] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
+        <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-[var(--cf-hover)] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
           <Lock size={11} className="mt-[2px] shrink-0" />
           <span className="min-w-0 break-words">
             {status === "published" ? t("huReview.closedPublishedHint") : t("huReview.closedHint")}
@@ -2951,7 +2953,7 @@ export function WorkItemReviewView() {
                     row has no state to show, and an empty capsule is a chip that says nothing while
                     looking like it says something. */}
                 {item.state.trim() && (
-                  <span className={`rounded-full border px-1.5 py-px text-[10px] font-medium ${stateTone(item.state)}`}>
+                  <span className={`rounded-full border px-1.5 py-px text-[10.5px] font-medium ${stateTone(item.state)}`}>
                     {item.state}
                   </span>
                 )}
@@ -2992,7 +2994,7 @@ export function WorkItemReviewView() {
                   type="button"
                   onClick={closeReview}
                   title={t("huReview.closeReviewHint")}
-                  className="flex h-[30px] shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 text-[11.5px] font-medium text-[var(--cf-text)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
+                  className="flex h-[30px] shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 text-[12px] font-medium text-[var(--cf-text)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
                 >
                   <Lock size={12} />
                   {t("huReview.closeReview")}
@@ -3029,9 +3031,10 @@ export function WorkItemReviewView() {
                 disabled={!draftReady || Boolean(publishing)}
                 onClick={publishEverything}
                 title={t("huReview.publishAllHint")}
-                className="ml-auto flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11.5px] font-medium text-white transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+                className={buttonClass({ variant: "primary", size: "sm", className: "ml-auto" })}
               >
-                {publishing ? <ThinkingOrb size="sm" /> : <UploadCloud size={11} />}
+                {/* Publishing is an upload to the tracker, not a model at work: a spinner, never the orb. */}
+                {publishing ? <Loader2 size={13} className="animate-spin" /> : <UploadCloud size={13} />}
                 {t("huReview.publishAll")}
               </button>
             )}

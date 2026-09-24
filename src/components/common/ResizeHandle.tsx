@@ -33,6 +33,11 @@ interface ResizeHandleProps {
    * they separate. Here the cursor is the affordance, and the seam only appears under the pointer.
    */
   quiet?: boolean;
+  /**
+   * No line at rest, glow and grip on approach. For a seam between the frame and a sheet: the sheet
+   * already draws its own hairline, and a second one a pixel away read as a doubled edge.
+   */
+  seamless?: boolean;
 }
 
 export function ResizeHandle({
@@ -43,6 +48,7 @@ export function ResizeHandle({
   onChange,
   onCommit,
   onDragChange,
+  seamless = false,
   invert,
   quiet,
 }: ResizeHandleProps) {
@@ -103,7 +109,7 @@ export function ResizeHandle({
         // One pixel is the floor for the *layout* — anything less and the panels stop being flush
         // against a real edge — so the line is thinned by weight rather than by width: the border
         // colour at 60% reads as a hairline between two panes instead of a drawn rule.
-        quiet ? "" : "bg-[var(--cf-border)]/60"
+        quiet || seamless ? "" : "bg-[var(--cf-border)]/60"
       } ${axis === "x" ? "w-px" : "h-px"}`}
     >
       {/* The grab area: wider than the line, centred on it, and overlapping the panels either side.

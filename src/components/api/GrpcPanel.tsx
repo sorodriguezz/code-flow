@@ -13,10 +13,13 @@ import {
   Tags,
   X,
 } from "lucide-react";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { EmptyState } from "../common/EmptyState";
+import { chipClass, fieldClass } from "../common/recipes";
 import { Select } from "../common/Select";
+import { Tooltip } from "../common/Tooltip";
 import { KeyValueTable } from "./KeyValueTable";
 import { useApiStore } from "../../state/apiStore";
 import { DEFAULT_GRPC_CALL, useApiRuntimeStore } from "../../state/apiRuntimeStore";
@@ -71,8 +74,17 @@ const GRPC_STATUS_NAMES: Record<number, string> = {
   16: "UNAUTHENTICATED",
 };
 
-const INPUT =
-  "w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)]";
+/** The 26px strip field, level with the `compact` selects beside it. */
+const INPUT = fieldClass({ size: "sm", className: "w-full" });
+
+/** The small uppercase caption over a field or a pane ("MESSAGE", "RESPONSE"). */
+const CAPTION = "text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
+
+/**
+ * `sm` buttons are 24px and the fields they share a bottom-aligned row with are 26px; a pixel of
+ * margin puts the two on one centre line instead of one baseline.
+ */
+const ON_FIELD_LINE = "mb-px";
 
 export function GrpcPanel({ tabId }: { tabId: string }) {
   const t = useT();
@@ -207,12 +219,12 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 space-y-2 border-b border-[var(--cf-border)] px-3 py-2">
-        <div className="flex items-end gap-2">
+      <div className="shrink-0 space-y-2.5 border-b border-[var(--cf-border)] px-3.5 py-2.5">
+        <div className="flex items-end gap-3">
           <div className="w-56">
             <Field label={t("api.grpc.source")}>
               <Select
-                size="sm"
+                size="compact"
                 value={grpc.source}
                 onChange={(value) => patch({ source: value === "proto" ? "proto" : "reflection" })}
                 options={[
@@ -237,7 +249,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
               </div>
               <button
                 onClick={() => void pickProto()}
-                className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                className={buttonClass({ variant: "secondary", size: "sm", className: ON_FIELD_LINE })}
               >
                 <FileCode size={13} />
                 {t("api.body.chooseFile")}
@@ -245,12 +257,10 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
             </div>
           )}
 
-          <div className="flex items-center gap-3 pb-1">
-            <label className="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
-              <Checkbox checked={grpc.useTls} onChange={(checked) => patch({ useTls: checked })} />
-              {t("api.grpc.useTls")}
-            </label>
-          </div>
+          <label className="flex h-[26px] shrink-0 cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
+            <Checkbox checked={grpc.useTls} onChange={(checked) => patch({ useTls: checked })} />
+            {t("api.grpc.useTls")}
+          </label>
 
           <div className="w-48">
             <Field label={t("api.grpc.authority")}>
@@ -271,7 +281,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
           <button
             onClick={() => void loadServices()}
             disabled={describing}
-            className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-50"
+            className={buttonClass({ variant: "secondary", size: "sm", className: ON_FIELD_LINE })}
           >
             {describing ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
             {t("api.grpc.loadServices")}
@@ -280,7 +290,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
           <div className="min-w-0 flex-1">
             <Field label={t("api.grpc.service")}>
               <Select
-                size="sm"
+                size="compact"
                 value={grpc.service}
                 placeholder={t("api.grpc.service")}
                 disabled={!services || services.length === 0}
@@ -304,7 +314,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
           <div className="min-w-0 flex-1">
             <Field label={t("api.grpc.method")}>
               <Select
-                size="sm"
+                size="compact"
                 value={grpc.method}
                 placeholder={t("api.grpc.method")}
                 disabled={!service}
@@ -325,7 +335,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
           <button
             onClick={() => void invoke()}
             disabled={busy || !grpc.service || !grpc.method}
-            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            className={buttonClass({ variant: "primary", size: "sm", className: ON_FIELD_LINE })}
           >
             {busy ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
             {t("api.grpc.invoke")}
@@ -334,7 +344,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
           {busy && (
             <button
               onClick={cancel}
-              className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              className={buttonClass({ variant: "secondary", size: "sm", className: ON_FIELD_LINE })}
             >
               <X size={13} />
               {t("api.cancel")}
@@ -343,14 +353,14 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
         </div>
 
         {method && batched && (
-          <p className="flex items-start gap-1.5 text-[11px] text-[var(--cf-warning)]">
-            <AlertTriangle size={12} className="mt-px shrink-0" />
+          <p className="flex items-start gap-2 rounded-md bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-2.5 py-1.5 text-[12px] leading-snug text-[var(--cf-text)]">
+            <AlertTriangle size={13} className="mt-px shrink-0 text-[var(--cf-warning)]" />
             {t("api.grpc.batchHint")}
           </p>
         )}
       </div>
 
-      <div className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
+      <div className="shrink-0 border-b border-[var(--cf-border)] px-3.5 py-2">
         <CollapsibleSection icon={Tags} title={t("api.tab.metadata")} defaultOpen={grpc.metadata.length > 0}>
           <KeyValueTable
             key={`${tabId}:metadata`}
@@ -365,17 +375,15 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col border-r border-[var(--cf-border)]">
-          <div className="flex shrink-0 items-center gap-2 px-3 py-1.5">
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("api.tab.message")}
-            </span>
+          <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] py-1 pl-3.5 pr-2">
+            <span className={CAPTION}>{t("api.tab.message")}</span>
             <div className="flex-1" />
             <button
               onClick={generateExample}
               disabled={!method}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-40"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
             >
-              <Braces size={12} />
+              <Braces size={13} />
               {t("api.grpc.generateExample")}
             </button>
           </div>
@@ -426,7 +434,7 @@ function ResponseSide({
 }) {
   if (error) {
     return (
-      <div className="flex h-full items-start gap-2 p-4 text-[12px] text-[var(--cf-danger)]">
+      <div className="flex h-full items-start gap-2 px-3.5 py-3 text-[12px] leading-snug text-[var(--cf-danger)]">
         <AlertTriangle size={14} className="mt-px shrink-0" />
         <span className="min-w-0 break-words">{error}</span>
       </div>
@@ -448,29 +456,22 @@ function ResponseSide({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 px-3 py-1.5">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("api.response.title")}
-        </span>
-        <span
-          className="rounded px-1.5 py-px font-mono text-[11px] font-medium"
-          style={{
-            color: ok ? "var(--cf-success)" : "var(--cf-danger)",
-            backgroundColor: ok
-              ? "color-mix(in oklab, var(--cf-success) 14%, transparent)"
-              : "color-mix(in oklab, var(--cf-danger) 14%, transparent)",
-          }}
-        >
+      <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-[var(--cf-border)] py-1.5 pl-3.5 pr-3">
+        <span className={CAPTION}>{t("api.response.title")}</span>
+        {/* The code and its canonical name together — the name is what keeps the tone from being
+            the only thing that says whether the call worked. */}
+        <span className={chipClass(ok ? "ok" : "bad", "font-mono")}>
           {response.status_code} {statusName}
         </span>
         {response.status_message && (
-          <span className="min-w-0 truncate text-[11px] text-[var(--cf-text-muted)]" title={response.status_message}>
+          <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-muted)]" title={response.status_message}>
             {response.status_message}
           </span>
         )}
         <div className="flex-1" />
-        <span className="shrink-0 font-mono text-[11px] text-[var(--cf-text-muted)]">
-          {t("api.response.time")} {response.duration_ms} ms
+        <span className="shrink-0 text-[12px] text-[var(--cf-text-faint)]">
+          {t("api.response.time")}{" "}
+          <span className="font-medium tabular-nums text-[var(--cf-text)]">{response.duration_ms} ms</span>
         </span>
       </div>
 
@@ -493,7 +494,7 @@ function ResponseSide({
         />
       </div>
 
-      <div className="max-h-48 shrink-0 space-y-2 overflow-y-auto border-t border-[var(--cf-border)] px-3 py-2">
+      <div className="max-h-48 shrink-0 space-y-2 overflow-y-auto border-t border-[var(--cf-border)] px-3.5 py-2">
         <CollapsibleSection icon={Tags} title={t("api.response.headers")} defaultOpen={response.headers.length > 0}>
           <PairTable pairs={response.headers} />
         </CollapsibleSection>
@@ -506,15 +507,18 @@ function ResponseSide({
 }
 
 function PairTable({ pairs }: { pairs: [string, string][] }) {
-  if (pairs.length === 0) return <p className="text-[11px] text-[var(--cf-text-muted)]">—</p>;
+  if (pairs.length === 0) return <p className="text-[12px] text-[var(--cf-text-faint)]">—</p>;
   return (
-    <div className="space-y-0.5">
+    <div>
       {pairs.map(([key, value], index) => (
-        <div key={`${key}-${index}`} className="flex gap-2 text-[11px]">
-          <span className="w-40 shrink-0 truncate font-mono text-[var(--cf-text-muted)]" title={key}>
+        <div
+          key={`${key}-${index}`}
+          className="flex gap-3 border-b border-[var(--cf-border)] py-1 font-mono text-[12px] last:border-b-0"
+        >
+          <span className="w-40 shrink-0 truncate text-[var(--cf-text-muted)]" title={key}>
             {key}
           </span>
-          <span className="min-w-0 flex-1 break-all font-mono text-[var(--cf-text)]">{value}</span>
+          <span className="min-w-0 flex-1 break-all text-[var(--cf-text)]">{value}</span>
         </div>
       ))}
     </div>
@@ -535,17 +539,8 @@ function KindBadge({ kind, t }: { kind: GrpcCallKind; t: Translate }) {
           ? t("api.grpc.clientStream")
           : t("api.grpc.bidiStream");
   const batched = BATCH_STREAMING_KINDS.includes(kind);
-  return (
-    <span
-      className={`shrink-0 self-center rounded px-1.5 py-px text-[10px] uppercase tracking-wide ${
-        batched
-          ? "border border-[var(--cf-border)] text-[var(--cf-text-muted)]"
-          : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-      }`}
-    >
-      {label}
-    </span>
-  );
+  // `mb-[3px]` centres the 20px chip on the 26px line of the pickers it sits beside.
+  return <span className={chipClass(batched ? "neutral" : "accent", "mb-[3px]")}>{label}</span>;
 }
 
 function ImportPaths({
@@ -558,10 +553,8 @@ function ImportPaths({
   t: Translate;
 }) {
   return (
-    <div className="space-y-1">
-      <span className="block text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {t("api.grpc.importPaths")}
-      </span>
+    <div className="space-y-1.5">
+      <span className={`block ${CAPTION}`}>{t("api.grpc.importPaths")}</span>
       {paths.map((path, index) => (
         <div key={index} className="flex items-center gap-1.5">
           <input
@@ -570,20 +563,22 @@ function ImportPaths({
             placeholder="/path/to/protos"
             className={`${INPUT} font-mono`}
           />
-          <button
-            onClick={() => onChange(paths.filter((_, i) => i !== index))}
-            title={t("api.removeRow")}
-            className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-          >
-            <X size={13} />
-          </button>
+          <Tooltip label={t("api.removeRow")}>
+            <button
+              onClick={() => onChange(paths.filter((_, i) => i !== index))}
+              aria-label={t("api.removeRow")}
+              className={iconButtonClass({ size: "xs" })}
+            >
+              <X size={13} />
+            </button>
+          </Tooltip>
         </div>
       ))}
       <button
         onClick={() => onChange([...paths, ""])}
-        className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+        className={buttonClass({ variant: "ghost", size: "sm", className: "-ml-2" })}
       >
-        <Plus size={12} />
+        <Plus size={13} />
         {t("api.grpc.addImportPath")}
       </button>
     </div>
@@ -593,9 +588,7 @@ function ImportPaths({
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-0.5 block text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {label}
-      </span>
+      <span className={`mb-1 block ${CAPTION}`}>{label}</span>
       {children}
     </label>
   );

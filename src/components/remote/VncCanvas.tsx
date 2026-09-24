@@ -197,7 +197,7 @@ export function VncCanvas({
       <div ref={containerRef} className="h-full w-full" />
 
       {state !== "connected" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[var(--cf-bg)]/90 p-6 text-center">
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[var(--cf-surface)]/90 p-6 text-center">
           {state === "connecting" ? (
             <>
               <Loader2 size={20} className="animate-spin text-[var(--cf-text-muted)]" />

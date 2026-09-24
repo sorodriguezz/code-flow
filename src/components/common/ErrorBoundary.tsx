@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { RefreshCw, RotateCcw, TriangleAlert } from "lucide-react";
 import { translate } from "../../state/languageStore";
+import { buttonClass } from "./Button";
 
 /**
  * The last thing between a thrown render and a blank window.
@@ -63,9 +64,11 @@ export class ErrorBoundary extends Component<Props, State> {
     const detail = `${error.message || String(error)}`;
 
     return (
-      <div className="flex h-full min-h-0 w-full flex-col items-center justify-center gap-3 overflow-auto bg-[var(--cf-bg)] p-6 text-center">
+      // The sheet's own colour: a boundary almost always stands in for one view inside a sheet, and
+      // the frame's tone there read as a hole cut in the page.
+      <div className="flex h-full min-h-0 w-full flex-col items-center justify-center gap-3 overflow-auto bg-[var(--cf-surface)] p-6 text-center">
         <TriangleAlert size={22} className="shrink-0 text-[var(--cf-danger)]" />
-        <p className="text-[13px] font-medium text-[var(--cf-text)]">
+        <p className="text-[14px] font-medium text-[var(--cf-text)]">
           {this.props.label
             ? translate("error.boundaryTitleNamed", { name: this.props.label })
             : translate("error.boundaryTitle")}
@@ -78,7 +81,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
         {/* Selectable, unlike the rest of the app's chrome: this is the one string worth pasting
             into a bug report, and `user-select: none` on the body would otherwise prevent it. */}
-        <pre className="max-h-40 max-w-full select-text overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-left font-mono text-[11px] text-[var(--cf-text-muted)]">
+        <pre className="max-h-40 max-w-full select-text overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2.5 py-1.5 text-left font-mono text-[11px] text-[var(--cf-text-muted)]">
           {detail}
         </pre>
 
@@ -87,16 +90,16 @@ export class ErrorBoundary extends Component<Props, State> {
             <button
               type="button"
               onClick={() => this.setState({ error: null })}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+              className={buttonClass({ variant: "secondary" })}
             >
-              <RotateCcw size={12} />
+              <RotateCcw size={13} />
               {translate("error.boundaryRetry")}
             </button>
           )}
           <button
             type="button"
             onClick={() => window.location.reload()}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
+            className={buttonClass({ variant: "primary" })}
           >
             <RefreshCw size={12} />
             {translate("error.boundaryReload")}

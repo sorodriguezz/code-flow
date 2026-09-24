@@ -5,6 +5,8 @@ import { useT } from "../../state/languageStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { remoteDiscoverAzure } from "../../lib/tauri/remoteCommands";
 import type { DiscoveredHost } from "../../types/remote";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 /**
  * Sign in once, and the accounts are simply there.
@@ -89,7 +91,7 @@ export function AzureSignInModal({ onClose }: { onClose: () => void }) {
             type="button"
             onClick={onClose}
             aria-label={t("common.close")}
-            className="rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
           >
             <X size={14} />
           </button>
@@ -101,7 +103,7 @@ export function AzureSignInModal({ onClose }: { onClose: () => void }) {
             onChange={(e) => setTenant(e.target.value)}
             placeholder={t("remote.azTenantHint")}
             spellCheck={false}
-            className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 font-mono text-[11px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: "sm", className: "min-w-0 flex-1 font-mono" })}
           />
           <button
             type="button"
@@ -144,13 +146,13 @@ export function AzureSignInModal({ onClose }: { onClose: () => void }) {
                   className={`flex w-full items-center gap-2.5 rounded-md border px-2.5 py-1.5 text-left transition-colors ${
                     picked
                       ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]"
-                      : "border-transparent hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+                      : "border-transparent hover:bg-[var(--cf-hover)]"
                   }`}
                 >
                   <span
                     className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
                       picked
-                        ? "border-[var(--cf-accent)] bg-[var(--cf-accent)] text-white"
+                        ? "border-[var(--cf-accent)] bg-[var(--cf-accent)] text-[var(--cf-on-accent)]"
                         : "border-[var(--cf-border)]"
                     }`}
                   >
@@ -160,7 +162,7 @@ export function AzureSignInModal({ onClose }: { onClose: () => void }) {
                     <span className="block truncate text-[12px] text-[var(--cf-text)]">
                       {entry.account.name}
                     </span>
-                    <span className="block truncate text-[10px] text-[var(--cf-text-muted)]">
+                    <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">
                       {entry.account.subscription} · {entry.account.resource_group} ·{" "}
                       {entry.account.location}
                     </span>
@@ -174,13 +176,13 @@ export function AzureSignInModal({ onClose }: { onClose: () => void }) {
         <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-4 py-3">
           {/* Said out loud, because "signed in with Microsoft" usually means a key was fetched and
               stored somewhere, and here it deliberately does not. */}
-          <span className="min-w-0 flex-1 text-[10px] leading-relaxed text-[var(--cf-text-muted)]">
+          <span className="min-w-0 flex-1 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
             {t("remote.azSignInNote")}
           </span>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost" })}
           >
             {t("common.cancel")}
           </button>
@@ -188,7 +190,7 @@ export function AzureSignInModal({ onClose }: { onClose: () => void }) {
             type="button"
             onClick={() => void add()}
             disabled={chosen.length === 0 || busy}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {busy && <Loader2 size={12} className="animate-spin" />}
             {t("remote.azAddChosen", { count: chosen.length })}

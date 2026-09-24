@@ -30,6 +30,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useConversationStore } from "../../state/conversationStore";
 import { useT } from "../../state/languageStore";
+import { fieldClass } from "../common/recipes";
 
 /** How long the search box waits before asking the backend. Title matches are filtered locally and
  *  are instant; this delay only governs the round trip that looks *inside* messages. */
@@ -417,7 +418,7 @@ export function ConversationSidebar() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={t("chat.searchPlaceholder")}
-            className="w-full select-text rounded-lg border border-[var(--cf-border)] bg-transparent py-[5px] pl-7 pr-6 text-[12px] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full select-text pl-7 pr-6" })}
           />
           {query && (
             <button
@@ -597,7 +598,7 @@ export function ConversationSidebar() {
         )}
 
         {visible.length === 0 && (
-          <p className="px-2 py-4 text-center text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+          <p className="px-2 py-4 text-center text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
             {trimmed ? t("chat.searchNoMatches") : t("chat.sidebarEmpty")}
           </p>
         )}
@@ -612,7 +613,7 @@ export function ConversationSidebar() {
                 onClick={() => void open(hit.conversationId)}
                 className={`${ROW} ${ROW_IDLE} flex-col items-start gap-0.5`}
               >
-                <span className="w-full truncate text-[12.5px]">{hit.title || t("chat.untitled")}</span>
+                <span className="w-full truncate text-[13px]">{hit.title || t("chat.untitled")}</span>
                 <span className="w-full truncate text-[10.5px] text-[var(--cf-text-muted)]">{hit.snippet}</span>
               </button>
             ))}
@@ -642,7 +643,7 @@ export function ConversationSidebar() {
           of on the folder the user is aiming at — the drop target would never light up. */}
       {dragging && pointer && (
         <div
-          className="pointer-events-none fixed z-50 max-w-[200px] truncate rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface)] px-2 py-1 text-[11.5px] shadow-lg"
+          className="pointer-events-none fixed z-50 max-w-[200px] truncate rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface)] px-2 py-1 text-[12px] shadow-lg"
           style={{ left: pointer.x + 12, top: pointer.y + 12 }}
         >
           {dragging.title || t("chat.untitled")}
@@ -842,7 +843,7 @@ function FolderSection({
           }}
           title={t("chat.rowMenu")}
           aria-label={t("chat.rowMenu")}
-          className="shrink-0 rounded p-0.5 opacity-55 transition-opacity hover:bg-black/[0.06] hover:text-[var(--cf-text)] hover:opacity-100 focus-visible:opacity-100 dark:hover:bg-white/[0.08]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 opacity-55 transition-opacity hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)] hover:opacity-100 focus-visible:opacity-100"
         >
           <MoreHorizontal size={13} />
         </button>
@@ -899,7 +900,7 @@ export function splitProjects(groups: ChatGroup[]): { pinned: ChatGroup[]; loose
 
 function GroupHeading({ text }: { text: string }) {
   return (
-    <p className="px-2 pb-0.5 pt-2 text-[9.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+    <p className="px-2 pb-0.5 pt-2 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
       {text}
     </p>
   );
@@ -997,7 +998,7 @@ const ConversationRow = memo(function ConversationRow({
             reserving for something nobody was looking at. Out of the flow at rest, the title gets
             those pixels; on hover it gives them back. */}
         {when && (
-          <span className="hidden shrink-0 text-[10px] tabular-nums text-[var(--cf-text-muted)] group-hover/row:inline">
+          <span className="hidden shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)] group-hover/row:inline">
             {when}
           </span>
         )}
@@ -1026,7 +1027,7 @@ const ConversationRow = memo(function ConversationRow({
         // cannot be tabbed to — so hiding this one would take the folder menu away from the
         // keyboard entirely. It is also the affordance that says the menu exists at all, which was
         // the point of adding it, and seventeen muted pixels is a price the row can pay.
-        className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] opacity-55 transition-opacity hover:bg-black/[0.06] hover:text-[var(--cf-text)] hover:opacity-100 focus-visible:opacity-100 group-hover/row:opacity-100 dark:hover:bg-white/[0.08]"
+        className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] opacity-55 transition-opacity hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)] hover:opacity-100 focus-visible:opacity-100 group-hover/row:opacity-100"
       >
         <MoreHorizontal size={13} />
       </button>

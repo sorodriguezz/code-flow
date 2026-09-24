@@ -22,7 +22,7 @@ function QuestionRow({
 }) {
   const t = useT();
   return (
-    <div className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-2">
+    <div className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-2">
       <p className="mb-1.5 text-[12px] leading-snug text-[var(--cf-text)]">{question}</p>
       <textarea
         value={answer}
@@ -147,7 +147,7 @@ export function OpenQuestionsModal({
           <>
             {open.length > 0 && (
               <section className="space-y-2">
-                <h4 className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                <h4 className="text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
                   {t("stories.openQuestions")}
                 </h4>
                 {open.map((question) => (
@@ -163,7 +163,7 @@ export function OpenQuestionsModal({
 
             {settled.length > 0 && (
               <section className="space-y-2">
-                <h4 className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                <h4 className="text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
                   {t("stories.answerSettled")}
                 </h4>
                 <Note>{t("stories.answerSettledHint")}</Note>

@@ -14,15 +14,9 @@ import { safeFileName } from "../../lib/diagrams/exportFile";
 import { useThemeStore } from "../../state/themeStore";
 import { useToastStore } from "../../state/toastStore";
 import { CopyButton } from "./CopyButton";
-import {
-  SEG_GROUP_LABEL,
-  SEG_TRACK,
-  TOOL_BAR,
-  TOOL_BTN,
-  TOOL_BTN_PRIMARY,
-  ToolClose,
-  segItem,
-} from "./toolChrome";
+import { ActivePill } from "../common/ActivePill";
+import { segItemClass, segTrackClass } from "../common/recipes";
+import { SEG_GROUP_LABEL, TOOL_BAR, TOOL_BTN, TOOL_BTN_PRIMARY, ToolClose } from "./toolChrome";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -66,25 +60,35 @@ export function DbmlConvertPanel({
         {/* Ten targets as three named choices. Flat, they were a row of ten words you had to read
             left to right to find Prisma in; grouped, the kind you want is the first thing you pick
             and the list under it is short. The group names are the acronyms themselves — see
-            `ConversionKind`. */}
+            `ConversionKind`.
+
+            Three tracks, one choice: the thumb shares a single `layoutId` across all three, so
+            picking Prisma after PostgreSQL slides it from one track into the next. That is the one
+            place sharing an id is right rather than a bug — the three are not three controls that
+            happen to be on screen together, they are one control drawn in three labelled pieces,
+            and exactly one of them is ever lit. */}
         {CONVERSION_KINDS.map((kind) => {
           const group = CONVERSION_TARGETS.filter((candidate) => candidate.kind === kind);
           if (group.length === 0) return null;
           return (
-            <div key={kind} className="flex items-center gap-1.5">
+            <div key={kind} className="flex items-center gap-2">
               <span className={SEG_GROUP_LABEL}>{kind}</span>
-              <div className={SEG_TRACK} role="group" aria-label={kind}>
-                {group.map((candidate) => (
-                  <button
-                    key={candidate.id}
-                    type="button"
-                    onClick={() => setTarget(candidate.id)}
-                    aria-pressed={candidate.id === target}
-                    className={segItem(candidate.id === target)}
-                  >
-                    {candidate.label}
-                  </button>
-                ))}
+              <div className={segTrackClass({ className: "flex-wrap" })} role="group" aria-label={kind}>
+                {group.map((candidate) => {
+                  const active = candidate.id === target;
+                  return (
+                    <button
+                      key={candidate.id}
+                      type="button"
+                      onClick={() => setTarget(candidate.id)}
+                      aria-pressed={active}
+                      className={segItemClass(active)}
+                    >
+                      {active && <ActivePill layoutId="dbml-convert-target" variant="raised" />}
+                      <span className="relative">{candidate.label}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           );
@@ -103,7 +107,7 @@ export function DbmlConvertPanel({
             title={t("dbml.convert.save")}
             className={TOOL_BTN_PRIMARY}
           >
-            <Download size={12} />
+            <Download size={14} />
             {t("dbml.convert.saveShort")}
             <span className="font-mono opacity-70">.{entry.extension}</span>
           </button>

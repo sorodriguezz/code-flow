@@ -12,8 +12,11 @@ import {
   Table2,
   X,
 } from "lucide-react";
-import { ApiModal, GhostButton } from "../api/ApiModal";
-import { EmptyState } from "../common/EmptyState";
+import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
+import { buttonClass, iconButtonClass, Kbd } from "../common/Button";
+import { docStripClass, docTabClass } from "../common/recipes";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
 import { DbExplorer } from "./DbExplorer";
 import { SqlConsolePanel } from "./SqlConsolePanel";
 import { DataTabPanel } from "./DataTabPanel";
@@ -24,11 +27,12 @@ import { SchemaPanel } from "./SchemaPanel";
 import { ConnectionModal } from "./ConnectionModal";
 import { ObjectFilterModal } from "./TableFilterModal";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
-import { CARD, EngineBadge, nodeIcon } from "./dbChrome";
+import { CARD, EngineBadge, IdentityBadge, ToolbarButton, nodeIcon } from "./dbChrome";
 import { ensureDbStoreLoaded, pendingCount, useDbStore, type DbTab } from "../../state/dbStore";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useUiStore } from "../../state/uiStore";
 import { preventMiddleClickAutoscroll } from "../../lib/pointerDrag";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import { confirmAction } from "../../state/confirmStore";
 import { translate, useT } from "../../state/languageStore";
 import { referenceLabel } from "./ResultGrid";
@@ -192,11 +196,15 @@ function DbTabStrip() {
   // put a second label on every tab, so the size that fits is a strip-wide answer, not a per-tab one.
   const width = manyConnections ? "w-[220px]" : "w-[180px]";
 
+  // The app's document tabs: the active one takes the sheet's colour and melts into the panel under
+  // it, the rest sit on the sunken strip — the same strip the editor's files and the API client's
+  // requests are drawn on, so an open query reads as an open document.
   return (
-    <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--cf-border)] px-1.5 py-1">
+    <div className={docStripClass}>
       {tabs.map((tab) => {
         const connection = connections.find((c) => c.id === tab.connectionId);
         const engine = connection ? engineInfo(connection.kind) : null;
+        const active = tab.id === activeTabId;
         const Icon =
           tab.kind === "console"
             ? FileCode2
@@ -225,37 +233,45 @@ function DbTabStrip() {
               // Middle click closes, like every other tab strip in the app.
               if (e.button === 1) void closeTabSafely(tab);
             }}
-            className={`group flex ${width} shrink-0 cursor-default items-center gap-1.5 rounded-md px-2 py-1 text-[12px] ${
-              tab.id === activeTabId
-                ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-            }`}
+            className={docTabClass(active, `${width} cursor-default`)}
           >
             {connection && engine && <EngineBadge kind={connection.kind} label={engine.label} />}
-            <Icon size={12} className="shrink-0" />
-            <span className="min-w-0 flex-1 truncate">{tab.name}</span>
+            <Icon size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
+            {/* Italic as well as the dot: unsaved is never said by a colour alone. */}
+            <span className={`min-w-0 flex-1 truncate ${dirty ? "italic" : ""}`}>{tab.name}</span>
             {manyConnections && connection && (
-              <span className="min-w-0 max-w-[80px] shrink truncate text-[10.5px] opacity-60">
+              <span className="min-w-0 max-w-[80px] shrink truncate text-[11px] text-[var(--cf-text-faint)]">
                 {connection.name}
               </span>
             )}
-            {dirty && (
-              <span
-                title={t("db.unsaved")}
-                className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-warning)]"
-              />
-            )}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                void closeTabSafely(tab);
-              }}
-              title={t("db.closeTab")}
-              aria-label={t("db.closeTab")}
-              className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-            >
-              <X size={11} />
-            </button>
+            {/* One slot for two marks: the unsaved dot at rest, the close button on hover (and on
+                the active tab when there is nothing unsaved to show). Sharing the slot keeps every
+                tab's name the same width whatever state it is in. */}
+            <span className="relative flex h-[22px] w-[22px] shrink-0 items-center justify-center">
+              {dirty && (
+                <span
+                  title={t("db.unsaved")}
+                  aria-label={t("db.unsaved")}
+                  className="h-[7px] w-[7px] rounded-full bg-[var(--cf-accent)] group-hover/doctab:hidden"
+                />
+              )}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void closeTabSafely(tab);
+                }}
+                title={t("db.closeTab")}
+                aria-label={t("db.closeTab")}
+                className={iconButtonClass({
+                  size: "xs",
+                  className: `absolute inset-0 ${
+                    active && !dirty ? "" : "opacity-0"
+                  } group-hover/doctab:opacity-100 focus-visible:opacity-100`,
+                })}
+              >
+                <X size={13} />
+              </button>
+            </span>
           </div>
         );
       })}
@@ -267,59 +283,74 @@ function DbTabStrip() {
 // Empty state
 // ---------------------------------------------------------------------------
 
+/**
+ * No tab open: the buttons, and nothing else.
+ *
+ * It used to be the app's empty-state box — a cylinder, a heading and a sentence — above the same
+ * buttons. The sentence ("pick a table in the explorer, or open a console") only restated them, so it
+ * rides the primary button's tooltip now, where it is there for whoever wonders and costs nobody
+ * else a line.
+ */
 function DbEmptyState() {
   const t = useT();
+  const chord = useShortcutChord();
   const connections = useDbStore((s) => s.connections);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const store = useDbStore.getState();
   const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
+  const newConsoleChord = chord("db.newConsole");
+  const connectionsChord = chord("db.connections");
 
   return (
-    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3">
-      <div className="h-[150px] w-full">
-        <EmptyState
-          icon={Database}
-          title={t("db.title")}
-          subtitle={connections.length === 0 ? t("db.noConnectionsInWorkspace") : t("db.openHint")}
-        />
-      </div>
-      <div className="flex flex-wrap items-center justify-center gap-2">
-        {connections.length === 0 ? (
+    <div className="flex h-full min-h-0 flex-wrap items-center justify-center gap-2 p-6">
+      {connections.length === 0 ? (
+        <Tooltip label={t("db.newConnection")} description={t("db.noConnectionsInWorkspace")}>
           <button
             onClick={(e) => setEngineMenu(menuAnchor(e))}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
+            className={buttonClass({ variant: "primary" })}
           >
-            <Plus size={13} />
+            <Plus size={14} />
             {t("db.newConnection")}
           </button>
-        ) : (
-          <>
+        </Tooltip>
+      ) : (
+        <>
+          <Tooltip
+            label={t("db.newConsole")}
+            description={t("db.openHint")}
+            trailing={newConsoleChord ? <Kbd>{newConsoleChord}</Kbd> : undefined}
+          >
             <button
               onClick={() => store.newConsole(connections[0].id)}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
+              className={buttonClass({ variant: "primary" })}
             >
-              <FileCode2 size={13} />
+              <FileCode2 size={14} />
               {t("db.newConsole")}
             </button>
-            <button
-              onClick={(e) => setEngineMenu(menuAnchor(e))}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-            >
-              <Plus size={13} />
-              {t("db.newConnection")}
-            </button>
-            {/* The whole set, for when the connections exist and it's one of them that needs
-                changing — the same dialog the explorer's gear opens. */}
+          </Tooltip>
+          <button
+            onClick={(e) => setEngineMenu(menuAnchor(e))}
+            className={buttonClass({ variant: "secondary" })}
+          >
+            <Plus size={14} />
+            {t("db.newConnection")}
+          </button>
+          {/* The whole set, for when the connections exist and it's one of them that needs
+              changing — the same dialog the explorer's gear opens. */}
+          <Tooltip
+            label={t("db.dataSources")}
+            trailing={connectionsChord ? <Kbd>{connectionsChord}</Kbd> : undefined}
+          >
             <button
               onClick={() => openModal({ kind: "connections" })}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+              className={buttonClass({ variant: "secondary" })}
             >
-              <Settings2 size={13} />
+              <Settings2 size={14} />
               {t("db.manageConnections")}
             </button>
-          </>
-        )}
-      </div>
+          </Tooltip>
+        </>
+      )}
 
       {engineMenu && (
         <EngineMenu
@@ -340,7 +371,7 @@ function DbEmptyState() {
 /**
  * One cell's whole value.
  *
- * Exists because a 26px row cannot show a JSON document, a long text column or a stack trace — and
+ * Exists because a 28px row cannot show a JSON document, a long text column or a stack trace — and
  * truncating one in a grid is how you end up editing what you can't see. Editable when the grid is.
  */
 function CellModal({
@@ -371,26 +402,16 @@ function CellModal({
         // Only where there is a choice to make: on a value that isn't JSON the pair would be two
         // buttons that render the same text.
         formatted ? (
-          <div className="inline-flex gap-0.5 rounded-lg bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
-            {[
-              { id: false, label: t("db.formatJson") },
-              { id: true, label: t("db.rawValue") },
-            ].map((entry) => (
-              <button
-                key={String(entry.id)}
-                type="button"
-                onClick={() => setRaw(entry.id)}
-                aria-pressed={raw === entry.id}
-                className={`rounded-[6px] px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                  raw === entry.id
-                    ? "bg-[var(--cf-surface)] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
-                    : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                }`}
-              >
-                {entry.label}
-              </button>
-            ))}
-          </div>
+          <Segmented
+            size="sm"
+            layoutId="cf-db-cell-format"
+            value={raw ? "raw" : "formatted"}
+            onChange={(next) => setRaw(next === "raw")}
+            options={[
+              { value: "formatted", label: t("db.formatJson") },
+              { value: "raw", label: t("db.rawValue") },
+            ]}
+          />
         ) : undefined
       }
       footer={
@@ -407,7 +428,11 @@ function CellModal({
       {/* `ApiModal`'s body brings no padding or scroll of its own — see the note in
           `ConnectionModal`. Here the `<pre>` is the scroll container. */}
       <div className="min-h-0 flex-1 overflow-hidden p-4">
-        <pre className="h-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-2 font-mono text-[12px] text-[var(--cf-text)]">
+        <pre
+          className={`h-full overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 py-2.5 font-mono text-[12px] leading-[1.6] ${
+            isNull ? "italic text-[var(--cf-text-faint)]" : "text-[var(--cf-text)]"
+          }`}
+        >
           {shown}
         </pre>
       </div>
@@ -497,9 +522,9 @@ function RecordsModal({
         {modal.records.map((record) => (
           <div
             key={record.index}
-            className="overflow-hidden rounded-md border border-[var(--cf-border)]"
+            className="overflow-hidden rounded-lg border border-[var(--cf-border)]"
           >
-            <p className="border-b border-[var(--cf-border)] bg-black/[0.03] px-2 py-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
+            <p className="border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_70%,var(--cf-surface))] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
               {t(model.itemLabel, { n: String(record.index + 1) })}
             </p>
             <dl className="divide-y divide-[var(--cf-border)]">
@@ -510,25 +535,23 @@ function RecordsModal({
                   foreignKeys: modal.foreignKeys,
                 });
                 return (
-                  <div key={column.name} className="grid grid-cols-[minmax(0,150px)_1fr] gap-2 px-2 py-1">
+                  <div key={column.name} className="grid grid-cols-[minmax(0,160px)_1fr] gap-3 px-3 py-1.5">
                     {/* The type under the name, as in the grid's own headers. It used to live only
                         in the `title`, which meant the one view built for reading a record whole
                         was the one view that made you hover to find out what a field is. */}
                     <dt
                       title={facts.type ? `${column.name} · ${facts.type}` : column.name}
-                      className="min-w-0 text-[11.5px] text-[var(--cf-text-muted)]"
+                      className="min-w-0 text-[12px] text-[var(--cf-text-muted)]"
                     >
-                      <span className="flex min-w-0 items-baseline gap-1">
+                      <span className="flex min-w-0 items-center gap-1.5">
                         <span className="min-w-0 truncate">{column.name}</span>
                         {/* The engine's own word, not "PK" everywhere: on a document `PK` would be
                             naming a concept MongoDB does not have. */}
                         {facts.identity && model.identity && (
-                          <span
+                          <IdentityBadge
+                            badge={model.identity.badge}
                             title={t(model.identity.label)}
-                            className="shrink-0 text-[9px] font-bold leading-none text-[var(--cf-accent)]"
-                          >
-                            {model.identity.badge}
-                          </span>
+                          />
                         )}
                       </span>
                       {facts.type && (
@@ -537,7 +560,7 @@ function RecordsModal({
                           // answered for this field, and the next one may well be a string where
                           // this one was an int.
                           title={facts.typeFromRecord ? t("db.typeFromRecord") : undefined}
-                          className={`block truncate text-[9.5px] leading-tight opacity-70 ${
+                          className={`mt-0.5 block truncate font-mono text-[11px] leading-tight text-[var(--cf-text-faint)] ${
                             facts.typeFromRecord ? "italic" : ""
                           }`}
                         >
@@ -551,7 +574,7 @@ function RecordsModal({
                       {facts.reference && (
                         <span
                           title={t("db.referencesField", { target: referenceLabel(facts.reference) })}
-                          className="block truncate text-[9.5px] leading-tight text-[var(--cf-accent)] opacity-80"
+                          className="mt-0.5 block truncate text-[11px] leading-tight text-[var(--cf-accent)]"
                         >
                           → {referenceLabel(facts.reference)}
                         </span>
@@ -562,7 +585,7 @@ function RecordsModal({
                     <dd
                       className={`min-w-0 whitespace-pre-wrap break-words font-mono text-[12px] ${
                         value === null
-                          ? "italic text-[var(--cf-text-muted)]"
+                          ? "italic text-[var(--cf-text-faint)]"
                           : "text-[var(--cf-text)]"
                       }`}
                     >
@@ -610,63 +633,66 @@ function SqlLogPanel() {
 
   return (
     <div className="shrink-0 border-t border-[var(--cf-border)]">
-      <div className="flex items-center gap-2 px-2 py-1">
+      <div className="flex h-8 items-center gap-2 px-3">
         <button
           type="button"
           onClick={() => setOpen((current) => !current)}
           aria-expanded={open}
-          className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className="flex h-6 items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
         >
           <ChevronUp
-            size={12}
+            size={14}
             className={`transition-transform ${open ? "rotate-180" : ""}`}
           />
           {t("db.sqlLog")}
-          <span className="tabular-nums opacity-70">({entries.length})</span>
+          <span className="tabular-nums text-[var(--cf-text-faint)]">({entries.length})</span>
         </button>
         {open && entries.length > 0 && (
           <button
             type="button"
             onClick={clear}
-            className="ml-auto text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className={buttonClass({ variant: "ghost", size: "sm", className: "ml-auto" })}
           >
             {t("db.clear")}
           </button>
         )}
       </div>
+      {/* A well inside the sheet, like every log in the app: the statements are something to read
+          back, not a part of the page. */}
       {open && (
-        <div ref={listRef} className="max-h-48 overflow-auto border-t border-[var(--cf-border)]">
+        <div
+          ref={listRef}
+          className="max-h-48 overflow-auto border-t border-[var(--cf-border)] bg-[var(--cf-sunken)]"
+        >
           {entries.length === 0 ? (
-            <p className="p-2 text-[11px] text-[var(--cf-text-muted)]">{t("db.sqlLogEmpty")}</p>
+            <p className="px-3 py-2 text-[12px] text-[var(--cf-text-faint)]">{t("db.sqlLogEmpty")}</p>
           ) : (
             entries.map((entry) => (
               <div
                 key={entry.id}
-                className="flex items-start gap-2 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
+                className="flex items-start gap-2.5 border-b border-[var(--cf-border)] px-3 py-1 last:border-b-0"
               >
-                <span className="shrink-0 pt-[1px] text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+                <span className="shrink-0 pt-[5px] font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
                   {new Date(entry.at).toLocaleTimeString()}
                 </span>
-                <span className="shrink-0 pt-[1px] text-[9.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+                <span className="shrink-0 pt-[5px] text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                   {entry.source}
                 </span>
                 <span
-                  className={`min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[11.5px] ${
+                  className={`min-w-0 flex-1 whitespace-pre-wrap break-words pt-[3px] font-mono text-[12px] ${
                     entry.error ? "text-[var(--cf-danger)]" : "text-[var(--cf-text)]"
                   }`}
                 >
                   {entry.sql || t("db.sqlLogNoStatement")}
                   {entry.error && `\n${entry.error}`}
                 </span>
-                <button
-                  type="button"
+                <ToolbarButton
                   onClick={() => void navigator.clipboard.writeText(entry.sql)}
                   title={t("db.copy")}
-                  className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
                 >
-                  <Copy size={11} />
-                </button>
-                <span className="shrink-0 whitespace-nowrap pt-[1px] text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+                  <Copy size={13} />
+                </ToolbarButton>
+                <span className="shrink-0 whitespace-nowrap pt-[5px] text-[11px] tabular-nums text-[var(--cf-text-faint)]">
                   {[
                     entry.durationMs === null ? null : `${entry.durationMs} ms`,
                     entry.rows === null
@@ -718,23 +744,22 @@ function PreviewModal({
       footer={
         <div className="flex w-full items-center justify-end gap-2">
           <GhostButton onClick={onClose}>{t("common.cancel")}</GhostButton>
-          <button
+          <PrimaryButton
             onClick={() => {
               modal.onConfirm();
               onClose();
             }}
-            className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
           >
             {t("db.apply")}
-          </button>
+          </PrimaryButton>
         </div>
       }
     >
-      <ul className="min-h-0 flex-1 space-y-1 overflow-auto p-4">
+      <ul className="min-h-0 flex-1 space-y-1.5 overflow-auto p-4">
         {modal.statements.map((statement, index) => (
           <li
             key={index}
-            className="rounded-md border border-[var(--cf-border)] px-2 py-1.5 font-mono text-[12px] text-[var(--cf-text)]"
+            className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2.5 py-1.5 font-mono text-[12px] text-[var(--cf-text)]"
           >
             {statement}
           </li>

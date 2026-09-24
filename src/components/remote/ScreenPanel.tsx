@@ -6,6 +6,7 @@ import { useRemoteStore, type RemoteScreenTab } from "../../state/remoteStore";
 import { remoteGetPassword } from "../../lib/tauri/remoteCommands";
 import { useT } from "../../state/languageStore";
 import { parseHostSpec } from "../../types/remote";
+import { buttonClass } from "../common/Button";
 
 /**
  * A launched screen.
@@ -109,7 +110,7 @@ export function ScreenPanel({ tab }: { tab: RemoteScreenTab }) {
             onClick={() => void openScreen(tab.hostId)}
             title={t("remote.screenReopen")}
             aria-label={t("remote.screenReopen")}
-            className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
           >
             <RefreshCw size={12} />
           </button>
@@ -167,7 +168,7 @@ export function ScreenPanel({ tab }: { tab: RemoteScreenTab }) {
         <button
           type="button"
           onClick={() => void openScreen(tab.hostId)}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
+          className={buttonClass({ variant: "primary" })}
         >
           <ExternalLink size={13} />
           {t("remote.screenReopen")}

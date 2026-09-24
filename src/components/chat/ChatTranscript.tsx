@@ -203,7 +203,7 @@ export function ChatTranscript({
                 <Sparkles size={20} />
               </div>
               <p className="text-[14px] font-semibold">{t("chat.emptyTurnTitle")}</p>
-              <p className="max-w-[360px] text-[12.5px] leading-relaxed text-[var(--cf-text-muted)]">
+              <p className="max-w-[360px] text-[13px] leading-relaxed text-[var(--cf-text-muted)]">
                 {t("chat.emptyTurnSubtitle")}
               </p>
             </div>
@@ -310,7 +310,7 @@ export function ChatTranscript({
         <button
           type="button"
           onClick={() => jump()}
-          className="cf-fade-in absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-1.5 text-[11.5px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
+          className="cf-fade-in absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-1.5 text-[12px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
         >
           <ArrowDown size={12} />
           {t("chat.jumpToLatest")}
@@ -422,7 +422,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
       {day && (
         <div className="flex items-center gap-2 pt-1">
           <div className="h-px flex-1 bg-[var(--cf-border)]" />
-          <span className="text-[10px] text-[var(--cf-text-muted)]">{day}</span>
+          <span className="text-[10.5px] text-[var(--cf-text-muted)]">{day}</span>
           <div className="h-px flex-1 bg-[var(--cf-border)]" />
         </div>
       )}

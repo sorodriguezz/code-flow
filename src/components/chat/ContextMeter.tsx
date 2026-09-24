@@ -130,7 +130,7 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
         onClick={() => setOpen((v) => !v)}
         title={t("chat.contextTitle")}
         aria-expanded={open}
-        className={`flex h-7 items-center gap-1 rounded-md px-1.5 text-[10.5px] tabular-nums transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.07] ${
+        className={`flex h-[26px] items-center gap-1 rounded-md px-2 text-[11px] tabular-nums transition-colors hover:bg-[var(--cf-hover)] ${
           open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
         }`}
       >
@@ -167,7 +167,7 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
           </p>
 
           {fraction !== null && (
-            <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-black/[0.07] dark:bg-white/[0.09]">
+            <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
               <div
                 className="h-full rounded-full transition-[width]"
                 style={{ width: `${Math.max(2, fraction * 100)}%`, background: tone }}
@@ -226,7 +226,7 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
                 // `whitespace-pre-wrap` and a scroll box: this is prose the model wrote, it can run
                 // to several paragraphs, and it must be readable in full rather than elided — the
                 // whole reason it is here is so the user can check what was kept.
-                <p className="mt-1.5 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg bg-black/[0.04] p-2 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)] dark:bg-white/[0.05]">
+                <p className="mt-1.5 max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg bg-[var(--cf-hover)] p-2 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
                   {reading.summary}
                 </p>
               )}
@@ -237,7 +237,7 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
             type="button"
             onClick={() => reading.onCompact()}
             disabled={reading.compacting}
-            className="flex w-full items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[11.5px] transition-colors hover:border-[var(--cf-accent)] disabled:opacity-50"
+            className="flex w-full items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[12px] transition-colors hover:border-[var(--cf-accent)] disabled:opacity-50"
           >
             {reading.compacting ? (
               <Loader2 size={12} className="shrink-0 animate-spin" />

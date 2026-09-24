@@ -55,16 +55,16 @@ function ToastItem({ toast }: { toast: ToastData }) {
     <div
       onMouseEnter={pause}
       onMouseLeave={resume}
-      className="cf-fade-in flex w-96 max-w-[calc(100vw-1.5rem)] items-start gap-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-shadow)]"
-      style={{ borderLeftColor: color, borderLeftWidth: 3 }}
+      className="cf-fade-in flex w-[440px] max-w-[calc(100vw-1.5rem)] items-start gap-2.5 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-2.5 pl-3 pr-2.5 shadow-[var(--cf-shadow)]"
     >
-      <Icon size={15} className="mt-0.5 shrink-0" style={{ color }} />
+      <Icon size={16} className="mt-px shrink-0" style={{ color }} />
       <p className="min-w-0 flex-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words text-[13px] leading-snug text-[var(--cf-text)]">
         {toast.message}
       </p>
       <button
         onClick={() => dismiss(toast.id)}
-        className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        aria-label="×"
+        className="-my-0.5 flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         <X size={13} />
       </button>
@@ -77,7 +77,7 @@ export function ToastContainer() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="pointer-events-none fixed right-3 top-14 z-50 flex flex-col gap-2">
+    <div className="pointer-events-none fixed bottom-10 left-1/2 z-50 flex -translate-x-1/2 flex-col-reverse items-center gap-2">
       {toasts.map((toast) => (
         <div key={toast.id} className="pointer-events-auto">
           <ToastItem toast={toast} />

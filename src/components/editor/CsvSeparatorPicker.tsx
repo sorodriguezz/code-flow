@@ -77,7 +77,7 @@ export function CsvSeparatorPicker({
         className={`flex h-5 min-w-5 items-center justify-center rounded-md px-1 font-mono text-[11px] leading-none ${
           at || override
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-            : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         }`}
       >
         {current.glyph}

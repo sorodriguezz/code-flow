@@ -5,6 +5,7 @@ import { ReviewContextEditor } from "./ReviewContextEditor";
 import { ReviewMemoriesSettings } from "./ReviewMemoriesSettings";
 import { ReviewEngineSettings } from "./ReviewEngineSettings";
 import { ActiveUnderline } from "../common/ActivePill";
+import { underlineStripClass, underlineTabClass } from "../common/recipes";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -43,19 +44,23 @@ export function ReviewSettings() {
         hint={t("settings.reviewHint")}
       />
 
-      <div className="mb-4 flex flex-wrap gap-1 border-b border-[var(--cf-border)]">
+      {/* The shared underline strip, less its own inset: the pane already pads the column, and the
+          first tab should start under the heading rather than a step to the right of it. */}
+      <div role="tablist" className={`${underlineStripClass} mb-4 pl-0 pr-0`}>
         {TABS.map(({ id, labelKey, icon: Icon }) => (
           <button
             key={id}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
             onClick={() => setTab(id)}
-            // No weight change on select, for the same reason as the settings nav: bolding
-            // re-measures the label and shoves every tab to its right along by a few pixels.
-            className={`relative -mb-px flex items-center gap-1.5 px-2.5 pb-2.5 pt-1.5 text-[12.5px] ${
-              tab === id ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            }`}
+            // No weight change on select (the recipe keeps every tab at one weight), for the same
+            // reason as the settings nav: bolding re-measures the label and shoves every tab to its
+            // right along by a few pixels.
+            className={underlineTabClass(tab === id)}
           >
             {tab === id && <ActiveUnderline layoutId="cf-review-tab-underline" />}
-            <Icon size={13} />
+            <Icon size={14} />
             {t(labelKey)}
           </button>
         ))}

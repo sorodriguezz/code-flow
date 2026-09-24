@@ -49,7 +49,7 @@ export function VaultGenerator({
       </div>
 
       <div className="mb-2 flex items-center gap-1">
-        <code className="min-w-0 flex-1 truncate rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-2 py-1.5 font-mono text-[12.5px] text-[var(--cf-text)]">
+        <code className="min-w-0 flex-1 truncate rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 py-1.5 font-mono text-[13px] text-[var(--cf-text)]">
           {password}
         </code>
         <button
@@ -63,7 +63,7 @@ export function VaultGenerator({
         </button>
       </div>
 
-      <label className="mb-2 flex items-center gap-2 text-[11.5px] text-[var(--cf-text-muted)]">
+      <label className="mb-2 flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
         <span className="w-16 shrink-0">{t("vault.length")}</span>
         <input
           type="range"
@@ -87,7 +87,7 @@ export function VaultGenerator({
             ["ambiguous", "vault.useAmbiguous"],
           ] as const
         ).map(([key, label]) => (
-          <label key={key} className="flex items-center gap-1.5 text-[11.5px] text-[var(--cf-text)]">
+          <label key={key} className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
             <input
               type="checkbox"
               checked={recipe[key] as boolean}

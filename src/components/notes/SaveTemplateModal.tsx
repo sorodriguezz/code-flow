@@ -3,6 +3,7 @@ import { LayoutTemplate, X } from "lucide-react";
 import { TEMPLATE_ICON_NAMES, iconOf } from "../../lib/notes/templateIcons";
 import { useNotesStore } from "../../state/notesStore";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /**
  * Turns the open note into a reusable template.
@@ -143,7 +144,7 @@ export function SaveTemplateModal({ onClose }: { onClose: () => void }) {
           <button
             type="submit"
             disabled={!ready}
-            className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {t("notes.save")}
           </button>

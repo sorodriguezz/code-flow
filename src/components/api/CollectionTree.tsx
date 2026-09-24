@@ -35,6 +35,8 @@ import {
   Users,
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
+import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass } from "../common/Button";
 import { badgeColor, badgeShort, statusColor } from "./methodStyle";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { canDrop, useApiDragStore, type ApiDrag, type ApiDropZone } from "../../state/apiDragStore";
@@ -64,14 +66,31 @@ const ROW_PAD = 6;
  * icon on a container. Sharing one width is what puts every name on the same left edge, so a
  * request reads as the sibling of the folder above it rather than as something inside it.
  *
- * Wide enough for `PATCH` — five characters, and the longest label this column draws now that
- * `DELETE` and `OPTIONS` are abbreviated for it (see `badgeShort`). It was 40px when they were
- * spelled out, and that width is paid by every row: the container rows reserve the same column to
- * keep their names on the tree's one left edge, so a word appearing twice in thirty rows was setting
- * how far every folder icon floats from its own name. A method is free text, so something longer
- * still truncates — by then it is a name, not a verb. */
+ * Wide enough for `PATCH` — five characters of 10.5px bold JetBrains Mono, 31½px of glyphs less
+ * the tight tracking, and the longest label this column draws now that `DELETE` and `OPTIONS` are
+ * abbreviated for it (see `badgeShort`). It was 40px when they were spelled out, and that width is
+ * paid by every row: the container rows reserve the same column to keep their names on the tree's
+ * one left edge, so a word appearing twice in thirty rows was setting how far every folder icon
+ * floats from its own name. A method is free text, so something longer still truncates — by then it
+ * is a name, not a verb. */
 const TWISTY_W = 12;
-const GLYPH_W = 30;
+const GLYPH_W = 32;
+
+/** One row of the tree: 28px, the explorer row height every sub-app's tree shares. */
+const ROW = "group relative flex h-7 cursor-pointer items-center gap-1.5 rounded-md pr-1 text-[13px]";
+
+/**
+ * The row's hover-revealed controls: 22px targets (they were 16px), out of the layout until the row
+ * is hovered or has focus inside it — so a collection's name gets the room they would otherwise
+ * hold empty, and Tab still reaches them from the focused row. Written out rather than taken from
+ * `iconButtonClass`, whose own `inline-flex` would fight the `hidden` this starts from.
+ */
+const ROW_ACTION =
+  "hidden h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] group-hover:inline-flex group-focus-within:inline-flex";
+
+/** The inline rename / new-item field, sized to sit inside a 28px row. */
+const ROW_INPUT =
+  "h-6 min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1.5 text-[13px] text-[var(--cf-text)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] outline-none";
 
 /** How much of a folder row's height, top and bottom, aims *between* rows rather than into it.
  * Small enough that the middle — "into this folder" — is what you hit without trying. */
@@ -119,7 +138,7 @@ export function MethodBadge({ protocol, method }: { protocol: ApiProtocol; metho
   return (
     <span
       style={{ color: badgeColor(protocol, method), width: GLYPH_W }}
-      className="shrink-0 truncate font-mono text-[9px] font-bold uppercase leading-none tracking-tight"
+      className="shrink-0 truncate font-mono text-[10.5px] font-bold uppercase leading-none tracking-tight"
     >
       {badgeShort(protocol, method)}
     </span>
@@ -253,6 +272,9 @@ interface TreeRowProps {
   dragging: boolean;
   /** The pointer is aiming *into* this container, as opposed to at a gap beside it. */
   dropInto: boolean;
+  /** The row behind the tab on screen: the request being edited, or the container whose settings
+   *  are open. */
+  selected?: boolean;
   onActivate: (node: NodeRef) => void;
   onMenu: (node: NodeRef, x: number, y: number) => void;
   /** Containers only: the inline "+" that starts a new request without opening the menu. */
@@ -289,6 +311,7 @@ function TreeRowBase({
   renaming,
   dragging,
   dropInto,
+  selected = false,
   onActivate,
   onMenu,
   onQuickAdd,
@@ -338,12 +361,17 @@ function TreeRowBase({
         e.preventDefault();
         onMenu(node, e.clientX, e.clientY);
       }}
+      aria-selected={selected}
       style={{ paddingLeft: depth * INDENT + ROW_PAD, ...riseDelay(at) }}
-      className={`cf-rise group relative flex cursor-pointer items-center gap-1.5 rounded-md py-0.5 pr-1 text-[13px] ${
-        // Nothing but the drop target lights up while a drag is in flight.
-        isHovered && !anyDrag ? "cf-row-hover" : ""
-      } ${
-        dropInto ? "bg-[var(--cf-accent-soft)] ring-1 ring-inset ring-[var(--cf-accent)]" : ""
+      className={`cf-rise ${ROW} ${
+        dropInto
+          ? "bg-[var(--cf-accent-soft)] ring-1 ring-inset ring-[var(--cf-accent)]"
+          : selected
+            ? "bg-[var(--cf-accent-soft)]"
+            : // Nothing but the drop target lights up while a drag is in flight.
+              isHovered && !anyDrag
+              ? "cf-row-hover"
+              : ""
       } ${dragging ? "opacity-40" : ""}`}
     >
       <IndentGuides depth={depth} />
@@ -367,7 +395,7 @@ function TreeRowBase({
               onToggle(node);
             }}
             style={{ width: TWISTY_W }}
-            className={`flex shrink-0 justify-center text-[var(--cf-text-muted)] ${
+            className={`flex shrink-0 justify-center text-[var(--cf-text-faint)] ${
               onToggle ? "hover:text-[var(--cf-text)]" : ""
             }`}
           >
@@ -375,11 +403,11 @@ function TreeRowBase({
           </span>
           <GlyphSlot>
             {node.kind === "collection" ? (
-              <Boxes size={13} className="text-[var(--cf-accent)]" />
+              <Boxes size={14} className="text-[var(--cf-accent)]" />
             ) : expanded ? (
-              <FolderOpen size={13} className="text-[var(--cf-text-muted)]" />
+              <FolderOpen size={14} className="text-[var(--cf-text-muted)]" />
             ) : (
-              <Folder size={13} className="text-[var(--cf-text-muted)]" />
+              <Folder size={14} className="text-[var(--cf-text-muted)]" />
             )}
           </GlyphSlot>
         </>
@@ -397,7 +425,7 @@ function TreeRowBase({
                 onToggle(node);
               }}
               style={{ width: TWISTY_W }}
-              className="flex shrink-0 items-center justify-center text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              className="flex h-full shrink-0 items-center justify-center text-[var(--cf-text-faint)] hover:text-[var(--cf-text)]"
             >
               {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
             </button>
@@ -427,12 +455,16 @@ function TreeRowBase({
             }
           }}
           onBlur={onCancelRename}
-          className="min-w-0 flex-1 rounded-sm border border-[var(--cf-accent)] bg-[var(--cf-bg)] px-1 py-0 text-[13px] text-[var(--cf-text)] outline-none"
+          className={ROW_INPUT}
         />
       ) : (
         <span
           className={`min-w-0 flex-1 truncate ${
-            node.kind === "request" ? "text-[var(--cf-text)]" : "font-medium text-[var(--cf-text)]"
+            node.kind === "collection"
+              ? "font-semibold text-[var(--cf-text)]"
+              : node.kind === "folder"
+                ? "font-medium text-[var(--cf-text)]"
+                : "text-[var(--cf-text)]"
           }`}
         >
           {node.name || t("api.untitledRequest")}
@@ -454,86 +486,92 @@ function TreeRowBase({
                     ? t("api.collab.syncing")
                     : t("api.collab.rowShared")
           }
-          className={`flex h-4 w-4 shrink-0 items-center justify-center ${
+          className={`flex h-5 w-5 shrink-0 items-center justify-center ${
             share === "conflict" || share === "error" || share === "paused"
               ? "text-[var(--cf-warning)]"
               : share === "syncing"
                 ? "animate-pulse text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)]"
+                : "text-[var(--cf-text-faint)]"
           }`}
         >
-          {share === "conflict" ? <ShieldAlert size={12} /> : share === "paused" ? <PauseCircle size={12} /> : <Users size={12} />}
+          {share === "conflict" ? <ShieldAlert size={13} /> : share === "paused" ? <PauseCircle size={13} /> : <Users size={13} />}
         </span>
       )}
       {conflicted && (
         <span
           title={t("api.collab.rowConflict")}
-          className="flex h-4 w-4 shrink-0 items-center justify-center text-[var(--cf-warning)]"
+          className="flex h-5 w-5 shrink-0 items-center justify-center text-[var(--cf-warning)]"
         >
-          <ShieldAlert size={12} />
+          <ShieldAlert size={13} />
         </span>
       )}
       {global && (
         <span
           title={t("scope.globalBadge")}
-          className="flex h-4 w-4 shrink-0 items-center justify-center text-[var(--cf-text-muted)]"
+          className="flex h-5 w-5 shrink-0 items-center justify-center text-[var(--cf-text-faint)]"
         >
-          <Globe size={12} />
+          <Globe size={13} />
         </span>
       )}
 
       {/* The one control here that stays lit when it's off-hover: a pin is state, not an action,
           and it's the reason the row is where it is in the list. */}
       {onTogglePin && (
-        <button
-          title={pinned ? t("api.unpinCollection") : t("api.pinCollection")}
-          aria-label={pinned ? t("api.unpinCollection") : t("api.pinCollection")}
-          aria-pressed={pinned}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            onTogglePin(node);
-          }}
-          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded ${
-            pinned
-              ? "text-[var(--cf-accent)]"
-              : "text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] group-hover:opacity-100"
-          }`}
-        >
-          <Star size={12} fill={pinned ? "currentColor" : "none"} />
-        </button>
+        <Tooltip label={pinned ? t("api.unpinCollection") : t("api.pinCollection")}>
+          <button
+            type="button"
+            aria-label={pinned ? t("api.unpinCollection") : t("api.pinCollection")}
+            aria-pressed={pinned}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onTogglePin(node);
+            }}
+            className={pinned ? iconButtonClass({ size: "xs" }) : ROW_ACTION}
+          >
+            <Star
+              size={13}
+              fill={pinned ? "currentColor" : "none"}
+              className={pinned ? "text-[var(--cf-accent)]" : undefined}
+            />
+          </button>
+        </Tooltip>
       )}
 
       {/* Creating a request is the overwhelmingly common thing to do to a collection, and it was
           two clicks behind the menu. Sits left of the overflow, revealed on hover like it. */}
       {onQuickAdd && (
+        <Tooltip label={t("api.newRequest")}>
+          <button
+            type="button"
+            aria-label={t("api.newRequest")}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onQuickAdd(node);
+            }}
+            className={ROW_ACTION}
+          >
+            <Plus size={14} />
+          </button>
+        </Tooltip>
+      )}
+
+      <Tooltip label={t("api.moreActions")}>
         <button
-          title={t("api.newRequest")}
-          aria-label={t("api.newRequest")}
+          type="button"
+          aria-label={t("api.moreActions")}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
-            onQuickAdd(node);
+            const rect = e.currentTarget.getBoundingClientRect();
+            onMenu(node, rect.left, rect.bottom + 2);
           }}
-          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] group-hover:opacity-100"
+          className={ROW_ACTION}
         >
-          <Plus size={13} />
+          <MoreHorizontal size={14} />
         </button>
-      )}
-
-      <button
-        title={t("api.moreActions")}
-        aria-label={t("api.moreActions")}
-        onPointerDown={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.stopPropagation();
-          const rect = e.currentTarget.getBoundingClientRect();
-          onMenu(node, rect.left, rect.bottom + 2);
-        }}
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] group-hover:opacity-100"
-      >
-        <MoreHorizontal size={13} />
-      </button>
+      </Tooltip>
     </div>
   );
 }
@@ -592,18 +630,19 @@ function ExampleRow({
         e.preventDefault();
         onMenu(e.clientX, e.clientY);
       }}
+      aria-selected={active}
       style={{ paddingLeft: depth * INDENT + ROW_PAD }}
-      className={`group relative flex cursor-pointer items-center gap-1.5 rounded-md py-0.5 pr-1 text-[13px] ${
+      className={`${ROW} ${
         active ? "bg-[var(--cf-accent-soft)]" : isHovered && !anyDrag ? "cf-row-hover" : ""
       }`}
     >
       <IndentGuides depth={depth} />
       <span style={{ width: TWISTY_W }} className="flex shrink-0 justify-center">
-        <Bookmark size={11} className="text-[var(--cf-text-muted)]" />
+        <Bookmark size={12} className="text-[var(--cf-text-faint)]" />
       </span>
       <span
         style={{ color: statusColor(example.status), width: GLYPH_W }}
-        className="shrink-0 truncate font-mono text-[9px] font-bold leading-none tracking-tight"
+        className="shrink-0 truncate font-mono text-[10.5px] font-bold leading-none tracking-tight"
       >
         {example.status}
       </span>
@@ -625,31 +664,33 @@ function ExampleRow({
             }
           }}
           onBlur={onCancelRename}
-          className="min-w-0 flex-1 rounded-sm border border-[var(--cf-accent)] bg-[var(--cf-bg)] px-1 py-0 text-[13px] text-[var(--cf-text)] outline-none"
+          className={ROW_INPUT}
         />
       ) : (
         <span
           className={`min-w-0 flex-1 truncate ${
-            active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+            active ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
           }`}
         >
           {example.name || t("api.example.untitled")}
         </span>
       )}
 
-      <button
-        title={t("api.moreActions")}
-        aria-label={t("api.moreActions")}
-        onPointerDown={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.stopPropagation();
-          const rect = e.currentTarget.getBoundingClientRect();
-          onMenu(rect.left, rect.bottom + 2);
-        }}
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] group-hover:opacity-100"
-      >
-        <MoreHorizontal size={13} />
-      </button>
+      <Tooltip label={t("api.moreActions")}>
+        <button
+          type="button"
+          aria-label={t("api.moreActions")}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            const rect = e.currentTarget.getBoundingClientRect();
+            onMenu(rect.left, rect.bottom + 2);
+          }}
+          className={ROW_ACTION}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </Tooltip>
     </div>
   );
 }
@@ -669,15 +710,15 @@ function DraftRow({
   return (
     <div
       style={{ paddingLeft: depth * INDENT + ROW_PAD }}
-      className="relative flex items-center gap-1.5 py-0.5 pr-2 text-[13px]"
+      className="relative flex h-7 items-center gap-1.5 pr-2 text-[13px]"
     >
       <IndentGuides depth={depth} />
       <span style={{ width: TWISTY_W }} className="shrink-0" />
       <GlyphSlot>
         {kind === "folder" ? (
-          <Folder size={13} className="text-[var(--cf-text-muted)]" />
+          <Folder size={14} className="text-[var(--cf-text-muted)]" />
         ) : (
-          <FilePlus size={13} className="text-[var(--cf-text-muted)]" />
+          <FilePlus size={14} className="text-[var(--cf-text-muted)]" />
         )}
       </GlyphSlot>
       <input
@@ -695,7 +736,7 @@ function DraftRow({
         // Clicking away abandons the entry rather than committing it — a half-typed name losing
         // focus shouldn't leave a stray request behind.
         onBlur={onCancel}
-        className="min-w-0 flex-1 rounded-sm border border-[var(--cf-accent)] bg-[var(--cf-bg)] px-1 py-0 text-[13px] text-[var(--cf-text)] outline-none"
+        className={ROW_INPUT}
       />
     </div>
   );
@@ -716,6 +757,15 @@ export function CollectionTree() {
   const activeExampleId = useApiRuntimeStore((s) =>
     activeTabId ? (s.exampleViews[activeTabId]?.exampleId ?? null) : null,
   );
+  // And which row that tab edits — the request, or the collection or folder whose settings are
+  // open — so the tree marks where you are the way every other explorer does. Keyed by kind like
+  // `nodeRefs`, and a string, so the selector only re-renders the tree when the answer changes.
+  const selectedKey = useApiStore((s) => {
+    const request = s.openTabs.find((tab) => tab.id === s.activeTabId);
+    if (request) return request.requestId === null ? null : `request:${request.requestId}`;
+    const entity = s.entityTabs.find((tab) => tab.id === s.activeTabId);
+    return entity ? `${entity.kind}:${entity.entityId}` : null;
+  });
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [renaming, setRenaming] = useState<NodeRef | null>(null);
@@ -1343,8 +1393,8 @@ export function CollectionTree() {
     if (parentId === null && folderRows.length === 0 && requestRows.length === 0 && !draftHere && !drag) {
       return (
         <p
-          style={{ paddingLeft: depth * INDENT + ROW_PAD }}
-          className="py-0.5 text-[11px] text-[var(--cf-text-muted)]"
+          style={{ paddingLeft: depth * INDENT + ROW_PAD + TWISTY_W + 6 }}
+          className="py-1 text-[12px] text-[var(--cf-text-faint)]"
         >
           {t("api.noRequests")}
         </p>
@@ -1398,6 +1448,8 @@ export function CollectionTree() {
         renaming={renaming?.id === request.id}
         dragging={drag?.id === request.id}
         dropInto={false}
+        // An example on screen is marked on its own row instead.
+        selected={selectedKey === `request:${request.id}` && activeExampleId === null}
         onActivate={handleActivate}
         onMenu={handleMenu}
         onBeginDrag={beginDrag}
@@ -1442,6 +1494,7 @@ export function CollectionTree() {
           renaming={renaming?.id === folder.id}
           dragging={drag?.id === folder.id}
           dropInto={over?.mode === "into" && over.parentId === folder.id}
+          selected={selectedKey === `folder:${folder.id}`}
           onActivate={handleActivate}
           onMenu={handleMenu}
           onQuickAdd={handleQuickAdd}
@@ -1457,7 +1510,7 @@ export function CollectionTree() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div role="tree" className="min-h-0 flex-1 overflow-auto py-1">
+      <div role="tree" className="min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-0.5">
         {ordered.length === 0 ? (
           <EmptyState icon={Boxes} title={t("api.noCollections")} />
         ) : (
@@ -1479,6 +1532,7 @@ export function CollectionTree() {
                   renaming={renaming?.id === collection.id}
                   dragging={false}
                   dropInto={over?.mode === "into" && over.parentId === null && over.collectionId === collection.id}
+                  selected={selectedKey === `collection:${collection.id}`}
                   onActivate={handleActivate}
                   onMenu={handleMenu}
                   onQuickAdd={handleQuickAdd}
@@ -1524,7 +1578,7 @@ export function CollectionTree() {
           <div
             ref={ghostRef}
             style={{ transform: `translate(${origin.x + 12}px, ${origin.y + 12}px)` }}
-            className="pointer-events-none fixed left-0 top-0 z-[100] rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface)] px-2 py-1 text-[11px] text-[var(--cf-text)] shadow-lg"
+            className="pointer-events-none fixed left-0 top-0 z-[100] rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-2 py-1 text-[12px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
           >
             {drag.name || t("api.untitledRequest")}
           </div>,

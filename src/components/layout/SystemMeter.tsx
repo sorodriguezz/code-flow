@@ -14,8 +14,8 @@ const OPEN_DELAY = 140;
  *  read by colour without having to know which widget it came from. */
 const TINT: Record<ReturnType<typeof loadSeverity>, string | undefined> = {
   normal: undefined,
-  high: "text-[#f59e0b]",
-  critical: "text-[#ef4444]",
+  high: "text-[var(--cf-warning)]",
+  critical: "text-[var(--cf-danger)]",
 };
 
 /**
@@ -185,14 +185,22 @@ function Pill({
       // looks pressable and isn't is worse than a label — so this reads as a label, and the hover
       // that opens the panel belongs to the group.
       aria-label={`${label} ${Math.round(percent)}%`}
-      className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1 text-[11px] tabular-nums ${
+      className={`flex h-[22px] shrink-0 items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums ${
         tint ?? "text-[var(--cf-text-muted)]"
       }`}
     >
-      <Icon size={12} className="shrink-0" />
+      <Icon size={14} className="shrink-0" />
+      {/* The load as a length as well as a number: read at a glance, and it keeps its place when the
+          digits change. `scaleX`, not `width` — it moves every couple of seconds. */}
+      <span aria-hidden className="h-1 w-[18px] shrink-0 overflow-hidden rounded-full bg-[var(--cf-press)]">
+        <span
+          className="block h-full origin-left rounded-full bg-current opacity-70 transition-transform duration-300"
+          style={{ transform: `scaleX(${Math.min(1, Math.max(0, percent / 100))})` }}
+        />
+      </span>
       {/* Fixed width, right-aligned: these change every couple of seconds, and three digits
           appearing under two would shuffle the three pills and the battery beside them. */}
-      <span className="w-[27px] text-right">{Math.round(percent)}%</span>
+      <span className="w-[30px] text-right">{Math.round(percent)}%</span>
     </span>
   );
 }
@@ -209,18 +217,20 @@ function Row({ label, percent, detail }: { label: string; percent: number; detai
   return (
     <div className="flex items-center gap-2 text-[11px]">
       <span className="w-[52px] shrink-0 text-[var(--cf-text-muted)]">{label}</span>
-      <span className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-black/[0.08] dark:bg-white/[0.1]">
+      <span className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-[var(--cf-press)]">
         {/* A floor of 2%, so a machine at 0.4% still draws something. A bar that is empty at a
             non-zero reading looks like a bar that failed to load. */}
+        {/* Scaled, not sized: a transform moves on the compositor, a width re-lays the row out on
+            every frame of the transition — and this one runs each time the machine is sampled. */}
         <span
-          className={`block h-full rounded-full transition-[width] duration-300 ${
+          className={`block h-full origin-left rounded-full transition-transform duration-300 ${
             severity === "critical"
-              ? "bg-[#ef4444]"
+              ? "bg-[var(--cf-danger)]"
               : severity === "high"
-                ? "bg-[#f59e0b]"
+                ? "bg-[var(--cf-warning)]"
                 : "bg-[var(--cf-accent)]"
           }`}
-          style={{ width: `${Math.max(2, Math.min(100, percent))}%` }}
+          style={{ transform: `scaleX(${Math.max(2, Math.min(100, percent)) / 100})` }}
         />
       </span>
       {detail && <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{detail}</span>}

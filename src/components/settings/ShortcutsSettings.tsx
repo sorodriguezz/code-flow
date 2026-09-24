@@ -4,6 +4,8 @@ import { useT } from "../../state/languageStore";
 import { useShortcutsStore, activeChords, bindingFor } from "../../state/shortcutsStore";
 import { SHORTCUT_COMMANDS, type ShortcutId } from "../../lib/shortcuts";
 import { chordKeycaps, eventToChord, isBindable } from "../../lib/keys";
+import { Kbd, buttonClass, iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
 import { RailSection } from "./settingsNav";
 
 /**
@@ -81,61 +83,64 @@ export function ShortcutsSettings() {
     const duplicate = chord ? assigned.get(chord) !== id : false;
 
     return (
-      <div key={id} className="flex items-center gap-3 border-b border-[var(--cf-border)]/60 py-1.5 last:border-0">
+      <div key={id} className="flex min-h-[42px] items-center gap-3 border-b border-[var(--cf-border)] py-1.5 last:border-0">
         <div className="min-w-0 flex-1">
           {/* Wraps: the name of a shortcut is the only thing telling you which row you are rebinding. */}
-              <p className="break-words text-[13px] leading-snug text-[var(--cf-text)]">{t(command.labelKey)}</p>
+          <p className="break-words text-[13px] leading-snug text-[var(--cf-text)]">{t(command.labelKey)}</p>
           {/* One warning now, because there is one kind of collision. The editor's chords used to
               be a separate list that could only be warned about; they are ordinary commands in the
               same table, so the duplicate check that always covered app actions covers them too. */}
           {duplicate && !recording && (
             <p className="mt-0.5 flex items-center gap-1 text-[11px] text-[var(--cf-warning)]">
-              <AlertTriangle size={11} />
+              <AlertTriangle size={12} className="shrink-0" />
               {t("shortcuts.conflict")}
             </p>
           )}
         </div>
 
+        {/* The chord well: the keys as key caps in an outlined field, lit in the accent while it is
+            listening for the next press. */}
         <button
+          type="button"
           onClick={() => setRecording(recording ? null : id)}
-          className={`flex h-7 min-w-[120px] items-center justify-center gap-1 rounded-md border px-2 ${
+          aria-pressed={recording}
+          className={`flex h-7 min-w-[120px] items-center justify-center gap-1 rounded-md px-2 transition-colors duration-100 ${
             recording
-              ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-              : "border-[var(--cf-border)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent)]"
+              : "bg-[var(--cf-surface)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] hover:bg-[var(--cf-hover)]"
           }`}
         >
           {recording ? (
             <span className="text-[11px] font-medium">{t("shortcuts.recording")}</span>
           ) : chord ? (
-            chordKeycaps(chord).map((key, i) => (
-              <kbd
-                key={`${key}-${i}`}
-                className="rounded border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-1.5 py-0.5 font-sans text-[10px] text-[var(--cf-text)]"
-              >
-                {key}
-              </kbd>
-            ))
+            chordKeycaps(chord).map((key, i) => <Kbd key={`${key}-${i}`}>{key}</Kbd>)
           ) : (
-            <span className="text-[11px] italic text-[var(--cf-text-muted)]">{t("shortcuts.unbound")}</span>
+            <span className="text-[11px] italic text-[var(--cf-text-faint)]">{t("shortcuts.unbound")}</span>
           )}
         </button>
 
-        <button
-          onClick={() => void setBinding(id, null)}
-          disabled={!chord}
-          title={t("shortcuts.clear")}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-white/[0.08]"
-        >
-          <X size={13} />
-        </button>
-        <button
-          onClick={() => void resetBinding(id)}
-          disabled={!customized}
-          title={t("shortcuts.resetOne")}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-white/[0.08]"
-        >
-          <RotateCcw size={13} />
-        </button>
+        <Tooltip label={t("shortcuts.clear")}>
+          <button
+            type="button"
+            onClick={() => void setBinding(id, null)}
+            disabled={!chord}
+            aria-label={t("shortcuts.clear")}
+            className={iconButtonClass({ size: "md" })}
+          >
+            <X size={14} />
+          </button>
+        </Tooltip>
+        <Tooltip label={t("shortcuts.resetOne")}>
+          <button
+            type="button"
+            onClick={() => void resetBinding(id)}
+            disabled={!customized}
+            aria-label={t("shortcuts.resetOne")}
+            className={iconButtonClass({ size: "md" })}
+          >
+            <RotateCcw size={14} />
+          </button>
+        </Tooltip>
       </div>
     );
   };
@@ -151,9 +156,10 @@ export function ShortcutsSettings() {
 
           <div className="mt-4 border-t border-[var(--cf-border)] pt-4">
             <button
+              type="button"
               onClick={() => void resetAll()}
               disabled={Object.keys(overrides).length === 0}
-              className="flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-[13px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.04]"
+              className={buttonClass({ variant: "secondary", size: "md" })}
             >
               <RotateCcw size={14} />
               {t("shortcuts.resetAll")}

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
+import { buttonClass } from "../common/Button";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
 
@@ -15,6 +16,9 @@ import { pushErrorToast } from "../../state/toastStore";
  * The link is deep where the host allows it. For Azure, GitHub and GitLab that means the
  * organisation or host already typed into the field above, which is the difference between four
  * steps you follow and one link you click.
+ *
+ * A ghost toggle under a hairline rather than a tinted box: it is help, read once, and a box of its
+ * own under the form read as a second form.
  */
 export function TokenHowTo({
   title,
@@ -30,24 +34,23 @@ export function TokenHowTo({
   const [open, setOpen] = useState(false);
 
   return (
-    <div className="mt-3 rounded-lg border border-[var(--cf-border)] bg-black/[0.02] dark:bg-white/[0.03]">
+    <div className="mt-3 border-t border-[var(--cf-border)] pt-2">
       <button
         type="button"
         onClick={() => setOpen((wasOpen) => !wasOpen)}
         aria-expanded={open}
-        className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[12px] font-medium text-[var(--cf-text)]"
+        // `-ml-2` takes back the button's own padding, so the chevron sits on the form's left edge.
+        className={buttonClass({ variant: "ghost", size: "sm", className: "-ml-2" })}
       >
-        {open ? (
-          <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-        ) : (
-          <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-        )}
+        {open ? <ChevronDown size={14} className="shrink-0" /> : <ChevronRight size={14} className="shrink-0" />}
         {title}
       </button>
 
       {open && (
-        <div className="px-3 pb-3">
-          <ol className="ml-3.5 list-decimal space-y-1 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+        // `pl-5` is the toggle's label edge (14px chevron + 6px gap), so the steps read as its body
+        // and their numbers hang under the chevron.
+        <div className="pb-1 pl-5">
+          <ol className="mt-1 list-decimal space-y-1 text-[12px] leading-snug text-[var(--cf-text-muted)] marker:text-[var(--cf-text-faint)]">
             {steps.map((step) => (
               <li key={step}>{step}</li>
             ))}
@@ -55,9 +58,9 @@ export function TokenHowTo({
           <button
             type="button"
             onClick={() => void openExternalUrl(url).catch((e: unknown) => pushErrorToast(String(e)))}
-            className="mt-2 flex items-center gap-1 text-[11.5px] font-medium text-[var(--cf-accent)] hover:underline"
+            className="mt-2 inline-flex items-center gap-1 text-[12px] font-medium text-[var(--cf-accent)] hover:underline"
           >
-            <ExternalLink size={11} />
+            <ExternalLink size={12} className="shrink-0" />
             {linkLabel}
           </button>
         </div>

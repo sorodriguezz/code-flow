@@ -36,6 +36,8 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import type { FpSuppression, ReviewRunDetail, ReviewRunSummary, SavedFinding } from "../../types/domain";
 import { Skeleton } from "../common/Skeleton";
 import { EmptyState } from "../common/EmptyState";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { chipClass } from "../common/recipes";
 import { riseDelay } from "../../lib/rise";
 
 /** Lifecycle state of a saved finding, as an icon rather than an emoji so it matches the icon
@@ -92,9 +94,9 @@ function FpSuppressionsSection({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
-      <div className="border-b border-[var(--cf-border)] bg-black/[0.02] px-3 py-2 dark:bg-white/[0.03]">
-        <p className="flex items-center gap-1.5 text-[12.5px] font-medium">
-          <ShieldOff size={12} className="text-[var(--cf-text-muted)]" />
+      <div className="border-b border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 py-2">
+        <p className="flex items-center gap-1.5 text-[13px] font-medium">
+          <ShieldOff size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
           {t("settings.fpRulesTitle", { n: rules.length })}
         </p>
         <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">{t("settings.fpRulesHint")}</p>
@@ -107,21 +109,23 @@ function FpSuppressionsSection({ workspaceId }: { workspaceId: string }) {
                 <span className="font-mono">{rule.categoria}</span>
                 <span className="text-[var(--cf-text-muted)]">
                   {" · "}
-                  {rule.archivo ?? t("settings.fpRuleWholeRepo")}
+                  {rule.archivo ? <span className="font-mono">{rule.archivo}</span> : t("settings.fpRuleWholeRepo")}
                 </span>
               </p>
               <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">{rule.motivo}</p>
-              <p className="mt-0.5 truncate text-[10px] text-[var(--cf-text-muted)]">
+              <p className="mt-0.5 truncate font-mono text-[11px] text-[var(--cf-text-faint)]">
                 {repoLabel(rule.repo_key)}
                 {rule.pr_id > 0 ? ` · PR #${rule.pr_id}` : ""}
               </p>
             </div>
             <button
+              type="button"
               onClick={() => void remove(rule)}
               title={t("settings.fpRuleRemove")}
-              className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+              aria-label={t("settings.fpRuleRemove")}
+              className={`-mr-1 -mt-[3px] ${DANGER_ICON_BUTTON}`}
             >
-              <Trash2 size={12} />
+              <Trash2 size={13} />
             </button>
           </div>
         ))}
@@ -130,9 +134,16 @@ function FpSuppressionsSection({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-/** Shared styling for the two header actions (export / purge) and the per-PR delete. */
-const HEADER_BUTTON =
-  "flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]";
+/** The header actions (export / import) — the bordered button of the shared recipe. */
+const HEADER_BUTTON = buttonClass({ variant: "secondary", size: "sm" });
+
+/**
+ * The icon button for the bins on this screen — a rule, a PR's runs, one run. Written out rather than
+ * taken from `iconButtonClass`, whose hover is the neutral tint: a bin says which way it goes before
+ * the click.
+ */
+const DANGER_ICON_BUTTON =
+  "inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40";
 
 /** One PR's group of saved runs (newest first). */
 interface PrGroup {
@@ -329,12 +340,18 @@ export function ReviewMemoriesSettings() {
     return (
       <div className="space-y-3">
         <FpSuppressionsSection workspaceId={workspaceId} />
-        <EmptyState icon={Database} title={t("settings.memoryEmpty")} subtitle={t("settings.memoryEmptyHint")} />
-        <div className="flex justify-center">
-          <button onClick={() => void importRuns()} className={`${HEADER_BUTTON} hover:text-[var(--cf-text)]`}>
-            <Upload size={12} /> {t("settings.memoryImport")}
-          </button>
-        </div>
+        {/* The button rides in the empty state's own column, so the two arrive as one group. */}
+        <EmptyState
+          icon={Database}
+          title={t("settings.memoryEmpty")}
+          subtitle={t("settings.memoryEmptyHint")}
+          action={
+            <button type="button" onClick={() => void importRuns()} className={HEADER_BUTTON}>
+              <Upload size={13} />
+              {t("settings.memoryImport")}
+            </button>
+          }
+        />
       </div>
     );
   }
@@ -354,19 +371,32 @@ export function ReviewMemoriesSettings() {
         </p>
         <div className="flex shrink-0 items-center gap-1.5">
           <button
+            type="button"
             onClick={() => void exportRuns({ projectId: filtered?.projectId })}
-            className={`${HEADER_BUTTON} hover:text-[var(--cf-text)]`}
+            className={HEADER_BUTTON}
           >
-            <Download size={12} />
+            <Download size={13} />
             {filtered
               ? t("settings.memoryExportRepo", { repo: filtered.projectName })
               : t("settings.memoryExportAll")}
           </button>
-          <button onClick={() => void importRuns()} className={`${HEADER_BUTTON} hover:text-[var(--cf-text)]`}>
-            <Upload size={12} /> {t("settings.memoryImport")}
+          <button type="button" onClick={() => void importRuns()} className={HEADER_BUTTON}>
+            <Upload size={13} />
+            {t("settings.memoryImport")}
           </button>
-          <button onClick={() => void purge()} className={`${HEADER_BUTTON} hover:text-[var(--cf-danger)]`}>
-            <Trash2 size={12} /> {t("settings.memoryPurge")}
+          {/* Red from the start rather than only on hover: it empties the whole workspace's memory,
+              and that should read before the pointer gets there. */}
+          <button
+            type="button"
+            onClick={() => void purge()}
+            className={buttonClass({
+              variant: "danger-ghost",
+              size: "sm",
+              className: "shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-danger)_35%,transparent)]",
+            })}
+          >
+            <Trash2 size={13} />
+            {t("settings.memoryPurge")}
           </button>
         </div>
       </div>
@@ -398,23 +428,26 @@ export function ReviewMemoriesSettings() {
         <div key={`${group.projectId}:${group.prId}`} className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
           {/* Project name moved onto its own muted line: inline after the title it collided with the
               PR subject, and both got clipped by the same truncate. */}
-          {/* A literal tint rather than --cf-surface-raised: that var equals --cf-surface in the light
+          {/* The sunken tone rather than --cf-surface-raised: that var equals --cf-surface in the light
               theme, so the header band would only be visible in dark mode. */}
-          <div className="flex items-start justify-between gap-2 border-b border-[var(--cf-border)] bg-black/[0.02] px-3 py-2 dark:bg-white/[0.03]">
+          <div className="flex items-start justify-between gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 py-2">
             <div className="min-w-0">
-              <p className="truncate text-[12.5px] font-medium">
-                <span className="text-[var(--cf-text-muted)]">#{group.prId}</span> {group.prTitle || group.projectName}
+              <p className="truncate text-[13px] font-medium">
+                <span className="tabular-nums text-[var(--cf-text-muted)]">#{group.prId}</span>{" "}
+                {group.prTitle || group.projectName}
               </p>
               <p className="mt-0.5 truncate text-[11px] text-[var(--cf-text-muted)]">
                 {group.projectName} · {t("settings.memoryRunsCount", { n: group.runs.length })}
               </p>
             </div>
             <button
+              type="button"
               onClick={() => void removePr(group)}
               title={t("settings.memoryDeletePr")}
-              className="-mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.06]"
+              aria-label={t("settings.memoryDeletePr")}
+              className={`-mr-1 ${DANGER_ICON_BUTTON}`}
             >
-              <Trash2 size={12} />
+              <Trash2 size={13} />
             </button>
           </div>
           <div className="divide-y divide-[var(--cf-border)]">
@@ -425,9 +458,7 @@ export function ReviewMemoriesSettings() {
                   <span className="shrink-0 tabular-nums text-[var(--cf-text-muted)]">
                     {run.created_at.slice(0, 16).replace("T", " ")}
                   </span>
-                  <span className="shrink-0 rounded bg-black/[0.05] px-1.5 py-0.5 text-[10px] capitalize text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-                    {run.level}
-                  </span>
+                  <span className={chipClass("neutral", "capitalize")}>{run.level}</span>
                   <span className="min-w-0 truncate text-[11px] text-[var(--cf-text-muted)]">
                     {t("settings.memoryRunMeta", { iter: run.iter, n: run.findings_count })}
                   </span>
@@ -435,6 +466,7 @@ export function ReviewMemoriesSettings() {
                     <RunAction
                       icon={expandedId === run.id ? ChevronDown : Eye}
                       label={t("settings.memoryView")}
+                      expanded={expandedId === run.id}
                       onClick={() => void toggle(run)}
                     />
                     <RunAction
@@ -451,7 +483,7 @@ export function ReviewMemoriesSettings() {
                   </div>
                 </div>
                 {expandedId === run.id && (
-                  <div className="space-y-3 border-t border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3">
+                  <div className="space-y-3 border-t border-[var(--cf-border)] bg-[var(--cf-sunken)] p-3">
                     {detail === null ? (
                       <Skeleton className="h-24 w-full" />
                     ) : (
@@ -474,40 +506,40 @@ export function ReviewMemoriesSettings() {
   );
 }
 
-/** Text action on a saved finding (ignore / false positive / clear). Padded into a pill on hover so
- * it reads as a control instead of stray 10px text. */
+/** Text action on a saved finding (ignore / false positive / clear). The ghost button, so it reads as
+ * a control instead of stray small text. */
 function MarkButton({ label, onClick }: { label: string; onClick: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      className="whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
-    >
+    <button type="button" onClick={onClick} className={buttonClass({ variant: "ghost", size: "sm" })}>
       {label}
     </button>
   );
 }
 
-/** Square icon button for a run row. Sized to a 24px hit target with a hover surface — the bare
- * 12px icons had no hover feedback and were awkward to click. */
+/** Square icon button for a run row — the 22px icon button, with a hover surface; the bare 12px
+ * icons it replaced had no hover feedback and were awkward to click. `expanded` marks the one that
+ * opens the run, while it is open. */
 function RunAction({
   icon: Icon,
   label,
   danger,
+  expanded,
   onClick,
 }: {
   icon: LucideIcon;
   label: string;
   danger?: boolean;
+  expanded?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       title={label}
       aria-label={label}
-      className={`flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
-        danger ? "hover:text-[var(--cf-danger)]" : "hover:text-[var(--cf-accent)]"
-      }`}
+      aria-expanded={expanded}
+      className={danger ? DANGER_ICON_BUTTON : iconButtonClass({ size: "xs", active: expanded })}
     >
       <Icon size={13} />
     </button>
@@ -543,14 +575,19 @@ function RunFindings({ detail, onMarked }: { detail: ReviewRunDetail; onMarked: 
         const EstadoIcon = estado?.icon;
         return (
           // Discarded findings are dimmed so the state icon isn't the only cue that they're out.
-          <div key={f.id} className={`flex items-center gap-2 text-[11.5px] ${discarded ? "opacity-55" : ""}`}>
+          <div key={f.id} className={`flex items-center gap-2 text-[12px] ${discarded ? "opacity-55" : ""}`}>
             <span title={estado ? t(estado.labelKey) : f.estado} className={`shrink-0 ${estado?.color ?? ""}`}>
-              {EstadoIcon ? <EstadoIcon size={12} /> : "•"}
+              {EstadoIcon ? <EstadoIcon size={13} /> : "•"}
             </span>
             <span className="shrink-0 font-mono text-[var(--cf-text-muted)]">{f.id}</span>
             <span className="min-w-0 truncate">
               {f.categoria}
-              {f.archivo ? <span className="text-[var(--cf-text-muted)]"> · {f.archivo}</span> : null}
+              {f.archivo ? (
+                <span className="text-[var(--cf-text-muted)]">
+                  {" · "}
+                  <span className="font-mono">{f.archivo}</span>
+                </span>
+              ) : null}
             </span>
             <div className="ml-auto flex shrink-0 items-center gap-0.5">
               {discarded ? (
@@ -571,7 +608,11 @@ function RunFindings({ detail, onMarked }: { detail: ReviewRunDetail; onMarked: 
   );
 }
 
-/** One repository in the filter row, with how much memory it holds. */
+/**
+ * One repository in the filter row, with how much memory it holds. A chip rather than a segmented
+ * control: the options are the workspace's repositories, as many as it has, so the row has to be
+ * free to wrap.
+ */
 function FilterChip({
   label,
   count,
@@ -585,13 +626,13 @@ function FilterChip({
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11.5px] ${
-        active
-          ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-      }`}
+      className={chipClass(
+        active ? "accent" : "neutral",
+        `transition-colors duration-100 ${active ? "" : "hover:text-[var(--cf-text)]"}`,
+      )}
     >
       <span className="max-w-[180px] truncate">{label}</span>
       <span className="tabular-nums opacity-70">{count}</span>

@@ -2,11 +2,19 @@ import { useEffect, useMemo, useState } from "react";
 import Editor from "@monaco-editor/react";
 import {
   AlertTriangle,
+  Check,
   ChevronRight,
+  CircleX,
+  Info,
   Loader2,
   Terminal,
   X,
+  type LucideIcon,
 } from "lucide-react";
+import { ActiveUnderline } from "../common/ActivePill";
+import { iconButtonClass } from "../common/Button";
+import { chipClass, tabCountClass, underlineStripClass, underlineTabClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useThemeStore } from "../../state/themeStore";
@@ -52,11 +60,11 @@ export function RunnerResults({
 
   if (report === null) {
     return (
-      <div className="flex min-h-0 flex-1 flex-col p-3">
-        <p className="p-3 text-[12px] text-[var(--cf-text-muted)]">
+      <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+        <p className="text-[13px] text-[var(--cf-text-muted)]">
           {running ? (
-            <span className="flex items-center gap-1.5">
-              <Loader2 size={12} className="animate-spin" />
+            <span className="flex items-center gap-2">
+              <Loader2 size={14} className="animate-spin" />
               {t("api.runner.running")}
             </span>
           ) : (
@@ -84,15 +92,15 @@ export function RunnerResults({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {/* ---- run header ---- */}
-      <div className="shrink-0 border-b border-[var(--cf-border)] px-4 pb-2.5 pt-2">
-        <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
-          {running && <Loader2 size={11} className="animate-spin text-[var(--cf-accent)]" />}
+      <div className="shrink-0 border-b border-[var(--cf-border)] px-4 pb-3 pt-2.5">
+        <p className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
+          {running && <Loader2 size={13} className="animate-spin text-[var(--cf-accent)]" />}
           {running
             ? t("api.runner.running")
             : t("api.runner.ranAt", { time: new Date(report.startedAt).toLocaleTimeString() })}
         </p>
 
-        <div className="mt-2 flex flex-wrap gap-x-7 gap-y-2">
+        <div className="mt-2.5 flex flex-wrap gap-x-7 gap-y-2.5">
           <Metric label={t("api.runner.source")} value={t("api.runner.sourceRunner")} />
           <Metric
             label={t("api.runner.environment")}
@@ -118,21 +126,18 @@ export function RunnerResults({
       )}
 
       {/* ---- filter tabs ---- */}
-      <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--cf-border)] px-3">
+      <div role="tablist" className={underlineStripClass}>
         {FILTERS.map(({ id, label }) => (
           <button
             key={id}
+            role="tab"
+            aria-selected={filter === id}
             onClick={() => changeFilter(id)}
-            className={`shrink-0 border-b-2 px-2 py-1.5 text-[11px] ${
-              filter === id
-                ? "border-[var(--cf-accent)] font-medium text-[var(--cf-accent)]"
-                : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            }`}
+            className={underlineTabClass(filter === id)}
           >
             {t(label)}
-            {id !== "all" && id !== "console" && (
-              <span className="ml-1 opacity-70">({stats[id]})</span>
-            )}
+            {id !== "all" && id !== "console" && <span className={tabCountClass}>{stats[id]}</span>}
+            {filter === id && <ActiveUnderline layoutId="cf-runner-filter" />}
           </button>
         ))}
       </div>
@@ -257,10 +262,10 @@ function ResultRow({
     <div className={`border-b border-[var(--cf-border)] ${active ? "bg-[var(--cf-accent-soft)]" : ""}`}>
       <button
         onClick={onSelect}
-        className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
+        className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-[var(--cf-hover)]"
       >
         <span
-          className="mt-[1px] w-[46px] shrink-0 font-mono text-[10px] font-semibold uppercase"
+          className="mt-[1px] w-[46px] shrink-0 font-mono text-[10.5px] font-semibold uppercase"
           style={{ color: badgeColor("http", item.method) }}
         >
           {item.method}
@@ -286,7 +291,7 @@ function ResultRow({
         <span className="flex shrink-0 items-center gap-2 pt-[1px]">
           {item.status !== null && (
             <span
-              className="rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold"
+              className="rounded-[5px] px-1.5 py-0.5 font-mono text-[11px] font-semibold tabular-nums"
               style={{
                 color: statusColor(item.status),
                 background: `color-mix(in oklab, ${statusColor(item.status)} 14%, transparent)`,
@@ -296,7 +301,7 @@ function ResultRow({
             </span>
           )}
           {item.tests.length > 0 && (
-            <span className="font-mono text-[10px] text-[var(--cf-text-muted)]">
+            <span className="font-mono text-[10.5px] text-[var(--cf-text-muted)]">
               • {item.tests.length}
             </span>
           )}
@@ -316,16 +321,13 @@ function ResultRow({
 
       {tests.map((test, index) => (
         <div key={index} className="flex items-start gap-2 px-3 pb-1 pl-[56px] last:pb-2">
-          <span
-            className={`mt-[1px] shrink-0 rounded px-1.5 py-[1px] font-mono text-[9px] font-bold tracking-wide ${
-              test.passed
-                ? "bg-[color-mix(in_oklab,var(--cf-success)_16%,transparent)] text-[var(--cf-success)]"
-                : "bg-[color-mix(in_oklab,var(--cf-danger)_16%,transparent)] text-[var(--cf-danger)]"
-            }`}
-          >
+          {/* Shape as well as colour: a check or a cross, so a pass and a fail differ for a reader
+              who does not see the green and the red apart. */}
+          <span className={chipClass(test.passed ? "ok" : "bad", "mt-[1px] h-[18px] px-1.5 font-semibold")}>
+            {test.passed ? <Check size={11} strokeWidth={2.5} /> : <CircleX size={11} strokeWidth={2.5} />}
             {test.passed ? t("api.runner.testPass") : t("api.runner.testFail")}
           </span>
-          <span className="min-w-0 flex-1 text-[11px] leading-snug text-[var(--cf-text)]">
+          <span className="min-w-0 flex-1 text-[12px] leading-snug text-[var(--cf-text)]">
             {test.name}
             {!test.passed && test.error !== null && (
               <span className="text-[var(--cf-text-muted)]"> — {test.error}</span>
@@ -340,7 +342,7 @@ function ResultRow({
 function Metric({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
     <div className="min-w-0">
-      <p className="text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
+      <p className="text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
       <p
         className="truncate text-[12px] font-medium text-[var(--cf-text)]"
         style={tone ? { color: tone } : undefined}
@@ -375,7 +377,7 @@ function DetailPane({ item, onClose }: { item: RunnerResultItem; onClose: () => 
     <div className="flex w-[42%] min-w-[300px] shrink-0 flex-col border-l border-[var(--cf-border)]">
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
         <span
-          className="shrink-0 font-mono text-[10px] font-semibold uppercase"
+          className="shrink-0 font-mono text-[10.5px] font-semibold uppercase"
           style={{ color: badgeColor("http", item.method) }}
         >
           {item.method}
@@ -383,17 +385,14 @@ function DetailPane({ item, onClose }: { item: RunnerResultItem; onClose: () => 
         <span className="min-w-0 flex-1 truncate text-[12px] font-medium" title={item.name}>
           {item.name}
         </span>
-        <button
-          onClick={onClose}
-          title={t("common.close")}
-          aria-label={t("common.close")}
-          className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-        >
-          <X size={13} />
-        </button>
+        <Tooltip label={t("common.close")}>
+          <button onClick={onClose} aria-label={t("common.close")} className={iconButtonClass({ size: "xs" })}>
+            <X size={14} />
+          </button>
+        </Tooltip>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2">
+      <div role="tablist" className={underlineStripClass}>
         {(
           [
             ["response", t("api.runner.detailResponse")],
@@ -403,17 +402,16 @@ function DetailPane({ item, onClose }: { item: RunnerResultItem; onClose: () => 
         ).map(([id, label]) => (
           <button
             key={id}
+            role="tab"
+            aria-selected={tab === id}
             onClick={() => setTab(id)}
-            className={`border-b-2 px-2 py-1.5 text-[11px] ${
-              tab === id
-                ? "border-[var(--cf-accent)] font-medium text-[var(--cf-accent)]"
-                : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            }`}
+            className={underlineTabClass(tab === id)}
           >
             {label}
+            {tab === id && <ActiveUnderline layoutId="cf-runner-detail" />}
           </button>
         ))}
-        <span className="ml-auto flex shrink-0 items-center gap-2 pr-1 font-mono text-[10px] text-[var(--cf-text-muted)]">
+        <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px] text-[var(--cf-text-muted)]">
           {item.status !== null && (
             <span style={{ color: statusColor(item.status) }}>
               {item.status}
@@ -567,6 +565,15 @@ const CONSOLE_TONE: Record<ConsoleLine["level"], string> = {
   error: "var(--cf-danger)",
 };
 
+/** The level as a glyph too, so a warning and an error are told apart without their colours. A
+ *  plain `log` line carries none — it is the default, and most lines are one. */
+const CONSOLE_ICON: Record<ConsoleLine["level"], LucideIcon | null> = {
+  log: null,
+  info: Info,
+  warn: AlertTriangle,
+  error: CircleX,
+};
+
 /**
  * The shared script console, clipped to the run.
  *
@@ -590,19 +597,25 @@ function ConsoleView({ since }: { since: number }) {
 
   return (
     <div className="min-h-0 flex-1 overflow-auto p-2">
-      {own.map((line, index) => (
-        <div key={index} className="flex gap-2 px-1 py-[2px]">
-          <span className="shrink-0 font-mono text-[10px] text-[var(--cf-text-muted)]">
-            {new Date(line.at).toLocaleTimeString()}
-          </span>
-          <span
-            className="min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[11px]"
-            style={{ color: CONSOLE_TONE[line.level] }}
-          >
-            {line.text}
-          </span>
-        </div>
-      ))}
+      {own.map((line, index) => {
+        const Icon = CONSOLE_ICON[line.level];
+        return (
+          <div key={index} className="flex gap-2 px-1 py-[2px]">
+            <span className="shrink-0 select-none font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+              {new Date(line.at).toLocaleTimeString()}
+            </span>
+            <span className="mt-[2px] flex w-3 shrink-0 justify-center" style={{ color: CONSOLE_TONE[line.level] }}>
+              {Icon && <Icon size={12} />}
+            </span>
+            <span
+              className="min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[12px]"
+              style={{ color: CONSOLE_TONE[line.level] }}
+            >
+              {line.text}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -16,6 +16,10 @@ import {
   X,
 } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { chipClass, fieldClass } from "../common/recipes";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
 import {
   entryIsGlobal,
   entryIsRunning,
@@ -190,26 +194,26 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div className="h-full overflow-auto">
-      <div className="space-y-4 p-3">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <InboxAction
-            icon={Plus}
-            label={t("assistant.chat")}
-            disabled={!activeProject}
-            onClick={() => activeProject && openNewChat(activeProject.id)}
-          />
-          {activeProject && <ReviewPrMenu projectId={activeProject.id} variant="button" />}
-          <InboxAction
-            icon={ShieldCheck}
-            label={t("assistant.analyze")}
-            disabled={!activeProject || changes === 0}
-            title={changes === 0 ? t("analyze.nothingToAnalyze") : undefined}
-            onClick={() => activeProject && openAnalysis(activeProject.id, { run: true })}
-          />
-        </div>
+      <div className="flex flex-wrap items-center gap-1.5 px-3 pb-1 pt-3">
+        <InboxAction
+          icon={Plus}
+          label={t("assistant.chat")}
+          disabled={!activeProject}
+          onClick={() => activeProject && openNewChat(activeProject.id)}
+        />
+        {activeProject && <ReviewPrMenu projectId={activeProject.id} variant="button" />}
+        <InboxAction
+          icon={ShieldCheck}
+          label={t("assistant.analyze")}
+          disabled={!activeProject || changes === 0}
+          title={changes === 0 ? t("analyze.nothingToAnalyze") : undefined}
+          onClick={() => activeProject && openAnalysis(activeProject.id, { run: true })}
+        />
+      </div>
 
+      <div className="px-2 pb-3">
         {needs.length > 0 && (
-          <section className="space-y-1">
+          <section>
             <SectionLabel label={t("assistant.needsYou")} count={needs.length} />
             {needs.map((row) => (
               <NeedsRow key={row.key} row={row} />
@@ -218,7 +222,7 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
         )}
 
         {running.length > 0 && (
-          <section className="space-y-1">
+          <section>
             <SectionLabel label={t("assistant.running")} count={running.length} />
             {running.map((run) => (
               <RunningRow key={run.id} runId={run.id} workspaceId={workspaceId} about={run.about} queued={run.queued} />
@@ -227,70 +231,72 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
         )}
 
         {!empty && (
-          <section className="space-y-1.5">
-            <div className="flex items-center gap-2">
+          <section>
+            <div className="flex items-center gap-2 pr-0.5">
               <SectionLabel label={t("assistant.recent")} />
               {projects.length > 1 && activeProject && (
-                <div className="ml-auto flex rounded-md border border-[var(--cf-border)] p-0.5" role="group">
-                  {(["repo", "workspace"] as const).map((value) => (
-                    <button
-                      key={value}
-                      onClick={() => setScope(value)}
-                      aria-pressed={scope === value}
-                      title={value === "repo" ? activeProject.name : undefined}
-                      className={`rounded px-1.5 py-0.5 text-[10.5px] font-medium ${
-                        scope === value
-                          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                          : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                      }`}
-                    >
-                      {value === "repo" ? t("assistant.scopeRepo") : t("assistant.scopeWorkspace")}
-                    </button>
-                  ))}
-                </div>
+                <Segmented
+                  size="sm"
+                  className="ml-auto"
+                  layoutId={`inbox-scope-${workspaceId}`}
+                  value={scope}
+                  onChange={setScope}
+                  options={[
+                    { value: "repo", label: t("assistant.scopeRepo"), title: activeProject.name },
+                    { value: "workspace", label: t("assistant.scopeWorkspace") },
+                  ]}
+                />
               )}
             </div>
-            <label className="flex items-center gap-1.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg)] px-2 py-1 text-[var(--cf-text-muted)] focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]">
-              <Search size={12} className="shrink-0" />
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={(e) => e.key === "Escape" && setQuery("")}
-                placeholder={t("assistant.search")}
-                aria-label={t("assistant.search")}
-                className="min-w-0 flex-1 bg-transparent text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
-              />
-            </label>
-            <div className="flex flex-wrap gap-1" role="group">
-              {(
-                [
-                  ["all", t("assistant.filterAll")],
-                  ["chat", t("assistant.filterChats")],
-                  ["pr", t("assistant.filterPrs")],
-                  ["analysis", t("assistant.filterAnalyses")],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  onClick={() => setFilter(value)}
-                  aria-pressed={filter === value}
-                  className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${
-                    filter === value
-                      ? "border-[var(--cf-text)] bg-[var(--cf-text)] text-[var(--cf-surface)]"
-                      : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+            <div className="space-y-1.5 px-0.5 pb-1">
+              <div className="relative">
+                <Search
+                  size={13}
+                  className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
+                />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+                  placeholder={t("assistant.search")}
+                  aria-label={t("assistant.search")}
+                  // The recipe's padding, with room made on the left for the magnifier — inline, so
+                  // it wins over the recipe's own `px` without two classes fighting for the edge.
+                  style={{ paddingLeft: 26 }}
+                  className={fieldClass({ size: "sm", className: "w-full" })}
+                />
+              </div>
+              <div className="flex flex-wrap gap-1" role="group">
+                {(
+                  [
+                    ["all", t("assistant.filterAll")],
+                    ["chat", t("assistant.filterChats")],
+                    ["pr", t("assistant.filterPrs")],
+                    ["analysis", t("assistant.filterAnalyses")],
+                  ] as const
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    onClick={() => setFilter(value)}
+                    aria-pressed={filter === value}
+                    className={
+                      filter === value
+                        ? chipClass("accent")
+                        : chipClass("neutral", "transition-colors duration-100 hover:text-[var(--cf-text)]")
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
             <RecentList entries={recent} showRepo={showRepo} projectName={projectName} />
             {recent.length === 0 && (
-              <p className="px-1 py-3 text-center text-[11.5px] text-[var(--cf-text-muted)]">{t("ai.noMatches")}</p>
+              <p className="px-1 py-3 text-center text-[12px] text-[var(--cf-text-faint)]">{t("ai.noMatches")}</p>
             )}
             {hasMore && (
-              <p className="flex items-center justify-center gap-1.5 py-2 text-[11px] text-[var(--cf-text-muted)]">
-                <Loader2 size={11} className="animate-spin" />
+              <p className="flex items-center justify-center gap-1.5 py-2 text-[12px] text-[var(--cf-text-muted)]">
+                <Loader2 size={13} className="animate-spin" />
                 {t("ai.loadingOlder")}
               </p>
             )}
@@ -414,32 +420,36 @@ function NeedsRow({ row }: { row: NeedRow }) {
   const t = useT();
   const Icon = row.icon;
   return (
-    <div className="group flex items-center gap-2 rounded-lg px-1.5 py-1.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+    <div className="group flex items-center gap-2 rounded-lg px-1.5 py-1.5 hover:bg-[var(--cf-hover)]">
       <button onClick={row.open} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-        <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${TONES[row.tone]}`}>
-          <Icon size={12} />
+        <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${TONES[row.tone]}`}>
+          <Icon size={14} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[12px] font-medium text-[var(--cf-text)]">{row.title}</span>
-          <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">{row.detail}</span>
+          <span className="block truncate text-[13px] font-medium text-[var(--cf-text)]">{row.title}</span>
+          <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{row.detail}</span>
         </span>
         {row.unread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent)]" aria-label={t("assistant.unread")} />}
       </button>
       <button
         onClick={row.open}
-        className="shrink-0 rounded-md border border-[var(--cf-border)] px-2 py-0.5 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        className={buttonClass({ variant: "secondary", size: "sm" })}
       >
         {row.action}
       </button>
       {row.dismiss && (
-        <button
-          onClick={row.dismiss}
-          title={t("assistant.dismiss")}
-          aria-label={t("assistant.dismiss")}
-          className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover:opacity-100"
-        >
-          <X size={11} />
-        </button>
+        <Tooltip label={t("assistant.dismiss")}>
+          <button
+            onClick={row.dismiss}
+            aria-label={t("assistant.dismiss")}
+            className={iconButtonClass({
+              size: "xs",
+              className: "opacity-0 focus-visible:opacity-100 group-hover:opacity-100",
+            })}
+          >
+            <X size={13} />
+          </button>
+        </Tooltip>
       )}
     </div>
   );
@@ -463,14 +473,14 @@ function RunningRow({
     if (about.target) void followTarget(workspaceId, about.target);
   };
   return (
-    <div className="group flex items-center gap-2 rounded-lg px-1.5 py-1.5 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+    <div className="group flex items-center gap-2 rounded-lg px-1.5 py-1.5 hover:bg-[var(--cf-hover)]">
       <button onClick={open} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-        <span className="flex h-6 w-6 shrink-0 items-center justify-center">
-          {queued ? <Clock size={13} className="text-[var(--cf-warning)]" /> : <ThinkingOrb size="sm" />}
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center">
+          {queued ? <Clock size={14} className="text-[var(--cf-warning)]" /> : <ThinkingOrb size="sm" />}
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[12px] font-medium text-[var(--cf-text)]">{about.detail || t(about.kindKey)}</span>
-          <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">
+          <span className="block truncate text-[13px] font-medium text-[var(--cf-text)]">{about.detail || t(about.kindKey)}</span>
+          <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
             {queued
               ? queued.holder
                 ? t("assistant.queuedBehind", { holder: queued.holder })
@@ -484,9 +494,9 @@ function RunningRow({
         disabled={cancelling}
         title={t("ai.stopRun")}
         aria-label={t("ai.stopRun")}
-        className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-1.5 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] opacity-0 hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] focus-visible:opacity-100 disabled:opacity-50 group-hover:opacity-100"
+        className="flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] text-[var(--cf-text-muted)] opacity-0 shadow-[inset_0_0_0_1px_var(--cf-border-strong)] hover:text-[var(--cf-danger)] hover:shadow-[inset_0_0_0_1px_var(--cf-danger)] focus-visible:opacity-100 disabled:opacity-50 group-hover:opacity-100"
       >
-        <Square size={8} className="fill-current" />
+        <Square size={9} className="fill-current" />
         {cancelling ? t("ai.stopping") : t("ai.stop")}
       </button>
     </div>
@@ -524,7 +534,7 @@ function RecentList({
         lastDay = day;
         return (
           <div key={entryKey(entry)}>
-            {header && <p className="px-1.5 pb-0.5 pt-1.5 text-[10.5px] font-semibold text-[var(--cf-text-muted)]">{header}</p>}
+            {header && <p className="px-1.5 pb-1 pt-2 text-[11px] font-semibold text-[var(--cf-text-faint)]">{header}</p>}
             <RecentRow entry={entry} repo={showRepo ? projectOf(entry, projectName) : null} />
           </div>
         );
@@ -589,7 +599,7 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
             else if (e.key === "Escape") setMode("idle");
           }}
           aria-label={t("ai.rename")}
-          className="min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-transparent px-1.5 py-0.5 text-[12px] outline-none"
+          className={fieldClass({ size: "sm", className: "flex-1" })}
         />
       </div>
     );
@@ -598,19 +608,13 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
   if (mode === "deleting") {
     return (
       <div className="flex items-center gap-2 rounded-lg bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] px-1.5 py-1.5">
-        <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text)]">
+        <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--cf-text)]">
           {runs > 1 ? t("assistant.deleteWithRuns", { n: runs }) : t("assistant.deleteOne")}
         </span>
-        <button
-          onClick={() => setMode("idle")}
-          className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-        >
+        <button onClick={() => setMode("idle")} className={buttonClass({ variant: "ghost", size: "sm" })}>
           {t("common.cancel")}
         </button>
-        <button
-          onClick={() => void remove()}
-          className="shrink-0 rounded-md bg-[var(--cf-danger)] px-2 py-0.5 text-[11px] font-medium text-white"
-        >
+        <button onClick={() => void remove()} className={buttonClass({ variant: "danger", size: "sm" })}>
           {t("chatHistory.delete")}
         </button>
       </div>
@@ -619,19 +623,19 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
 
   const time = new Date(entryTimestamp(entry)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
-    <div className="group flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]">
+    <div className="group flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-[var(--cf-hover)]">
       <button onClick={() => void openActivityEntry(entry)} title={title} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-        <Icon size={13} className="shrink-0" style={{ color }} />
-        {entryIsGlobal(entry) && <Globe size={11} className="shrink-0 text-[var(--cf-text-muted)]" aria-label={t("activity.workspaceWide")} />}
+        <Icon size={14} className="shrink-0" style={{ color }} />
+        {entryIsGlobal(entry) && <Globe size={12} className="shrink-0 text-[var(--cf-text-muted)]" aria-label={t("activity.workspaceWide")} />}
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[12px] text-[var(--cf-text)]">{title}</span>
+          <span className="block truncate text-[13px] text-[var(--cf-text)]">{title}</span>
           {(repo || runs > 1) && (
-            <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">
+            <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
               {[repo, runs > 1 ? t("ai.runCount", { n: runs }) : null].filter(Boolean).join(" · ")}
             </span>
           )}
         </span>
-        <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)] group-hover:hidden">{time}</span>
+        <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)] group-hover:hidden">{time}</span>
       </button>
       <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
         <button
@@ -641,17 +645,17 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
           }}
           title={t("ai.rename")}
           aria-label={t("ai.rename")}
-          className="rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]"
         >
-          <Pencil size={11} />
+          <Pencil size={13} />
         </button>
         <button
           onClick={() => setMode("deleting")}
           title={t("chatHistory.delete")}
           aria-label={t("chatHistory.delete")}
-          className="rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
         >
-          <Trash2 size={11} />
+          <Trash2 size={13} />
         </button>
       </span>
     </div>
@@ -677,9 +681,9 @@ function InboxAction({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
+      className={buttonClass({ variant: "secondary", size: "sm" })}
     >
-      <Icon size={12} />
+      <Icon size={13} />
       {label}
     </button>
   );
@@ -687,9 +691,9 @@ function InboxAction({
 
 function SectionLabel({ label, count }: { label: string; count?: number }) {
   return (
-    <p className="flex items-center gap-1.5 px-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+    <p className="flex items-center gap-1.5 px-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
       {label}
-      {count !== undefined && <span className="font-mono tracking-normal opacity-70">{count}</span>}
+      {count !== undefined && <span className="tabular-nums tracking-normal">{count}</span>}
     </p>
   );
 }

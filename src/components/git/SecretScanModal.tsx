@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { AlertOctagon, AlertTriangle, MapPin, ShieldAlert } from "lucide-react";
 import type { SecretHit } from "../../types/domain";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 const SEVERITY_STYLE: Record<SecretHit["severity"], { icon: typeof AlertOctagon; color: string }> = {
   critical: { icon: AlertOctagon, color: "var(--cf-danger)" },
@@ -66,7 +67,7 @@ export function SecretScanModal({
                   <Icon size={14} style={{ color: style.color }} className="shrink-0" />
                   <span className="text-[13px] font-medium text-[var(--cf-text)]">{hit.rule_name}</span>
                   <span
-                    className="ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase"
+                    className="ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[10.5px] font-semibold uppercase"
                     style={{ color: style.color, backgroundColor: `color-mix(in oklab, ${style.color} 14%, transparent)` }}
                   >
                     {t(hit.severity === "critical" ? "secrets.critical" : "secrets.warning")}
@@ -78,7 +79,7 @@ export function SecretScanModal({
                     {hit.file}:{hit.line}
                   </span>
                 </div>
-                <code className="mt-1 block truncate rounded bg-black/[0.04] px-1.5 py-1 font-mono text-[11px] text-[var(--cf-text)] dark:bg-white/[0.06]">
+                <code className="mt-1 block truncate rounded bg-[var(--cf-hover)] px-1.5 py-1 font-mono text-[11px] text-[var(--cf-text)]">
                   {hit.preview}
                 </code>
               </li>
@@ -93,14 +94,14 @@ export function SecretScanModal({
           <div className="flex gap-2">
             <button
               onClick={onCommitAnyway}
-              className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+              className={buttonClass({ variant: "ghost" })}
             >
               {t("secrets.commitAnyway")}
             </button>
             <button
               onClick={onCancel}
               autoFocus
-              className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
+              className={buttonClass({ variant: "primary" })}
             >
               {t("secrets.cancel")}
             </button>

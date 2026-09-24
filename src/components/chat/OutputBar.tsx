@@ -169,7 +169,7 @@ export function OutputBar({
           // The relative path, not the name: two files called `datos.csv` in different
           // subdirectories are two chips that would otherwise be indistinguishable.
           title={t("chat.outputSave", { name: file.path })}
-          className="group flex max-w-[240px] items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-2)] px-2 py-1 text-[11.5px] text-[var(--cf-text)] transition-colors hover:border-[var(--cf-accent)]"
+          className="group flex max-w-[240px] items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-2)] px-2 py-1 text-[12px] text-[var(--cf-text)] transition-colors hover:border-[var(--cf-accent)]"
         >
           <Download size={11} className="shrink-0 text-[var(--cf-text-muted)] group-hover:text-[var(--cf-accent)]" />
           <span className="truncate">{file.name}</span>

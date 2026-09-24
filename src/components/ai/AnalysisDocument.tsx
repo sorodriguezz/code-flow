@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCw, ShieldCheck, Square } from "lucide-react";
+import { buttonClass } from "../common/Button";
 import { parseAnalysis, type AnalysisFinding } from "../../lib/parseAnalysis";
 import { startAnalysis, useChangesToAnalyze } from "../../lib/aiPanelNav";
 import { useIsQueued } from "../../lib/repoQueue";
@@ -130,10 +131,10 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
         <DocHeader>
           <div className="flex items-center gap-2">
-            <ShieldCheck size={14} className="shrink-0 text-[var(--cf-accent)]" />
-            <p className="min-w-0 flex-1 truncate text-[13px] font-semibold">{t("analyze.title")}</p>
+            <ShieldCheck size={15} className="shrink-0 text-[var(--cf-accent)]" />
+            <p className="min-w-0 flex-1 truncate text-[14px] font-semibold">{t("analyze.title")}</p>
           </div>
-          <p className="truncate text-[11px] text-[var(--cf-text-muted)]">
+          <p className="truncate text-[12px] text-[var(--cf-text-faint)]">
             {project?.name ?? ""}
             {displayJob ? ` · ${relativeTime(displayJob.createdAt, t)}` : ""}
           </p>
@@ -153,11 +154,11 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
 
         <div className="space-y-2.5 p-3">
           {!isLatest && (
-            <div className="flex items-center gap-2 rounded-lg bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-2.5 py-1.5 text-[11.5px]">
+            <div className="flex items-center gap-2 rounded-lg bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] py-1.5 pl-3 pr-1.5 text-[12px]">
               <span className="min-w-0 flex-1">{t("doc.readOnlyAnalysis")}</span>
               <button
                 onClick={() => useAiPanelStore.getState().setAnalysisJob(projectId, null)}
-                className="shrink-0 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-0.5 text-[11px] font-medium"
+                className={buttonClass({ variant: "secondary", size: "sm" })}
               >
                 {t("doc.backToLatest")}
               </button>
@@ -168,7 +169,7 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
             <div className="space-y-1.5">
               {queued && (
                 <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-warning)]">
-                  <Loader2 size={11} className="animate-spin" />
+                  <Loader2 size={12} className="animate-spin" />
                   {queued.holder ? t("assistant.queuedBehind", { holder: queued.holder }) : t("assistant.queuedUnknown")}
                 </p>
               )}
@@ -179,30 +180,30 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
                 expanded={logExpanded}
                 onToggle={() => setLogExpanded((v) => !v)}
               />
-              {displayJob && <p className="px-0.5 text-[11px] text-[var(--cf-text-muted)]">{t("doc.whileRunningAnalysis")}</p>}
+              {displayJob && <p className="px-0.5 text-[11px] text-[var(--cf-text-faint)]">{t("doc.whileRunningAnalysis")}</p>}
             </div>
           )}
 
           {!runningJob && settledAfter?.status === "cancelled" && (
-            <p className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--cf-border)] px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">
-              <Square size={11} className="shrink-0 fill-current" />
+            <p className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">
+              <Square size={12} className="shrink-0 fill-current" />
               {t("ai.runStopped")}
             </p>
           )}
           {!runningJob && settledAfter?.status === "error" && settledAfter.error && (
             <div className="space-y-1">
               <AiErrorBanner error={settledAfter.error} />
-              {displayJob && <p className="px-0.5 text-[11px] text-[var(--cf-text-muted)]">{t("doc.showingEarlierAnalysis")}</p>}
+              {displayJob && <p className="px-0.5 text-[11px] text-[var(--cf-text-faint)]">{t("doc.showingEarlierAnalysis")}</p>}
             </div>
           )}
 
           {!displayJob && !runningJob && (
-            <p className="px-1 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">{t("analyze.nothingYet")}</p>
+            <p className="px-1 py-6 text-center text-[12px] text-[var(--cf-text-faint)]">{t("analyze.nothingYet")}</p>
           )}
 
           {hydrating && (
             <p className="flex items-center justify-center gap-1.5 py-6 text-[12px] text-[var(--cf-text-muted)]">
-              <Loader2 size={12} className="animate-spin" />
+              <Loader2 size={13} className="animate-spin" />
               {t("doc.loadingReview")}
             </p>
           )}
@@ -213,7 +214,7 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
             ) : (
               <div className="flex flex-col items-center gap-2 py-8 text-center">
                 <ShieldCheck size={26} className="text-[var(--cf-success)]" />
-                <p className="max-w-xs select-text text-[12.5px] text-[var(--cf-text-muted)]">{summary || t("analyze.noFindings")}</p>
+                <p className="max-w-xs select-text text-[13px] text-[var(--cf-text-muted)]">{summary || t("analyze.noFindings")}</p>
               </div>
             ))}
 
@@ -254,24 +255,27 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
             </>
           )}
 
-          {footer && !hydrating && <p className="text-[11px] text-[var(--cf-text-muted)]">{footer}</p>}
+          {footer && !hydrating && <p className="text-[11px] text-[var(--cf-text-faint)]">{footer}</p>}
         </div>
       </div>
 
       <ActionBar>
         <div className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--cf-text-muted)]" title={analyzeModel}>
+          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]" title={analyzeModel}>
             {analyzeModel}
           </span>
-          <button
-            onClick={run}
-            disabled={Boolean(runningJob) || changes === 0}
-            title={!runningJob && changes === 0 ? t("analyze.nothingToAnalyze") : undefined}
-            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-50"
-          >
-            {runningJob ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-            {runningJob ? t("ai.working") : displayJob ? t("analyze.reanalyze") : t("doc.analyze")}
-          </button>
+          {/* The reason it is off rides on a wrapper: a disabled recipe button takes no pointer
+              events, and "nothing to analyze" is exactly what the disabled one has to say. */}
+          <span className="flex shrink-0" title={!runningJob && changes === 0 ? t("analyze.nothingToAnalyze") : undefined}>
+            <button
+              onClick={run}
+              disabled={Boolean(runningJob) || changes === 0}
+              className={buttonClass({ variant: "primary", size: "md" })}
+            >
+              {runningJob ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+              {runningJob ? t("ai.working") : displayJob ? t("analyze.reanalyze") : t("doc.analyze")}
+            </button>
+          </span>
         </div>
       </ActionBar>
     </div>

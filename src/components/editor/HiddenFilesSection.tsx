@@ -2,6 +2,8 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight, Eye, EyeOff, Folder } from "lucide-react";
 import { useHiddenFilesStore } from "../../state/hiddenFilesStore";
 import { FileGlyph } from "../common/FileGlyph";
+import { Tooltip } from "../common/Tooltip";
+import { buttonClass } from "../common/Button";
 import { splitPath } from "../../lib/splitPath";
 import { useT } from "../../state/languageStore";
 
@@ -14,9 +16,9 @@ function HiddenRow({ path, isDir, onShow }: { path: string; isDir: boolean; onSh
       type="button"
       onClick={onShow}
       title={t("editor.hiddenShow")}
-      // The whole row restores, with the eye as the affordance — a 20px target for an action whose
-      // only cost when mis-clicked is that a row comes back.
-      className="group flex w-full items-center gap-1.5 rounded-md py-0.5 pl-2 pr-1.5 text-left text-[13px] text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+      // The whole row restores, with the eye as the affordance — a full tree-row target for an
+      // action whose only cost when mis-clicked is that a row comes back.
+      className="group flex h-[26px] w-full items-center gap-1.5 rounded-md pl-2 pr-1.5 text-left text-[13px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
     >
       {isDir ? (
         <Folder size={13} className="shrink-0" />
@@ -26,12 +28,12 @@ function HiddenRow({ path, isDir, onShow }: { path: string; isDir: boolean; onSh
       {/* The folders it sits in stay dimmer than the name: two entries called `index.ts` are only
           told apart by the path, so it has to be there — but it is not what you read first. */}
       <span className="min-w-0 flex-1 truncate" title={path}>
-        {dir && <span className="opacity-50">{dir}/</span>}
+        {dir && <span className="text-[var(--cf-text-faint)]">{dir}/</span>}
         {name}
       </span>
       <Eye
-        size={13}
-        className="shrink-0 text-[var(--cf-text-muted)] opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+        size={14}
+        className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
       />
     </button>
   );
@@ -56,30 +58,31 @@ export function HiddenFilesSection() {
   if (entries.length === 0) return null;
 
   return (
-    <div className="shrink-0 border-t border-[var(--cf-border)]">
-      <div className="flex items-center gap-1 px-2 py-1">
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          title={t("editor.hiddenHint")}
-          className="flex min-w-0 flex-1 items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-        >
-          {open ? (
-            <ChevronDown size={11} className="shrink-0" />
-          ) : (
-            <ChevronRight size={11} className="shrink-0" />
-          )}
-          <EyeOff size={12} className="shrink-0" />
-          <span className="truncate">{t("editor.hiddenSection")}</span>
-          <span className="tabular-nums opacity-70">({entries.length})</span>
-        </button>
-        {open && (
+    <div className="shrink-0 border-t border-[var(--cf-border)] p-2">
+      <div className="flex items-center gap-1">
+        <Tooltip side="top" label={t("editor.hiddenSection")} description={t("editor.hiddenHint")}>
           <button
             type="button"
-            onClick={showAll}
-            className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            className="flex h-[26px] min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 text-left text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
+            {open ? (
+              <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
+            ) : (
+              <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
+            )}
+            <EyeOff size={14} className="shrink-0" />
+            <span className="truncate text-[11px] font-semibold uppercase tracking-[0.06em]">
+              {t("editor.hiddenSection")}
+            </span>
+            <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+              {entries.length}
+            </span>
+          </button>
+        </Tooltip>
+        {open && (
+          <button type="button" onClick={showAll} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {t("editor.hiddenShowAll")}
           </button>
         )}
@@ -87,7 +90,7 @@ export function HiddenFilesSection() {
       {/* Capped and scrollable: someone who hides thirty build folders must not lose the tree to
           the list of what they hid. */}
       {open && (
-        <div className="max-h-[180px] overflow-y-auto pb-1">
+        <div className="mt-1 max-h-[180px] overflow-y-auto">
           {entries.map((entry) => (
             <HiddenRow
               key={entry.path}

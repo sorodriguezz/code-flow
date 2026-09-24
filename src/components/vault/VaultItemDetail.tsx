@@ -29,9 +29,11 @@ import {
   Pencil,
   RefreshCw,
   Star,
+  Timer,
   Trash2,
   X,
 } from "lucide-react";
+import { Tooltip } from "../common/Tooltip";
 
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -169,7 +171,7 @@ export function VaultItemDetail({ item }: { item: VaultItem }) {
               setTitle(event.target.value);
               setDirty(true);
             }}
-            className="min-w-0 flex-1 rounded border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-0.5 text-[13px] font-medium text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+            className="min-w-0 flex-1 rounded border border-[var(--cf-border)] bg-[var(--cf-field)] px-1.5 py-0.5 text-[13px] font-medium text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
           />
         ) : (
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">
@@ -371,7 +373,7 @@ function ReadView({
       )}
 
       {bare && (
-        <p className="text-[11.5px] italic text-[var(--cf-text-muted)]">{t("vault.entryEmpty")}</p>
+        <p className="text-[12px] italic text-[var(--cf-text-muted)]">{t("vault.entryEmpty")}</p>
       )}
 
       <VaultAttachments itemId={item.id} />
@@ -405,7 +407,7 @@ function ReadRow({
       </span>
       <div className="flex items-start gap-1">
         <span
-          className={`min-w-0 flex-1 text-[12.5px] text-[var(--cf-text)] ${
+          className={`min-w-0 flex-1 text-[13px] text-[var(--cf-text)] ${
             secret ? "font-mono" : ""
           } ${multiline && !hidden ? "whitespace-pre-wrap break-words" : "truncate"}`}
         >
@@ -436,24 +438,33 @@ function ReadRow({
   );
 }
 
-/** The live 2FA code, with the seconds it has left. */
+/**
+ * The live 2FA code, with the seconds it has left — the one value on the page you read off and type
+ * somewhere else, so it is the largest thing on it: big, monospaced, split into two groups of three
+ * the way the authenticator apps print it. One click copies it (the copy is the unsplit code).
+ */
 function TotpRow({ code }: { code: TotpCode | null }) {
   const t = useT();
   if (!code) return null;
+  const shown = code.code.length === 6 ? `${code.code.slice(0, 3)} ${code.code.slice(3)}` : code.code;
   return (
-    <div className="flex flex-col gap-0.5">
-      <span className="text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
         {t("vault.totpCode")}
       </span>
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => void useVaultStore.getState().copySecret(code.code)}
-          className="rounded-md bg-[var(--cf-accent-soft)] px-2 py-1 font-mono text-[15px] tracking-[0.2em] text-[var(--cf-accent)]"
-        >
-          {code.code}
-        </button>
-        <span className="text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+      <div className="flex items-center gap-3">
+        <Tooltip label={t("vault.copy")}>
+          <button
+            type="button"
+            onClick={() => void useVaultStore.getState().copySecret(code.code)}
+            aria-label={`${t("vault.copy")} ${code.code}`}
+            className="rounded-lg bg-[var(--cf-accent-soft)] px-3 py-1 font-mono text-[22px] font-semibold tabular-nums tracking-[0.12em] text-[var(--cf-accent)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-accent)_22%,transparent)]"
+          >
+            {shown}
+          </button>
+        </Tooltip>
+        <span className="flex items-center gap-1.5 text-[12px] tabular-nums text-[var(--cf-text-muted)]">
+          <Timer size={13} aria-hidden />
           {t("vault.totpSeconds", { n: code.seconds_remaining })}
         </span>
       </div>
@@ -563,7 +574,7 @@ export function VaultGallery() {
       <p className="text-[13px] font-medium text-[var(--cf-text)]">
         {items.length === 0 ? t("vault.empty") : t("vault.entriesN", { n: items.length })}
       </p>
-      <p className="max-w-xs text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+      <p className="max-w-xs text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
         {t("vault.emptyBody")}
       </p>
     </div>

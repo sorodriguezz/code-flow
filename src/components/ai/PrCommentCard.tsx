@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { CheckCheck, ChevronDown, ChevronRight, Loader2, MapPin, MessageCircle, Wand2 } from "lucide-react";
 import type { PrCommentThread, ThreadCloseOutcome } from "../../types/domain";
 import { Skeleton } from "../common/Skeleton";
+import { buttonClass } from "../common/Button";
+import { Segmented } from "../common/Segmented";
+import { textAreaClass } from "./docParts";
 import { draftPrCommentReply } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { withExtraInstructions } from "../../lib/parseAnalysis";
@@ -19,16 +22,12 @@ import { InlineMarkdown, ResolveWithAiButton, ResolvedChip, useResolveWithAi } f
 export function PrCommentsSkeleton({ label, rows = 2 }: { label: string; rows?: number }) {
   return (
     <div className="mb-4 space-y-2" aria-busy="true">
-      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        <Loader2 size={11} className="animate-spin" />
+      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+        <Loader2 size={12} className="animate-spin" />
         {label}
       </p>
       {Array.from({ length: rows }).map((_, i) => (
-        <div
-          key={i}
-          className="flex items-start gap-2 rounded-lg border border-[var(--cf-border)] px-3 py-2"
-          style={{ borderLeft: "3px solid var(--cf-border)" }}
-        >
+        <div key={i} className="flex items-start gap-2 rounded-lg border border-[var(--cf-border)] px-3 py-2.5">
           <Skeleton className="mt-0.5 h-3.5 w-3.5 shrink-0 rounded-full" />
           <div className="min-w-0 flex-1 space-y-1.5">
             <Skeleton className="h-2.5" style={{ width: "35%" }} />
@@ -212,38 +211,39 @@ export function PrCommentCard({
   const loc = locationLabel(thread);
 
   return (
-    <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
+    <div className="overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)]">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
-        style={{ borderLeft: "3px solid var(--cf-text-muted)" }}
+        className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors duration-100 hover:bg-[var(--cf-hover)]"
       >
-        <MessageCircle size={14} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+        <MessageCircle size={14} className="mt-0.5 shrink-0 text-[var(--cf-text-faint)]" />
         <div className="min-w-0 flex-1">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{first.author}</p>
-          <p className="mt-0.5 text-[13px] font-medium text-[var(--cf-text)]">
+          <p className="truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+            {first.author}
+          </p>
+          <p className="mt-1 text-[13px] font-medium leading-snug text-[var(--cf-text)]">
             <InlineMarkdown text={first.content} className="cf-markdown-inline" />
           </p>
           {loc && (
-            <p className="mt-0.5 flex items-center gap-1 truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
-              <MapPin size={10} className="shrink-0" />
+            <p className="mt-1 flex items-center gap-1 truncate font-mono text-[11px] text-[var(--cf-text-faint)]">
+              <MapPin size={12} className="shrink-0" />
               {loc}
             </p>
           )}
         </div>
         {resolution && <ResolvedChip />}
         {open ? (
-          <ChevronDown size={13} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+          <ChevronDown size={14} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
         ) : (
-          <ChevronRight size={13} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+          <ChevronRight size={14} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
         )}
       </button>
 
       {open && (
-        <div className="space-y-2 border-t border-[var(--cf-border)] px-3 py-2.5 text-[12px]">
+        <div className="space-y-2 px-3 pb-3 pt-0.5 text-[12px] leading-relaxed">
           {rest.map((c, i) => (
             <p key={i}>
-              <span className="font-medium text-[var(--cf-text)]">{c.author}: </span>
+              <span className="font-semibold text-[var(--cf-text)]">{c.author}: </span>
               <InlineMarkdown text={c.content} className="cf-markdown-inline text-[var(--cf-text-muted)]" />
             </p>
           ))}
@@ -264,9 +264,10 @@ export function PrCommentCard({
                   onClick={() => (composing ? setComposing(false) : openComposer())}
                   disabled={closingThread}
                   title={t("pr.resolveThreadHint")}
-                  className="flex items-center gap-1.5 rounded-md border border-[color-mix(in_oklab,var(--cf-success)_45%,transparent)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-success)] hover:bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] disabled:cursor-not-allowed disabled:opacity-40"
+                  aria-expanded={composing}
+                  className="inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] font-medium text-[var(--cf-success)] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-success)_45%,transparent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] disabled:pointer-events-none disabled:opacity-45"
                 >
-                  {closingThread ? <Loader2 size={11} className="animate-spin" /> : <CheckCheck size={11} />}
+                  {closingThread ? <Loader2 size={13} className="animate-spin" /> : <CheckCheck size={13} />}
                   {t("pr.resolveThread")}
                 </button>
               )
@@ -289,7 +290,7 @@ export function PrCommentCard({
           {/* The AI half is what a missing working copy removes — say so once, rather than
               leaving a button that silently does nothing. */}
           {!projectId && (
-            <p className="text-[11px] text-[var(--cf-text-muted)]">{t("pr.noWorkingCopyForFix")}</p>
+            <p className="text-[11px] text-[var(--cf-text-faint)]">{t("pr.noWorkingCopyForFix")}</p>
           )}
         </div>
       )}
@@ -335,6 +336,8 @@ function ThreadCloseComposer({
   onCancel: () => void;
 }) {
   const t = useT();
+  // One segmented control per composer on screen, so its thumb never slides into another's.
+  const outcomeId = useId();
   const hasBody = body.trim().length > 0;
   const confirmLabel = replyPosted
     ? "pr.threadRetryClose"
@@ -342,13 +345,21 @@ function ThreadCloseComposer({
       ? "pr.threadReplyAndClose"
       : "pr.threadCloseWithoutReply";
   return (
-    <div className="space-y-2 rounded-md border border-[var(--cf-border)] bg-black/[0.02] px-2.5 py-2 dark:bg-white/[0.03]">
-      <p className="text-[11px] font-medium text-[var(--cf-text)]">{t("pr.threadCloseTitle")}</p>
-      <div className="flex flex-wrap items-center gap-1.5">
-        <OutcomeChip label={t("pr.threadOutcomeFixed")} active={!wontFix} onClick={() => onWontFix(false)} />
-        <OutcomeChip label={t("pr.threadOutcomeWontFix")} active={wontFix} onClick={() => onWontFix(true)} />
-      </div>
-      <p className="text-[10px] leading-relaxed text-[var(--cf-text-muted)]">
+    <div className="space-y-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2.5 py-2">
+      <p className="text-[12px] font-medium text-[var(--cf-text)]">{t("pr.threadCloseTitle")}</p>
+      {/* The two closes as the segmented control — two peer choices about the same thing, which is
+          that control's job. A radio group would be heavier than the decision. */}
+      <Segmented
+        size="sm"
+        layoutId={`thread-outcome-${outcomeId}`}
+        value={wontFix ? "wontfix" : "fixed"}
+        onChange={(value) => onWontFix(value === "wontfix")}
+        options={[
+          { value: "fixed", label: t("pr.threadOutcomeFixed") },
+          { value: "wontfix", label: t("pr.threadOutcomeWontFix") },
+        ]}
+      />
+      <p className="text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
         {t(wontFix ? "pr.threadOutcomeWontFixHint" : "pr.threadOutcomeFixedHint")}
       </p>
       <textarea
@@ -358,20 +369,14 @@ function ThreadCloseComposer({
         autoFocus
         disabled={drafting || replyPosted}
         placeholder={t("pr.threadReplyPlaceholder")}
-        className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)] disabled:opacity-60"
+        className={textAreaClass}
       />
       {replyPosted && (
-        <p className="text-[10px] text-[var(--cf-text-muted)]">{t("pr.threadReplyAlreadyPosted")}</p>
+        <p className="text-[11px] text-[var(--cf-text-muted)]">{t("pr.threadReplyAlreadyPosted")}</p>
       )}
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          onClick={onConfirm}
-          disabled={busy || drafting}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50"
-        >
-          {busy && <Loader2 size={11} className="animate-spin" />}
-          {t(confirmLabel)}
-        </button>
+      {/* The helper on the left, the step's own action at the right edge with Cancel beside it —
+          the order every bar in the assistant keeps. */}
+      <div className="flex flex-wrap items-center gap-1.5">
         {/* Drafting is offered with the box empty (write me something reasonable) and with a note
             already in it (say this properly) — the note is the intent, not a replacement for it. */}
         {!replyPosted && (
@@ -379,37 +384,25 @@ function ThreadCloseComposer({
             onClick={onDraft}
             disabled={drafting || busy}
             title={t("pr.threadDraftHint")}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+            className={buttonClass({ variant: "secondary", size: "sm" })}
           >
-            {drafting ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
+            {drafting ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
             {t(drafting ? "pr.threadDrafting" : "pr.threadDraftWithAi")}
           </button>
         )}
-        <button
-          onClick={onCancel}
-          disabled={busy}
-          className="text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] disabled:opacity-50"
-        >
+        <span className="flex-1" />
+        <button onClick={onCancel} disabled={busy} className={buttonClass({ variant: "ghost", size: "sm" })}>
           {t("common.cancel")}
+        </button>
+        <button
+          onClick={onConfirm}
+          disabled={busy || drafting}
+          className={buttonClass({ variant: "primary", size: "sm" })}
+        >
+          {busy && <Loader2 size={13} className="animate-spin" />}
+          {t(confirmLabel)}
         </button>
       </div>
     </div>
-  );
-}
-
-/** One of the two closes, as a pill. Selected state is carried by fill rather than a radio dot —
- * the choice is between two words, and a radio group would be heavier than the decision. */
-function OutcomeChip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className={`rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors ${
-        active
-          ? "bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-      }`}
-    >
-      {label}
-    </button>
   );
 }

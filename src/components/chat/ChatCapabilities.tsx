@@ -45,7 +45,7 @@ function Ability({ yes, label, detail }: { yes: boolean; label: string; detail?:
         className={`mt-[3px] flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full ${
           yes
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-            : "bg-black/[0.06] text-[var(--cf-text-muted)] dark:bg-white/[0.08]"
+            : "bg-[var(--cf-press)] text-[var(--cf-text-muted)]"
         }`}
       >
         {yes ? <Check size={9} strokeWidth={3} /> : <Minus size={9} strokeWidth={3} />}
@@ -102,7 +102,7 @@ export function ChatCapabilities({
         title={t("chat.capabilitiesTitle")}
         aria-label={t("chat.capabilitiesTitle")}
         aria-expanded={open}
-        className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.07] ${
+        className={`flex h-[26px] w-[26px] items-center justify-center rounded-md transition-colors hover:bg-[var(--cf-hover)] ${
           open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
         }`}
       >

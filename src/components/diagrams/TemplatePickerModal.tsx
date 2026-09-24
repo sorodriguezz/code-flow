@@ -78,7 +78,7 @@ export function TemplatePickerModal({
         <header className="flex shrink-0 items-start gap-3 border-b border-[var(--cf-border)] px-4 py-3">
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
             <h2 className="text-[13px] font-semibold">{t("diagrams.templatePickerTitle")}</h2>
-            <p className="text-[11.5px] text-[var(--cf-text-muted)]">
+            <p className="text-[12px] text-[var(--cf-text-muted)]">
               {t("diagrams.templatePickerSubtitle")}
             </p>
           </div>
@@ -181,7 +181,7 @@ export function TemplatePickerModal({
           </div>
 
           {templates.length === 0 && (
-            <p className="flex items-center justify-center gap-2 px-2 py-8 text-center text-[11.5px] text-[var(--cf-text-muted)]">
+            <p className="flex items-center justify-center gap-2 px-2 py-8 text-center text-[12px] text-[var(--cf-text-muted)]">
               <LayoutTemplate size={14} />
               {t("diagrams.noTemplates")}
             </p>

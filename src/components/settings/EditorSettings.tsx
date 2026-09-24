@@ -57,7 +57,7 @@ export function EditorSettings() {
             {/* The rail names the pane, so no heading is repeated here — but the hint says what the
                 label cannot, so it stays. Same call as the AI section. */}
             {active?.hintKey && (
-              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+              <p className="mb-3 text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
             )}
 
             {tab === "snippets" && <SnippetsSettings />}

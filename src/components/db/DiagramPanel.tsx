@@ -40,6 +40,7 @@ import { useDbStore, type DbDiagramTab } from "../../state/dbStore";
 import { ensureDiagramsStoreLoaded, useDiagramsStore } from "../../state/diagramsStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { fieldClass } from "../common/recipes";
 
 /**
  * A schema, drawn.
@@ -456,7 +457,7 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
             value={query}
             onChange={(e) => setUi(tab.id, { query: e.target.value })}
             placeholder={t("db.diagram.findPlaceholder")}
-            className="w-[150px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-[3px] pl-5 pr-5 text-[11.5px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-[150px] pl-5 pr-5" })}
           />
           {query && (
             <button
@@ -560,10 +561,10 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
-        className="relative min-h-0 flex-1 cursor-grab touch-none overflow-hidden bg-[var(--cf-bg)] active:cursor-grabbing"
+        className="relative min-h-0 flex-1 cursor-grab touch-none overflow-hidden bg-[var(--cf-sunken)] active:cursor-grabbing"
       >
         {tab.loading && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 bg-[var(--cf-bg)]/70 text-[12px] text-[var(--cf-text-muted)]">
+          <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 bg-[var(--cf-surface)]/70 text-[12px] text-[var(--cf-text-muted)]">
             <Loader2 size={13} className="animate-spin" />
             {t("db.diagram.reading")}
           </div>

@@ -7,7 +7,6 @@ import {
   ChevronRight,
   Copy,
   Filter,
-  Database,
   Eraser,
   FileCode2,
   FolderCode,
@@ -36,8 +35,16 @@ import {
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ResizeHandle } from "../common/ResizeHandle";
-import { ActivePill } from "../common/ActivePill";
-import { CARD, ConnectionDot, ToolbarButton, engineColor, engineIcon, nodeIcon } from "./dbChrome";
+import { Segmented } from "../common/Segmented";
+import { iconButtonClass } from "../common/Button";
+import {
+  explorerClass,
+  explorerHeadClass,
+  fieldClass,
+  rowClass,
+  sectionLabelClass,
+} from "../common/recipes";
+import { ConnectionDot, EngineBadge, ToolbarButton, nodeIcon } from "./dbChrome";
 import { DbHistoryList } from "./DbHistoryList";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { effectiveObjectFilter, schemaIsNarrowed } from "../../lib/db/objectFilter";
@@ -58,6 +65,7 @@ import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { RowScope } from "../../types/domain";
 import { dbChildren } from "../../lib/tauri/dbCommands";
@@ -70,6 +78,7 @@ import {
   type SqlTemplate,
 } from "../../lib/db/sqlTemplates";
 import {
+  DB_ENGINES,
   engineInfo,
   nodeRefOf,
   type DbConnectionRow,
@@ -126,6 +135,13 @@ const MAX_RESULTS = 200;
 // One row
 // ---------------------------------------------------------------------------
 
+/** Where a depth-0 row's chevron starts, and how far each level steps in. */
+const ROW_INSET = 6;
+const INDENT = 12;
+/** The left edge of a row's glyph at `depth` — where a note hanging under that row lines up: the
+ * inset, the chevron (14px) and `rowClass`'s 8px gap. */
+const noteInset = (depth: number) => ROW_INSET + depth * INDENT + 14 + 8;
+
 function TreeRow({
   depth,
   at = 0,
@@ -145,6 +161,7 @@ function TreeRow({
   badge,
   color,
   title,
+  strong,
   drag,
   dropTarget,
 }: {
@@ -153,6 +170,9 @@ function TreeRow({
   at?: number;
   icon: React.ReactNode;
   name: string;
+  /** Semibold name. Only a connection with a live session sets it — the weight is the word that
+   * goes with the dot's fill, so "connected" is never said by the colour alone. */
+  strong?: boolean;
   detail?: string;
   /** Hover text for the whole row, for what is worth keeping but not worth a line of its own. */
   title?: string;
@@ -223,26 +243,29 @@ function TreeRow({
           onKeyDown?.(e);
         }
       }}
-      style={{ paddingLeft: 6 + depth * 12, ...riseDelay(at) }}
+      style={{ paddingLeft: ROW_INSET + depth * INDENT, ...riseDelay(at) }}
+      // The app's list row (`rowClass`) at the tree's 28px: the accent tint when selected, the
+      // neutral one on hover, and the global focus ring rather than one of its own.
+      //
       // The insertion point is the row's own top border rather than a floating line: the tree has
       // no spare pixels between rows, and a border that is transparent when idle keeps every row
       // exactly where it was — a drag that shifted the list under the pointer would move the target
       // out from under it.
-      className={`cf-rise group flex w-full cursor-default items-center gap-1 rounded-md py-[3px] pr-1.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
-        // Only the rows that can be dropped onto carry the border, transparent or not: giving it to
-        // every row would add a pixel to each of the hundreds a schema can hold, for a line that
-        // only ever draws on a connection. Keyed off `dropTarget` rather than off `drag`, because a
-        // table row is draggable without being droppable — it would otherwise have paid the pixel.
-        dropTarget !== undefined
-          ? dropTarget
-            ? "border-t border-[var(--cf-accent)]"
-            : "border-t border-transparent"
-          : ""
-      } ${
-        active
-          ? "bg-[var(--cf-accent-soft)]"
-          : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-      }`}
+      className={rowClass(
+        Boolean(active),
+        `cf-rise group h-7 cursor-default ${
+          // Only the rows that can be dropped onto carry the border, transparent or not: giving it
+          // to every row would add a pixel to each of the hundreds a schema can hold, for a line
+          // that only ever draws on a connection. Keyed off `dropTarget` rather than off `drag`,
+          // because a table row is draggable without being droppable — it would otherwise have
+          // paid the pixel.
+          dropTarget !== undefined
+            ? dropTarget
+              ? "border-t border-[var(--cf-accent)]"
+              : "border-t border-transparent"
+            : ""
+        }`,
+      )}
     >
       {/* The only thing that expands. `stopPropagation` so a double click here folds and unfolds
           rather than also firing the row's open action. */}
@@ -261,12 +284,12 @@ function TreeRow({
         // The cost is that the chevron is not a drag handle, which is the right way round anyway.
         onPointerDown={(e) => e.stopPropagation()}
         aria-hidden={!expandable}
-        className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)] ${
+        className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-faint)] ${
           expandable ? "cursor-pointer hover:text-[var(--cf-text)]" : ""
         }`}
       >
         {loading ? (
-          <Loader2 size={11} className="animate-spin" />
+          <Loader2 size={12} className="animate-spin" />
         ) : expandable ? (
           expanded ? (
             <ChevronDown size={12} />
@@ -276,13 +299,23 @@ function TreeRow({
         ) : null}
       </span>
       {leading}
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center" style={{ color }}>
+      {/* Sized by what it holds: a 14px glyph for a node, the engine's 18px tile for a connection. */}
+      <span
+        className="flex min-w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-faint)]"
+        style={{ color }}
+      >
         {icon}
       </span>
-      <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--cf-text)]">{name}</span>
+      <span
+        className={`min-w-0 flex-1 truncate text-[13px] text-[var(--cf-text)] ${
+          strong ? "font-semibold" : ""
+        }`}
+      >
+        {name}
+      </span>
       {badge}
       {detail && (
-        <span className="max-w-[45%] shrink-0 truncate text-[11px] text-[var(--cf-text-muted)]">
+        <span className="max-w-[45%] shrink-0 truncate text-[11px] tabular-nums text-[var(--cf-text-faint)]">
           {detail}
         </span>
       )}
@@ -742,7 +775,7 @@ function NodeSubtree({
               }
             : undefined
         }
-        icon={<Icon size={12} />}
+        icon={<Icon size={14} />}
         name={node.name}
         detail={node.detail}
         badge={
@@ -751,9 +784,10 @@ function NodeSubtree({
               // The pattern itself in the tooltip, because "filtered" alone leaves the next
               // question unanswered — you want to know *by what*, and then to go change it.
               title={t("db.narrowedBy", { pattern: narrowing })}
+              aria-label={t("db.narrowedBy", { pattern: narrowing })}
               className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-accent)]"
             >
-              <Filter size={10} />
+              <Filter size={12} />
             </span>
           ) : undefined
         }
@@ -772,10 +806,10 @@ function NodeSubtree({
       />
       {expanded && error && (
         <p
-          style={{ paddingLeft: 24 + depth * 12 }}
-          className="flex items-start gap-1 py-1 pr-2 text-[11px] text-[var(--cf-danger)]"
+          style={{ paddingLeft: noteInset(depth) }}
+          className="flex items-start gap-1.5 py-1 pr-2 text-[12px] text-[var(--cf-danger)]"
         >
-          <AlertTriangle size={11} className="mt-[2px] shrink-0" />
+          <AlertTriangle size={13} className="mt-[2px] shrink-0" />
           <span className="min-w-0 break-words">{error}</span>
         </p>
       )}
@@ -794,8 +828,8 @@ function NodeSubtree({
         ))}
       {expanded && !error && children?.length === 0 && (
         <p
-          style={{ paddingLeft: 24 + depth * 12 }}
-          className="py-1 text-[11px] italic text-[var(--cf-text-muted)]"
+          style={{ paddingLeft: noteInset(depth) }}
+          className="py-1 text-[12px] text-[var(--cf-text-faint)]"
         >
           {t("db.empty")}
         </p>
@@ -1104,12 +1138,13 @@ function ConnectionBranch({
     },
   });
 
-  // The engine's own glyph, not the generic cylinder. A connection row used to carry the same
+  // The engine's own tile, not the generic cylinder. A connection row used to carry the same
   // `Database` icon as the `postgres` database *inside* it, so the two levels of the tree that mean
   // the most different things looked identical — and nothing anywhere in the row said whether you
-  // were pointing at IRIS or at Mongo. This is the same glyph the engine picker and the connection
-  // dialog draw, in the same colour, so an engine looks like itself everywhere it appears.
-  const EngineIcon = engineIcon(row.kind);
+  // were pointing at IRIS or at Mongo. This is the same tile the tab strip and the toolbars draw,
+  // and the glyph the engine picker and the connection dialog use, so an engine looks like itself
+  // everywhere it appears.
+  const engineLabel = engineInfo(row.kind).label;
 
   return (
     <>
@@ -1139,16 +1174,22 @@ function ConnectionBranch({
           onPointerUp: () => commitDrop(row.group_name, row.id),
         }}
         dropTarget={isDropTarget}
-        icon={<EngineIcon size={12} />}
-        color={engineColor(row.kind)}
+        icon={<EngineBadge kind={row.kind} label={engineLabel} size={18} />}
         name={row.name}
+        strong={connected}
         detail={undefined}
         // The same mark the notes shelf and the collection tree use, in the slot that already
         // exists for it — so "this one is on every workspace's shelf" reads identically in all
         // three trees.
         badge={
           row.scope === "global" ? (
-            <Globe size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <span
+              title={t("scope.globalBadge")}
+              aria-label={t("scope.globalBadge")}
+              className="flex shrink-0 items-center text-[var(--cf-text-faint)]"
+            >
+              <Globe size={12} />
+            </span>
           ) : undefined
         }
         // Where it points, on hover rather than on a line of its own. A connection URL is long
@@ -1186,8 +1227,11 @@ function ConnectionBranch({
           reason to open a connection more often than the schema is. */}
       {expanded && <SavedConsolesFolder consoles={consoles} connectionId={row.id} />}
       {expanded && error && (
-        <p className="flex items-start gap-1 py-1 pl-[26px] pr-2 text-[11px] text-[var(--cf-danger)]">
-          <AlertTriangle size={11} className="mt-[2px] shrink-0" />
+        <p
+          style={{ paddingLeft: noteInset(0) }}
+          className="flex items-start gap-1.5 py-1 pr-2 text-[12px] text-[var(--cf-danger)]"
+        >
+          <AlertTriangle size={13} className="mt-[2px] shrink-0" />
           <span className="min-w-0 break-words">{error}</span>
         </p>
       )}
@@ -1263,7 +1307,7 @@ function SavedConsolesFolder({
     <>
       <TreeRow
         depth={1}
-        icon={<FolderCode size={12} />}
+        icon={<FolderCode size={14} />}
         name={t("db.savedConsoles")}
         detail={consoles.length > 0 ? String(consoles.length) : undefined}
         expandable
@@ -1276,7 +1320,10 @@ function SavedConsolesFolder({
         }}
       />
       {open && consoles.length === 0 && (
-        <p className="py-1 pl-[38px] pr-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+        <p
+          style={{ paddingLeft: noteInset(1) }}
+          className="py-1 pr-2 text-[12px] leading-snug text-[var(--cf-text-faint)]"
+        >
           {t("db.savedConsolesEmpty")}
         </p>
       )}
@@ -1323,10 +1370,10 @@ function ConsoleNameInput({ saved }: { saved: DbConsole }) {
   const cancelled = useRef(false);
 
   return (
-    <div style={{ paddingLeft: 6 + 2 * 12 }} className="flex items-center gap-1 py-[3px] pr-1.5">
+    <div style={{ paddingLeft: ROW_INSET + 2 * INDENT }} className="flex h-7 items-center gap-2 pr-2">
       <span className="h-3.5 w-3.5 shrink-0" />
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
-        <FileCode2 size={12} />
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-faint)]">
+        <FileCode2 size={14} />
       </span>
       <input
         autoFocus
@@ -1348,11 +1395,16 @@ function ConsoleNameInput({ saved }: { saved: DbConsole }) {
             store.setRenamingConsole(null);
           }
         }}
-        className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1 py-[1px] text-[13px] outline-none"
+        className={INLINE_NAME_FIELD}
       />
     </div>
   );
 }
+
+/** The box a tree row turns into while it is being named: the field's fill with its focus ring
+ * already on — it only exists while focused — at the height of the row it replaces, less a margin. */
+const INLINE_NAME_FIELD =
+  "h-[22px] min-w-0 flex-1 select-text rounded-[5px] border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1.5 text-[13px] font-normal normal-case tracking-normal text-[var(--cf-text)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] outline-none";
 
 /**
  * The inline editor a group is named in. Selects on mount, commits on Enter or blur, cancels on
@@ -1399,7 +1451,7 @@ function GroupNameInput({
           onCancel();
         }
       }}
-      className="min-w-0 flex-1 select-text rounded border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1 py-px text-[12px] outline-none"
+      className={INLINE_NAME_FIELD}
     />
   );
 }
@@ -1407,10 +1459,11 @@ function GroupNameInput({
 /**
  * One folder in the connection tree, with its connections under it.
  *
- * The members are indented by a wrapper rather than by a `depth` threaded through every row: a
- * connection's subtree already numbers its own levels from the connection, and a group is a shelf
- * the whole subtree sits on, not another level inside it. One padding here moves the branch and
- * everything it will ever expand into, and `ConnectionBranch` never learns it is in a folder.
+ * The folder is drawn as a section heading — the small uppercase label the app puts over a group of
+ * rows ("LOCAL 2") — with a chevron, because it still folds. It used to be a row of its own, a
+ * folder icon and a name at the size of the connections, which made a shelf look like one more
+ * thing on the shelf. A heading needs no indent under it to say what belongs to it, so the members
+ * sit at the tree's own left edge and a connection's subtree never learns it is in a folder.
  */
 function GroupSection({
   group,
@@ -1462,9 +1515,6 @@ function GroupSection({
       : "workspace");
 
   const label = group || t("db.ungrouped");
-  // `FolderOpen` for the bucket that is the *absence* of a group, `FolderCode` for a real one — see
-  // the icon on the heading below.
-  const GroupIcon = group === UNGROUPED ? FolderOpen : FolderCode;
 
   /**
    * Deleting a folder, with the one thing worth confirming spelled out.
@@ -1549,7 +1599,7 @@ function GroupSection({
   }
 
   return (
-    <div className="py-0.5">
+    <div>
       <div
         role="treeitem"
         aria-expanded={!collapsed}
@@ -1571,20 +1621,15 @@ function GroupSection({
           setMenu({ x: e.clientX, y: e.clientY });
         }}
         style={riseDelay(at)}
-        className={`cf-rise group flex w-full cursor-default items-center gap-1 rounded-md px-1.5 py-[3px] text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+        className={`${sectionLabelClass} cf-rise group w-full cursor-default rounded-md text-left ${
           isDropTarget
             ? "bg-[var(--cf-accent-soft)] ring-1 ring-[var(--cf-accent)]"
-            : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            : "hover:text-[var(--cf-text-muted)]"
         }`}
       >
-        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
+        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         </span>
-        {/* The same two icons the "move to group" menu uses for the same two things — a named folder
-            and the loose bucket. Picking a different pair here would mean the tree and the menu
-            disagreed about what a group looks like, which is the one thing a chooser must not do.
-            Outside the rename branch: the row is still that group while its name is being typed. */}
-        <GroupIcon size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
         {renaming ? (
           <GroupNameInput
             value={group}
@@ -1596,10 +1641,8 @@ function GroupSection({
           />
         ) : (
           <>
-            <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--cf-text-muted)]">
-              {label}
-            </span>
-            <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+            <span className="min-w-0 flex-1 truncate">{label}</span>
+            <span className="shrink-0 font-medium tracking-normal tabular-nums">
               {members.length}
             </span>
           </>
@@ -1607,7 +1650,7 @@ function GroupSection({
       </div>
 
       {!collapsed && (
-        <div className="pl-3">
+        <div>
           {members.map((row, index) => (
             <ConnectionBranch key={row.id} row={row} index={index} total={members.length} />
           ))}
@@ -1737,14 +1780,14 @@ function SearchResults({ query }: { query: string }) {
 
   if (hits.out.length === 0) {
     return (
-      <p className="px-3 py-4 text-center text-[12px] text-[var(--cf-text-muted)]">
+      <p className="px-4 py-4 text-center text-[12px] text-[var(--cf-text-faint)]">
         {t("db.searchNoResults", { query: query.trim() })}
       </p>
     );
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto py-1">
+    <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5">
       {hits.out.map(({ connectionId, node }) => {
         const Icon = nodeIcon(node.kind);
         const connection = connections.find((c) => c.id === connectionId);
@@ -1752,19 +1795,19 @@ function SearchResults({ query }: { query: string }) {
           <button
             key={`${connectionId}|${node.id}`}
             onClick={() => store.openData(connectionId, nodeRefOf(node), node.name)}
-            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            className={rowClass(false, "py-1.5")}
           >
-            <Icon size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <Icon size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[13px] text-[var(--cf-text)]">{node.name}</span>
-              <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
+              <span className="block truncate text-[11px] text-[var(--cf-text-faint)]">
                 {[connection?.name, node.database, node.schema].filter(Boolean).join(" / ")}
               </span>
             </span>
           </button>
         );
       })}
-      <p className="px-2 py-2 text-[11px] italic text-[var(--cf-text-muted)]">
+      <p className="px-2 py-2 text-[11px] text-[var(--cf-text-faint)]">
         {t("db.searchScope", { n: String(hits.scanned) })}
       </p>
     </div>
@@ -1777,6 +1820,7 @@ function SearchResults({ query }: { query: string }) {
 
 export function DbExplorer() {
   const t = useT();
+  const chord = useShortcutChord();
   const width = useLayoutStore((s) => s.sizes.dbSidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
@@ -1818,9 +1862,9 @@ export function DbExplorer() {
     };
   }, []);
 
-  const sections: { id: DbSidebarSection; label: string }[] = [
-    { id: "explorer", label: t("db.explorer") },
-    { id: "history", label: t("db.history") },
+  const sections: { value: DbSidebarSection; label: string }[] = [
+    { value: "explorer", label: t("db.explorer") },
+    { value: "history", label: t("db.history") },
   ];
 
   const buckets = useMemo(
@@ -1862,79 +1906,80 @@ export function DbExplorer() {
         // that starts a drag would sweep a selection across every row it crossed. The two text
         // fields opt back in with `select-text`, since a search box you cannot select inside is
         // unusable — and under a `user-select: none` ancestor WebKit takes it from them too.
-        className={`flex h-full min-h-0 shrink-0 select-none flex-col overflow-hidden ${CARD}`}
+        // The app's explorer: a half-step into the sunken tone so the grid beside it reads as the
+        // page, with its own hairline — the resize seam below draws none at rest.
+        className={`${explorerClass} h-full select-none overflow-hidden`}
       >
-        <div
-          data-tour="db-explorer-actions"
-          className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1"
-        >
-          <span className="mr-auto min-w-0 truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {t("db.title")}
-          </span>
-          {/* The whole set, not one connection: the way into "set my databases up" that doesn't
-              require having a connection to right-click first. Arranging the order is not in there
-              — that is this tree's own job, by dragging a row. */}
-          <ToolbarButton
-            onClick={() => openModal({ kind: "connections" })}
-            title={t("db.manageConnections")}
-          >
-            <Settings2 size={13} />
-          </ToolbarButton>
-          <ToolbarButton
-            onClick={() => {
-              setSection("explorer");
-              setCreatingGroup(true);
-            }}
-            title={t("db.newGroup")}
-          >
-            <FolderPlus size={13} />
-          </ToolbarButton>
-          <ToolbarButton
-            onClick={(e) => setEngineMenu(menuAnchor(e))}
-            title={t("db.newConnection")}
-          >
-            <Plus size={13} />
-          </ToolbarButton>
-        </div>
-
-        <div className="flex shrink-0 gap-0.5 px-1.5 pt-1.5">
-          {sections.map((entry) => (
-            <button
-              key={entry.id}
-              onClick={() => setSection(entry.id)}
-              title={entry.label}
-              className={`relative min-w-0 flex-1 rounded-md px-1.5 py-1 text-[11px] font-medium ${
-                section === entry.id
-                  ? "text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-              }`}
+        {/* The head: which list is showing, and what can be added to it. The section switch is the
+            segmented control every two-way choice in the app uses; the three buttons keep the tour's
+            anchor to themselves, since that step is about them and not about the switch. */}
+        <div className={explorerHeadClass}>
+          {/* `min-w-0` and no clipping: squeezed, the labels end in an ellipsis (see `Segmented`)
+              instead of being cut mid-word by the edge of this box. */}
+          <div className="min-w-0 flex-1">
+            <Segmented
+              full
+              layoutId="cf-db-section"
+              value={section}
+              onChange={setSection}
+              options={sections}
+            />
+          </div>
+          <div data-tour="db-explorer-actions" className="flex shrink-0 items-center gap-0.5">
+            {/* The whole set, not one connection: the way into "set my databases up" that doesn't
+                require having a connection to right-click first. Arranging the order is not in
+                there — that is this tree's own job, by dragging a row. */}
+            <ToolbarButton
+              size="sm"
+              onClick={() => openModal({ kind: "connections" })}
+              title={t("db.manageConnections")}
+              shortcut={chord("db.connections")}
             >
-              {section === entry.id && <ActivePill layoutId="cf-db-section-pill" />}
-              <span className="relative block truncate">{entry.label}</span>
-            </button>
-          ))}
+              <Settings2 size={15} />
+            </ToolbarButton>
+            <ToolbarButton
+              size="sm"
+              onClick={() => {
+                setSection("explorer");
+                setCreatingGroup(true);
+              }}
+              title={t("db.newGroup")}
+            >
+              <FolderPlus size={15} />
+            </ToolbarButton>
+            <ToolbarButton
+              size="sm"
+              onClick={(e) => setEngineMenu(menuAnchor(e))}
+              title={t("db.newConnection")}
+              // The engines by name, which is the question the `+` raises before it is pressed.
+              description={DB_ENGINES.map((engine) => engine.label).join(" · ")}
+            >
+              <Plus size={15} />
+            </ToolbarButton>
+          </div>
         </div>
 
         {section === "explorer" && (
-          <div className="relative shrink-0 px-1.5 py-1.5">
+          <div className="relative shrink-0 pb-2 pl-3.5 pr-2">
             <Search
-              size={12}
-              className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+              size={13}
+              className="pointer-events-none absolute left-[22px] top-[13px] -translate-y-1/2 text-[var(--cf-text-faint)]"
             />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t("db.searchPlaceholder")}
-              className="w-full select-text rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-1 pl-6 pr-6 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+              aria-label={t("db.searchPlaceholder")}
+              className={fieldClass({ size: "sm", className: "w-full select-text pl-7 pr-7" })}
             />
             {query && (
               <button
                 onClick={() => setQuery("")}
                 title={t("db.clearSearch")}
                 aria-label={t("db.clearSearch")}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                className={iconButtonClass({ size: "xs", className: "absolute right-[10px] top-[2px]" })}
               >
-                <X size={12} />
+                <X size={13} />
               </button>
             )}
           </div>
@@ -1946,14 +1991,13 @@ export function DbExplorer() {
           ) : query.trim() ? (
             <SearchResults query={query} />
           ) : connections.length === 0 && !foldered && !creatingGroup ? (
-            // Just the state, no call to action: the "+" in the header is already the one way to
-            // add a connection, and repeating it here as a second button (plus a list of the
-            // engines, which the engine menu itself shows) made an empty panel look busier than a
-            // full one.
-            <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-              <Database size={22} className="text-[var(--cf-text-muted)]" />
-              <p className="text-[13px] text-[var(--cf-text)]">{t("db.noConnections")}</p>
-            </div>
+            // Just the state, in one faint line, and no call to action: the "+" in the header is
+            // already the one way to add a connection, and repeating it here as a second button
+            // (plus a list of the engines, which the engine menu itself shows) made an empty panel
+            // look busier than a full one.
+            <p className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-[12px] text-[var(--cf-text-faint)]">
+              {t("db.noConnections")}
+            </p>
           ) : (
             <div
               role="tree"
@@ -1961,11 +2005,11 @@ export function DbExplorer() {
                 e.preventDefault();
                 setTreeMenu({ x: e.clientX, y: e.clientY });
               }}
-              className="min-h-0 flex-1 overflow-auto p-1"
+              className="min-h-0 flex-1 overflow-auto px-2 pb-2.5"
             >
               {creatingGroup && (
-                <div className="flex items-center gap-1 px-1.5 py-[3px]">
-                  <FolderPlus size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                <div className="flex h-7 items-center gap-2 px-1.5">
+                  <FolderPlus size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
                   <GroupNameInput
                     value=""
                     onCommit={(value) => {
@@ -1990,7 +2034,7 @@ export function DbExplorer() {
               {/* Only when there is something on both sides of it: a rule above the first connection
                   of a tree that has no folders would be a line under nothing. */}
               {foldered && loose.length > 0 && (
-                <div className="mx-1 my-1.5 border-t border-[var(--cf-border)]" />
+                <div className="mx-1.5 my-2 h-px bg-[var(--cf-border)]" />
               )}
               {/* The loose connections are also the way *out* of a group. Every other target is a
                   row or a heading, and "no group" has neither — so the area they live in is the
@@ -2008,7 +2052,7 @@ export function DbExplorer() {
                   <ConnectionBranch key={row.id} row={row} index={index} total={loose.length} />
                 ))}
                 {dragging && loose.length === 0 && (
-                  <p className="px-2 py-3 text-center text-[11px] text-[var(--cf-text-muted)]">
+                  <p className="px-2 py-3 text-center text-[12px] text-[var(--cf-text-faint)]">
                     {t("db.dropToUngroup")}
                   </p>
                 )}
@@ -2020,6 +2064,8 @@ export function DbExplorer() {
 
       <ResizeHandle
         axis="x"
+        // The explorer draws its own hairline; a seam line beside it would double the edge.
+        seamless
         value={width}
         min={WIDTH_MIN}
         max={WIDTH_MAX}

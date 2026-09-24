@@ -38,6 +38,7 @@ import {
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useT } from "../../state/languageStore";
+import { fieldClass } from "../common/recipes";
 
 /**
  * The explorer: search, the book tree, and the tag filter.
@@ -698,7 +699,7 @@ export function NoteExplorer() {
             placeholder={t("notes.searchPlaceholder")}
             aria-label={t("notes.searchPlaceholder")}
             spellCheck={false}
-            className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] py-1 pl-6 pr-6 text-[11.5px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: "sm", className: "w-full pl-6 pr-6" })}
           />
           {query && (
             <button
@@ -746,7 +747,7 @@ export function NoteExplorer() {
         onKeyDown={onTreeKeyDown}
       >
         {rows.length === 0 ? (
-          <p className="px-2 py-6 text-center text-[11.5px] text-[var(--cf-text-muted)]">
+          <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">
             {query || tagFilter.length > 0 ? t("notes.noMatches") : t("notes.treeEmpty")}
           </p>
         ) : (
@@ -819,7 +820,7 @@ export function NoteExplorer() {
                 aria-pressed={tagsByCount}
                 title={tagsByCount ? t("notes.tagSortByCount") : t("notes.tagSortByName")}
                 aria-label={tagsByCount ? t("notes.tagSortByCount") : t("notes.tagSortByName")}
-                className={`shrink-0 rounded p-0.5 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
+                className={`inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 hover:bg-[var(--cf-hover)] ${
                   tagsByCount ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
                 }`}
               >
@@ -927,10 +928,10 @@ function TagRow({
       type="button"
       onClick={onClick}
       aria-pressed={active}
-      className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-[3px] text-left text-[11.5px] ${
+      className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-[3px] text-left text-[12px] ${
         active
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+          : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
       }`}
     >
       <span
@@ -942,10 +943,10 @@ function TagRow({
       {/* `tabular-nums` so a column of counts lines up on its digits rather than shuffling as they
           change width — the whole reason for putting them on one edge. */}
       <span
-        className={`shrink-0 rounded-full px-1.5 py-px text-[10px] tabular-nums ${
+        className={`shrink-0 rounded-full px-1.5 py-px text-[10.5px] tabular-nums ${
           active
             ? "bg-[var(--cf-accent)]/20 text-[var(--cf-accent)]"
-            : "bg-black/[0.06] text-[var(--cf-text-muted)] dark:bg-white/[0.08]"
+            : "bg-[var(--cf-press)] text-[var(--cf-text-muted)]"
         }`}
       >
         {count}
@@ -994,7 +995,7 @@ function TemplateStrip() {
         type="button"
         onClick={() => setOpen(true)}
         data-tour="notes-templates"
-        className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-2 text-left text-[11.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+        className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-2 text-left text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         <LayoutTemplate size={12} className="shrink-0" />
         <span className="min-w-0 flex-1 truncate">{t("notes.templates")}</span>

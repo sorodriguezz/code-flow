@@ -662,7 +662,7 @@ export function ChatView() {
             describes. */}
         <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-4">
           <MessagesSquare size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
-          <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
             {conversation?.title || t("chat.newChat")}
           </span>
 
@@ -760,7 +760,7 @@ export function ChatView() {
               // banner off would let the user believe they had corrected a question they had in
               // fact only asked twice.
               <div className={`${READING_COLUMN} ${COLUMN_GUTTER} shrink-0`}>
-                <div className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
+                <div className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)]">
                   <Pencil size={11} className="shrink-0" />
                   <span className="flex-1">{t("chat.reAskingTurn", { n: editingTurn })}</span>
                   <button

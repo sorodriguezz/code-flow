@@ -18,6 +18,7 @@ import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { BoardWorkItem, NewStoryWorkItem } from "../../types/domain";
+import { fieldClass } from "../common/recipes";
 
 /** Mirrors `queries::MAX_CHAIN_REPOS`, halved by `create_story_chain`'s row budget: a story run is
  * two passes per repository. */
@@ -253,7 +254,7 @@ export function StoryRealizerModal({
                 }
               }}
               placeholder={t("agents.storyRefPlaceholder")}
-              className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+              className={fieldClass({ className: "min-w-0 flex-1" })}
             />
             <GhostButton onClick={() => void load()} disabled={loading || !input.trim()}>
               {loading ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
@@ -267,10 +268,10 @@ export function StoryRealizerModal({
         {item && (
           <div className="rounded-lg border border-[var(--cf-border)] px-2.5 py-2">
             <div className="flex items-center gap-2">
-              <span className="shrink-0 rounded bg-black/[0.06] px-1.5 py-[1px] text-[10px] font-semibold tabular-nums dark:bg-white/[0.1]">
+              <span className="shrink-0 rounded bg-[var(--cf-press)] px-1.5 py-[1px] text-[10.5px] font-semibold tabular-nums">
                 {item.work.key || `#${item.work.id}`}
               </span>
-              <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{item.work.title}</span>
+              <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{item.work.title}</span>
               {item.work.url && (
                 <button
                   type="button"

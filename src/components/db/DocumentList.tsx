@@ -184,11 +184,11 @@ function DocumentCard({
   return (
     <div className={`group/doc rounded-md border ${STATE_STYLE[state]}`}>
       <div className="flex items-start gap-1.5 px-2 py-1.5">
-        <span className="w-8 shrink-0 select-none pt-[1px] text-right text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+        <span className="w-8 shrink-0 select-none pt-[1px] text-right text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
           {number ?? "+"}
         </span>
         <pre
-          className={`min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-[11.5px] leading-[17px] ${
+          className={`min-w-0 flex-1 overflow-x-auto whitespace-pre font-mono text-[12px] leading-[17px] ${
             state === "deleted" ? "line-through opacity-60" : ""
           }`}
         >
@@ -282,7 +282,7 @@ function CardButton({
       title={title}
       aria-label={title}
       disabled={disabled}
-      className={`rounded p-1 transition-colors hover:bg-black/[0.05] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-white/[0.08] ${
+      className={`inline-flex h-[22px] w-[22px] items-center justify-center rounded-md transition-colors hover:bg-[var(--cf-hover)] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent ${
         danger
           ? "text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
           : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"

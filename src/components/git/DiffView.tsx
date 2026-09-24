@@ -1,10 +1,14 @@
-import { lazy, memo, Suspense, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Columns2, FileDiff, Rows3, X } from "lucide-react";
 import type { DiffLine, FileDiffInfo } from "../../types/domain";
 import { EmptyState } from "../common/EmptyState";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass } from "../common/Button";
+import { chipClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { inlineSpans, lineClasses, pairHunkLines, worthHighlighting } from "../../lib/diffText";
-import { fileStatusLabelKey, fileStatusColor as statusColor } from "../../lib/fileStatus";
+import { fileStatusChipStyle, fileStatusLabelKey } from "../../lib/fileStatus";
 
 /**
  * The split view's editor pane, and the only part of this file that needs Monaco.
@@ -25,8 +29,8 @@ const SPLIT_LINE_HEIGHT = 19;
 
 /** `leading-5` on the unified hunk body, in pixels — one rendered code line. */
 const UNIFIED_LINE_HEIGHT = 20;
-/** The `@@ … @@` bar above a unified hunk: one `leading-5` line plus its `py-1`. */
-const UNIFIED_HUNK_HEADER_HEIGHT = 28;
+/** The `@@ … @@` bar above a unified hunk: one `leading-5` line, its `py-1`, and its hairlines. */
+const UNIFIED_HUNK_HEADER_HEIGHT = 30;
 
 /**
  * The height a unified hunk will take, from its line count alone.
@@ -160,7 +164,7 @@ function ChangeMap({
     <div
       ref={stripRef}
       onClick={jumpTo}
-      className="sticky top-0 h-full w-3 shrink-0 cursor-pointer self-stretch bg-black/[0.02] dark:bg-white/[0.04]"
+      className="sticky top-0 h-full w-3 shrink-0 cursor-pointer self-stretch border-l border-[var(--cf-border)] bg-[var(--cf-sunken)]"
     >
       <div className="relative h-full w-full">
         {marks.map((m) => {
@@ -235,64 +239,135 @@ function InlineContent({ line, lines, index }: { line: DiffLine; lines: DiffLine
   );
 }
 
+/**
+ * A file's status as a word and its path, for the head of a diff.
+ *
+ * `sticky` is for the multi-file view, where one of these heads each file in the scroll; a
+ * single-file diff has its file named in the toolbar instead (see `DiffViewImpl`).
+ */
+function FileHeader({ file, t }: { file: FileDiffInfo; t: ReturnType<typeof useT> }) {
+  return (
+    <div
+      className="sticky top-0 z-10 flex h-9 items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-3"
+      // `contain: paint` stays — it keeps the header's repaints out of the rest of the list.
+      // `will-change: transform` does not: it promotes the element to its own composited layer *for
+      // the element's whole lifetime*, and this header is emitted once per file, so a 200-file commit
+      // was holding 200 permanent GPU textures (~23MB) to smooth a transform that only happens while
+      // that one file is on screen. `position: sticky` already gets promoted when it needs to be.
+      style={{ contain: "paint" }}
+    >
+      <span className={chipClass("neutral")} style={fileStatusChipStyle(file.status)}>
+        {t(fileStatusLabelKey(file.status))}
+      </span>
+      <span className="truncate font-mono text-[12px] text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
+    </div>
+  );
+}
+
 function DiffViewImpl({
   files,
   onClose,
+  context,
 }: {
   files: FileDiffInfo[];
   /**
    * Dismisses the diff. Supplied only where the diff is one pane of a view that reads perfectly
-   * well without it — the Changes screen — and left out where the diff *is* the view, as in the
-   * stash dialog, whose own chrome already closes it.
+   * well without it — the Changes screen, the graph's side panel — and left out where the diff *is*
+   * the view, as in the stash dialog, whose own chrome already closes it.
    *
    * Must be referentially stable. This component is memoised on its props precisely so that
    * dragging the panel's resize handle doesn't rebuild a large diff on every pointer move, and an
    * inline arrow would defeat that on every parent render.
    */
   onClose?: () => void;
+  /**
+   * Where the diff comes from, on a quiet line under the toolbar — the graph passes the commit.
+   * Stable for the same reason as `onClose`: memoise it in the caller.
+   */
+  context?: ReactNode;
 }) {
   const t = useT();
   const [mode, setMode] = useState<ViewMode>("unified");
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Per instance, not a constant: the Changes pane, the graph's panel and the stash dialog can all
+  // hold a diff at once, and two segmented thumbs sharing a `layoutId` would fly between them.
+  const segmentedId = useId();
+
+  const closeButton = onClose ? (
+    <Tooltip label={t("diff.close")}>
+      <button type="button" onClick={onClose} aria-label={t("diff.close")} className={iconButtonClass({ size: "xs" })}>
+        <X size={14} />
+      </button>
+    </Tooltip>
+  ) : null;
+
+  const contextLine = context ? (
+    <div className="flex h-8 shrink-0 items-center border-b border-[var(--cf-border)] px-3">
+      <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-faint)]">{context}</span>
+    </div>
+  ) : null;
 
   if (files.length === 0) {
-    return <EmptyState icon={FileDiff} title={t("diff.noChanges")} subtitle={t("diff.noChangesHint")} />;
+    const empty = <EmptyState icon={FileDiff} title={t("diff.noChanges")} subtitle={t("diff.noChangesHint")} />;
+    if (!closeButton) return empty;
+    // A pane with a way out keeps the bar the way out lives in: an empty diff is still a pane the
+    // user opened, and without this the only close button on it disappeared with the diff.
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex h-10 shrink-0 items-center justify-end border-b border-[var(--cf-border)] pl-3 pr-2">
+          {closeButton}
+        </div>
+        {contextLine}
+        <div className="min-h-0 flex-1">{empty}</div>
+      </div>
+    );
   }
+
+  /**
+   * One file — the Changes pane and the graph's panel always show exactly one — is named in the
+   * toolbar, status word and path, and gets no sticky header of its own: the header used to repeat
+   * the toolbar's file one bar lower. The stash dialog shows a whole stash and keeps a header per
+   * file, because there the files are what you scroll through.
+   */
+  const single = files.length === 1 ? files[0] : null;
+  const singlePath = single ? (single.new_path ?? single.old_path ?? "") : "";
 
   /** Shared by both modes, so the close button can't exist in one view and not the other. Sits
    * outside the scroll container in both, so it stays put while the diff scrolls under it. */
   const toolbar = (
-    <div className="flex shrink-0 items-center justify-end gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5">
-      <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
-        <button
-          onClick={() => setMode("unified")}
-          title={t("diff.unifiedView")}
-          className={`flex h-5 w-5 items-center justify-center rounded ${
-            mode === "unified" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-          }`}
-        >
-          <Rows3 size={12} />
-        </button>
-        <button
-          onClick={() => setMode("split")}
-          title={t("diff.splitView")}
-          className={`flex h-5 w-5 items-center justify-center rounded ${
-            mode === "split" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-          }`}
-        >
-          <Columns2 size={12} />
-        </button>
-      </div>
-      {onClose && (
-        <button
-          onClick={onClose}
-          title={t("diff.close")}
-          aria-label={t("diff.close")}
-          className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-        >
-          <X size={13} />
-        </button>
+    <div className="flex h-10 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-3 pr-2">
+      {single ? (
+        <>
+          <span className={chipClass("neutral")} style={fileStatusChipStyle(single.status)}>
+            {t(fileStatusLabelKey(single.status))}
+          </span>
+          {/* `dir="rtl"` so a long path loses its *front* — `…/git/GraphView.tsx` names the file,
+              `src/components/git/Gra…` names nothing. The marks either side keep the path's own
+              left-to-right order, so a leading `.` stays at the front instead of being moved to the
+              end by the right-to-left run it sits in. */}
+          <span className="min-w-0 flex-1" title={singlePath}>
+            <span dir="rtl" className="block truncate text-left font-mono text-[12px] text-[var(--cf-text)]">
+              {`\u200e${singlePath}\u200e`}
+            </span>
+          </span>
+        </>
+      ) : (
+        <span className="flex-1" />
       )}
+      {/* The one control for how a diff is laid out, the same segmented switch every "two ways to
+          show one thing" in the app wears. Icons only, named by their tooltips: this pane can be
+          280px wide, and two labelled options would take a third of it. */}
+      <Segmented
+        size="sm"
+        value={mode}
+        onChange={setMode}
+        layoutId={`diff-mode-${segmentedId}`}
+        options={[
+          { value: "unified", icon: Rows3, title: t("diff.unifiedView") },
+          { value: "split", icon: Columns2, title: t("diff.splitView") },
+        ]}
+      />
+      {closeButton}
     </div>
   );
 
@@ -300,40 +375,21 @@ function DiffViewImpl({
     return (
       <div className="flex h-full flex-col">
         {toolbar}
+        {contextLine}
         <div className="flex min-h-0 flex-1">
           <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
             <div className="divide-y divide-[var(--cf-border)]">
-              {files.map((file, i) => {
-                const color = statusColor(file.status);
-                return (
-                  <div key={i}>
-                    <div
-                      className="sticky top-0 z-10 flex items-center gap-2 border-b-2 bg-[var(--cf-surface-raised)] px-3 py-2 text-[12px] font-semibold shadow-sm"
-                      // `contain: paint` stays — it keeps the header's repaints out of the rest of
-                      // the list. `will-change: transform` does not: it promotes the element to its
-                      // own composited layer *for the element's whole lifetime*, and this header is
-                      // emitted once per file, so a 200-file commit was holding 200 permanent GPU
-                      // textures (~23MB) to smooth a transform that only happens while that one file
-                      // is on screen. `position: sticky` already gets promoted when it needs to be.
-                      style={{ borderBottomColor: color, contain: "paint" }}
-                    >
-                      <span
-                        className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
-                        style={{ background: `color-mix(in oklab, ${color} 18%, transparent)`, color }}
-                      >
-                        {t(fileStatusLabelKey(file.status))}
-                      </span>
-                      <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
-                    </div>
-                    {/* The fallback is the very element `SplitFileDiff` itself renders until it
-                        intersects the viewport (and most panes in a long diff are showing exactly
-                        that at any moment), so the chunk arriving changes nothing on screen. */}
-                    <Suspense fallback={<div style={{ height: splitHeightOf(file) }} className="bg-[var(--cf-bg)]" />}>
-                      <SplitFileDiff file={file} height={splitHeightOf(file)} />
-                    </Suspense>
-                  </div>
-                );
-              })}
+              {files.map((file, i) => (
+                <div key={i}>
+                  {!single && <FileHeader file={file} t={t} />}
+                  {/* The fallback is the very element `SplitFileDiff` itself renders until it
+                      intersects the viewport (and most panes in a long diff are showing exactly
+                      that at any moment), so the chunk arriving changes nothing on screen. */}
+                  <Suspense fallback={<div style={{ height: splitHeightOf(file) }} className="bg-[var(--cf-sunken)]" />}>
+                    <SplitFileDiff file={file} height={splitHeightOf(file)} />
+                  </Suspense>
+                </div>
+              ))}
             </div>
           </div>
           <ChangeMap files={files} containerRef={scrollRef} />
@@ -345,28 +401,13 @@ function DiffViewImpl({
   return (
     <div className="flex h-full flex-col">
       {toolbar}
+      {contextLine}
       <div className="flex min-h-0 flex-1">
         <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
           <div className="divide-y divide-[var(--cf-border)]">
-            {files.map((file, i) => {
-              const color = statusColor(file.status);
-              return (
+            {files.map((file, i) => (
                 <div key={i}>
-                  <div
-                    className="sticky top-0 z-10 flex items-center gap-2 border-b-2 bg-[var(--cf-surface-raised)] px-3 py-2 text-[12px] font-semibold shadow-sm"
-                    // See the same header in the split branch above: `contain: paint` earns its
-                    // place, `will-change: transform` was buying one permanent composited layer per
-                    // file in the commit for a promotion `position: sticky` already gets on its own.
-                    style={{ borderBottomColor: color, contain: "paint" }}
-                  >
-                    <span
-                      className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
-                      style={{ background: `color-mix(in oklab, ${color} 18%, transparent)`, color }}
-                    >
-                      {t(fileStatusLabelKey(file.status))}
-                    </span>
-                    <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
-                  </div>
+                  {!single && <FileHeader file={file} t={t} />}
                   {file.hunks.map((hunk, hIdx) => (
                     // `select-text` re-enables selection here (the app-wide `body { user-select: none }`
                     // otherwise makes this custom-rendered diff feel like an image). The line-number
@@ -398,13 +439,24 @@ function DiffViewImpl({
                         containIntrinsicSize: `auto ${unifiedHunkHeight(hunk.lines.length)}px`,
                       }}
                     >
-                      <div className="bg-[var(--cf-accent-soft)] px-3 py-1 text-[var(--cf-accent)]">{hunk.header}</div>
+                      {/* A quiet band between hunks rather than an accent bar: the `@@` line is
+                          where you are, not something to act on, and in accent it outshouted the
+                          added and removed lines it introduces. A hairline above every hunk but
+                          the first — which sits under the toolbar's or the file header's own — so
+                          two hunks in a row read as two. */}
+                      <div
+                        className={`border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] px-3 py-1 text-[var(--cf-text-muted)] ${
+                          hIdx > 0 ? "border-t" : ""
+                        }`}
+                      >
+                        {hunk.header}
+                      </div>
                       {hunk.lines.map((line, lIdx) => (
                         <div key={lIdx} className={`flex gap-3 px-3 ${lineClasses(line.origin)}`}>
-                          <span className="w-8 shrink-0 select-none text-right text-[var(--cf-text-muted)]">
+                          <span className="w-8 shrink-0 select-none text-right tabular-nums text-[var(--cf-text-faint)]">
                             {line.old_lineno ?? ""}
                           </span>
-                          <span className="w-8 shrink-0 select-none text-right text-[var(--cf-text-muted)]">
+                          <span className="w-8 shrink-0 select-none text-right tabular-nums text-[var(--cf-text-faint)]">
                             {line.new_lineno ?? ""}
                           </span>
                           <span className="whitespace-pre-wrap break-all">
@@ -416,8 +468,7 @@ function DiffViewImpl({
                     </div>
                   ))}
                 </div>
-              );
-            })}
+            ))}
           </div>
         </div>
         <ChangeMap files={files} containerRef={scrollRef} />

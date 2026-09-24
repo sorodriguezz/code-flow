@@ -204,7 +204,7 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
             onClick={() => void useStoriesStore.getState().select(null)}
             title={t("stories.closeBatchHint")}
             aria-label={t("stories.closeBatch")}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
             <X size={14} />
           </button>
@@ -213,7 +213,7 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
         {/* The exact text the model was given. Collapsed by default and one click away, because
             "why did it write that?" is answered here and nowhere else — the wiki has moved on. */}
         {showSource && (
-          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-2 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-2 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
             {batch.source_text}
           </pre>
         )}
@@ -462,7 +462,7 @@ function HeaderButton({
       title={title}
       className={`flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium disabled:cursor-not-allowed disabled:opacity-40 ${
         primary
-          ? "bg-[var(--cf-accent)] text-white hover:brightness-110"
+          ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))]"
           : "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
       }`}
     >

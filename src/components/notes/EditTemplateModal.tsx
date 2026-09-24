@@ -7,6 +7,7 @@ import { serializeTags } from "../../lib/notes/tags";
 import type { NoteTemplate } from "../../types/notes";
 import { useNotesStore } from "../../state/notesStore";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /**
  * Edits a template in place — name, description, icon, tags and body — including the six that
@@ -191,7 +192,7 @@ export function EditTemplateModal({
             type="button"
             disabled={!ready}
             onClick={() => void submit()}
-            className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {t("notes.save")}
           </button>

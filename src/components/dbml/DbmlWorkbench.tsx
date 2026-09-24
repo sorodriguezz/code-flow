@@ -51,7 +51,10 @@ import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ViewSkeleton } from "../common/ViewSkeleton";
-import { ToolbarButton } from "../db/dbChrome";
+import { ActivePill } from "../common/ActivePill";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { segItemClass, segTrackClass } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
 import * as edits from "../../lib/dbml/edit";
 import { formatDbml } from "../../lib/dbml/format";
 import { hintFor } from "../../lib/dbml/errors";
@@ -126,6 +129,20 @@ const DIMMED = 0.32;
 /** `motion-reduce` drops the *transition*, not the fade: the fade is the information. */
 const CHROME_FADE = "transition-opacity duration-200 motion-reduce:transition-none";
 
+/**
+ * What every control floating over the drawing stands on: a solid raised surface, a hairline and
+ * the app's popover shadow.
+ *
+ * **Solid, never blurred.** These bars used to be a translucent raised fill with a `backdrop-blur`
+ * behind it, five of them, and a blur over a canvas is the most expensive thing that can be put on
+ * one: the canvas pans and zooms under the bar, so what the bar blurs changes every frame and the
+ * compositor re-rasterises the blurred region on every one of them — for a frosting nobody can see
+ * through a 26px button anyway. An opaque surface with a shadow lifts the controls off the drawing
+ * just as clearly and costs nothing while it moves.
+ */
+const FLOAT_BAR =
+  "flex items-center gap-0.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[3px] shadow-[var(--cf-shadow)]";
+
 /** How long after the last keystroke the document is re-parsed. */
 const PARSE_DEBOUNCE_MS = 260;
 /** And how long after the last change the gallery's picture is redrawn. Longer: it rasterises. */
@@ -170,21 +187,6 @@ const TOOLS: { id: Tool; Icon: typeof FileCode2 }[] = [
   { id: "import", Icon: FileUp },
   { id: "diff", Icon: GitCompare },
 ];
-
-/**
- * One position of the view control — Diagrama, Datos, or the tool.
- *
- * The selected one is filled in the accent and the others are muted, and that is the whole contract
- * the control has to keep: exactly one of the three is what you are looking at.
- */
-function viewPill(selected: boolean): string {
-  return (
-    "flex items-center gap-1 rounded-md px-2.5 py-[3px] text-[11px] font-medium transition-colors " +
-    (selected
-      ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-      : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]")
-  );
-}
 
 interface Parser {
   parseDbml: (doc: string) => DbmlSchema;
@@ -1326,9 +1328,12 @@ export function DbmlWorkbench({
             right: inspectorShowing ? inspectorWidth + 1 + 16 : 16,
             opacity: chromeHot ? 1 : DIMMED,
           }}
-          className={`absolute top-3 z-20 flex items-center gap-1 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 px-2 py-[5px] text-[10.5px] font-medium text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] backdrop-blur transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] ${CHROME_FADE}`}
+          // The float bar's surface (see `FLOAT_BAR`) on a worded button. The transition names both
+          // properties it animates: `transition-colors` beside the fade's `transition-opacity` was
+          // two utilities setting one property, and only one of them ever won.
+          className="absolute top-3 z-20 flex h-8 items-center gap-1.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 text-[12px] font-medium text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] transition-[color,opacity] duration-200 hover:text-[var(--cf-text)] motion-reduce:transition-none"
         >
-          <Minimize size={12} />
+          <Minimize size={14} />
           {t("dbml.zenExit")}
         </button>
       )}
@@ -1340,53 +1345,74 @@ export function DbmlWorkbench({
         />
       )}
       {!zen && (
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5">
+      // The toolbar anatomy — 44px, a hairline under it — with one allowance: it wraps. Three
+      // positions, a status and seven buttons do not fit one row of a narrow window, and a toolbar
+      // that clips its own controls is worse than one that grows a line.
+      <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] py-1.5 pl-3 pr-3">
         {/* One segmented control with *three* positions, because there are three things that can be
             in front of you and only ever one of them is.
 
             The tools button used to sit outside this group, bordered, on the theory that it was a
             menu rather than a view. It isn't: what it opens covers the surface whole. Outside the
-            group it left Diagrama filled in the accent while Comparar was what you were reading —
-            the control claiming the canvas was showing while a panel covered it. Inside, the rule
-            is simple and visible: whichever one is filled is what you are looking at, and pressing
-            another replaces it. */}
-        <div className="flex items-center gap-[2px] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-field)] p-[2px]">
-          {(["diagram", "data"] as const).map((entry) => (
-            <button
-              key={entry}
-              type="button"
-              onClick={() => {
-                setSurface(entry);
-                // Diagrama and Datos *are* the view. A tool left open over the surface you just
-                // chose would mean pressing Datos and still looking at generated Prisma.
-                setTool(null);
-              }}
-              // Only when no tool is covering it — see the note above.
-              aria-pressed={tool === null && surface === entry}
-              className={viewPill(tool === null && surface === entry)}
-            >
-              {t(`dbml.tab.${entry}` as "dbml.tab.diagram")}
-              {/* The Datos pill carries state, so the diagram can tell you your data is stale
-                  without your going to look. The count is what there is; the amber dot is that the
-                  model has moved under it. */}
-              {entry === "data" && sandboxRows > 0 && (
-                <span className="font-mono text-[9.5px] tabular-nums opacity-70">
-                  {sandboxRows}
+            group it left Diagrama lit while Comparar was what you were reading — the control
+            claiming the canvas was showing while a panel covered it. Inside, the rule is simple
+            and visible: whichever one wears the raised thumb is what you are looking at, and
+            pressing another slides it there.
+
+            The segmented recipe with its own markup rather than `Segmented`, because the third
+            position is a menu trigger and not a value — but it is the same track, the same items
+            and the same sliding thumb as every other segmented control in the app. */}
+        <div className={segTrackClass()} role="group">
+          {(["diagram", "data"] as const).map((entry) => {
+            const active = tool === null && surface === entry;
+            const item = (
+              <button
+                key={entry}
+                type="button"
+                onClick={() => {
+                  setSurface(entry);
+                  // Diagrama and Datos *are* the view. A tool left open over the surface you just
+                  // chose would mean pressing Datos and still looking at generated Prisma.
+                  setTool(null);
+                }}
+                // Only when no tool is covering it — see the note above.
+                aria-pressed={active}
+                className={segItemClass(active)}
+              >
+                {active && <ActivePill layoutId="dbml-surface" variant="raised" />}
+                <span className="relative inline-flex items-center gap-1.5">
+                  {t(`dbml.tab.${entry}` as "dbml.tab.diagram")}
+                  {/* The Datos position carries state, so the diagram can tell you your data is
+                      stale without your going to look. The count is what there is; the amber dot
+                      is that the model has moved under it — and the tooltip says so in words,
+                      because a dot on its own is a colour asking to be decoded. */}
+                  {entry === "data" && sandboxRows > 0 && (
+                    <span className="font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+                      {sandboxRows}
+                    </span>
+                  )}
+                  {entry === "data" && sandboxDrifted && (
+                    <span
+                      aria-hidden
+                      className="h-[6px] w-[6px] rounded-full bg-[var(--cf-warning)]"
+                    />
+                  )}
                 </span>
-              )}
-              {entry === "data" && sandboxDrifted && (
-                <span
-                  aria-hidden
-                  className="h-[5px] w-[5px] rounded-full bg-[var(--cf-warning)]"
-                />
-              )}
-            </button>
-          ))}
+              </button>
+            );
+            return entry === "data" && sandboxDrifted ? (
+              <Tooltip key={entry} label={t("dbml.sandbox.driftTitle")}>
+                {item}
+              </Tooltip>
+            ) : (
+              item
+            );
+          })}
 
           {/* The third position. It is one button and not three because the three tools are
               alternatives to *this slot*, not to each other — so the chevron: press it and pick
-              which one goes here. Once one is open the pill wears that tool's name and glyph, which
-              is what makes the group readable at a glance: Diagrama, Datos, Comparar. */}
+              which one goes here. Once one is open the position wears that tool's name and glyph,
+              which is what makes the group readable at a glance: Diagrama, Datos, Comparar. */}
           {(() => {
             const open = TOOLS.find((entry) => entry.id === tool);
             const Icon = open ? open.Icon : Wrench;
@@ -1396,11 +1422,14 @@ export function DbmlWorkbench({
                 onClick={(event) => setToolsAt(event.currentTarget.getBoundingClientRect())}
                 aria-pressed={tool !== null}
                 aria-haspopup="menu"
-                className={viewPill(tool !== null)}
+                className={segItemClass(tool !== null)}
               >
-                <Icon size={11} />
-                {open ? t(`dbml.tab.${open.id}` as "dbml.tab.convert") : t("dbml.tools")}
-                <ChevronDown size={11} className="opacity-70" />
+                {tool !== null && <ActivePill layoutId="dbml-surface" variant="raised" />}
+                <span className="relative inline-flex items-center gap-1.5">
+                  <Icon size={13} />
+                  {open ? t(`dbml.tab.${open.id}` as "dbml.tab.convert") : t("dbml.tools")}
+                  <ChevronDown size={12} className="text-[var(--cf-text-faint)]" />
+                </span>
               </button>
             );
           })()}
@@ -1408,9 +1437,10 @@ export function DbmlWorkbench({
 
         <span className="flex-1" />
 
-        {/* Whether the document currently parses, as a light. It is the one thing about a schema
-            being typed that you want to know without looking away from the canvas. */}
-        <span className="flex items-center gap-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+        {/* Whether the document currently parses, as a light and the words for it. It is the one
+            thing about a schema being typed that you want to know without looking away from the
+            canvas. */}
+        <span className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
           <span
             className="h-[6px] w-[6px] rounded-full"
             style={{
@@ -1422,68 +1452,73 @@ export function DbmlWorkbench({
             : t("dbml.statusParsed", { count: String(schema.tables.length) })}
         </span>
 
-        <ToolbarButton
-          onClick={() => {
-            setReference(false);
-            setHistory((open) => !open);
-          }}
-          title={t("dbml.history")}
-          active={history}
-          // Never disabled, even with nothing recorded yet. The panel is not only this session's
-          // change list — the saved versions, which reach back past today, are reached from the
-          // foot of it — and a freshly opened schema is exactly the case with no revisions and a
-          // month of versions behind it. Greying it out there put the only way to those versions
-          // behind a button that looked broken.
-        >
-          <History size={12} />
-        </ToolbarButton>
-        <ToolbarButton
-          onClick={() => {
-            setHistory(false);
-            setReference((open) => !open);
-          }}
-          title={t("dbml.reference")}
-          active={reference}
-        >
-          <BookOpen size={12} />
-        </ToolbarButton>
-        <ToolbarButton onClick={tidy} title={t("dbml.format")}>
-          <Wand2 size={12} />
-        </ToolbarButton>
-        {/* Next to the formatter, because they are the same gesture on the two halves of the
-            document: one tidies the text, the other tidies the picture. It had only ever been a row
-            in a popover behind a button in the canvas's bottom-right corner that fades to a third
-            opacity when the pointer leaves — which is to say it existed and nobody could find it. */}
-        {/* No arrange and no line-style button here on purpose. Both change how the *picture* is
-            drawn rather than what the document says, and both already live where that decision
-            belongs: the canvas's own "Ver" menu, in the corner of the drawing they act on, and its
-            background context menu. This toolbar is for the document. */}
-        <ToolbarButton onClick={onSaveAsTemplate} title={t("diagrams.saveAsTemplate")}>
-          <Table2 size={12} />
-        </ToolbarButton>
-        <ToolbarButton
-          onClick={(event) => setExportAt({ x: event.clientX, y: event.clientY })}
-          title={t("diagrams.export")}
-        >
-          <Download size={12} />
-        </ToolbarButton>
-        {/* The sparkle, in this workbench's own toolbar — the same place draw.io's injected one
-            sits, and it opens the same panel. See `DiagramsView`. */}
-        <ToolbarButton onClick={onAskAi} title={t("diagrams.ai.title")}>
-          <Sparkles size={12} />
-        </ToolbarButton>
-        {/* Full screen last, next to the sparkle: both are things you do *to the view* rather than
-            to the document. Disabled on the Datos surface — there is no canvas to fill. */}
-        {/* Disabled while the AI panel or a tool drawer is open rather than left to be undone a tick
-            later by the effect below: pressing it then closed the reference and history panels and
-            re-fitted the canvas on the way to doing nothing at all. */}
-        <ToolbarButton
-          onClick={enterZen}
-          title={t("dbml.zen")}
-          disabled={surface !== "diagram" || aiOpen || tool !== null}
-        >
-          <Expand size={12} />
-        </ToolbarButton>
+        <span aria-hidden className="mx-0.5 h-4 w-px bg-[var(--cf-border-strong)]" />
+
+        <div className="flex items-center gap-0.5">
+          <ToolButton
+            onClick={() => {
+              setReference(false);
+              setHistory((open) => !open);
+            }}
+            label={t("dbml.history")}
+            active={history}
+            // Never disabled, even with nothing recorded yet. The panel is not only this session's
+            // change list — the saved versions, which reach back past today, are reached from the
+            // foot of it — and a freshly opened schema is exactly the case with no revisions and
+            // a month of versions behind it. Greying it out there put the only way to those
+            // versions behind a button that looked broken.
+          >
+            <History size={15} />
+          </ToolButton>
+          <ToolButton
+            onClick={() => {
+              setHistory(false);
+              setReference((open) => !open);
+            }}
+            label={t("dbml.reference")}
+            active={reference}
+          >
+            <BookOpen size={15} />
+          </ToolButton>
+          <ToolButton onClick={tidy} label={t("dbml.format")}>
+            <Wand2 size={15} />
+          </ToolButton>
+          {/* Next to the formatter, because they are the same gesture on the two halves of the
+              document: one tidies the text, the other tidies the picture. It had only ever been a
+              row in a popover behind a button in the canvas's bottom-right corner that fades to a
+              third opacity when the pointer leaves — which is to say it existed and nobody could
+              find it. */}
+          {/* No arrange and no line-style button here on purpose. Both change how the *picture* is
+              drawn rather than what the document says, and both already live where that decision
+              belongs: the canvas's own "Ver" menu, in the corner of the drawing they act on, and
+              its background context menu. This toolbar is for the document. */}
+          <ToolButton onClick={onSaveAsTemplate} label={t("diagrams.saveAsTemplate")}>
+            <Table2 size={15} />
+          </ToolButton>
+          <ToolButton
+            onClick={(event) => setExportAt({ x: event.clientX, y: event.clientY })}
+            label={t("diagrams.export")}
+          >
+            <Download size={15} />
+          </ToolButton>
+          {/* The sparkle, in this workbench's own toolbar — the same place draw.io's injected one
+              sits, and it opens the same panel. See `DiagramsView`. */}
+          <ToolButton onClick={onAskAi} label={t("diagrams.ai.title")}>
+            <Sparkles size={15} />
+          </ToolButton>
+          {/* Full screen last, next to the sparkle: both are things you do *to the view* rather
+              than to the document. Disabled on the Datos surface — there is no canvas to fill. */}
+          {/* Disabled while the AI panel or a tool drawer is open rather than left to be undone a
+              tick later by the effect below: pressing it then closed the reference and history
+              panels and re-fitted the canvas on the way to doing nothing at all. */}
+          <ToolButton
+            onClick={enterZen}
+            label={t("dbml.zen")}
+            disabled={surface !== "diagram" || aiOpen || tool !== null}
+          >
+            <Expand size={15} />
+          </ToolButton>
+        </div>
       </div>
       )}
 
@@ -1513,9 +1548,9 @@ export function DbmlWorkbench({
             />
           </div>
           {schema.error && (
-            <div className="max-h-[38%] shrink-0 overflow-auto border-t border-[var(--cf-danger)] bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] px-2 py-1.5">
-              <p className="flex items-start gap-1.5 text-[11px] font-medium text-[var(--cf-danger)]">
-                <AlertTriangle size={12} className="mt-[1px] shrink-0" />
+            <div className="max-h-[38%] shrink-0 overflow-auto border-t border-[color-mix(in_oklab,var(--cf-danger)_45%,transparent)] bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] px-3 py-2">
+              <p className="flex items-start gap-1.5 text-[12px] font-medium text-[var(--cf-danger)]">
+                <AlertTriangle size={14} className="mt-[1px] shrink-0" />
                 <span className="whitespace-pre-wrap">{schema.error}</span>
               </p>
               {/* The coordinate, as a control. The message above already ends in `(12:5)`, but a
@@ -1526,7 +1561,12 @@ export function DbmlWorkbench({
                 <button
                   type="button"
                   onClick={goToError}
-                  className="mt-1 ml-[18px] rounded border border-[var(--cf-danger)]/40 px-1.5 py-[1px] font-mono text-[10px] tabular-nums text-[var(--cf-danger)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-danger)_12%,transparent)]"
+                  className={buttonClass({
+                    variant: "danger-ghost",
+                    size: "sm",
+                    className:
+                      "ml-[14px] mt-1 font-mono tabular-nums shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-danger)_40%,transparent)]",
+                  })}
                 >
                   {t("dbml.goToError", {
                     line: String(schema.errorAt.line),
@@ -1535,17 +1575,17 @@ export function DbmlWorkbench({
                 </button>
               )}
               {hint && (
-                <div className="mt-1.5 pl-[18px]">
-                  <p className="text-[9.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                <div className="mt-2 pl-5">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                     {t("dbml.hints")}
                   </p>
-                  <ul className="mt-0.5 list-disc pl-3.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                  <ul className="mt-1 list-disc pl-3.5 text-[12px] leading-snug text-[var(--cf-text-muted)]">
                     {hint.suggestions.map((key) => (
                       <li key={key}>{t(key)}</li>
                     ))}
                   </ul>
                   {hint.example && (
-                    <pre className="mt-1 overflow-x-auto rounded border border-[var(--cf-border)] bg-[var(--cf-field)] p-1.5 font-mono text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+                    <pre className="mt-1.5 overflow-x-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-2 font-mono text-[11px] leading-snug text-[var(--cf-text)]">
                       {hint.example}
                     </pre>
                   )}
@@ -1555,8 +1595,9 @@ export function DbmlWorkbench({
           )}
 
           {/* What the document is, in numbers. The one thing a text pane owes its writer that the
-              canvas cannot answer, and the place every editor in the world puts it. */}
-          <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-2.5 py-[3px] text-[9.5px] tabular-nums text-[var(--cf-text-muted)]">
+              canvas cannot answer, and the place every editor in the world puts it. The status
+              strip's recipe: 26px here, faint meta type, the numbers tabular. */}
+          <div className="flex h-[26px] shrink-0 items-center gap-3 border-t border-[var(--cf-border)] px-3 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
             <span>{t("dbml.editorLines", { count: String(lineCount) })}</span>
             <span className="flex-1" />
             <span>{t("dbml.editorChars", { count: String(source.length) })}</span>
@@ -1686,14 +1727,19 @@ export function DbmlWorkbench({
                         for the middle of the drawing; the first two are in the one along the bottom
                         and the zoom reads off the control that changes it. */}
                     <div
-                      className={`absolute left-4 top-2 ${CHROME_FADE}`}
+                      className={`absolute left-3 top-3 ${CHROME_FADE}`}
                       style={{ opacity: chromeHot || searchHot || query ? 1 : DIMMED }}
                     >
                       <div className="relative">
                         <Search
-                          size={11}
-                          className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+                          size={13}
+                          className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
                         />
+                        {/* The field recipe's metrics and focus halo on the float bar's surface —
+                            solid raised, with the popover shadow — because a field's own fill is
+                            the canvas's colour in the dark themes and would sink into the drawing.
+                            A query that finds nothing turns the edge red, keyed off `data-miss` so
+                            the conditional never fights the base border for the same property. */}
                         <input
                           ref={searchRef}
                           value={query}
@@ -1710,31 +1756,29 @@ export function DbmlWorkbench({
                             if (event.key === "Enter") canvas.current?.nextMatch();
                           }}
                           placeholder={t("dbml.searchPlaceholder")}
-                          className={`w-56 rounded-lg border bg-[var(--cf-surface-raised)]/90 py-[5px] pl-[26px] text-[11px] shadow-[var(--cf-shadow)] outline-none backdrop-blur transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] ${
-                            query ? "pr-[52px]" : "pr-2"
-                          } ${
-                            query && hits === 0
-                              ? "border-[var(--cf-danger)]"
-                              : "border-[var(--cf-border)]"
+                          data-miss={Boolean(query) && hits === 0}
+                          className={`h-8 w-60 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] pl-8 text-[12px] text-[var(--cf-text)] shadow-[var(--cf-shadow)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] data-[miss=true]:border-[var(--cf-danger)] ${
+                            query ? "pr-[60px]" : "pr-2.5"
                           }`}
                         />
                         {query && (
-                          <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5">
-                            <span className="text-[9.5px] tabular-nums text-[var(--cf-text-muted)]">
+                          <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                            <span className="font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
                               {hits ?? 0}
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setQuery("");
-                                searchRef.current?.focus();
-                              }}
-                              title={t("dbml.clearSearch")}
-                              aria-label={t("dbml.clearSearch")}
-                              className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
-                            >
-                              <X size={11} />
-                            </button>
+                            <Tooltip label={t("dbml.clearSearch")}>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setQuery("");
+                                  searchRef.current?.focus();
+                                }}
+                                aria-label={t("dbml.clearSearch")}
+                                className={iconButtonClass({ size: "xs" })}
+                              >
+                                <X size={13} />
+                              </button>
+                            </Tooltip>
                           </div>
                         )}
                       </div>
@@ -1754,38 +1798,52 @@ export function DbmlWorkbench({
                       toolbar, and they were the only overlay in the top-right corner — which is
                       where the boxes of a left-to-right layout end up. */}
                   <div
-                    className={`absolute bottom-2 right-4 flex items-center gap-1 ${CHROME_FADE}`}
+                    className={`absolute bottom-3 right-4 flex items-center gap-1.5 ${CHROME_FADE}`}
                     style={{ opacity: chromeHot || viewAt ? 1 : DIMMED }}
                   >
-                    <button
-                      type="button"
-                      onClick={(event) =>
-                        setViewAt(viewAt ? null : event.currentTarget.getBoundingClientRect())
-                      }
-                      aria-expanded={Boolean(viewAt)}
-                      title={t("dbml.view")}
-                      className="flex items-center gap-1 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 px-2 py-[5px] text-[10.5px] font-medium text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)] backdrop-blur transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-                    >
-                      <SlidersHorizontal size={12} />
-                      {t("dbml.view")}
-                    </button>
+                    <div className={FLOAT_BAR}>
+                      <button
+                        type="button"
+                        onClick={(event) =>
+                          setViewAt(viewAt ? null : event.currentTarget.getBoundingClientRect())
+                        }
+                        aria-expanded={Boolean(viewAt)}
+                        aria-haspopup="menu"
+                        // Pressed while its menu is open — off `aria-expanded`, a variant, so it
+                        // outranks the recipe's own resting colours rather than racing them.
+                        className={buttonClass({
+                          variant: "ghost",
+                          size: "sm",
+                          className:
+                            "aria-expanded:bg-[var(--cf-press)] aria-expanded:text-[var(--cf-text)]",
+                        })}
+                      >
+                        <SlidersHorizontal size={14} />
+                        {t("dbml.view")}
+                      </button>
+                    </div>
 
-                    <div className="flex items-center rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 shadow-[var(--cf-shadow)] backdrop-blur">
+                    <div className={FLOAT_BAR}>
                       <ZoomStep onClick={() => canvas.current?.zoomBy(1 / 1.2)} title={t("dbml.zoomOut")}>
-                        <ZoomOut size={13} />
+                        <ZoomOut size={15} />
                       </ZoomStep>
                       {/* The readout doubles as "fit": the number tells you the zoom is wrong and
                           this is the control you are already looking at when it does. */}
-                      <button
-                        type="button"
-                        onClick={() => canvas.current?.fit()}
-                        title={t("dbml.fit")}
-                        className="min-w-[42px] px-1 py-[5px] text-[10.5px] tabular-nums text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
-                      >
-                        {`${Math.round(zoom * 100)}%`}
-                      </button>
+                      <Tooltip label={t("dbml.fit")}>
+                        <button
+                          type="button"
+                          onClick={() => canvas.current?.fit()}
+                          className={buttonClass({
+                            variant: "ghost",
+                            size: "sm",
+                            className: "min-w-[48px] font-mono tabular-nums",
+                          })}
+                        >
+                          {`${Math.round(zoom * 100)}%`}
+                        </button>
+                      </Tooltip>
                       <ZoomStep onClick={() => canvas.current?.zoomBy(1.2)} title={t("dbml.zoomIn")}>
-                        <ZoomIn size={13} />
+                        <ZoomIn size={15} />
                       </ZoomStep>
                     </div>
                   </div>
@@ -1861,7 +1919,7 @@ export function DbmlWorkbench({
                       the same treatment as the line and character counts under the text pane. The
                       two numbers describe the document rather than the view, so they belong in
                       furniture that is always there and never in front of the drawing. */}
-                  <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-2.5 py-[3px] text-[9.5px] tabular-nums text-[var(--cf-text-muted)]">
+                  <div className="flex h-7 shrink-0 items-center gap-3.5 border-t border-[var(--cf-border)] px-4 text-[11px] tabular-nums text-[var(--cf-text-faint)]">
                     <span>{t("dbml.chipTables", { count: String(schema.tables.length) })}</span>
                     <span>{t("dbml.chipRefs", { count: String(schema.refs.length) })}</span>
                     {/* How the review is going. Only the two counts that are a to-do list — a
@@ -1884,14 +1942,15 @@ export function DbmlWorkbench({
                         nobody has marked is not offered a way to unmark it. Counted off `marked`
                         rather than `marks` so it follows exactly what the strip beside it shows. */}
                     {marked.remove + marked.review + marked.keep > 0 && (
-                      <button
-                        type="button"
-                        onClick={clearAllMarks}
-                        title={t("dbml.mark.clearAllHow")}
-                        className="rounded px-1 text-[9.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-                      >
-                        {t("dbml.mark.clearAll")}
-                      </button>
+                      <Tooltip label={t("dbml.mark.clearAll")} description={t("dbml.mark.clearAllHow")}>
+                        <button
+                          type="button"
+                          onClick={clearAllMarks}
+                          className="-mx-1 rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+                        >
+                          {t("dbml.mark.clearAll")}
+                        </button>
+                      </Tooltip>
                     )}
                     <span className="flex-1" />
                     {query && <span>{t("dbml.searchHits", { count: String(hits ?? 0) })}</span>}
@@ -2092,11 +2151,60 @@ export function DbmlWorkbench({
 }
 
 /**
+ * One of the toolbar's icon buttons: `iconButtonClass` at 26px, labelled by the app's tooltip.
+ *
+ * It replaced the database workspace's `ToolbarButton`, a 20px square borrowed from another app's
+ * toolbar: under the 22px floor, and labelled by the browser's `title`, which arrives a second and a
+ * half late in the platform's grey box. `active` is for the two panels this toolbar toggles and
+ * pairs with `aria-pressed`, as the recipe asks.
+ *
+ * The span between tooltip and button keeps the label reachable while the button is disabled —
+ * full screen is, on the Datos surface — because a disabled button takes no pointer events and the
+ * pointer then has to land on something inside the tooltip's trigger.
+ */
+function ToolButton({
+  onClick,
+  label,
+  active,
+  disabled,
+  children,
+}: {
+  onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
+  label: string;
+  /** A toggle's state. Leave it out for a plain action, so no `aria-pressed` is claimed. */
+  active?: boolean;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <Tooltip label={label} side="bottom">
+      <span className="inline-flex">
+        <button
+          type="button"
+          onClick={onClick}
+          aria-label={label}
+          aria-pressed={active}
+          disabled={disabled}
+          className={iconButtonClass({ size: "sm", active: Boolean(active) })}
+        >
+          {children}
+        </button>
+      </span>
+    </Tooltip>
+  );
+}
+
+/**
  * A pane's fold-away handle, riding the edge it folds.
  *
  * Half-height of a normal button and flush against the seam, because it is chrome for chrome: it
  * has to be findable without being one more thing competing with the drawing. The chevron always
  * points the way the pane will go, which is the only part of it anybody reads.
+ *
+ * What is drawn is a 13px tab; what can be pressed is 22px wide. The tab is the size it has to be
+ * to stay out of the drawing, and the target is the size the app's hit targets are — the extra
+ * width is transparent and lies over the canvas's edge, where nothing else is aimed at. The tab
+ * wears the float bar's solid surface; see `FLOAT_BAR` for why none of these are blurred.
  */
 function EdgeTab({
   side,
@@ -2116,18 +2224,25 @@ function EdgeTab({
   const pointsLeft = side === "left" ? open : !open;
   const Glyph = pointsLeft ? ChevronLeft : ChevronRight;
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-      aria-expanded={open}
-      className={`absolute top-1/2 ${above ? "z-40" : "z-20"} flex h-11 w-[13px] -translate-y-1/2 items-center justify-center border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]/90 text-[var(--cf-text-muted)] backdrop-blur transition-colors hover:text-[var(--cf-accent)] ${
-        side === "left" ? "left-0 rounded-r-md border-l-0" : "right-0 rounded-l-md border-r-0"
-      }`}
-    >
-      <Glyph size={11} />
-    </button>
+    <Tooltip label={title} side={side === "left" ? "right" : "left"}>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={title}
+        aria-expanded={open}
+        className={`group/edge absolute top-1/2 ${above ? "z-40" : "z-20"} flex h-11 w-[22px] -translate-y-1/2 items-center ${
+          side === "left" ? "left-0 justify-start" : "right-0 justify-end"
+        }`}
+      >
+        <span
+          className={`flex h-11 w-[13px] items-center justify-center border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] text-[var(--cf-text-muted)] shadow-[var(--cf-shadow-lift)] transition-colors group-hover/edge:text-[var(--cf-accent)] ${
+            side === "left" ? "rounded-r-md border-l-0" : "rounded-l-md border-r-0"
+          }`}
+        >
+          <Glyph size={12} />
+        </span>
+      </button>
+    </Tooltip>
   );
 }
 
@@ -2135,14 +2250,14 @@ function EdgeTab({
  * One step of the zoom cluster.
  *
  * Was three separate `Pad`s — two zoom buttons in a stack of six, and the percentage as a chip in
- * the opposite corner. Joining them into one bordered group is the whole point: `−`, the number and
- * `+` are one control, and the number is the readout of the two buttons beside it rather than a
- * fourth fact about the document.
+ * the opposite corner. Joining them into one group is the whole point: `−`, the number and `+` are
+ * one control, and the number is the readout of the two buttons beside it rather than a fourth fact
+ * about the document.
  *
- * The group keeps the surface every floating control here wears — translucent raised, hairline
- * border, the app's own shadow — because it is still chrome sitting *on* the drawing, and has to
- * stay legible over a dotted ground and over whatever table it lands on. Its two siblings, `Chip`
- * and `Pill`, went with the overlays they drew.
+ * The group stands on the surface every floating control here wears — `FLOAT_BAR`: solid raised,
+ * hairline border, the app's own shadow — because it is still chrome sitting *on* the drawing, and
+ * has to stay legible over a dotted ground and over whatever table it lands on. Its two siblings,
+ * `Chip` and `Pill`, went with the overlays they drew.
  */
 function ZoomStep({
   onClick,
@@ -2154,15 +2269,16 @@ function ZoomStep({
   children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      aria-label={title}
-      className="flex h-[26px] w-[26px] items-center justify-center text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
-    >
-      {children}
-    </button>
+    <Tooltip label={title}>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={title}
+        className={iconButtonClass({ size: "sm" })}
+      >
+        {children}
+      </button>
+    </Tooltip>
   );
 }
 

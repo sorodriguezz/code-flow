@@ -160,7 +160,7 @@ function Side({
         <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {title}
         </span>
-        {ago && <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{ago}</span>}
+        {ago && <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{ago}</span>}
       </div>
       {deleted || !summary ? (
         <p className="text-[12px] italic text-[var(--cf-warning)]">{t("api.conflict.deletedHere")}</p>
@@ -170,7 +170,7 @@ function Side({
           {summary.url !== undefined && (
             <div className="mt-0.5 flex items-center gap-1.5">
               <MethodBadge protocol={summary.protocol ?? "http"} method={summary.method ?? "GET"} />
-              <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
+              <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-[var(--cf-text-muted)]">
                 {summary.url || "—"}
               </span>
             </div>
@@ -258,7 +258,7 @@ function ConflictCard({ conflict, disabled }: { conflict: SyncConflict; disabled
           {[conflict.local_payload, conflict.remote_payload].map((payload, index) => (
             <pre
               key={index}
-              className="max-h-[200px] overflow-auto rounded-md bg-black/[0.03] p-2 font-mono text-[10px] leading-snug text-[var(--cf-text-muted)] dark:bg-white/[0.04]"
+              className="max-h-[200px] overflow-auto rounded-md bg-[var(--cf-hover)] p-2 font-mono text-[10.5px] leading-snug text-[var(--cf-text-muted)]"
             >
               {pretty(payload)}
             </pre>

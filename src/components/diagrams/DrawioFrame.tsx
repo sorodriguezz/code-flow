@@ -515,7 +515,7 @@ export function DrawioFrame({
           // `pointer-events-none` from the moment it starts fading: it is still on top for a
           // quarter of a second after the editor is usable, and a click swallowed by a skeleton
           // nobody can see any more is the kind of dead first click that reads as a hung app.
-          className={`absolute inset-0 z-10 bg-[var(--cf-bg)] transition-opacity duration-[250ms] ease-out ${
+          className={`absolute inset-0 z-10 bg-[var(--cf-sunken)] transition-opacity duration-[250ms] ease-out ${
             painted ? "pointer-events-none opacity-0" : "opacity-100"
           }`}
         >

@@ -88,7 +88,7 @@ export function ClaudeSettings() {
                 something the label can't (what "inherit" falls back to, that a prompt is shared
                 across engines), so it stays. */}
             {active?.hintKey && (
-              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+              <p className="mb-3 max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
             )}
 
             {tab === "providers" && <ProvidersSection />}

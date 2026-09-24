@@ -51,13 +51,15 @@ export const DARK_THEMES: CodeTheme[] = [
     id: "codeflow-dark",
     name: "CodeFlow Dark",
     mode: "dark",
+    // "Nocturno": ink neutrals with a slight indigo bias. `bg` is the frame the navigation sits on and
+    // `surface` the sheet the work sits on — see the note atop `index.css`.
     ui: {
-      bg: "#16161d",
-      surface: "#1e1e27",
-      surfaceRaised: "#262632",
-      border: "#313140",
-      text: "#eceef5",
-      textMuted: "#9797ab",
+      bg: "#0b0c11",
+      surface: "#121319",
+      surfaceRaised: "#191a23",
+      border: "#252733",
+      text: "#e8e9f1",
+      textMuted: "#a1a4b5",
     },
     tokens: {
       comment: "#6b7280",
@@ -340,13 +342,14 @@ export const LIGHT_THEMES: CodeTheme[] = [
     id: "codeflow-light",
     name: "CodeFlow Light",
     mode: "light",
+    // "Papel": a grey frame around white sheets, so the two read apart without extra borders.
     ui: {
-      bg: "#f7f7fb",
+      bg: "#ebebf0",
       surface: "#ffffff",
       surfaceRaised: "#ffffff",
-      border: "#e7e7ef",
-      text: "#1c1c26",
-      textMuted: "#6b6b7d",
+      border: "#e1e2e9",
+      text: "#15161d",
+      textMuted: "#545767",
     },
     tokens: {
       comment: "#8a8a99",
@@ -763,5 +766,6 @@ export function applyThemeVars(theme: CodeTheme) {
   root.setProperty("--cf-border", theme.ui.border);
   root.setProperty("--cf-text", theme.ui.text);
   root.setProperty("--cf-text-muted", theme.ui.textMuted);
-  root.setProperty("--cf-accent-soft", "color-mix(in oklab, var(--cf-accent) 18%, var(--cf-surface))");
+  // 15%, the same mix `index.css` declares — the two used to disagree (14% there, 18% here).
+  root.setProperty("--cf-accent-soft", "color-mix(in oklab, var(--cf-accent) 15%, var(--cf-surface))");
 }

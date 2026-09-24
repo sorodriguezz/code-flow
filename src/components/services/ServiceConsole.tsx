@@ -28,6 +28,7 @@ import {
   statusLabel,
   useElapsed,
 } from "./serviceBits";
+import { buttonClass } from "../common/Button";
 
 /**
  * One service, on the right of the dock: what it is doing, why, where it listens, and everything it
@@ -105,7 +106,7 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
         )}
         {(runtime?.restarts ?? 0) > 0 && (
           <Tooltip label={t("services.restartsBadge", { count: runtime!.restarts })}>
-            <span className="flex shrink-0 items-center gap-0.5 rounded bg-[color-mix(in_srgb,var(--cf-warning)_14%,transparent)] px-1 text-[10px] tabular-nums text-[var(--cf-warning)]">
+            <span className="flex shrink-0 items-center gap-0.5 rounded bg-[color-mix(in_srgb,var(--cf-warning)_14%,transparent)] px-1 text-[10.5px] tabular-nums text-[var(--cf-warning)]">
               <RotateCw size={9} /> {runtime!.restarts}/3
             </span>
           </Tooltip>
@@ -114,7 +115,7 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
         {stale && (
           <button
             onClick={() => void restart(service.id)}
-            className="shrink-0 rounded-full border border-[var(--cf-warning)] px-2 py-0.5 text-[10px] text-[var(--cf-warning)] hover:bg-[color-mix(in_srgb,var(--cf-warning)_12%,transparent)]"
+            className="shrink-0 rounded-full border border-[var(--cf-warning)] px-2 py-0.5 text-[10.5px] text-[var(--cf-warning)] hover:bg-[color-mix(in_srgb,var(--cf-warning)_12%,transparent)]"
           >
             {t("services.applyChanges")}
           </button>
@@ -140,7 +141,7 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
         ) : (
           <button
             onClick={() => void start(service.id)}
-            className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white hover:brightness-110"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             <CirclePlay size={12} />
             {t("services.start")}
@@ -160,7 +161,7 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
         </IconButton>
       </div>
 
-      <div className="flex h-7 shrink-0 items-center gap-4 overflow-hidden border-b border-[var(--cf-border)] bg-[var(--cf-bg)] px-3 text-[11px] text-[var(--cf-text-muted)]">
+      <div className="flex h-7 shrink-0 items-center gap-4 overflow-hidden border-b border-[var(--cf-border)] bg-[var(--cf-sunken)] px-3 text-[11px] text-[var(--cf-text-muted)]">
         <span className="flex min-w-0 shrink items-center gap-1.5 font-mono text-[var(--cf-text)]" title={service.command}>
           <TerminalSquare size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
           <span className="truncate">{service.command}</span>
@@ -188,7 +189,7 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
               ? "border-[color-mix(in_srgb,var(--cf-danger)_30%,transparent)] bg-[color-mix(in_srgb,var(--cf-danger)_10%,transparent)] text-[var(--cf-danger)]"
               : tone === "warning"
                 ? "border-[color-mix(in_srgb,var(--cf-warning)_30%,transparent)] bg-[color-mix(in_srgb,var(--cf-warning)_9%,transparent)] text-[var(--cf-warning)]"
-                : "border-[var(--cf-border)] bg-[var(--cf-bg)] text-[var(--cf-text-muted)]"
+                : "border-[var(--cf-border)] bg-[var(--cf-sunken)] text-[var(--cf-text-muted)]"
           }`}
         >
           {tone === "danger" && <TriangleAlert size={12} className="shrink-0" />}
@@ -196,7 +197,7 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
           {status === "failed" && !runtime?.alive && (
             <button
               onClick={() => void start(service.id)}
-              className="shrink-0 rounded border border-current px-1.5 py-0.5 text-[10px] font-medium hover:bg-[color-mix(in_srgb,currentColor_12%,transparent)]"
+              className="shrink-0 rounded border border-current px-1.5 py-0.5 text-[10.5px] font-medium hover:bg-[color-mix(in_srgb,currentColor_12%,transparent)]"
             >
               {t("services.tryAgain")}
             </button>
@@ -257,12 +258,12 @@ function NeverRun({
             : t("services.neverRun")}
         </p>
       </div>
-      <code className="max-w-md truncate rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-2 py-1 text-[11px] text-[var(--cf-text)]">
+      <code className="max-w-md truncate rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 py-1 text-[11px] text-[var(--cf-text)]">
         {where} $ {service.command}
       </code>
       <button
         onClick={onStart}
-        className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
+        className={buttonClass({ variant: "primary" })}
       >
         <CirclePlay size={13} />
         {t("services.start")}
@@ -306,7 +307,7 @@ function IconButton({ onClick, label, children }: { onClick: () => void; label: 
       <button
         onClick={onClick}
         aria-label={label}
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         {children}
       </button>

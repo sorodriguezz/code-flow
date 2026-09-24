@@ -1,9 +1,15 @@
+import { useId } from "react";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
 import { useT } from "../../state/languageStore";
 import type { ReviewLevel } from "../../state/prStore";
 
-/** Compact segmented control for the review depth (básico / completo / ultra). The choice is
- * shared through `prStore`, so wherever a review is launched from — the AI panel, the title-bar
- * shortcut, the "review a PR from its link" modal — it runs at the same level. */
+const LEVELS: ReviewLevel[] = ["basico", "completo", "ultra"];
+
+/** The review depth (básico / completo / ultra) as the app's segmented control — three peer
+ * choices about the same run. The choice is shared through `prStore`, so wherever a review is
+ * launched from — the AI panel, the title-bar shortcut, the "review a PR from its link" modal — it
+ * runs at the same level. */
 export function ReviewLevelSelector({
   value,
   onChange,
@@ -14,23 +20,18 @@ export function ReviewLevelSelector({
   disabled: boolean;
 }) {
   const t = useT();
-  const levels: ReviewLevel[] = ["basico", "completo", "ultra"];
+  // Several of these can be mounted at once — one per open review, plus the link modal — and each
+  // needs a thumb of its own to slide.
+  const id = useId();
   return (
-    <div className="flex items-center rounded-md border border-[var(--cf-border)] p-0.5" title={t("pr.levelHint")}>
-      {levels.map((level) => (
-        <button
-          key={level}
-          onClick={() => onChange(level)}
-          disabled={disabled}
-          className={`rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors disabled:opacity-50 ${
-            value === level
-              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-              : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          }`}
-        >
-          {t(`pr.level.${level}` as never)}
-        </button>
-      ))}
-    </div>
+    <Tooltip label={t("pr.levelHint")}>
+      <Segmented
+        size="sm"
+        layoutId={`review-level-${id}`}
+        value={value}
+        onChange={onChange}
+        options={LEVELS.map((level) => ({ value: level, label: t(`pr.level.${level}` as never), disabled }))}
+      />
+    </Tooltip>
   );
 }

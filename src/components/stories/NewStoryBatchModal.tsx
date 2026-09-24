@@ -20,6 +20,7 @@ import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore
 import { useT } from "../../state/languageStore";
 import type { AdoWiki, AdoWikiPage, StorySourceKind } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { fieldClass } from "../common/recipes";
 
 const SOURCES: { id: StorySourceKind; icon: typeof BookText; labelKey: TranslationKey }[] = [
   { id: "wiki", icon: BookText, labelKey: "stories.sourceWiki" },
@@ -256,7 +257,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
                 className={`flex flex-1 items-center justify-center gap-1.5 rounded px-2 py-1.5 text-[12px] font-medium ${
                   active
                     ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                    : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                    : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
                 }`}
               >
                 <Icon size={13} />
@@ -321,7 +322,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
                     pages.map((page) => (
                       <label
                         key={page.path}
-                        className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
+                        className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-[var(--cf-hover)]"
                         style={{ paddingLeft: 6 + page.depth * 14 }}
                       >
                         <Checkbox
@@ -332,7 +333,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
                           {page.title}
                         </span>
                         {page.has_children && (
-                          <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">
+                          <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">
                             {t("stories.hasChildren")}
                           </span>
                         )}
@@ -369,7 +370,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
                     value={fileQuery}
                     onChange={(e) => setFileQuery(e.target.value)}
                     placeholder={t("stories.filesSearchPlaceholder")}
-                    className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] py-1 pl-6 pr-2 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                    className={fieldClass({ size: "sm", className: "w-full pl-6 pr-2" })}
                   />
                 </div>
                 <div className="max-h-64 overflow-y-auto rounded-md border border-[var(--cf-border)] p-1">
@@ -381,7 +382,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
                     visibleFiles.map((path) => (
                       <label
                         key={path}
-                        className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
+                        className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 hover:bg-[var(--cf-hover)]"
                       >
                         <Checkbox checked={pickedFiles.includes(path)} onChange={() => toggleFile(path)} />
                         <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]" title={path}>
@@ -418,7 +419,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder={t("stories.batchNamePlaceholder")}
-            className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full" })}
           />
         </Field>
 

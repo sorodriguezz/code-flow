@@ -56,10 +56,10 @@ export function ServicesActivity() {
     >
       <button
         onClick={() => !panelOpen && togglePanel()}
-        className="flex items-center gap-1 px-1.5 text-[11px] tabular-nums text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        className="flex h-[22px] items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         <CirclePlay
-          size={12}
+          size={14}
           style={{ color: failing ? STATUS_TONE.failed : starting ? STATUS_TONE.starting : STATUS_TONE.ready }}
         />
         {total}

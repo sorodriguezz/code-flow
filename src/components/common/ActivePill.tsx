@@ -22,21 +22,32 @@ const SLIDE = { type: "spring", stiffness: 520, damping: 40, mass: 0.7 } as cons
  * border of its own takes the default `inset-0`, while a bordered one needs `-inset-px` so the
  * pill's own hairline lands on top of the button's instead of leaving a grey ring around it.
  */
+/**
+ * `soft` marks the selected row of a list or rail (an accent-tinted fill). `raised` is the thumb of a
+ * segmented control and the active tab on the frame: a small sheet lifted off its track — the same
+ * shape the active project and the active app wear, so selection reads one way across the chrome.
+ */
 export function ActivePill({
   layoutId,
   inset = "inset-0",
   radius = "rounded-md",
+  variant = "soft",
 }: {
   layoutId: string;
   inset?: string;
   radius?: string;
+  variant?: "soft" | "raised";
 }) {
   const reduceMotion = useReducedMotion();
   return (
     <motion.span
       layoutId={layoutId}
       aria-hidden
-      className={`absolute ${inset} ${radius} border border-[color-mix(in_oklab,var(--cf-accent)_38%,transparent)] bg-[var(--cf-accent-soft)]`}
+      className={`absolute ${inset} ${radius} ${
+        variant === "raised"
+          ? "bg-[var(--cf-surface)] shadow-[var(--cf-shadow-lift),0_0_0_1px_var(--cf-border)]"
+          : "bg-[var(--cf-accent-soft)]"
+      }`}
       transition={reduceMotion ? { duration: 0 } : SLIDE}
     />
   );

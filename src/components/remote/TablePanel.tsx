@@ -43,6 +43,8 @@ import {
   remoteTables,
 } from "../../lib/tauri/remoteCommands";
 import type { TablePage, TableSummary } from "../../types/remote";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 /**
  * Azure Table storage: the account's tables down one side, an entity grid beside it.
@@ -727,7 +729,7 @@ export function TablePanel({ hostId }: { hostId: string }) {
           ordinary and scrolling for one by eye is not a way to find it. */}
       <div className="flex w-56 shrink-0 flex-col border-r border-[var(--cf-border)]">
         <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1">
-          <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("remote.tables")}
             {tables.length > 0 && (
               <span className="ml-1 tabular-nums opacity-60">{tables.length}</span>
@@ -787,7 +789,7 @@ export function TablePanel({ hostId }: { hostId: string }) {
                 className={`flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[12px] ${
                   one.name === selected
                     ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                    : "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                    : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
                 }`}
               >
                 <Table2 size={12} className="shrink-0 opacity-60" />
@@ -898,18 +900,18 @@ export function TablePanel({ hostId }: { hostId: string }) {
                 placeholder="PartitionKey eq 'eu' and RowKey eq '42'"
                 disabled={!selected}
                 autoFocus
-                className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 font-mono text-[11px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-40"
+                className={fieldClass({ size: "sm", className: "min-w-0 flex-1 font-mono" })}
               />
               <button
                 type="button"
                 onClick={() => void run(selected, filter)}
                 disabled={!selected || busy}
-                className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white disabled:opacity-40"
+                className={buttonClass({ variant: "primary", size: "sm" })}
               >
                 {t("remote.tableRun")}
               </button>
             </div>
-            {selected && <p className="pt-1 text-[10px] text-[var(--cf-text-muted)]">{shape}</p>}
+            {selected && <p className="pt-1 text-[10.5px] text-[var(--cf-text-muted)]">{shape}</p>}
           </div>
         )}
 

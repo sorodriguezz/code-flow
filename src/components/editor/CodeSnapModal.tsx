@@ -14,6 +14,7 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { CodeTheme } from "../../lib/codeThemes";
+import { buttonClass } from "../common/Button";
 
 const MIN_PADDING = 0;
 const MAX_PADDING = 96;
@@ -247,7 +248,7 @@ export function CodeSnapModal({
               </span>
             </Toggle>
             <Toggle active={showTitle} onClick={() => setShowTitle((v) => !v)} title={t("codesnap.showPath")}>
-              <span className="text-[9px] font-semibold">A</span>
+              <span className="text-[10.5px] font-semibold">A</span>
             </Toggle>
 
             <div className="mx-1 h-5 w-px bg-[var(--cf-border)]" />
@@ -258,10 +259,10 @@ export function CodeSnapModal({
                 onClick={() => setScale(factor)}
                 aria-pressed={scale === factor}
                 title={t("codesnap.scale")}
-                className={`h-5 rounded px-1.5 text-[10px] font-medium ${
+                className={`h-5 rounded px-1.5 text-[10.5px] font-medium ${
                   scale === factor
                     ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                    : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                    : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
                 }`}
               >
                 {factor}x
@@ -272,7 +273,7 @@ export function CodeSnapModal({
               <button
                 onClick={() => void copy()}
                 disabled={busy}
-                className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] disabled:opacity-50"
+                className={buttonClass({ variant: "secondary", size: "sm" })}
               >
                 {copied ? <Check size={12} className="text-[var(--cf-success)]" /> : <Copy size={12} />}
                 {t("codesnap.copy")}
@@ -280,7 +281,7 @@ export function CodeSnapModal({
               <button
                 onClick={() => void download()}
                 disabled={busy}
-                className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-50"
+                className={buttonClass({ variant: "primary", size: "sm" })}
               >
                 {busy ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
                 {t("codesnap.save")}
@@ -314,7 +315,7 @@ function Toggle({
       className={`flex h-6 w-6 items-center justify-center rounded-md ${
         active
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
       }`}
     >
       {children}
@@ -342,7 +343,7 @@ function Stepper({
       >
         <Minus size={10} />
       </button>
-      <span className="w-6 text-center font-mono text-[10px] text-[var(--cf-text-muted)]">{value}</span>
+      <span className="w-6 text-center font-mono text-[10.5px] text-[var(--cf-text-muted)]">{value}</span>
       <button
         onClick={() => onChange(value + step)}
         aria-label={`${label} +`}

@@ -217,7 +217,7 @@ export function ScriptEditor({
           <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("api.scripts.snippets")}
           </p>
-          <div className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-1">
+          <div className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-1.5 py-1">
             <Search size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
             <input
               value={filter}

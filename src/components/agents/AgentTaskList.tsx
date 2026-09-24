@@ -1,13 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Bot,
+  ChevronDown,
   CircleCheck,
   CircleHelp,
   Copy,
   Folder,
   GitCompare,
   Link2,
-  ListChecks,
   Pencil,
   Pin,
   PinOff,
@@ -26,12 +25,20 @@ import { ContinueWithModal } from "./ContinueWithModal";
 import { TaskTree } from "./TaskTree";
 import { RenameRow, Row, menuBlocks, type RowMenu } from "./TreeRow";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
-import { CARD } from "../api/panelChrome";
 import { relativeTime } from "../api/settingsChrome";
-import { ToolbarButton } from "../db/dbChrome";
-import { ActivePill } from "../common/ActivePill";
-import { EmptyState } from "../common/EmptyState";
+import { Kbd, buttonClass, iconButtonClass } from "../common/Button";
+import {
+  explorerClass,
+  explorerHeadClass,
+  fieldClass,
+  rowClass,
+  sectionLabelClass,
+  tabCountClass,
+} from "../common/recipes";
+import { Segmented } from "../common/Segmented";
 import { ThinkingOrb } from "../common/ThinkingOrb";
+import { Tooltip } from "../common/Tooltip";
+import { chordLabel } from "../../lib/keys";
 import { useAgentsStore, type TaskGrouping } from "../../state/agentsStore";
 import { benchTabLabel, terminalsOfTab, useBenchStore } from "../../state/benchStore";
 import { useChainStore } from "../../state/chainStore";
@@ -222,85 +229,90 @@ export function AgentTaskList({
   const nothingYet = tasks.length === 0 && chains.length === 0;
 
   return (
-    <div
-      data-tour="agents-tree"
-      style={{ width }}
-      className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
-    >
-      <div
-        data-tour="agents-tree-actions"
-        className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1"
-      >
-        <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("agents.tasks")}
-        </span>
-        <ToolbarButton onClick={() => onNewTask("")} title={t("agents.newTask")}>
-          <Plus size={13} />
-        </ToolbarButton>
-        <ToolbarButton onClick={() => onNewChain("")} title={t("agents.newChain")}>
-          <Link2 size={13} />
-        </ToolbarButton>
-        <ToolbarButton onClick={() => onNewStory("")} title={t("agents.newStory")}>
-          <Wand2 size={13} />
-        </ToolbarButton>
-        <ToolbarButton onClick={onNewProject} title={t("agents.newProject")}>
-          <Folder size={13} />
-        </ToolbarButton>
-        {/* The terminal bench, between the folders and the roster — which is where it belongs in
-            the reading of this toolbar rather than merely where it fits. Everything to the left
-            creates work for an agent to do; the roster to the right is who does it. This is the
-            one that hands the machine back to the user: whatever CLI they want, driven by hand,
-            in the same workspace. Active while the panel is up, like the roster's own button. */}
-        <ToolbarButton onClick={toggleBench} active={benchOpen} title={t("bench.title")}>
-          <TerminalSquare size={13} />
-        </ToolbarButton>
-        <ToolbarButton onClick={toggleRoster} active={rosterOpen} title={t("agents.manageAgents")}>
-          <Users size={13} />
-        </ToolbarButton>
-        <ToolbarButton onClick={onHelp} title={t("agents.help")}>
-          <CircleHelp size={13} />
-        </ToolbarButton>
+    <div data-tour="agents-tree" style={{ width }} className={`${explorerClass} h-full overflow-hidden`}>
+      {/* One primary action, and the three toggles. Creating is what this panel is for, so it gets
+          the one filled button; the other three ways to create (a chain, a story run, a folder)
+          fold into its caret rather than standing beside it as four look-alike glyphs. What stays
+          out here are the things that open and close — the terminal bench and the roster, which
+          wear the "on" tint while their panel is up — and the manual. */}
+      <div data-tour="agents-tree-actions" className={explorerHeadClass}>
+        <NewSplitButton
+          onNewTask={() => onNewTask("")}
+          onNewChain={() => onNewChain("")}
+          onNewStory={() => onNewStory("")}
+          onNewProject={onNewProject}
+        />
+        <span className="min-w-1 flex-1" />
+        {/* The terminal bench, before the roster — which is where it belongs in the reading of this
+            toolbar rather than merely where it fits. The button to its left creates work for an
+            agent to do; the roster to its right is who does it. This is the one that hands the
+            machine back to the user: whatever CLI they want, driven by hand, in the same
+            workspace. */}
+        <Tooltip label={t("bench.title")}>
+          <button
+            type="button"
+            onClick={toggleBench}
+            aria-pressed={benchOpen}
+            aria-label={t("bench.title")}
+            className={iconButtonClass({ active: benchOpen })}
+          >
+            <TerminalSquare size={15} />
+          </button>
+        </Tooltip>
+        <Tooltip label={t("agents.manageAgents")}>
+          <button
+            type="button"
+            onClick={toggleRoster}
+            aria-pressed={rosterOpen}
+            aria-label={t("agents.manageAgents")}
+            className={iconButtonClass({ active: rosterOpen })}
+          >
+            <Users size={15} />
+          </button>
+        </Tooltip>
+        <Tooltip label={t("agents.help")}>
+          <button type="button" onClick={onHelp} aria-label={t("agents.help")} className={iconButtonClass()}>
+            <CircleHelp size={15} />
+          </button>
+        </Tooltip>
       </div>
 
-      <div className="flex shrink-0 gap-0.5 px-1.5 pt-1.5">
-        {GROUPINGS.map((entry) => (
-          <button
-            key={entry.id}
-            onClick={() => setGroupBy(entry.id)}
-            title={t(entry.labelKey)}
-            className={`relative min-w-0 flex-1 rounded-md px-1.5 py-1 text-[11px] font-medium ${
-              groupBy === entry.id
-                ? "text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
-            }`}
-          >
-            {groupBy === entry.id && <ActivePill layoutId="cf-agents-section-pill" />}
-            <span className="relative block truncate">{t(entry.labelKey)}</span>
-          </button>
-        ))}
+      <div className="shrink-0 px-2.5 pb-2">
+        <Segmented
+          options={GROUPINGS.map((entry) => ({ value: entry.id, label: t(entry.labelKey) }))}
+          value={groupBy}
+          onChange={setGroupBy}
+          layoutId="cf-agents-grouping"
+          full
+        />
       </div>
 
-      <div className="relative shrink-0 px-1.5 py-1.5">
-        <Search
-          size={12}
-          className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
-        />
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={t("agents.searchPlaceholder")}
-          className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-1 pl-6 pr-6 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
-        />
-        {query && (
-          <button
-            onClick={() => setQuery("")}
-            title={t("api.clearSearch")}
-            aria-label={t("api.clearSearch")}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          >
-            <X size={12} />
-          </button>
-        )}
+      <div className="shrink-0 px-2.5 pb-1.5">
+        <div className="relative">
+          <Search
+            size={13}
+            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
+          />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t("agents.searchPlaceholder")}
+            aria-label={t("agents.searchPlaceholder")}
+            className={fieldClass({ size: "sm", className: "w-full pl-7 pr-7" })}
+          />
+          {query && (
+            <Tooltip label={t("api.clearSearch")}>
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label={t("api.clearSearch")}
+                className={iconButtonClass({ size: "xs", className: "absolute right-0.5 top-1/2 -translate-y-1/2" })}
+              >
+                <X size={13} />
+              </button>
+            </Tooltip>
+          )}
+        </div>
       </div>
 
       {/* The bench, from the outside — above the body and outside every branch of it.
@@ -323,16 +335,15 @@ export function AgentTaskList({
       {benchTabs.length > 0 && (
         // Capped and scrolled rather than left to grow: this sits above the task list in the fixed
         // part of the panel, so eight tabs would push the work itself off the bottom.
-        <div className="max-h-[8.5rem] shrink-0 overflow-y-auto border-b border-[var(--cf-border)] px-1.5 pb-1.5 pt-1">
-          <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {t("bench.section")}
-          </p>
+        <div className="max-h-[9.5rem] shrink-0 overflow-y-auto border-b border-[var(--cf-border)] px-2 pb-1.5">
+          <p className={sectionLabelClass}>{t("bench.section")}</p>
           {benchTabs.map((tab) => {
             const mine = terminalsOfTab(benchTerminals, tab.id);
             const live = mine.some((terminal) => terminal.session_id !== null);
             return (
               <button
                 key={tab.id}
+                type="button"
                 onClick={() => {
                   if (!workspaceId) return;
                   // Focused on one of this tab's own shells, which is how `show` is told which tab
@@ -348,30 +359,29 @@ export function AgentTaskList({
                   setBenchMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
                 }}
                 title={benchTabLabel(tab, benchTerminals, t("bench.title"))}
-                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12px] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                className={rowClass(false, "h-7")}
               >
-                {/* Green when anything in the tab is still running — the one thing about a
-                    backgrounded tab that is not in its name. */}
+                {/* Green and filled when anything in the tab is still running, a hollow ring when
+                    nothing is — the one thing about a backgrounded tab that is not in its name, and
+                    told by shape as well as by colour. */}
                 <span
                   aria-hidden
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                    live ? "bg-[var(--cf-success)]" : "bg-[var(--cf-text-muted)]/40"
+                  className={`h-[7px] w-[7px] shrink-0 rounded-full ${
+                    live ? "bg-[var(--cf-success)]" : "border border-[var(--cf-text-faint)]"
                   }`}
                 />
-                <TerminalSquare size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                <TerminalSquare size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
                 <span className="min-w-0 flex-1 truncate">
                   {benchTabLabel(tab, benchTerminals, t("bench.title"))}
                 </span>
-                <span className="shrink-0 rounded-full bg-black/[0.06] px-1.5 text-[10px] font-semibold text-[var(--cf-text-muted)] dark:bg-white/[0.1]">
-                  {mine.length}
-                </span>
+                <span className={tabCountClass}>{mine.length}</span>
               </button>
             );
           })}
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-2 pb-2.5">
         {loading ? null : groupBy === "templates" ? (
           // Ahead of the "nothing yet" branch on purpose: that one counts tasks and chains, and a
           // workspace with saved plans but no work started yet would otherwise show an empty state
@@ -393,9 +403,7 @@ export function AgentTaskList({
           // there is nobody to hand a task to yet, so offering "new task" first would open a dialog
           // with an empty picker.
           <ListEmpty
-            icon={roster.length === 0 ? Bot : ListChecks}
-            title={t(roster.length === 0 ? "agents.rosterEmpty" : "agents.tasksEmpty")}
-            subtitle={t(roster.length === 0 ? "agents.rosterEmptyHint" : "agents.tasksEmptyHint")}
+            hint={t(roster.length === 0 ? "agents.rosterEmptyHint" : "agents.tasksEmptyHint")}
             actionLabel={t(roster.length === 0 ? "agents.newAgent" : "agents.newTask")}
             onAction={roster.length === 0 ? onNewAgent : () => onNewTask("")}
           />
@@ -412,17 +420,15 @@ export function AgentTaskList({
             onUseTemplate={onUseTemplate}
           />
         ) : filtered.length === 0 ? (
-          <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">{t("agents.noMatches")}</p>
+          <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-faint)]">{t("agents.noMatches")}</p>
         ) : (
           groups.map((group) => (
             <section key={group.key}>
-              <h4 className="flex items-center gap-1.5 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              <h4 className={sectionLabelClass}>
                 <span className="truncate">{group.label}</span>
-                <span className="shrink-0 rounded-full bg-black/[0.06] px-1.5 text-[10px] font-semibold dark:bg-white/[0.1]">
-                  {group.tasks.length}
-                </span>
+                <span className={`${tabCountClass} tracking-normal`}>{group.tasks.length}</span>
               </h4>
-              <div className="px-1.5">
+              <div>
                 {group.tasks.map((task, at) =>
                   renamingId === task.id ? (
                     <RenameRow
@@ -496,32 +502,101 @@ export function AgentTaskList({
   );
 }
 
-function ListEmpty({
-  icon,
-  title,
-  subtitle,
-  actionLabel,
-  onAction,
+/**
+ * "Nueva tarea ▾": the panel's one primary action, split.
+ *
+ * The body does what the `+` always did — a new task, the same as ⌘N. The caret holds the three
+ * other ways to start something, with the labels and icons they had as buttons of their own, so
+ * nothing moved further than one click. Only the caret opens the menu: the main body stays a single
+ * press for the thing done most.
+ */
+function NewSplitButton({
+  onNewTask,
+  onNewChain,
+  onNewStory,
+  onNewProject,
 }: {
-  icon: typeof Bot;
-  title: string;
-  subtitle: string;
-  actionLabel: string;
-  onAction: () => void;
+  onNewTask: () => void;
+  onNewChain: () => void;
+  onNewStory: () => void;
+  onNewProject: () => void;
 }) {
+  const t = useT();
+  const activeView = useUiStore((s) => s.activeView);
+  const boxRef = useRef<HTMLDivElement>(null);
+  /** The split button's rect while its menu is open — the menu hangs off the whole control, so it
+   *  lines up with the button's left edge rather than with the caret. */
+  const [at, setAt] = useState<DOMRect | null>(null);
+
+  // The menu portals to `document.body` and this view is hidden rather than unmounted — left open,
+  // it would float over whatever the user switched to.
+  useEffect(() => {
+    if (activeView !== "agents") setAt(null);
+  }, [activeView]);
+
+  // Both halves wear the primary fill themselves, so each lights on its own hover; the hairline
+  // between them is the one thing that says there are two.
+  const half =
+    "flex items-center bg-[var(--cf-accent)] text-[var(--cf-on-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))]";
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2">
-      <div className="w-full">
-        <EmptyState icon={icon} title={title} subtitle={subtitle} />
-      </div>
-      <button
-        type="button"
-        onClick={onAction}
-        className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-      >
-        <Plus size={13} />
-        {actionLabel}
-      </button>
+    <div ref={boxRef} className="flex h-[26px] min-w-0 shrink items-stretch">
+      <Tooltip label={t("agents.newTask")} trailing={<Kbd>{chordLabel("Mod+N")}</Kbd>}>
+        <button
+          type="button"
+          onClick={onNewTask}
+          className={`${half} min-w-0 gap-1.5 rounded-l-md pl-2 pr-2.5 text-[12px] font-semibold`}
+        >
+          <Plus size={14} className="shrink-0" />
+          <span className="truncate">{t("agents.newTask")}</span>
+        </button>
+      </Tooltip>
+      <Tooltip label={t("api.moreActions")}>
+        <button
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={at !== null}
+          aria-label={t("api.moreActions")}
+          onClick={() => {
+            const rect = boxRef.current?.getBoundingClientRect();
+            if (rect) setAt(rect);
+          }}
+          className={`${half} w-[22px] shrink-0 justify-center rounded-r-md shadow-[inset_1px_0_0_color-mix(in_oklab,var(--cf-on-accent)_28%,transparent)]`}
+        >
+          <ChevronDown size={13} />
+        </button>
+      </Tooltip>
+      {at && (
+        <ContextMenu
+          x={at.left}
+          y={at.bottom}
+          anchor={{ top: at.top, bottom: at.bottom, left: at.left, right: at.right, align: "start" }}
+          items={[
+            { label: t("agents.newChain"), icon: Link2, onClick: onNewChain },
+            { label: t("agents.newStory"), icon: Wand2, onClick: onNewStory },
+            // A folder is not work for an agent, so it sits under a hairline of its own.
+            { label: t("agents.newProject"), icon: Folder, onClick: onNewProject, separated: true },
+          ]}
+          onClose={() => setAt(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The list with nothing in it: just the way out. What the thing *is* — an agent, a task — goes in the
+ * tooltip rather than in a heading and a paragraph over the button.
+ */
+function ListEmpty({ hint, actionLabel, onAction }: { hint: string; actionLabel: string; onAction: () => void }) {
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+      <Tooltip label={hint}>
+        <button type="button" onClick={onAction} className={buttonClass({ variant: "secondary" })}>
+          <Plus size={14} />
+          {actionLabel}
+        </button>
+      </Tooltip>
     </div>
   );
 }
@@ -571,7 +646,7 @@ function FlatTaskRow({
         void select(task.id);
       }}
       title={task.goal || task.title}
-      glyph={status === "running" ? <ThinkingOrb size="sm" /> : <Icon size={13} className={color} />}
+      glyph={status === "running" ? <ThinkingOrb size="sm" /> : <Icon size={14} className={color} />}
       label={task.title || t("agents.newTask")}
       meta={[task.agent_name, projectName, when].filter(Boolean).join(" · ")}
       menuLabel={t("api.moreActions")}

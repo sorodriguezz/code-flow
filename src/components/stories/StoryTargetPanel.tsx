@@ -34,6 +34,7 @@ import type {
   BoardProvider,
   MondayBoardSchema,
 } from "../../types/domain";
+import { fieldClass } from "../common/recipes";
 
 /** One entry of a target's host list. `value` is what gets stored; `label` is what is shown. */
 interface Option {
@@ -261,7 +262,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
       className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)] ${CARD}`}
     >
       <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1">
-        <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("stories.target")}
         </span>
         {org && project && (
@@ -426,7 +427,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                   rather than assumed, because it is the one target where the app is guessing. */}
               {isMonday && project && mondaySchema && (
                 <div className="space-y-1.5">
-                  <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                  <p className="text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
                     {t("stories.mondayMapping")}
                   </p>
                   {mondaySchema.text_column ? (
@@ -497,7 +498,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                     if (tags !== target.tags) save({ tags });
                   }}
                   placeholder="backlog; checkout"
-                  className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                  className={fieldClass({ className: "w-full" })}
                 />
               </Field>
 

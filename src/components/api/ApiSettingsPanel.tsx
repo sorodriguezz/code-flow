@@ -214,7 +214,7 @@ function CertificatesPanel() {
               <button
                 onClick={() => removeCert(cert.id)}
                 title={t("api.settings.removeCert")}
-                className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] hover:bg-[var(--cf-hover)]"
               >
                 <Trash2 size={12} />
               </button>

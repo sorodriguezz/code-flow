@@ -14,6 +14,7 @@ import { useAccountName, useAiAccountsStore, useProviderAccounts } from "../../s
 import { SYSTEM_ACCOUNT, validPreference } from "../../lib/aiAccounts";
 import { useT } from "../../state/languageStore";
 import type { WorkspaceAgent } from "../../types/domain";
+import { fieldClass } from "../common/recipes";
 
 /**
  * Create or edit one agent.
@@ -137,7 +138,7 @@ export function AgentEditorModal({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder={t("settings.sddAgentNamePlaceholder")}
-            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[13px] font-medium outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full" })}
           />
         </Field>
 
@@ -146,7 +147,7 @@ export function AgentEditorModal({
             value={role}
             onChange={(e) => setRole(e.target.value)}
             placeholder={t("settings.sddAgentRolePlaceholder")}
-            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ className: "w-full" })}
           />
         </Field>
 

@@ -2,6 +2,7 @@ import { Check, Coffee, Download, Globe, Loader2, RefreshCw, RotateCw, Sparkles,
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdateStore } from "../../state/updateStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /** Where the support button goes. Opened in the system browser rather than the app's own webview,
  *  and that is not a detail: a payment page inside CodeFlow is a page with no address bar, and
@@ -45,21 +46,19 @@ export function UpdateSection({ bare = false }: { bare?: boolean }) {
   const restart = useUpdateStore((s) => s.restart);
   const openNotes = useUpdateStore((s) => s.openNotes);
 
-  const btnPrimary =
-    "flex items-center gap-2 rounded-md bg-[var(--cf-accent)] px-3 py-2 text-[13px] font-medium text-white disabled:opacity-50";
-  const btnOutline =
-    "flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-[13px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]";
+  const btnPrimary = buttonClass({ variant: "primary", size: "md" });
+  const btnOutline = buttonClass({ variant: "secondary", size: "md" });
 
   return (
     <div className={bare ? "" : "mt-6 border-t border-[var(--cf-border)] pt-4"}>
-      {!bare && <h3 className="mb-1 text-sm font-semibold">{t("settings.updatesTitle")}</h3>}
-      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">
+      {!bare && <h3 className="mb-1 text-[13px] font-semibold text-[var(--cf-text)]">{t("settings.updatesTitle")}</h3>}
+      <p className="mb-3 max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">
         {t("settings.updatesHint")} {t("update.autoHint")}
       </p>
 
       {version && (
         <p className="mb-3 text-[12px] text-[var(--cf-text-muted)]">
-          {t("settings.currentVersion")}: <span className="font-mono text-[var(--cf-text)]">v{version}</span>
+          {t("settings.currentVersion")}: <span className="font-mono tabular-nums text-[var(--cf-text)]">v{version}</span>
           {lastCheckedAt !== null && (
             <>
               {" · "}
@@ -81,13 +80,13 @@ export function UpdateSection({ bare = false }: { bare?: boolean }) {
       <div className="flex flex-wrap items-center gap-2">
         {/* Idle / up-to-date / error → "Check for updates" */}
         {(status === "idle" || status === "checking" || status === "uptodate" || status === "error") && (
-          <button onClick={() => void checkNow(true)} disabled={status === "checking"} className={btnOutline}>
+          <button type="button" onClick={() => void checkNow(true)} disabled={status === "checking"} className={btnOutline}>
             {status === "checking" ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
             {status === "checking" ? t("settings.checkingUpdates") : t("settings.checkForUpdates")}
           </button>
         )}
 
-        <button onClick={openExternally(SITE_URL)} className={btnOutline} title={t("settings.visitSiteHint")}>
+        <button type="button" onClick={openExternally(SITE_URL)} className={btnOutline} title={t("settings.visitSiteHint")}>
           <Globe size={14} />
           {t("settings.visitSite")}
         </button>
@@ -96,7 +95,7 @@ export function UpdateSection({ bare = false }: { bare?: boolean }) {
             from a screen the user already had a reason to open. Only the icon carries Ko-fi's own
             red — the accent colour is the user's to choose, and a brand mark that changes hue with
             the theme stops reading as the brand it links to. */}
-        <button onClick={openExternally(KOFI_URL)} className={btnOutline} title={t("settings.supportKofiHint")}>
+        <button type="button" onClick={openExternally(KOFI_URL)} className={btnOutline} title={t("settings.supportKofiHint")}>
           <Coffee size={14} className="text-[#ff5e5b]" />
           {t("settings.supportKofi")}
         </button>
@@ -116,18 +115,18 @@ export function UpdateSection({ bare = false }: { bare?: boolean }) {
         ))}
 
       {status === "available" && update && (
-        <div className="flex flex-col gap-2">
+        <div className="mt-3 flex flex-col gap-2">
           <p className="text-[13px] text-[var(--cf-text)]">
             {t("settings.updateAvailable", { version: `v${update.version}` })}
           </p>
           <div className="flex items-center gap-2">
-            <button onClick={() => void install()} className={btnPrimary}>
+            <button type="button" onClick={() => void install()} className={btnPrimary}>
               <Download size={14} />
               {t("settings.installUpdate", { version: `v${update.version}` })}
             </button>
             {/* Reading first is a legitimate answer to "should I update?", so it sits next to
                 the install button rather than behind it. */}
-            <button onClick={openNotes} className={btnOutline}>
+            <button type="button" onClick={openNotes} className={btnOutline}>
               <Sparkles size={14} />
               {t("update.seeWhatsNew")}
             </button>
@@ -136,24 +135,29 @@ export function UpdateSection({ bare = false }: { bare?: boolean }) {
       )}
 
       {status === "downloading" && (
-        <div className="flex flex-col gap-2">
-          <p className="flex items-center gap-1.5 text-[13px] text-[var(--cf-text)]">
+        <div className="mt-3 flex flex-col gap-2">
+          <p className="flex items-center gap-1.5 text-[13px] tabular-nums text-[var(--cf-text)]">
             <Loader2 size={14} className="animate-spin" />
             {t("settings.downloadingUpdate", { progress: progress })}
           </p>
+          {/* The fill is scaled rather than sized, so each progress tick is a transform — no
+              layout for a bar that moves many times a second. */}
           <div className="h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-[var(--cf-border)]">
-            <div className="h-full rounded-full bg-[var(--cf-accent)] transition-all" style={{ width: `${progress}%` }} />
+            <div
+              className="h-full w-full origin-left rounded-full bg-[var(--cf-accent)] transition-transform duration-200 ease-out"
+              style={{ transform: `scaleX(${Math.min(Math.max(progress, 0), 100) / 100})` }}
+            />
           </div>
         </div>
       )}
 
       {status === "ready" && (
-        <div className="flex flex-col gap-2">
+        <div className="mt-3 flex flex-col gap-2">
           <p className="flex items-center gap-1.5 text-[13px] text-[var(--cf-success)]">
             <Check size={14} />
             {t("settings.updateReady")}
           </p>
-          <button onClick={() => void restart()} className={`${btnPrimary} self-start`}>
+          <button type="button" onClick={() => void restart()} className={`${btnPrimary} self-start`}>
             <RotateCw size={14} />
             {t("settings.restartNow")}
           </button>

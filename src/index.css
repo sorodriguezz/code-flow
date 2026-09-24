@@ -3,28 +3,52 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 @theme {
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Instrument Sans for the interface and JetBrains Mono for code, hashes and paths — both variable,
+     both shipped in the bundle (see the `@fontsource-variable/*` imports in `main.tsx` and
+     `satellite.tsx`), so they cost no network and ~70 KB for the latin subsets actually loaded.
+     Until 2026-09 this said "Inter", which nothing ever loaded: the app rendered in whatever the OS
+     default was, a different face on every machine. The fallbacks are that same system stack. */
+  --font-sans: "Instrument Sans Variable", "Instrument Sans", -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
+/* "Trazo" — the frame and the sheet.
+
+   The window is a *frame* (`--cf-bg`: the title row, the projects panel, the app rail, the status
+   bar) holding *sheets* (`--cf-surface`: the view, the assistant, the dock), each a rounded
+   rectangle with a hairline. Navigation lives on the frame and work lives on a sheet, so the two
+   stop competing without anyone adding a border.
+
+   Six of these values are rewritten at runtime by the chosen editor theme (`applyThemeVars` in
+   `lib/codeThemes.ts`) and `--cf-accent` by the accent picker. Everything in the "derived" group
+   below is computed *from* those with `color-mix`, which is what lets all 21 schemes get a hover
+   tint, a sunken tone or a strong border without anyone editing 21 palettes — and why none of them
+   may be written as a literal. */
 :root {
-  --cf-bg: #f7f7fb;
+  --cf-bg: #ebebf0;
   --cf-surface: #ffffff;
   --cf-surface-raised: #ffffff;
-  --cf-border: #e7e7ef;
-  --cf-text: #1c1c26;
-  --cf-text-muted: #6b6b7d;
-  --cf-accent: #6366f1;
-  --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 14%, var(--cf-surface));
+  --cf-border: #e1e2e9;
+  --cf-text: #15161d;
+  --cf-text-muted: #545767;
+  --cf-accent: #5457e0;
+  /* Text on an accent (or danger) fill. White here and dark ink in the dark block: the dark-mode
+     accents are the lifted 400 shades, and white on those measured 1.7–3.0:1 for all ten — every
+     primary button in the app failed contrast in dark mode. See `accentStore`. */
+  --cf-on-accent: #ffffff;
+  --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 15%, var(--cf-surface));
   /* A field has to read as a field on both surfaces it lands on — the white panels, where a white
      fill alone says nothing, and the tinted cards, where a transparent one said nothing at all. So
      the border does most of the work and is deliberately darker than `--cf-border`: that one is
      tuned for dividing regions, and a divider's weight is too quiet for the edge of something you
      are meant to type into. */
   --cf-field: #ffffff;
-  --cf-field-border: #cfcfdd;
-  --cf-success: #16a34a;
+  --cf-field-border: #c6c8d4;
+  /* The 700 shades, not the 500s: these are read as *text* all over the app ("+12", "Conectado",
+     "Guardado"), and the 500s sat at ~3.2:1 on white. */
+  --cf-success: #15803d;
   --cf-danger: #dc2626;
-  --cf-warning: #d97706;
+  --cf-warning: #b45309;
   /* The violet the schema canvas draws an enum and a `unique` column in. Its own token because it
      has to be the one colour on that canvas the accent can never become — an enum drawn in the
      accent is indistinguishable from a table the moment somebody picks Purple — and because, like
@@ -55,38 +79,62 @@
   --cf-bson-id: #b45309;
   --cf-bson-date: #7c3aed;
   --cf-bson-literal: #9333ea;
-  /* Mixed halfway into the surface rather than used at full strength: the bar spans the whole
-     window and never changes, so at full saturation three hues of it were the loudest thing on
-     screen permanently — chrome outshouting the content it frames. Halved, the identity survives
-     and the accent is free to mean something again where it does carry information. */
+  /* Kept for the satellite title bar, which still wears the brand wash. The main window's title row
+     is plain frame now: at full width and full time it was the loudest thing on screen. */
   --cf-titlebar-gradient: linear-gradient(
     120deg,
     color-mix(in oklab, #c9e9e6 50%, var(--cf-surface)) 0%,
     color-mix(in oklab, #d8c9ec 50%, var(--cf-surface)) 45%,
     color-mix(in oklab, #f3c9d8 50%, var(--cf-surface)) 100%
   );
-  --cf-shadow: 0 1px 2px rgba(20, 20, 40, 0.04), 0 8px 24px rgba(20, 20, 40, 0.06);
-  /* Same hue family as the titlebar gradient, just as faint washes rather than a solid
-     band — the ambient background behind Graph/Changes/Editor (see .cf-ambient-bg below). */
-  --cf-ambient-1: color-mix(in oklab, #6fd0c8 20%, transparent);
-  --cf-ambient-2: color-mix(in oklab, #b79ae8 18%, transparent);
-  --cf-ambient-3: color-mix(in oklab, #f0a8c4 16%, transparent);
+  /* Floating surfaces only — menus, popovers, tooltips (`--cf-shadow`), dialogs (`-modal`) and the
+     one-pixel lift a selected tab or sheet sits on (`-lift`). Never on a row: a shadow per row is a
+     layer per row. */
+  --cf-shadow: 0 1px 2px rgba(18, 20, 40, 0.05), 0 10px 28px -8px rgba(18, 20, 40, 0.2);
+  --cf-shadow-modal: 0 28px 70px -16px rgba(18, 20, 40, 0.34);
+  --cf-shadow-lift: 0 1px 2px rgba(18, 20, 40, 0.06);
+  /* Same hue family as the brand stroke, as faint washes on the sheet behind Graph/Changes/Editor
+     (see .cf-ambient-bg below). */
+  --cf-ambient-1: color-mix(in oklab, #6fd0c8 12%, transparent);
+  --cf-ambient-2: color-mix(in oklab, #b79ae8 11%, transparent);
+  --cf-ambient-3: color-mix(in oklab, #f0a8c4 9%, transparent);
+
+  /* Derived — never literals; see the note above. */
+  --cf-sunken: color-mix(in oklab, var(--cf-surface) 50%, var(--cf-bg));
+  /* Referenced by the chat, the assistant's error banner and a few chips since they were written,
+     but never defined — every one of those backgrounds rendered transparent. */
+  --cf-surface-2: var(--cf-sunken);
+  --cf-border-strong: color-mix(in oklab, var(--cf-border) 72%, var(--cf-text));
+  --cf-text-faint: color-mix(in oklab, var(--cf-text-muted) 82%, var(--cf-surface));
+  /* The only two hover/press tints. There were nine black and seven white alphas, each chosen on
+     the spot; mixed out of `--cf-text`, one declaration darkens on light and lightens on dark. */
+  --cf-hover: color-mix(in oklab, var(--cf-text) 5%, transparent);
+  --cf-press: color-mix(in oklab, var(--cf-text) 9%, transparent);
+  --cf-accent-line: color-mix(in oklab, var(--cf-accent) 40%, var(--cf-surface));
+  --cf-focus: color-mix(in oklab, var(--cf-accent) 60%, transparent);
+  /* The brand stroke: the logo's violet → indigo → cyan. Reserved for a model at work (the orb, the
+     run beam) — the mark people already read as "the AI is running". */
+  --cf-ai-a: #8b5cf6;
+  --cf-ai-b: #6366f1;
+  --cf-ai-c: #06b6d4;
+  --cf-sheet-radius: 10px;
 }
 
 :root[data-theme="dark"] {
-  --cf-bg: #16161d;
-  --cf-surface: #1e1e27;
-  --cf-surface-raised: #262632;
-  --cf-border: #313140;
-  --cf-text: #eceef5;
-  --cf-text-muted: #9797ab;
+  --cf-bg: #0b0c11;
+  --cf-surface: #121319;
+  --cf-surface-raised: #191a23;
+  --cf-border: #252733;
+  --cf-text: #e8e9f1;
+  --cf-text-muted: #a1a4b5;
   --cf-accent: #818cf8;
-  --cf-accent-soft: #2a2a44;
+  --cf-on-accent: #0b0c11;
+  --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 15%, var(--cf-surface));
   /* Dark fields go darker than the surface, not lighter — a well rather than a raised tile, which
      is the direction a dark UI reads as "recessed, put text here". Same reasoning as the light
      theme's note. */
-  --cf-field: #131320;
-  --cf-field-border: #3d3d50;
+  --cf-field: #0c0d12;
+  --cf-field-border: #343747;
   --cf-success: #4ade80;
   --cf-danger: #f87171;
   --cf-warning: #fbbf24;
@@ -99,55 +147,58 @@
   --cf-bson-id: #fbbf5c;
   --cf-bson-date: #c4a2fb;
   --cf-bson-literal: #d8a2fb;
-  /* Same halving as the light theme — see the note there. */
   --cf-titlebar-gradient: linear-gradient(
     120deg,
     color-mix(in oklab, #163a3a 50%, var(--cf-surface)) 0%,
     color-mix(in oklab, #2a2148 50%, var(--cf-surface)) 45%,
     color-mix(in oklab, #3a1f30 50%, var(--cf-surface)) 100%
   );
-  --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.4);
-  --cf-ambient-1: color-mix(in oklab, #2dd4c4 16%, transparent);
-  --cf-ambient-2: color-mix(in oklab, #8b6fd9 16%, transparent);
-  --cf-ambient-3: color-mix(in oklab, #d9527d 12%, transparent);
+  --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 30px -8px rgba(0, 0, 0, 0.55);
+  --cf-shadow-modal: 0 30px 80px -16px rgba(0, 0, 0, 0.7);
+  --cf-shadow-lift: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --cf-ambient-1: color-mix(in oklab, #2dd4c4 9%, transparent);
+  --cf-ambient-2: color-mix(in oklab, #8b6fd9 10%, transparent);
+  --cf-ambient-3: color-mix(in oklab, #d9527d 7%, transparent);
 }
 
+/* First paint only: `themeStore` stamps `data-theme` before anything is drawn from state, so this is
+   what a window shows for the frame or two before that — the same palette as the explicit block. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --cf-bg: #16161d;
-    --cf-surface: #1e1e27;
-    --cf-surface-raised: #262632;
-    --cf-border: #313140;
-    --cf-text: #eceef5;
-    --cf-text-muted: #9797ab;
+    --cf-bg: #0b0c11;
+    --cf-surface: #121319;
+    --cf-surface-raised: #191a23;
+    --cf-border: #252733;
+    --cf-text: #e8e9f1;
+    --cf-text-muted: #a1a4b5;
     --cf-accent: #818cf8;
-    --cf-accent-soft: #2a2a44;
-    /* Same as the explicit dark theme above. */
-    --cf-field: #131320;
-    --cf-field-border: #3d3d50;
+    --cf-on-accent: #0b0c11;
+    --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 15%, var(--cf-surface));
+    --cf-field: #0c0d12;
+    --cf-field-border: #343747;
     --cf-success: #4ade80;
     --cf-danger: #f87171;
     --cf-warning: #fbbf24;
     --cf-violet: #c084fc;
     --cf-blue: #60a5fa;
     --cf-teal: #2dd4bf;
-    /* Same as the explicit dark theme above. */
     --cf-bson-string: #6ee7a8;
     --cf-bson-number: #93b4fd;
     --cf-bson-id: #fbbf5c;
     --cf-bson-date: #c4a2fb;
     --cf-bson-literal: #d8a2fb;
-    /* Same halving as the light theme — see the note there. */
     --cf-titlebar-gradient: linear-gradient(
       120deg,
       color-mix(in oklab, #163a3a 50%, var(--cf-surface)) 0%,
       color-mix(in oklab, #2a2148 50%, var(--cf-surface)) 45%,
       color-mix(in oklab, #3a1f30 50%, var(--cf-surface)) 100%
     );
-    --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.4);
-    --cf-ambient-1: color-mix(in oklab, #2dd4c4 16%, transparent);
-    --cf-ambient-2: color-mix(in oklab, #8b6fd9 16%, transparent);
-    --cf-ambient-3: color-mix(in oklab, #d9527d 12%, transparent);
+    --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 30px -8px rgba(0, 0, 0, 0.55);
+    --cf-shadow-modal: 0 30px 80px -16px rgba(0, 0, 0, 0.7);
+    --cf-shadow-lift: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --cf-ambient-1: color-mix(in oklab, #2dd4c4 9%, transparent);
+    --cf-ambient-2: color-mix(in oklab, #8b6fd9 10%, transparent);
+    --cf-ambient-3: color-mix(in oklab, #d9527d 7%, transparent);
   }
 }
 
@@ -192,7 +243,7 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--cf-border);
+  background: var(--cf-border-strong);
   background-clip: content-box;
   border: 4px solid transparent;
   border-radius: 999px;
@@ -333,7 +384,7 @@ body {
     radial-gradient(ellipse 900px 520px at 6% -8%, var(--cf-ambient-1), transparent 60%),
     radial-gradient(ellipse 820px 620px at 102% -4%, var(--cf-ambient-2), transparent 60%),
     radial-gradient(ellipse 760px 520px at 46% 112%, var(--cf-ambient-3), transparent 62%),
-    var(--cf-bg);
+    var(--cf-surface);
 }
 
 /* Lightweight, GPU-only animations (opacity/transform) — no JS animation loop. */
@@ -621,8 +672,8 @@ body {
   }
 }
 
-/* `will-change` on both, so the compositor keeps a layer for each and the blur underneath the halo
-   is rasterized once instead of on every step of the scale. Two elements in the whole app, so the
+/* `will-change` on both, so the compositor keeps a layer for each and the halo's gradient is
+   rasterized once instead of on every step of the scale. Two elements in the whole app, so the
    usual objection to `will-change` (a layer per node, forever) doesn't apply. */
 .cf-bell-halo {
   will-change: transform, opacity;
@@ -712,8 +763,8 @@ body {
   --cf-orb-stroke: calc(var(--cf-orb-size) * 0.13);
   --cf-orb-travel: calc(var(--cf-orb-size) * 0.36);
   --cf-orb-dot: calc(var(--cf-orb-size) * 0.17);
-  --cf-orb-c2: #22d3ee;
-  --cf-orb-c3: #d946ef;
+  --cf-orb-c2: var(--cf-ai-c);
+  --cf-orb-c3: var(--cf-ai-a);
   position: relative;
   display: inline-block;
   width: var(--cf-orb-size);
@@ -890,7 +941,8 @@ body {
   background: linear-gradient(
     90deg,
     transparent,
-    color-mix(in oklab, var(--cf-accent) 85%, transparent),
+    var(--cf-ai-a),
+    var(--cf-ai-c),
     transparent
   );
   animation: cf-run-beam 1.5s ease-in-out infinite;
@@ -1656,7 +1708,7 @@ body.cf-dragging * {
   position: absolute;
   top: 0.45em;
   right: 2.6rem;
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1774,7 +1826,7 @@ body.cf-dragging * {
   text-decoration: underline;
 }
 .cf-markdown-preview code {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
   background: color-mix(in oklab, var(--cf-text) 8%, transparent);
   border-radius: 4px;
@@ -1884,7 +1936,7 @@ body.cf-dragging * {
 /* Single-line variant (`renderInlineMarkdown`) — a finding's subtitle/why/suggestion field,
  * so just enough styling for bold/code/links inline, no block spacing rules. */
 .cf-markdown-inline code {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.92em;
   background: color-mix(in oklab, var(--cf-text) 8%, transparent);
   border-radius: 4px;
@@ -2171,4 +2223,147 @@ body.cf-dragging * {
 
 .cf-dep-outdated-line {
   background: color-mix(in oklab, var(--cf-warning) 8%, transparent);
+}
+
+/* Keyboard focus, everywhere, once. 242 controls said `outline-none` and only 48 drew anything in its
+   place, so most buttons showed WebKit's default ring or nothing at all. Unlayered on purpose — it
+   has to outrank the `outline-none` utility — and it steps aside for any element that styles its own
+   `focus-visible:` state. */
+:is(button, a[href], summary, [role="button"], [role="tab"], [role="menuitem"], [role="option"], [role="treeitem"]):focus-visible:not([class*="focus-visible:"]) {
+  outline: 2px solid var(--cf-focus);
+  outline-offset: 1px;
+}
+
+/* A sheet: the view, the assistant, the dock. See the note on the tokens at the top. */
+.cf-sheet {
+  background: var(--cf-surface);
+  border-radius: var(--cf-sheet-radius);
+  box-shadow: 0 0 0 1px var(--cf-border);
+  overflow: hidden;
+}
+
+/* A panel appearing: its content fades in rather than the panel growing from zero width — a width
+   animation relays out the whole window on every frame (it used to, on four panels). */
+@keyframes cf-panel-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.cf-panel-in {
+  animation: cf-panel-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-panel-in,
+  .cf-fade-in,
+  .cf-skeleton,
+  .cf-bounce-dot {
+    animation: none;
+  }
+}
+
+/* Key caps, for shortcut hints in menus, tooltips and the palette. */
+.cf-kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font: 500 10.5px/1 var(--font-sans);
+  color: var(--cf-text-muted);
+  background: var(--cf-surface);
+  box-shadow: inset 0 0 0 1px var(--cf-border-strong);
+  white-space: nowrap;
+}
+
+/* An island coming back (see `ReturnBurst`): where it landed says so for a moment. The icon drops
+   into its slot and settles, two rings ripple out of it, and a pill beside it names what came back.
+   One-shot — about two seconds from start to gone — and transform/opacity only, so the compositor
+   does all of it. Reduced motion keeps only the pill, fading in and out in place. */
+@keyframes cf-return-land {
+  0% {
+    transform: translateY(-8px) scale(0.8);
+    opacity: 0.35;
+  }
+  55% {
+    transform: translateY(0) scale(1.14);
+    opacity: 1;
+  }
+  78% {
+    transform: scale(0.96);
+  }
+  100% {
+    transform: none;
+  }
+}
+
+@keyframes cf-return-ripple {
+  from {
+    transform: scale(0.92);
+    opacity: 0.6;
+  }
+  to {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+
+@keyframes cf-return-pill {
+  0% {
+    opacity: 0;
+    transform: translateX(var(--cf-return-dx, 8px)) scale(0.96);
+  }
+  14% {
+    opacity: 1;
+    transform: none;
+  }
+  82% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(calc(var(--cf-return-dx, 8px) * -0.5));
+  }
+}
+
+@keyframes cf-return-pill-still {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  12%,
+  85% {
+    opacity: 1;
+  }
+}
+
+.cf-return-land {
+  animation: cf-return-land 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.cf-return-ripple {
+  border: 2px solid var(--cf-accent);
+  opacity: 0;
+  animation: cf-return-ripple 900ms cubic-bezier(0.2, 0.7, 0.2, 1) 120ms both;
+}
+
+.cf-return-ripple-2 {
+  animation-delay: 300ms;
+}
+
+.cf-return-pill {
+  animation: cf-return-pill 2200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cf-return-land,
+  .cf-return-ripple {
+    animation: none;
+  }
+  .cf-return-pill {
+    animation: cf-return-pill-still 2200ms linear both;
+  }
 }

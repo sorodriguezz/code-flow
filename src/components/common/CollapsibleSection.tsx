@@ -59,14 +59,14 @@ export function CollapsibleSection({
       <div className={`flex items-center justify-between ${dense ? "mb-0.5" : "mb-1"}`}>
         <button
           onClick={() => change(!open)}
-          className={`flex min-w-0 items-center gap-1 font-semibold uppercase text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] ${
-            dense ? "text-[9px] tracking-[0.09em]" : "text-[11px] tracking-wide"
+          className={`flex min-w-0 items-center gap-1 font-semibold uppercase text-[var(--cf-text-faint)] hover:text-[var(--cf-text)] ${
+            dense ? "text-[10.5px] tracking-[0.08em]" : "text-[11px] tracking-[0.06em]"
           }`}
         >
           {open ? (
-            <ChevronDown size={dense ? 10 : 11} className="shrink-0" />
+            <ChevronDown size={dense ? 11 : 12} className="shrink-0" />
           ) : (
-            <ChevronRight size={dense ? 10 : 11} className="shrink-0" />
+            <ChevronRight size={dense ? 11 : 12} className="shrink-0" />
           )}
           {/* The glyph is what goes first when the row gets narrow: at 9px the chevron already says
               "this folds", and the title is the only part that cannot be inferred. */}

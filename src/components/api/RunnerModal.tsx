@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, FileSpreadsheet, GripVertical, Play, Square, X } from "lucide-react";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
-import { ApiModal, Field, GhostButton, PrimaryButton } from "./ApiModal";
+import { fieldClass } from "../common/recipes";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
+import { ApiModal, GhostButton, PrimaryButton } from "./ApiModal";
+import { MethodBadge } from "./CollectionTree";
 import { RunnerResults } from "./RunnerResults";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useApiStore } from "../../state/apiStore";
@@ -747,30 +752,22 @@ export function RunnerModal({
       busy={running}
       onClose={onClose}
       toolbar={
-        <div className="flex items-center gap-1">
-          {(
-            [
-              ["setup", t("api.runner.setup")],
-              ["results", t("api.runner.results")],
-            ] as const
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              onClick={() => setView(id)}
-              className={`rounded-md px-2 py-1 text-[11px] ${
-                view === id
-                  ? "bg-[var(--cf-accent-soft)] font-medium text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        // Two views of the same run — the segmented control. One runner is open at a time, so a
+        // fixed `layoutId` can't meet a second copy of itself.
+        <Segmented
+          size="sm"
+          layoutId="cf-api-runner-view"
+          value={view}
+          onChange={setView}
+          options={[
+            { value: "setup", label: t("api.runner.setup") },
+            { value: "results", label: t("api.runner.results") },
+          ]}
+        />
       }
       footer={
         <>
-          <span className="mr-auto min-w-0 truncate text-[11px] text-[var(--cf-text-muted)]">
+          <span className="mr-auto min-w-0 truncate text-[12px] tabular-nums text-[var(--cf-text-muted)]">
             {progress
               ? `${t("api.runner.progress", { done: progress.done, total: progress.total })} · ${progress.label}`
               : report
@@ -783,18 +780,18 @@ export function RunnerModal({
           </span>
           {report && !running && (
             <GhostButton onClick={() => void exportReport()}>
-              <Download size={12} />
+              <Download size={14} />
               {t("api.runner.exportResults")}
             </GhostButton>
           )}
           {running ? (
             <PrimaryButton danger onClick={() => (abortRef.current = true)}>
-              <Square size={12} />
+              <Square size={14} />
               {t("api.runner.stop")}
             </PrimaryButton>
           ) : (
             <PrimaryButton onClick={() => void run()} disabled={selectedIds.length === 0}>
-              <Play size={13} />
+              <Play size={14} />
               {t("api.runner.run")}
             </PrimaryButton>
           )}
@@ -805,17 +802,17 @@ export function RunnerModal({
         <div className="flex min-h-0 flex-1">
           {/* Ordered request list */}
           <div className="flex min-w-0 flex-1 flex-col border-r border-[var(--cf-border)]">
-            <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
+            <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
               <Checkbox checked={allSelected} onChange={toggleAll} />
-              <span className="text-[11px] text-[var(--cf-text)]">{t("api.runner.selectAll")}</span>
-              <span className="ml-auto text-[11px] text-[var(--cf-text-muted)]">
+              <span className="text-[12px] text-[var(--cf-text)]">{t("api.runner.selectAll")}</span>
+              <span className="ml-auto text-[11px] text-[var(--cf-text-faint)]">
                 {t("api.runner.reorderHint")}
               </span>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-auto p-1">
+            <div className="min-h-0 flex-1 overflow-auto">
               {order.length === 0 && (
-                <p className="p-3 text-[12px] text-[var(--cf-text-muted)]">{t("api.noRequests")}</p>
+                <p className="px-3 py-3 text-[12px] text-[var(--cf-text-muted)]">{t("api.noRequests")}</p>
               )}
               {order.map((id, index) => {
                 const row = byId.get(id);
@@ -825,26 +822,27 @@ export function RunnerModal({
                     {dropIndex === index && dragId !== null && (
                       <div className="mx-2 h-[2px] rounded bg-[var(--cf-accent)]" />
                     )}
+                    {/* Hairline rows, the verb in the tree's own badge — this list is a pointer at
+                        requests the same way the tree is, so it wears the tree's column. */}
                     <div
-                      className={`flex items-center gap-2 rounded-md px-2 py-1.5 ${
-                        dragId === id ? "opacity-40" : "hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                      className={`flex h-8 items-center gap-2 border-b border-[var(--cf-border)] pl-1.5 pr-3 ${
+                        dragId === id ? "opacity-40" : "hover:bg-[var(--cf-hover)]"
                       }`}
                     >
-                      <span
-                        onPointerDown={(e) => beginDrag(e, id)}
-                        title={t("api.runner.reorderHint")}
-                        className="cursor-grab text-[var(--cf-text-muted)]"
-                      >
-                        <GripVertical size={13} />
-                      </span>
+                      <Tooltip label={t("api.runner.reorderHint")}>
+                        <span
+                          onPointerDown={(e) => beginDrag(e, id)}
+                          className="inline-flex h-[22px] w-[18px] shrink-0 cursor-grab items-center justify-center rounded text-[var(--cf-text-faint)] hover:text-[var(--cf-text-muted)]"
+                        >
+                          <GripVertical size={13} />
+                        </span>
+                      </Tooltip>
                       <Checkbox checked={!excluded.has(id)} onChange={() => toggleOne(id)} />
-                      <span className="w-[44px] shrink-0 font-mono text-[10px] font-semibold uppercase text-[var(--cf-accent)]">
-                        {row.method}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
+                      <MethodBadge protocol={row.protocol} method={row.method} />
+                      <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--cf-text)]">
                         {row.name}
                       </span>
-                      <span className="min-w-0 max-w-[45%] truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
+                      <span className="min-w-0 max-w-[45%] truncate font-mono text-[11px] text-[var(--cf-text-faint)]">
                         {row.url}
                       </span>
                     </div>
@@ -857,64 +855,72 @@ export function RunnerModal({
             </div>
           </div>
 
-          {/* Run settings */}
-          <div className="w-[240px] shrink-0 overflow-auto p-3">
-            <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+          {/* Run settings — the inspector tone, so the list reads as the page and this as its side. */}
+          <div className="w-[248px] shrink-0 overflow-auto bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))] px-4 py-3.5">
+            <label className="mb-1.5 block text-[12px] font-medium text-[var(--cf-text-muted)]">
               {t("api.runner.iterations")}
             </label>
-            <Field
+            <input
               type="number"
               value={String(iterations)}
-              onChange={(value) => setIterations(Number(value))}
+              onChange={(e) => setIterations(Number(e.target.value))}
+              className={fieldClass({ size: "sm", className: "w-full tabular-nums" })}
             />
 
-            <label className="mb-1 mt-3 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+            <label className="mb-1.5 mt-3.5 block text-[12px] font-medium text-[var(--cf-text-muted)]">
               {t("api.runner.delay")}
             </label>
-            <Field type="number" value={String(delayMs)} onChange={(value) => setDelayMs(Number(value))} />
+            <input
+              type="number"
+              value={String(delayMs)}
+              onChange={(e) => setDelayMs(Number(e.target.value))}
+              className={fieldClass({ size: "sm", className: "w-full tabular-nums" })}
+            />
 
-            <label className="mb-1 mt-3 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+            <label className="mb-1.5 mt-3.5 block text-[12px] font-medium text-[var(--cf-text-muted)]">
               {t("api.runner.dataFile")}
             </label>
             {dataPath === null ? (
-              <GhostButton onClick={() => void pickData()}>
-                <FileSpreadsheet size={12} />
+              <button onClick={() => void pickData()} className={buttonClass({ variant: "secondary", size: "sm" })}>
+                <FileSpreadsheet size={13} />
                 {t("api.import.pickFile")}
-              </GhostButton>
+              </button>
             ) : (
-              <div className="rounded-md border border-[var(--cf-border)] p-2">
+              <div className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] py-1.5 pl-2.5 pr-1">
                 <div className="flex items-center gap-1.5">
-                  <FileSpreadsheet size={12} className="shrink-0 text-[var(--cf-accent)]" />
-                  <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={dataPath}>
+                  <FileSpreadsheet size={13} className="shrink-0 text-[var(--cf-accent)]" />
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px]" title={dataPath}>
                     {dataPath.split(/[\\/]/).pop()}
                   </span>
-                  <button
-                    onClick={() => {
-                      setData([]);
-                      setDataPath(null);
-                    }}
-                    title={t("api.runner.removeData")}
-                    className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                  >
-                    <X size={12} />
-                  </button>
+                  <Tooltip label={t("api.runner.removeData")}>
+                    <button
+                      onClick={() => {
+                        setData([]);
+                        setDataPath(null);
+                      }}
+                      aria-label={t("api.runner.removeData")}
+                      className={iconButtonClass({ size: "xs" })}
+                    >
+                      <X size={13} />
+                    </button>
+                  </Tooltip>
                 </div>
-                <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">
+                <p className="text-[11px] tabular-nums text-[var(--cf-text-faint)]">
                   {t("api.runner.dataRows", { n: data.length })}
                 </p>
               </div>
             )}
 
-            <label className="mt-4 flex cursor-pointer items-start gap-2">
-              <Checkbox checked={persistVariables} onChange={setPersistVariables} className="mt-[1px]" />
-              <span className="text-[12px] text-[var(--cf-text)]">
+            <label className="mt-5 flex cursor-pointer items-start gap-2">
+              <Checkbox checked={persistVariables} onChange={setPersistVariables} className="mt-px" />
+              <span className="text-[13px] leading-snug text-[var(--cf-text)]">
                 {t("api.runner.persistVariables")}
               </span>
             </label>
 
-            <label className="mt-2 flex cursor-pointer items-start gap-2">
-              <Checkbox checked={stopOnError} onChange={setStopOnError} className="mt-[1px]" />
-              <span className="text-[12px] text-[var(--cf-text)]">{t("api.runner.stopOnError")}</span>
+            <label className="mt-2.5 flex cursor-pointer items-start gap-2">
+              <Checkbox checked={stopOnError} onChange={setStopOnError} className="mt-px" />
+              <span className="text-[13px] leading-snug text-[var(--cf-text)]">{t("api.runner.stopOnError")}</span>
             </label>
           </div>
         </div>

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Eye, Settings2 } from "lucide-react";
+import { Eye, Layers, Settings2 } from "lucide-react";
 import { Select } from "../common/Select";
+import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass } from "../common/Button";
 import { useApiStore } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useT } from "../../state/languageStore";
@@ -12,8 +14,8 @@ import type { VariableScope } from "../../types/api";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 /**
- * The environment picker and its variable quick look, docked to the foot of the sidebar card —
- * the same corner Postman puts them in, and close to the collections they resolve against.
+ * The environment picker and its variable quick look, docked to the foot of the explorer — the same
+ * corner Postman puts them in, and close to the collections they resolve against.
  */
 
 const NO_ENVIRONMENT = "";
@@ -115,16 +117,18 @@ function VariableQuickLook({ collectionId }: { collectionId: string | null }) {
 
   return (
     <>
-      <button
-        type="button"
-        ref={triggerRef}
-        onClick={() => (open ? setPos(null) : place())}
-        title={t("api.env.quickLook")}
-        aria-label={t("api.env.quickLook")}
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-      >
-        <Eye size={14} />
-      </button>
+      <Tooltip label={t("api.env.quickLook")}>
+        <button
+          type="button"
+          ref={triggerRef}
+          onClick={() => (open ? setPos(null) : place())}
+          aria-label={t("api.env.quickLook")}
+          aria-expanded={open}
+          className={iconButtonClass({ size: "sm", active: open })}
+        >
+          <Eye size={15} />
+        </button>
+      </Tooltip>
 
       {pos &&
         createPortal(
@@ -137,24 +141,25 @@ function VariableQuickLook({ collectionId }: { collectionId: string | null }) {
               width: PANEL_WIDTH,
               maxHeight: Math.min(420, pos.maxHeight),
             }}
-            className="z-[9999] flex flex-col overflow-hidden rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+            className="z-[9999] flex flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
           >
-            <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2.5 py-1.5">
-              <span className="flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">
+            <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] pl-3 pr-1.5">
+              <span className="flex-1 truncate text-[13px] font-semibold text-[var(--cf-text)]">
                 {t("api.env.quickLook")}
               </span>
-              <button
-                type="button"
-                title={t("api.env.manage")}
-                aria-label={t("api.env.manage")}
-                onClick={() => {
-                  setPos(null);
-                  openModal({ kind: "environments" });
-                }}
-                className="rounded p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
-              >
-                <Settings2 size={13} />
-              </button>
+              <Tooltip label={t("api.env.manage")}>
+                <button
+                  type="button"
+                  aria-label={t("api.env.manage")}
+                  onClick={() => {
+                    setPos(null);
+                    openModal({ kind: "environments" });
+                  }}
+                  className={iconButtonClass({ size: "sm" })}
+                >
+                  <Settings2 size={15} />
+                </button>
+              </Tooltip>
             </div>
 
             <div className="min-h-0 flex-1 overflow-auto p-1.5">
@@ -165,21 +170,21 @@ function VariableQuickLook({ collectionId }: { collectionId: string | null }) {
               ) : (
                 sections.map(({ scope, rows }) => (
                   <div key={scope} className="mb-2 last:mb-0">
-                    <p className="px-1.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                    <p className="px-1.5 pb-1 pt-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                       {t(SCOPE_LABEL[scope])}
                     </p>
                     {rows.map((row) => (
                       <div
                         key={`${scope}:${row.key}`}
                         title={row.shadowed ? t("api.env.shadowed") : undefined}
-                        className={`flex items-baseline gap-2 rounded px-1.5 py-0.5 ${
+                        className={`flex items-baseline gap-2 rounded-md px-1.5 py-1 ${
                           row.shadowed ? "opacity-45 line-through" : ""
                         }`}
                       >
-                        <span className="min-w-0 max-w-[45%] shrink-0 truncate font-mono text-[11px] text-[var(--cf-accent)]">
+                        <span className="min-w-0 max-w-[45%] shrink-0 truncate font-mono text-[12px] text-[var(--cf-accent)]">
                           {row.key}
                         </span>
-                        <span className="min-w-0 flex-1 truncate text-right font-mono text-[11px] text-[var(--cf-text)]">
+                        <span className="min-w-0 flex-1 truncate text-right font-mono text-[12px] text-[var(--cf-text)]">
                           {row.secret ? "••••••••" : row.value}
                         </span>
                       </div>
@@ -204,12 +209,13 @@ export function EnvironmentBar() {
   const entityTabs = useApiStore((s) => s.entityTabs);
   const activeTabId = useApiStore((s) => s.activeTabId);
 
+  // The layers glyph marks the picker as the environment one at a glance, closed as well as open.
   const options = useMemo(
     () => [
-      { value: NO_ENVIRONMENT, label: t("api.env.noEnvironment") },
+      { value: NO_ENVIRONMENT, label: t("api.env.noEnvironment"), icon: Layers },
       ...environments
         .filter((environment) => !environment.is_global)
-        .map((environment) => ({ value: environment.id, label: environment.name })),
+        .map((environment) => ({ value: environment.id, label: environment.name, icon: Layers })),
     ],
     [environments, t],
   );
@@ -224,11 +230,11 @@ export function EnvironmentBar() {
   return (
     <div
       data-tour="api-env"
-      className="flex shrink-0 items-center gap-1 border-t border-[var(--cf-border)] px-1.5 py-1.5"
+      className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] p-2"
     >
       <div className="min-w-0 flex-1">
         <Select
-          size="sm"
+          size="compact"
           value={activeEnvironmentId ?? NO_ENVIRONMENT}
           onChange={(value) => setActiveEnvironment(value === NO_ENVIRONMENT ? null : value)}
           options={options}

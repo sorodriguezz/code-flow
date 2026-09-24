@@ -5,6 +5,7 @@ import { Play, Square, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useThemeStore } from "../../state/themeStore";
 import type { DbStatementResult } from "../../types/database";
+import { buttonClass } from "../common/Button";
 
 /**
  * The SQL console — a drawer under the grid, with no production guards, on purpose.
@@ -73,7 +74,7 @@ export function SandboxConsole({
         </span>
         {/* The chord, written down. It is the difference between a console you use with two hands
             on the keyboard and one you drive by aiming at a button. */}
-        <span className="hidden font-mono text-[10px] text-[var(--cf-text-muted)] sm:inline">
+        <span className="hidden font-mono text-[10.5px] text-[var(--cf-text-muted)] sm:inline">
           {t("dbml.sandbox.consoleRunHint")}
         </span>
         <span className="flex-1" />
@@ -92,7 +93,7 @@ export function SandboxConsole({
           <button
             type="button"
             onClick={() => onRun(target())}
-            className="inline-flex h-[26px] items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
+            className={buttonClass({ variant: "primary", size: "sm" })}
           >
             <Play size={11} />
             {t("dbml.sandbox.run")}
@@ -179,7 +180,7 @@ function ResultBlock({ result }: { result: DbStatementResult }) {
         )}
       </div>
       <div className="overflow-x-auto">
-        <table className="border-collapse text-[11.5px]">
+        <table className="border-collapse text-[12px]">
           <thead>
             <tr>
               {result.columns.map((column) => (

@@ -9,6 +9,7 @@ import { isRowidAlias, refsFrom } from "../../lib/dbml/sqlite";
 import type { SandboxPage } from "../../lib/tauri/sandboxCommands";
 import { sandboxPage as fetchPage } from "../../lib/tauri/sandboxCommands";
 import type { DbmlSchema, DbmlTable } from "../../lib/dbml/types";
+import { buttonClass } from "../common/Button";
 
 /**
  * The writable grid — where you type rows in and the model bites back.
@@ -335,7 +336,7 @@ export function SandboxGrid({
           type="button"
           onClick={focusFirst}
           title={t("dbml.sandbox.newRowHow")}
-          className="flex h-[24px] items-center gap-1 rounded-md px-1.5 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+          className={buttonClass({ variant: "ghost", size: "sm" })}
         >
           <Plus size={12} />
           {t("dbml.sandbox.newRow")}
@@ -357,13 +358,13 @@ export function SandboxGrid({
             >
               <Check size={12} />
               {t("dbml.sandbox.saveRow")}
-              <span className="font-mono text-[9.5px] opacity-60">⌘↵</span>
+              <span className="font-mono text-[10.5px] opacity-60">⌘↵</span>
             </button>
             <button
               type="button"
               onClick={discardDraft}
               title={t("dbml.sandbox.discardRowHow")}
-              className="flex h-[24px] items-center gap-1 rounded-md px-1.5 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
             >
               <X size={12} />
               {t("dbml.sandbox.discardRow")}
@@ -426,7 +427,7 @@ export function SandboxGrid({
       )}
 
       <div className="min-h-0 flex-1 overflow-auto">
-        <table className="border-collapse text-[11.5px]" style={{ tableLayout: "fixed" }}>
+        <table className="border-collapse text-[12px]" style={{ tableLayout: "fixed" }}>
           <thead>
             <tr style={{ height: HEADER_H }}>
               <th
@@ -456,7 +457,7 @@ export function SandboxGrid({
                     {column.pk && <Badge tone="warning">PK</Badge>}
                     {column.ref && <Badge tone="accent">FK</Badge>}
                     {column.unique && !column.pk && <Badge tone="violet">U</Badge>}
-                    <span className="ml-auto shrink-0 font-mono text-[9.5px] text-[var(--cf-text-muted)]">
+                    <span className="ml-auto shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
                       {column.type}
                     </span>
                   </div>
@@ -505,7 +506,7 @@ export function SandboxGrid({
                       </span>
                       <span
                         onClick={() => togglePick(rowid)}
-                        className="cursor-pointer font-mono text-[10px] tabular-nums text-[var(--cf-text-muted)]"
+                        className="cursor-pointer font-mono text-[10.5px] tabular-nums text-[var(--cf-text-muted)]"
                       >
                         {index + 1}
                       </span>
@@ -661,7 +662,7 @@ export function SandboxGrid({
                       autoFocusIndex={index}
                     />
                     {errors[column.name] && (
-                      <div className="pointer-events-none -mt-[1px] truncate text-[9.5px] leading-[12px] text-[var(--cf-danger)]">
+                      <div className="pointer-events-none -mt-[1px] truncate text-[10.5px] leading-[12px] text-[var(--cf-danger)]">
                         {errors[column.name]}
                       </div>
                     )}
@@ -684,7 +685,7 @@ function Badge({ tone, children }: { tone: "warning" | "accent" | "violet"; chil
         ? "text-[var(--cf-accent)]"
         : "text-[var(--cf-violet,var(--cf-accent))]";
   return (
-    <span className={`shrink-0 font-mono text-[8.5px] font-semibold tracking-wide ${colour}`}>
+    <span className={`shrink-0 font-mono text-[10.5px] font-semibold tracking-wide ${colour}`}>
       {children}
     </span>
   );
@@ -779,7 +780,7 @@ function CellInput({
           onCommit(next);
         }}
         onKeyDown={keys}
-        className="w-full bg-transparent font-mono text-[11.5px] text-[var(--cf-text)] outline-none"
+        className="w-full bg-transparent font-mono text-[12px] text-[var(--cf-text)] outline-none"
       >
         <option value="">—</option>
         {column.enumValues.map((entry) => (
@@ -816,7 +817,7 @@ function CellInput({
             onCommit(event.target.value || null);
           }}
           onKeyDown={keys}
-          className="w-full min-w-0 bg-transparent font-mono text-[11.5px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] placeholder:opacity-50"
+          className="w-full min-w-0 bg-transparent font-mono text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] placeholder:opacity-50"
         />
         {generateUuid && (
           // `onMouseDown` with `preventDefault`, like the foreign-key picker's rows: a plain click

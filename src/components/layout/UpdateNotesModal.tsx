@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Markdown } from "../common/Markdown";
 import { useUpdateStore } from "../../state/updateStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /** The `date` the updater reports comes straight from the release manifest and isn't always a
  * shape `Date` can read (Tauri writes it as `2026-07-28 09:14:02.000 +00:00:00`). A release
@@ -70,11 +71,11 @@ export function UpdateNotesModal() {
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-20" onClick={closeNotes}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[70vh] w-[540px] flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+        className="flex max-h-[70vh] w-[540px] flex-col rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
       >
         <div className="flex shrink-0 items-start justify-between gap-2 border-b border-[var(--cf-border)] p-4">
           <div className="min-w-0">
-            <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
+            <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
               <Sparkles size={14} className="shrink-0 text-[var(--cf-accent)]" />
               {t("update.whatsNew", { version: `v${update.version}` })}
             </h3>
@@ -114,8 +115,8 @@ export function UpdateNotesModal() {
               </p>
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--cf-border)]">
                 <div
-                  className="h-full rounded-full bg-[var(--cf-accent)] transition-all"
-                  style={{ width: `${progress}%` }}
+                  className="h-full origin-left rounded-full bg-[var(--cf-accent)] transition-transform duration-200"
+                  style={{ transform: `scaleX(${Math.min(100, Math.max(0, progress)) / 100})` }}
                 />
               </div>
             </div>
@@ -129,7 +130,7 @@ export function UpdateNotesModal() {
                 </p>
                 <button
                   onClick={() => void restart()}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
+                  className={buttonClass({ variant: "primary" })}
                 >
                   <RotateCw size={13} />
                   {t("settings.restartNow")}
@@ -142,14 +143,14 @@ export function UpdateNotesModal() {
                 <button
                   onClick={closeNotes}
                   disabled={busy}
-                  className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+                  className={buttonClass({ variant: "ghost" })}
                 >
                   {t("update.later")}
                 </button>
                 <button
                   onClick={() => void install()}
                   disabled={busy}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
+                  className={buttonClass({ variant: "primary" })}
                 >
                   <Download size={13} />
                   {t("settings.installUpdate", { version: `v${update.version}` })}

@@ -35,7 +35,7 @@ function LogRow({ line, highlighted }: { line: LogLine; highlighted: boolean }) 
       // overscan either side. Dragging past that scrolls, and the rows that leave take their part
       // of the selection with them. That is the trade for not building a thousand-line log up
       // front, and the copy button is still there for the whole thing.
-      className={`flex select-text gap-3 whitespace-pre pr-3 font-mono text-[11.5px] ${
+      className={`flex select-text gap-3 whitespace-pre pr-3 font-mono text-[12px] ${
         bad ? "bg-[color-mix(in_oklab,var(--cf-danger)_9%,transparent)]" : ""
       } ${highlighted ? "bg-[var(--cf-accent-soft)]" : ""}`}
       style={{ height: LINE_H, lineHeight: `${LINE_H}px` }}
@@ -215,7 +215,7 @@ export function JobLogPane({
   return (
     <>
       <div className="flex h-[29px] shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] pl-2.5 pr-2">
-        <span className="mr-auto flex min-w-0 items-center gap-1.5 text-[11.5px] font-medium">
+        <span className="mr-auto flex min-w-0 items-center gap-1.5 text-[12px] font-medium">
           {job ? (
             <>
               <StatusGlyph status={job.status} size={13} />
@@ -242,7 +242,7 @@ export function JobLogPane({
               }
             }}
             placeholder={t("pipelines.search")}
-            className="h-5 w-40 shrink-0 rounded-[5px] border border-[var(--cf-border)] bg-transparent px-2 text-[11px] outline-none focus:border-[var(--cf-accent)]"
+            className="h-[22px] w-44 shrink-0 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 text-[12px] outline-none placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)]"
           />
         ) : (
           <Tooltip label={t("pipelines.search")}>
@@ -270,23 +270,23 @@ export function JobLogPane({
       <div
         ref={scroller}
         onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-        className="min-h-0 flex-1 overflow-auto bg-[var(--cf-bg)] py-2"
+        className="min-h-0 flex-1 overflow-auto bg-[var(--cf-sunken)] py-2"
       >
         {busy && lines.length === 0 && (
-          <p className="flex items-center gap-2 px-3 text-[11.5px] text-[var(--cf-text-muted)]">
+          <p className="flex items-center gap-2 px-3 text-[12px] text-[var(--cf-text-muted)]">
             <RunningGlyph size={12} />
             {t("pipelines.loadingLog")}
           </p>
         )}
-        {showError && <p className="px-3 text-[11.5px] text-[var(--cf-danger)]">{error}</p>}
+        {showError && <p className="px-3 text-[12px] text-[var(--cf-danger)]">{error}</p>}
         {pending && (
-          <p className="flex items-center gap-2 px-3 text-[11.5px] text-[var(--cf-text-muted)]">
+          <p className="flex items-center gap-2 px-3 text-[12px] text-[var(--cf-text-muted)]">
             <RunningGlyph size={12} />
             {t(job.status === "queued" ? "pipelines.logQueued" : "pipelines.logPending")}
           </p>
         )}
         {!busy && !showError && !pending && log && visible.length === 0 && (
-          <p className="px-3 text-[11.5px] text-[var(--cf-text-muted)]">
+          <p className="px-3 text-[12px] text-[var(--cf-text-muted)]">
             {query ? t("pipelines.noMatches") : t("pipelines.emptyLog")}
           </p>
         )}
@@ -300,7 +300,7 @@ export function JobLogPane({
       </div>
 
       <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5">
-        <span className="mr-auto text-[10.5px] text-[var(--cf-text-muted)]">
+        <span className="mr-auto text-[11px] tabular-nums text-[var(--cf-text-faint)]">
           {log
             ? log.truncated
               ? t("pipelines.logTruncated", { n: lines.length })
@@ -311,7 +311,7 @@ export function JobLogPane({
           <button
             type="button"
             onClick={() => void askWhy()}
-            className="flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-[color-mix(in_oklab,var(--cf-accent)_34%,transparent)] bg-[var(--cf-accent-soft)] px-2.5 text-[11.5px] font-semibold text-[var(--cf-accent)] transition-[filter] hover:brightness-105"
+            className="flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)] px-2.5 text-[12px] font-semibold text-[var(--cf-accent)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-accent)_22%,transparent)]"
           >
             <Sparkles size={12} />
             {t("pipelines.whyDidItFail")}
@@ -337,7 +337,7 @@ export function JobLogPane({
 }
 
 const TOOLBAR =
-  "flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]";
+  "flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]";
 
 /**
  * The answer, under the log it is about.
@@ -369,7 +369,7 @@ function AnalysisDrawer({
     <div className="flex max-h-[280px] shrink-0 flex-col border-t border-[var(--cf-border)] bg-[var(--cf-surface)]">
       <div className="flex h-[29px] shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-2.5 pr-2">
         {running && <ThinkingOrb size="sm" />}
-        <span className="mr-auto text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <span className="mr-auto text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("pipelines.analysisTitle")}
         </span>
         <button type="button" onClick={onClose} className={TOOLBAR} aria-label={t("common.close")}>
@@ -388,11 +388,11 @@ function AnalysisDrawer({
             />
           </div>
         )}
-        {error && <p className="px-3.5 py-3 text-[12.5px] text-[var(--cf-danger)]">{error}</p>}
+        {error && <p className="px-3.5 py-3 text-[13px] text-[var(--cf-danger)]">{error}</p>}
         {text && (
           <Markdown
             source={text}
-            className="cf-markdown-preview px-3.5 py-3 text-[12.5px] leading-[1.62]"
+            className="cf-markdown-preview px-3.5 py-3 text-[13px] leading-[1.62]"
           />
         )}
       </div>

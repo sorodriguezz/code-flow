@@ -24,6 +24,7 @@ import { useT } from "../../state/languageStore";
 import { useToastStore } from "../../state/toastStore";
 import { useVaultStore } from "../../state/vaultStore";
 import { BUTTON, BUTTON_QUIET, INPUT, passwordStrength } from "./vaultChrome";
+import { buttonClass } from "../common/Button";
 
 /** Mirrors `crypto::MIN_MASTER_LENGTH`. */
 const MIN_LENGTH = 10;
@@ -42,7 +43,7 @@ const AUTOLOCK_CHOICES = [0, 5, 15, 30, 60];
 function LockedNote() {
   const t = useT();
   return (
-    <p className="flex items-center gap-1.5 rounded-md bg-black/[0.03] px-2.5 py-2 text-[11px] text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
+    <p className="flex items-center gap-1.5 rounded-md bg-[var(--cf-hover)] px-2.5 py-2 text-[11px] text-[var(--cf-text-muted)]">
       <Lock size={11} className="shrink-0" />
       {t("vault.settingsLocked")}
     </p>
@@ -121,10 +122,10 @@ export function VaultSettingsBody({ onReset }: { onReset?: () => void }) {
               type="button"
               disabled={!unlocked}
               onClick={() => void useVaultStore.getState().setAutolock(minutes)}
-              className={`rounded-md border px-2.5 py-1 text-[11.5px] transition-colors ${
+              className={`rounded-md border px-2.5 py-1 text-[12px] transition-colors ${
                 autolockMinutes === minutes
                   ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : "border-[var(--cf-border)] text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+                  : "border-[var(--cf-border)] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
               }`}
             >
               {minutes === 0 ? t("vault.autolockNever") : t("vault.autolockMinutes", { n: minutes })}
@@ -142,7 +143,7 @@ export function VaultSettingsBody({ onReset }: { onReset?: () => void }) {
           {t("vault.remember")}
         </h3>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="min-w-0 flex-1 text-[11.5px] text-[var(--cf-text)]">
+          <span className="min-w-0 flex-1 text-[12px] text-[var(--cf-text)]">
             {t(remembered ? "vault.rememberedOn" : "vault.rememberedOff")}
           </span>
           {remembered && (
@@ -220,7 +221,7 @@ export function VaultSettingsBody({ onReset }: { onReset?: () => void }) {
           <ShieldAlert size={12} />
           {t("vault.reset.title")}
         </h3>
-        <p className="mb-2 text-[11.5px] leading-relaxed text-[var(--cf-text)]">
+        <p className="mb-2 text-[12px] leading-relaxed text-[var(--cf-text)]">
           {t("vault.reset.body")}
         </p>
         <div className="flex flex-wrap items-center gap-2">
@@ -234,7 +235,7 @@ export function VaultSettingsBody({ onReset }: { onReset?: () => void }) {
             type="button"
             onClick={() => void reset()}
             disabled={!canReset}
-            className="shrink-0 rounded-md bg-[var(--cf-danger)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            className={buttonClass({ variant: "danger" })}
           >
             <Trash2 size={12} className="mr-1 inline" />
             {resetting ? t("vault.reset.running") : t("vault.reset.action")}

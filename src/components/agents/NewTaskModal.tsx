@@ -214,7 +214,7 @@ export function NewTaskModal({
                   {/* Only the first one is called out, and only once there is more than one: it is
                       the task the dialog leaves open, which is otherwise invisible. */}
                   {at === 0 && projectIds.length > 1 && (
-                    <span className="shrink-0 rounded bg-black/[0.05] px-1.5 py-[1px] text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.07]">
+                    <span className="shrink-0 rounded bg-[var(--cf-hover)] px-1.5 py-[1px] text-[10.5px] text-[var(--cf-text-muted)]">
                       {t("agents.repoPrimary")}
                     </span>
                   )}

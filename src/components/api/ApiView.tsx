@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { Download, Plus, Users, Zap, type LucideIcon } from "lucide-react";
+import { Boxes, Download, Plus, Users, type LucideIcon } from "lucide-react";
 import { ApiSidebar } from "./ApiSidebar";
 import { DatabaseView } from "../db/DatabaseView";
 import { RequestTabs } from "./RequestTabs";
@@ -16,7 +16,8 @@ import { CollabModal } from "./CollabModal";
 import { ConflictModal } from "./ConflictModal";
 import { tabActions } from "./tabActions";
 import { CARD } from "./panelChrome";
-import { EmptyState } from "../common/EmptyState";
+import { buttonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
 import { useApiCommandStore } from "../../state/apiCommandStore";
 import { useApiModalStore } from "../../state/apiModalStore";
@@ -33,8 +34,8 @@ import { useT } from "../../state/languageStore";
  * listener of its own.
  *
  * There is deliberately no toolbar row of its own: the environment picker sits at the foot of the
- * sidebar and every action it used to hold lives in the sidebar header or its overflow menu, so
- * the request builder starts at the top of the window.
+ * explorer and every action it used to hold lives in the explorer's tool row or its overflow menu,
+ * so the request builder starts at the top of the window.
  */
 
 // ---------------------------------------------------------------------------
@@ -58,39 +59,29 @@ function ApiEmptyState() {
       <button
         type="button"
         onClick={onClick}
-        className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium ${
-          primary
-            ? "bg-[var(--cf-accent)] text-white hover:brightness-110"
-            : "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-        }`}
+        className={buttonClass({ variant: primary ? "primary" : "secondary", size: "md" })}
       >
-        <Icon size={13} />
+        <Icon size={14} />
         {label}
       </button>
     );
   };
 
+  // Just the buttons: no glyph, heading or paragraph over them — the tab strip, the explorer and the
+  // title row already say where you are. The one sentence that earned its place — that it is *this
+  // workspace* which has no collections, so an empty view straight after a workspace switch doesn't
+  // read as "my collections are gone" — rides on the button that answers it.
   return (
-    <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3">
-      {/* No fixed height. `EmptyState` is `h-full`, and a percentage height against a content-sized
-          parent resolves to `auto` — so it sizes to its own content and its internal centring is
-          simply a no-op, which is right here because the column outside already centres the whole
-          group. The 150px this used to carry was a guess that a two-line subtitle overflowed. */}
-      <div className="w-full">
-        {/* The subtitle says "this workspace" rather than just "no collections": an empty API view
-            straight after a workspace switch otherwise reads as "my collections are gone". */}
-        <EmptyState
-          icon={Zap}
-          title={t("api.title")}
-          subtitle={collections.length === 0 ? t("api.noCollectionsInWorkspace") : undefined}
-        />
-      </div>
-      <div className="flex flex-wrap items-center justify-center gap-2">
-        {action(t("api.newRequest"), Plus, () => useApiStore.getState().openScratchTab(), true)}
-        {action(t("api.newCollection"), Plus, () => void newCollection())}
-        {action(t("api.import.title"), Download, () => openModal({ kind: "import" }))}
-        {action(t("api.collab.importCollaborative"), Users, () => openModal({ kind: "collab" }))}
-      </div>
+    <div className="flex h-full min-h-0 flex-wrap content-center items-center justify-center gap-2 p-6">
+      {action(t("api.newRequest"), Plus, () => useApiStore.getState().openScratchTab(), true)}
+      <Tooltip
+        label={t("api.newCollection")}
+        description={collections.length === 0 ? t("api.noCollectionsInWorkspace") : undefined}
+      >
+        {action(t("api.newCollection"), Boxes, () => void newCollection())}
+      </Tooltip>
+      {action(t("api.import.title"), Download, () => openModal({ kind: "import" }))}
+      {action(t("api.collab.importCollaborative"), Users, () => openModal({ kind: "collab" }))}
     </div>
   );
 }
@@ -167,10 +158,11 @@ export function ApiView() {
 
   return (
     <>
-      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
-        {/* Flush: no padding, no gaps. Each column is a plain surface and the only thing between two
-            of them is the `ResizeHandle`'s one-pixel seam — the same everywhere in the app, so the
-            five views read as one window rather than as cards floating on a background. */}
+      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
+        {/* Flush: no padding, no gaps. The explorer and the snippet inspector sit a half-step into
+            the sunken tone with a hairline of their own, the builder between them is the page, and
+            the only thing between two columns is that one-pixel edge — the same anatomy every
+            sub-app has, so the views read as one window rather than as cards on a background. */}
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Both workspaces stay mounted once visited, so switching back doesn't re-fetch a tree or
               throw away a result grid — the same reason `App` keeps its views mounted.

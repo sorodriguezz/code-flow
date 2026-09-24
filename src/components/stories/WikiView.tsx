@@ -8,6 +8,7 @@ import {
   FileCode2,
   FolderGit2,
   History,
+  Loader2,
   MoreHorizontal,
   Network,
   Pencil,
@@ -30,6 +31,8 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { ThinkingOrb } from "../common/ThinkingOrb";
+import { chipClass } from "../common/recipes";
+import { buttonClass } from "../common/Button";
 import { confirmAction } from "../../state/confirmStore";
 import { NO_DOC_PARAMS, useDocsStore } from "../../state/docsStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -447,7 +450,7 @@ function NewDocumentModal({ onClose }: { onClose: () => void }) {
                 }`}
               >
                 <span
-                  className={`flex items-center gap-1.5 text-[12.5px] font-medium ${
+                  className={`flex items-center gap-1.5 text-[13px] font-medium ${
                     on ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
                   }`}
                 >
@@ -782,7 +785,7 @@ function DocumentList({ width }: { width: number }) {
           onClick={() => setImporting(true)}
           title={t("docs.importSubtitle")}
           aria-label={t("docs.import")}
-          className="ml-auto flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
+          className="ml-auto flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]"
         >
           <CloudDownload size={14} />
         </button>
@@ -791,7 +794,7 @@ function DocumentList({ width }: { width: number }) {
           onClick={() => setComposing(true)}
           title={t("docs.new")}
           aria-label={t("docs.new")}
-          className="flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
+          className="flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]"
         >
           <Plus size={14} />
         </button>
@@ -799,7 +802,7 @@ function DocumentList({ width }: { width: number }) {
 
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         {pages.length === 0 ? (
-          <p className="px-2 py-4 text-center text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+          <p className="px-2 py-4 text-center text-[12px] leading-snug text-[var(--cf-text-muted)]">
             {t("docs.empty")}
           </p>
         ) : (
@@ -867,7 +870,7 @@ function DocumentRow({
       }}
       style={riseDelay(at)}
       className={`cf-rise group relative flex w-full items-start rounded-md transition-colors ${
-        active ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        active ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
       }`}
     >
       <button
@@ -881,7 +884,7 @@ function DocumentRow({
         </span>
         <span className="min-w-0 flex-1">
           <span
-            className={`block truncate text-[12.5px] font-medium ${
+            className={`block truncate text-[13px] font-medium ${
               active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
             }`}
           >
@@ -1007,7 +1010,7 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
                     .join(" · ")}
             </span>
             {picked.length > 1 && (
-              <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
+              <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10.5px] font-semibold tabular-nums text-[var(--cf-accent)]">
                 {picked.length}
               </span>
             )}
@@ -1022,7 +1025,7 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
                 {repos.map((repo) => (
                   <label
                     key={repo.id}
-                    className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                    className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
                   >
                     <Checkbox
                       checked={picked.includes(repo.id)}
@@ -1095,7 +1098,7 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
         className={`flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md transition-[filter] ${
           running
             ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-            : "bg-[var(--cf-accent)] text-white hover:brightness-110 disabled:opacity-40 disabled:hover:brightness-100"
+            : "bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:opacity-40 disabled:hover:bg-[var(--cf-accent)]"
         }`}
       >
         {running ? <Square size={12} /> : <Play size={12} />}
@@ -1247,9 +1250,10 @@ function PublishPanel({ page, body, width }: { page: DocPage; body: string; widt
               if (ok) void store().publish();
             });
           }}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          className={buttonClass({ variant: "primary", className: "w-full" })}
         >
-          {publishing ? <ThinkingOrb size="sm" /> : <UploadCloud size={12} />}
+          {/* A spinner, not the orb: publishing is an upload, and the orb means a model is thinking. */}
+          {publishing ? <Loader2 size={13} className="animate-spin" /> : <UploadCloud size={13} />}
           {publishing ? t("docs.publishing") : t("docs.publish")}
         </button>
       </div>
@@ -1343,22 +1347,16 @@ export function WikiView() {
                 </span>
               )}
               {dirty && (
-                <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--cf-accent)]">
-                  {t("docs.unsaved")}
-                </span>
+                <span className={chipClass("accent")}>{t("docs.unsaved")}</span>
               )}
               <button
                 type="button"
                 onClick={() => void store().save()}
                 disabled={!dirty || saving}
                 title={t("docs.saveHint")}
-                className={`flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed ${
-                  dirty
-                    ? "bg-[var(--cf-accent)] text-white hover:brightness-110"
-                    : "border border-[var(--cf-border)] text-[var(--cf-text-muted)] opacity-60"
-                }`}
+                className={buttonClass({ variant: dirty ? "primary" : "secondary", size: "sm" })}
               >
-                {saving ? <ThinkingOrb size="sm" /> : <Save size={12} />}
+                {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
                 {t("common.save")}
               </button>
               <button
@@ -1366,7 +1364,7 @@ export function WikiView() {
                 onClick={() => void store().select(null)}
                 title={t("docs.closeHint")}
                 aria-label={t("docs.close")}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
               >
                 <X size={14} />
               </button>

@@ -86,7 +86,7 @@ export function PortChip({ port, dim = false, title }: { port: number; dim?: boo
         void openExternalUrl(`http://localhost:${port}`);
       }}
       title={title ?? `http://localhost:${port}`}
-      className={`shrink-0 rounded border px-1 font-mono text-[10px] tabular-nums leading-[15px] transition-colors ${
+      className={`shrink-0 rounded border px-1 font-mono text-[10.5px] tabular-nums leading-[15px] transition-colors ${
         dim
           ? "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
           : "border-[color-mix(in_srgb,var(--cf-accent)_40%,transparent)] text-[var(--cf-accent)] hover:border-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)]"

@@ -10,6 +10,14 @@ import { startScrollFeedback } from "./lib/scrollFeedback";
 import { startExternalLinks } from "./lib/externalLinks";
 import { startContextMenuGuard } from "./lib/contextMenuGuard";
 import { startOverlayDragRegion } from "./lib/overlayDragRegion";
+// The app's two faces, from the bundle rather than a CDN: Instrument Sans for the interface and
+// JetBrains Mono for code, hashes and paths. `@font-face` only — each subset (~30–40 KB) is read the
+// first time a glyph in its range is drawn, and never from the network. See `--font-sans` in
+// `index.css`.
+import "@fontsource-variable/instrument-sans/wght.css";
+import "@fontsource-variable/instrument-sans/wght-italic.css";
+import "@fontsource-variable/jetbrains-mono/wght.css";
+import "@fontsource-variable/jetbrains-mono/wght-italic.css";
 import "./index.css";
 
 startScrollFeedback();

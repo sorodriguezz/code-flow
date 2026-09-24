@@ -22,10 +22,10 @@ import {
   AppWindow,
   Bell,
   Blocks,
-  Bot,
   BookOpen,
-  Briefcase,
+  Bot,
   Braces,
+  Briefcase,
   ChartColumn,
   Compass,
   Database,
@@ -48,13 +48,13 @@ import {
   MessageSquareText,
   Network,
   PackagePlus,
+  Palette,
   PanelsTopLeft,
+  QrCode,
+  Rainbow,
   RefreshCw,
   Route,
   ScanSearch,
-  Palette,
-  QrCode,
-  Rainbow,
   Scissors,
   Server,
   Settings2,
@@ -64,16 +64,16 @@ import {
   SlidersHorizontal,
   Smartphone,
   Sparkles,
-  SunMoon,
   SquarePen,
+  SunMoon,
   TerminalSquare,
+  type LucideIcon,
   Upload,
   UserRound,
   UsersRound,
   Volume2,
   Waypoints,
   Wrench,
-  type LucideIcon,
 } from "lucide-react";
 import type { TranslationKey } from "./i18n/translations";
 import type { SettingsSectionId } from "../state/uiStore";
@@ -375,7 +375,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     id: "notifications",
     labelKey: "notifications.settingsTitle",
-    icon: MessageSquareText,
+    // The bell, the same glyph as the status bar's notification centre these settings are about.
+    icon: Bell,
     group: "global",
     // The two questions in the order they get asked: how loudly, and about what.
     tabs: [

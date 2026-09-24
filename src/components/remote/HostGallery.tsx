@@ -7,13 +7,16 @@ import {
   LayoutGrid,
   List,
   Monitor,
-  MonitorSmartphone,
   Plus,
   Settings2,
   Terminal,
   Waypoints,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { chipClass } from "../common/recipes";
 import { HostDot, KindGlyph, OsGlyph, Pill } from "./remoteChrome";
 import { useHostMenu, useNewConnectionMenu, useOpenPrimary } from "./hostMenu";
 import {
@@ -100,25 +103,24 @@ export function HostGallery() {
 
   if (hosts.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center">
-        <MonitorSmartphone size={28} className="mb-2 shrink-0 text-[var(--cf-text-muted)]" />
-        <p className="text-sm font-medium text-[var(--cf-text)]">{t("remote.emptyTitle")}</p>
-        <p className="max-w-sm text-[13px] leading-relaxed text-[var(--cf-text-muted)]">
-          {t("remote.emptySubtitle")}
-        </p>
-        {/* The one thing to do on an empty estate, where the eye already is. The sidebar's (+) is
-            the same menu, but an empty view that only *describes* the button is a dead end. */}
-        <button
-          type="button"
-          onClick={(event) => {
-            const rect = event.currentTarget.getBoundingClientRect();
-            openNewMenu(rect.left, rect.bottom + 4);
-          }}
-          className="mt-2 flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:brightness-110"
-        >
-          <Plus size={13} />
-          {t("remote.newConnection")}
-        </button>
+      <div className="flex h-full items-center justify-center p-8">
+        {/* The one thing to do on an empty estate, where the eye already is — and nothing else: an
+            empty state is its button. What the estate is for goes in the tooltip, for whoever asks.
+            The sidebar's (+) is the same menu, but an empty view that only *describes* the button
+            is a dead end. */}
+        <Tooltip label={t("remote.emptyTitle")} description={t("remote.emptySubtitle")} side="bottom">
+          <button
+            type="button"
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              openNewMenu(rect.left, rect.bottom + 4);
+            }}
+            className={buttonClass({ variant: "primary", size: "lg" })}
+          >
+            <Plus size={14} />
+            {t("remote.newConnection")}
+          </button>
+        </Tooltip>
         {menu && (
           <ContextMenu
             x={menu.x}
@@ -140,32 +142,32 @@ export function HostGallery() {
         openNewMenu(event.clientX, event.clientY);
       }}
     >
-      <div className="flex shrink-0 items-center gap-2 px-4 pb-2 pt-3">
-        <span className="text-[12px] font-medium text-[var(--cf-text)]">
+      <div className="flex min-h-11 shrink-0 items-center gap-2.5 px-4 py-2">
+        <span className="shrink-0 text-[14px] font-semibold text-[var(--cf-text)]">
           {t("remote.hosts")}
-          <span className="ml-1.5 tabular-nums text-[var(--cf-text-muted)]">{visible.length}</span>
+          <span className="ml-1.5 text-[12px] font-normal tabular-nums text-[var(--cf-text-faint)]">
+            {visible.length}
+          </span>
         </span>
         <TagFilterRow />
-        <div className="ml-auto flex shrink-0 items-center gap-0.5 rounded-md bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
-          <ViewButton
-            icon={LayoutGrid}
-            label={t("remote.viewGrid")}
-            active={hostView === "grid"}
-            onClick={() => setHostView("grid")}
-          />
-          <ViewButton
-            icon={List}
-            label={t("remote.viewList")}
-            active={hostView === "list"}
-            onClick={() => setHostView("list")}
-          />
-        </div>
+        <Segmented
+          className="ml-auto"
+          size="sm"
+          layoutId="remote-host-view"
+          ariaLabel={t("remote.hosts")}
+          value={hostView}
+          onChange={setHostView}
+          options={[
+            { value: "grid", icon: LayoutGrid, title: t("remote.viewGrid") },
+            { value: "list", icon: List, title: t("remote.viewList") },
+          ]}
+        />
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
         {visible.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-10 text-center">
-            <p className="text-[12px] text-[var(--cf-text-muted)]">{t("remote.noHostsMatch")}</p>
+            <p className="text-[12px] text-[var(--cf-text-faint)]">{t("remote.noHostsMatch")}</p>
             {/* The one empty result that is worth explaining rather than just reporting.
                 Two or more tags under AND is the combination that returns nothing for a reason the
                 screen otherwise keeps to itself — nothing is both DESA and QA — and the user has no
@@ -176,7 +178,7 @@ export function HostGallery() {
               <button
                 type="button"
                 onClick={() => setTagMode("any")}
-                className="rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] text-[var(--cf-text)] transition-colors hover:border-[var(--cf-accent)]"
+                className={buttonClass({ variant: "secondary", size: "sm" })}
               >
                 {t("remote.tagsTryAny", { tags: tagFilter.join(", ") })}
               </button>
@@ -190,14 +192,14 @@ export function HostGallery() {
                     the estate and not the rest. The count is on the heading for the same reason the
                     tree puts it there: it is the one number that says whether you are looking at
                     all of a group or at what a filter left of it. */}
-                <h3 className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+                <h3 className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                   {group ? (
-                    <Folder size={12} className="shrink-0" />
+                    <Folder size={13} className="shrink-0" />
                   ) : (
-                    <FolderDot size={12} className="shrink-0" />
+                    <FolderDot size={13} className="shrink-0" />
                   )}
                   <span className="min-w-0 truncate">{group || t("remote.ungrouped")}</span>
-                  <span className="shrink-0 tabular-nums opacity-70">{members.length}</span>
+                  <span className="shrink-0 font-medium tabular-nums">{members.length}</span>
                 </h3>
                 {hostView === "grid" ? (
                   // `auto-fill` rather than `auto-fit`: with two hosts, `auto-fit` collapses the
@@ -211,7 +213,7 @@ export function HostGallery() {
                     ))}
                   </div>
                 ) : (
-                  <div className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-md border border-[var(--cf-border)]">
+                  <div className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)]">
                     {members.map((host, at) => (
                       <HostListRow key={host.id} host={host} at={from + at} onMenu={setMenu} />
                     ))}
@@ -254,35 +256,6 @@ function useCardMenu(onMenu: SetMenu) {
   };
 }
 
-function ViewButton({
-  icon: Icon,
-  label,
-  active,
-  onClick,
-}: {
-  icon: typeof LayoutGrid;
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-pressed={active}
-      onClick={onClick}
-      className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
-        active
-          ? "bg-[var(--cf-surface)] text-[var(--cf-text)] shadow-sm"
-          : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-      }`}
-    >
-      <Icon size={13} />
-    </button>
-  );
-}
-
 /**
  * The tags in use, as toggles.
  *
@@ -311,11 +284,11 @@ export function TagFilterRow() {
             type="button"
             aria-pressed={on}
             onClick={() => toggleTag(tag)}
-            className={`shrink-0 rounded px-1.5 py-px text-[11px] transition-colors ${
+            className={
               on
-                ? "bg-[var(--cf-accent)] text-white"
-                : "bg-black/[0.05] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] dark:bg-white/[0.07]"
-            }`}
+                ? chipClass("accent")
+                : chipClass("neutral", "transition-colors duration-100 hover:text-[var(--cf-text)]")
+            }
           >
             {tag}
           </button>
@@ -325,20 +298,21 @@ export function TagFilterRow() {
           "all" and "any" would describe the same result — a control that cannot change what you are
           looking at. It appears exactly when it starts to mean something. */}
       {tagFilter.length > 1 && (
-        <button
-          type="button"
-          onClick={() => setTagMode(tagMode === "all" ? "any" : "all")}
-          title={t(tagMode === "all" ? "remote.tagsAllHint" : "remote.tagsAnyHint")}
-          className="shrink-0 rounded px-1.5 py-px text-[11px] text-[var(--cf-text-muted)] underline decoration-dotted underline-offset-2 transition-colors hover:text-[var(--cf-text)]"
-        >
-          {t(tagMode === "all" ? "remote.tagsAll" : "remote.tagsAny")}
-        </button>
+        <Tooltip label={t(tagMode === "all" ? "remote.tagsAllHint" : "remote.tagsAnyHint")}>
+          <button
+            type="button"
+            onClick={() => setTagMode(tagMode === "all" ? "any" : "all")}
+            className="h-5 shrink-0 rounded px-1.5 text-[11px] text-[var(--cf-text-muted)] underline decoration-dotted underline-offset-2 transition-colors hover:text-[var(--cf-text)]"
+          >
+            {t(tagMode === "all" ? "remote.tagsAll" : "remote.tagsAny")}
+          </button>
+        </Tooltip>
       )}
       {tagFilter.length > 0 && (
         <button
           type="button"
           onClick={clearTags}
-          className="shrink-0 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className="h-5 shrink-0 rounded px-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
         >
           {t("remote.clear")}
         </button>
@@ -404,18 +378,31 @@ function Action({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-      className="flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.08]"
-    >
-      <Icon size={13} />
-    </button>
+    <Tooltip label={label}>
+      <button
+        type="button"
+        aria-label={label}
+        onClick={(e) => {
+          e.stopPropagation();
+          onClick();
+        }}
+        className={iconButtonClass({ size: "xs" })}
+      >
+        <Icon size={13} />
+      </button>
+    </Tooltip>
+  );
+}
+
+/** The host's colour as a short bar at the card's or row's edge — the same mark the tree draws. */
+function ColorEdge({ color }: { color: string }) {
+  if (!color.trim()) return null;
+  return (
+    <span
+      aria-hidden
+      className="pointer-events-none absolute bottom-[9px] left-[3px] top-[9px] w-0.5 rounded-full"
+      style={{ background: color }}
+    />
   );
 }
 
@@ -445,32 +432,30 @@ function HostCard({ host, at, onMenu }: { host: RemoteHostRow; at: number; onMen
           openPrimary(host, spec);
         }
       }}
-      style={{
-        ...riseDelay(at),
-        // The host's own colour, always drawn — this is the one the picker sets, and until now it
-        // only reached the state dot (which is grey unless something is *running*) and the active
-        // tab. A colour that appears once you have already connected cannot answer the question it
-        // exists for, which is "is this production?" asked *before* connecting. An inset edge
-        // rather than a fill, the same mark the terminal bench uses for its focused pane: it reads
-        // at a glance and does not fight the selected-row background for the same pixels.
-        boxShadow: host.color?.trim() ? `inset 2px 0 0 ${host.color}` : undefined,
-      }}
-      className={`cf-rise group flex cursor-default flex-col gap-1.5 rounded-lg border p-2.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+      style={riseDelay(at)}
+      className={`cf-rise group relative flex cursor-default flex-col gap-2 rounded-lg border py-3 pl-4 pr-3 text-left outline-none transition-colors duration-100 focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         selected
-          ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]"
-          : "border-[var(--cf-border)] hover:border-[var(--cf-accent)]/50"
+          ? "border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)]"
+          : "border-[var(--cf-border)] bg-[var(--cf-surface)] hover:border-[var(--cf-border-strong)]"
       }`}
     >
-      <div className="flex min-w-0 items-center gap-1.5">
+      {/* The host's own colour, always drawn — this is the one the picker sets, and until now it
+          only reached the state dot (which is grey unless something is *running*) and the active
+          tab. A colour that appears once you have already connected cannot answer the question it
+          exists for, which is "is this production?" asked *before* connecting. A bar at the edge
+          rather than a fill: it reads at a glance and does not fight the selected card's background
+          for the same pixels. */}
+      <ColorEdge color={host.color} />
+      <div className="flex min-w-0 items-center gap-2">
         <HostDot session={session} active={active} busy={busy} color={host.color} />
         <OsGlyph os={spec.os} size={14} />
-        <KindGlyph kind={spec.kind} size={13} />
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">
+        <KindGlyph kind={spec.kind} size={14} />
+        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-[var(--cf-text)]">
           {host.name}
         </span>
       </div>
 
-      <span className="min-w-0 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
+      <span className="min-w-0 truncate font-mono text-[12px] text-[var(--cf-text-muted)]">
         {detail || t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")}
       </span>
 
@@ -528,26 +513,20 @@ function HostListRow({ host, at, onMenu }: { host: RemoteHostRow; at: number; on
           openPrimary(host, spec);
         }
       }}
-      style={{
-        ...riseDelay(at),
-        // The host's own colour, always drawn — this is the one the picker sets, and until now it
-        // only reached the state dot (which is grey unless something is *running*) and the active
-        // tab. A colour that appears once you have already connected cannot answer the question it
-        // exists for, which is "is this production?" asked *before* connecting. An inset edge
-        // rather than a fill, the same mark the terminal bench uses for its focused pane: it reads
-        // at a glance and does not fight the selected-row background for the same pixels.
-        boxShadow: host.color?.trim() ? `inset 2px 0 0 ${host.color}` : undefined,
-      }}
-      className={`cf-rise group flex cursor-default items-center gap-2 px-3 py-1.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
-        selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      style={riseDelay(at)}
+      className={`cf-rise group relative flex h-9 cursor-default items-center gap-2 pl-4 pr-3 text-left outline-none transition-colors duration-100 focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+        selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
       }`}
     >
+      {/* The host's own colour, always drawn — see `HostCard`. */}
+      <ColorEdge color={host.color} />
       <HostDot session={session} active={active} busy={busy} color={host.color} />
-      <OsGlyph os={spec.os} size={13} />
-      <span className="w-[160px] shrink-0 truncate text-[12px] font-medium text-[var(--cf-text)]">
+      <OsGlyph os={spec.os} size={14} />
+      <KindGlyph kind={spec.kind} size={14} />
+      <span className="w-[160px] shrink-0 truncate text-[13px] font-medium text-[var(--cf-text)]">
         {host.name}
       </span>
-      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
+      <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--cf-text-muted)]">
         {describeHost(spec)}
       </span>
       <span className="hidden shrink-0 items-center gap-1 sm:flex">

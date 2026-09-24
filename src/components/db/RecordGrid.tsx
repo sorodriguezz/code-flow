@@ -152,7 +152,7 @@ export function RecordGrid({
           style={{ height: HEADER_HEIGHT }}
         >
           <div
-            className="sticky left-0 z-30 flex shrink-0 items-center border-b border-r border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
+            className="sticky left-0 z-30 flex shrink-0 items-center border-b border-r border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
             style={{ width: fieldWidth }}
           >
             {t("db.field")}
@@ -218,13 +218,13 @@ export function RecordGrid({
               className="sticky left-0 z-10 flex shrink-0 items-center gap-1 border-b border-r border-[var(--cf-border)] bg-[var(--cf-surface)] px-2"
               style={{ width: fieldWidth }}
             >
-              <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text)]">
+              <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
                 {column.name}
               </span>
               {facts.identity && model.identity && (
                 <span
                   title={t(model.identity.label)}
-                  className="shrink-0 text-[9px] font-bold text-[var(--cf-accent)]"
+                  className="shrink-0 text-[10.5px] font-bold text-[var(--cf-accent)]"
                 >
                   {model.identity.badge}
                 </span>
@@ -234,7 +234,7 @@ export function RecordGrid({
               {facts.type && (
                 <span
                   title={facts.typeFromRecord ? t("db.typeFromRecord") : undefined}
-                  className={`max-w-[42%] shrink-0 truncate text-[9.5px] text-[var(--cf-text-muted)] ${
+                  className={`max-w-[42%] shrink-0 truncate text-[10.5px] text-[var(--cf-text-muted)] ${
                     facts.typeFromRecord ? "italic" : ""
                   }`}
                 >

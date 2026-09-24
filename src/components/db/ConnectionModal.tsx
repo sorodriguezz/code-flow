@@ -46,6 +46,8 @@ import {
   type DbServerInfo,
   type DbSslMode,
 } from "../../types/database";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 /**
  * The connection dialog: every saved connection down the left, the selected one's settings on the
@@ -506,7 +508,7 @@ export function ConnectionModal({
             <button
               onClick={() => void saveAndClose()}
               disabled={saving || nothingSelected}
-              className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:opacity-50"
+              className={buttonClass({ variant: "primary" })}
             >
               {t("common.save")}
             </button>
@@ -519,7 +521,7 @@ export function ConnectionModal({
             databases rather than about one of them. */}
         <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--cf-border)]">
           <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1.5">
-            <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("db.connectionsHeading")}
             </span>
             <IconButton
@@ -1338,7 +1340,7 @@ function SchemasTab({
         <div className="overflow-hidden rounded-md border border-[var(--cf-border)]">
           {/* The header is the select-all, sitting over the rows it governs the way the first row
               of a table of checkboxes does. */}
-          <div className="flex items-center gap-2 border-b border-[var(--cf-border)] bg-black/[0.03] px-2 py-1.5 dark:bg-white/[0.04]">
+          <div className="flex items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-hover)] px-2 py-1.5">
             <label className="flex min-w-0 cursor-pointer items-center gap-2">
               <Checkbox
                 checked={allShownChosen}
@@ -1364,7 +1366,7 @@ function SchemasTab({
                 placeholder={t("db.filterSchemas")}
                 spellCheck={false}
                 aria-label={t("db.filterSchemas")}
-                className="w-full rounded border border-[var(--cf-border)] bg-transparent py-[3px] pl-6 pr-1.5 text-[11.5px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+                className={fieldClass({ className: "w-full pl-6 pr-1.5" })}
               />
             </div>
             {/* Reading the full list costs a connection, so it is a button and not something the
@@ -1392,7 +1394,7 @@ function SchemasTab({
               {filtered.map((entry) => (
                 <label
                   key={entry.name}
-                  className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                  className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-[var(--cf-hover)]"
                 >
                   <Checkbox checked={isChosen(entry.name)} onChange={() => toggle(entry.name)} />
                   <span className="min-w-0 truncate text-[12px] text-[var(--cf-text)]">
@@ -1467,7 +1469,7 @@ function ConnectionRow({
       className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${
         active
           ? "bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
-          : "hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+          : "hover:bg-[var(--cf-hover)]"
       }`}
     >
       <span className="shrink-0">{glyph}</span>
@@ -1545,7 +1547,7 @@ function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
     // it (`black/…` in both), the thumb goes to `--cf-surface-raised`, which is a step above the
     // panel in either theme. The hairline is what carries the edge on dark, where a drop shadow
     // over a dark track is invisible.
-    <div className="inline-flex gap-0.5 rounded-lg bg-black/[0.05] p-[3px] dark:bg-black/25">
+    <div className="inline-flex gap-0.5 rounded-lg bg-[var(--cf-hover)] p-[3px] dark:bg-black/25">
       {entries.map((entry) => {
         const Icon = entry.icon;
         return (
@@ -1554,7 +1556,7 @@ function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
             type="button"
             onClick={() => onChange(entry.id)}
             aria-pressed={mode === entry.id}
-            className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+            className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
               mode === entry.id
                 ? "bg-[var(--cf-surface-raised)] text-[var(--cf-text)] shadow-sm ring-1 ring-inset ring-[var(--cf-border)]"
                 : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
@@ -1628,7 +1630,7 @@ function IconButton({
       title={title}
       aria-label={title}
       disabled={disabled}
-      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.06] hover:text-[var(--cf-text)] disabled:pointer-events-none disabled:opacity-40 dark:hover:bg-white/[0.1]"
+      className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)] disabled:pointer-events-none disabled:opacity-40"
     >
       {children}
     </button>

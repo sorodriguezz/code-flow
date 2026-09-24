@@ -1,20 +1,30 @@
 import { useMemo, useState, type ReactNode } from "react";
 import {
-  AlertOctagon,
-  AlertTriangle,
   Ban,
   Check,
   ChevronDown,
   ChevronRight,
+  CircleCheck,
+  CircleX,
   EyeOff,
   Info,
+  Lightbulb,
   Loader2,
   MapPin,
+  MessageCircleQuestionMark,
   MessageSquarePlus,
+  OctagonAlert,
+  TriangleAlert,
   Undo2,
   Wand2,
   X,
+  type LucideIcon,
 } from "lucide-react";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { chipClass, type ChipTone } from "../common/recipes";
+import { Tooltip } from "../common/Tooltip";
+import { textAreaClass } from "./docParts";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import {
   computeQualityGatePassed,
   formatFindingAsFixPrompt,
@@ -49,11 +59,34 @@ import { riseDelay } from "../../lib/rise";
 // same "### finding" format.
 export const SHORT_SUMMARY_MAX = 160;
 
-export const SEVERITY_STYLE: Record<AnalysisFinding["severity"], { icon: typeof AlertOctagon; color: string }> = {
-  critical: { icon: AlertOctagon, color: "var(--cf-danger)" },
-  warning: { icon: AlertTriangle, color: "var(--cf-warning)" },
-  info: { icon: Info, color: "var(--cf-accent)" },
+/**
+ * Each severity as a shape, a word and a tone — never the tone alone.
+ *
+ * The shapes are the road-sign ones: an octagon stops you, a triangle warns, a circle informs. They
+ * replace the 3px stripe down the card's left edge, which said severity with colour and nothing
+ * else: indistinguishable in a monochrome theme, to a colour-blind reader, and — for `info`, which
+ * wore the accent — next to a rose accent that reads as danger.
+ */
+export const SEVERITY_STYLE: Record<
+  AnalysisFinding["severity"],
+  { icon: LucideIcon; tone: ChipTone; labelKey: TranslationKey }
+> = {
+  critical: { icon: OctagonAlert, tone: "bad", labelKey: "analyze.critical" },
+  warning: { icon: TriangleAlert, tone: "warn", labelKey: "analyze.warning" },
+  info: { icon: Info, tone: "neutral", labelKey: "analyze.info" },
 };
+
+/** A severity as its chip: the shape, and the word — or, given `count`, how many of them. */
+export function SeverityChip({ severity, count }: { severity: AnalysisFinding["severity"]; count?: number }) {
+  const t = useT();
+  const { icon: Icon, tone, labelKey } = SEVERITY_STYLE[severity];
+  return (
+    <span className={chipClass(tone)}>
+      <Icon size={12} className="shrink-0" aria-hidden />
+      {count === undefined ? <span className="capitalize">{t(labelKey)}</span> : `${count} ${t(labelKey)}`}
+    </span>
+  );
+}
 
 /** Inline markdown (bold, `code`, links) inside a single short field — the finding's own
  * fields are one line each, not a full document, so this renders without `marked` wrapping
@@ -278,15 +311,15 @@ export function ResolveWithAiButton({
   if (hideAi && !trailing) return null;
   return (
     <>
-      <div className="flex flex-wrap items-center gap-2 pt-1">
+      <div className="flex flex-wrap items-center gap-1.5 pt-1">
         {!hideAi && (
           <>
             <button
               onClick={() => onClick(extra.trim())}
               disabled={resolving}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+              className={buttonClass({ variant: "secondary", size: "sm" })}
             >
-              {resolving ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
+              {resolving ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
               {queued
                 ? t("assistant.queued")
                 : resolving
@@ -300,15 +333,15 @@ export function ResolveWithAiButton({
               disabled={resolving}
               title={t("finding.addInstructionsHint")}
               aria-expanded={noteOpen}
-              className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium disabled:opacity-50 ${
+              className={
                 // Shut over a note that's been written, the button is the only thing still saying
                 // the fix isn't the plain one — so it carries the accent instead of sitting quiet.
                 hasNote
-                  ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] text-[var(--cf-accent)]"
-                  : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-              }`}
+                  ? "inline-flex h-6 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md bg-[var(--cf-accent-soft)] px-2 text-[12px] font-medium text-[var(--cf-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent)_20%,transparent)] disabled:pointer-events-none disabled:opacity-45"
+                  : buttonClass({ variant: "ghost", size: "sm" })
+              }
             >
-              <MessageSquarePlus size={11} />
+              <MessageSquarePlus size={13} />
               {hasNote ? t("finding.instructionsAdded") : t("finding.addInstructions")}
             </button>
           </>
@@ -323,7 +356,7 @@ export function ResolveWithAiButton({
           rows={3}
           autoFocus
           placeholder={t("finding.instructionsPlaceholder")}
-          className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
+          className={textAreaClass}
         />
       )}
       {resolving && runId && (
@@ -336,9 +369,9 @@ export function ResolveWithAiButton({
         />
       )}
       {resolution && (
-        <div className="relative rounded-md border border-[color-mix(in_oklab,var(--cf-success)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_9%,transparent)] px-2.5 py-1.5 pr-6">
-          <span className="mb-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-success)]">
-            <Check size={11} />
+        <div className="relative rounded-md border border-[color-mix(in_oklab,var(--cf-success)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_9%,transparent)] px-2.5 py-2 pr-8">
+          <span className="mb-0.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-success)]">
+            <CircleCheck size={12} />
             {t("finding.resolved")}
           </span>
           <p className="select-text text-[12px] leading-relaxed text-[var(--cf-text)]">{resolution}</p>
@@ -346,9 +379,10 @@ export function ResolveWithAiButton({
             <button
               onClick={onClear}
               title={t("finding.dismissResolution")}
-              className="absolute right-1.5 top-1.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              aria-label={t("finding.dismissResolution")}
+              className={iconButtonClass({ size: "xs", className: "absolute right-1 top-1" })}
             >
-              <X size={11} />
+              <X size={13} />
             </button>
           )}
         </div>
@@ -383,6 +417,9 @@ export interface DiscardOptions {
   notifyHost: boolean;
 }
 
+/** The two ways of ruling a finding out. */
+type DiscardKind = "falso_positivo" | "ignorado";
+
 /**
  * "This isn't a real defect" — the control that was previously only reachable from the settings
  * screen, put where the finding is actually read.
@@ -391,22 +428,29 @@ export interface DiscardOptions {
  * model stops re-deriving the same rejected finding), what the pull request is told when the
  * thread is closed, and what makes a repository-wide rule reviewable months later. It stays
  * optional, because forcing prose is how you get "n/a".
+ *
+ * Which rejection is being composed (`drafting`) is the card's, not this component's: at rest the
+ * two buttons ride at the end of the fix row, so fixing and ruling out read as the two answers to
+ * the finding on one line, and only the composer opens below it.
  */
 function DiscardControls({
   mark,
   onDiscard,
   busy,
   draftKey,
+  drafting,
+  onDrafting,
 }: {
   mark?: FindingMark | null;
   onDiscard: (estado: string, opts: DiscardOptions) => void;
   busy: boolean;
   /** Where the reason is kept while the card is off screen; local to the card without one. */
   draftKey?: string;
+  /** Which rejection is being composed, if any — `null` is the resting state (just the two buttons). */
+  drafting: DiscardKind | null;
+  onDrafting: (kind: DiscardKind | null) => void;
 }) {
   const t = useT();
-  // Which rejection is being composed, if any — `null` is the resting state (just the two buttons).
-  const [drafting, setDrafting] = useState<"falso_positivo" | "ignorado" | null>(null);
   // The reason is prose someone took the trouble to write: kept in the assistant's drafts so moving
   // to another tab mid-sentence does not throw it away.
   const [localMotivo, setLocalMotivo] = useState("");
@@ -422,18 +466,18 @@ function DiscardControls({
   if (isDiscarded(mark)) {
     const falso = mark?.estado === "falso_positivo";
     return (
-      <div className="rounded-md border border-[var(--cf-border)] bg-black/[0.02] px-2.5 py-1.5 dark:bg-white/[0.03]">
-        <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {falso ? <Ban size={11} /> : <EyeOff size={11} />}
+      <div className="rounded-md bg-[var(--cf-hover)] px-2.5 py-2">
+        <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-muted)]">
+          {falso ? <Ban size={12} /> : <EyeOff size={12} />}
           {t(falso ? "finding.discardedFalse" : "finding.discardedIgnored")}
         </span>
         {mark?.motivo && <p className="mt-0.5 text-[12px] leading-relaxed text-[var(--cf-text)]">{mark.motivo}</p>}
         <button
           onClick={() => onDiscard("abierto", { motivo: "", scopeRepo: false, notifyHost: false })}
           disabled={busy}
-          className="mt-1 flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline disabled:opacity-50"
+          className={buttonClass({ variant: "ghost", size: "sm", className: "-ml-2 mt-1" })}
         >
-          {busy ? <Loader2 size={10} className="animate-spin" /> : <Undo2 size={10} />}
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <Undo2 size={13} />}
           {t("finding.undoDiscard")}
         </button>
       </div>
@@ -442,23 +486,22 @@ function DiscardControls({
 
   if (drafting === null) {
     return (
-      <div className="flex flex-wrap items-center gap-2">
-        <DiscardButton icon={Ban} label={t("finding.markFalsePositive")} onClick={() => setDrafting("falso_positivo")} />
-        <DiscardButton icon={EyeOff} label={t("finding.markIgnored")} onClick={() => setDrafting("ignorado")} />
+      <div className="flex justify-end">
+        <DiscardButtons onPick={onDrafting} />
       </div>
     );
   }
 
   const close = () => {
-    setDrafting(null);
+    onDrafting(null);
     setMotivo("");
     setScopeRepo(false);
     setNotifyHost(true);
   };
 
   return (
-    <div className="space-y-2 rounded-md border border-[var(--cf-border)] bg-black/[0.02] px-2.5 py-2 dark:bg-white/[0.03]">
-      <p className="text-[11px] font-medium text-[var(--cf-text)]">
+    <div className="space-y-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2.5 py-2">
+      <p className="text-[12px] font-medium text-[var(--cf-text)]">
         {t(drafting === "falso_positivo" ? "finding.markFalsePositive" : "finding.markIgnored")}
       </p>
       <textarea
@@ -467,12 +510,12 @@ function DiscardControls({
         rows={2}
         autoFocus
         placeholder={t("finding.discardReasonPlaceholder")}
-        className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+        className={textAreaClass}
       />
       {/* "Ignore" is a call about this pull request ("not now"), so it never becomes a standing
           rule about the code — only a false positive does. */}
       {drafting === "falso_positivo" && (
-        <label className="flex items-start gap-1.5 text-[11px] text-[var(--cf-text-muted)]" title={t("finding.discardScopeRepoHint")}>
+        <label className="flex items-start gap-2 text-[12px] text-[var(--cf-text-muted)]" title={t("finding.discardScopeRepoHint")}>
           <span className="mt-0.5">
             <Checkbox checked={scopeRepo} onChange={setScopeRepo} />
           </span>
@@ -480,41 +523,48 @@ function DiscardControls({
         </label>
       )}
       {mark?.posted && (
-        <label className="flex items-start gap-1.5 text-[11px] text-[var(--cf-text-muted)]" title={t("finding.discardNotifyHostHint")}>
+        <label className="flex items-start gap-2 text-[12px] text-[var(--cf-text-muted)]" title={t("finding.discardNotifyHostHint")}>
           <span className="mt-0.5">
             <Checkbox checked={notifyHost} onChange={setNotifyHost} />
           </span>
           {t("finding.discardNotifyHost")}
         </label>
       )}
-      <div className="flex items-center gap-2">
+      {/* The step's own action at the right edge, Cancel beside it — the order every bar in the
+          assistant keeps. */}
+      <div className="flex items-center justify-end gap-1.5">
+        <button onClick={close} className={buttonClass({ variant: "ghost", size: "sm" })}>
+          {t("common.cancel")}
+        </button>
         <button
           onClick={() => {
             onDiscard(drafting, { motivo: motivo.trim(), scopeRepo, notifyHost });
             close();
           }}
           disabled={busy}
-          className="rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+          className={buttonClass({ variant: "primary", size: "sm" })}
         >
           {t("finding.discardConfirm")}
-        </button>
-        <button onClick={close} className="text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
-          {t("common.cancel")}
         </button>
       </div>
     </div>
   );
 }
 
-function DiscardButton({ icon: Icon, label, onClick }: { icon: typeof Ban; label: string; onClick: () => void }) {
+/** "False positive" and "Ignore", at rest — the doors into the composer above. */
+function DiscardButtons({ onPick }: { onPick: (kind: DiscardKind) => void }) {
+  const t = useT();
   return (
-    <button
-      onClick={onClick}
-      className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
-    >
-      <Icon size={11} />
-      {label}
-    </button>
+    <span className="ml-auto flex shrink-0 items-center gap-0.5">
+      <button onClick={() => onPick("falso_positivo")} className={buttonClass({ variant: "ghost", size: "sm" })}>
+        <Ban size={13} />
+        {t("finding.markFalsePositive")}
+      </button>
+      <button onClick={() => onPick("ignorado")} className={buttonClass({ variant: "ghost", size: "sm" })}>
+        <EyeOff size={13} />
+        {t("finding.markIgnored")}
+      </button>
+    </span>
   );
 }
 
@@ -524,11 +574,8 @@ export function DiscardedChip({ estado }: { estado: string }) {
   const t = useT();
   const falso = estado === "falso_positivo";
   return (
-    <span
-      title={t(falso ? "finding.discardedFalse" : "finding.discardedIgnored")}
-      className="flex shrink-0 items-center gap-0.5 rounded-full bg-black/[0.06] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-text-muted)] dark:bg-white/[0.09]"
-    >
-      {falso ? <Ban size={10} /> : <EyeOff size={10} />}
+    <span title={t(falso ? "finding.discardedFalse" : "finding.discardedIgnored")} className={chipClass("neutral")}>
+      {falso ? <Ban size={12} /> : <EyeOff size={12} />}
     </span>
   );
 }
@@ -538,65 +585,50 @@ export function DiscardedChip({ estado }: { estado: string }) {
 export function ResolvedChip() {
   const t = useT();
   return (
-    <span
-      title={t("finding.resolved")}
-      className="flex shrink-0 items-center gap-0.5 rounded-full bg-[color-mix(in_oklab,var(--cf-success)_16%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-success)]"
-    >
-      <Check size={10} />
+    <span title={t("finding.resolved")} className={chipClass("ok")}>
+      <Check size={12} />
     </span>
   );
 }
 
-/** Severity tally pills (`3 Critical · 2 Warning · …`) — a scannable summary of a findings list,
+/** Severity tally chips (`3 critical · 2 warning · …`) — a scannable summary of a findings list,
  * shown in the PR-review findings header and the pre-commit analysis header so the two read the
- * same. Renders nothing when there are no findings. */
+ * same, each with its severity's shape. Renders nothing when there are no findings. */
 export function SeverityCountBadges({ findings }: { findings: AnalysisFinding[] }) {
-  const t = useT();
-  const items = [
-    { severity: "critical" as const, label: t("analyze.critical"), color: "var(--cf-danger)" },
-    { severity: "warning" as const, label: t("analyze.warning"), color: "var(--cf-warning)" },
-    { severity: "info" as const, label: t("analyze.info"), color: "var(--cf-accent)" },
-  ]
-    .map((i) => ({ ...i, n: findings.filter((f) => f.severity === i.severity).length }))
+  const items = (["critical", "warning", "info"] as const)
+    .map((severity) => ({ severity, n: findings.filter((f) => f.severity === severity).length }))
     .filter((i) => i.n > 0);
   if (items.length === 0) return null;
   return (
-    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+    <div className="flex flex-wrap items-center gap-1.5">
       {items.map((i) => (
-        <span
-          key={i.severity}
-          className="rounded-full px-1.5 py-0.5 font-medium"
-          style={{ background: `color-mix(in oklab, ${i.color} 16%, transparent)`, color: i.color }}
-        >
-          {i.n} {i.label}
-        </span>
+        <SeverityChip key={i.severity} severity={i.severity} count={i.n} />
       ))}
     </div>
   );
 }
 
-/** Quality Gate pill + the model's own A–E grades — shown once per review, above the
- * findings list, in both the pre-commit analysis view and the PR review view. */
+/** Quality Gate chip + the model's own A–E grades — shown once per review, above the
+ * findings list, in both the pre-commit analysis view and the PR review view. The grades are one
+ * chip of three letters; which letter is which is its tooltip, so the strip stays one line. */
 export function QualityGateBadges({ grades, findings }: { grades: QualityGrades | null; findings: AnalysisFinding[] }) {
   const t = useT();
   const passed = computeQualityGatePassed(findings);
+  const spelled = grades
+    ? `${t("analyze.reliability")} ${grades.reliability} · ${t("analyze.security")} ${grades.security} · ${t("analyze.maintainability")} ${grades.maintainability}`
+    : "";
   return (
-    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-      <span
-        className="rounded-full px-1.5 py-0.5 font-medium"
-        style={{
-          background: `color-mix(in oklab, ${passed ? "var(--cf-success)" : "var(--cf-danger)"} 16%, transparent)`,
-          color: passed ? "var(--cf-success)" : "var(--cf-danger)",
-        }}
-      >
-        {passed ? "✅" : "❌"} {t(passed ? "analyze.qualityGatePassed" : "analyze.qualityGateFailed")}
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className={chipClass(passed ? "ok" : "bad")}>
+        {passed ? <CircleCheck size={12} /> : <CircleX size={12} />}
+        {t(passed ? "analyze.qualityGatePassed" : "analyze.qualityGateFailed")}
       </span>
       {grades && (
-        <span className="text-[var(--cf-text-muted)]">
-          {t("analyze.reliability")} <strong className="text-[var(--cf-text)]">{grades.reliability}</strong> ·{" "}
-          {t("analyze.security")} <strong className="text-[var(--cf-text)]">{grades.security}</strong> ·{" "}
-          {t("analyze.maintainability")} <strong className="text-[var(--cf-text)]">{grades.maintainability}</strong>
-        </span>
+        <Tooltip label={spelled}>
+          <span aria-label={spelled} className={chipClass("neutral", "font-mono tabular-nums")}>
+            {grades.reliability} · {grades.security} · {grades.maintainability}
+          </span>
+        </Tooltip>
       )}
     </div>
   );
@@ -654,7 +686,6 @@ export function FindingCard({
   const [localOpen, setLocalOpen] = useState(defaultOpen);
   const open = openProp ?? localOpen;
   const toggle = onToggle ?? (() => setLocalOpen((v) => !v));
-  const { icon: Icon, color } = SEVERITY_STYLE[finding.severity];
   const { resolving, resolution, resolve, clearResolution, runId, runStartedAt } = useResolveWithAi(
     projectId,
     prSourceBranch,
@@ -662,14 +693,20 @@ export function FindingCard({
     finding.subtitle,
   );
   const discarded = isDiscarded(mark);
+  const [drafting, setDrafting] = useState<DiscardKind | null>(null);
+  // Fixing it and rejecting it are the two answers to a finding, so at rest they share one row —
+  // fix on the left, the two rulings at its far end. Once a ruling is being written, or has been
+  // made, the discard controls take their own block below.
+  const fixRow = Boolean(projectId) && !discarded;
+  const rulingsInRow = fixRow && Boolean(onDiscard) && drafting === null;
 
   return (
     // Dimmed rather than hidden: a rejected finding is still part of what the review said, and
     // hiding it would make the ruling impossible to revisit from the list it was made in.
     <div
       style={riseDelay(at)}
-      className={`cf-rise overflow-hidden rounded-lg border transition-opacity ${
-        highlighted ? "border-[color-mix(in_oklab,var(--cf-accent)_55%,var(--cf-border))]" : "border-[var(--cf-border)]"
+      className={`cf-rise overflow-hidden rounded-lg border bg-[var(--cf-surface)] transition-opacity ${
+        highlighted ? "border-[var(--cf-accent-line)]" : "border-[var(--cf-border)]"
       } ${discarded || stale ? "opacity-55" : ""}`}
     >
       <div
@@ -684,23 +721,25 @@ export function FindingCard({
             toggle();
           }
         }}
-        className={`flex w-full cursor-pointer items-start gap-2 px-3 py-2 text-left ${
-          highlighted ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+        className={`flex w-full cursor-pointer items-start gap-2 px-3 py-2.5 text-left transition-colors duration-100 ${
+          highlighted ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
         }`}
-        style={{ borderLeft: `3px solid ${discarded ? "var(--cf-border)" : color}` }}
       >
-        <Icon size={14} className="mt-0.5 shrink-0" style={{ color }} />
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
-            <span className="font-semibold uppercase tracking-wide" style={{ color }}>
-              {finding.type}
+          {/* The severity leads the card as a chip with a shape — see `SEVERITY_STYLE` — in the
+              line that says what kind of finding it is, so the title below keeps the full width
+              of a narrow panel. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-[var(--cf-text-faint)]">
+            <SeverityChip severity={finding.severity} />
+            <span className="min-w-0 truncate">
+              <span className="font-medium text-[var(--cf-text-muted)]">{finding.type}</span>
+              {" · "}
+              {finding.category}
+              {" · "}
+              <span className="font-mono">{finding.id}</span>
             </span>
-            <span>·</span>
-            <span>{finding.category}</span>
-            <span>·</span>
-            <span className="font-mono">{finding.id}</span>
           </div>
-          <p className="mt-0.5 text-[13px] font-medium text-[var(--cf-text)]">
+          <p className="mt-1.5 text-[13px] font-semibold leading-snug text-[var(--cf-text)]">
             <InlineMarkdown text={finding.subtitle} className="cf-markdown-inline" />
           </p>
           {finding.location &&
@@ -713,14 +752,14 @@ export function FindingCard({
                   if (finding.location) onOpenLocation(finding.location.file, finding.location.startLine);
                 }}
                 title={t("finding.openLocation")}
-                className="mt-0.5 flex max-w-full items-center gap-1 truncate font-mono text-[10px] text-[var(--cf-accent)] underline decoration-[color-mix(in_oklab,var(--cf-accent)_35%,transparent)] underline-offset-2 hover:decoration-[var(--cf-accent)]"
+                className="mt-1 flex max-w-full items-center gap-1 truncate font-mono text-[11px] text-[var(--cf-accent)] underline decoration-[color-mix(in_oklab,var(--cf-accent)_35%,transparent)] underline-offset-2 hover:decoration-[var(--cf-accent)]"
               >
-                <MapPin size={10} className="shrink-0" />
+                <MapPin size={12} className="shrink-0" />
                 <span className="truncate">{locationLabel(finding.location)}</span>
               </button>
             ) : (
-              <p className="mt-0.5 flex items-center gap-1 truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
-                <MapPin size={10} className="shrink-0" />
+              <p className="mt-1 flex items-center gap-1 truncate font-mono text-[11px] text-[var(--cf-text-faint)]">
+                <MapPin size={12} className="shrink-0" />
                 {locationLabel(finding.location)}
               </p>
             ))}
@@ -728,17 +767,12 @@ export function FindingCard({
         {discarded && <DiscardedChip estado={mark?.estado ?? ""} />}
         {resolution && <ResolvedChip />}
         {finding.confidence !== null && (
-          <span
-            className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
-            style={{ background: `color-mix(in oklab, ${color} 16%, transparent)`, color }}
-          >
-            {finding.confidence}%
-          </span>
+          <span className={chipClass("neutral", "tabular-nums")}>{finding.confidence}%</span>
         )}
         {open ? (
-          <ChevronDown size={13} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+          <ChevronDown size={14} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
         ) : (
-          <ChevronRight size={13} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+          <ChevronRight size={14} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
         )}
       </div>
 
@@ -746,29 +780,36 @@ export function FindingCard({
         // The substance of the finding — the reasoning, the suggestion, the example — is the part
         // worth quoting into a commit message or a reply, so the whole body is selectable rather
         // than just the fields that happen to render through the markdown class.
-        <div className="select-text space-y-2 border-t border-[var(--cf-border)] px-3 py-2.5 text-[12px]">
+        <div className="select-text space-y-2 px-3 pb-3 pt-0.5 text-[12px] leading-relaxed">
+          {/* Why and Suggestion are told apart by their icon as well as their word: a question
+              for the reasoning, a light bulb — in the accent — for what to do about it. */}
           {finding.why && (
-            <p>
-              <span className="font-medium text-[var(--cf-text)]">💭 {t("analyze.why")}: </span>
-              <InlineMarkdown text={finding.why} className="cf-markdown-inline text-[var(--cf-text-muted)]" />
+            <p className="flex items-start gap-2">
+              <MessageCircleQuestionMark size={14} className="mt-[3px] shrink-0 text-[var(--cf-text-faint)]" />
+              <span className="min-w-0">
+                <span className="font-semibold text-[var(--cf-text)]">{t("analyze.why")}: </span>
+                <InlineMarkdown text={finding.why} className="cf-markdown-inline text-[var(--cf-text-muted)]" />
+              </span>
             </p>
           )}
           {finding.suggestion && (
-            <p>
-              <span className="font-medium text-[var(--cf-text)]">💡 {t("analyze.suggestion")}: </span>
-              <InlineMarkdown text={finding.suggestion} className="cf-markdown-inline text-[var(--cf-text-muted)]" />
+            <p className="flex items-start gap-2">
+              <Lightbulb size={14} className="mt-[3px] shrink-0 text-[var(--cf-accent)]" />
+              <span className="min-w-0">
+                <span className="font-semibold text-[var(--cf-text)]">{t("analyze.suggestion")}: </span>
+                <InlineMarkdown text={finding.suggestion} className="cf-markdown-inline text-[var(--cf-text-muted)]" />
+              </span>
             </p>
           )}
           {finding.exampleCode && (
-            <pre className="overflow-x-auto rounded-md bg-black/[0.04] p-2 font-mono text-[11px] leading-relaxed dark:bg-white/[0.06]">
+            <pre className="overflow-x-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2.5 py-2 font-mono text-[11px] leading-relaxed">
               {finding.exampleCode}
             </pre>
           )}
 
-          {/* Fixing it and rejecting it are the two answers to a finding, so they sit together —
-              except once rejected, where offering to fix what was just called a non-defect would
+          {/* Except once rejected, where offering to fix what was just called a non-defect would
               be the panel arguing with itself. */}
-          {projectId && !discarded && (
+          {fixRow && (
             <ResolveWithAiButton
               resolving={resolving}
               resolution={resolution}
@@ -777,14 +818,17 @@ export function FindingCard({
               onClick={(extra) => void resolve(withExtraInstructions(formatFindingAsFixPrompt(finding), extra))}
               onClear={clearResolution}
               noteKey={resolutionKey ? `note:${resolutionKey}` : undefined}
+              trailing={rulingsInRow ? <DiscardButtons onPick={setDrafting} /> : undefined}
             />
           )}
-          {onDiscard && (
+          {onDiscard && !rulingsInRow && (
             <DiscardControls
               mark={mark}
               onDiscard={onDiscard}
               busy={discarding}
               draftKey={resolutionKey ? `discard:${resolutionKey}` : undefined}
+              drafting={drafting}
+              onDrafting={setDrafting}
             />
           )}
         </div>

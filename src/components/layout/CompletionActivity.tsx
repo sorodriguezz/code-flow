@@ -59,9 +59,9 @@ export function CompletionActivity() {
   if (failed) {
     return (
       <Tooltip label={engine.message}>
-        <span className="flex items-center gap-1 px-1.5 text-[var(--cf-warning)]">
-          <TriangleAlert size={12} />
-          <span className="text-[11px]">{t("localai.barFailed")}</span>
+        <span className="flex h-[22px] items-center gap-[5px] px-1.5 text-[var(--cf-warning)]">
+          <TriangleAlert size={14} />
+          <span className="text-[12px]">{t("localai.barFailed")}</span>
         </span>
       </Tooltip>
     );
@@ -69,12 +69,12 @@ export function CompletionActivity() {
 
   return (
     <Tooltip label={warming ? t("localai.barWarmingHint") : t("localai.barThinkingHint")}>
-      <span className="flex items-center gap-1.5 px-1.5 text-[var(--cf-text-muted)]">
+      <span className="flex h-[22px] items-center gap-1.5 px-1.5 text-[var(--cf-text-muted)]">
         <ThinkingOrb size="sm" />
         {/* The label only while warming. A one-off wait of several seconds deserves words; a
             request that is merely slow does not need the bar to grow and shove its neighbours
             sideways every time it happens. */}
-        {warming && <span className="text-[11px]">{t("localai.barWarming")}</span>}
+        {warming && <span className="text-[12px]">{t("localai.barWarming")}</span>}
       </span>
     </Tooltip>
   );

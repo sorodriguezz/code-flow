@@ -1,5 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, Link2, ListOrdered, MousePointerClick, Pencil, Pin, Plus, Trash2, X } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Code2,
+  Link2,
+  ListOrdered,
+  MousePointerClick,
+  Pencil,
+  Pin,
+  Plus,
+  Trash2,
+  X,
+} from "lucide-react";
 import {
   groupOfTable,
   neighboursOf,
@@ -11,10 +23,21 @@ import type { Cardinality, FieldEdit, RefEnd } from "../../lib/dbml/edit";
 import { typeSuggestions } from "../../lib/dbml/dataTypes";
 import type { DbmlMarkKind } from "../../lib/dbml/layout";
 import { ContextMenu } from "../common/ContextMenu";
-import { MARK_COLOUR, MARK_KINDS, markMenuItems, markNamesOf } from "./markChrome";
+import {
+  LegendBadge,
+  LEGEND,
+  MARK_COLOUR,
+  MARK_KINDS,
+  markMenuItems,
+  markNamesOf,
+} from "./markChrome";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { Select } from "../common/Select";
-import { ICON_BUTTON } from "../diagrams/diagramsChrome";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { chipClass, fieldClass, inspectorClass } from "../common/recipes";
+import { Segmented } from "../common/Segmented";
+import { Tooltip } from "../common/Tooltip";
+import { PANE_TITLE } from "../diagrams/diagramsChrome";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -174,46 +197,44 @@ export function DbmlInspector({
   }, [schema]);
 
   return (
-    <aside
-      style={{ width: width ?? 236 }}
-      className="flex shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)] bg-[var(--cf-surface)]"
-    >
-      <header className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2.5 py-[7px]">
-        <span className="min-w-0 flex-1 truncate text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
-          {t("dbml.inspector.title")}
-        </span>
+    <aside style={{ width: width ?? 236 }} className={`${inspectorClass} overflow-hidden`}>
+      {/* The inspector's head is a toolbar — 44px, the pane's name and its two icon buttons — so
+          its hairline lines up with the workbench's toolbar hairline across the canvas. */}
+      <header className="flex h-11 shrink-0 items-center gap-1 border-b border-[var(--cf-border)] pl-3.5 pr-2">
+        <span className={PANE_TITLE}>{t("dbml.inspector.title")}</span>
         {id && onTogglePin && (
-          <button
-            type="button"
-            className={ICON_BUTTON}
-            style={pinned ? { color: "var(--cf-accent)" } : undefined}
-            title={t(pinned ? "dbml.inspector.unpin" : "dbml.inspector.pin")}
-            aria-label={t(pinned ? "dbml.inspector.unpin" : "dbml.inspector.pin")}
-            aria-pressed={pinned}
-            onClick={onTogglePin}
-          >
-            {/* One glyph in two states rather than two glyphs: a crossed-out pin on the button
-                that *applies* the pin reads as "pinning is off limits here". */}
-            <Pin size={12} fill={pinned ? "currentColor" : "none"} />
-          </button>
+          <Tooltip label={t(pinned ? "dbml.inspector.unpin" : "dbml.inspector.pin")}>
+            <button
+              type="button"
+              className={iconButtonClass({ size: "sm", active: pinned })}
+              aria-label={t(pinned ? "dbml.inspector.unpin" : "dbml.inspector.pin")}
+              aria-pressed={pinned}
+              onClick={onTogglePin}
+            >
+              {/* One glyph in two states rather than two glyphs: a crossed-out pin on the button
+                  that *applies* the pin reads as "pinning is off limits here". */}
+              <Pin size={15} fill={pinned ? "currentColor" : "none"} />
+            </button>
+          </Tooltip>
         )}
         {id && (
-          <button
-            type="button"
-            className={ICON_BUTTON}
-            title={t("dbml.inspector.close")}
-            aria-label={t("dbml.inspector.close")}
-            onClick={onClose}
-          >
-            <X size={12} />
-          </button>
+          <Tooltip label={t("dbml.inspector.close")}>
+            <button
+              type="button"
+              className={iconButtonClass({ size: "sm" })}
+              aria-label={t("dbml.inspector.close")}
+              onClick={onClose}
+            >
+              <X size={15} />
+            </button>
+          </Tooltip>
         )}
       </header>
 
       {!table && !asEnum ? (
-        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-          <MousePointerClick size={18} className="text-[var(--cf-text-muted)] opacity-60" />
-          <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-5 text-center">
+          <MousePointerClick size={18} className="text-[var(--cf-text-faint)]" />
+          <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">
             {t("dbml.selectHint")}
           </p>
         </div>
@@ -222,8 +243,8 @@ export function DbmlInspector({
           {/* Outside the scroller on purpose. What you are looking at is the one thing that must
               still be true at the bottom of a forty-column table — scrolling the name away leaves a
               list of columns belonging to nothing. */}
-          <div className="shrink-0 border-b border-[var(--cf-border)] px-2.5 pb-2 pt-2.5">
-            <p className="text-[9px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
+          <div className="shrink-0 border-b border-[var(--cf-border)] px-3.5 pb-3 pt-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
               {t(asEnum ? "dbml.inspector.enum" : "dbml.inspector.table")}
             </p>
             {/* Double click to rename, which is the gesture the canvas box uses for the same
@@ -239,15 +260,14 @@ export function DbmlInspector({
               // position is keyed by it. See `moveSidecarKey` in the workbench.
               onCommit={(next) => id && edit?.renameTable(id, next)}
             />
-            <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10px] text-[var(--cf-text-muted)]">
+            <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px] text-[var(--cf-text-faint)]">
               {related > 0 && <span>{t("dbml.relatedCount", { count: String(related) })}</span>}
-              {group && (
-                <span className="rounded bg-[var(--cf-text-muted)]/15 px-1.5 py-[1px] font-mono text-[9.5px]">
-                  {group.name}
-                </span>
-              )}
+              {group && <span className={chipClass("neutral", "font-mono")}>{group.name}</span>}
+              {/* The word and the glyph, not a colour alone: "held" has to read to somebody who
+                  cannot tell the accent from the text beside it. */}
               {pinned && (
-                <span className="text-[9.5px] uppercase tracking-wide text-[var(--cf-accent)]">
+                <span className={chipClass("accent")}>
+                  <Pin size={11} fill="currentColor" />
                   {t("dbml.inspector.pinned")}
                 </span>
               )}
@@ -256,12 +276,12 @@ export function DbmlInspector({
             {/* The review mark, in the header rather than in a section.
                 It is a property of the *whole* table, like its name and its group, and it is what
                 you are setting over and over on a model being triaged — so it sits with the two
-                facts that never scroll away rather than behind a fold. Three swatches and no
-                labels: the colours are the legend the canvas already draws, and a row of three
-                words would be wider than the panel. */}
+                facts that never scroll away rather than behind a fold. Three buttons and no words
+                on them: the colours are the legend the canvas already draws, the names are in their
+                tooltips, and a row of three words would be wider than the panel. */}
             {mark && table && (
-              <div className="mt-1.5 flex items-center gap-1">
-                <span className="mr-0.5 text-[9px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
+              <div className="mt-2.5 flex items-center gap-0.5">
+                <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                   {t("dbml.mark.title")}
                 </span>
                 {MARK_KINDS.map((kind) => (
@@ -277,7 +297,7 @@ export function DbmlInspector({
             )}
           </div>
 
-          <div className="min-h-0 flex-1 overflow-auto px-2.5 py-2.5">
+          <div className="min-h-0 flex-1 overflow-auto px-3.5 py-3">
             {table && (table.note || edit) && (
               <Section label={t("dbml.inspector.note")}>
                 {edit ? (
@@ -288,7 +308,7 @@ export function DbmlInspector({
                     onCommit={(next) => edit.setNote(table.name, next)}
                   />
                 ) : (
-                  <p className="whitespace-pre-wrap rounded-md bg-[var(--cf-field)] px-2 py-1.5 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+                  <p className="whitespace-pre-wrap rounded-md bg-[var(--cf-sunken)] px-2.5 py-2 text-[12px] leading-snug text-[var(--cf-text-muted)]">
                     {table.note}
                   </p>
                 )}
@@ -301,12 +321,12 @@ export function DbmlInspector({
                 open
               >
                 {asEnum.values.map((value) => (
-                  <div key={value.name} className="flex items-center gap-2 py-[3px]">
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+                  <div key={value.name} className="flex min-h-[26px] items-center gap-2 px-1">
+                    <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
                       {value.name}
                     </span>
                     {value.note && (
-                      <span className="max-w-[50%] truncate text-[9.5px] text-[var(--cf-text-muted)]">
+                      <span className="max-w-[50%] truncate text-[11px] text-[var(--cf-text-faint)]">
                         {value.note}
                       </span>
                     )}
@@ -395,7 +415,7 @@ export function DbmlInspector({
                 }
               >
                 {outgoing.length === 0 && incoming.length === 0 && adding !== "ref" && (
-                  <p className="py-1 text-[10.5px] text-[var(--cf-text-muted)]">
+                  <p className="px-1 py-1 text-[12px] text-[var(--cf-text-faint)]">
                     {t("dbml.inspector.noRelations")}
                   </p>
                 )}
@@ -463,12 +483,12 @@ export function DbmlInspector({
             {table && table.indexes.length > 0 && (
               <Section label={t("dbml.inspector.indexes")} count={table.indexes.length}>
                 {table.indexes.map((index, at) => (
-                  <div key={`${index.name}-${at}`} className="flex items-center gap-1.5 py-[3px]">
-                    <ListOrdered size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
-                    <span className="min-w-0 flex-1 truncate font-mono text-[10.5px]">
+                  <div key={`${index.name}-${at}`} className="flex min-h-[26px] items-center gap-1.5 px-1">
+                    <ListOrdered size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
+                    <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
                       {index.columns.join(", ")}
                     </span>
-                    {index.unique && <Badge label="U" tone="unique" />}
+                    {index.unique && <LegendBadge label="U" />}
                   </div>
                 ))}
               </Section>
@@ -477,40 +497,56 @@ export function DbmlInspector({
         </>
       )}
 
-      {onOpen && id && (
-        <button
-          type="button"
-          onClick={() => onOpen(id)}
-          className="shrink-0 border-t border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
-        >
-          {t("dbml.goToDefinition")}
-        </button>
-      )}
+      {/* The two footer actions as real buttons — the ghost and danger-ghost recipes, full width —
+          rather than lines of 10px text that happened to be clickable. */}
+      {id && (onOpen || (edit && (table || asEnum))) && (
+        <div className="flex shrink-0 flex-col gap-0.5 border-t border-[var(--cf-border)] p-1.5">
+          {onOpen && (
+            <button
+              type="button"
+              onClick={() => onOpen(id)}
+              className={buttonClass({ variant: "ghost", className: "w-full justify-start" })}
+            >
+              <Code2 size={14} className="shrink-0" />
+              {t("dbml.goToDefinition")}
+            </button>
+          )}
 
-      {/* Deleting the whole thing, in the footer rather than the header or behind a fold. The
-          header already refuses a third control, a hover row action needs a row and a table has
-          none, and a section holding one button is a button you have to unfold to find. Outside the
-          scroller, so it is in the same place on a two-column table and on a forty-column one — and
-          last, so a destructive control is never the thing directly above what you were reaching
-          for. No confirmation, matching this panel's own `dropField`/`dropRelation` and the canvas
-          menu: the change is one text edit on Monaco's undo stack and in the history panel. */}
-      {edit && id && (table || asEnum) && (
-        <button
-          type="button"
-          disabled={edit.blocked}
-          title={edit.blocked ? edit.blockedReason : undefined}
-          onClick={() => {
-            edit.dropTable(id);
-            // The selection self-heals once the re-parse notices the id is gone, but that is a
-            // parse debounce away — long enough to read as a panel still describing what you just
-            // deleted.
-            onClose();
-          }}
-          className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[10.5px] text-[var(--cf-danger)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-danger)_12%,transparent)] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
-        >
-          <Trash2 size={12} className="shrink-0 opacity-80" />
-          {t(asEnum ? "dbml.dropEnum" : "dbml.dropTable")}
-        </button>
+          {/* Deleting the whole thing, in the footer rather than the header or behind a fold. The
+              header already refuses a third control, a hover row action needs a row and a table
+              has none, and a section holding one button is a button you have to unfold to find.
+              Outside the scroller, so it is in the same place on a two-column table and on a
+              forty-column one — and last, so a destructive control is never the thing directly
+              above what you were reaching for. No confirmation, matching this panel's own
+              `dropField`/`dropRelation` and the canvas menu: the change is one text edit on
+              Monaco's undo stack and in the history panel. */}
+          {edit && (table || asEnum) && (
+            <div
+              // On the wrapper, not the button: a disabled button takes no pointer events, so the
+              // reason it is disabled would never be shown on it.
+              title={edit.blocked ? edit.blockedReason : undefined}
+            >
+              <button
+                type="button"
+                disabled={edit.blocked}
+                onClick={() => {
+                  edit.dropTable(id);
+                  // The selection self-heals once the re-parse notices the id is gone, but that is
+                  // a parse debounce away — long enough to read as a panel still describing what
+                  // you just deleted.
+                  onClose();
+                }}
+                className={buttonClass({
+                  variant: "danger-ghost",
+                  className: "w-full justify-start",
+                })}
+              >
+                <Trash2 size={14} className="shrink-0" />
+                {t(asEnum ? "dbml.dropEnum" : "dbml.dropTable")}
+              </button>
+            </div>
+          )}
+        </div>
       )}
     </aside>
   );
@@ -550,7 +586,7 @@ function Section({
         action={(ctx) => (
           <span className="flex shrink-0 items-center gap-1 pl-1">
             {count !== undefined && (
-              <span className="text-[9px] tabular-nums text-[var(--cf-text-muted)]">{count}</span>
+              <span className="text-[11px] tabular-nums text-[var(--cf-text-faint)]">{count}</span>
             )}
             {action?.(ctx)}
           </span>
@@ -563,11 +599,17 @@ function Section({
 }
 
 /**
- * One of the three marks, as a swatch.
+ * One of the three marks, as a real button.
  *
- * A filled dot when it is the current mark and a ring when it is not, so the state is legible
- * without reading a colour against two other colours — which is the thing that stops working for a
- * reader who cannot tell the red from the amber.
+ * A 22px target holding the swatch: a filled dot when it is the current mark and a ring when it is
+ * not, so the state is legible without reading a colour against two other colours — which is the
+ * thing that stops working for a reader who cannot tell the red from the amber. It used to *be* the
+ * 16px circle, which had to be aimed at.
+ *
+ * The names are in the tooltip rather than on the buttons, and it says the state once one is set —
+ * "Marked for removal", and that pressing it again clears it — rather than offering to do again
+ * what has already been done. `aria-label` keeps the verb, which is what a pressed toggle is read
+ * as.
  */
 function MarkSwatch({
   kind,
@@ -580,21 +622,30 @@ function MarkSwatch({
   label: string;
   onClick: () => void;
 }) {
+  const t = useT();
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      aria-pressed={on}
-      className="flex h-4 w-4 items-center justify-center rounded-full border transition-colors"
-      style={{
-        borderColor: MARK_COLOUR[kind],
-        background: on ? MARK_COLOUR[kind] : "transparent",
-      }}
+    <Tooltip
+      label={on ? markNamesOf(t)[kind] : label}
+      description={on ? t("dbml.mark.clear") : undefined}
     >
-      {on && <Check size={9} className="text-[var(--cf-surface)]" strokeWidth={3.5} />}
-    </button>
+      <button
+        type="button"
+        onClick={onClick}
+        aria-label={label}
+        aria-pressed={on}
+        className={iconButtonClass({ size: "xs" })}
+      >
+        <span
+          className="flex h-3.5 w-3.5 items-center justify-center rounded-full border-2"
+          style={{
+            borderColor: MARK_COLOUR[kind],
+            background: on ? MARK_COLOUR[kind] : "transparent",
+          }}
+        >
+          {on && <Check size={9} className="text-[var(--cf-on-accent)]" strokeWidth={3.5} />}
+        </span>
+      </button>
+    </Tooltip>
   );
 }
 
@@ -608,8 +659,10 @@ function MarkSwatch({
  * them is 120 coloured circles in a panel whose whole design note is about how little of it should
  * be on screen at once. So the three are folded behind the one thing worth drawing per row —
  * *whether this column has been decided about, and which way* — and the menu is where the three
- * live. That also makes the indicator and the control the same 8px target at the same x, which is
- * what lets the column of them be both read and used without the eye leaving the left edge.
+ * live. That also makes the indicator and the control the same target at the same x, which is what
+ * lets the column of them be both read and used without the eye leaving the left edge. The dot is
+ * 8px and the target around it is the app's 22px floor — it was the dot alone, which is a thing you
+ * aim at rather than press.
  *
  * Unmarked, it is invisible until the pointer is on the row (or the keyboard is on the button, or
  * its menu is open). Marked, it is always there — a decision that only shows itself on hover is a
@@ -632,30 +685,33 @@ function FieldMark({
 
   return (
     <>
-      <button
-        type="button"
-        title={label}
-        aria-label={label}
-        aria-haspopup="menu"
-        aria-expanded={at !== null}
-        onClick={(event) =>
-          setAt(at ? null : event.currentTarget.getBoundingClientRect())
-        }
-        className={`flex h-3.5 w-2.5 shrink-0 items-center justify-center transition-opacity ${
-          current || at ? "" : "opacity-0 focus-visible:opacity-100 group-hover:opacity-100"
-        }`}
-      >
-        {/* Filled when it is set and a ring when it is not — the same pair `MarkSwatch` uses, so
-            the two controls read as one idea, and so the state survives a reader who cannot tell
-            the red from the amber. */}
-        <span
-          className="h-2 w-2 rounded-full border"
-          style={{
-            borderColor: current ? MARK_COLOUR[current] : "var(--cf-text-muted)",
-            background: current ? MARK_COLOUR[current] : "transparent",
-          }}
-        />
-      </button>
+      <Tooltip label={label}>
+        <button
+          type="button"
+          aria-label={label}
+          aria-haspopup="menu"
+          aria-expanded={at !== null}
+          onClick={(event) =>
+            setAt(at ? null : event.currentTarget.getBoundingClientRect())
+          }
+          className={iconButtonClass({
+            size: "xs",
+            className:
+              current || at ? "" : "opacity-0 focus-visible:opacity-100 group-hover:opacity-100",
+          })}
+        >
+          {/* Filled when it is set and a ring when it is not — the same pair `MarkSwatch` uses, so
+              the two controls read as one idea, and so the state survives a reader who cannot
+              tell the red from the amber. */}
+          <span
+            className="h-2 w-2 rounded-full border"
+            style={{
+              borderColor: current ? MARK_COLOUR[current] : "var(--cf-text-muted)",
+              background: current ? MARK_COLOUR[current] : "transparent",
+            }}
+          />
+        </button>
+      </Tooltip>
       {at && (
         <ContextMenu
           x={at.left}
@@ -671,6 +727,52 @@ function FieldMark({
   );
 }
 
+/**
+ * A 22px icon action of this panel, labelled by the app's tooltip.
+ *
+ * The span between the tooltip and the button is what keeps the label reachable while the button is
+ * *disabled*, which is exactly when it matters here — the label is then the reason ("the document
+ * does not parse"). A disabled button takes no pointer events (`iconButtonClass` says so), so the
+ * pointer lands on the span, which is inside the tooltip's trigger; on the bare button it would land
+ * on nothing and the reason would never be shown.
+ */
+function RowAction({
+  label,
+  ariaLabel,
+  disabled,
+  danger = false,
+  onClick,
+  children,
+}: {
+  label: string;
+  /** The accessible name, when the tooltip is saying something else — a blocked reason. */
+  ariaLabel?: string;
+  disabled?: boolean;
+  danger?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <Tooltip label={label}>
+      <span className="inline-flex shrink-0">
+        <button
+          type="button"
+          aria-label={ariaLabel ?? label}
+          disabled={disabled}
+          onClick={onClick}
+          className={
+            danger
+              ? "inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40"
+              : iconButtonClass({ size: "xs" })
+          }
+        >
+          {children}
+        </button>
+      </span>
+    </Tooltip>
+  );
+}
+
 /** The "+" on a section header. */
 function AddButton({
   title,
@@ -682,16 +784,9 @@ function AddButton({
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      disabled={disabled}
-      onClick={onClick}
-      className="flex h-3.5 w-3.5 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-[var(--cf-text-muted)]"
-    >
-      <Plus size={11} />
-    </button>
+    <RowAction label={title} disabled={disabled} onClick={onClick}>
+      <Plus size={14} />
+    </RowAction>
   );
 }
 
@@ -724,7 +819,7 @@ function InlineName({
       <h2
         title={editable ? title : undefined}
         onDoubleClick={editable ? () => setDraft(value) : undefined}
-        className={`mt-0.5 truncate font-mono text-[14px] font-semibold text-[var(--cf-text)] ${
+        className={`mt-1 truncate font-mono text-[15px] font-semibold text-[var(--cf-text)] ${
           editable ? "cursor-text" : ""
         }`}
       >
@@ -748,7 +843,9 @@ function InlineName({
         if (event.key === "Enter") commit();
         if (event.key === "Escape") setDraft(null);
       }}
-      className="mt-0.5 w-full rounded border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1 py-[1px] font-mono text-[14px] font-semibold text-[var(--cf-text)] outline-none"
+      // The field's halo rather than a bare accent edge — the same focus every text field in the
+      // app wears — at the name's own size, so the heading does not jump when it turns into one.
+      className="mt-1 w-full rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1.5 py-0.5 font-mono text-[15px] font-semibold text-[var(--cf-text)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] outline-none"
     />
   );
 }
@@ -777,7 +874,7 @@ function NoteField({
       placeholder={t("dbml.inspector.notePlaceholder")}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={() => draft !== value && onCommit(draft)}
-      className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[10.5px] leading-snug text-[var(--cf-text-muted)] outline-none transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+      className="w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-2 text-[12px] leading-snug text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] disabled:cursor-not-allowed disabled:opacity-50"
     />
   );
 }
@@ -833,7 +930,7 @@ function FieldForm({
 
   return (
     <div
-      className="my-1 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] p-1.5"
+      className={FORM_CARD}
       onKeyDown={(event) => {
         if (event.key === "Enter" && !event.shiftKey) {
           event.preventDefault();
@@ -848,14 +945,15 @@ function FieldForm({
         onChange={(event) => set({ name: event.target.value })}
         placeholder={t("dbml.inspector.fieldName")}
         aria-invalid={clash}
-        className={`w-full rounded border bg-[var(--cf-surface)] px-1.5 py-[3px] font-mono text-[11px] outline-none ${
-          clash
-            ? "border-[var(--cf-danger)]"
-            : "border-[var(--cf-border)] focus:border-[var(--cf-accent)]"
-        }`}
+        // The clash is drawn off `aria-invalid`, which the field already carries for a screen
+        // reader — one fact, one attribute, and the recipe's own border is left alone.
+        className={fieldClass({
+          size: "sm",
+          className: "w-full font-mono aria-[invalid=true]:border-[var(--cf-danger)]",
+        })}
       />
       {clash && (
-        <p className="mt-[2px] text-[9.5px] leading-snug text-[var(--cf-danger)]">
+        <p className="-mt-0.5 text-[11px] leading-snug text-[var(--cf-danger)]">
           {t("dbml.inspector.nameTaken")}
         </p>
       )}
@@ -864,7 +962,7 @@ function FieldForm({
         list={listId}
         onChange={(event) => set({ type: event.target.value })}
         placeholder={t("dbml.inspector.fieldType")}
-        className="mt-1 w-full rounded border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-[3px] font-mono text-[11px] outline-none focus:border-[var(--cf-accent)]"
+        className={fieldClass({ size: "sm", className: "w-full font-mono" })}
       />
       <datalist id={listId}>
         {types.map((type) => (
@@ -880,63 +978,110 @@ function FieldForm({
         value={field.note ?? ""}
         onChange={(event) => set({ note: event.target.value })}
         placeholder={t("dbml.inspector.fieldNote")}
-        className="mt-1 w-full rounded border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-[3px] text-[11px] outline-none focus:border-[var(--cf-accent)]"
+        className={fieldClass({ size: "sm", className: "w-full" })}
       />
 
-      <div className="mt-1 flex flex-wrap items-center gap-1">
-        <Toggle label="PK" on={Boolean(field.pk)} onClick={() => set({ pk: !field.pk })} />
+      {/* The flags wear the legend when they are on — a `PK` switched on here is the same amber as
+          the `PK` it will become on the row and on the canvas. */}
+      <div className="flex flex-wrap items-center gap-1">
+        <Toggle
+          label="PK"
+          hue={LEGEND.PK}
+          on={Boolean(field.pk)}
+          onClick={() => set({ pk: !field.pk })}
+        />
         <Toggle
           label="U"
+          hue={LEGEND.U}
           on={Boolean(field.unique)}
           onClick={() => set({ unique: !field.unique })}
         />
         <Toggle
           label={t("dbml.inspector.notNull")}
+          hue={LEGEND.NN}
           on={Boolean(field.notNull)}
           onClick={() => set({ notNull: !field.notNull })}
         />
         <Toggle
           label={t("dbml.inspector.increment")}
+          hue={LEGEND.AI}
           on={Boolean(field.increment)}
           onClick={() => set({ increment: !field.increment })}
         />
-        <span className="flex-1" />
-        <button
-          type="button"
-          onClick={onCancel}
-          title={t("common.cancel")}
-          aria-label={t("common.cancel")}
-          className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-        >
-          <X size={11} />
-        </button>
-        <button
-          type="button"
-          onClick={save}
-          disabled={!ready}
-          title={t("common.save")}
-          aria-label={t("common.save")}
-          className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-accent)] disabled:opacity-40"
-        >
-          <Check size={11} />
-        </button>
       </div>
+      <FormActions onCancel={onCancel} onSave={save} ready={ready} />
     </div>
   );
 }
 
-/** One of the column form's flags. */
-function Toggle({ label, on, onClick }: { label: string; on: boolean; onClick: () => void }) {
+/** Where the two inspector forms sit: a card lifted off the panel, with an accent hairline. */
+const FORM_CARD =
+  "my-1.5 flex flex-col gap-1.5 rounded-lg border border-[var(--cf-accent-line)] bg-[var(--cf-surface)] p-2";
+
+/** Cancel and Save, worded — they were two 16px glyphs, a tick and a cross, at the form's corner. */
+function FormActions({
+  onCancel,
+  onSave,
+  ready,
+}: {
+  onCancel: () => void;
+  onSave: () => void;
+  ready: boolean;
+}) {
+  const t = useT();
+  return (
+    <div className="mt-0.5 flex items-center justify-end gap-1">
+      <button type="button" onClick={onCancel} className={buttonClass({ variant: "ghost", size: "sm" })}>
+        {t("common.cancel")}
+      </button>
+      <button
+        type="button"
+        onClick={onSave}
+        disabled={!ready}
+        className={buttonClass({ variant: "primary", size: "sm" })}
+      >
+        <Check size={13} />
+        {t("common.save")}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * One of the column form's flags — an independent switch, not one of a set, so a toggle chip rather
+ * than a segment. On, it takes the hue it is given (the legend's, for the four flags), off it is a
+ * hairline outline that tints on hover.
+ */
+function Toggle({
+  label,
+  on,
+  hue = "var(--cf-accent)",
+  onClick,
+}: {
+  label: string;
+  on: boolean;
+  hue?: string;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
       aria-pressed={on}
-      className={`rounded border px-1.5 py-[1px] text-[8.5px] font-bold uppercase transition-colors ${
+      className={`inline-flex h-[22px] items-center rounded-md px-2 text-[10.5px] font-bold uppercase tracking-[0.03em] transition-colors duration-100 ${
         on
-          ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          ? ""
+          : "text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       }`}
+      style={
+        on
+          ? {
+              color: hue,
+              background: `color-mix(in oklab, ${hue} 14%, transparent)`,
+              boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${hue} 45%, transparent)`,
+            }
+          : undefined
+      }
     >
       {label}
     </button>
@@ -978,15 +1123,14 @@ function RefForm({
 
   if (others.length === 0) {
     return (
-      <p className="py-1 text-[10.5px] text-[var(--cf-text-muted)]">{t("dbml.inspector.needTwo")}</p>
+      <p className="px-1 py-1 text-[12px] text-[var(--cf-text-faint)]">
+        {t("dbml.inspector.needTwo")}
+      </p>
     );
   }
 
   return (
-    <div
-      className="my-1 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] p-1.5"
-      onKeyDown={(event) => event.key === "Escape" && onCancel()}
-    >
+    <div className={FORM_CARD} onKeyDown={(event) => event.key === "Escape" && onCancel()}>
       <Select
         size="sm"
         ariaLabel={t("dbml.inspector.fromColumn")}
@@ -994,16 +1138,20 @@ function RefForm({
         onChange={setColumn}
         options={from.fields.map((field) => ({ value: field.name, label: field.name }))}
       />
-      <div className="my-1 flex items-center gap-1">
-        {(["<", ">", "-", "<>"] as Cardinality[]).map((mark) => (
-          <Toggle
-            key={mark}
-            label={mark}
-            on={cardinality === mark}
-            onClick={() => setCardinality(mark)}
-          />
-        ))}
-      </div>
+      {/* The four arrows are one choice out of four, so the segmented control rather than four
+          toggles that happened to exclude each other. One form is open at a time, so the thumb's
+          id cannot meet itself on screen. */}
+      <Segmented
+        size="sm"
+        full
+        layoutId="dbml-ref-cardinality"
+        value={cardinality}
+        onChange={setCardinality}
+        options={(["<", ">", "-", "<>"] as Cardinality[]).map((mark) => ({
+          value: mark,
+          label: <span className="font-mono">{mark}</span>,
+        }))}
+      />
       <Select
         size="sm"
         ariaLabel={t("dbml.inspector.toTable")}
@@ -1011,46 +1159,28 @@ function RefForm({
         onChange={setTarget}
         options={others.map((entry) => ({ value: entry.id, label: entry.name }))}
       />
-      <div className="mt-1">
-        <Select
-          size="sm"
-          ariaLabel={t("dbml.inspector.toColumn")}
-          value={targetColumn}
-          onChange={setTargetColumn}
-          options={(targetTable?.fields ?? []).map((field) => ({
-            value: field.name,
-            label: field.name,
-          }))}
-        />
-      </div>
-      <div className="mt-1 flex items-center justify-end gap-1">
-        <button
-          type="button"
-          onClick={onCancel}
-          title={t("common.cancel")}
-          aria-label={t("common.cancel")}
-          className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-        >
-          <X size={11} />
-        </button>
-        <button
-          type="button"
-          disabled={!column || !targetTable || !targetColumn}
-          onClick={() =>
-            targetTable &&
-            onSave(
-              { table: from.name, column },
-              { table: targetTable.name, column: targetColumn },
-              cardinality,
-            )
-          }
-          title={t("common.save")}
-          aria-label={t("common.save")}
-          className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-accent)] disabled:opacity-40"
-        >
-          <Check size={11} />
-        </button>
-      </div>
+      <Select
+        size="sm"
+        ariaLabel={t("dbml.inspector.toColumn")}
+        value={targetColumn}
+        onChange={setTargetColumn}
+        options={(targetTable?.fields ?? []).map((field) => ({
+          value: field.name,
+          label: field.name,
+        }))}
+      />
+      <FormActions
+        onCancel={onCancel}
+        ready={Boolean(column && targetTable && targetColumn)}
+        onSave={() =>
+          targetTable &&
+          onSave(
+            { table: from.name, column },
+            { table: targetTable.name, column: targetColumn },
+            cardinality,
+          )
+        }
+      />
     </div>
   );
 }
@@ -1058,10 +1188,8 @@ function RefForm({
 /** The "references" / "referenced by" run inside the relations section. */
 function Direction({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="mt-1 first:mt-0">
-      <p className="mb-[1px] pl-1 text-[9px] uppercase tracking-[0.08em] text-[var(--cf-text-muted)] opacity-70">
-        {label}
-      </p>
+    <div className="mt-1.5 first:mt-0">
+      <p className="mb-0.5 pl-1 text-[11px] text-[var(--cf-text-faint)]">{label}</p>
       {children}
     </div>
   );
@@ -1149,22 +1277,22 @@ function FieldRow({
   }
 
   return (
-    <div className="group py-[3px]">
-      <div className="flex items-center gap-1.5">
+    <div className="group">
+      <div className="relative flex min-h-[26px] items-center gap-1">
         {/* The review mark, as one 8px circle in a slot every row reserves.
             Held *before* the name, and it is the only thing in this panel that is: a column of dots
             down the left edge is the shape you can read forty rows of at a glance, which is the
             entire question this feature answers ("which of these still need looking at"). Anywhere
             else on the row it would land at a different x on every line, because the type column
             that precedes it is as wide as each type happens to be.
-            The slot is reserved whether or not this column is marked — 10px is cheaper than a list
-            of names that jogs sideways as marks are set — and on an unmarked row it is empty until
-            the pointer is on the row. */}
+            The slot is reserved whether or not this column is marked — a steady indent is cheaper
+            than a list of names that jogs sideways as marks are set — and on an unmarked row it is
+            empty until the pointer is on the row. */}
         {mark && <FieldMark name={field.name} current={mark.current} set={mark.set} />}
         <span
-          className="min-w-0 flex-1 truncate font-mono text-[11px]"
+          className="min-w-0 flex-1 truncate font-mono text-[12px]"
           style={{
-            color: field.pk ? "var(--cf-warning)" : undefined,
+            color: field.pk ? LEGEND.PK : undefined,
             fontStyle: field.notNull || field.pk ? undefined : "italic",
             // Struck through when it is going, which is the one mark that needs no legend — the
             // same treatment the canvas gives the same column, and the table's name above it.
@@ -1176,99 +1304,84 @@ function FieldRow({
         >
           {field.name}
         </span>
-        {field.pk && <Badge label="PK" tone="key" />}
-        {field.unique && !field.pk && <Badge label="U" tone="unique" />}
+        {/* The legend's own chips, in the canvas's order — see `LEGEND`. */}
+        {field.pk && <LegendBadge label="PK" />}
+        {field.unique && !field.pk && <LegendBadge label="U" />}
         {/* Text, not a pill — see the note on this component. Right-aligned so the types line up
             into a column of their own, which is the shape that makes them skimmable. */}
         {field.type && (
-          <span className="max-w-[45%] shrink-0 truncate font-mono text-[9.5px] text-[var(--cf-text-muted)]">
+          <span className="max-w-[45%] shrink-0 truncate font-mono text-[11px] text-[var(--cf-text-faint)]">
             {field.type}
           </span>
         )}
-        {/* The two row actions appear on hover, and hold their width so the type column does not
-            shift sideways as the pointer runs down the list. */}
-        {edit && (
-          <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+        {hasDetail && (
+          <Tooltip label={t("dbml.inspector.detail")}>
             <button
               type="button"
+              onClick={() => setOpen((current) => !current)}
+              aria-label={t("dbml.inspector.detail")}
+              aria-expanded={open}
+              className={iconButtonClass({ size: "xs" })}
+            >
+              <ChevronDown
+                size={13}
+                className="transition-transform"
+                style={{ transform: open ? "rotate(180deg)" : undefined }}
+              />
+            </button>
+          </Tooltip>
+        )}
+        {/* The two row actions appear on hover, laid *over* the end of the row rather than beside
+            it. At the 22px every target in the app is now, two of them held in reserve on every row
+            would take a fifth of a 236px panel away from the names; over the type column they cost
+            nothing, and nothing moves sideways as the pointer runs down the list, which is what the
+            reserved width used to buy. The fade behind them is the panel's own tone, so the type
+            under them is covered rather than overprinted. Left of the disclosure, which has to stay
+            pressable on a hovered row. */}
+        {edit && (
+          <span
+            className="absolute inset-y-0 flex items-center gap-0.5 pl-5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100"
+            style={{
+              right: hasDetail ? 22 : 0,
+              background:
+                "linear-gradient(to right, transparent, color-mix(in oklab, var(--cf-sunken) 55%, var(--cf-surface)) 16px)",
+            }}
+          >
+            <RowAction
+              label={edit.blocked ? edit.blockedReason : t("dbml.inspector.editField")}
+              ariaLabel={t("dbml.inspector.editField")}
               disabled={edit.blocked}
               onClick={() => setEditing(true)}
-              title={edit.blocked ? edit.blockedReason : t("dbml.inspector.editField")}
-              aria-label={t("dbml.inspector.editField")}
-              className="flex h-3.5 w-3.5 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)] disabled:opacity-40"
             >
-              <Pencil size={10} />
-            </button>
-            <button
-              type="button"
+              <Pencil size={13} />
+            </RowAction>
+            <RowAction
+              label={edit.blocked ? edit.blockedReason : t("dbml.inspector.dropField")}
+              ariaLabel={t("dbml.inspector.dropField")}
               disabled={edit.blocked}
+              danger
               onClick={edit.remove}
-              title={edit.blocked ? edit.blockedReason : t("dbml.inspector.dropField")}
-              aria-label={t("dbml.inspector.dropField")}
-              className="flex h-3.5 w-3.5 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-danger)] disabled:opacity-40"
             >
-              <Trash2 size={10} />
-            </button>
+              <Trash2 size={13} />
+            </RowAction>
           </span>
-        )}
-        {hasDetail && (
-          <button
-            type="button"
-            onClick={() => setOpen((current) => !current)}
-            title={t("dbml.inspector.detail")}
-            aria-label={t("dbml.inspector.detail")}
-            aria-expanded={open}
-            className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
-          >
-            <ChevronDown
-              size={10}
-              className="transition-transform"
-              style={{ transform: open ? "rotate(180deg)" : undefined }}
-            />
-          </button>
         )}
       </div>
       {open && (
-        <div className="mt-[2px] border-l border-[var(--cf-border)] pl-1.5">
+        <div
+          className={`mb-1 mt-0.5 border-l border-[var(--cf-border)] pl-2 ${mark ? "ml-[26px]" : ""}`}
+        >
           {field.note && (
-            <p className="text-[9.5px] leading-snug text-[var(--cf-text-muted)]">{field.note}</p>
+            <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">{field.note}</p>
           )}
           {field.default !== null && (
-            <p className="font-mono text-[9.5px] leading-snug text-[var(--cf-text-muted)]">
+            <p className="font-mono text-[11px] leading-snug text-[var(--cf-text-muted)]">
               {t("dbml.inspector.default", { value: field.default })}
             </p>
           )}
         </div>
       )}
     </div>
-  );
-}
-
-/**
- * The same chips the canvas draws on a row, in HTML.
- *
- * Tinted rather than flooded, and to the same three tones, for the same reason the canvas's are:
- * the badge on a box and the badge in this panel describe one column, and two treatments of that
- * would make the reader check whether they mean the same thing.
- *
- * Only two tones reach this now — `key` and `unique`. The third, `type`, was every row's, and a
- * badge that is on everything is not a badge; it is drawn as plain muted text in `FieldRow`. The
- * tone is kept here because the indexes section still asks for `unique`, and because the pair is
- * the fixed legend the canvas shares rather than anything derived from the accent.
- */
-function Badge({ label, tone }: { label: string; tone: "key" | "unique" }) {
-  const hue = tone === "key" ? "var(--cf-warning)" : "var(--cf-violet)";
-  return (
-    <span
-      className="shrink-0 rounded border px-1.5 py-[1px] text-[8.5px] font-bold"
-      style={{
-        color: hue,
-        borderColor: `color-mix(in oklab, ${hue} 40%, transparent)`,
-        background: `color-mix(in oklab, ${hue} 18%, transparent)`,
-      }}
-    >
-      {label}
-    </span>
   );
 }
 
@@ -1305,27 +1418,25 @@ function Relation({
       // leave and re-light the whole neighbourhood for a frame.
       onPointerEnter={() => onHover?.(refer.id)}
       onPointerLeave={() => onHover?.(null)}
-      className="group/rel flex w-full items-center gap-1.5 rounded px-1 py-[3px] transition-colors hover:bg-[var(--cf-accent-soft)]"
+      className="group/rel flex min-h-[26px] w-full items-center gap-1.5 rounded-md pl-1 transition-colors duration-100 hover:bg-[var(--cf-hover)]"
     >
-      <Link2 size={10} className="shrink-0 text-[var(--cf-accent)]" />
+      {/* In the accent, like the line it names on the canvas: a relationship is the one thing on
+          that canvas the accent is for. */}
+      <Link2 size={13} className="shrink-0 text-[var(--cf-accent)]" />
       <button
         type="button"
         onClick={onClick}
         title={`${side(one)} < ${side(many)}`}
-        className="min-w-0 flex-1 truncate text-left font-mono text-[10px] text-[var(--cf-text-muted)]"
+        className="min-w-0 flex-1 truncate text-left font-mono text-[12px] text-[var(--cf-text-muted)] transition-colors group-hover/rel:text-[var(--cf-text)]"
       >
         {side(one)} <span className="text-[var(--cf-accent)]">&lt;</span> {side(many)}
       </button>
       {onRemove && (
-        <button
-          type="button"
-          onClick={onRemove}
-          title={t("dbml.inspector.dropRelation")}
-          aria-label={t("dbml.inspector.dropRelation")}
-          className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover/rel:opacity-100"
-        >
-          <Trash2 size={10} />
-        </button>
+        <span className="opacity-0 transition-opacity focus-within:opacity-100 group-hover/rel:opacity-100">
+          <RowAction label={t("dbml.inspector.dropRelation")} danger onClick={onRemove}>
+            <Trash2 size={13} />
+          </RowAction>
+        </span>
       )}
     </div>
   );

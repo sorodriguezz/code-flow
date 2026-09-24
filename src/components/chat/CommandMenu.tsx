@@ -174,10 +174,10 @@ export function CommandMenu({
               key={command.id}
               type="button"
               onClick={() => onRunApp(command.id)}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)]"
             >
               <command.icon size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-              <span className="font-mono text-[11.5px] text-[var(--cf-text)]">{command.name}</span>
+              <span className="font-mono text-[12px] text-[var(--cf-text)]">{command.name}</span>
               <span className="truncate text-[11px] text-[var(--cf-text-muted)]">{t(command.descriptionKey)}</span>
             </button>
           ))}
@@ -192,9 +192,9 @@ export function CommandMenu({
               key={command.name}
               type="button"
               onClick={() => onInsert(command.name)}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)]"
             >
-              <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-[var(--cf-text)]">
+              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--cf-text)]">
                 {command.name}
               </span>
               {command.description && (
@@ -204,7 +204,7 @@ export function CommandMenu({
               )}
               {/* Where this row came from, on the row. "cli-reported" is the binary's own answer;
                   "documented" is a file we read and may be behind the CLI it describes. */}
-              <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 text-[9.5px] leading-[15px] text-[var(--cf-text-muted)]">
+              <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 text-[10.5px] leading-[15px] text-[var(--cf-text-muted)]">
                 {t(SOURCE_KEYS[command.source] ?? "chat.sourceDocumented")}
               </span>
             </button>
@@ -223,10 +223,10 @@ export function CommandMenu({
             disabled={!onOpenTerminal}
             onClick={onOpenTerminal}
             title={onOpenTerminal ? undefined : t("chat.noRepoHint")}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-white/[0.05]"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)] disabled:cursor-not-allowed disabled:opacity-40"
           >
             <SquareTerminal size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-            <span className="text-[11.5px] text-[var(--cf-text)]">
+            <span className="text-[12px] text-[var(--cf-text)]">
               {t("chat.openInTerminal", { provider: providerName })}
             </span>
           </button>
@@ -238,7 +238,7 @@ export function CommandMenu({
 
 function SectionHeading({ text }: { text: string }) {
   return (
-    <p className="px-3 pb-0.5 pt-1.5 text-[9.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+    <p className="px-3 pb-0.5 pt-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
       {text}
     </p>
   );

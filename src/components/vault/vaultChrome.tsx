@@ -27,23 +27,23 @@ export const CARD = "bg-[var(--cf-surface)]";
 export const ROW =
   "group/row flex w-full items-center gap-2 rounded-md px-2 py-[5px] text-left text-[12px] transition-colors";
 
-export const ROW_IDLE = "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]";
+export const ROW_IDLE = "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]";
 
 export const ROW_ACTIVE = "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]";
 
 const ICON_BUTTON_SHELL =
-  "flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-black/[0.05] disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-white/[0.07]";
+  "flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-[var(--cf-hover)] disabled:cursor-not-allowed disabled:opacity-30";
 
 export const ICON_BUTTON = `${ICON_BUTTON_SHELL} text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]`;
 
 export const INPUT =
-  "w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]";
+  "w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]";
 
 export const BUTTON =
-  "rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
+  "rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-on-accent)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
 
 export const BUTTON_QUIET =
-  "rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] text-[var(--cf-text)] transition-colors hover:bg-black/[0.04] disabled:opacity-40 dark:hover:bg-white/[0.05]";
+  "rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] text-[var(--cf-text)] transition-colors hover:bg-[var(--cf-hover)] disabled:opacity-40";
 
 /**
  * What a hidden value looks like.

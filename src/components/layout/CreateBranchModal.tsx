@@ -5,6 +5,8 @@ import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
 import { ConfirmFlowDiagram } from "../common/ConfirmFlowDiagram";
 import type { BranchInfo } from "../../types/domain";
+import { buttonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 
 /**
  * Creating a branch, in the same shape as every other branch operation: a modal with the diagram
@@ -65,10 +67,10 @@ export function CreateBranchModal({ branches, onClose }: { branches: BranchInfo[
           field, the start-point select and both pills of the diagram — hold branch names, and
           conventional ones (`feature/TICKET-123-short-description`) run past what a narrower
           dialog fits. */}
-      <div className="cf-fade-in max-h-[calc(100vh-2rem)] w-[560px] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]">
-        <h3 className="mb-3 text-[13px] font-semibold">{t("branch.createModalTitle")}</h3>
+      <div className="cf-fade-in max-h-[calc(100vh-2rem)] w-[560px] max-w-[90vw] overflow-y-auto rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]">
+        <h3 className="mb-3 text-[15px] font-semibold">{t("branch.createModalTitle")}</h3>
 
-        <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
           {t("sidebar.newBranchName")}
         </label>
         <input
@@ -77,10 +79,10 @@ export function CreateBranchModal({ branches, onClose }: { branches: BranchInfo[
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && void submit()}
           placeholder={t("sidebar.newBranchName")}
-          className="mb-3 w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          className={fieldClass({ className: "mb-3 w-full font-mono" })}
         />
 
-        <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
           {t("branch.createStartPoint")}
         </label>
         <div className="mb-4">
@@ -122,14 +124,14 @@ export function CreateBranchModal({ branches, onClose }: { branches: BranchInfo[
         <div className="flex justify-end gap-2">
           <button
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            className={buttonClass({ variant: "ghost" })}
           >
             {t("common.cancel")}
           </button>
           <button
             onClick={submit}
             disabled={!trimmed || creating}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:opacity-40"
+            className={buttonClass({ variant: "primary" })}
           >
             {creating ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
             {t("sidebar.create")}

@@ -1,6 +1,28 @@
 import { lazy, Suspense, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Check, ChevronDown, Copy, CornerUpLeft, GitBranch, Lock, Minus, Square, X } from "lucide-react";
+import {
+  Bot,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ClipboardList,
+  Copy,
+  CornerUpLeft,
+  Database,
+  GitBranch,
+  KeyRound,
+  Layers,
+  Lock,
+  MessagesSquare,
+  Minus,
+  MonitorSmartphone,
+  NotebookPen,
+  Send,
+  Square,
+  Workflow,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
@@ -12,6 +34,10 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { RemoteActions } from "../git/RemoteActions";
 import { useT } from "../../state/languageStore";
 import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass } from "../common/Button";
+import { monogram, monogramStyle } from "../../lib/monogram";
+import { setChromeSlot } from "./ChromeSlot";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import type { Workspace } from "../../types/domain";
 
 const win = getCurrentWindow();
@@ -87,12 +113,13 @@ function WindowsControls() {
   return (
     // `data-window-control` for the same reason the main bar's carry it: these belong to the window
     // rather than the app, and an overlay laid across them must hand their presses back.
-    <div className="flex items-center">
+    // Full height and flush with the corner, like the main window's — see `TitleBar`.
+    <div className="flex self-stretch">
       <button
         aria-label="Minimize"
         data-window-control="minimize"
         onClick={() => win.minimize()}
-        className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-black/10"
+        className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-[var(--cf-press)]"
       >
         <Minus size={14} />
       </button>
@@ -100,7 +127,7 @@ function WindowsControls() {
         aria-label={maximized ? "Restore" : "Maximize"}
         data-window-control="maximize"
         onClick={() => void toggleMaximize().catch((e) => console.error("toggleMaximize", e))}
-        className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-black/10"
+        className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-[var(--cf-press)]"
       >
         {maximized ? <Copy size={11} className="-scale-x-100" /> : <Square size={12} />}
       </button>
@@ -108,7 +135,7 @@ function WindowsControls() {
         aria-label="Close"
         data-window-control="close"
         onClick={() => win.close()}
-        className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-red-500 hover:text-white"
+        className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-red-500 hover:text-white"
       >
         <X size={14} />
       </button>
@@ -131,12 +158,12 @@ export function SatelliteTitleBar() {
   const t = useT();
 
   const spec = WINDOW.satellite;
+  const project = spec?.kind === "repo" ? (projects?.find((p) => p.id === spec.refId) ?? null) : null;
+  const app = appMeta(spec?.refId ?? "");
   /** What the bar says this window is. A repository's name is user data and is shown as-is; an
    *  app's is a translated label, looked up from the same key the rail uses. */
   const name =
-    spec?.kind === "repo"
-      ? (projects?.find((p) => p.id === spec.refId)?.name ?? t("windows.repoElsewhereShort"))
-      : t(appTitleKey(spec?.refId ?? ""));
+    spec?.kind === "repo" ? (project?.name ?? t("windows.repoElsewhereShort")) : t(app.labelKey);
 
   /** Sends this window's contents back to the main window: bring that one forward, then close this.
    *  The order matters — closing first leaves the desk showing whatever was behind, which reads as
@@ -149,31 +176,65 @@ export function SatelliteTitleBar() {
   return (
     <div
       data-tauri-drag-region
-      className="flex h-9 shrink-0 select-none items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-bg-elevated)] pr-1 text-[12px]"
+      // Part of the frame, like the main window's title row: no fill of its own (it used to name
+      // `--cf-bg-elevated`, a token nothing defines, so it was transparent anyway) and no rule under
+      // it — the sheet below starts where the frame ends.
+      className={`flex h-11 shrink-0 select-none items-center gap-2 pl-3 text-[13px] ${isMac ? "pr-2" : ""}`}
     >
-      {/* On macOS the traffic lights are AppKit's own, drawn over the webview — all this bar has to
-          do is leave them room. In fullscreen they are gone, so the gap is not reserved. */}
-      {isMac && <div aria-hidden className={fullscreen ? "w-1" : "w-[62px]"} />}
-      {!isMac && <div aria-hidden className="w-2" />}
+      {/* The main window's left edge, exactly — the same `pl-3`, the same 62px of room and the same
+          gap after it. AppKit draws the traffic lights at the same spot in both windows too
+          (`windows.rs` copies the main window's `trafficLightPosition`), so the title sits on the
+          lights' line and a step away from the last of them. At AppKit's default spot, with no
+          `pl-3`, it sat under their middle and hard against the green one. In fullscreen the
+          lights are gone, so the room is not reserved. */}
+      <div className="flex shrink-0 items-center">
+        {isMac ? <div aria-hidden className={fullscreen ? "w-1" : "w-[62px]"} /> : <div aria-hidden className="w-1" />}
+      </div>
 
-      {/* `min-w-0` so it actually gives when the bar runs out of room: as a flex item its
-          default `min-width: auto` makes `truncate` a no-op, which was invisible while this
-          bar held three things and is not now that a repository window also carries a branch
-          and three buttons. */}
-      <span className="min-w-0 truncate font-medium text-[var(--cf-text)]">{name}</span>
-
-      {workspace &&
-        (spec?.kind === "repo" ? (
-          <span
-            className="flex shrink-0 items-center gap-1.5 rounded border border-[var(--cf-border)] px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)]"
-            title={t("windows.workspaceOfRepo")}
-          >
-            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: workspace.color }} />
-            {workspace.name}
+      {spec?.kind === "repo" ? (
+        // The repository crumb the main window's title row draws: its monogram and its name.
+        // `min-w-0` so it gives when the bar runs out of room — a repository window also carries
+        // the workspace, a branch and three buttons.
+        <span className="flex h-7 min-w-0 items-center gap-2 pl-0.5 pr-1 font-semibold text-[var(--cf-text)]">
+          {project && (
+            <span
+              aria-hidden
+              className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] text-[10.5px] font-bold tracking-[0.02em]"
+              style={monogramStyle(project.color)}
+            >
+              {monogram(project.name)}
+            </span>
+          )}
+          <span className="min-w-0 truncate">{name}</span>
+        </span>
+      ) : (
+        // "Workspace › App", as the main window says it — the workspace crumb being this window's
+        // picker, since an app window holds its own workspace. Then the slot an app puts its own
+        // mode controls in (Especificación's three modes), exactly as in the main window.
+        <>
+          {workspace && (
+            <>
+              <WorkspacePicker current={workspace} />
+              <ChevronRight size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
+            </>
+          )}
+          <span className="flex h-7 min-w-0 items-center gap-2 px-1 font-semibold text-[var(--cf-text)]">
+            <app.icon size={15} className="shrink-0 text-[var(--cf-accent)]" />
+            <span className="min-w-0 truncate">{name}</span>
           </span>
-        ) : (
-          <WorkspacePicker current={workspace} />
-        ))}
+          <span ref={setChromeSlot} className="ml-2 flex min-w-0 items-center gap-2" />
+        </>
+      )}
+
+      {workspace && spec?.kind === "repo" && (
+        <span
+          className="flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border)]"
+          title={t("windows.workspaceOfRepo")}
+        >
+          <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: workspace.color }} />
+          {workspace.name}
+        </span>
+      )}
 
       {spec?.kind === "repo" && <RepoRemote />}
 
@@ -183,9 +244,9 @@ export function SatelliteTitleBar() {
         <button
           onClick={reattach}
           aria-label={t("windows.reattach")}
-          className="flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.08]"
+          className={iconButtonClass({ size: "sm" })}
         >
-          <CornerUpLeft size={13} />
+          <CornerUpLeft size={15} />
         </button>
       </Tooltip>
 
@@ -201,7 +262,7 @@ export function SatelliteTitleBar() {
  * window's status bar does: repository, then branch, then what you can do to its remote.
  *
  * Nothing at all until the branches have loaded — `setRepoPath` refreshes them on mount, and a
- * skeleton for a row of icons in a 36px bar would be more movement than the thing it stands in for.
+ * skeleton for a row of icons in a 44px bar would be more movement than the thing it stands in for.
  */
 function RepoRemote() {
   const branch = useRepoStore((s) => s.branches.find((entry) => entry.is_head) ?? null);
@@ -232,9 +293,9 @@ function RepoRemote() {
         // hint is what tells the user the switcher is the same one they know from the shell.
         title={hint("branch.switcher", t("shortcuts.cmdBranchSwitcher"))}
         aria-haspopup="dialog"
-        className="flex min-w-0 shrink items-center gap-1 rounded-md px-1 py-0.5 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+        className="flex h-6 min-w-0 shrink items-center gap-1.5 rounded-md px-1.5 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
-        <GitBranch size={11} className="shrink-0" />
+        <GitBranch size={13} className="shrink-0" />
         <span className="min-w-0 truncate">{name ?? t("statusbar.detachedHead")}</span>
         {/* The explanation for a greyed-out push, in the same glyph the status bar uses. Without it
             the button is disabled with its reason only in a tooltip. */}
@@ -243,10 +304,10 @@ function RepoRemote() {
             className="shrink-0 text-[var(--cf-warning)]"
             title={branch.locked_by_rule ? t("branch.lockedByRuleBadge") : t("branch.lockedBadge")}
           >
-            <Lock size={10} />
+            <Lock size={11} />
           </span>
         )}
-        <ChevronDown size={10} className="shrink-0 opacity-70" />
+        <ChevronDown size={12} className="shrink-0 opacity-70" />
       </button>
       <RemoteActions />
       {/* No fallback: the dialog is the whole of what this renders, and a skeleton of it flashing
@@ -305,17 +366,27 @@ function WorkspacePicker({ current }: { current: Workspace }) {
         aria-haspopup="menu"
         aria-expanded={open}
         title={t("windows.switchWorkspace")}
-        className="flex items-center gap-1.5 rounded border border-[var(--cf-border)] px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-text)]"
+        // Drawn as the main window's workspace crumb — the tile in the workspace's colour, the name —
+        // plus the caret that says this one opens a list.
+        className={`flex h-7 min-w-0 items-center gap-2 rounded-md pl-1 pr-1.5 text-[13px] font-semibold text-[var(--cf-text)] transition-colors ${
+          open ? "bg-[var(--cf-hover)]" : "hover:bg-[var(--cf-hover)]"
+        }`}
       >
-        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: current.color }} />
-        {current.name}
-        <ChevronDown size={11} />
+        <span
+          aria-hidden
+          className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px]"
+          style={monogramStyle(current.color)}
+        >
+          <Layers size={12} />
+        </span>
+        <span className="max-w-[200px] truncate">{current.name}</span>
+        <ChevronDown size={13} className="shrink-0 text-[var(--cf-text-faint)]" />
       </button>
 
       {open && (
         <div
           role="menu"
-          className="absolute left-0 top-[calc(100%+4px)] z-50 max-h-[320px] min-w-[180px] overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-1 shadow-[var(--cf-shadow)]"
+          className="cf-fade-in absolute left-0 top-[calc(100%+4px)] z-50 max-h-[320px] min-w-[200px] overflow-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)]"
         >
           {workspaces.map((entry) => (
             <button
@@ -326,13 +397,15 @@ function WorkspacePicker({ current }: { current: Workspace }) {
                 setOpen(false);
                 if (entry.id !== current.id) setActiveWorkspace(entry.id);
               }}
-              className={`flex w-full items-center gap-2 px-2.5 py-1 text-left text-[12px] transition-colors hover:bg-[var(--cf-accent-soft)] ${
-                entry.id === current.id ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
+              className={`flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] transition-colors ${
+                entry.id === current.id
+                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
               }`}
             >
-              <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: entry.color }} />
+              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: entry.color }} />
               <span className="min-w-0 flex-1 truncate">{entry.name}</span>
-              {entry.id === current.id && <Check size={12} className="shrink-0" />}
+              {entry.id === current.id && <Check size={14} className="shrink-0" />}
             </button>
           ))}
         </div>
@@ -341,34 +414,35 @@ function WorkspacePicker({ current }: { current: Workspace }) {
   );
 }
 
-/** The rail's own label key for an app id. Kept beside the bar rather than imported from `AppRail`,
- *  which is shell and must not be reachable from a satellite's bundle. */
+/** The rail's own label key and glyph for an app id — the same pair the main window's title row
+ *  shows. Kept beside the bar rather than imported from `AppRail`, which is shell and must not be
+ *  reachable from a satellite's bundle; keep the glyphs in step with the rail's by hand. */
 // One more list of the rail's apps, and the twelfth place a new one has to be registered. It is the
 // easiest to miss because forgetting it breaks nothing visible *inside* the window: the view renders
 // from `SatelliteApp`'s own map, so a detached chat drew the whole chat correctly under a title bar
 // announcing that this version did not know what the window held. If you are adding an app, the
 // symptom to look for is exactly that mismatch.
-function appTitleKey(refId: string) {
+function appMeta(refId: string): { labelKey: TranslationKey; icon: LucideIcon } {
   switch (refId) {
     case "api:requests":
-      return "tabbar.api" as const;
+      return { labelKey: "tabbar.api", icon: Send };
     case "api:database":
-      return "tabbar.databases" as const;
+      return { labelKey: "tabbar.databases", icon: Database };
     case "agents":
-      return "tabbar.agents" as const;
+      return { labelKey: "tabbar.agents", icon: Bot };
     case "stories":
-      return "tabbar.stories" as const;
+      return { labelKey: "tabbar.stories", icon: ClipboardList };
     case "remote":
-      return "tabbar.remote" as const;
+      return { labelKey: "tabbar.remote", icon: MonitorSmartphone };
     case "notes":
-      return "tabbar.notes" as const;
+      return { labelKey: "tabbar.notes", icon: NotebookPen };
     case "diagrams":
-      return "tabbar.diagrams" as const;
+      return { labelKey: "tabbar.diagrams", icon: Workflow };
     case "vault":
-      return "tabbar.vault" as const;
+      return { labelKey: "tabbar.vault", icon: KeyRound };
     case "chat":
-      return "tabbar.chat" as const;
+      return { labelKey: "tabbar.chat", icon: MessagesSquare };
     default:
-      return "windows.unknownApp" as const;
+      return { labelKey: "windows.unknownApp", icon: Layers };
   }
 }

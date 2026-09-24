@@ -404,7 +404,7 @@ function FilePane({
           onClick={onUp}
           title={t("remote.sftpUp")}
           aria-label={t("remote.sftpUp")}
-          className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
         >
           <ChevronRight size={13} className="-rotate-90" />
         </button>
@@ -418,7 +418,7 @@ function FilePane({
             }
             title={t("remote.sftpNewFolder")}
             aria-label={t("remote.sftpNewFolder")}
-            className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
           >
             <FolderPlus size={13} />
           </button>
@@ -428,7 +428,7 @@ function FilePane({
           onClick={onRefresh}
           title={t("remote.refresh")}
           aria-label={t("remote.refresh")}
-          className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
         >
           <RefreshCw size={12} />
         </button>
@@ -491,7 +491,7 @@ function FilePane({
               className={`cf-rise group flex cursor-default items-center gap-2 px-2 py-1 outline-none ${
                 selected?.path === entry.path
                   ? "bg-[var(--cf-accent-soft)]"
-                  : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  : "hover:bg-[var(--cf-hover)]"
               }`}
             >
               <span className="shrink-0 text-[var(--cf-text-muted)]">
@@ -507,7 +507,7 @@ function FilePane({
                 <span className="block truncate text-[12px] text-[var(--cf-text)]">{entry.name}</span>
                 {/* Under the name, the way Termius does it — and it is the answer to "why did that
                     upload fail", which is otherwise a trip to the shell. */}
-                <span className="block truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
+                <span className="block truncate font-mono text-[10.5px] text-[var(--cf-text-muted)]">
                   {entry.permissions}
                 </span>
               </span>
@@ -529,7 +529,7 @@ function FilePane({
                     }}
                     aria-label={t("remote.sftpRename")}
                     title={t("remote.sftpRename")}
-                    className="rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                    className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
                   >
                     <Pencil size={12} />
                   </button>
@@ -543,7 +543,7 @@ function FilePane({
                     }}
                     aria-label={t("common.delete")}
                     title={t("common.delete")}
-                    className="rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                    className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] hover:bg-[var(--cf-hover)]"
                   >
                     <Trash2 size={12} />
                   </button>

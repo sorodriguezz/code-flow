@@ -11,8 +11,8 @@ const PANEL_WIDTH = 216;
  * across the status bar reads by colour without having to know which widget said it. */
 const TINT: Record<ReturnType<typeof batterySeverity>, string | undefined> = {
   normal: undefined,
-  low: "text-[#f59e0b]",
-  critical: "text-[#ef4444]",
+  low: "text-[var(--cf-warning)]",
+  critical: "text-[var(--cf-danger)]",
 };
 
 /**
@@ -121,11 +121,11 @@ export function BatteryMeter() {
         onClick={() => setOpen((wasOpen) => !wasOpen)}
         aria-expanded={open}
         title={t("battery.title")}
-        className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] tabular-nums hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
+        className={`flex h-[22px] shrink-0 items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums hover:bg-[var(--cf-hover)] ${
           TINT[severity] ?? "text-[var(--cf-text-muted)]"
         }`}
       >
-        <Icon size={12} className={`shrink-0 ${motion}`} />
+        <Icon size={14} className={`shrink-0 ${motion}`} />
         <span>{percent}%</span>
       </button>
 

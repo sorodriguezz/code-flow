@@ -10,6 +10,7 @@ import { useNotesStore } from "../../state/notesStore";
 import { notify } from "../../state/notificationStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /** The routing row this runs under — `AiTask::Notes` on the Rust side. */
 const TASK = "notes";
@@ -294,7 +295,7 @@ export function NoteAiPanel({
             <span className="mb-1 block text-[10.5px] font-medium text-[var(--cf-accent)]">
               {t("notes.ai.ready")}
             </span>
-            <pre className="max-h-16 overflow-hidden rounded-md border border-[color-mix(in_oklab,var(--cf-accent)_35%,transparent)] bg-[var(--cf-field)] px-2 py-1 text-[10px] leading-snug text-[var(--cf-text-muted)]">
+            <pre className="max-h-16 overflow-hidden rounded-md border border-[color-mix(in_oklab,var(--cf-accent)_35%,transparent)] bg-[var(--cf-field)] px-2 py-1 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
               {parked.slice(0, 240)}
               {parked.length > 240 ? "…" : ""}
             </pre>
@@ -317,7 +318,7 @@ export function NoteAiPanel({
             </span>
             {/* Two lines of it, so "replace this" names something the user can recognise without
                 the window turning into a second editor. */}
-            <pre className="max-h-12 overflow-hidden rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] px-2 py-1 text-[10px] leading-snug text-[var(--cf-text-muted)]">
+            <pre className="max-h-12 overflow-hidden rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] px-2 py-1 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
               {selection.slice(0, 160)}
               {selection.length > 160 ? "…" : ""}
             </pre>
@@ -347,13 +348,13 @@ export function NoteAiPanel({
           rows={3}
           aria-label={t("notes.ai.instruction")}
           placeholder={t("notes.ai.instructionPlaceholder")}
-          className="w-full resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[11.5px] leading-relaxed text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
+          className="w-full resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] leading-relaxed text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
         />
 
         {/* A label, never a control. Changing the routing is Settings' job, and a picker here would
             be the second place to set it — which is how the two ended up disagreeing. */}
         <p
-          className="flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)]"
+          className="flex items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)]"
           title={t("notes.ai.engineHint", { provider: providerLabel, model: modelLabel })}
         >
           <ProviderGlyph providerId={providerId} size={10} />
@@ -410,7 +411,7 @@ export function NoteAiPanel({
               // The same promise the Write button makes, and it still holds: this is one Monaco
               // edit at the caret, so one undo takes it back out.
               title={t("notes.ai.undoHint")}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
+              className={buttonClass({ variant: "primary", size: "sm" })}
             >
               <Check size={11} />
               {t("notes.ai.insert")}
@@ -433,7 +434,7 @@ export function NoteAiPanel({
               // is reassurance about the button, and the window is small enough that a third of it
               // should not be spent on text you read once.
               title={t("notes.ai.undoHint")}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+              className={buttonClass({ variant: "primary", size: "sm" })}
             >
               <Sparkles size={11} />
               {t("notes.ai.write")}

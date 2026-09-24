@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Archive, ChevronDown, ChevronRight, RotateCcw, X } from "lucide-react";
 import { changedLines, HISTORY_PAGE, type Revision } from "../../lib/dbml/history";
 import { readLayout } from "../../lib/dbml/layout";
-import { ICON_BUTTON } from "../diagrams/diagramsChrome";
+import { iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
+import { PANE_HEAD, PANE_TITLE } from "../diagrams/diagramsChrome";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -61,29 +63,31 @@ export function DbmlHistory({
   return (
     <>
       <div className="fixed inset-0 z-30" onMouseDown={onClose} />
-      <aside className="absolute right-2 top-[38px] z-40 flex max-h-[calc(100%-52px)] w-[380px] flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]">
-        <header className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2.5 py-[7px]">
-          <span className="min-w-0 flex-1 truncate text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[var(--cf-text-muted)]">
-            {t("dbml.history")}
-          </span>
-          <button
-            type="button"
-            className={ICON_BUTTON}
-            title={t("dbml.history.close")}
-            aria-label={t("dbml.history.close")}
-            onClick={onClose}
-          >
-            <X size={12} />
-          </button>
+      {/* The popover surface — raised, hairline, the app's shadow — with no inner padding: the
+          rows below run edge to edge and carry their own. `top-12` clears the 44px toolbar it
+          drops from. */}
+      <aside className="absolute right-2 top-12 z-40 flex max-h-[calc(100%-60px)] w-[380px] flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]">
+        <header className={PANE_HEAD}>
+          <span className={PANE_TITLE}>{t("dbml.history")}</span>
+          <Tooltip label={t("dbml.history.close")}>
+            <button
+              type="button"
+              className={iconButtonClass({ size: "xs" })}
+              aria-label={t("dbml.history.close")}
+              onClick={onClose}
+            >
+              <X size={14} />
+            </button>
+          </Tooltip>
         </header>
 
         {revisions.length === 0 ? (
-          <p className="px-3 py-4 text-center text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          <p className="px-3 py-4 text-center text-[12px] leading-snug text-[var(--cf-text-muted)]">
             {t("dbml.history.empty")}
           </p>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto py-1">
-            <p className="px-2.5 pb-1 text-[10px] leading-snug text-[var(--cf-text-muted)]">
+            <p className="px-3 pb-1.5 pt-1 text-[11px] leading-snug text-[var(--cf-text-faint)]">
               {t("dbml.history.hint")}
             </p>
             {visible.map((revision) => (
@@ -102,9 +106,9 @@ export function DbmlHistory({
               <button
                 type="button"
                 onClick={() => setShown((count) => count + HISTORY_PAGE)}
-                className="flex w-full items-center justify-center gap-1 border-t border-[var(--cf-border)] px-2.5 py-[6px] text-[10.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-accent-soft)] hover:text-[var(--cf-accent)]"
+                className="flex h-8 w-full items-center justify-center gap-1.5 border-t border-[var(--cf-border)] px-3 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
               >
-                <ChevronDown size={11} />
+                <ChevronDown size={13} />
                 {t("dbml.history.showMore", {
                   count: String(Math.min(remaining, HISTORY_PAGE)),
                 })}
@@ -129,11 +133,11 @@ export function DbmlHistory({
             onOlder();
             onClose();
           }}
-          className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-[7px] text-[11px] text-[var(--cf-text)] transition-colors hover:bg-[var(--cf-accent-soft)] hover:text-[var(--cf-accent)]"
+          className="flex h-9 shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-3 text-[13px] text-[var(--cf-text)] transition-colors hover:bg-[var(--cf-hover)]"
         >
-          <Archive size={11} className="shrink-0" />
+          <Archive size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
           <span className="min-w-0 flex-1 truncate text-left">{t("dbml.history.older")}</span>
-          <ChevronRight size={11} className="shrink-0 opacity-60" />
+          <ChevronRight size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
         </button>
       </aside>
     </>
@@ -174,51 +178,53 @@ function Row({
 
   return (
     <div className="border-b border-[var(--cf-border)] last:border-b-0">
-      <div className="flex items-center gap-1.5 px-2.5 py-[5px]">
+      <div className="flex min-h-[34px] items-center gap-1.5 py-1 pl-3 pr-2 transition-colors hover:bg-[var(--cf-hover)]">
         <button
           type="button"
           onClick={onToggle}
           aria-expanded={expanded}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
-          <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--cf-text)]">
+          <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--cf-text)]">
             {t(CAUSE_LABEL[revision.cause])}
           </span>
-          <span className="shrink-0 font-mono text-[9.5px] tabular-nums text-[var(--cf-success)]">
+          <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-success)]">
             {summary.added > 0 ? `+${summary.added}` : ""}
           </span>
-          <span className="shrink-0 font-mono text-[9.5px] tabular-nums text-[var(--cf-danger)]">
+          <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-danger)]">
             {summary.removed > 0 ? `−${summary.removed}` : ""}
           </span>
-          <span className="shrink-0 font-mono text-[9.5px] tabular-nums text-[var(--cf-text-muted)]">
+          <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
             {new Date(revision.at).toLocaleTimeString(undefined, {
               hour: "2-digit",
               minute: "2-digit",
             })}
           </span>
         </button>
-        <button
-          type="button"
-          onClick={onRevert}
-          title={t("dbml.history.revert")}
-          aria-label={t("dbml.history.revert")}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-accent-soft)] hover:text-[var(--cf-accent)]"
-        >
-          <RotateCcw size={11} />
-        </button>
+        <Tooltip label={t("dbml.history.revert")}>
+          <button
+            type="button"
+            onClick={onRevert}
+            aria-label={t("dbml.history.revert")}
+            className={iconButtonClass({ size: "xs" })}
+          >
+            <RotateCcw size={13} />
+          </button>
+        </Tooltip>
       </div>
 
+      {/* A code well: the sunken tone every read-only block of code inside a sheet wears. */}
       {expanded && diff && (
-        <div className="max-h-[220px] overflow-auto border-t border-[var(--cf-border)] bg-[var(--cf-field)] px-1 py-1">
+        <div className="max-h-[220px] overflow-auto border-t border-[var(--cf-border)] bg-[var(--cf-sunken)] px-1.5 py-1.5">
           {diff.lines.length === 0 ? (
-            <p className="px-1.5 py-1 text-[10px] text-[var(--cf-text-muted)]">
+            <p className="px-1.5 py-1 text-[11px] text-[var(--cf-text-muted)]">
               {t("dbml.history.noLines")}
             </p>
           ) : (
             diff.lines.map((line, at) => (
               <div
                 key={`${line.kind}-${line.line}-${at}`}
-                className="flex items-baseline gap-1.5 font-mono text-[10px] leading-[1.45]"
+                className="flex items-baseline gap-1.5 font-mono text-[11px] leading-[1.5]"
                 style={{
                   color: line.kind === "add" ? "var(--cf-success)" : "var(--cf-danger)",
                 }}
@@ -234,7 +240,7 @@ function Row({
             ))
           )}
           {diff.truncated > 0 && (
-            <p className="px-1.5 pt-1 text-[9.5px] italic text-[var(--cf-text-muted)]">
+            <p className="px-1.5 pt-1 text-[11px] italic text-[var(--cf-text-faint)]">
               {t("dbml.history.more", { count: String(diff.truncated) })}
             </p>
           )}

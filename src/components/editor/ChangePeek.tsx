@@ -185,10 +185,10 @@ export function ChangePeek({
       disabled={opts?.enabled !== undefined ? !opts.enabled : disabled}
       title={label}
       aria-label={label}
-      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] disabled:opacity-30 ${
+      className={`inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] disabled:opacity-30 hover:bg-[var(--cf-hover)] ${
         opts?.danger
-          ? "hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
-          : "hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+          ? "hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
+          : "hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       }`}
     >
       {opts?.spinning ? <Loader2 size={13} className="animate-spin" /> : <Icon size={13} />}

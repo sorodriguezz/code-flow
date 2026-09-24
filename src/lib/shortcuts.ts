@@ -473,7 +473,9 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     id: "view.pipelines",
     group: "views",
     labelKey: "tabbar.pipelines",
-    defaultChord: "Mod+Shift+P",
+    // Not Mod+Shift+P: that is the command palette's, listed first, so this one shipped dead — and
+    // the Shortcuts pane greeted everyone with a conflict warning they had not caused.
+    defaultChord: "Mod+Alt+P",
     run: () => useUiStore.getState().setActiveView("pipelines"),
   },
   {
@@ -529,7 +531,8 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     id: "editor.anchors",
     group: "editor",
     labelKey: "anchors.title",
-    defaultChord: "Mod+Shift+M",
+    // Not Mod+Shift+M, which the Remote view claims first (see `view.remote`).
+    defaultChord: "Mod+Alt+M",
     run: () => useEditorCommandStore.getState().send("anchors"),
   },
   {
@@ -932,8 +935,9 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     group: "vault",
     labelKey: "vault.lock",
     // Deliberately not a bare chord: locking throws away the in-memory key, and every unsaved
-    // entry with it. ⌘⇧L is the nearest thing to "put it away" that nothing else claims.
-    defaultChord: "Mod+Shift+K",
+    // entry with it. Mod+Alt+L: "lock" on a chord nothing else claims — Mod+Shift+K was the editor's
+    // delete-line, listed first, so the lock never fired, and Mod+Shift+L opens a PR from its link.
+    defaultChord: "Mod+Alt+L",
     run: () => {
       void import("../state/vaultStore").then(({ useVaultStore }) => {
         if (useVaultStore.getState().unlocked) void useVaultStore.getState().lock();

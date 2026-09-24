@@ -14,7 +14,10 @@ import {
   Loader2,
   Upload,
 } from "lucide-react";
+import { Checkbox } from "../common/Checkbox";
 import { CollapsibleSection } from "../common/CollapsibleSection";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { fieldClass } from "../common/recipes";
 import { ApiModal, GhostButton, PrimaryButton } from "./ApiModal";
 import { badgeColor, badgeLabel, statusColor } from "./methodStyle";
 import { useApiStore } from "../../state/apiStore";
@@ -39,6 +42,17 @@ const FORMAT_LABELS: Record<ImportFormat, string> = {
   insomnia: "Insomnia",
   codeflow: "CodeFlow",
 };
+
+/** One indent step of the preview tree: a checkbox and its gap, so a child's box sits under its
+ *  parent's twisty. */
+const INDENT = 22;
+
+/** A field's label, above it. */
+const LABEL = "mb-1.5 block text-[12px] font-medium text-[var(--cf-text-muted)]";
+
+/** The paste box: a field in every token but its height, which is its own. */
+const TEXTAREA =
+  "rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 py-2 font-mono text-[12px] leading-relaxed text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] disabled:opacity-50";
 
 // ---------------------------------------------------------------------------
 // Selection
@@ -175,19 +189,18 @@ function TriCheckbox({
   label: string;
   disabled?: boolean;
 }) {
+  // The shared box, which draws the mixed state itself. It takes no `aria-label`, so the name rides
+  // on a visually hidden label around it — a folder's box still has to say which folder it is.
   return (
-    <input
-      type="checkbox"
-      aria-label={label}
-      disabled={disabled}
-      checked={state === "all"}
-      // `indeterminate` is a DOM property with no HTML attribute, so React can't set it for us.
-      ref={(el) => {
-        if (el) el.indeterminate = state === "some";
-      }}
-      onChange={onChange}
-      className="h-3 w-3 shrink-0 accent-[var(--cf-accent)]"
-    />
+    <label className="inline-flex shrink-0">
+      <span className="sr-only">{label}</span>
+      <Checkbox
+        checked={state === "all"}
+        indeterminate={state === "some"}
+        disabled={disabled}
+        onChange={() => onChange()}
+      />
+    </label>
   );
 }
 
@@ -197,11 +210,11 @@ function Twisty({ open, onClick }: { open: boolean; onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+      className={iconButtonClass({ size: "xs" })}
       tabIndex={-1}
       aria-hidden
     >
-      <Icon size={12} />
+      <Icon size={13} />
     </button>
   );
 }
@@ -231,7 +244,7 @@ function TreeRows({
       {items.map((item, index) => {
         const key = `${prefix}.${index}`;
         if (visible && !visible.has(key)) return null;
-        const pad = { paddingLeft: `${depth * 14}px` };
+        const pad = { paddingLeft: `${depth * INDENT}px` };
 
         if (item.kind === "folder") {
           const keys = descendantKeys(item.items, key);
@@ -240,7 +253,7 @@ function TreeRows({
           const open = visible !== null || !toggled.has(key);
           return (
             <div key={key}>
-              <div className="flex items-center gap-1.5 py-[3px] text-[12px]" style={pad}>
+              <div className="flex min-h-[26px] items-center gap-1.5 text-[13px]" style={pad}>
                 <TriCheckbox
                   state={state}
                   label={item.name}
@@ -273,7 +286,7 @@ function TreeRows({
         return (
           <div key={key}>
             <div
-              className={`flex items-center gap-1.5 py-[3px] text-[12px] ${checked ? "" : "opacity-50"}`}
+              className={`flex min-h-[26px] items-center gap-1.5 text-[13px] ${checked ? "" : "opacity-50"}`}
               style={pad}
             >
               <TriCheckbox
@@ -287,7 +300,7 @@ function TreeRows({
                 <span className="w-3 shrink-0" />
               )}
               <span
-                className="w-[46px] shrink-0 font-mono text-[10px] font-semibold uppercase"
+                className="w-[46px] shrink-0 font-mono text-[10.5px] font-semibold uppercase"
                 style={{ color: badgeColor(item.spec.protocol, item.spec.method) }}
               >
                 {badgeLabel(item.spec.protocol, item.spec.method)}
@@ -302,11 +315,11 @@ function TreeRows({
                 <div
                   key={example.id}
                   className="flex items-center gap-1.5 py-[2px] text-[11px]"
-                  style={{ paddingLeft: `${(depth + 1) * 14 + 32}px` }}
+                  style={{ paddingLeft: `${(depth + 1) * INDENT + 32}px` }}
                 >
                   <FileText size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
                   <span
-                    className="shrink-0 font-mono text-[10px] font-semibold"
+                    className="shrink-0 font-mono text-[10.5px] font-semibold"
                     style={{ color: statusColor(example.status) }}
                   >
                     {example.status}
@@ -610,9 +623,6 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const fieldClass =
-    "w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50";
-
   return (
     <ApiModal
       icon={Download}
@@ -648,7 +658,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
     >
       <div className="min-h-0 flex-1 overflow-auto p-3">
         <div className="mb-3">
-          <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+          <label className={LABEL}>
             {t("api.import.urlLabel")}
           </label>
           <div className="flex gap-2">
@@ -668,13 +678,18 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
                   if (e.key === "Enter") void load();
                 }}
                 placeholder={t("api.import.urlPlaceholder")}
-                className={`${fieldClass} pl-7 font-mono`}
+                className={fieldClass({ className: "w-full pl-7 font-mono" })}
               />
             </div>
-            <GhostButton onClick={() => void load()} disabled={busy || !url.trim()}>
+            <button
+              type="button"
+              onClick={() => void load()}
+              disabled={busy || !url.trim()}
+              className={buttonClass({ variant: "secondary", size: "lg" })}
+            >
               {fetching ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
               {t("api.import.load")}
-            </GhostButton>
+            </button>
           </div>
           {fetchNote && (
             <p
@@ -724,7 +739,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
 
-        <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+        <label className={LABEL}>
           {t("api.import.pasteText")}
         </label>
         <textarea
@@ -738,12 +753,12 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
             setFetchNote(null);
           }}
           placeholder={t("api.import.curlPlaceholder")}
-          className="mb-3 h-24 w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent p-2 font-mono text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
+          className={`${TEXTAREA} mb-3 h-24 w-full resize-y`}
         />
 
         {result && result.collections.length === 1 && (
           <>
-            <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
+            <label className={LABEL}>
               {t("api.import.name")}
             </label>
             <input
@@ -755,7 +770,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
                 setNameDirty(true);
               }}
               placeholder={result.collections[0]?.name}
-              className={`${fieldClass} mb-3`}
+              className={fieldClass({ className: "mb-3 w-full" })}
             />
           </>
         )}
@@ -782,7 +797,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
         )}
 
         <div className="mb-1 flex items-center gap-2">
-          <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
             {t("api.import.preview")}
           </span>
           {hasAnyRequest && (
@@ -793,7 +808,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
                 placeholder={t("api.import.filter")}
-                className="ml-auto w-40 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-[2px] text-[11px] outline-none focus:border-[var(--cf-accent)]"
+                className={fieldClass({ size: "sm", className: "ml-auto w-44" })}
               />
               <GhostButton onClick={() => setAll(true)} disabled={busy}>
                 {t("api.import.selectAll")}

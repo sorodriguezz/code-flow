@@ -24,6 +24,10 @@ import {
   revealInFileManager,
 } from "../../lib/tauri/commands";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { Tooltip } from "../common/Tooltip";
+import { iconButtonClass, Kbd } from "../common/Button";
+import { explorerHeadClass, explorerTitleClass } from "../common/recipes";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import { HiddenFilesSection } from "./HiddenFilesSection";
 import {
   EMPTY_NESTS,
@@ -79,26 +83,32 @@ interface Draft {
 
 function ToolbarButton({
   onClick,
-  title,
-  ariaLabel,
+  label,
+  description,
+  shortcut,
   children,
 }: {
   onClick: () => void;
-  title: string;
-  /** The accessible name, for when the tooltip says more than the name does — a title carrying a
-   * "— and here is what it will do" hint reads badly out loud. Defaults to `title`. */
-  ariaLabel?: string;
+  /** The name — the tooltip's first line and the accessible name. */
+  label: string;
+  /** A second, quieter line for when the name doesn't say what the press will do. Tooltip only: a
+   * name carrying a "— and here is what it will do" hint reads badly out loud. */
+  description?: string;
+  /** The action's chord, from the binding registry, drawn as a key cap beside the name. */
+  shortcut?: string | null;
   children: React.ReactNode;
 }) {
   return (
-    <button
-      onClick={onClick}
-      title={title}
-      aria-label={ariaLabel ?? title}
-      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+    <Tooltip
+      side="bottom"
+      label={label}
+      description={description}
+      trailing={shortcut ? <Kbd>{shortcut}</Kbd> : undefined}
     >
-      {children}
-    </button>
+      <button onClick={onClick} aria-label={label} className={iconButtonClass({ size: "sm" })}>
+        {children}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -142,7 +152,7 @@ function DraftRow({
   return (
     <div
       style={{ paddingLeft: depth * 14 + 6 }}
-      className="flex items-center gap-1.5 py-0.5 pr-2 text-[13px]"
+      className="flex h-[26px] items-center gap-1.5 pr-2 text-[13px]"
     >
       <span className="w-3 shrink-0" />
       {/* Follows what is being typed, so a rule that claims `.spec.ts` shows its icon before the
@@ -166,7 +176,9 @@ function DraftRow({
         // Clicking away abandons the entry rather than committing it — a half-typed name
         // losing focus shouldn't leave a stray file behind.
         onBlur={onCancel}
-        className="min-w-0 flex-1 rounded-sm border border-[var(--cf-accent)] bg-[var(--cf-bg)] px-1 py-0 text-[13px] text-[var(--cf-text)] outline-none"
+        // The field's focused look — accent hairline and its soft halo — at the row's height: this
+        // input only exists while it has the caret.
+        className="h-[22px] min-w-0 flex-1 rounded-[5px] border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1.5 text-[13px] text-[var(--cf-text)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] outline-none placeholder:text-[var(--cf-text-faint)]"
       />
     </div>
   );
@@ -213,7 +225,7 @@ function RowTwisty({
         e.stopPropagation();
         onToggle();
       }}
-      className="flex w-3 shrink-0 items-center justify-center"
+      className="flex w-3 shrink-0 items-center justify-center text-[var(--cf-text-faint)]"
     >
       {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
     </span>
@@ -466,23 +478,27 @@ const TreeNode = memo(function TreeNode({
         }}
         onDoubleClick={() => !entry.is_dir && onOpenFile?.(entry.path)}
         style={{ paddingLeft: depth * 14 + 6, ...riseDelay(at) }}
-        className={`cf-rise flex w-full items-center gap-1.5 truncate rounded-md py-0.5 pr-2 text-left text-[13px] ${
+        // The shared list row (`rowClass`) at the explorer's 26px, written out rather than imported
+        // for one reason: its hover is CSS `:hover`, and this tree tracks hover in JavaScript — see
+        // `rowHoverStore` for the WebKit drag bug that makes it. `cf-row-hover` is the same tint.
+        // Selected is the accent wash with the name kept in full text, as every list selects.
+        className={`cf-rise flex h-[26px] w-full items-center gap-1.5 truncate rounded-md pr-2 text-left text-[13px] ${
           isSelected
-            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
             : // Nothing but the drop target is highlighted while a drag is in flight.
               isHovered && !anyDrag
               ? "cf-row-hover"
               : ""
-        } ${isSelected ? "" : color ? "" : "text-[var(--cf-text-muted)]"} ${
+        } ${isSelected || color ? "" : "text-[var(--cf-text)]"} ${
           isDropTarget || isRevealed ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
         } ${isDragging ? "opacity-40" : ""}`}
       >
         {entry.is_dir ? (
           <>
             {isExpanded ? (
-              <ChevronDown size={12} className="shrink-0" />
+              <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
             ) : (
-              <ChevronRight size={12} className="shrink-0" />
+              <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
             )}
             <FileGlyphView
               path={entry.path}
@@ -526,7 +542,7 @@ const TreeNode = memo(function TreeNode({
         {ownStatus && (
           <span
             title={t(fileStatusLabelKey(ownStatus))}
-            className="ml-auto shrink-0 text-[10px] font-bold uppercase"
+            className="ml-auto w-4 shrink-0 text-center font-mono text-[10.5px] font-bold uppercase"
             style={{ color }}
           >
             {ownStatus[0]}
@@ -558,7 +574,7 @@ const TreeNode = memo(function TreeNode({
             <TreeNode key={child.path} entry={child} depth={depth + 1} at={index} {...inherited} />
           ))}
           {children && children.length === 0 && !draftHere && (
-            <p style={{ paddingLeft: (depth + 1) * 14 + 6 }} className="text-[11px] text-[var(--cf-text-muted)]">
+            <p style={{ paddingLeft: (depth + 1) * 14 + 6 }} className="py-1 text-[11px] text-[var(--cf-text-faint)]">
               {/* "Empty" would be a lie about a folder whose every entry is hidden — and the kind
                   of lie that gets reported as a missing file. */}
               {(hiddenCountByDir.get(entry.path) ?? 0) > 0
@@ -635,6 +651,7 @@ export function FileTree({
   onRefresh?: () => void;
 }) {
   const t = useT();
+  const chord = useShortcutChord();
   // Expansion and the listing cache both live here rather than in each node, so "collapse
   // all" and "refresh" can act on the whole tree at once. "" keys the repo root.
   const [childrenByDir, setChildrenByDir] = useState<Map<string, FileEntry[]>>(new Map());
@@ -1646,15 +1663,19 @@ export function FileTree({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1">
-        <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t("editor.explorer")}
+      <div className={explorerHeadClass}>
+        <span className={`${explorerTitleClass} mr-auto`}>
+          <span className="truncate">{t("editor.explorer")}</span>
         </span>
-        <ToolbarButton onClick={() => startDraft("file")} title={t("editor.newFile")}>
-          <FilePlus size={13} />
+        <ToolbarButton onClick={() => startDraft("file")} label={t("editor.newFile")} shortcut={chord("editor.newFile")}>
+          <FilePlus size={14} />
         </ToolbarButton>
-        <ToolbarButton onClick={() => startDraft("dir")} title={t("editor.newFolder")}>
-          <FolderPlus size={13} />
+        <ToolbarButton
+          onClick={() => startDraft("dir")}
+          label={t("editor.newFolder")}
+          shortcut={chord("editor.newFolder")}
+        >
+          <FolderPlus size={14} />
         </ToolbarButton>
         <ToolbarButton
           // `onRefresh` first and `refresh()` second: the latter is what drives this button's own
@@ -1667,13 +1688,13 @@ export function FileTree({
               await refresh();
             });
           }}
-          title={`${t("editor.refreshExplorer")} — ${t("editor.refreshHint")}`}
-          ariaLabel={t("editor.refreshExplorer")}
+          label={t("editor.refreshExplorer")}
+          description={t("editor.refreshHint")}
         >
-          <RefreshCw size={13} className={refreshing ? "animate-spin" : undefined} />
+          <RefreshCw size={14} className={refreshing ? "animate-spin" : undefined} />
         </ToolbarButton>
-        <ToolbarButton onClick={collapseAll} title={t("editor.collapseAll")}>
-          <ChevronsDownUp size={13} />
+        <ToolbarButton onClick={collapseAll} label={t("editor.collapseAll")}>
+          <ChevronsDownUp size={14} />
         </ToolbarButton>
       </div>
       <div
@@ -1694,7 +1715,10 @@ export function FileTree({
           if (e.target === e.currentTarget) openMenu(e, null);
         }}
         // Dropping on that same empty space moves to the repo root.
-        className={`min-h-0 flex-1 overflow-auto py-1 ${
+        // Inset from the column's edges, so a row's rounded selection reads as a row rather than
+        // as a band the width of the panel. The padding is still this element — a click or a drop
+        // there is a click or a drop on the root, like the space below the last row.
+        className={`min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-1 ${
           rootIsDropTarget ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
         }`}
       >
@@ -1756,7 +1780,7 @@ export function FileTree({
           <div
             ref={ghostRef}
             style={{ transform: `translate(${treeOrigin.x + 12}px, ${treeOrigin.y + 12}px)` }}
-            className="pointer-events-none fixed left-0 top-0 z-[100] rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface)] px-2 py-1 text-[11px] text-[var(--cf-text)] shadow-lg"
+            className="pointer-events-none fixed left-0 top-0 z-[100] rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-2 py-1 text-[12px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
           >
             {marked.size > 1 && marked.has(treeDrag.path)
               ? t("editor.movingN", { n: String(marked.size) })

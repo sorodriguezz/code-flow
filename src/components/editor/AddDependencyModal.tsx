@@ -168,11 +168,11 @@ export function AddDependencyModal() {
                   className={`flex w-full flex-col items-start gap-0.5 py-2 pl-3 pr-9 text-left ${
                     picked === hit.name
                       ? "bg-[color-mix(in_oklab,var(--cf-accent)_14%,transparent)]"
-                      : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                      : "hover:bg-[var(--cf-hover)]"
                   }`}
                 >
                   <span className="flex w-full items-baseline gap-2">
-                    <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-[var(--cf-text)]">
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">
                       {hit.name}
                     </span>
                     <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-text-muted)]">
@@ -195,7 +195,7 @@ export function AddDependencyModal() {
                   <button
                     type="button"
                     onClick={() => void openExternalUrl(npmPackageUrl(hit.name))}
-                    className={`absolute right-1.5 top-2 flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] transition-opacity hover:bg-black/[0.06] hover:text-[var(--cf-text)] focus-visible:opacity-100 dark:hover:bg-white/[0.10] ${
+                    className={`absolute right-1.5 top-2 flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] transition-opacity hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)] focus-visible:opacity-100 ${
                       picked === hit.name ? "opacity-100" : "opacity-0 group-hover/hit:opacity-100"
                     }`}
                   >

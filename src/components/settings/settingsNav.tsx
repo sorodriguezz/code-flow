@@ -90,19 +90,22 @@ export function SettingsRail({
           onClick={() => onSelect(id)}
           aria-current={active === id ? "page" : undefined}
           // Selection changes colour and nothing else — no weight change, which would re-measure
-          // the label and reflow the row on every click.
-          className={`relative mb-0.5 flex w-full items-start rounded-md px-2.5 py-1.5 text-left text-[12.5px] leading-[1.35] transition-colors ${
+          // the label and reflow the row on every click. The selected row reads like every other
+          // selected row in the app (`rowClass`): the soft accent fill, the label in full text and
+          // only the glyph in the accent — an accent-coloured label on an accent wash was the one
+          // row whose name got *harder* to read by being picked. 32px at least, one line or two.
+          className={`relative mb-0.5 flex min-h-8 w-full items-start rounded-md px-2.5 py-1.5 text-left text-[13px] leading-[1.35] transition-colors duration-100 ${
             active === id
-              ? "text-[var(--cf-accent)]"
-              : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+              ? "text-[var(--cf-text)]"
+              : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           }`}
         >
           {active === id && <ActivePill layoutId={layoutId} />}
           {/* Above the pill, which covers the whole button. */}
-          <span className="relative flex min-w-0 flex-1 items-start gap-1.5">
-            {/* `mt-[2px]` puts a 13px glyph on the cap height of the first line rather than
+          <span className="relative flex min-w-0 flex-1 items-start gap-2">
+            {/* `mt-[2px]` puts a 14px glyph on the cap height of the first line rather than
                 centred against a label that may be two lines tall. */}
-            <Icon size={13} className="mt-[2px] shrink-0" />
+            <Icon size={14} className={`mt-[2px] shrink-0 ${active === id ? "text-[var(--cf-accent)]" : ""}`} />
             {/* No `truncate`, and `break-words` so a single long word — a provider name, a
                 language server id — wraps instead of pushing the rail wider. */}
             <span className="min-w-0 flex-1 break-words">{t(labelKey)}</span>
@@ -159,7 +162,7 @@ export function RailSection({
         <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
           <Panel>
             {active?.hintKey && (
-              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+              <p className="mb-3 max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
             )}
             {children(tab)}
           </Panel>
@@ -177,8 +180,9 @@ export function RailSection({
 export function PaneBlock({ title, hint, children }: { title: string; hint?: ReactNode; children: ReactNode }) {
   return (
     <div className="mt-5 border-t border-[var(--cf-border)] pt-4 first:mt-0 first:border-t-0 first:pt-0">
-      <h3 className="mb-1 text-sm font-semibold">{title}</h3>
-      {hint && <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{hint}</p>}
+      {/* Without a hint under it, the heading keeps the gap the hint would have left. */}
+      <h3 className={`text-[13px] font-semibold text-[var(--cf-text)] ${hint ? "mb-1" : "mb-2.5"}`}>{title}</h3>
+      {hint && <p className="mb-3 max-w-[62ch] text-[12px] leading-snug text-[var(--cf-text-muted)]">{hint}</p>}
       {children}
     </div>
   );

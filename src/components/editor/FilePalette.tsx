@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { FileSearch, Loader2 } from "lucide-react";
 import { listRepoFiles } from "../../lib/tauri/commands";
 import { FileGlyph } from "../common/FileGlyph";
+import { Kbd } from "../common/Button";
+import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useT } from "../../state/languageStore";
 
 /** How many rows the list renders. Filtering happens over the whole repo; only the top slice is
@@ -44,6 +47,7 @@ export function FilePalette({
   onClose: () => void;
 }) {
   const t = useT();
+  const openChord = useShortcutChord()("editor.goToFile");
   const [files, setFiles] = useState<string[] | null>(null);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
@@ -113,25 +117,36 @@ export function FilePalette({
   // the app chrome, which is why the bars around the palette never dimmed and stayed clickable
   // straight through it. Out here `z-50` puts it with the app's other root overlays: the command
   // palette, Settings, the shortcuts sheet.
+  // The command palette's shell, row for row — the two are the same gesture (type, arrow, Enter)
+  // and a second look for the same thing would be a second thing to learn.
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[12vh]" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-xl overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+        className="cf-fade-in flex max-h-[64vh] w-[600px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
       >
-        <input
-          autoFocus
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder={t("editor.goToFilePlaceholder")}
-          className="w-full border-b border-[var(--cf-border)] bg-transparent px-3 py-2.5 text-[13px] outline-none"
-        />
-        <div ref={listRef} className="max-h-[50vh] overflow-auto py-1">
+        <div className="flex h-[52px] shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] px-4">
+          <FileSearch size={17} className="shrink-0 text-[var(--cf-text-faint)]" />
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onKeyDown}
+            placeholder={t("editor.goToFilePlaceholder")}
+            className="min-w-0 flex-1 bg-transparent text-[15px] outline-none placeholder:text-[var(--cf-text-faint)]"
+          />
+          {/* The key that brings this back, from the binding registry — where the placeholder
+              used to spell it out, Ctrl on a Mac included. */}
+          {openChord && <Kbd>{openChord}</Kbd>}
+        </div>
+        <div ref={listRef} className="flex-1 overflow-auto p-1.5">
           {files === null ? (
-            <p className="px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("editor.loading")}</p>
+            <p className="flex items-center justify-center gap-2 px-2 py-6 text-[13px] text-[var(--cf-text-muted)]">
+              <Loader2 size={14} className="animate-spin" />
+              {t("editor.loading")}
+            </p>
           ) : matches.length === 0 ? (
-            <p className="px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("titlebar.noResults")}</p>
+            <p className="px-2 py-6 text-center text-[13px] text-[var(--cf-text-muted)]">{t("titlebar.noResults")}</p>
           ) : (
             matches.map((path, index) => {
               const name = path.slice(path.lastIndexOf("/") + 1);
@@ -140,22 +155,33 @@ export function FilePalette({
                 <button
                   key={path}
                   data-active={index === active}
+                  aria-selected={index === active}
                   onMouseEnter={() => setActive(index)}
                   onClick={() => {
                     onPick(path);
                     onClose();
                   }}
-                  className={`flex w-full items-center gap-2 px-3 py-1 text-left ${
+                  className={`flex h-[34px] w-full items-center gap-2.5 rounded-lg px-2.5 text-left ${
                     index === active ? "bg-[var(--cf-accent-soft)]" : ""
                   }`}
                 >
                   <FileGlyph path={path} />
                   <span className="shrink-0 text-[13px] text-[var(--cf-text)]">{name}</span>
-                  <span className="truncate text-[11px] text-[var(--cf-text-muted)]">{dir}</span>
+                  <span className="truncate font-mono text-[11px] text-[var(--cf-text-faint)]">{dir}</span>
                 </button>
               );
             })
           )}
+        </div>
+        {/* The keys, always in view: this is a keyboard surface, and the keys are its controls. */}
+        <div className="flex shrink-0 items-center gap-4 border-t border-[var(--cf-border)] px-3.5 py-2 text-[12px] text-[var(--cf-text-faint)]">
+          <span className="flex items-center gap-1.5">
+            <Kbd>↑</Kbd>
+            <Kbd>↓</Kbd>
+          </span>
+          <span className="flex items-center gap-1.5">
+            <Kbd>↵</Kbd>
+          </span>
         </div>
       </div>
     </div>,

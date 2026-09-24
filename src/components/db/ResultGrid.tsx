@@ -456,7 +456,7 @@ export function ResultGrid({
                     {facts.identity && model.identity && (
                       <span
                         title={t(model.identity.label)}
-                        className="shrink-0 text-[9px] font-bold leading-none text-[var(--cf-accent)]"
+                        className="shrink-0 text-[10.5px] font-bold leading-none text-[var(--cf-accent)]"
                       >
                         {model.identity.badge}
                       </span>
@@ -467,7 +467,7 @@ export function ResultGrid({
                         {/* Which key this is, when there is more than one — an arrow on three
                             columns says nothing about which of them breaks the tie. */}
                         {(sort?.length ?? 0) > 1 && (
-                          <span className="text-[8.5px] font-bold leading-none tabular-nums">
+                          <span className="text-[10.5px] font-bold leading-none tabular-nums">
                             {sortIndex + 1}
                           </span>
                         )}
@@ -482,7 +482,7 @@ export function ResultGrid({
                       // Italic when it came off a value rather than a declaration: on a document
                       // store this is the type of the first document that had the field, and saying
                       // it as flatly as a column type would be claiming the rest agree.
-                      className={`min-w-0 truncate text-[9px] leading-none text-[var(--cf-text-muted)] ${
+                      className={`min-w-0 truncate text-[10.5px] leading-none text-[var(--cf-text-muted)] ${
                         facts.typeFromRecord ? "italic" : ""
                       }`}
                     >
@@ -544,14 +544,14 @@ export function ResultGrid({
                         ? "bg-[var(--cf-danger)]/[0.08]"
                         : selected
                           ? "bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)]"
-                          : "hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                          : "hover:bg-[var(--cf-hover)]"
                   }`}
                 >
                   {/* The row number, pinned: the anchor for "the third row" in any conversation
                       about a result, where insert/delete state is marked — and, when the panel
                       wants a selection, the handle you click to build one. */}
                   <div
-                    className={`sticky left-0 z-[5] flex shrink-0 items-stretch justify-end gap-1 border-r border-[var(--cf-border)] text-[10px] tabular-nums ${
+                    className={`sticky left-0 z-[5] flex shrink-0 items-stretch justify-end gap-1 border-r border-[var(--cf-border)] text-[10.5px] tabular-nums ${
                       selected
                         ? "bg-[color-mix(in_oklab,var(--cf-accent)_22%,var(--cf-surface))] font-semibold text-[var(--cf-text)]"
                         : "bg-[var(--cf-surface)] text-[var(--cf-text-muted)]"
@@ -568,7 +568,11 @@ export function ResultGrid({
                       </button>
                     ) : null}
                     {inserted || !onSelectRow ? (
-                      <span className="flex items-center pr-1.5">{inserted ? "+" : row + 1}</span>
+                      <span
+                        className={`flex items-center pr-1.5 ${inserted ? "font-semibold text-[var(--cf-success)]" : ""}`}
+                      >
+                        {inserted ? "+" : row + 1}
+                      </span>
                     ) : (
                       <button
                         type="button"
@@ -634,7 +638,7 @@ export function ResultGrid({
                         }}
                         className={`group/cell relative flex shrink-0 items-center border-r border-[var(--cf-border)] px-2 ${
                           isChanged && !inserted ? "bg-[var(--cf-warning)]/[0.12]" : ""
-                        } ${deleted ? "line-through opacity-60" : ""}`}
+                        } ${deleted ? "line-through decoration-[var(--cf-danger)] opacity-70" : ""}`}
                       >
                         {isEditing ? (
                           <CellEditor
@@ -726,7 +730,7 @@ export function ResultGrid({
                             title={action.label}
                             aria-label={action.label}
                             disabled={action.disabled}
-                            className={`flex h-[18px] w-[18px] items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-white/[0.08] ${
+                            className={`flex h-[18px] w-[18px] items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent ${
                               action.danger
                                 ? "hover:text-[var(--cf-danger)]"
                                 : "hover:text-[var(--cf-text)]"
@@ -799,7 +803,7 @@ export function CellEditor({
           onCommit(null);
         }
       }}
-      className="h-full w-full min-w-0 border-0 bg-[var(--cf-bg)] px-0 font-mono text-[12px] text-[var(--cf-text)] outline-none ring-1 ring-inset ring-[var(--cf-accent)]"
+      className="h-full w-full min-w-0 border-0 bg-[var(--cf-field)] px-0 font-mono text-[12px] text-[var(--cf-text)] outline-none ring-1 ring-inset ring-[var(--cf-accent)]"
     />
   );
 }

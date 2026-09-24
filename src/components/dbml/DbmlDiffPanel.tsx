@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { ArrowLeftRight, Minus, Pencil, Plus } from "lucide-react";
-import { INPUT } from "../db/dbChrome";
+import { iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
 import { diffSchemas, type DiffStatus, type SchemaDiff } from "../../lib/dbml/diff";
 import type { DbmlSchema } from "../../lib/dbml/types";
-import { TOOL_BTN, ToolClose } from "./toolChrome";
+import { TOOL_AREA, ToolClose } from "./toolChrome";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -42,40 +43,44 @@ export function DbmlDiffPanel({
 
   return (
     <div className="flex h-full min-h-0">
-      <div className="flex min-h-0 w-[38%] shrink-0 flex-col gap-1.5 border-r border-[var(--cf-border)] p-2">
+      <div className="flex min-h-0 w-[38%] shrink-0 flex-col gap-2 border-r border-[var(--cf-border)] p-3">
         <div className="flex shrink-0 items-center gap-1.5">
-          <span className="text-[11px] font-medium">{t("dbml.diff.other")}</span>
+          <span className="text-[13px] font-medium text-[var(--cf-text)]">{t("dbml.diff.other")}</span>
           <span className="flex-1" />
-          <button
-            type="button"
-            onClick={() => setSwapped((current) => !current)}
-            title={t("dbml.diff.swap")}
-            aria-label={t("dbml.diff.swap")}
-            className={TOOL_BTN}
-          >
-            <ArrowLeftRight size={12} />
-          </button>
+          {/* A toggle, and drawn as one: lit while the pasted side is the *after*. It used to look
+              the same either way, so which reading the list was in had to be remembered. */}
+          <Tooltip label={t("dbml.diff.swap")}>
+            <button
+              type="button"
+              onClick={() => setSwapped((current) => !current)}
+              aria-label={t("dbml.diff.swap")}
+              aria-pressed={swapped}
+              className={iconButtonClass({ size: "md", active: swapped })}
+            >
+              <ArrowLeftRight size={15} />
+            </button>
+          </Tooltip>
         </div>
         <textarea
           value={other}
           onChange={(event) => setOther(event.target.value)}
           spellCheck={false}
           placeholder={t("dbml.diff.placeholder")}
-          className={`${INPUT} min-h-0 flex-1 resize-none font-mono text-[11.5px] leading-relaxed`}
+          className={`${TOOL_AREA} min-h-0 flex-1 resize-none font-mono leading-relaxed`}
         />
       </div>
 
-      <div className="relative min-h-0 flex-1 overflow-auto p-2 pr-10">
-        <div className="absolute right-2 top-2 z-10">
+      <div className="relative min-h-0 flex-1 overflow-auto p-3 pr-12">
+        <div className="absolute right-3 top-2 z-10">
           <ToolClose onClose={onClose} />
         </div>
         {diff === null ? (
-          <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("dbml.diff.empty")}</p>
+          <p className="text-[12px] text-[var(--cf-text-muted)]">{t("dbml.diff.empty")}</p>
         ) : !diff.changed ? (
-          <p className="text-[11.5px] text-[var(--cf-success)]">{t("dbml.diff.noChanges")}</p>
+          <p className="text-[12px] text-[var(--cf-success)]">{t("dbml.diff.noChanges")}</p>
         ) : (
-          <div className="flex flex-col gap-2">
-            <p className="text-[10.5px] text-[var(--cf-text-muted)]">
+          <div className="flex flex-col gap-3">
+            <p className="text-[12px] text-[var(--cf-text-muted)]">
               {t("dbml.diff.summary", {
                 added: String(diff.counts.added),
                 modified: String(diff.counts.modified),
@@ -87,21 +92,21 @@ export function DbmlDiffPanel({
               {diff.tables
                 .filter((table) => table.status !== "unchanged")
                 .map((table) => (
-                  <div key={table.id} className="rounded-md border border-[var(--cf-border)] p-1.5">
+                  <div key={table.id} className="rounded-lg border border-[var(--cf-border)] px-2.5 py-2">
                     <div className="flex items-center gap-1.5">
                       <StatusMark status={table.status} />
-                      <span className="font-mono text-[11.5px] font-medium">{table.name}</span>
-                      <span className="text-[10px] text-[var(--cf-text-muted)]">
+                      <span className="font-mono text-[12px] font-semibold">{table.name}</span>
+                      <span className="text-[11px] text-[var(--cf-text-faint)]">
                         {t(`dbml.diff.${table.status}` as "dbml.diff.added")}
                       </span>
                     </div>
                     {table.fields
                       .filter((field) => field.status !== "unchanged")
                       .map((field) => (
-                        <div key={field.name} className="mt-1 flex items-baseline gap-1.5 pl-4">
+                        <div key={field.name} className="mt-1 flex items-baseline gap-1.5 pl-5">
                           <StatusMark status={field.status} />
-                          <span className="font-mono text-[11px]">{field.name}</span>
-                          <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--cf-text-muted)]">
+                          <span className="font-mono text-[12px]">{field.name}</span>
+                          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
                             {field.changes
                               .map((change) => `${change.property}: ${change.before} → ${change.after}`)
                               .join(" · ")}
@@ -119,8 +124,8 @@ export function DbmlDiffPanel({
                   .map((entry) => (
                     <div key={entry.id} className="flex items-baseline gap-1.5">
                       <StatusMark status={entry.status} />
-                      <span className="font-mono text-[11.5px]">{entry.name}</span>
-                      <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--cf-text-muted)]">
+                      <span className="font-mono text-[12px]">{entry.name}</span>
+                      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
                         {[
                           ...entry.added.map((value) => `+${value}`),
                           ...entry.removed.map((value) => `−${value}`),
@@ -136,7 +141,7 @@ export function DbmlDiffPanel({
                 {diff.refs.map((ref) => (
                   <div key={`${ref.status}-${ref.key}`} className="flex items-baseline gap-1.5">
                     <StatusMark status={ref.status} />
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{ref.key}</span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{ref.key}</span>
                   </div>
                 ))}
               </Group>
@@ -150,8 +155,8 @@ export function DbmlDiffPanel({
 
 function Group({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <section className="flex flex-col gap-1">
-      <h3 className="text-[9.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+    <section className="flex flex-col gap-1.5">
+      <h3 className="text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
         {label}
       </h3>
       {children}
@@ -161,8 +166,8 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
 
 /** The one-glyph statement of what happened, in the colour the rest of the app uses for it. */
 function StatusMark({ status }: { status: DiffStatus }) {
-  if (status === "added") return <Plus size={11} className="shrink-0 text-[var(--cf-success)]" />;
-  if (status === "removed") return <Minus size={11} className="shrink-0 text-[var(--cf-danger)]" />;
-  if (status === "modified") return <Pencil size={10} className="shrink-0 text-[var(--cf-warning)]" />;
-  return <span className="w-[11px] shrink-0" />;
+  if (status === "added") return <Plus size={13} className="shrink-0 text-[var(--cf-success)]" />;
+  if (status === "removed") return <Minus size={13} className="shrink-0 text-[var(--cf-danger)]" />;
+  if (status === "modified") return <Pencil size={12} className="shrink-0 text-[var(--cf-warning)]" />;
+  return <span className="w-[13px] shrink-0" />;
 }

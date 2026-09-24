@@ -41,6 +41,7 @@ import {
   type GraphqlSchema,
 } from "../../lib/api/graphql";
 import type { ApiRequestSpec, GraphqlBody } from "../../types/api";
+import { buttonClass } from "../common/Button";
 
 const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
   ...OVERFLOW_SAFE_OPTIONS,
@@ -348,7 +349,7 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
           <button
             onClick={() => void fetchSchema()}
             disabled={fetching}
-            className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-0.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] disabled:opacity-50 dark:hover:bg-white/[0.06]"
+            className={buttonClass({ variant: "secondary", size: "sm" })}
           >
             {fetching ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
             {t("api.graphql.fetchSchema")}
@@ -366,10 +367,10 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
             onClick={() => setTabView(tabId, { graphqlExplorerOpen: !explorerOpen })}
             title={t("api.graphql.explorer")}
             aria-label={t("api.graphql.explorer")}
-            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded ${
+            className={`inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 hover:bg-[var(--cf-hover)] ${
               explorerOpen
                 ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:bg-black/[0.06] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)]"
             }`}
           >
             {explorerOpen ? <PanelRightClose size={12} /> : <PanelRightOpen size={12} />}
@@ -520,7 +521,7 @@ function SchemaExplorer({
 
         {roots.map((root) => (
           <div key={root.operation} className="mb-2">
-            <div className="px-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            <div className="px-2 pb-0.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {root.name}
             </div>
             {root.fields.map((field) => (
@@ -540,7 +541,7 @@ function SchemaExplorer({
         ))}
 
         {types.length > 0 && (
-          <div className="px-2 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <div className="px-2 pb-0.5 pt-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("api.graphql.types")}
           </div>
         )}
@@ -564,7 +565,7 @@ function TypeRow({ type, open, onToggle }: { type: GqlType; open: boolean; onTog
     <div>
       <button
         onClick={onToggle}
-        className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+        className="flex w-full items-center gap-1 rounded px-1 py-0.5 text-left hover:bg-[var(--cf-hover)]"
       >
         {open ? (
           <ChevronDown size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
@@ -572,7 +573,7 @@ function TypeRow({ type, open, onToggle }: { type: GqlType; open: boolean; onTog
           <ChevronRight size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
         )}
         <span className="truncate text-[12px] text-[var(--cf-text)]">{type.name}</span>
-        <span className="ml-auto shrink-0 text-[10px] uppercase text-[var(--cf-text-muted)]">
+        <span className="ml-auto shrink-0 text-[10.5px] uppercase text-[var(--cf-text-muted)]">
           {type.kind.replace("_", " ")}
         </span>
       </button>

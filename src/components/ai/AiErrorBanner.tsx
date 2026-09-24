@@ -201,7 +201,7 @@ function CommandRow({ command, subSize }: { command: string; subSize: string }) 
       <button
         onClick={copy}
         title={t("ai.setupCopyCommand")}
-        className="rounded-md border border-[var(--cf-border)] p-1 hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+        className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md border border-[var(--cf-border)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] hover:bg-[var(--cf-hover)]"
       >
         {copied ? <Check size={12} /> : <Copy size={12} />}
       </button>

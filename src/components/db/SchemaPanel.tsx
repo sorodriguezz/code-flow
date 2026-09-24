@@ -15,6 +15,7 @@ import { useDbStore, type DbSchemaSortKey as SortKey, type DbSchemaTab } from ".
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { DbNodeKind, DbObjectInfo } from "../../types/database";
+import { fieldClass } from "../common/recipes";
 
 /**
  * A whole schema, listed.
@@ -181,7 +182,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2.5 py-1.5">
-        <span className="min-w-0 truncate text-[12.5px] font-medium text-[var(--cf-text)]">{tab.name}</span>
+        <span className="min-w-0 truncate text-[13px] font-medium text-[var(--cf-text)]">{tab.name}</span>
         <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">
           {t("db.schemaObjectCount", { n: objects.length })}
         </span>
@@ -191,7 +192,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
             value={query}
             onChange={(e) => setUi(tab.id, { query: e.target.value })}
             placeholder={t("db.schemaFilter")}
-            className="w-40 rounded-md border border-[var(--cf-border)] bg-transparent py-1 pl-6 pr-6 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+            className={fieldClass({ size: "sm", className: "w-40 pl-6 pr-6" })}
           />
           {query && (
             <button
@@ -206,7 +207,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
           onClick={() => void loadSchema(tab.id)}
           disabled={tab.loading}
           title={t("db.refresh")}
-          className="shrink-0 rounded-md p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] disabled:opacity-50 dark:hover:bg-white/[0.06]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md shrink-0 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-50"
         >
           {tab.loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
         </button>
@@ -250,7 +251,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
                   className={`flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[12px] ${
                     active
                       ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                      : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+                      : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                   }`}
                 >
                   <Icon size={12} className="shrink-0" />
@@ -309,7 +310,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
                     <tr
                       key={`${object.kind}:${object.name}`}
                       onDoubleClick={() => open(object)}
-                      className="group cursor-default border-b border-[var(--cf-border)]/50 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                      className="group cursor-default border-b border-[var(--cf-border)]/50 hover:bg-[var(--cf-hover)]"
                     >
                       <td className="max-w-[24rem] truncate px-2.5 py-1 text-[var(--cf-text)]">
                         <span className="inline-flex min-w-0 items-center gap-1.5">
@@ -359,7 +360,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
                             <button
                               onClick={() => open(object)}
                               title={t("db.openData")}
-                              className="rounded p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.06] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                              className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)]"
                             >
                               <Table2 size={11} />
                             </button>
@@ -378,7 +379,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
                               )
                             }
                             title={t("db.showDdl")}
-                            className="rounded p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.06] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)]"
                           >
                             <FileCode2 size={11} />
                           </button>

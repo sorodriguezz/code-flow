@@ -4,6 +4,9 @@ import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import { AlertTriangle, CheckCircle2, FolderOpen, Info, WandSparkles, X } from "lucide-react";
 import { Select } from "../common/Select";
+import { Segmented } from "../common/Segmented";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
 import { KeyValueTable } from "./KeyValueTable";
 import { GraphqlPanel } from "./GraphqlPanel";
 import { useApiStore } from "../../state/apiStore";
@@ -222,41 +225,49 @@ function Body({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--cf-border)] px-3 py-2">
-        {MODES.map(({ mode, labelKey }) => (
-          <ModeRadio
-            key={mode}
-            group={`cf-body-mode-${tabId}`}
-            checked={body.mode === mode}
-            label={t(labelKey)}
-            onSelect={() => patchBody({ mode })}
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-[var(--cf-border)] px-3.5 py-1.5">
+        {/* One control for the one choice. It scrolls sideways rather than wrapping when the editor
+            is narrow: six options broken over two lines stop reading as a single choice. */}
+        <div className="min-w-0 max-w-full overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <Segmented
+            size="sm"
+            // Per tab, like the radio group it replaced: switching requests shows the other
+            // request's mode rather than sliding the thumb as if this one had changed.
+            layoutId={`cf-api-body-mode-${tabId}`}
+            ariaLabel={t("api.tab.body")}
+            value={body.mode}
+            // A segmented option, unlike a radio, fires on the option already selected — and any
+            // write to the draft marks the tab unsaved.
+            onChange={(mode) => {
+              if (mode !== body.mode) patchBody({ mode });
+            }}
+            options={MODES.map(({ mode, labelKey }) => ({ value: mode, label: t(labelKey) }))}
           />
-        ))}
+        </div>
 
         {body.mode === "raw" && (
-          <div className="ml-auto flex items-center gap-2">
-            <Select
-              size="sm"
-              className="w-32"
-              ariaLabel={t("api.body.language")}
-              value={body.rawLanguage}
-              onChange={(value) => setRawLanguage(value as RawLanguage)}
-              // Values are Monaco's own language ids — `RawLanguage` is named after them, so the
-              // same string drives the picker, the editor and the implied `Content-Type`.
-              options={[
-                { value: "json", label: "JSON" },
-                { value: "xml", label: "XML" },
-                { value: "html", label: "HTML" },
-                { value: "javascript", label: "JavaScript" },
-                { value: "text", label: t("api.body.text") },
-              ]}
-            />
+          <div className="ml-auto flex items-center gap-1.5">
+            {/* Sized from outside: `Select`'s trigger is `w-full`, which a width in `className` loses to. */}
+            <div className="w-32 shrink-0">
+              <Select
+                size="compact"
+                ariaLabel={t("api.body.language")}
+                value={body.rawLanguage}
+                onChange={(value) => setRawLanguage(value as RawLanguage)}
+                // Values are Monaco's own language ids — `RawLanguage` is named after them, so the
+                // same string drives the picker, the editor and the implied `Content-Type`.
+                options={[
+                  { value: "json", label: "JSON" },
+                  { value: "xml", label: "XML" },
+                  { value: "html", label: "HTML" },
+                  { value: "javascript", label: "JavaScript" },
+                  { value: "text", label: t("api.body.text") },
+                ]}
+              />
+            </div>
             {(body.rawLanguage === "json" || body.rawLanguage === "xml") && (
-              <button
-                onClick={beautify}
-                className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-0.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
-              >
-                <WandSparkles size={12} />
+              <button type="button" onClick={beautify} className={buttonClass({ variant: "ghost", size: "sm" })}>
+                <WandSparkles size={13} />
                 {t("api.body.beautify")}
               </button>
             )}
@@ -265,21 +276,21 @@ function Body({
       </div>
 
       {overridden && (
-        <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-1 text-[11px] text-[var(--cf-text-muted)]">
-          <Info size={11} className="shrink-0" />
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-blue)_8%,transparent)] px-3.5 py-1.5 text-[12px] text-[var(--cf-text-muted)]">
+          <Info size={13} className="shrink-0 text-[var(--cf-blue)]" />
           {t("api.body.contentTypeOverride")}
         </div>
       )}
 
       <div className="min-h-0 flex-1">
         {body.mode === "none" && (
-          <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-[var(--cf-text-muted)]">
+          <div className="flex h-full items-center justify-center px-6 text-center text-[13px] text-[var(--cf-text-faint)]">
             {t("api.body.noBody")}
           </div>
         )}
 
         {body.mode === "formdata" && (
-          <div className="h-full overflow-auto">
+          <div className="h-full overflow-auto px-3.5 py-3">
             <KeyValueTable
               key={`${tabId}:formdata`}
               rows={body.formdata}
@@ -292,7 +303,7 @@ function Body({
         )}
 
         {body.mode === "urlencoded" && (
-          <div className="h-full overflow-auto">
+          <div className="h-full overflow-auto px-3.5 py-3">
             <KeyValueTable
               key={`${tabId}:urlencoded`}
               rows={body.urlencoded}
@@ -321,16 +332,21 @@ function Body({
             </div>
             {body.rawLanguage === "json" && body.raw.trim() !== "" && (
               <div
-                className={`flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-3 py-1 text-[11px] ${
+                className={`flex h-7 shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-3.5 text-[11px] ${
                   jsonError ? "text-[var(--cf-danger)]" : "text-[var(--cf-success)]"
                 }`}
               >
                 {jsonError ? (
-                  <AlertTriangle size={11} className="shrink-0" />
+                  <AlertTriangle size={12} className="shrink-0" />
                 ) : (
-                  <CheckCircle2 size={11} className="shrink-0" />
+                  <CheckCircle2 size={12} className="shrink-0" />
                 )}
-                <span className="truncate">
+                <span
+                  className="truncate"
+                  // The parser's message carries the position, which is the part a narrow editor
+                  // cuts off.
+                  title={jsonError ? t("api.body.invalidJson", { error: jsonError }) : undefined}
+                >
                   {jsonError ? t("api.body.invalidJson", { error: jsonError }) : t("api.body.validJson")}
                 </span>
               </div>
@@ -341,32 +357,35 @@ function Body({
         {body.mode === "binary" && (
           <div className="flex h-full flex-col items-center justify-center gap-3 px-6">
             <button
+              type="button"
               onClick={() => void pickBinary()}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+              className={buttonClass({ variant: "secondary", size: "md" })}
             >
-              <FolderOpen size={13} />
+              <FolderOpen size={14} />
               {t("api.body.chooseFile")}
             </button>
             {body.binaryPath ? (
-              <div className="flex max-w-full items-center gap-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2 py-1.5">
+              <div className="flex max-w-full items-center gap-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-2 pl-3 pr-1.5">
                 <div className="min-w-0">
-                  <div className="truncate text-[12px] text-[var(--cf-text)]">{baseName(body.binaryPath)}</div>
-                  <div className="truncate text-[11px] text-[var(--cf-text-muted)]" title={body.binaryPath}>
+                  <div className="truncate text-[13px] font-medium text-[var(--cf-text)]">{baseName(body.binaryPath)}</div>
+                  <div className="truncate font-mono text-[11px] text-[var(--cf-text-muted)]" title={body.binaryPath}>
                     {body.binaryPath}
                   </div>
-                  <div className="text-[11px] text-[var(--cf-text-muted)]">{guessMime(body.binaryPath)}</div>
+                  <div className="font-mono text-[11px] text-[var(--cf-text-faint)]">{guessMime(body.binaryPath)}</div>
                 </div>
-                <button
-                  onClick={() => patchBody({ binaryPath: "" })}
-                  title={t("api.body.clearFile")}
-                  aria-label={t("api.body.clearFile")}
-                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.06] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-                >
-                  <X size={12} />
-                </button>
+                <Tooltip label={t("api.body.clearFile")}>
+                  <button
+                    type="button"
+                    onClick={() => patchBody({ binaryPath: "" })}
+                    aria-label={t("api.body.clearFile")}
+                    className={iconButtonClass({ size: "xs" })}
+                  >
+                    <X size={13} />
+                  </button>
+                </Tooltip>
               </div>
             ) : (
-              <p className="text-[12px] text-[var(--cf-text-muted)]">{t("api.body.noFile")}</p>
+              <p className="text-[12px] text-[var(--cf-text-faint)]">{t("api.body.noFile")}</p>
             )}
           </div>
         )}
@@ -374,43 +393,5 @@ function Body({
         {body.mode === "graphql" && <GraphqlPanel tabId={tabId} />}
       </div>
     </div>
-  );
-}
-
-/** A real radio input under a styled dot, for the same reason `Checkbox` does it: keyboard focus,
- * screen readers and "click the label" all keep working without being re-implemented. */
-function ModeRadio({
-  group,
-  checked,
-  label,
-  onSelect,
-}: {
-  group: string;
-  checked: boolean;
-  label: string;
-  onSelect: () => void;
-}) {
-  return (
-    <label className="flex cursor-pointer items-center gap-1.5">
-      <span className="relative inline-flex h-3.5 w-3.5 shrink-0">
-        <input
-          type="radio"
-          name={group}
-          checked={checked}
-          onChange={onSelect}
-          className="peer absolute inset-0 h-full w-full cursor-pointer opacity-0"
-        />
-        <span
-          aria-hidden
-          className="pointer-events-none flex h-3.5 w-3.5 items-center justify-center rounded-full border transition-colors duration-100 peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--cf-accent)] peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-[var(--cf-surface)]"
-          style={{ borderColor: checked ? "var(--cf-accent)" : "var(--cf-border)" }}
-        >
-          {checked && <span className="h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />}
-        </span>
-      </span>
-      <span className={`text-[12px] ${checked ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"}`}>
-        {label}
-      </span>
-    </label>
   );
 }

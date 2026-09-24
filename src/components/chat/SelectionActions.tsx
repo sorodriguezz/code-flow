@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { MessageSquarePlus, Quote } from "lucide-react";
 import { useT } from "../../state/languageStore";
+import { buttonClass } from "../common/Button";
 
 /** How far above the selection the bar floats, in pixels. Enough to clear the text's own
  *  descenders and the browser's selection highlight without detaching from it. */
@@ -182,7 +183,7 @@ export function SelectionActions({
           onQuoteReply(picked.text);
           setPicked(null);
         }}
-        className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] text-[var(--cf-text)] transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.07]"
+        className={buttonClass({ variant: "ghost", size: "sm" })}
       >
         <Quote size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
         {t("chat.quoteReply")}
@@ -194,7 +195,7 @@ export function SelectionActions({
           onQuoteNewChat(picked.text);
           setPicked(null);
         }}
-        className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] text-[var(--cf-text)] transition-colors hover:bg-black/[0.05] dark:hover:bg-white/[0.07]"
+        className={buttonClass({ variant: "ghost", size: "sm" })}
       >
         <MessageSquarePlus size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
         {t("chat.quoteNewChat")}

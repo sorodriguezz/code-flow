@@ -221,7 +221,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   const shell = reading
     ? isUser
       ? "ml-auto max-w-[85%] whitespace-pre-wrap rounded-2xl border border-[color-mix(in_oklab,var(--cf-accent)_26%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_11%,var(--cf-surface))] px-4 py-2.5 text-[14px] leading-[1.7] text-[var(--cf-text)]"
-      : "w-full text-[14.5px] leading-[1.75] text-[var(--cf-text)]"
+      : "w-full text-[15px] leading-[1.75] text-[var(--cf-text)]"
     : isUser
       ? "ml-auto max-w-[85%] whitespace-pre-wrap rounded-lg border border-[color-mix(in_oklab,var(--cf-accent)_30%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_14%,var(--cf-surface))] px-2.5 py-1.5 text-[12px] leading-relaxed text-[var(--cf-text)]"
       : "mr-auto max-w-[85%] rounded-lg bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] px-2.5 py-1.5 text-[12px] leading-relaxed text-[var(--cf-text)]";
@@ -372,7 +372,7 @@ function BubbleAction({
       onClick={onClick}
       title={label}
       aria-label={label}
-      className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.07]"
+      className="flex items-center gap-1 rounded-md px-1.5 py-1 text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
     >
       <Icon size={12} className={done ? "text-[var(--cf-success)]" : undefined} />
       {cost !== undefined && cost > 0 && costTitle && <CostChip turns={cost} title={costTitle} />}
@@ -604,7 +604,7 @@ function ChatStamp({ message, detail }: { message: ChatBubbleMessage; detail: Ch
   return (
     <div
       title={when?.toLocaleString(locale)}
-      className={`px-0.5 text-[10px] leading-tight text-[var(--cf-text-muted)] ${
+      className={`px-0.5 text-[10.5px] leading-tight text-[var(--cf-text-muted)] ${
         message.role === "user" ? "text-right" : ""
       }`}
     >

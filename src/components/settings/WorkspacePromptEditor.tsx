@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { RotateCcw } from "lucide-react";
+import { Check, RotateCcw } from "lucide-react";
 import { defaultWorkspacePrompt, getWorkspacePrompt, setWorkspacePrompt } from "../../lib/tauri/commands";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Skeleton } from "../common/Skeleton";
+import { buttonClass } from "../common/Button";
+import { chipClass, fieldClass } from "../common/recipes";
 
 /**
  * A per-workspace, provider-independent prompt override (the review standard or the PR-description
@@ -105,17 +107,15 @@ export function WorkspacePromptEditor({
   return (
     <div>
       <div className="mb-2 flex items-center justify-between gap-2">
-        <p className="text-[13px] text-[var(--cf-text-muted)]">{t(hintKey)}</p>
+        <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(hintKey)}</p>
+        {/* One chip in both states, so "saved" swaps in without the row changing height. */}
         {savedFlash ? (
-          <span className="shrink-0 text-[10px] font-medium text-[var(--cf-success)]">{t("settings.saved")}</span>
+          <span className={chipClass("ok")}>
+            <Check size={11} />
+            {t("settings.saved")}
+          </span>
         ) : (
-          <span
-            className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
-              isCustom
-                ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                : "bg-black/[0.05] text-[var(--cf-text-muted)] dark:bg-white/[0.08]"
-            }`}
-          >
+          <span className={chipClass(isCustom ? "accent" : "neutral")}>
             {isCustom ? t("settings.templateCustom") : t("settings.templateDefault")}
           </span>
         )}
@@ -128,16 +128,13 @@ export function WorkspacePromptEditor({
         rows={rows}
         spellCheck={false}
         placeholder={t(placeholderKey)}
-        className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+        className={fieldClass({ size: "sm", className: "h-auto w-full resize-y py-1.5 font-mono leading-relaxed" })}
       />
-      <div className="mt-1.5 flex items-center justify-between">
-        <span className="text-[10.5px] text-[var(--cf-text-muted)]">{t("settings.templateAutosave")}</span>
+      <div className="mt-1.5 flex min-h-6 items-center justify-between gap-2">
+        <span className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.templateAutosave")}</span>
         {isCustom && (
-          <button
-            onClick={() => void reset()}
-            className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-          >
-            <RotateCcw size={11} />
+          <button type="button" onClick={() => void reset()} className={buttonClass({ variant: "ghost", size: "sm" })}>
+            <RotateCcw size={13} />
             {t("settings.templateReset")}
           </button>
         )}

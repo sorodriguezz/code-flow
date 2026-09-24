@@ -8,6 +8,7 @@ import {
   KeyRound,
   Link2,
   Link2Off,
+  Loader2,
   Pencil,
   Server,
   Plus,
@@ -15,11 +16,13 @@ import {
   ShieldAlert,
   Trash2,
   Users,
-  type LucideIcon,
 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
-import { Field, GhostButton, Row } from "./ApiModal";
+import { Button, buttonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
+import { underlineStripClass, underlineTabClass } from "../common/recipes";
+import { Field, Row } from "./ApiModal";
 import { Actions, Group, Note, Panel, Status, Tag, relativeTime } from "./settingsChrome";
 import { ActiveUnderline } from "../common/ActivePill";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -85,6 +88,14 @@ const PROJECT_STEPS: { url: string; labelKey: TranslationKey }[] = [
 /** Re-verify on open if the last check is older than this. Cheap, and keeps the dot honest. */
 const RECHECK_AFTER_MS = 5 * 60_000;
 
+/**
+ * The chevron of a row that unfolds: faint at rest, full text while the pointer is on the part of
+ * the row that does the unfolding (the button carries `group/row`), so it is that part which
+ * answers the hover rather than the row's own button beside it.
+ */
+const DISCLOSURE_CHEVRON =
+  "shrink-0 text-[var(--cf-text-faint)] transition-colors duration-100 group-hover/row:text-[var(--cf-text)]";
+
 type CollabTab = "project" | "shares" | "join";
 
 /** A connection and the one fact about it that lives outside `listConnections`. */
@@ -101,11 +112,15 @@ export interface UsableConnection extends Connection {
  * above it, so pasting an invitation code meant scrolling past the whole of somebody else's
  * concern. They are also three different errands: hosting is set up once, sharing is what an owner
  * does, and importing is what a guest does. Almost nobody needs two of them in the same visit.
+ *
+ * Words only, like every other row of section tabs in the app: the glyphs they used to carry were
+ * the one thing telling this strip apart from the others, which is the opposite of what a shared
+ * recipe is for.
  */
-const TABS: { id: CollabTab; labelKey: TranslationKey; icon: LucideIcon }[] = [
-  { id: "project", labelKey: "api.collab.tabProject", icon: Server },
-  { id: "shares", labelKey: "api.collab.tabShares", icon: Users },
-  { id: "join", labelKey: "api.collab.tabJoin", icon: FolderInput },
+const TABS: { id: CollabTab; labelKey: TranslationKey }[] = [
+  { id: "project", labelKey: "api.collab.tabProject" },
+  { id: "shares", labelKey: "api.collab.tabShares" },
+  { id: "join", labelKey: "api.collab.tabJoin" },
 ];
 
 export function CollaborationPanel() {
@@ -298,29 +313,30 @@ export function CollaborationPanel() {
           are sharing out of it, and what you are bringing in. They were three groups stacked in one
           column, which is why the last of them sat four screens below the first — and why the
           warnings belonging to sharing were the only thing on screen when you scrolled past it.
-          Same underlined strip, and the same equal thirds, as the backup section's sub-tabs.
+          The app's one strip of section tabs (`underlineStripClass`), so these read as the sections
+          of this pane exactly the way a request's Params and Headers read as the sections of it.
 
           They open the pane now, with no paragraph above them. The one that was there described
           collaboration as a whole to someone who had already navigated to Collaboration, and each
           pane says its own half of it anyway. */}
-      <div className="mb-3 flex border-b border-[var(--cf-border)]">
-        {TABS.map(({ id, labelKey, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            aria-current={tab === id ? "page" : undefined}
-            title={t(labelKey)}
-            className={`relative -mb-px flex min-w-0 flex-1 items-center justify-center gap-1.5 px-2 pb-2.5 pt-1.5 text-[12.5px] ${
-              tab === id
-                ? "text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            }`}
-          >
-            {tab === id && <ActiveUnderline layoutId="cf-collab-tab-underline" />}
-            <Icon size={13} className="shrink-0" />
-            <span className="truncate">{t(labelKey)}</span>
-          </button>
-        ))}
+      <div role="tablist" className={`${underlineStripClass} mb-3`}>
+        {TABS.map(({ id, labelKey }) => {
+          const active = tab === id;
+          return (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              aria-current={active ? "page" : undefined}
+              onClick={() => setTab(id)}
+              className={underlineTabClass(active)}
+            >
+              {t(labelKey)}
+              {active && <ActiveUnderline layoutId="cf-collab-tab-underline" />}
+            </button>
+          );
+        })}
       </div>
 
       {tab === "project" &&
@@ -332,16 +348,19 @@ export function CollaborationPanel() {
                 leftovers of a form rather than as the one thing there is to do here. */}
             <div className="mt-4 flex justify-center">
               {/* Straight into the form. Landing on an empty list and a second button to press is
-                  one more click for the one thing this button can possibly have meant. */}
-              <GhostButton
+                  one more click for the one thing this button can possibly have meant.
+
+                  Secondary, not primary: hosting is something a guest may opt into, and an accent
+                  fill would say it is what they are here to do. */}
+              <Button
                 onClick={() => {
                   setHosting(true);
                   setAdding(true);
                 }}
               >
-                <Server size={12} />
+                <Server size={14} />
                 {t("api.collab.setUpHosting")}
-              </GhostButton>
+              </Button>
             </div>
           </>
         ) : (
@@ -349,11 +368,12 @@ export function CollaborationPanel() {
             {/* One row per connection, collapsed to the three things you came to look at: which
                 project, whether it works, and the button that re-asks. Everything else — the URL,
                 the key, the install script — is setup, and setup done once does not deserve to be
-                the whole pane forever. */}
+                the whole pane forever. Hairlines between the rows rather than a tinted card each:
+                the rows are one list, and a card per row made a list of one look like a form. */}
             {connections.length === 0 && !adding && (
               <Note>{t("api.collab.noConnections")}</Note>
             )}
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col divide-y divide-[var(--cf-border)]">
               {connections.map((connection) => (
                 <ConnectionRow
                   key={projectHost(connection.url)}
@@ -375,10 +395,17 @@ export function CollaborationPanel() {
               />
             ) : (
               <div className="mt-2 flex justify-end">
-                <GhostButton onClick={() => setAdding(true)}>
-                  <Plus size={12} />
+                {/* The pane's main action only while the list is empty — once there is a project,
+                    adding another is the exception, and an accent fill under a working list would
+                    point at the wrong thing. */}
+                <Button
+                  variant={connections.length === 0 ? "primary" : "secondary"}
+                  size="sm"
+                  onClick={() => setAdding(true)}
+                >
+                  <Plus size={13} />
                   {t("api.collab.addConnection")}
-                </GhostButton>
+                </Button>
               </div>
             )}
 
@@ -390,7 +417,7 @@ export function CollaborationPanel() {
                   different job: those move between panes of a form, these each open a page in the
                   browser. Independent rather than sequential, because the console remembers where
                   you were and step two is where you go back to when you mislay the key. */}
-              <ol className="mb-2 flex items-stretch gap-1">
+              <ol className="mb-2 flex items-stretch gap-1.5">
                 {PROJECT_STEPS.map(({ url, labelKey }, index) => (
                   <li key={url} className="min-w-0 flex-1">
                     <button
@@ -399,13 +426,13 @@ export function CollaborationPanel() {
                         void openExternalUrl(url).catch((e: unknown) => pushErrorToast(String(e)))
                       }
                       title={url}
-                      className="flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:border-[color-mix(in_oklab,var(--cf-accent)_50%,transparent)] hover:text-[var(--cf-accent)]"
+                      className={buttonClass({ variant: "secondary", size: "sm", className: "w-full" })}
                     >
-                      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[var(--cf-border)] text-[10px] font-medium">
+                      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--cf-hover)] text-[10.5px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
                         {index + 1}
                       </span>
                       <span className="truncate">{t(labelKey)}</span>
-                      <ExternalLink size={10} className="shrink-0" />
+                      <ExternalLink size={11} className="shrink-0 text-[var(--cf-text-faint)]" />
                     </button>
                   </li>
                 ))}
@@ -424,25 +451,34 @@ export function CollaborationPanel() {
 
       {tab === "shares" && (
         <>
-          {workspaces.map((workspace) => (
-            <WorkspaceShares
-              key={workspace.id}
-              workspaceId={workspace.id}
-              workspaceName={workspace.name}
-              active={workspace.id === activeWorkspaceId}
-              collections={trees[workspace.id] ?? []}
-              connections={usable}
-            />
-          ))}
-          {!settings.syncAuto && shares.length > 0 && (
-            <Note tone="warning">{t("api.collab.pausedHint")}</Note>
-          )}
-          <Row label={t("api.collab.auto")} hint={t("api.collab.autoHint")}>
-            <Checkbox
-              checked={settings.syncAuto}
-              onChange={(syncAuto) => void updateSettings({ syncAuto })}
-            />
-          </Row>
+          {/* Space between workspaces rather than a rule: their rows already have rules between
+              them, and a second rule of the same weight would not say which of the two it was. */}
+          <div className="flex flex-col gap-4">
+            {workspaces.map((workspace) => (
+              <WorkspaceShares
+                key={workspace.id}
+                workspaceId={workspace.id}
+                workspaceName={workspace.name}
+                workspaceColor={workspace.color}
+                active={workspace.id === activeWorkspaceId}
+                collections={trees[workspace.id] ?? []}
+                connections={usable}
+              />
+            ))}
+          </div>
+          {/* Set off from the workspaces by a rule: it is a switch for all of them, not a row of
+              the last one. */}
+          <div className="mt-3 border-t border-[var(--cf-border)] pt-2.5">
+            {!settings.syncAuto && shares.length > 0 && (
+              <Note tone="warning">{t("api.collab.pausedHint")}</Note>
+            )}
+            <Row label={t("api.collab.auto")} hint={t("api.collab.autoHint")}>
+              <Checkbox
+                checked={settings.syncAuto}
+                onChange={(syncAuto) => void updateSettings({ syncAuto })}
+              />
+            </Row>
+          </div>
           {/* The four standing facts about sharing, folded away behind one line.
               They are true whether or not you are sharing anything, and they do not change — which
               is exactly what makes four of them stacked under the controls a wall you read past
@@ -499,7 +535,11 @@ function ConnectionRow({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
+  /**
+   * What the row is doing, or `null` when it is idle. Named rather than a flag so the button that
+   * started it is the one that spins; everything else only needs to know that something is running.
+   */
+  const [busy, setBusy] = useState<"check" | "save" | "forget" | null>(null);
   const [editing, setEditing] = useState(false);
   /** Only ever what has been typed *now*. Empty means "leave the stored one alone". */
   const [anonKey, setAnonKey] = useState("");
@@ -528,14 +568,14 @@ function ConnectionRow({
    */
   const pinned = connection.shares > 0;
 
-  const guard = async (action: () => Promise<unknown>) => {
-    setBusy(true);
+  const guard = async (action: () => Promise<unknown>, what: "check" | "save" | "forget") => {
+    setBusy(what);
     try {
       await action();
     } catch (e) {
       pushErrorToast(String(e));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -545,7 +585,7 @@ function ConnectionRow({
         setAnonKey("");
         setEditing(false);
       }
-    });
+    }, "save");
 
   /**
    * Out of the replacement, back to the row as it was.
@@ -565,7 +605,7 @@ function ConnectionRow({
       if (!(await confirmAction(t("api.collab.forgetConfirm", { ref: projectRef(connection.url) }))))
         return;
       await onForget();
-    });
+    }, "forget");
 
   const checkedAgo = relativeTime(connection.checkedAt, {
     now: t("api.collab.justNow"),
@@ -575,7 +615,7 @@ function ConnectionRow({
   });
 
   return (
-    <div className="rounded-md bg-black/[0.02] px-2 py-1.5 dark:bg-white/[0.03]">
+    <div className="py-1.5">
       {/* The disclosure and the check button are siblings rather than one inside the other: a
           button nested in a button is invalid, and making the whole row toggle would mean the
           row's own action also collapses it. */}
@@ -585,12 +625,12 @@ function ConnectionRow({
           onClick={() => setOpen((current) => !current)}
           aria-expanded={open}
           title={projectHost(connection.url)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left"
+          className="group/row flex min-h-[26px] min-w-0 flex-1 items-center gap-1.5 rounded-md text-left"
         >
           {open ? (
-            <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <ChevronDown size={13} className={DISCLOSURE_CHEVRON} />
           ) : (
-            <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <ChevronRight size={13} className={DISCLOSURE_CHEVRON} />
           )}
           <span className="truncate font-mono text-[12px] text-[var(--cf-text)]">
             {projectRef(connection.url)}
@@ -606,7 +646,7 @@ function ConnectionRow({
             </Tag>
           )}
         </button>
-        {busy ? (
+        {busy !== null ? (
           <Status tone="accent" pulse>
             {t("api.collab.checking")}
           </Status>
@@ -623,23 +663,28 @@ function ConnectionRow({
             {connection.checkedAt === "" ? t("api.collab.untested") : t("api.collab.notReachable")}
           </Status>
         )}
-        <GhostButton onClick={() => void guard(() => onCheck(false))} disabled={busy}>
-          <RefreshCw size={12} />
+        <Button size="sm" onClick={() => void guard(() => onCheck(false), "check")} disabled={busy !== null}>
+          {busy === "check" ? (
+            <Loader2 size={13} className="animate-spin" />
+          ) : (
+            <RefreshCw size={13} />
+          )}
           {t("api.collab.test")}
-        </GhostButton>
+        </Button>
       </div>
 
       {open && (
         // Indented to the ref rather than the chevron, so what unfolds reads as belonging to the
         // row above it instead of starting a new one.
-        <div className="mt-1 pl-[18px]">
+        <div className="mt-1.5 pl-[19px]">
           {/* Text, not a disabled field. It is never editable on this row, and a greyed-out input
               says "you may not touch this yet" — which invites looking for the button that unlocks
-              it. There isn't one, and there is nothing here to type. */}
+              it. There isn't one, and there is nothing here to type. Inset like the field's own
+              text, so the URL and the key below it start on the same line. */}
           <Row label={t("api.collab.projectUrl")} wide>
             <span
               title={connection.url}
-              className="block select-text truncate font-mono text-[12px] text-[var(--cf-text-muted)]"
+              className="block w-full select-text truncate px-2.5 font-mono text-[12px] text-[var(--cf-text-muted)]"
             >
               {connection.url}
             </span>
@@ -657,45 +702,63 @@ function ConnectionRow({
           {!connection.hasKey && <Note>{t("api.collab.needsCredentials")}</Note>}
           {editing && <Note>{t("api.collab.urlPinned")}</Note>}
 
-          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <GhostButton onClick={() => void onCopySql()} disabled={busy}>
-              <ClipboardCopy size={12} />
-              {t("api.collab.copySql")}
-            </GhostButton>
-            {/* The two are mutually exclusive by construction: locked, the key field is disabled,
-                so there is never anything for "Connect" to send — it would sit there greyed out
-                under a working connection, which reads as something being wrong. Re-checking a
-                connection that holds is the button on the row above. */}
-            {locked ? (
-              <GhostButton onClick={() => setEditing(true)} title={t("api.collab.editHint")}>
-                <Pencil size={12} />
-                {t("api.collab.replaceKey")}
-              </GhostButton>
-            ) : (
-              <GhostButton onClick={save} disabled={busy || anonKey.trim() === ""}>
-                <Link2 size={12} />
-                {t("api.collab.connect")}
-              </GhostButton>
-            )}
-            {/* Only while replacing a key that already works. A connection with no key has nothing
-                to go back to: cancelling there would leave the same empty field it left. */}
-            {editing && (
-              <GhostButton onClick={cancelEdit} disabled={busy}>
-                {t("api.collab.cancel")}
-              </GhostButton>
-            )}
-            {/* `ml-auto`, so it sits at the far end of whichever line it lands on rather than
-                beside the ones it is not one of. Those set the connection up; this one ends it. */}
-            <span className="ml-auto">
-              <GhostButton
-                onClick={forget}
-                disabled={busy || pinned}
-                title={pinned ? t("api.collab.forgetBlocked") : undefined}
-              >
-                <Trash2 size={12} />
-                {t("api.collab.forget")}
-              </GhostButton>
-            </span>
+          <div className="mt-2">
+            <Actions>
+              <Button size="sm" onClick={() => void onCopySql()} disabled={busy !== null}>
+                <ClipboardCopy size={13} />
+                {t("api.collab.copySql")}
+              </Button>
+              {/* The two are mutually exclusive by construction: locked, the key field is disabled,
+                  so there is never anything for "Connect" to send — it would sit there greyed out
+                  under a working connection, which reads as something being wrong. Re-checking a
+                  connection that holds is the button on the row above. */}
+              {locked ? (
+                <Tooltip label={t("api.collab.editHint")}>
+                  <Button size="sm" onClick={() => setEditing(true)}>
+                    <Pencil size={13} />
+                    {t("api.collab.replaceKey")}
+                  </Button>
+                </Tooltip>
+              ) : (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={save}
+                  disabled={busy !== null || anonKey.trim() === ""}
+                >
+                  {busy === "save" ? (
+                    <Loader2 size={13} className="animate-spin" />
+                  ) : (
+                    <Link2 size={13} />
+                  )}
+                  {t("api.collab.connect")}
+                </Button>
+              )}
+              {/* Only while replacing a key that already works. A connection with no key has nothing
+                  to go back to: cancelling there would leave the same empty field it left. */}
+              {editing && (
+                <Button variant="ghost" size="sm" onClick={cancelEdit} disabled={busy !== null}>
+                  {t("api.collab.cancel")}
+                </Button>
+              )}
+              {/* `ml-auto`, so it sits at the far end of whichever line it lands on rather than
+                  beside the ones it is not one of. Those set the connection up; this one ends it.
+                  The wrapper is what the reason lands on while the button is off: a disabled button
+                  takes no pointer events, so a tooltip on the button itself would never open. */}
+              <Tooltip label={t("api.collab.forgetBlocked")} disabled={!pinned}>
+                <span className="ml-auto inline-flex">
+                  <Button
+                    variant="danger-ghost"
+                    size="sm"
+                    onClick={forget}
+                    disabled={busy !== null || pinned}
+                  >
+                    <Trash2 size={13} />
+                    {t("api.collab.forget")}
+                  </Button>
+                </span>
+              </Tooltip>
+            </Actions>
           </div>
         </div>
       )}
@@ -743,7 +806,10 @@ function NewConnection({
   };
 
   return (
-    <div className="mt-2 rounded-md border border-dashed border-[var(--cf-border)] px-2 py-1.5">
+    // A well rather than a dashed box: this is a form being filled in inside the list, not a
+    // placeholder for something that is not there yet, and the fields read better on the sunken
+    // tone than on the sheet the rows sit on.
+    <div className="mt-2 rounded-lg bg-[var(--cf-sunken)] px-3 py-2">
       <Row label={t("api.collab.projectUrl")} wide>
         <Field mono value={url} placeholder="https://xxxx.supabase.co" onChange={setUrl} />
       </Row>
@@ -756,22 +822,22 @@ function NewConnection({
         <Note>{t("api.collab.needsCredentials")}</Note>
       )}
       <Actions>
-        <GhostButton onClick={() => void onCopySql()} disabled={busy}>
-          <ClipboardCopy size={12} />
+        <Button size="sm" onClick={() => void onCopySql()} disabled={busy}>
+          <ClipboardCopy size={13} />
           {t("api.collab.copySql")}
-        </GhostButton>
-        <GhostButton
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
           onClick={() => void submit()}
           disabled={busy || duplicate || url.trim() === "" || anonKey.trim() === ""}
         >
-          <Link2 size={12} />
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <Link2 size={13} />}
           {t("api.collab.connect")}
-        </GhostButton>
-        <span className="ml-auto">
-          <GhostButton onClick={onDone} disabled={busy}>
-            {t("api.collab.cancel")}
-          </GhostButton>
-        </span>
+        </Button>
+        <Button variant="ghost" size="sm" className="ml-auto" onClick={onDone} disabled={busy}>
+          {t("api.collab.cancel")}
+        </Button>
       </Actions>
     </div>
   );
@@ -784,12 +850,15 @@ function NewConnection({
 function WorkspaceShares({
   workspaceId,
   workspaceName,
+  workspaceColor,
   active,
   collections,
   connections,
 }: {
   workspaceId: string;
   workspaceName: string;
+  /** The workspace's own colour, for the dot that tells one workspace's block from the next. */
+  workspaceColor: string;
   active: boolean;
   collections: ApiCollection[];
   /** The connections a new share could be created on — checked, and with a key stored. */
@@ -864,21 +933,21 @@ function WorkspaceShares({
   };
 
   return (
-    <div className="mb-2 rounded-lg border border-[var(--cf-border)] px-2 py-1.5 last:mb-0">
+    <div className="rounded-[10px] border border-[var(--cf-border)] px-3 py-2">
       <div className="flex items-center gap-2">
-        <Users size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-        <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">
+        <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: workspaceColor }} aria-hidden />
+        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">
           {workspaceName}
         </span>
         {active && <Tag tone="accent">{t("api.collab.activeWorkspace")}</Tag>}
-        <GhostButton
+        <Button variant="ghost" size="sm"
           onClick={() => setPicking((open) => !open)}
           disabled={blocked !== null}
           title={blocked ? t(blocked) : undefined}
         >
           <Plus size={12} />
           {t("api.collab.addCollection")}
-        </GhostButton>
+        </Button>
       </div>
 
       {picking && (
@@ -915,13 +984,13 @@ function WorkspaceShares({
               />
             </div>
           )}
-          <GhostButton
+          <Button variant="ghost" size="sm"
             onClick={() => void confirmShare()}
             disabled={choice === "" || target === ""}
           >
             <Link2 size={12} />
             {t("api.collab.share")}
-          </GhostButton>
+          </Button>
         </div>
       )}
 
@@ -1119,7 +1188,7 @@ function ShareRow({
   );
 
   return (
-    <div className="rounded-md bg-black/[0.02] px-2 py-1.5 dark:bg-white/[0.03]">
+    <div className="rounded-md bg-[var(--cf-hover)] px-2 py-1.5">
       {/* Collapsed, a share is the three things you came to look at: which collection, whether it
           is up to date, and the button that makes it up to date. Everything else — the tags, the
           invitation, a new code, walking away — is either a fact you already know or an errand you
@@ -1145,10 +1214,10 @@ function ShareRow({
           <span className="truncate text-[12px] text-[var(--cf-text)]">{name}</span>
         </button>
         {status}
-        <GhostButton onClick={syncOne} disabled={busy}>
+        <Button variant="ghost" size="sm" onClick={syncOne} disabled={busy}>
           <RefreshCw size={12} />
           {t("api.collab.syncNow")}
-        </GhostButton>
+        </Button>
       </div>
 
       {open && (
@@ -1188,25 +1257,25 @@ function ShareRow({
               everyone else. */}
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {isOwner && (
-              <GhostButton onClick={copyInvite} disabled={busy} title={t("api.collab.copyInviteHint")}>
+              <Button variant="ghost" size="sm" onClick={copyInvite} disabled={busy} title={t("api.collab.copyInviteHint")}>
                 <ClipboardCopy size={12} />
                 {t("api.collab.copyInvite")}
-              </GhostButton>
+              </Button>
             )}
             {isOwner && (
-              <GhostButton onClick={rotateCode} disabled={busy}>
+              <Button variant="ghost" size="sm" onClick={rotateCode} disabled={busy}>
                 <KeyRound size={12} />
                 {t("api.collab.rotate")}
-              </GhostButton>
+              </Button>
             )}
             {/* `ml-auto`, so it sits at the far end of whichever line it lands on rather than
                 beside the ones it is not one of. Those maintain the share; this one ends it, and
                 being the odd one out is the point. */}
             <span className="ml-auto">
-              <GhostButton onClick={stop} disabled={busy}>
+              <Button variant="ghost" size="sm" onClick={stop} disabled={busy}>
                 <Link2Off size={12} />
                 {isOwner ? t("api.collab.leave") : t("api.collab.disconnect")}
-              </GhostButton>
+              </Button>
             </span>
           </div>
         </div>
@@ -1247,7 +1316,7 @@ export function JoinBlock({ onDone }: { onDone?: () => void } = {}) {
             options={workspaces.map((w) => ({ value: w.id, label: w.name }))}
           />
         </div>
-        <GhostButton
+        <Button variant="ghost" size="sm"
           onClick={() =>
             void (async () => {
               setBusy(true);
@@ -1265,7 +1334,7 @@ export function JoinBlock({ onDone }: { onDone?: () => void } = {}) {
         >
           <FolderInput size={12} />
           {t("api.collab.join")}
-        </GhostButton>
+        </Button>
       </div>
       <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
         {t("api.collab.joinHint")}

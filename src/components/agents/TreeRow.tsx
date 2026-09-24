@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
-import { MoreHorizontal, Pencil, Pin } from "lucide-react";
+import { Folder, MoreHorizontal, Pencil, Pin } from "lucide-react";
 import type { MenuItem } from "../common/ContextMenu";
+import { chipClass, fieldClass, rowClass } from "../common/recipes";
 import { riseDelay } from "../../lib/rise";
 
 /** Where a row's menu was asked for. Only the id is kept, never the row itself: a turn landing
@@ -35,6 +36,11 @@ const INDENT = 14;
  * rendered outside the main button by its caller's own element. It keeps its width whether or not
  * the pointer is over the row: revealing the "…" by making space would shift every name to the left
  * as the mouse moved down the list.
+ *
+ * The frame is the shared `rowClass` — the same hover and selected tint every explorer in the app
+ * wears. That recipe centres its children, which suits a one-line row; this one has two lines, so
+ * the chevron and the "…" pin themselves to the first line with `self-start` rather than floating
+ * between the name and the line of context under it.
  */
 export function Row({
   selected,
@@ -85,44 +91,46 @@ export function Row({
         e.stopPropagation();
         onMenu(e.clientX, e.clientY);
       }}
-      style={{ paddingLeft: depth * INDENT, ...riseDelay(at) }}
-      className={`cf-rise group relative flex w-full items-start rounded-md ${
-        selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-      }`}
+      // The inline left padding overrides the recipe's own, so the nesting indent and the row's
+      // resting inset are one number.
+      style={{ paddingLeft: 4 + depth * INDENT, ...riseDelay(at) }}
+      className={rowClass(selected, "cf-rise group pr-1")}
     >
-      {leading && <span className="mt-[5px] flex shrink-0 items-center pl-1">{leading}</span>}
+      {leading && <span className="mt-[8px] flex shrink-0 self-start">{leading}</span>}
       <button
         type="button"
         onClick={onClick}
         disabled={muted}
         aria-current={selected ? "page" : undefined}
         title={title}
-        className={`flex min-w-0 flex-1 items-start gap-2 rounded-md py-1.5 text-left ${
-          leading ? "pl-1" : "pl-2"
-        } ${muted ? "cursor-default" : ""}`}
+        className={`flex min-w-0 flex-1 items-start gap-2 self-stretch rounded-md py-[7px] text-left ${leading ? "" : "pl-1"} ${
+          muted ? "cursor-default" : ""
+        }`}
       >
-        <span className="mt-[3px] flex h-3.5 w-3.5 shrink-0 items-center justify-center">{glyph}</span>
+        <span className="mt-[2px] flex h-3.5 w-3.5 shrink-0 items-center justify-center">{glyph}</span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-1">
-            {pinned && <Pin size={10} className="shrink-0 text-[var(--cf-text-muted)]" />}
+            {pinned && <Pin size={11} className="shrink-0 text-[var(--cf-text-faint)]" />}
             <span
-              className={`min-w-0 flex-1 truncate text-[13px] ${
-                selected ? "text-[var(--cf-accent)]" : muted ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"
+              className={`min-w-0 flex-1 truncate text-[13px] font-medium leading-[18px] ${
+                muted ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"
               }`}
             >
               {label}
             </span>
           </span>
-          <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{meta}</span>
+          <span className="block truncate text-[11px] leading-4 text-[var(--cf-text-faint)]">{meta}</span>
         </span>
         {chip && (
-          <span className="mt-[1px] max-w-[38%] shrink-0 truncate rounded bg-black/[0.05] px-1.5 py-[1px] text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.07]">
-            {chip}
+          <span className={chipClass("neutral", "mt-px max-w-[38%]")}>
+            <Folder size={11} className="shrink-0" />
+            <span className="min-w-0 truncate">{chip}</span>
           </span>
         )}
       </button>
       {/* The same menu the right-click opens. Right-click is not discoverable on its own, and this
-          list is where someone goes looking for how to get rid of a row. */}
+          list is where someone goes looking for how to get rid of a row. The pressed tint rather
+          than the hover one: it sits on a row that is already wearing the hover tint. */}
       <button
         type="button"
         aria-haspopup="menu"
@@ -132,9 +140,9 @@ export function Row({
           const rect = e.currentTarget.getBoundingClientRect();
           onMenu(rect.right - 4, rect.bottom + 2);
         }}
-        className="mr-1 mt-[5px] flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:bg-black/[0.06] hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover:opacity-100 dark:hover:bg-white/[0.1]"
+        className="mt-[5px] flex h-[22px] w-[22px] shrink-0 items-center justify-center self-start rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover:opacity-100"
       >
-        <MoreHorizontal size={13} />
+        <MoreHorizontal size={14} />
       </button>
     </div>
   );
@@ -157,8 +165,9 @@ export function RenameRow({
   const [draft, setDraft] = useState(value);
   return (
     <div
-      style={{ paddingLeft: depth * INDENT }}
-      className="flex w-full items-center gap-2 rounded-md py-1.5 pl-2 pr-1"
+      // Lined up with the glyph column of the rows around it: 4px of row inset plus the button's own.
+      style={{ paddingLeft: 8 + depth * INDENT }}
+      className="flex w-full items-center gap-2 py-1 pr-1"
     >
       <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
         <Pencil size={12} className="text-[var(--cf-text-muted)]" />
@@ -172,7 +181,7 @@ export function RenameRow({
           if (e.key === "Enter") onCommit(draft);
           if (e.key === "Escape") onCancel();
         }}
-        className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-transparent px-1 py-0.5 text-[12px] text-[var(--cf-text)] outline-none"
+        className={fieldClass({ size: "sm", className: "flex-1" })}
       />
     </div>
   );

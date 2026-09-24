@@ -68,7 +68,7 @@ function GitAction({
       disabled={disabled}
       title={title}
       aria-label={title}
-      className="flex h-6 min-w-6 shrink-0 items-center justify-center gap-0.5 rounded-md px-1 text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] dark:hover:bg-white/[0.08] dark:disabled:hover:bg-transparent"
+      className="flex h-6 min-w-6 shrink-0 items-center justify-center gap-0.5 rounded-md px-1 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] dark:disabled:hover:bg-transparent"
     >
       {icon}
       {/* The count as a digit beside the glyph, in the button's own colour — not a badge. A filled
@@ -80,7 +80,7 @@ function GitAction({
           Clamped at 99: past a hundred commits the exact number changes nothing about what you do
           next, and three digits would push the row around. */}
       {count !== undefined && count > 0 && (
-        <span className="text-[10px] font-semibold leading-none tabular-nums">
+        <span className="text-[10.5px] font-semibold leading-none tabular-nums">
           {count > 99 ? "99+" : count}
         </span>
       )}
@@ -89,7 +89,7 @@ function GitAction({
           bar once a second. Fixed width and right-aligned so `60s` shrinking to `9s` moves nothing
           around it — a control that shuffles its neighbours every ten seconds is unclickable. */}
       {countdown !== undefined && countdown !== null && (
-        <span className="w-[17px] shrink-0 text-right text-[9px] font-medium leading-none tabular-nums">
+        <span className="w-[17px] shrink-0 text-right text-[10.5px] font-medium leading-none tabular-nums">
           {countdown}s
         </span>
       )}

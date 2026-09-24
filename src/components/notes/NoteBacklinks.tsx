@@ -83,7 +83,7 @@ export function NoteBacklinks({ noteId, title }: { noteId: string; title: string
                 <button
                   type="button"
                   onClick={() => void openNote(hit.id)}
-                  className="w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+                  className="w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-[var(--cf-hover)]"
                 >
                   {/* The linking note's title, in full — this list is short and its rows are the
                       answer, so truncating one would hide the thing the panel exists to show. */}

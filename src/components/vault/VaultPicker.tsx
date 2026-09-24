@@ -198,7 +198,7 @@ export function VaultPicker({
           </p>
           {statusError ? (
             <>
-              <p className="max-w-xs break-words text-center text-[11.5px] leading-relaxed text-[var(--cf-danger)]">
+              <p className="max-w-xs break-words text-center text-[12px] leading-relaxed text-[var(--cf-danger)]">
                 {statusError}
               </p>
               <button
@@ -242,7 +242,7 @@ export function VaultPicker({
             autoComplete="current-password"
             className={INPUT}
           />
-          {unlockError && <p className="text-[11.5px] text-[var(--cf-danger)]">{unlockError}</p>}
+          {unlockError && <p className="text-[12px] text-[var(--cf-danger)]">{unlockError}</p>}
           <button
             type="submit"
             disabled={password.length === 0 || unlocking}
@@ -253,7 +253,7 @@ export function VaultPicker({
         </form>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 py-3">
-          <div className="flex shrink-0 items-center gap-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-2.5">
+          <div className="flex shrink-0 items-center gap-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2.5">
             <Search size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
             <input
               ref={searchRef}

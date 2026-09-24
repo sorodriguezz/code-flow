@@ -37,6 +37,7 @@ import type {
   ResponseTimings,
   SavedExample,
 } from "../../types/api";
+import { buttonClass } from "../common/Button";
 
 /** Above this, `JSON.parse` + `JSON.stringify` on the UI thread is a visible freeze. */
 const PRETTY_LIMIT = 2 * 1024 * 1024;
@@ -384,7 +385,7 @@ function IconButton({
       title={title}
       aria-label={title}
       onClick={onClick}
-      className={`rounded p-1 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
+      className={`inline-flex h-[22px] w-[22px] items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
         active ? "text-[var(--cf-success)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
       }`}
     >
@@ -417,7 +418,7 @@ function ViewTab({
       {label}
       {badge && (
         <span
-          className="rounded-full px-1.5 py-px text-[10px] font-medium"
+          className="rounded-full px-1.5 py-px text-[10.5px] font-medium"
           style={{
             color: badgeColor(badge.tone),
             backgroundColor: `color-mix(in oklab, ${badgeColor(badge.tone)} 14%, transparent)`,
@@ -447,7 +448,7 @@ function BodyViewPicker({ value, onChange }: { value: BodyView; onChange: (view:
   return (
     <div
       role="tablist"
-      className="flex shrink-0 items-center gap-px rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-px"
+      className="flex shrink-0 items-center gap-px rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-px"
     >
       {BODY_VIEWS.map(({ id, label }) => (
         <button
@@ -461,7 +462,7 @@ function BodyViewPicker({ value, onChange }: { value: BodyView; onChange: (view:
           className={`whitespace-nowrap rounded-[5px] px-2 py-[3px] text-[11px] transition-colors ${
             value === id
               ? "bg-[var(--cf-accent-soft)] font-medium text-[var(--cf-accent)]"
-              : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+              : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           }`}
         >
           {t(label)}
@@ -519,7 +520,7 @@ function BinaryBody({ response, onSave }: { response: ApiResponse; onSave: () =>
       <button
         type="button"
         onClick={onSave}
-        className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
+        className={buttonClass({ variant: "secondary", size: "sm" })}
       >
         <Download size={13} />
         {t("api.response.save")}
@@ -572,7 +573,7 @@ function BodyEditor({
           onClick={openFind}
           title={t("api.response.search")}
           aria-label={t("api.response.search")}
-          className="rounded p-1 text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         >
           <Search size={13} />
         </button>
@@ -582,7 +583,7 @@ function BodyEditor({
           title={t("api.response.wrapLines")}
           aria-label={t("api.response.wrapLines")}
           aria-pressed={wrap}
-          className={`rounded p-1 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
+          className={`inline-flex h-[22px] w-[22px] items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
             wrap ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
           }`}
         >

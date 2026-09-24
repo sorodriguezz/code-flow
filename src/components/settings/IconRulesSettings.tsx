@@ -90,7 +90,7 @@ function IconPicker({
   const results = useMemo(() => (ready ? searchIcons(query) : []), [query, ready]);
 
   return (
-    <div className="mt-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-1.5">
+    <div className="mt-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-1.5">
       <div className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-1.5 focus-within:border-[var(--cf-accent)]">
         <Search size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
         <input
@@ -250,7 +250,7 @@ function RuleRow({
         <button
           onClick={(e) => setMenu({ x: e.clientX, y: e.clientY })}
           title={t("icons.more")}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         >
           <MoreHorizontal size={13} />
         </button>
@@ -471,7 +471,7 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
             if (e.key === "Escape") setNaming(null);
           }}
           placeholder={t("icons.profileNamePlaceholder")}
-          className="min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-bg)] px-1.5 py-1 text-[12px] outline-none"
+          className="min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1.5 py-1 text-[12px] outline-none"
         />
       ) : (
         <div className="min-w-0 flex-1">
@@ -487,7 +487,7 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
       <button
         onClick={onAddRule}
         title={t("icons.addRule")}
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         <Plus size={13} />
       </button>
@@ -499,14 +499,14 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
             ? t("icons.resetProfile", { name: active?.name ?? "" })
             : t("icons.resetProfileUnavailable")
         }
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-white/[0.08]"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
       >
         <RotateCcw size={12} />
       </button>
       <button
         onClick={(e) => setMenu({ x: e.clientX, y: e.clientY })}
         title={t("icons.more")}
-        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         <MoreHorizontal size={13} />
       </button>
@@ -653,7 +653,7 @@ export function IconRulesSettings() {
           <button
             onClick={() => void setDefaultFolderIcon(null)}
             title={t("icons.defaultFolderReset")}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
             <RotateCcw size={11} />
           </button>

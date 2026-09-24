@@ -97,7 +97,7 @@ export function EffortPicker({
         disabled={disabled}
         onClick={() => setOpen((was) => !was)}
         title={t("chat.effortTitle")}
-        className="flex h-7 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-white/[0.07]"
+        className="flex h-[26px] items-center gap-1 rounded-md px-2 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40"
       >
         <Brain size={13} />
         {/* The word only when a level was actually chosen. An unchosen control that announces
