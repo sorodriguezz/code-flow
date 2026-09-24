@@ -4,7 +4,6 @@ import { usePreferencesStore } from "./preferencesStore";
 import { sendNativeNotification } from "../lib/nativeNotify";
 import { useUiStore, type MainView, type StoriesMode } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
-import { workspaceIdFromBucket } from "../lib/prTarget";
 import type { TranslationKey } from "../lib/i18n/translations";
 
 /**
@@ -112,6 +111,12 @@ export interface NotificationTarget {
        *  different store. A conversation here usually has no project at all. */
       | "chatAppConversation"
       | "job"
+      /** One finding of a review or an analysis: `${jobId}::${findingId}`. Opens the document the
+       *  finding is in, with the finding open — where a "resolve with AI" result is read. */
+      | "finding"
+      /** A project's pull request: `${projectId}::${prId}`. For work on a PR that is not a run of
+       *  its own, like a fix to one of its comment threads. */
+      | "pullRequest"
       /** `${projectId}:${provider}:${runId}` — a run number alone is ambiguous across
        *  repositories exactly as a PR number is. See `runKey` in `ciStore`. */
       | "pipelineRun";
@@ -251,7 +256,30 @@ function raiseNative(item: AppNotification): void {
  * completions deserve both.
  */
 export function notify(input: NotificationInput): void {
+  markAssistantUnread(input);
   useNotificationStore.getState().push(input);
+}
+
+/**
+ * A result that landed in the assistant, filed as unread on the tab it belongs to — unless that tab
+ * is the one on screen.
+ *
+ * Done here because a notification with an assistant target is exactly "a result arrived that the
+ * user may not be looking at", and every completion path already raises one. Deliberately before
+ * the mute check in `push`: muting the notification centre is about the list and the sound, not
+ * about losing track of which conversation has an answer waiting.
+ */
+function markAssistantUnread(input: NotificationInput): void {
+  const target = input.target;
+  if (!target?.openAiPanel || !target.select || input.status === "info") return;
+  const { select } = target;
+  const status = input.status === "error" ? "error" : "success";
+  void import("../lib/aiPanelNav").then(({ tabKeyForSelect }) => {
+    const key = tabKeyForSelect(select);
+    if (key) void import("./aiPanelStore").then(({ useAiPanelStore }) =>
+      useAiPanelStore.getState().markUnread(key, { status, workspaceId: input.workspaceId }),
+    );
+  });
 }
 
 /**
@@ -338,9 +366,10 @@ async function enterWorkspace(stampedWorkspaceId: string | null, target: Notific
       // reads whichever workspace is *active*. Pre-loading here would list the old one; `openById`
       // does its own load, after the switch below, which is the only order that works.
       //
-      // `chatConversation` and `job` are absent for the opposite reason: neither is filed per
-      // workspace. The chat loads its own conversation on demand and the job list holds every
-      // bucket this session touched, so there is nothing to pre-load for either.
+      // `chatConversation`, `job`, `finding` and `pullRequest` are absent for the opposite reason:
+      // none is filed per workspace. The chat loads its own conversation on demand, the job list
+      // holds every bucket this session touched, and a pull request is fetched by its project — so
+      // there is nothing to pre-load for any of them.
     }
   }
 
@@ -365,51 +394,9 @@ async function enterWorkspace(stampedWorkspaceId: string | null, target: Notific
  * which belongs to no repository here) are the same row to the user, and the id is unique either
  * way, so carrying the bucket through the notification would only be a second thing to keep true.
  */
-async function showJobInAiPanel(jobId: string): Promise<void> {
-  const [{ useJobsStore }, { usePrStore }, { useAnalyzeUiStore }] = await Promise.all([
-    import("./jobsStore"),
-    import("./prStore"),
-    import("./analyzeUiStore"),
-  ]);
-  const job = Object.values(useJobsStore.getState().byProject)
-    .flat()
-    .find((j) => j.id === jobId);
-  // Deleted from Activity since it finished. The panel is open on the right project either way,
-  // which is most of where the user was going.
-  if (!job) return;
-
-  const linkWorkspaceId = workspaceIdFromBucket(job.projectId);
-  if (linkWorkspaceId) {
-    useAnalyzeUiStore.getState().hide();
-    usePrStore.getState().openLinkPrFromMeta(job.meta, linkWorkspaceId);
-    return;
-  }
-  if (job.kind === "analyze-changes") {
-    usePrStore.getState().selectPr(null);
-    useAnalyzeUiStore.getState().showJob(job.id);
-    return;
-  }
-  if (job.kind === "pipeline-analyze") {
-    // Not the assistant rail: a pipeline analysis belongs under the log it is about, which is a
-    // view rather than a panel. Its coordinates travel in `meta` — see `analyze_pipeline_failure`.
-    const { openPipelineAnalysis } = await import("./ciStore");
-    await openPipelineAnalysis(job);
-    return;
-  }
-  const prId = job.meta.prId;
-  if (typeof prId !== "number") return;
-  // Fetched rather than read off whatever the sidebar last loaded: the pull request this reviewed
-  // may not be in that list at all, and a review reached from a notification has to open either way.
-  const pr = await usePrStore.getState().ensureProjectPr(job.projectId, prId);
-  if (!pr) return;
-  useAnalyzeUiStore.getState().hide();
-  // The job's own repository, named rather than left to `selectPr`'s fallback. That fallback reads
-  // the *active* project, and this line runs after a host round trip that the user is free to walk
-  // away from — so a review followed from the bell could arrive stamped against whichever
-  // repository they had wandered into, which is the mis-owned selection `selectedPrProjectId` was
-  // introduced to make impossible. `job.projectId` is a real project here: the workspace-bucket
-  // case returned above.
-  usePrStore.getState().selectPr(pr, job.projectId);
+async function showJobInAiPanel(jobId: string, finding?: string | null): Promise<void> {
+  const { openJobById } = await import("../lib/aiPanelNav");
+  await openJobById(jobId, finding);
 }
 
 /**
@@ -501,21 +488,11 @@ export async function followTarget(
     const { useWorkItemReviewStore } = await import("./workItemReviewStore");
     await useWorkItemReviewStore.getState().openById(id);
   } else if (kind === "chatConversation") {
-    // Addressed by project — the rail reads its conversation from whichever one is active — so
-    // without one there is no chat to open, only the panel that was already opened above.
+    // A conversation is filed under its repository, so without one there is nothing to open — only
+    // the panel, which was already opened above. Its own tab: nothing else has to be cleared.
     if (!target.projectId) return;
-    const [{ useChatStore }, { usePrStore }, { useAnalyzeUiStore }] = await Promise.all([
-      import("./chatStore"),
-      import("./prStore"),
-      import("./analyzeUiStore"),
-    ]);
-    // The panel shows one thing at a time and the chat is the last in line: a pull request left
-    // selected, or an analysis left open, would sit on top of the answer this notification is
-    // about. The same clearing the Activity list does before opening a chat row.
-    usePrStore.getState().selectPr(null);
-    usePrStore.getState().closeLinkPr();
-    useAnalyzeUiStore.getState().hide();
-    await useChatStore.getState().switchTo(target.projectId, id);
+    const { openChat } = await import("../lib/aiPanelNav");
+    await openChat(target.projectId, id);
   } else if (kind === "chatAppConversation") {
     // No project needed, and that is the whole difference from the branch above: a conversation in
     // this workspace addresses itself by its own id and usually belongs to no repository at all.
@@ -523,6 +500,16 @@ export async function followTarget(
     await useConversationStore.getState().open(id);
   } else if (kind === "job") {
     await showJobInAiPanel(id);
+  } else if (kind === "finding") {
+    const [jobId, findingId] = id.split("::");
+    await showJobInAiPanel(jobId, findingId || null);
+  } else if (kind === "pullRequest") {
+    const [projectId, prNumber] = id.split("::");
+    const prId = Number(prNumber);
+    if (!projectId || !Number.isFinite(prId)) return;
+    const [{ usePrStore }, { useAiPanelStore }] = await Promise.all([import("./prStore"), import("./aiPanelStore")]);
+    const pr = await usePrStore.getState().ensureProjectPr(projectId, prId);
+    if (pr) useAiPanelStore.getState().open({ kind: "pr", projectId, pr });
   } else if (kind === "pipelineRun") {
     // The view is already opening (the target names it); this only has to put the right run
     // under the cursor. The store re-reads it rather than trusting a snapshot: a run that was

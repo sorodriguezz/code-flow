@@ -51,7 +51,7 @@ import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
-import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
+import { useAiPanelStore, useVisiblePrId } from "../../state/aiPanelStore";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   scanFolder,
@@ -805,12 +805,10 @@ function PullRequestsSection({ project }: { project: Project }) {
   const loading = usePrStore((s) => s.loadingProjectId === project.id);
   const loadError = usePrStore((s) => s.loadErrorByProject[project.id]);
   const loadPullRequests = usePrStore((s) => s.loadPullRequests);
-  const selectPr = usePrStore((s) => s.selectPr);
-  // This section draws *this* repository's pull requests, so only a selection that belongs to it
-  // may tint a row. Read unguarded, a "#42" left selected in another repository lit up this one's
-  // "#42" — two different pull requests that share nothing but a number.
-  const selectedPr = usePrStore((s) => (s.selectedPrProjectId === project.id ? s.selectedPr : null));
-  const openAiPanel = useUiStore((s) => s.openAiPanel);
+  // The row tinted is the pull request of *this* repository that the assistant is showing — its
+  // tab names the project, so another repository's "#42" can never light this one's up.
+  const shownPrId = useVisiblePrId(project.id);
+  const openPr = (pr: PullRequestSummary) => useAiPanelStore.getState().open({ kind: "pr", projectId: project.id, pr });
   const openSettings = useUiStore((s) => s.openSettings);
   const settingsOpen = useUiStore((s) => s.settingsOpen);
   const [hosting, setHosting] = useState<HostingState | undefined>(undefined);
@@ -1048,10 +1046,7 @@ function PullRequestsSection({ project }: { project: Project }) {
           <CreatePrModal
             project={project}
             onClose={() => setShowCreatePr(false)}
-            onCreated={() => {
-              useAnalyzeUiStore.getState().hide();
-              openAiPanel();
-            }}
+            onCreated={openPr}
           />
         )}
       </CollapsibleSection>
@@ -1222,14 +1217,10 @@ function PullRequestsSection({ project }: { project: Project }) {
                     {items.slice(0, shown).map((pr, at) => (
                       <button
                         key={pr.id}
-                        onClick={() => {
-                          useAnalyzeUiStore.getState().hide();
-                          selectPr(pr);
-                          openAiPanel();
-                        }}
+                        onClick={() => openPr(pr)}
                         style={pageDelay(at)}
                         className={`cf-rise flex w-full items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[12px] ${
-                          selectedPr?.id === pr.id
+                          shownPrId === pr.id
                             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
                             : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                         }`}
@@ -1256,10 +1247,7 @@ function PullRequestsSection({ project }: { project: Project }) {
         <CreatePrModal
           project={project}
           onClose={() => setShowCreatePr(false)}
-          onCreated={() => {
-            useAnalyzeUiStore.getState().hide();
-            openAiPanel();
-          }}
+          onCreated={openPr}
         />
       )}
     </CollapsibleSection>

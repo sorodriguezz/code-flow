@@ -9,14 +9,15 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
-import type { BranchInfo, Project } from "../../types/domain";
+import type { BranchInfo, Project, PullRequestSummary } from "../../types/domain";
 
 const PREFERRED_TARGETS = ["main", "master", "develop", "development"];
 
 interface CreatePrModalProps {
   project: Project;
   onClose: () => void;
-  onCreated: () => void;
+  /** The pull request just opened — its caller puts it on screen in the assistant. */
+  onCreated: (pr: PullRequestSummary) => void;
 }
 
 /**
@@ -142,7 +143,9 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
       kindKey: "agents.liveKindPrDescription",
       detail: `${source} → ${target}`,
       workspaceId: useWorkspaceStore.getState().workspaceOfProject(project.id),
-      target: { projectId: project.id, openAiPanel: true },
+      // The description lands in this form, not in the assistant — so the row leads to the repository
+      // and no further; there is no panel page for a draft that lives in a modal.
+      target: { projectId: project.id },
     });
     try {
       const draftText = await generatePrDescription(project.id, source, target, runId);
@@ -162,7 +165,7 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
     if (!canSubmit) return;
     setCreating(true);
     try {
-      await createPr(project.id, {
+      const created = await createPr(project.id, {
         title: title.trim(),
         description,
         sourceBranch: source,
@@ -170,7 +173,7 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
         draft,
         workItemIds: workItems.map((item) => item.id),
       });
-      onCreated();
+      onCreated(created);
       onClose();
     } catch (e) {
       pushErrorToast(String(e));

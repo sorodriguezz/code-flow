@@ -25,7 +25,10 @@ import {
 } from "../../lib/parseAnalysis";
 import { renderInlineMarkdown } from "../../lib/markdown";
 import { resolveFindingWithAi } from "../../lib/tauri/commands";
+import { whenRepoFree, useIsQueued } from "../../lib/repoQueue";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
+import { useAiPanelStore } from "../../state/aiPanelStore";
+import type { NotificationTarget } from "../../state/notificationStore";
 import { AiRunLog } from "./AiRunLog";
 import { Checkbox } from "../common/Checkbox";
 import { useRepoStore } from "../../state/repoStore";
@@ -58,6 +61,21 @@ export const SEVERITY_STYLE: Record<AnalysisFinding["severity"], { icon: typeof 
 export function InlineMarkdown({ text, className }: { text: string; className?: string }) {
   const html = useMemo(() => renderInlineMarkdown(text), [text]);
   return <span className={className} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+/**
+ * Where a fix's result is read: the finding it was for, inside the review or analysis it came from,
+ * or — for a comment thread, which is no run of its own — the pull request.
+ *
+ * These notifications used to carry only the project, so following one opened the panel on
+ * whatever it happened to be showing; the result was on a card nothing led back to.
+ */
+function fixTarget(projectId: string, resolutionKey: string | undefined): NotificationTarget {
+  const job = resolutionKey?.match(/^job:(.+):([^:]+)$/);
+  if (job) return { openAiPanel: true, projectId, select: { kind: "finding", id: `${job[1]}::${job[2]}` } };
+  const thread = resolutionKey?.match(/^pr:(\d+):thread:/);
+  if (thread) return { openAiPanel: true, projectId, select: { kind: "pullRequest", id: `${projectId}::${thread[1]}` } };
+  return { openAiPanel: true, projectId };
 }
 
 /** Shared by `FindingCard` and `PrCommentCard` — applies a fix via Claude for whatever
@@ -157,23 +175,25 @@ export function useResolveWithAi(
     // only stop button and the only way back on it. Stamped with the workspace it started in and
     // pointed at the project whose files it is editing, the status-bar row can say where it lives
     // and click back to it.
+    const target = fixTarget(projectId, resolutionKey);
     useAiRunStore.getState().start(id, {
       kindKey: "agents.liveKindFix",
       detail: label ?? "",
       workspaceId,
-      target: { openAiPanel: true, projectId },
+      target,
     });
     markRunning({ runId: id, startedAt: Date.now() });
     try {
-      const result = await resolveFindingWithAi(projectId, promptText, id);
+      // A fix writes to the working tree, so it takes the repository's lease like a chat turn or an
+      // analysis does — and waits for it instead of failing when one of those holds it.
+      const result = await whenRepoFree(projectId, id, () => resolveFindingWithAi(projectId, promptText, id));
       record(result);
-      // The proposal is in the panel, on the finding it belongs to — which only exists while that
-      // project's review is the one open, so the project is part of the destination.
+      // The proposal is on the finding it belongs to; the notification leads there.
       notify({
         source: "review",
         titleKey: "notifications.fixDone",
         workspaceId,
-        target: { openAiPanel: true, projectId },
+        target,
         status: "success",
         detail: label,
       });
@@ -185,7 +205,7 @@ export function useResolveWithAi(
           source: "review",
           titleKey: "notifications.fixFailed",
           workspaceId,
-          target: { openAiPanel: true, projectId },
+          target,
           status: "error",
           detail: label,
         });
@@ -216,6 +236,7 @@ export function ResolveWithAiButton({
   onClear,
   trailing,
   showAi = true,
+  noteKey,
 }: {
   resolving: boolean;
   resolution: string | null;
@@ -231,12 +252,21 @@ export function ResolveWithAiButton({
   trailing?: ReactNode;
   /** False where there is no working copy to fix: `trailing` still renders, the AI half doesn't. */
   showAi?: boolean;
+  /** Where the note is kept while this card is off screen (the assistant's drafts). Without it the
+   *  note lives in the card and goes when the card does. */
+  noteKey?: string;
 }) {
   const t = useT();
   const [logExpanded, setLogExpanded] = useState(false);
   /** Extra instructions for the fix, kept whether the field is open or shut — collapsing it is
-   * "I'm done typing", not "throw that away", and a re-run usually wants the same note. */
-  const [extra, setExtra] = useState("");
+   * "I'm done typing", not "throw that away", and a re-run usually wants the same note. Kept in the
+   * assistant's drafts when the card has a key, so switching tab does not throw it away either. */
+  const [localExtra, setLocalExtra] = useState("");
+  const storedExtra = useAiPanelStore((s) => (noteKey ? (s.drafts[noteKey] ?? "") : ""));
+  const extra = noteKey ? storedExtra : localExtra;
+  const setExtra = (value: string) =>
+    noteKey ? useAiPanelStore.getState().setDraft(noteKey, value) : setLocalExtra(value);
+  const queued = useIsQueued(resolving ? runId : null);
   const [noteOpen, setNoteOpen] = useState(false);
   // "Fix with AI" needs a write-capable agentic engine — hidden entirely for a text-only engine so
   // there's no dead button, unless there's already a resolution to show from an earlier run.
@@ -257,7 +287,13 @@ export function ResolveWithAiButton({
               className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
             >
               {resolving ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
-              {resolving ? t("finding.resolving") : resolution ? t("finding.resolveAgain") : t("finding.resolve")}
+              {queued
+                ? t("assistant.queued")
+                : resolving
+                  ? t("finding.resolving")
+                  : resolution
+                    ? t("finding.resolveAgain")
+                    : t("finding.resolve")}
             </button>
             <button
               onClick={() => setNoteOpen((open) => !open)}
@@ -360,15 +396,24 @@ function DiscardControls({
   mark,
   onDiscard,
   busy,
+  draftKey,
 }: {
   mark?: FindingMark | null;
   onDiscard: (estado: string, opts: DiscardOptions) => void;
   busy: boolean;
+  /** Where the reason is kept while the card is off screen; local to the card without one. */
+  draftKey?: string;
 }) {
   const t = useT();
   // Which rejection is being composed, if any — `null` is the resting state (just the two buttons).
   const [drafting, setDrafting] = useState<"falso_positivo" | "ignorado" | null>(null);
-  const [motivo, setMotivo] = useState("");
+  // The reason is prose someone took the trouble to write: kept in the assistant's drafts so moving
+  // to another tab mid-sentence does not throw it away.
+  const [localMotivo, setLocalMotivo] = useState("");
+  const storedMotivo = useAiPanelStore((s) => (draftKey ? (s.drafts[draftKey] ?? "") : ""));
+  const motivo = draftKey ? storedMotivo : localMotivo;
+  const setMotivo = (value: string) =>
+    draftKey ? useAiPanelStore.getState().setDraft(draftKey, value) : setLocalMotivo(value);
   const [scopeRepo, setScopeRepo] = useState(false);
   // Defaults to on when the finding is on the PR: a rejection the author never sees leaves them
   // looking at a comment nobody intends to act on.
@@ -561,6 +606,11 @@ export function FindingCard({
   finding,
   at = 0,
   defaultOpen,
+  open: openProp,
+  onToggle,
+  onOpenLocation,
+  highlighted = false,
+  stale = false,
   projectId,
   prSourceBranch,
   resolutionKey,
@@ -572,6 +622,17 @@ export function FindingCard({
   /** Place in the list it arrives with, which is all the entry animation needs to stagger. */
   at?: number;
   defaultOpen: boolean;
+  /** Controlled open state — the assistant keeps it per tab, so a card is still open when you come
+   *  back to the review. Uncontrolled (starting at `defaultOpen`) when omitted. */
+  open?: boolean;
+  onToggle?: () => void;
+  /** Makes the location a link: opens the file at that line. Omitted where there is no working copy
+   *  to open it in (a PR reviewed from its link). */
+  onOpenLocation?: (file: string, line: number) => void;
+  /** Marks the card the detail column is showing, in the wide layout's list. */
+  highlighted?: boolean;
+  /** An earlier run's finding, shown while a new one runs — readable, visibly not current. */
+  stale?: boolean;
   /** Omit for a pre-commit finding (there's no PR/branch involved, no fix button shown
    * without a project to apply it to). */
   projectId?: string;
@@ -590,7 +651,9 @@ export function FindingCard({
   discarding?: boolean;
 }) {
   const t = useT();
-  const [open, setOpen] = useState(defaultOpen);
+  const [localOpen, setLocalOpen] = useState(defaultOpen);
+  const open = openProp ?? localOpen;
+  const toggle = onToggle ?? (() => setLocalOpen((v) => !v));
   const { icon: Icon, color } = SEVERITY_STYLE[finding.severity];
   const { resolving, resolution, resolve, clearResolution, runId, runStartedAt } = useResolveWithAi(
     projectId,
@@ -605,11 +668,25 @@ export function FindingCard({
     // hiding it would make the ruling impossible to revisit from the list it was made in.
     <div
       style={riseDelay(at)}
-      className={`cf-rise overflow-hidden rounded-lg border border-[var(--cf-border)] ${discarded ? "opacity-55" : ""}`}
+      className={`cf-rise overflow-hidden rounded-lg border transition-opacity ${
+        highlighted ? "border-[color-mix(in_oklab,var(--cf-accent)_55%,var(--cf-border))]" : "border-[var(--cf-border)]"
+      } ${discarded || stale ? "opacity-55" : ""}`}
     >
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={toggle}
+        onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggle();
+          }
+        }}
+        className={`flex w-full cursor-pointer items-start gap-2 px-3 py-2 text-left ${
+          highlighted ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+        }`}
         style={{ borderLeft: `3px solid ${discarded ? "var(--cf-border)" : color}` }}
       >
         <Icon size={14} className="mt-0.5 shrink-0" style={{ color }} />
@@ -626,12 +703,27 @@ export function FindingCard({
           <p className="mt-0.5 text-[13px] font-medium text-[var(--cf-text)]">
             <InlineMarkdown text={finding.subtitle} className="cf-markdown-inline" />
           </p>
-          {finding.location && (
-            <p className="mt-0.5 flex items-center gap-1 truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
-              <MapPin size={10} className="shrink-0" />
-              {locationLabel(finding.location)}
-            </p>
-          )}
+          {finding.location &&
+            (onOpenLocation ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  // The card's own toggle is the row; the location is its one link.
+                  e.stopPropagation();
+                  if (finding.location) onOpenLocation(finding.location.file, finding.location.startLine);
+                }}
+                title={t("finding.openLocation")}
+                className="mt-0.5 flex max-w-full items-center gap-1 truncate font-mono text-[10px] text-[var(--cf-accent)] underline decoration-[color-mix(in_oklab,var(--cf-accent)_35%,transparent)] underline-offset-2 hover:decoration-[var(--cf-accent)]"
+              >
+                <MapPin size={10} className="shrink-0" />
+                <span className="truncate">{locationLabel(finding.location)}</span>
+              </button>
+            ) : (
+              <p className="mt-0.5 flex items-center gap-1 truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
+                <MapPin size={10} className="shrink-0" />
+                {locationLabel(finding.location)}
+              </p>
+            ))}
         </div>
         {discarded && <DiscardedChip estado={mark?.estado ?? ""} />}
         {resolution && <ResolvedChip />}
@@ -648,7 +740,7 @@ export function FindingCard({
         ) : (
           <ChevronRight size={13} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
         )}
-      </button>
+      </div>
 
       {open && (
         // The substance of the finding — the reasoning, the suggestion, the example — is the part
@@ -684,9 +776,17 @@ export function FindingCard({
               runStartedAt={runStartedAt}
               onClick={(extra) => void resolve(withExtraInstructions(formatFindingAsFixPrompt(finding), extra))}
               onClear={clearResolution}
+              noteKey={resolutionKey ? `note:${resolutionKey}` : undefined}
             />
           )}
-          {onDiscard && <DiscardControls mark={mark} onDiscard={onDiscard} busy={discarding} />}
+          {onDiscard && (
+            <DiscardControls
+              mark={mark}
+              onDiscard={onDiscard}
+              busy={discarding}
+              draftKey={resolutionKey ? `discard:${resolutionKey}` : undefined}
+            />
+          )}
         </div>
       )}
     </div>

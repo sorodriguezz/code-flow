@@ -2,9 +2,9 @@
 #
 # It used to trigger on pushes to `main` too, and that is where the noise came from: a version bump
 # is a push to `main`, so every release produced two runs of the same commit — this two-minute
-# typecheck and the twenty-minute release beside it, neither aware of the other. The two checks now
+# typecheck and the twenty-minute release beside it, neither aware of the other. The checks now
 # also live in `release.yml` as its `verify` job, where they gate the builds that actually cost
-# something. So: a pull request gets this, a release gets the same two checks inside its own run,
+# something. So: a pull request gets this, a release gets the same checks inside its own run,
 # and a push to `main` that releases nothing runs nothing at all.
 #
 # What follows is the other half of the reasoning, unchanged — why this is the cheap half only.
@@ -12,7 +12,9 @@
 # What is here runs on Ubuntu in about two minutes with no Rust toolchain: a TypeScript typecheck
 # and a translation-key parity check. Between them they catch the two regressions this repository
 # actually produces — a type error that would otherwise surface twenty minutes into the release job
-# on a Windows runner, and an English string added without its Spanish twin.
+# on a Windows runner, and an English string added without its Spanish twin. A byte scan rides
+# along for a rarer one that hides itself: a control byte typed into source, where a single NUL
+# makes git show the whole file as binary.
 #
 # What is NOT here, and why: `cargo test`.
 #
@@ -60,5 +62,10 @@ jobs:
       # and because reading "you forgot the Spanish string" is more useful than reading the type
       # error that same omission produces.
       - run: node scripts/check-translations.mjs
+
+      # A NUL, ESC or Ctrl-C typed into source where its escape belonged. `tsc` cannot object — the
+      # string is the same either way — but one NUL is enough for git to diff the whole file as
+      # binary, hiding every change to it from review.
+      - run: node scripts/check-control-bytes.mjs
 
       - run: pnpm exec tsc --noEmit

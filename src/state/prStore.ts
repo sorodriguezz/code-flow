@@ -5,31 +5,39 @@ import { useJobsStore } from "./jobsStore";
 import { useLanguageStore } from "./languageStore";
 import { usePrWatchStore } from "./prWatchStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { tabsOfProject, useAiPanelStore, type LinkPrSession } from "./aiPanelStore";
 import { translations } from "../lib/i18n/translations";
 import * as prTarget from "../lib/prTarget";
 import { targetKey, targetPrKey, type PrTarget } from "../lib/prTarget";
 import type { PrDecision, PullRequestSummary } from "../types/domain";
 import type { PrAction, PostFindingItem } from "../lib/tauri/commands";
 
-/** Enough parked link reviews to cover an afternoon of "someone sent me this PR" without the
- * list becoming its own navigation problem. */
-const MAX_LINK_HISTORY = 8;
+export type { LinkPrSession };
+
+/** Where `postedByPr` files a publish: the pull request ([`targetPrKey`]) and the run published. */
+export function postedKey(prKey: string, runId: string): string {
+  return `${prKey}#${runId}`;
+}
 
 /**
- * A pull request opened from a link with nothing checked out for it.
+ * Rebuilds a link review from the Activity row it left behind.
  *
- * It lives beside `selectedPr` rather than inside it because the two are reached differently and
- * can't both be on screen: the panel shows whichever one is set.
+ * That row outlives the app run that produced it, so by the time it is clicked there may be nothing
+ * in memory to bring back — everything a session needs is in the row's `meta` (see
+ * `link_activity_meta` in the backend). `null` for a row written before that was recorded, which is
+ * the honest answer rather than a half-built session.
  */
-export interface LinkPrSession {
-  url: string;
-  pr: PullRequestSummary;
-  /** "owner/repo" — the panel says which repository this PR is in, since no project names it. */
-  repoLabel: string;
-  /** Offered as "clone it after all" from inside the session. */
-  cloneUrl: string;
-  /** Whose review standard, contexts and skills the review runs under. */
-  workspaceId: string;
+export function linkSessionFromMeta(meta: Record<string, unknown>, workspaceId: string): LinkPrSession | null {
+  const url = typeof meta.prUrl === "string" ? meta.prUrl : null;
+  const pr = (meta.pr ?? null) as PullRequestSummary | null;
+  if (!url || !pr || typeof pr.id !== "number") return null;
+  return {
+    url,
+    pr,
+    repoLabel: typeof meta.repoLabel === "string" ? meta.repoLabel : "",
+    cloneUrl: typeof meta.cloneUrl === "string" ? meta.cloneUrl : "",
+    workspaceId,
+  };
 }
 
 /** Review depth, mirroring the WF-PR-REVIEWER levels. `completo` is the default. */
@@ -66,16 +74,21 @@ function watchWorkspace(target: PrTarget): string {
 }
 
 /**
- * Whether the pull request on screen is the one this target names.
+ * The project's list with the host's latest copy of one pull request in it. Callers also hand the
+ * copy to the assistant's tabs (`aiPanelStore.updatePr`), which is the other place it is held.
  *
- * A PR number is only unique inside its repository, so `selectedPr.id === prId` alone matched
- * another repository's "#42" — which is how a decision taken on one repo's pull request rewrote the
- * panel showing a completely different one. A link session is identified by its URL instead, since
- * it belongs to no project at all and `selectedPr` is never what is showing it.
+ * Matched by target, never by number alone. "#42" repeats across repositories, and matching on the
+ * number is how refreshing one repository's PR used to overwrite a link review of another
+ * repository's "#42" that happened to be open.
  */
-function isSelected(state: PrState, target: PrTarget, prId: number): boolean {
-  if (target.kind !== "project") return false;
-  return state.selectedPr?.id === prId && state.selectedPrProjectId === target.projectId;
+function writePr(state: PrState, target: PrTarget, pr: PullRequestSummary): Partial<PrState> {
+  if (target.kind !== "project") return {};
+  return {
+    prsByProject: {
+      ...state.prsByProject,
+      [target.projectId]: (state.prsByProject[target.projectId] ?? []).map((p) => (p.id === pr.id ? pr : p)),
+    },
+  };
 }
 
 interface PrState {
@@ -83,29 +96,20 @@ interface PrState {
   loadingProjectId: string | null;
   loadErrorByProject: Record<string, string>;
 
-  selectedPr: PullRequestSummary | null;
-  /**
-   * Which repository the pull request in `selectedPr` belongs to.
-   *
-   * `PullRequestSummary` carries no project of its own, so the pairing used to be *invented at
-   * render time*: the AI panel and the title-bar menu each took the selection and married it to
-   * whichever repository was active when they drew. Switching repository therefore silently
-   * re-bound the open review to the new one — and not only as a click hazard. The panel's mount
-   * effect fires `loadPrDecision`, an unprompted host call asking repo Q about repo P's pull
-   * request, and `usePrWatchStore.track` writes a persisted "waiting on you" row keyed `Q:42`
-   * carrying P's snapshot. It reproduces on a plain project switch inside one workspace, not only
-   * on a workspace switch.
-   *
-   * Recorded here at the moment the PR is chosen, so the panel can *refuse* to draw a selection
-   * that isn't this project's rather than re-home it. `linkPr` needs no equivalent: a link session
-   * already names its own workspace.
-   */
-  selectedPrProjectId: string | null;
   /** Depth the next review runs at — shared so both the AI panel selector and the title-bar
    * shortcut launch at the same level. */
   reviewLevel: ReviewLevel;
-  posting: boolean;
-  posted: boolean;
+  /**
+   * Publishing in flight, and publishing done, per pull request ([`targetPrKey`]).
+   *
+   * These were two store-wide booleans, so publishing on one PR and moving to another showed
+   * "Posting…" on the wrong one — the same per-item-in-a-scalar defect `prActionBusy` had.
+   * Which PR is *on screen* is no longer this store's business at all: that is the assistant's
+   * tabs (`aiPanelStore`), each of which names its own pull request.
+   */
+  postingByPr: Record<string, boolean>;
+  /** Keyed by [`postedKey`]: what was published belongs to the run it came from. */
+  postedByPr: Record<string, boolean>;
   /**
    * Which PR action (approve / request_changes / close) is in flight, keyed by
    * [`targetPrKey`] — so its button can show a spinner and the *same* PR's other two disable
@@ -116,31 +120,6 @@ interface PrState {
    * nothing to do with. Same class as everything else here: a per-item state kept in a scalar.
    */
   prActionBusy: Record<string, PrAction>;
-
-  /** A PR being reviewed straight from its link, with no clone behind it. Mutually exclusive with
-   * `selectedPr` — the panel renders whichever is set. */
-  linkPr: LinkPrSession | null;
-  /**
-   * Every link session opened this run, newest first — including the one currently on screen.
-   *
-   * A link PR has no project, so it appears in no sidebar and no list: the panel showing it was
-   * the only handle on it, and closing that (or pressing "New chat") stranded its whole review —
-   * findings, comments, the approval — in memory with nothing left to reach it by. Its Activity
-   * was never actually deleted; it just became unreachable, which to the user is the same thing.
-   */
-  linkPrHistory: LinkPrSession[];
-  openLinkPr: (session: LinkPrSession) => void;
-  /** Reopens the review behind a workspace Activity row.
-   *
-   * That row outlives the app run that produced it, so by the time it's clicked there may be no
-   * session in memory to bring back — everything needed to rebuild one is in the row's `meta`
-   * (see `link_activity_meta` in the backend). Returns `false` when it isn't, which is the honest
-   * answer for a row written before that was recorded rather than a half-built session. */
-  openLinkPrFromMeta: (meta: Record<string, unknown>, workspaceId: string) => boolean;
-  closeLinkPr: () => void;
-  /** Drops a parked session from the list. Its jobs stay in `jobsStore` — this is about the list
-   * not growing forever, not about erasing what happened. */
-  forgetLinkPr: (url: string) => void;
 
   loadPullRequests: (projectId: string) => Promise<void>;
   /**
@@ -159,22 +138,16 @@ interface PrState {
    * network was down. The reason, when there is one, is in `loadErrorByProject`.
    */
   ensureProjectPr: (projectId: string, prId: number) => Promise<PullRequestSummary | null>;
-  /**
-   * Puts a project's pull request on screen, recording *which* project it is.
-   *
-   * `projectId` is optional because every caller that omits it has already brought the owning
-   * repository to the front — the sidebar list is the active project's, the Activity row is looked
-   * up in it, the link modal and the notification path both `focusProject` first — so the project
-   * active at the instant of the click *is* the answer. That resolution happens here, once, at the
-   * start; what this replaces is the panel re-deriving it on every render, long after the user has
-   * moved on. Pass it explicitly wherever the two can differ.
-   */
-  selectPr: (pr: PullRequestSummary | null, projectId?: string | null) => void;
   setReviewLevel: (level: ReviewLevel) => void;
   /** Fire-and-forget — the run is tracked in `jobsStore`, not here, precisely so it survives
    * switching away from this PR (or this project) before it finishes. Uses `reviewLevel` unless
-   * an explicit `level` is passed. */
-  reviewPr: (target: PrTarget, prId: number, level?: ReviewLevel, force?: boolean) => void;
+   * an explicit `level` is passed. A link review passes its `session`: the row it files has to say
+   * which repository it was, and carry enough to reopen the review after a restart. */
+  reviewPr: (
+    target: PrTarget,
+    pr: PullRequestSummary,
+    opts?: { level?: ReviewLevel; force?: boolean; session?: LinkPrSession | null },
+  ) => void;
   /** One comment thread per finding (anchored to its file/line when known) plus an optional
    * summary thread. On a project target these are reconciled against the saved run (`runId`) so a
    * finding keeps one thread across re-reviews; a link target has no saved run, so each finding
@@ -193,8 +166,8 @@ interface PrState {
   /** Fetches (and caches) that decision — called when a PR is opened. Silent on failure: not
    * knowing the decision must never block reviewing the PR. */
   loadPrDecision: (target: PrTarget, prId: number) => Promise<void>;
-  /** Re-reads the pull request itself from its host and writes it everywhere it is held (the open
-   * panel, the parked link sessions, the project's list), so what the panel shows is what the host
+  /** Re-reads the pull request itself from its host and writes it everywhere it is held (the
+   * project's list and every assistant tab showing it), so what the panel shows is what the host
    * currently says — a reset vote, a new head commit, a title edited on the website.
    *
    * Silent on failure, like `loadPrDecision`: an unreachable host leaves the panel showing what it
@@ -216,8 +189,8 @@ interface PrState {
     action: PrAction,
     note?: { runId: string; body: string } | null,
   ) => Promise<void>;
-  /** Opens a PR on the project's linked host, then refreshes the list and selects the new PR.
-   * Throws on failure so the caller (the modal) can keep itself open and surface the error. */
+  /** Opens a PR on the project's linked host and refreshes the list, resolving to the new PR (the
+   * caller puts it on screen). Throws on failure so the modal can keep itself open and say why. */
   createPr: (
     projectId: string,
     input: {
@@ -237,11 +210,9 @@ export const usePrStore = create<PrState>((set, get) => ({
   loadingProjectId: null,
   loadErrorByProject: {},
 
-  selectedPr: null,
-  selectedPrProjectId: null,
   reviewLevel: "completo",
-  posting: false,
-  posted: false,
+  postingByPr: {},
+  postedByPr: {},
   prActionBusy: {},
 
   loadPullRequests: async (projectId) => {
@@ -249,6 +220,13 @@ export const usePrStore = create<PrState>((set, get) => ({
     try {
       const prs = await api.listPullRequests(projectId);
       set((s) => ({ prsByProject: { ...s.prsByProject, [projectId]: prs } }));
+      // The tabs showing this repository's pull requests get the host's fresh copy too — a title
+      // edited on the website, a PR merged meanwhile.
+      for (const tab of tabsOfProject(projectId)) {
+        if (tab.kind !== "pr") continue;
+        const fresh = prs.find((pr) => pr.id === tab.prId);
+        if (fresh && fresh !== tab.pr) useAiPanelStore.getState().updatePr({ kind: "project", projectId }, fresh);
+      }
     } catch (e) {
       set((s) => ({ loadErrorByProject: { ...s.loadErrorByProject, [projectId]: String(e) } }));
     } finally {
@@ -266,107 +244,45 @@ export const usePrStore = create<PrState>((set, get) => ({
     return get().prsByProject[projectId]?.find((p) => p.id === prId) ?? null;
   },
 
-  linkPr: null,
-  linkPrHistory: [],
-
-  // Opening one clears the other: they're two ways of reaching a PR, not two panes.
-  openLinkPr: (session) =>
-    set((s) => ({
-      linkPr: session,
-      selectedPr: null,
-      selectedPrProjectId: null,
-      posted: false,
-      // Re-opening the same URL moves it back to the top rather than listing it twice; the fresh
-      // session object wins, since it carries the PR as the host last described it.
-      linkPrHistory: [session, ...s.linkPrHistory.filter((e) => e.url !== session.url)].slice(0, MAX_LINK_HISTORY),
-    })),
-  openLinkPrFromMeta: (meta, workspaceId) => {
-    const url = typeof meta.prUrl === "string" ? meta.prUrl : null;
-    const pr = (meta.pr ?? null) as PullRequestSummary | null;
-    if (!url || !pr || typeof pr.id !== "number") return false;
-    get().openLinkPr({
-      url,
-      pr,
-      repoLabel: typeof meta.repoLabel === "string" ? meta.repoLabel : "",
-      cloneUrl: typeof meta.cloneUrl === "string" ? meta.cloneUrl : "",
-      workspaceId,
-    });
-    return true;
-  },
-
-  // Closing only takes it off screen. It stays in `linkPrHistory` so one click brings the whole
-  // review back — that's what makes the session's in-memory Activity worth keeping.
-  closeLinkPr: () => set({ linkPr: null, posted: false }),
-
-  forgetLinkPr: (url) =>
-    set((s) => ({
-      linkPrHistory: s.linkPrHistory.filter((e) => e.url !== url),
-      linkPr: s.linkPr?.url === url ? null : s.linkPr,
-    })),
-
-  selectPr: (pr, projectId) =>
-    set({
-      selectedPr: pr,
-      // Stamped now, from the caller when it named one and otherwise from the repository the user
-      // is standing in as they click. Never re-read later: by the time the panel renders — or the
-      // title-bar menu is opened, or a decision comes back from the host — "the active project" is
-      // whatever they have since walked into, which is the one answer that is wrong exactly when it
-      // matters. Cleared with the selection, so nothing is left pointing at a PR that isn't shown.
-      selectedPrProjectId: pr ? projectId ?? useWorkspaceStore.getState().activeProjectId : null,
-      linkPr: pr ? null : get().linkPr,
-      posted: false,
-    }),
-
   setReviewLevel: (level) => set({ reviewLevel: level }),
 
-  reviewPr: (target, prId, level, force = false) => {
+  reviewPr: (target, pr, opts = {}) => {
     const key = targetKey(target);
-    // The current selection is a valid source for the label too: a review launched straight from
-    // a pasted link starts before that project's PR list has finished loading.
-    const shown = get().linkPr?.pr ?? get().selectedPr;
-    const pr =
-      (target.kind === "project" ? get().prsByProject[target.projectId]?.find((p) => p.id === prId) : undefined) ??
-      (shown?.id === prId ? shown : undefined);
-    const activeLevel = level ?? get().reviewLevel;
+    const activeLevel = opts.level ?? get().reviewLevel;
+    const force = opts.force ?? false;
     // A link review shares its bucket with every other repository reviewed from a link in this
     // workspace, so the row has to say which repo it is — and carry enough to reopen the session
     // later. The same shape the backend persists (see `link_activity_meta`), so the row reads
     // identically before and after a restart.
-    const session = target.kind === "link" && get().linkPr?.url === target.url ? get().linkPr : null;
-    const linkMeta =
-      session
-        ? {
-            prUrl: session.url,
-            repoLabel: session.repoLabel,
-            cloneUrl: session.cloneUrl,
-            prTitle: session.pr.title,
-            pr: session.pr,
-          }
-        : {};
-    const label = pr
-      ? session
-        ? `#${pr.id} ${session.repoLabel} · ${pr.title}`
-        : `#${pr.id} ${pr.title}`
-      : `PR #${prId}`;
+    const session = target.kind === "link" && opts.session?.url === target.url ? opts.session : null;
+    const linkMeta = session
+      ? { prUrl: session.url, repoLabel: session.repoLabel, cloneUrl: session.cloneUrl, prTitle: pr.title, pr }
+      : {};
+    const label = session ? `#${pr.id} ${session.repoLabel} · ${pr.title}` : `#${pr.id} ${pr.title}`;
     useJobsStore.getState().run({
       projectId: key,
       kind: "pr-review",
       label,
-      meta: { prId, level: activeLevel, ...linkMeta },
-      task: (jobId) => prTarget.review(target, prId, jobId, activeLevel, force),
+      meta: { prId: pr.id, level: activeLevel, ...linkMeta },
+      task: (jobId) => prTarget.review(target, pr.id, jobId, activeLevel, force),
     });
   },
 
   postReview: async (target, prId, runId, items, postSummary, summary) => {
-    set({ posting: true });
+    const key = targetPrKey(target, prId);
+    set((s) => ({ postingByPr: { ...s.postingByPr, [key]: true } }));
     try {
       await prTarget.postFindings(target, prId, runId, items, postSummary, summary);
-      set({ posted: true });
+      // Per run, not per PR: a re-review is new findings, and they have not been published yet.
+      set((s) => ({ postedByPr: { ...s.postedByPr, [postedKey(key, runId)]: true } }));
     } catch (e) {
       pushErrorToast(String(e));
       throw e;
     } finally {
-      set({ posting: false });
+      set((s) => {
+        const { [key]: _done, ...rest } = s.postingByPr;
+        return { postingByPr: rest };
+      });
     }
   },
 
@@ -385,28 +301,11 @@ export const usePrStore = create<PrState>((set, get) => ({
     try {
       const pr = await prTarget.refreshPr(target, prId);
       if (!pr) return;
-      // Written to every copy of this PR the store holds, for the same reason `actOnPr` does it:
-      // the panel, the parked link session and the project's list are three views of one pull
-      // request, and one of them being stale is how a refreshed panel goes back to looking old the
-      // moment the user leaves and returns.
-      set((s) => ({
-        // Matched on the project as well as the number: "#42" repeats across repositories, so a
-        // refresh of one repo's pull request used to overwrite the panel whenever another repo's
-        // PR of the same number happened to be the selected one.
-        selectedPr: isSelected(s, target, prId) ? pr : s.selectedPr,
-        linkPr: s.linkPr && s.linkPr.pr.id === prId ? { ...s.linkPr, pr } : s.linkPr,
-        linkPrHistory:
-          target.kind === "link"
-            ? s.linkPrHistory.map((e) => (e.url === target.url ? { ...e, pr } : e))
-            : s.linkPrHistory,
-        prsByProject:
-          target.kind === "project"
-            ? {
-                ...s.prsByProject,
-                [target.projectId]: (s.prsByProject[target.projectId] ?? []).map((p) => (p.id === prId ? pr : p)),
-              }
-            : s.prsByProject,
-      }));
+      // Written to every copy of this PR, for the same reason `actOnPr` does it: the list and the
+      // tabs are views of one pull request, and one of them being stale is how a refreshed review
+      // goes back to looking old the moment the user leaves and returns.
+      set((s) => writePr(s, target, pr));
+      useAiPanelStore.getState().updatePr(target, pr);
     } catch {
       // Offline or a host hiccup: keep showing the last state known to be true.
     }
@@ -434,23 +333,9 @@ export const usePrStore = create<PrState>((set, get) => ({
         // The host's own answer, so a closed PR reads as closed rather than staying "open" until
         // the list refresh lands. The PR deliberately stays on screen — including after closing
         // it, where dropping it used to look like the PR had disappeared.
-        selectedPr: isSelected(s, target, prId) ? pr : s.selectedPr,
-        linkPr: s.linkPr && s.linkPr.pr.id === prId ? { ...s.linkPr, pr } : s.linkPr,
-        // The parked copy too, or reopening this session from the list would show the PR as it
-        // was before the decision — "open" for one it just closed. Matched on the URL rather
-        // than the number, which repeats across repositories.
-        linkPrHistory:
-          target.kind === "link"
-            ? s.linkPrHistory.map((e) => (e.url === target.url ? { ...e, pr } : e))
-            : s.linkPrHistory,
-        prsByProject:
-          target.kind === "project"
-            ? {
-                ...s.prsByProject,
-                [target.projectId]: (s.prsByProject[target.projectId] ?? []).map((p) => (p.id === prId ? pr : p)),
-              }
-            : s.prsByProject,
+        ...writePr(s, target, pr),
       }));
+      useAiPanelStore.getState().updatePr(target, pr);
       // Both targets come back with a persisted Activity row — `job_history` for a project,
       // `workspace_activity` for a link — so the decision reads the same after a restart as it
       // does the moment it's taken.
@@ -472,16 +357,11 @@ export const usePrStore = create<PrState>((set, get) => ({
         }
       }
       if (target.kind === "project") {
-        // Re-read the list so the sidebar's open/draft/merged/closed buckets settle too.
+        // Re-read the list so the sidebar's open/draft/merged/closed buckets settle too, and hand
+        // its copy to the tab — it names this PR, so it cannot be swapped for another one.
         await get().loadPullRequests(target.projectId);
-        // Guarded on the selection still being this project's: the list load is two awaits long,
-        // and a user who picked another repository's PR in the meantime must not have it swapped
-        // out from under them for the one this decision was taken on.
-        set((s) =>
-          isSelected(s, target, prId)
-            ? { selectedPr: s.prsByProject[target.projectId]?.find((p) => p.id === prId) ?? s.selectedPr }
-            : {},
-        );
+        const fresh = get().prsByProject[target.projectId]?.find((p) => p.id === prId);
+        if (fresh) useAiPanelStore.getState().updatePr(target, fresh);
       }
     } catch (e) {
       pushErrorToast(String(e));
@@ -508,7 +388,6 @@ export const usePrStore = create<PrState>((set, get) => ({
       input.workItemIds,
     );
     await get().loadPullRequests(projectId);
-    set({ selectedPr: pr, selectedPrProjectId: projectId });
     useToastStore.getState().pushToast(translate("createPr.created"), "success");
     return pr;
   },

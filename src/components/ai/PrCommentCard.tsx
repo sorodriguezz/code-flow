@@ -6,7 +6,8 @@ import { draftPrCommentReply } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { withExtraInstructions } from "../../lib/parseAnalysis";
 import { pushErrorToast } from "../../state/toastStore";
-import { notify } from "../../state/notificationStore";
+import { notify, type NotificationTarget } from "../../state/notificationStore";
+import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useT } from "../../state/languageStore";
 import { InlineMarkdown, ResolveWithAiButton, ResolvedChip, useResolveWithAi } from "./FindingCard";
 
@@ -71,6 +72,8 @@ export function PrCommentCard({
   prSourceBranch,
   resolutionKey,
   onResolveThread,
+  draftKey,
+  target,
 }: {
   thread: PrCommentThread;
   /** Omitted for a PR reviewed from a link with no clone: there's no working copy for "resolve
@@ -94,9 +97,15 @@ export function PrCommentCard({
    * a reply the host took but a close it refused leaves the composer standing instead of looking
    * done. Omitted where there's nothing to close it on. */
   onResolveThread?: (reply: { body: string | null; wontFix: boolean }) => Promise<ThreadCloseOutcome | null>;
+  /** Where the reply being written is kept while the card is off screen (the assistant's drafts). */
+  draftKey?: string;
+  /** Where the work this card starts leads back to — the review it lives in. */
+  target?: NotificationTarget;
 }) {
   const t = useT();
-  const [open, setOpen] = useState(false);
+  // A reply left half-written reopens where it was: the card open, its composer up.
+  const hadDraft = () => Boolean(draftKey && useAiPanelStore.getState().drafts[draftKey]?.trim());
+  const [open, setOpen] = useState(hadDraft);
   // Which conversation a notification is about. The file and line is what identifies a thread to
   // the person reading it; a thread with no location falls back to the first thing it says.
   const threadLabel = locationLabel(thread) ?? thread.comments[0]?.content.slice(0, 80);
@@ -111,8 +120,14 @@ export function PrCommentCard({
   // is often closed *without* the change being made — "es intencional", "va en otro PR" — and
   // closing it silently leaves the author reading a conversation that ended with no answer. So the
   // reply travels with the close instead of the close being a bare button.
-  const [composing, setComposing] = useState(false);
-  const [replyBody, setReplyBody] = useState("");
+  const [composing, setComposing] = useState(hadDraft);
+  // A reply is prose, and prose is the one thing a tab switch must never throw away — so with a
+  // key it lives in the assistant's drafts, and a half-written reply reopens the composer on return.
+  const [localReply, setLocalReply] = useState("");
+  const storedReply = useAiPanelStore((st) => (draftKey ? (st.drafts[draftKey] ?? "") : ""));
+  const replyBody = draftKey ? storedReply : localReply;
+  const setReplyBody = (value: string) =>
+    draftKey ? useAiPanelStore.getState().setDraft(draftKey, value) : setLocalReply(value);
   // Which of the two closes this is. Azure records them differently, and "corregido" on a thread
   // nobody acted on is a lie on the pull request's record — so it defaults to what actually
   // happened: fixed only when a fix was applied from here. Re-read each time the composer opens,
@@ -130,10 +145,8 @@ export function PrCommentCard({
    * to edit, never something posted straight to the pull request. */
   const draftReply = async () => {
     const id = newRunId("draft");
-    // No target: the draft really does land in this thread's reply box and nowhere else — there is
-    // no `select.kind` for a comment thread, and opening the panel on a review the user has since
-    // left would be a worse answer than none. The workspace is stamped regardless, so the
-    // status-bar row can at least say which one this is running in.
+    // The draft lands in this thread's reply box, which lives in the review — so that review is
+    // where the status-bar row and the notification lead, and the box keeps the text while away.
     //
     // `threadLabel`, not the bare location: a PR-level comment has no file or line, and a row
     // reading "Drafting a reply" with nothing after it is indistinguishable from every other one.
@@ -141,6 +154,7 @@ export function PrCommentCard({
       kindKey: "agents.liveKindDraft",
       detail: threadLabel ?? "",
       workspaceId,
+      target,
     });
     setDrafting(true);
     try {
@@ -152,7 +166,7 @@ export function PrCommentCard({
         source: "review",
         titleKey: "notifications.draftDone",
         workspaceId,
-        target: { openAiPanel: true, projectId },
+        target: target ?? { openAiPanel: true, projectId },
         status: "success",
         detail: threadLabel,
       });
@@ -163,7 +177,7 @@ export function PrCommentCard({
           source: "review",
           titleKey: "notifications.draftFailed",
           workspaceId,
-          target: { openAiPanel: true, projectId },
+          target: target ?? { openAiPanel: true, projectId },
           status: "error",
           detail: threadLabel,
         });
@@ -184,8 +198,12 @@ export function PrCommentCard({
     try {
       const outcome = await onResolveThread({ body: replyPosted ? null : replyBody.trim() || null, wontFix });
       if (outcome?.replied) setReplyPosted(true);
-      // Left open on a refused close so the text isn't lost — the panel has already said why.
-      if (outcome?.resolved) setComposing(false);
+      // Left open on a refused close so the text isn't lost — the panel has already said why. A
+      // closed conversation's reply has been said, so its draft goes with it.
+      if (outcome?.resolved) {
+        setComposing(false);
+        setReplyBody("");
+      }
     } finally {
       setClosingThread(false);
     }

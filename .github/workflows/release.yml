@@ -97,6 +97,11 @@ jobs:
       # error that same omission produces.
       - run: node scripts/check-translations.mjs
 
+      # A NUL, ESC or Ctrl-C typed into source where its escape belonged. `tsc` cannot object — the
+      # string is the same either way — but one NUL is enough for git to diff the whole file as
+      # binary, hiding every change to it from review.
+      - run: node scripts/check-control-bytes.mjs
+
       - run: pnpm exec tsc --noEmit
 
   # The single writer of the release object, so that the two builds below can run at the same time.

@@ -16,7 +16,7 @@ import { VIEW_ON_KEYS } from "../../lib/providerLabels";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { usePrStore } from "../../state/prStore";
 import { useUiStore } from "../../state/uiStore";
-import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
+import { useAiPanelStore } from "../../state/aiPanelStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ReviewLevelSelector } from "../ai/ReviewLevelSelector";
@@ -137,13 +137,12 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
       pushErrorToast(String(e));
       return;
     }
-    useAnalyzeUiStore.getState().hide();
-    usePrStore.getState().selectPr(ready.pr);
-    useUiStore.getState().openAiPanel();
-    // The sidebar's own list is refreshed in the background so this PR shows as selected there
-    // too — the review itself doesn't wait on it.
+    // Its own tab in the assistant; whatever else was open there stays open.
+    useAiPanelStore.getState().open({ kind: "pr", projectId: ready.project_id, pr: ready.pr });
+    // The sidebar's own list is refreshed in the background so this PR shows as the one on screen
+    // there too — the review itself doesn't wait on it.
     void usePrStore.getState().loadPullRequests(ready.project_id);
-    if (review) usePrStore.getState().reviewPr({ kind: "project", projectId: ready.project_id }, ready.pr.id);
+    if (review) usePrStore.getState().reviewPr({ kind: "project", projectId: ready.project_id }, ready.pr);
     onClose();
   };
 
@@ -159,16 +158,16 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
    * just reading its diff from the host instead of from a working copy. */
   const openWithoutCloning = (found: Extract<PrLinkResolution, { status: "NoLocalRepo" }>) => {
     if (!activeWorkspaceId) return;
-    useAnalyzeUiStore.getState().hide();
-    usePrStore.getState().openLinkPr({
+    const session = {
       url: url.trim(),
       pr: found.pr,
       repoLabel: found.repo_label,
       cloneUrl: found.clone_url,
       workspaceId: activeWorkspaceId,
-    });
-    useUiStore.getState().openAiPanel();
-    usePrStore.getState().reviewPr({ kind: "link", url: url.trim(), workspaceId: activeWorkspaceId }, found.pr.id);
+    };
+    // The tab is the session: a link review belongs to no project, and its tab is its handle.
+    useAiPanelStore.getState().open({ kind: "prLink", session });
+    usePrStore.getState().reviewPr({ kind: "link", url: session.url, workspaceId: activeWorkspaceId }, found.pr, { session });
     onClose();
   };
 

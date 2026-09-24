@@ -1329,6 +1329,9 @@ export interface ChatAgentOverride {
   account?: string | null;
 }
 
+/** `stream` asks a streaming engine (Claude) to write the reply to `ai:chat-delta` as it goes, keyed
+ *  by `runId`. The phone never sets it: deltas are not forwarded to it, and the reply still arrives
+ *  whole in the returned value either way. */
 export const sendChatMessage = (
   projectId: string,
   message: string,
@@ -1336,6 +1339,7 @@ export const sendChatMessage = (
   conversationId: string,
   runId?: string,
   agent?: ChatAgentOverride | null,
+  stream?: boolean,
 ) =>
   invoke<ChatReply>("send_chat_message", {
     projectId,
@@ -1347,6 +1351,7 @@ export const sendChatMessage = (
     agentModel: agent?.model ?? null,
     agentPrompt: agent?.prompt ?? null,
     agentAccount: agent?.account ?? null,
+    stream: stream ?? null,
   });
 
 // ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------

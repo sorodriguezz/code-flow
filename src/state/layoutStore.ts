@@ -106,7 +106,8 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   graphColHash: 70,
   graphColDate: 70,
   graphColMessage: 360,
-  aiPanelWidth: 340,
+  // A findings document needs the room: at 340 its header and action bar left the findings a sliver.
+  aiPanelWidth: 400,
   terminalPanelHeight: 260,
   apiSidebarWidth: 288,
   apiSnippetWidth: 420,

@@ -60,6 +60,11 @@ function persist(projectId: string, map: ProjectResolutions) {
   void setSetting(settingKey(projectId), JSON.stringify(map)).catch(() => {});
 }
 
+/** Each project's read from disk. `save` and `clear` wait on it: written before it lands, the
+ * in-memory map (one new entry) would replace every resolution saved in earlier sessions — the same
+ * race `prWatchStore` had. */
+const reads = new Map<string, Promise<void>>();
+
 export const useResolutionsStore = create<ResolutionsState>((set, get) => ({
   byProject: {},
   loaded: {},
@@ -74,44 +79,52 @@ export const useResolutionsStore = create<ResolutionsState>((set, get) => ({
       return { running: rest };
     }),
 
-  load: async (projectId) => {
-    if (get().loaded[projectId]) return;
+  load: (projectId) => {
+    const pending = reads.get(projectId);
+    if (pending) return pending;
     // Set synchronously before the await so a double-invoked effect (dev StrictMode) can't both
     // pass the guard and fire two reads.
     set((s) => ({ loaded: { ...s.loaded, [projectId]: true } }));
-
-    const raw = await getSetting(settingKey(projectId)).catch(() => null);
-    if (!raw) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return; // corrupt blob — ignore rather than throw
-    }
-    if (!parsed || typeof parsed !== "object") return;
-    set((s) => ({
-      byProject: {
-        ...s.byProject,
-        // In-memory (fresh this session) takes precedence over the disk copy for the same key.
-        [projectId]: { ...(parsed as ProjectResolutions), ...(s.byProject[projectId] ?? {}) },
-      },
-    }));
+    const read = (async () => {
+      const raw = await getSetting(settingKey(projectId)).catch(() => null);
+      if (!raw) return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return; // corrupt blob — ignore rather than throw
+      }
+      if (!parsed || typeof parsed !== "object") return;
+      set((s) => ({
+        byProject: {
+          ...s.byProject,
+          // In-memory (fresh this session) takes precedence over the disk copy for the same key.
+          [projectId]: { ...(parsed as ProjectResolutions), ...(s.byProject[projectId] ?? {}) },
+        },
+      }));
+    })();
+    reads.set(projectId, read);
+    return read;
   },
 
   save: (projectId, key, text) => {
-    set((s) => {
-      const next = { ...(s.byProject[projectId] ?? {}), [key]: { text, at: Date.now() } };
-      persist(projectId, next);
-      return { byProject: { ...s.byProject, [projectId]: next } };
-    });
+    // Shown at once — the card is waiting for it — and written once the disk copy is merged in.
+    set((s) => ({ byProject: { ...s.byProject, [projectId]: { ...(s.byProject[projectId] ?? {}), [key]: { text, at: Date.now() } } } }));
+    void get().load(projectId).then(() => persist(projectId, get().byProject[projectId] ?? {}));
   },
 
   clear: (projectId, key) => {
     set((s) => {
       const next = { ...(s.byProject[projectId] ?? {}) };
       delete next[key];
-      persist(projectId, next);
       return { byProject: { ...s.byProject, [projectId]: next } };
+    });
+    void get().load(projectId).then(() => {
+      // The read may have brought the cleared key back from disk; this is the user's latest word.
+      const next = { ...(get().byProject[projectId] ?? {}) };
+      delete next[key];
+      set((s) => ({ byProject: { ...s.byProject, [projectId]: next } }));
+      persist(projectId, next);
     });
   },
 }));

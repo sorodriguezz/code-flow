@@ -54,21 +54,25 @@ export function mergeActivityEntries(
   conversations: ChatConversationSummary[],
   liveChats: ChatSession[] = [],
 ): ActivityEntry[] {
-  const prRuns = new Map<string | number, Job[]>();
-  const analyzeRuns: Job[] = [];
+  const prRuns = new Map<string, Job[]>();
+  const analyzeRuns = new Map<string, Job[]>();
   const standalone: Job[] = [];
   for (const job of jobs) {
     const belongsToPr = job.kind === "pr-review" || job.kind === "pr-action";
     if (belongsToPr && typeof job.meta.prId === "number") {
-      // Keyed by URL when there is one: a workspace's Activity holds reviews of *several*
-      // repositories reached by link, and a PR number only identifies a PR within one repo — so
-      // grouping on the number alone would fold two unrelated "#42"s into a single row.
-      const key = jobPrUrl(job) ?? job.meta.prId;
+      // Keyed by URL when there is one, and by bucket + number otherwise: the Inbox can list a
+      // whole workspace — several repositories, plus the ones reached by link — and a PR number
+      // only identifies a PR within one repo, so the number alone would fold two unrelated "#42"s
+      // into a single row.
+      const key = jobPrUrl(job) ?? `${job.projectId}:${job.meta.prId}`;
       const runs = prRuns.get(key);
       if (runs) runs.push(job);
       else prRuns.set(key, [job]);
     } else if (job.kind === "analyze-changes") {
-      analyzeRuns.push(job);
+      // One row per repository's analyses, for the same reason as above.
+      const runs = analyzeRuns.get(job.projectId);
+      if (runs) runs.push(job);
+      else analyzeRuns.set(job.projectId, [job]);
     } else {
       standalone.push(job);
     }
@@ -80,8 +84,8 @@ export function mergeActivityEntries(
     const sorted = byNewest(runs);
     jobEntries.push({ type: "job", job: sorted[0], runs: sorted });
   }
-  if (analyzeRuns.length > 0) {
-    const sorted = byNewest(analyzeRuns);
+  for (const runs of analyzeRuns.values()) {
+    const sorted = byNewest(runs);
     jobEntries.push({ type: "job", job: sorted[0], runs: sorted });
   }
 
@@ -172,55 +176,4 @@ export function entryVisual(entry: ActivityEntry): { icon: LucideIcon; color: st
     return { icon: Ban, color: "var(--cf-danger)", spinning: false };
   }
   return { icon: job.kind === "pr-review" ? GitPullRequest : ShieldCheck, color, spinning: false };
-}
-
-/** Which entry the AI panel is actually showing right now, so the Activity list can
- * highlight it — the panel only ever displays one of chat / a selected PR / the pre-commit
- * analysis at a time, and each of those maps to a specific entry (or none, if e.g. the
- * selected PR hasn't been reviewed yet and so has no job entry). */
-export function findActiveEntryKey(
-  entries: ActivityEntry[],
-  state: {
-    selectedPrId: number | null;
-    /** Set when the PR on screen was reached by link — matched instead of the number, which
-     * repeats across the repositories a workspace's Activity now spans. */
-    linkPrUrl: string | null;
-    analyzeOpen: boolean;
-    analyzeJobId: string | null;
-    activeSessionId: string | null;
-  },
-): string | null {
-  if (state.linkPrUrl !== null) {
-    const match = entries.find((e) => e.type === "job" && e.runs.some((run) => jobPrUrl(run) === state.linkPrUrl));
-    return match ? entryKey(match) : null;
-  }
-  if (state.selectedPrId !== null) {
-    // Matched against every entry in the row, not just its newest: a PR whose latest event is a
-    // decision rather than a review still has to highlight when that PR is open.
-    const match = entries.find(
-      (e) =>
-        e.type === "job" &&
-        e.runs.some(
-          (run) =>
-            (run.kind === "pr-review" || run.kind === "pr-action") &&
-            run.meta.prId === state.selectedPrId &&
-            // A link review of some other repo's "#42" is not this PR.
-            jobPrUrl(run) === null,
-        ),
-    );
-    return match ? entryKey(match) : null;
-  }
-  if (state.analyzeOpen) {
-    // A pinned run highlights its group (match against *any* run, since analyses are now collapsed
-    // into one row); with none pinned (fresh open) the newest analysis is shown, so highlight that.
-    const match = state.analyzeJobId
-      ? entries.find((e) => e.type === "job" && e.runs.some((r) => r.id === state.analyzeJobId))
-      : entries.find((e) => e.type === "job" && e.job.kind === "analyze-changes");
-    return match ? entryKey(match) : null;
-  }
-  if (state.activeSessionId) {
-    const match = entries.find((e) => e.type === "chat" && e.conv.session_id === state.activeSessionId);
-    return match ? entryKey(match) : null;
-  }
-  return null;
 }

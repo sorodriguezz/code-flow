@@ -5046,11 +5046,12 @@ pub async fn chat_turn(
 
 /// Open-ended, multi-turn chat about the currently open repository — the AI panel's chat.
 ///
-/// Kept as its own name and signature after [`chat_turn`] generalised it, because its three
-/// answers to that generalisation are not defaults but decisions about *this* flow: the repository
-/// system prompt, edits auto-approved (the panel's chat is meant to help work on the checkout, and
-/// a headless run can never be asked for permission — running commands still needs the shell tool
-/// enabled in Settings), and no delta sink, since nothing on that screen types.
+/// Kept as its own name and signature after [`chat_turn`] generalised it, because its answers to
+/// that generalisation are not defaults but decisions about *this* flow: the repository system
+/// prompt, and edits auto-approved (the panel's chat is meant to help work on the checkout, and a
+/// headless run can never be asked for permission — running commands still needs the shell tool
+/// enabled in Settings). `stream_deltas` is the caller's: the desk's panel asks for the reply as it
+/// is written; the paired phone, which is never sent deltas, does not.
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_with_repo(
     engine: &dyn AiEngine,
@@ -5061,6 +5062,7 @@ pub async fn chat_with_repo(
     session_id: Option<&str>,
     allowed_tools: &[String],
     cwd: &str,
+    stream_deltas: Option<DeltaSink>,
 ) -> Result<AiRun, String> {
     chat_turn(
         engine,
@@ -5074,7 +5076,7 @@ pub async fn chat_with_repo(
             cwd,
             system_prompt: None,
             auto_approve_edits: true,
-            stream_deltas: None,
+            stream_deltas,
             // The AI panel's repo chat has no per-conversation control, so it leaves every CLI on
             // its own configured default rather than inventing a level for it.
             effort: None,

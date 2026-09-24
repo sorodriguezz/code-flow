@@ -5,6 +5,7 @@ import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { usePrStore } from "../../state/prStore";
+import { EMPTY_TABS, INBOX_KEY, NO_WORKSPACE, useAiPanelStore } from "../../state/aiPanelStore";
 import { useT } from "../../state/languageStore";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 
@@ -101,18 +102,20 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
   const t = useT();
   const openAiPanel = useUiStore((s) => s.openAiPanel);
   const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
-  const project = useWorkspaceStore((s) => s.activeProject());
   /**
-   * The selected pull request, but only while its own repository is the one open.
+   * The pull request the assistant is showing, if it is showing one.
    *
-   * This menu item built its target from `project.id` and its number from whatever was selected,
-   * which are two different repositories the moment the user switches — so "Review PR #42" would
-   * launch a review of repo Q asking about repo P's pull request, against Q's working copy. The
-   * selection names its project now (`prStore.selectedPrProjectId`); when it isn't this one the
-   * item honestly reads as "no pull request selected" and stays disabled, which is the truth for
-   * the repository on screen.
+   * Its tab names its own project, so "review this PR" can never mix one repository's number with
+   * another's working copy — the hazard the old `selectedPrProjectId` guard existed for.
    */
-  const selectedPr = usePrStore((s) => (project && s.selectedPrProjectId === project.id ? s.selectedPr : null));
+  const panelOpen = useUiStore((s) => s.aiPanelOpen);
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId) ?? NO_WORKSPACE;
+  const shownTab = useAiPanelStore((s) => {
+    const key = s.activeByWorkspace[workspaceId] ?? INBOX_KEY;
+    return (s.tabsByWorkspace[workspaceId] ?? EMPTY_TABS).find((tab) => tab.key === key) ?? null;
+  });
+  const shown = panelOpen && shownTab?.kind === "pr" ? shownTab : null;
+  const selectedPr = shown?.pr ?? null;
   const reviewPr = usePrStore((s) => s.reviewPr);
 
   const openChat = () => {
@@ -130,9 +133,9 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
   const prSettled = selectedPr?.status === "merged" || selectedPr?.status === "closed";
 
   const reviewCurrentPr = () => {
-    if (!project || !selectedPr || prSettled) return;
+    if (!shown || !selectedPr || prSettled) return;
     openAiPanel();
-    reviewPr({ kind: "project", projectId: project.id }, selectedPr.id);
+    reviewPr({ kind: "project", projectId: shown.projectId }, selectedPr);
     onClose();
   };
 

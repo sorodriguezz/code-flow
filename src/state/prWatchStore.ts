@@ -58,6 +58,9 @@ interface PrWatchState {
   /** Applies what the host now says about a PR: settled ones leave the list, the rest are updated
    * in place. The single funnel for "is this still pending?", so no caller has to know the rule. */
   reconcile: (workspaceId: string, key: string, pr: PullRequestSummary, decision: string) => void;
+  /** The bodies of `track` / `reconcile`, run once the disk copy is in memory. Not for callers. */
+  applyTrack: (entry: TrackedPr) => void;
+  applyReconcile: (workspaceId: string, key: string, pr: PullRequestSummary, decision: string) => void;
 }
 
 export const EMPTY_TRACKED: TrackedPr[] = [];
@@ -74,36 +77,57 @@ function persist(workspaceId: string, entries: TrackedPr[]) {
   void setSetting(settingKey(workspaceId), JSON.stringify(entries)).catch(() => {});
 }
 
+/**
+ * Each workspace's read from disk, shared by every caller.
+ *
+ * Every write below waits on it. They used to write whatever was in memory straight away, and the
+ * first write of a session happens before anything has been read: opening a pull request fires
+ * `track` from the review's mount effect, in the same commit as the list's own `load` — and a link
+ * review mounts no list at all, so there `load` was never called. Either way the saved backlog was
+ * replaced by the one entry being tracked. A write that has merged the disk copy first cannot do
+ * that, whatever order the callers arrive in.
+ */
+const reads = new Map<string, Promise<void>>();
+
 export const usePrWatchStore = create<PrWatchState>((set, get) => ({
   byWorkspace: {},
   loaded: {},
 
-  load: async (workspaceId) => {
-    if (get().loaded[workspaceId]) return;
+  load: (workspaceId) => {
+    const pending = reads.get(workspaceId);
+    if (pending) return pending;
     // Set before the await so a double-invoked effect (dev StrictMode) can't both pass the guard.
     set((s) => ({ loaded: { ...s.loaded, [workspaceId]: true } }));
-    const raw = await getSetting(settingKey(workspaceId)).catch(() => null);
-    if (!raw) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return; // corrupt blob — an empty list beats a crash
-    }
-    if (!Array.isArray(parsed)) return;
-    const entries = (parsed as TrackedPr[]).filter(
-      (entry) => entry && typeof entry.key === "string" && entry.pr && typeof entry.prId === "number",
-    );
-    set((s) => ({
-      byWorkspace: {
-        ...s.byWorkspace,
-        // Anything tracked this session already is newer than the disk copy.
-        [workspaceId]: mergeNewest(s.byWorkspace[workspaceId] ?? [], entries),
-      },
-    }));
+    const read = (async () => {
+      const raw = await getSetting(settingKey(workspaceId)).catch(() => null);
+      if (!raw) return;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        return; // corrupt blob — an empty list beats a crash
+      }
+      if (!Array.isArray(parsed)) return;
+      const entries = (parsed as TrackedPr[]).filter(
+        (entry) => entry && typeof entry.key === "string" && entry.pr && typeof entry.prId === "number",
+      );
+      set((s) => ({
+        byWorkspace: {
+          ...s.byWorkspace,
+          // Anything tracked this session already is newer than the disk copy.
+          [workspaceId]: mergeNewest(s.byWorkspace[workspaceId] ?? [], entries),
+        },
+      }));
+    })();
+    reads.set(workspaceId, read);
+    return read;
   },
 
   track: (entry) => {
+    void get().load(entry.workspaceId).then(() => get().applyTrack(entry));
+  },
+
+  applyTrack: (entry) => {
     set((s) => {
       const current = s.byWorkspace[entry.workspaceId] ?? [];
       const previous = current.find((e) => e.key === entry.key);
@@ -121,11 +145,15 @@ export const usePrWatchStore = create<PrWatchState>((set, get) => ({
   },
 
   untrack: (workspaceId, key) => {
-    set((s) => {
-      const next = (s.byWorkspace[workspaceId] ?? []).filter((e) => e.key !== key);
-      persist(workspaceId, next);
-      return { byWorkspace: { ...s.byWorkspace, [workspaceId]: next } };
-    });
+    void get().load(workspaceId).then(() =>
+      set((s) => {
+        const current = s.byWorkspace[workspaceId] ?? [];
+        if (!current.some((e) => e.key === key)) return s;
+        const next = current.filter((e) => e.key !== key);
+        persist(workspaceId, next);
+        return { byWorkspace: { ...s.byWorkspace, [workspaceId]: next } };
+      }),
+    );
   },
 
   reconcile: (workspaceId, key, pr, decision) => {
@@ -134,6 +162,10 @@ export const usePrWatchStore = create<PrWatchState>((set, get) => ({
       get().untrack(workspaceId, key);
       return;
     }
+    void get().load(workspaceId).then(() => get().applyReconcile(workspaceId, key, pr, decision));
+  },
+
+  applyReconcile: (workspaceId, key, pr, decision) => {
     set((s) => {
       const current = s.byWorkspace[workspaceId] ?? [];
       if (!current.some((e) => e.key === key)) return s;

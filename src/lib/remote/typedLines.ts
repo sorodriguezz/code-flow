@@ -17,10 +17,10 @@
 
 /** Bytes that mean "this line is no longer something I can reconstruct". */
 const CANCEL = new Set([
-  "", // Ctrl-C
-  "", // Ctrl-D
-  "", // Ctrl-U, clears the line
-  "", // Ctrl-Z
+  "\x03", // Ctrl-C
+  "\x04", // Ctrl-D
+  "\x15", // Ctrl-U, clears the line
+  "\x1a", // Ctrl-Z
   "\t", // tab completion is resolved on the far side, so the buffer no longer matches the line
 ]);
 
@@ -49,7 +49,7 @@ export class TypedLineBuffer {
         if (isWorthKeeping(line)) completed = line;
         continue;
       }
-      if (ch === "" || ch === "\b") {
+      if (ch === "\x7f" || ch === "\b") {
         this.buffer = this.buffer.slice(0, -1);
         continue;
       }
@@ -59,7 +59,7 @@ export class TypedLineBuffer {
       }
       // An escape sequence — arrow keys, history recall, a mouse report. Whatever the line becomes
       // after it, this no longer knows, so the buffer is abandoned rather than guessed at.
-      if (ch === "") {
+      if (ch === "\x1b") {
         this.buffer = "";
         continue;
       }

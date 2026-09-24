@@ -182,7 +182,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       {
         key: "view:ai-panel",
         icon: MessageCircle,
-        label: t("chat.title"),
+        label: t("assistant.title"),
         group: "views" as const,
         onSelect: () => toggleAiPanel(),
       },

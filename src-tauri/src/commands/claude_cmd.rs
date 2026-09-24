@@ -751,6 +751,7 @@ pub async fn send_chat_message(
     agent_model: Option<String>,
     agent_prompt: Option<String>,
     agent_account: Option<String>,
+    stream: Option<bool>,
 ) -> Result<ChatReply, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -774,11 +775,15 @@ pub async fn send_chat_message(
         // An active agent runs on its own provider + model — and its own account, when it names
         // one; otherwise the normal chat routing. Either way an automatic account is this
         // repository's workspace's.
+        //
+        // A provider with no model is an engine pinned by the panel's chip on a conversation whose
+        // answers named none — the CLI's own default — and is honoured as such rather than dropped
+        // back to the routing, which would move the conversation to another engine behind its back.
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
-            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => load_ai_config_as(
+            (Some(p), m) if !p.trim().is_empty() => load_ai_config_as(
                 &conn,
                 p,
-                m,
+                m.unwrap_or("").trim(),
                 ai_accounts::Choice::parse(agent_account.as_deref()),
                 Some(AiTask::Chat),
                 Some(&workspace_id),
@@ -818,6 +823,12 @@ pub async fn send_chat_message(
     // The chat runs with edits auto-approved (see `chat_with_repo`), so it can and does touch
     // files — it gets the same undo protection as an explicit "fix with AI".
     let checkpoint = checkpoint_before(&project.local_path, "chat");
+    // The reply as it is written, for the panel that asked (Claude alone produces it; every other
+    // engine ignores the sink). Keyed by run: the panel matches fragments on the run id it minted.
+    let stream_deltas = stream.unwrap_or(false).then(|| ai::DeltaSink {
+        conversation_id: conversation_id.clone().unwrap_or_default(),
+        message_id: run_id.clone().unwrap_or_default(),
+    });
     let (result, trace) = ai_runs::scoped_with_trace(app, run_id, async {
         ai::chat_with_repo(
             &*config.engine,
@@ -828,6 +839,7 @@ pub async fn send_chat_message(
             session_id.as_deref(),
             &config.tools,
             &project.local_path,
+            stream_deltas,
         )
         .await
     })

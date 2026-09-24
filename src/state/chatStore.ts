@@ -13,6 +13,8 @@ import { pushErrorToast, useToastStore } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { formatAgentLogLine } from "../lib/agentLog";
+import { isQueuedCancellation, whenRepoFree } from "../lib/repoQueue";
+import { onAiChatDelta } from "../lib/tauri/events";
 
 /** The repository name the backend puts after its busy marker. */
 function repoNameFromBusy(error: string): string {
@@ -94,6 +96,19 @@ export interface ChatSession {
    * reconciled against the history list — one whose first turn errored or was stopped has no row
    * on disk by design, and must not be mistaken for one the user deleted. */
   persisted: boolean;
+  /** The reply as it is being written, for an engine that streams (Claude). Plain text, rendered
+   *  in place of the bubble's content until the turn lands whole. `""` when nothing streams. */
+  streamText: string;
+  /** A question taken back before it ever ran — stopped while it was queued behind another run.
+   *  The composer puts it back where it was typed and clears this. */
+  restored: string | null;
+}
+
+/** Which engine a conversation runs on, when it has been pinned rather than left to the routing. */
+export interface ChatEngine {
+  provider: string;
+  model: string;
+  account?: string | null;
 }
 
 function newSession(projectId: string, conversationId: string): ChatSession {
@@ -111,6 +126,8 @@ function newSession(projectId: string, conversationId: string): ChatSession {
     createdAt: now,
     updatedAt: now,
     persisted: false,
+    streamText: "",
+    restored: null,
   };
 }
 
@@ -161,7 +178,7 @@ const EMPTY_LIVE: ChatSession[] = [];
  * conversations ended up holding all twenty — messages *and* the process trace of every turn in
  * them. Five is what the panel can plausibly be moved between without paying for a reload.
  *
- * A collapsed conversation is not lost: `switchTo` reads it back from `activity_log` exactly as it
+ * A collapsed conversation is not lost: `ensureLoaded` reads it back from `activity_log` exactly as it
  * does one that was never opened this session. That reload is only trustworthy for a conversation
  * the backend actually wrote a row for, which is what `evictable` below is checking.
  */
@@ -171,6 +188,43 @@ const MAX_LIVE_CONVERSATIONS = 5;
  * state: nothing renders it, so keeping it in the store would re-render every subscriber on each
  * switch for nothing. */
 let recentConversations: string[] = [];
+
+/** Conversations an assistant tab is showing — never collapsed, the panel would go blank under
+ *  the user. Kept current by the panel (see `setPinned`). */
+let pinnedConversations = new Set<string>();
+
+/** Which conversation each in-flight turn belongs to, so a streamed fragment finds its bubble. */
+const runToConversation = new Map<string, string>();
+let deltaListener: Promise<unknown> | null = null;
+
+/**
+ * Subscribes once to `ai:chat-delta`, the channel a streaming engine writes a reply to as it goes.
+ *
+ * Only the answer's text is kept: the reasoning stream has nowhere to go in a panel this narrow,
+ * and the finished turn still carries the full trace. Each fragment replaces the session object —
+ * the bubble is memoised on its props, and a mutated string would look frozen on screen.
+ */
+function ensureDeltaListener(): void {
+  if (deltaListener) return;
+  deltaListener = onAiChatDelta((event) => {
+    if (event.kind !== "text") return;
+    const conversationId = runToConversation.get(event.runId);
+    if (!conversationId) return;
+    useChatStore.setState((s) => {
+      const session = s.byConversation[conversationId];
+      if (!session || session.runId !== event.runId) return s;
+      return {
+        byConversation: {
+          ...s.byConversation,
+          [conversationId]: { ...session, streamText: session.streamText + event.text },
+        },
+      };
+    });
+  }).catch(() => {
+    // No event bridge (a test DOM): nothing streams, and the reply still lands whole.
+    deltaListener = null;
+  });
+}
 
 /**
  * The model the last reply of a collapsed conversation ran on.
@@ -199,10 +253,10 @@ function touchConversation(conversationId: string): void {
  *   the question above it exist only here.
  */
 function pruneConversations(): void {
-  const { byConversation, activeByProject } = useChatStore.getState();
+  const { byConversation } = useChatStore.getState();
   const ids = Object.keys(byConversation);
   if (ids.length <= MAX_LIVE_CONVERSATIONS) return;
-  const active = new Set(Object.values(activeByProject).filter((id): id is string => id !== null));
+  const active = pinnedConversations;
   // Anything never touched counts as freshest, so an unknown id is simply not a candidate. Ids of
   // conversations that have since gone would otherwise sit in the list for ever.
   recentConversations = recentConversations.filter((id) => byConversation[id] !== undefined);
@@ -236,32 +290,40 @@ function pruneConversations(): void {
 
 interface ChatState {
   byConversation: Record<string, ChatSession>;
-  /** Which conversation each project is currently *showing*. `null`/absent means the panel is on
-   * a blank new chat — which is a view state, not a lifecycle one: whatever was showing before is
-   * still in `byConversation`, still running if it was running. */
-  activeByProject: Record<string, string | null>;
-  /** Fire-and-forget — the reply lands in its own conversation whenever it arrives, so it isn't
-   * lost (or misfiled) if the user switches chats, projects, or closes the AI panel while the
-   * engine is still answering. Several conversations can be in flight at once; only a second turn
-   * *within the same conversation* is refused, since the engine session can only be resumed once
-   * at a time. */
-  send: (projectId: string, message: string) => void;
-  /** Detaches the project from whatever it was showing so the next message starts a fresh
-   * conversation. Deliberately not destructive: a turn still running keeps running and stays in
-   * Activity, and reopening its row brings it back exactly where it was. */
-  clear: (projectId: string) => void;
-  /** Reopens a conversation. One still in memory — running or not — is shown as-is, with no round
-   * trip and nothing lost; anything else is read back from disk, adopting both its conversation id
-   * (so new turns keep filing under the same activity) and the engine session its last turn ran
-   * under (so the CLI continues where it left off). */
-  switchTo: (projectId: string, conversationId: string) => Promise<void>;
+  /**
+   * Engines pinned per conversation from the composer's chip.
+   *
+   * The chip used to write the *chat task's routing* — a settings change disguised as a choice about
+   * this chat, which also re-pointed every other conversation and the chat workspace's next one.
+   * A pick now belongs to the conversation it was made in, and rides each of its turns as the
+   * per-turn override `send_chat_message` already accepts.
+   */
+  engineByConversation: Record<string, ChatEngine>;
+  /**
+   * Asks `message` in `conversationId` — the conversation the assistant tab names, created on its
+   * first question.
+   *
+   * Fire-and-forget — the reply lands in its own conversation whenever it arrives, so it isn't
+   * lost (or misfiled) if the user switches tabs or closes the panel while the engine answers. A
+   * second turn *within the same conversation* is refused (an engine session resumes once at a
+   * time). A turn that finds the repository busy — another conversation, an analysis, a fix all
+   * hold the same lease — waits for it instead of failing: see `lib/repoQueue`.
+   */
+  send: (projectId: string, conversationId: string, message: string) => void;
+  /**
+   * Makes sure a conversation is in memory, reading it back from disk when it is not (or when the
+   * copy here may be stale). One still in flight, or never persisted, is left exactly as it is —
+   * memory is its only copy. Adopts the engine session of the last turn so the CLI continues
+   * where it left off.
+   */
+  ensureLoaded: (projectId: string, conversationId: string) => Promise<void>;
   /**
    * Folds turns another device added into a conversation this window is already holding.
    *
    * # Why this is append-only and not a reload
    *
-   * The obvious implementation is `switchTo`'s read, applied unconditionally. It is wrong here for a
-   * reason `switchTo` never has to face: this runs *unprompted*, off an event, while somebody may be
+   * The obvious implementation is `ensureLoaded`'s read, applied unconditionally. It is wrong here for a
+   * reason `ensureLoaded` never has to face: this runs *unprompted*, off an event, while somebody may be
    * reading the transcript. Replacing the array would scroll the pane, drop a trace that is open,
    * and — if a turn were in flight — take the optimistic bubble off the screen and put it back a
    * second later. So only rows the session does not already have are added, in the order the backend
@@ -278,33 +340,40 @@ interface ChatState {
   /** Forgets a conversation entirely — for one deleted from history, which has nothing left to
    * come back to. */
   discard: (conversationId: string) => void;
-  /** The conversation a project is showing, or an empty one when it's on a blank new chat. */
-  sessionFor: (projectId: string) => ChatSession;
+  /** Pins a conversation to an engine (the composer's chip). */
+  setEngine: (conversationId: string, engine: ChatEngine) => void;
+  /** Hands back a question that was stopped before it ran, once. */
+  takeRestored: (conversationId: string) => string | null;
+  /** The conversations open in assistant tabs, which the memory cap must never collapse. */
+  setPinned: (conversationIds: string[]) => void;
+}
+
+/**
+ * The engine a conversation's next turn should run on: what was picked for it, else what its last
+ * answer ran on — a conversation stays on its engine even if the routing changes under it — else
+ * nothing, which leaves a brand-new conversation to the chat routing.
+ */
+export function engineFor(session: ChatSession | undefined, picked: ChatEngine | undefined): ChatEngine | null {
+  if (picked) return picked;
+  const last = [...(session?.messages ?? [])].reverse().find((m) => m.role === "assistant" && m.provider);
+  return last?.provider ? { provider: last.provider, model: last.model ?? "" } : null;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
   byConversation: {},
-  activeByProject: {},
+  engineByConversation: {},
 
-  sessionFor: (projectId) => {
-    const id = get().activeByProject[projectId];
-    return (id ? get().byConversation[id] : undefined) ?? EMPTY_CHAT;
-  },
-
-  send: (projectId, message) => {
+  send: (projectId, conversationId, message) => {
     const trimmed = message.trim();
     if (!trimmed) return;
 
-    // First message of a chat names the conversation; every later turn reuses it, so the whole
-    // exchange stays one activity. "New chat" detaches, which is what makes the next message a
-    // separate one.
-    const activeId = get().activeByProject[projectId] ?? null;
-    const existing = (activeId ? get().byConversation[activeId] : undefined) ?? null;
+    // The conversation id is the tab's, minted when the tab was opened — so every turn files under
+    // one activity, and a new chat is simply a tab whose conversation has no turns yet.
+    const existing = get().byConversation[conversationId] ?? null;
     // Only this conversation's own turn blocks — another chat of the same project being mid-answer
-    // is exactly the case this store exists to allow.
+    // (or queued) is exactly the case this store exists to allow.
     if (existing?.sending) return;
 
-    const conversationId = existing?.conversationId ?? `conv-${crypto.randomUUID()}`;
     // Asking a question is the strongest possible "I am using this one", so it counts for the
     // memory cap's recency just as opening it does.
     touchConversation(conversationId);
@@ -344,10 +413,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           runId,
           runStartedAt: now,
           updatedAt: now,
+          streamText: "",
+          restored: null,
         },
       },
-      activeByProject: { ...s.activeByProject, [projectId]: conversationId },
     }));
+    runToConversation.set(runId, conversationId);
+    ensureDeltaListener();
 
     /** Writes the outcome into *this* conversation, wherever the user happens to be looking. The
      * active pointer is never touched here — moving the panel out from under someone because a
@@ -361,9 +433,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     };
 
-    // No agent override: a role-driven turn is what the Agents view is for, and this chat is
-    // deliberately the plain one — the routing it shows in the composer is the routing it uses.
-    void sendChatMessage(projectId, trimmed, base.sessionId, conversationId, runId)
+    // No agent *role*: that is what the Agents view is for. The override carries only the engine —
+    // the one picked in this conversation's chip, or the one it has been answering on.
+    const engine = engineFor(base, get().engineByConversation[conversationId]);
+    const agent = engine ? { provider: engine.provider, model: engine.model, prompt: "", account: engine.account ?? null } : null;
+    void whenRepoFree(projectId, runId, () =>
+      sendChatMessage(projectId, trimmed, base.sessionId, conversationId, runId, agent, true),
+    )
       .then((reply) => {
         // The live log is already in memory and formatted; attaching it to the message is what
         // keeps "what did it do?" answerable after the run ends, without a second round trip.
@@ -391,6 +467,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           runStartedAt: null,
           updatedAt: Date.now(),
           persisted: true,
+          streamText: "",
         }));
         // This panel does not replay the transcript into a new session, so a thread that moved to
         // another account (a routing change since its last turn) is talking to a model that has
@@ -423,10 +500,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
       })
       .catch((e) => {
-        // Another run already owns this repository's working copy, so this turn never reached an
-        // engine: nothing was recorded, nothing was edited. Filing it in the transcript as a red
-        // failure bubble would be a lie about something that did not happen — so the question is
-        // taken back out and the reason is said once, in passing.
+        // Stopped while it was still waiting for the repository: it never ran, so there is nothing
+        // to file — the question goes back into the composer it was typed in.
+        if (isQueuedCancellation(e)) {
+          settle((session) => ({
+            ...session,
+            messages: session.messages.slice(0, -1),
+            sending: false,
+            runId: null,
+            runStartedAt: null,
+            updatedAt: Date.now(),
+            streamText: "",
+            restored: trimmed,
+          }));
+          return;
+        }
+        // The repository stayed busy for longer than the queue will wait. The turn never reached an
+        // engine: nothing was recorded, nothing was edited, so filing it as a red failure bubble
+        // would be a lie — the question is taken back out and the reason is said once, in passing.
         if (isRepoBusy(e)) {
           settle((session) => ({
             ...session,
@@ -435,6 +526,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             runId: null,
             runStartedAt: null,
             updatedAt: Date.now(),
+            streamText: "",
+            restored: trimmed,
           }));
           pushErrorToast(translate("agents.busyInRepo", { name: repoNameFromBusy(String(e)) }));
           return;
@@ -471,6 +564,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           runId: null,
           runStartedAt: null,
           updatedAt: Date.now(),
+          streamText: "",
           // A stopped turn is never written to disk, so the conversation stays unpersisted and
           // must not be reconciled against the history list.
           persisted: session.persisted || !cancelled,
@@ -495,14 +589,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
           });
         }
       })
-      .finally(() => useAiRunStore.getState().finish(runId));
+      .finally(() => {
+        runToConversation.delete(runId);
+        useAiRunStore.getState().finish(runId);
+      });
   },
 
-  clear: (projectId) => {
-    set((s) => ({ activeByProject: { ...s.activeByProject, [projectId]: null } }));
-  },
-
-  switchTo: async (projectId, conversationId) => {
+  ensureLoaded: async (projectId, conversationId) => {
     touchConversation(conversationId);
     const cached = get().byConversation[conversationId];
     // The two cases where memory is the *only* copy, and pointing at it is the whole of the work.
@@ -512,7 +605,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // `!persisted`: nothing was ever written, by design (a stopped first turn, or one that errored),
     // so a read would come back empty and blank a conversation the user can still see.
     if (cached && (cached.sending || !cached.persisted)) {
-      set((s) => ({ activeByProject: { ...s.activeByProject, [projectId]: conversationId } }));
       pruneConversations();
       return;
     }
@@ -522,7 +614,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // add a turn: reopening the row showed the copy this window happened to have when it last
     // looked, so even "close it and open it again" did not surface a turn sent from a phone. The
     // read is one indexed query against a conversation the user just asked to see.
-    const entries = await getChatConversation(projectId, conversationId);
+    const entries = await getChatConversation(projectId, conversationId).catch(() => null);
+    // Nothing on disk under this id — a new chat whose first question has not been asked, which is
+    // an empty conversation and nothing to read. Leaving the store alone is the right answer.
+    if (!entries || entries.length === 0) return;
     // One stored row is one exchange, so both halves carry its timestamp — the question wasn't
     // recorded separately, and splitting hairs there would mean inventing a time.
     const messages: ChatMessage[] = entries.flatMap((e) => [
@@ -551,9 +646,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // read was in flight, and the freshly loaded copy would clobber it. Only `sending` blocks now,
       // not mere presence — presence is the ordinary case since this re-reads what it holds.
       const live = s.byConversation[conversationId];
-      if (live?.sending) {
-        return { activeByProject: { ...s.activeByProject, [projectId]: conversationId } };
-      }
+      if (live?.sending) return s;
       return {
         byConversation: {
           ...s.byConversation,
@@ -572,7 +665,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             persisted: true,
           },
         },
-        activeByProject: { ...s.activeByProject, [projectId]: conversationId },
       };
     });
     pruneConversations();
@@ -587,7 +679,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     set((s) => {
       const session = s.byConversation[conversationId];
-      // Re-checked after the await for the same reason `switchTo` re-checks: a turn started in the
+      // Re-checked after the await for the same reason `ensureLoaded` re-checks: a turn started in the
       // meantime owns this conversation, and its reply is about to land in it.
       if (!session || session.sending) return s;
       const known = new Set(
@@ -639,11 +731,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => {
       if (!s.byConversation[conversationId]) return s;
       const { [conversationId]: _dropped, ...rest } = s.byConversation;
-      const activeByProject = Object.fromEntries(
-        Object.entries(s.activeByProject).map(([p, id]) => [p, id === conversationId ? null : id]),
-      );
-      return { byConversation: rest, activeByProject };
+      return { byConversation: rest };
     });
+  },
+
+  setEngine: (conversationId, engine) => {
+    set((s) => ({ engineByConversation: { ...s.engineByConversation, [conversationId]: engine } }));
+  },
+
+  takeRestored: (conversationId) => {
+    const text = get().byConversation[conversationId]?.restored ?? null;
+    if (text === null) return null;
+    set((s) => {
+      const session = s.byConversation[conversationId];
+      return session ? { byConversation: { ...s.byConversation, [conversationId]: { ...session, restored: null } } } : s;
+    });
+    return text;
+  },
+
+  setPinned: (conversationIds) => {
+    pinnedConversations = new Set(conversationIds);
   },
 }));
 

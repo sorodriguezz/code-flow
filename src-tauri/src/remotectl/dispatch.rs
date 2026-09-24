@@ -895,6 +895,8 @@ pub async fn dispatch(
                 None,
                 None,
                 None,
+                // No streaming: deltas are never forwarded to a phone.
+                None,
             )
             .await?,
             Invalidate::Chat,
