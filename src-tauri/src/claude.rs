@@ -249,11 +249,30 @@ fn meta_cell() -> &'static Mutex<ClaudeRunMeta> {
     META.get_or_init(Mutex::default)
 }
 
+/// The last plan windows each **account** reported, with when — keyed by
+/// [`crate::ai_accounts::AccountEnv::key`] (`claude` for the system account).
+///
+/// Kept apart from [`meta_cell`] because the two answer different questions. The command list is
+/// a fact about the installed binary, and the latest run of any account is as good as another. The
+/// windows are a fact about one account's plan, and reporting the work account's week under the
+/// personal one would be a wrong number on the one panel whose only value is being trusted.
+fn limits_cell() -> &'static Mutex<std::collections::HashMap<String, (AiRateLimit, String)>> {
+    static LIMITS: OnceLock<Mutex<std::collections::HashMap<String, (AiRateLimit, String)>>> = OnceLock::new();
+    LIMITS.get_or_init(Mutex::default)
+}
+
 /// The most recent run's report. Empty before the first `claude` run of this process, which is a
 /// real state and the reason the command menu renders app commands alone until then rather than
 /// asserting this install has none.
 pub fn last_run_meta() -> ClaudeRunMeta {
     meta_cell().lock().map(|m| m.clone()).unwrap_or_default()
+}
+
+/// The plan windows `account_key` last reported and the instant it did, if it has run in this
+/// process. What an added account's row in the limits panel is drawn from — this app reads no
+/// token for an account it added; the CLI tells it on every run. See `ai_quota::claude`.
+pub fn last_rate_limit(account_key: &str) -> Option<(AiRateLimit, String)> {
+    limits_cell().lock().ok()?.get(account_key).cloned()
 }
 
 /// Files what a finished run reported about itself.
@@ -265,6 +284,14 @@ pub fn last_run_meta() -> ClaudeRunMeta {
 fn record_run_meta(stdout: &str) {
     let rate_limit = parse_rate_limit(stdout);
     let slash_commands = parse_slash_commands(stdout);
+    if let Some(limit) = rate_limit {
+        // Filed under the account the run was — `interpret` is called inside `with_account` by an
+        // engine bound to one, and outside it for the system account.
+        let key = crate::ai_accounts::current().map(|env| env.key()).unwrap_or_else(|| "claude".to_string());
+        if let Ok(mut limits) = limits_cell().lock() {
+            limits.insert(key, (limit, chrono::Utc::now().to_rfc3339()));
+        }
+    }
     let Ok(mut meta) = meta_cell().lock() else { return };
     if rate_limit.is_some() {
         meta.rate_limit = rate_limit;
@@ -307,6 +334,8 @@ fn parse_rate_limit(stdout: &str) -> Option<AiRateLimit> {
         found = Some(AiRateLimit {
             five_hour_pct: windows.five_hour.utilization * 100.0,
             seven_day_pct: windows.seven_day.utilization * 100.0,
+            five_hour_resets_at: windows.five_hour.resets_at,
+            seven_day_resets_at: windows.seven_day.resets_at,
         });
     }
     found
@@ -365,6 +394,9 @@ struct RateWindow {
     /// 0–1, as the CLI reports it.
     #[serde(default)]
     utilization: f64,
+    /// Seconds since the epoch.
+    #[serde(rename = "resetsAt", default)]
+    resets_at: i64,
 }
 
 #[derive(Deserialize)]

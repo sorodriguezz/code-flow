@@ -113,6 +113,11 @@ pub struct WorkspaceAgent {
     pub enabled: bool,
     pub sort_order: i64,
     pub created_at: String,
+    /// Which account of its provider this agent runs as: `None` automatic (the workspace's),
+    /// `"system"` the CLI's own login, else an account id. Copied into every task and chain step it
+    /// starts, like the provider and model. See `crate::ai_accounts`.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 /// A folder the user files agent work into. Not a repository: a task still names the `Project` its
@@ -196,6 +201,11 @@ pub struct AgentTask {
     pub last_error: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The agent's account preference when this task was created — see
+    /// [`WorkspaceAgent::account_id`]. Automatic is resolved per turn; a change of account starts a
+    /// fresh session, which the turn's own session rule takes care of.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 /// One run of "read this documentation, write the backlog": where the requirements came from,
@@ -470,6 +480,10 @@ pub struct AgentChainStep {
     pub feedback: String,
     pub created_at: String,
     pub updated_at: String,
+    /// The step's agent's account preference, copied at creation — see
+    /// [`WorkspaceAgent::account_id`].
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 /// A chain step stripped to what the task list needs to draw it: which chain it belongs to, which
@@ -1542,6 +1556,12 @@ pub struct ChatConversation {
     pub branched_at_turn: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
+    /// The account this thread runs as — `None` for the CLI's system account, which is also what
+    /// every thread started before accounts existed ran as. Fixed when the thread is created and
+    /// changed only by choosing another account for it; a change drops [`Self::engine_session_id`],
+    /// because the session lives in the old account's directory. See `crate::ai_accounts`.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 /// A folder in the chat sidebar.

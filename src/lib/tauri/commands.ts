@@ -560,8 +560,15 @@ export const listShellProfiles = () => invoke<ShellProfile[]>("list_shell_profil
 
 /** Omit `profileId` to open the configured default profile. The reply names the profile that
  * actually started, which is what the tab is titled after. */
-export const openTerminal = (cwd: string, profileId?: string) =>
-  invoke<TerminalOpened>("open_terminal", { cwd, profileId });
+/** `account` opens the shell *as* one account of an AI CLI: every `claude`/`codex`/`grok`/`opencode`
+ * typed into it runs as that account. See `lib/aiAccounts.ts`. */
+export const openTerminal = (cwd: string, profileId?: string, account?: { provider: string; accountId: string } | null) =>
+  invoke<TerminalOpened>("open_terminal", {
+    cwd,
+    profileId,
+    accountProvider: account?.provider ?? null,
+    accountId: account?.accountId ?? null,
+  });
 
 export const writeTerminal = (id: string, data: string) => invoke<void>("write_terminal", { id, data });
 
@@ -704,7 +711,8 @@ export const defaultLockedBranchRules = () => invoke<string[]>("default_locked_b
 
 /** Models the given provider's CLI reports as available (e.g. `opencode models`). Empty for
  * providers whose CLI has no listing command — the caller falls back to a curated list. */
-export const listAiModels = (provider: string) => invoke<string[]>("list_ai_models", { provider });
+export const listAiModels = (provider: string, account?: string | null) =>
+  invoke<string[]>("list_ai_models", { provider, account: account ?? null });
 
 /** Opens an http(s) link in the default browser — e.g. a provider's billing page from its own
  * error message. Non-http schemes are rejected backend-side. */
@@ -712,8 +720,10 @@ export const openExternalUrl = (url: string) => invoke<void>("open_external_url"
 
 /** The statistics screen's whole payload for one window, in hours — and the only thing that reads
  * the recorded-spend table, now that the status bar draws quota alone. */
-export const aiUsageStats = (windowHours: number) =>
-  invoke<UsageStats>("ai_usage_stats", { windowHours });
+/** `account` narrows every breakdown but the per-account one to `provider|accountId` (`claude|` for
+ * the system account). */
+export const aiUsageStats = (windowHours: number, account?: string | null) =>
+  invoke<UsageStats>("ai_usage_stats", { windowHours, account: account ?? null });
 
 /** How much of each provider's plan is left, read from the providers themselves.
  *
@@ -779,6 +789,8 @@ export const upsertWorkspaceAgent = (
   model: string,
   prompt: string,
   enabled: boolean,
+  /** `null` automatic, `"system"`, or an account id. */
+  account?: string | null,
 ) =>
   invoke<WorkspaceAgent>("upsert_workspace_agent", {
     id: id ?? null,
@@ -789,6 +801,7 @@ export const upsertWorkspaceAgent = (
     model,
     prompt,
     enabled,
+    account: account ?? null,
   });
 
 export const deleteWorkspaceAgent = (id: string) => invoke<void>("delete_workspace_agent", { id });
@@ -812,6 +825,8 @@ export const createAgentTask = (
   goal: string,
   title: string,
   agentProjectId: string,
+  /** The agent's account preference, copied like its provider and model. */
+  account?: string | null,
 ) =>
   invoke<AgentTask>("create_agent_task", {
     workspaceId,
@@ -824,6 +839,7 @@ export const createAgentTask = (
     goal,
     title,
     agentProjectId,
+    account: account ?? null,
   });
 
 export const updateAgentTaskRun = (
@@ -1293,6 +1309,11 @@ export interface ChatReply {
   created_at: string;
   /** How long the engine took to answer, in milliseconds. */
   response_time_ms: number;
+  /** The account that answered — `null` for the CLI's system account. */
+  account_id?: string | null;
+  /** The thread had a session and this turn started a fresh one because the account changed —
+   * this chat does not replay history, so the panel says so. */
+  account_changed?: boolean;
 }
 
 /** `sessionId` is the engine's resume token; `conversationId` is *our* identity for the chat and
@@ -1304,6 +1325,8 @@ export interface ChatAgentOverride {
   provider: string;
   model: string;
   prompt: string;
+  /** The agent's account preference: `null`/absent automatic, `"system"`, or an account id. */
+  account?: string | null;
 }
 
 export const sendChatMessage = (
@@ -1323,6 +1346,7 @@ export const sendChatMessage = (
     agentProvider: agent?.provider ?? null,
     agentModel: agent?.model ?? null,
     agentPrompt: agent?.prompt ?? null,
+    agentAccount: agent?.account ?? null,
   });
 
 // ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------
@@ -1465,8 +1489,9 @@ export const resolvePrCommentThread = (
 
 /** Drafts a reply to a PR comment thread with AI. `conversation` is the thread as text and `note`
  * the gist the reply should carry; returns prose for the user to edit — nothing is posted. */
-export const draftPrCommentReply = (conversation: string, note: string | null, runId: string) =>
-  invoke<string>("draft_pr_comment_reply", { conversation, note, runId });
+/** `workspaceId` is the workspace the review is open in — what lets its default AI account apply. */
+export const draftPrCommentReply = (conversation: string, note: string | null, runId: string, workspaceId?: string | null) =>
+  invoke<string>("draft_pr_comment_reply", { conversation, note, runId, workspaceId: workspaceId ?? null });
 
 /** `force` answers a skip that asked — a draft, a merged PR. Only ever set in reply to a
  * {@link REVIEW_SKIPPED} message the user chose to override; a review never assumes it. */
@@ -1742,7 +1767,17 @@ export const inlineEditWithAi = (
   selection: string,
   instruction: string,
   runId?: string,
-) => invoke<string>("inline_edit_with_ai", { relPath, fileContent, selection, instruction, runId });
+  /** The workspace of the file being edited — what lets its default AI account apply. */
+  workspaceId?: string | null,
+) =>
+  invoke<string>("inline_edit_with_ai", {
+    relPath,
+    fileContent,
+    selection,
+    instruction,
+    runId,
+    workspaceId: workspaceId ?? null,
+  });
 
 // ---------- activity log (AI chat history / conversations) ----------
 

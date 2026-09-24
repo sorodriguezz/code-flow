@@ -4,8 +4,12 @@ import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { aiUsageStats } from "../../lib/tauri/commands";
 import { compactTokens, formatCost } from "../../lib/usageFormat";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import type { ModelStat, ProviderStat, TaskStat, UsageStats } from "../../types/domain";
+import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
+import type { AccountNamer } from "../../lib/aiAccounts";
+import type { AccountStat, ModelStat, ProviderStat, TaskStat, UsageStats } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { Select, type SelectOption } from "../common/Select";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 
 /** The windows the picker offers, in hours. Mirrors nothing on the backend — it takes whatever it
  * is given and buckets accordingly — so the set is a product decision, not a constraint. */
@@ -37,6 +41,13 @@ function providerLabel(provider: string): string {
   return AI_PROVIDERS.find((candidate) => candidate.id === provider)?.label ?? provider;
 }
 
+/** The backend's filter spelling for one account: `provider|id`, and `provider|` for the system one. */
+const usageKey = (stat: Pick<AccountStat, "provider" | "account_id">) => `${stat.provider}|${stat.account_id ?? ""}`;
+
+function accountRowLabel(stat: Pick<AccountStat, "provider" | "account_id">, nameOf: AccountNamer) {
+  return `${providerLabel(stat.provider)} · ${nameOf(stat.provider, stat.account_id)}`;
+}
+
 function tokensOf(stat: ProviderStat): number {
   return stat.input_tokens + stat.output_tokens + stat.cache_read_tokens + stat.cache_write_tokens;
 }
@@ -57,11 +68,21 @@ export function UsageStatsSection() {
   const [hours, setHours] = useState<number>(24 * 7);
   const [stats, setStats] = useState<UsageStats | null>(null);
   const [loading, setLoading] = useState(true);
+  /** `""` is every account; otherwise one, as `provider|id`. */
+  const [account, setAccount] = useState("");
+  const accounts = useAiAccountsStore((s) => s.accounts);
+  const accountsLoaded = useAiAccountsStore((s) => s.loaded);
+  const ensureAccounts = useAiAccountsStore((s) => s.ensure);
+  const nameOf = useAccountName();
+
+  useEffect(() => {
+    void ensureAccounts();
+  }, [ensureAccounts]);
 
   useEffect(() => {
     let live = true;
     setLoading(true);
-    aiUsageStats(hours)
+    aiUsageStats(hours, account || null)
       .then((answer) => {
         // Guarded twice: by the unmount flag, and by the window the answer says it is about. The
         // picker is faster than the query, and a slow answer for 30 days landing under the 5-hour
@@ -77,7 +98,30 @@ export function UsageStatsSection() {
     return () => {
       live = false;
     };
-  }, [hours]);
+  }, [hours, account]);
+
+  // Only where there is something to tell apart: an install with one login per CLI, and no history
+  // from an account since removed, reads exactly as it did before accounts existed.
+  const byAccount = stats?.accounts ?? [];
+  const showAccounts = accountsLoaded && (accounts.length > 0 || byAccount.some((row) => row.account_id));
+  const accountOptions: SelectOption[] = [
+    { value: "", label: t("usage.allAccounts") },
+    ...byAccount.map((row) => ({
+      value: usageKey(row),
+      label: accountRowLabel(row, nameOf),
+      leading: <ProviderGlyph providerId={row.provider} size={13} />,
+    })),
+  ];
+  // The picked account can have spent nothing in a newly picked window; it stays selectable
+  // rather than the filter silently resetting under the user.
+  if (account && !accountOptions.some((option) => option.value === account)) {
+    const [provider, id] = account.split("|");
+    accountOptions.push({
+      value: account,
+      label: accountRowLabel({ provider, account_id: id || null }, nameOf),
+      leading: <ProviderGlyph providerId={provider} size={13} />,
+    });
+  }
 
   const totals = useMemo(() => {
     const providers = stats?.providers ?? [];
@@ -113,6 +157,17 @@ export function UsageStatsSection() {
           </button>
         ))}
         {loading && <Loader2 size={13} className="ml-1 animate-spin text-[var(--cf-text-muted)]" />}
+        {showAccounts && (
+          <div className="ml-auto w-[210px]">
+            <Select
+              size="sm"
+              ariaLabel={t("usage.accountFilter")}
+              value={account}
+              onChange={setAccount}
+              options={accountOptions}
+            />
+          </div>
+        )}
       </div>
 
       {!stats || totals.runs === 0 ? (
@@ -147,6 +202,8 @@ export function UsageStatsSection() {
           <Chart stats={stats} locale={locale} />
 
           <ProviderSplit providers={stats.providers} total={totals.tokens} />
+
+          {showAccounts && !account && <AccountTable rows={byAccount} nameOf={nameOf} />}
 
           <ModelTable models={stats.models} />
 
@@ -307,6 +364,46 @@ function ProviderSplit({ providers, total }: { providers: ProviderStat[]; total:
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+/** Which login spent it — the split that says whether the second subscription is pulling its
+ * weight. Unfiltered on the backend, so it stays whole whichever account the screen is narrowed to;
+ * it is hidden while narrowed, where it would be a table of one. */
+function AccountTable({ rows, nameOf }: { rows: AccountStat[]; nameOf: AccountNamer }) {
+  const t = useT();
+  if (rows.length === 0) return null;
+  const peak = Math.max(...rows.map((row) => row.tokens), 1);
+
+  return (
+    <div className="rounded-lg border border-[var(--cf-border)] p-3">
+      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        {t("usage.byAccount")}
+      </p>
+      <div className="space-y-1.5">
+        {rows.map((row) => (
+          <div key={usageKey(row)}>
+            <div className="flex items-center gap-1.5 text-[12px]">
+              <ProviderGlyph providerId={row.provider} size={12} />
+              <span className="min-w-0 flex-1 break-words leading-snug">{accountRowLabel(row, nameOf)}</span>
+              <span className="shrink-0 tabular-nums text-[var(--cf-text-muted)]">
+                {t("usage.runsN", { n: row.runs })}
+              </span>
+              <span className="w-14 shrink-0 text-right tabular-nums">{compactTokens(row.tokens)}</span>
+              <span className="w-16 shrink-0 text-right tabular-nums text-[var(--cf-text-muted)]">
+                {row.costed_runs > 0 ? formatCost(row.cost_usd) : t("usage.noCost")}
+              </span>
+            </div>
+            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-black/[0.07] dark:bg-white/[0.1]">
+              <div
+                className="h-full rounded-full"
+                style={{ width: `${Math.max((row.tokens / peak) * 100, 2)}%`, background: colourFor(row.provider) }}
+              />
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );

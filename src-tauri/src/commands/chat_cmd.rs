@@ -3,7 +3,7 @@
 //!
 //! This is the successor to [`crate::commands::claude_cmd::send_chat_message`], not a second copy
 //! of it, and the routing helpers are shared with it rather than duplicated ([`load_ai_config`],
-//! [`load_ai_config_for`], [`AiTask`]). What is different here is everything that follows from one
+//! [`load_ai_config_as`], [`AiTask`]). What is different here is everything that follows from one
 //! premise: **a conversation does not have to be about a repository.** Three of this module's
 //! decisions come straight out of that, and each is a decision rather than a default.
 //!
@@ -75,7 +75,8 @@ use tauri::{AppHandle, State};
 use crate::ai;
 use crate::ai_locks;
 use crate::ai_runs;
-use crate::commands::claude_cmd::{load_ai_config, load_ai_config_for, AiTask};
+use crate::ai_accounts;
+use crate::commands::claude_cmd::{load_ai_config_as, load_ai_config_in, AiConfig, AiTask};
 use crate::commands::skills_cmd::sync_skills_into_project;
 use crate::db::models::{ChatConversation, ChatGroup, ChatMessageRow, ChatSearchHit};
 use crate::db::{chat_queries, queries, Db};
@@ -121,6 +122,10 @@ pub struct ChatReply {
     /// all while the reveal is running, so "not until the next open" would sometimes mean "not
     /// until tomorrow".
     outputs: Vec<String>,
+    /// The account that answered — `None` for the system account. Usually the thread's own; it
+    /// differs only when that account was deleted and the turn fell back to resolution, which the
+    /// row has now been re-stamped with.
+    account_id: Option<String>,
 }
 
 /// A slash command the composer's `/` menu can offer for a provider. See
@@ -362,8 +367,25 @@ pub fn chat_create_conversation(
     project_id: Option<String>,
     provider: String,
     model: String,
+    account: Option<String>,
 ) -> Result<ChatConversation, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // Which account the thread runs as is settled now, once, and stamped: its sessions will live in
+    // that account's directory, so a later change of default must not move a thread out from under
+    // them. `account` is the composer's explicit pick; without one it is resolved for the workspace
+    // the thread was started in — the same answer every other chat surface there gets.
+    let account_id = if provider.trim().is_empty() {
+        None
+    } else {
+        ai_accounts::resolve(
+            &conn,
+            &provider,
+            Some(AiTask::Chat.key()),
+            Some(&workspace_id),
+            ai_accounts::Choice::parse(account.as_deref()),
+        )
+        .account_id
+    };
     // The system prompt is chosen per turn, from whether the conversation has a repository (see
     // [`chat_send`]), so the column is left empty rather than frozen at creation. It exists for a
     // conversation whose prompt the *user* sets, which nothing offers yet.
@@ -372,6 +394,7 @@ pub fn chat_create_conversation(
         &workspace_id,
         project_id.as_deref(),
         &provider,
+        account_id.as_deref(),
         &model,
         "",
     )
@@ -438,15 +461,40 @@ pub fn chat_set_unread(
 /// The conversation's own engine is what `chat_send` runs on — not the workspace's chat routing —
 /// so this is the only way to change what a thread talks to. See [`chat_queries::set_engine`] for
 /// why a provider change drops the resume token and a model change does not.
+///
+/// `account` is what the picker chose — an account id, `system`, or nothing for "automatic", which
+/// is resolved here for the thread's own workspace and stamped. Picking a different account than
+/// the thread has drops its resume token, exactly as picking a different provider does.
 #[tauri::command]
 pub fn chat_set_engine(
     db: State<'_, Db>,
     conversation_id: String,
     provider: String,
     model: String,
-) -> Result<(), String> {
+    account: Option<String>,
+) -> Result<Option<String>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    chat_queries::set_engine(&conn, &conversation_id, &provider, &model).map_err(|e| e.to_string())
+    let conversation = chat_queries::get_conversation(&conn, &conversation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "conversation not found".to_string())?;
+    // No account named and the provider unchanged: the thread keeps the account it has. Only an
+    // explicit pick, or a move to another provider, resolves a new one.
+    let account_id = match (account.as_deref(), provider == conversation.provider) {
+        (None, true) => conversation.account_id.clone(),
+        (choice, _) => ai_accounts::resolve(
+            &conn,
+            &provider,
+            Some(AiTask::Chat.key()),
+            Some(&conversation.workspace_id),
+            ai_accounts::Choice::parse(choice),
+        )
+        .account_id,
+    };
+    chat_queries::set_engine(&conn, &conversation_id, &provider, account_id.as_deref(), &model)
+        .map_err(|e| e.to_string())?;
+    // Handed back so the window can name the account on the chip without a second read — an
+    // automatic pick is only known once it has been resolved here.
+    Ok(account_id)
 }
 
 // ---------- turns in flight ----------
@@ -803,6 +851,7 @@ pub fn chat_branch_conversation(
         &parent.workspace_id,
         parent.project_id.as_deref(),
         &parent.provider,
+        parent.account_id.as_deref(),
         &parent.model,
         &parent.system_prompt,
     )
@@ -984,24 +1033,17 @@ pub async fn chat_send(
     // engine and has to know which one it is before the turn's context is assembled.
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        match (provider.as_deref(), model.as_deref()) {
-            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                load_ai_config_for(&conn, p, m)?
-            }
-            _ if !conversation.provider.trim().is_empty() => {
-                load_ai_config_for(&conn, &conversation.provider, &conversation.model)?
-            }
-            _ => load_ai_config(&conn, AiTask::Chat)?,
-        }
+        conversation_config(&conn, &conversation, provider.as_deref(), model.as_deref())?
     };
 
-    // A resume token minted by a different engine is not portable — see
-    // `claude_cmd::session_for_provider` for the full argument. Here the previous provider is on
-    // the conversation row itself rather than needing a query.
+    // A resume token minted by a different engine — or by another account of the same one — is
+    // not portable: see `claude_cmd::session_for_engine` for the full argument. Here the pair that
+    // minted it is on the conversation row itself rather than needing a query.
     let session_id = conversation
         .engine_session_id
         .clone()
-        .filter(|_| conversation.provider == config.provider);
+        .filter(|_| conversation.provider == config.provider)
+        .filter(|_| conversation.account_id.as_deref() == config.account_id());
 
     /*
      * Compacting *before* the question rather than leaving it to the user to notice.
@@ -1392,6 +1434,8 @@ pub async fn chat_send(
                     &conn,
                     &conversation_id,
                     run.session_id.as_deref(),
+                    &config.provider,
+                    config.account_id(),
                     run.model.as_deref().unwrap_or(&config.model),
                     // The engine's own figure for what it was holding on the last step of this
                     // turn — see `AiRun::context_tokens` for why that is a different number from
@@ -1415,6 +1459,7 @@ pub async fn chat_send(
     };
 
     Ok(ChatReply {
+        account_id: config.account_id().map(str::to_string),
         text: run.text,
         session_id: run.session_id,
         model: run.model,
@@ -1524,14 +1569,47 @@ pub async fn chat_compact(
 
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        if conversation.provider.trim().is_empty() {
-            load_ai_config(&conn, AiTask::Chat)?
-        } else {
-            load_ai_config_for(&conn, &conversation.provider, &conversation.model)?
-        }
+        conversation_config(&conn, &conversation, None, None)?
     };
 
     run_compaction(app, &db, &conversation_id, &config, guidance.as_deref(), run_id).await
+}
+
+/// The engine a conversation's next turn runs on, most specific first: what this turn asked for,
+/// then what the conversation was opened on, then the global `chat` route.
+///
+/// The middle step is what keeps a reopened conversation answering on the engine *and account*
+/// that wrote it after the user has changed their defaults — a thread whose second half ran as
+/// another account would also have lost its session to it. A stamp naming an account that has since
+/// been removed resolves afresh for the thread's workspace, and the session rule in [`chat_send`]
+/// then drops the token it can no longer resume.
+fn conversation_config(
+    conn: &Connection,
+    conversation: &ChatConversation,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<AiConfig, String> {
+    let workspace = Some(conversation.workspace_id.as_str());
+    match (provider, model) {
+        (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
+            load_ai_config_as(conn, p, m, ai_accounts::Choice::Auto, Some(AiTask::Chat), workspace)
+        }
+        _ if !conversation.provider.trim().is_empty() => {
+            let stamped = match conversation.account_id.as_deref() {
+                Some(id) => ai_accounts::Choice::Account(id.to_string()),
+                None => ai_accounts::Choice::System,
+            };
+            load_ai_config_as(
+                conn,
+                &conversation.provider,
+                &conversation.model,
+                stamped,
+                Some(AiTask::Chat),
+                workspace,
+            )
+        }
+        _ => load_ai_config_in(conn, AiTask::Chat, workspace),
+    }
 }
 
 /// How full a conversation has to be before a turn compacts it on the way past.
@@ -2132,7 +2210,7 @@ mod tests {
     fn a_new_conversation_replays_nothing() {
         let conn = install();
         let ws = workspace(&conn);
-        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", "", "").unwrap();
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
         assert!(replayed_prefix(&conn, &c.id).is_none());
     }
 
@@ -2142,7 +2220,7 @@ mod tests {
     fn a_fresh_session_is_handed_what_came_before() {
         let conn = install();
         let ws = workspace(&conn);
-        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", "", "").unwrap();
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
         say(&conn, &c.id, 0, "user", "¿qué es un rebase?");
         say(&conn, &c.id, 0, "assistant", "Reaplica commits sobre otra base.");
 
@@ -2161,7 +2239,7 @@ mod tests {
     fn stopped_and_failed_turns_are_not_replayed() {
         let conn = install();
         let ws = workspace(&conn);
-        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", "", "").unwrap();
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
         say(&conn, &c.id, 0, "user", "pregunta real");
         chat_queries::append_message(
             &conn,
@@ -2196,7 +2274,7 @@ mod tests {
     fn a_long_conversation_replays_its_tail_without_splitting_a_character() {
         let conn = install();
         let ws = workspace(&conn);
-        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", "", "").unwrap();
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
         for turn in 0..40 {
             say(&conn, &c.id, turn, "user", &"ñ".repeat(1_200));
             say(&conn, &c.id, turn, "assistant", &format!("respuesta {turn}"));
@@ -2217,7 +2295,7 @@ mod tests {
     fn a_compacted_conversation_replays_the_summary_and_only_what_came_after() {
         let conn = install();
         let ws = workspace(&conn);
-        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", "", "").unwrap();
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
         say(&conn, &c.id, 0, "user", "cómo migro la tabla de usuarios");
         say(&conn, &c.id, 0, "assistant", "con una migración aditiva");
         say(&conn, &c.id, 1, "user", "y los índices");
@@ -2242,7 +2320,7 @@ mod tests {
     fn compacting_everything_still_replays_something() {
         let conn = install();
         let ws = workspace(&conn);
-        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", "", "").unwrap();
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
         say(&conn, &c.id, 0, "user", "hola");
         say(&conn, &c.id, 0, "assistant", "qué tal");
         chat_queries::set_compaction(&conn, &c.id, "una charla corta", 0).unwrap();
@@ -2261,7 +2339,7 @@ mod tests {
     fn a_long_tail_never_eats_the_summary() {
         let conn = install();
         let ws = workspace(&conn);
-        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", "", "").unwrap();
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
         say(&conn, &c.id, 0, "user", "la parte vieja");
         for turn in 1..40 {
             say(&conn, &c.id, turn, "user", &"ñ".repeat(1_200));
@@ -2287,7 +2365,7 @@ mod tests {
     fn a_turn_compacts_on_what_it_can_measure_and_nothing_else() {
         let conn = install();
         let ws = workspace(&conn);
-        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", "", "").unwrap();
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
 
         // ---- the replay path: measured, always available ----
         // Comfortably short. Nothing to do.
@@ -2309,7 +2387,7 @@ mod tests {
             "an unmeasured session must not be compacted on a guess"
         );
 
-        chat_queries::update_session(&conn, &c.id, Some("s-1"), "m", Some(190_000)).unwrap();
+        chat_queries::update_session(&conn, &c.id, Some("s-1"), "claude", None, "m", Some(190_000)).unwrap();
         let measured = chat_queries::get_conversation(&conn, &c.id).unwrap().unwrap();
         assert!(
             needs_compacting(&conn, &measured, "claude-sonnet-4-5", true),
@@ -2321,7 +2399,7 @@ mod tests {
         );
 
         // A quarter full is a quarter full.
-        chat_queries::update_session(&conn, &c.id, Some("s-1"), "m", Some(50_000)).unwrap();
+        chat_queries::update_session(&conn, &c.id, Some("s-1"), "claude", None, "m", Some(50_000)).unwrap();
         let roomy = chat_queries::get_conversation(&conn, &c.id).unwrap().unwrap();
         assert!(!needs_compacting(&conn, &roomy, "claude-sonnet-4-5", true));
 
@@ -2341,7 +2419,7 @@ mod tests {
     fn compacting_once_is_enough() {
         let conn = install();
         let ws = workspace(&conn);
-        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", "", "").unwrap();
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
         for turn in 0..40 {
             say(&conn, &c.id, turn, "user", &"ñ".repeat(1_200));
             say(&conn, &c.id, turn, "assistant", "vale");

@@ -20,7 +20,7 @@ use crate::fsops;
 use crate::db::version_queries::{self, DocVersion};
 use crate::db::{diagram_queries, Db};
 
-use super::claude_cmd::{load_ai_config, AiTask};
+use super::claude_cmd::AiTask;
 use crate::ai;
 use crate::ai_runs;
 
@@ -481,10 +481,13 @@ pub async fn diagrams_draw_with_ai(
     // `ai::draw_diagram`. `None` is the drawing one, which is what an older frontend sends.
     format: Option<String>,
     run_id: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<String, String> {
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        load_ai_config(&conn, AiTask::Diagram)?
+    // The workspace the caller is in, so its default account applies. Optional: a caller that
+    // does not say gets the task's pin or the provider's default. See `crate::ai_accounts`.
+        crate::commands::claude_cmd::load_ai_config_in(&conn, AiTask::Diagram, workspace_id.as_deref())?
     };
     // `scoped` is what puts the run in the AI run log and makes it cancellable, the same way every
     // other long call in the app is.
@@ -525,11 +528,12 @@ pub async fn diagrams_fill_rows_with_ai(
     // its foreign keys at rows that exist rather than guessing ids.
     keys: Option<String>,
     run_id: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<String, String> {
     let (config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         (
-            load_ai_config(&conn, AiTask::SampleRows)?,
+            crate::commands::claude_cmd::load_ai_config_in(&conn, AiTask::SampleRows, workspace_id.as_deref())?,
             crate::commands::claude_cmd::shared_template(&conn, "sample_rows_template", "")?,
         )
     };

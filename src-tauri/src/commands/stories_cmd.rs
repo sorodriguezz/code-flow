@@ -25,7 +25,7 @@ use crate::ai_locks;
 use crate::boards::{self, azure, BoardAuth, BoardProvider};
 use crate::commands::ado_cmd::pat_for_org;
 use crate::secrets;
-use crate::commands::claude_cmd::{load_ai_config, load_ai_config_for, AiTask};
+use crate::commands::claude_cmd::{load_ai_config_as, load_ai_config_in, AiTask};
 use crate::commands::skills_cmd::sync_skills_into_project;
 use crate::db::{
     models::{Project, StoryBatch, StoryBatchDetail, StoryDraft},
@@ -988,9 +988,9 @@ pub async fn review_work_item(
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                load_ai_config_for(&conn, p, m)?
+                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::Auto, Some(AiTask::WorkItemReview), Some(&workspace_id))?
             }
-            _ => load_ai_config(&conn, AiTask::WorkItemReview)?,
+            _ => load_ai_config_in(&conn, AiTask::WorkItemReview, Some(&workspace_id))?,
         };
         let mut template =
             queries::get_workspace_prompt(&conn, &workspace_id, prompt_kind).map_err(|e| e.to_string())?;
@@ -1399,9 +1399,9 @@ pub async fn generate_doc_page(
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                load_ai_config_for(&conn, p, m)?
+                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::Auto, Some(AiTask::Wiki), Some(&workspace_id))?
             }
-            _ => load_ai_config(&conn, AiTask::Wiki)?,
+            _ => load_ai_config_in(&conn, AiTask::Wiki, Some(&workspace_id))?,
         };
         let repo_template =
             queries::get_workspace_prompt(&conn, &workspace_id, "repo_doc").map_err(|e| e.to_string())?;
@@ -2078,9 +2078,9 @@ pub async fn generate_stories(
             .ok_or_else(|| "Ese conjunto de historias ya no existe".to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                load_ai_config_for(&conn, p, m)?
+                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::Auto, Some(AiTask::Stories), Some(&detail.batch.workspace_id))?
             }
-            _ => load_ai_config(&conn, AiTask::Stories)?,
+            _ => load_ai_config_in(&conn, AiTask::Stories, Some(&detail.batch.workspace_id))?,
         };
         let template = queries::get_workspace_prompt(&conn, &detail.batch.workspace_id, "user_stories")
             .map_err(|e| e.to_string())?;
@@ -2586,9 +2586,9 @@ pub async fn verify_stories(
         let skills = queries::list_workspace_skills(&conn, &batch.workspace_id).map_err(|e| e.to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                load_ai_config_for(&conn, p, m)?
+                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::Auto, Some(AiTask::StoryVerify), Some(&batch.workspace_id))?
             }
-            _ => load_ai_config(&conn, AiTask::StoryVerify)?,
+            _ => load_ai_config_in(&conn, AiTask::StoryVerify, Some(&batch.workspace_id))?,
         };
         let template = queries::get_workspace_prompt(&conn, &batch.workspace_id, "story_verify")
             .map_err(|e| e.to_string())?;

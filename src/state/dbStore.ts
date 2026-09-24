@@ -1903,6 +1903,7 @@ export const useDbStore = create<DbState>((set, get) => ({
         })),
         history,
         runId,
+        runWorkspaceId,
       );
       // `current.ai?.runId === runId`, not just `current.ai`, on this and both writes below. The bar
       // can be closed and reopened while a question is in flight — closing it cancels, but the CLI

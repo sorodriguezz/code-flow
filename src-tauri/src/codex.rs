@@ -207,8 +207,13 @@ impl AiEngine for CodexEngine {
     }
 }
 
-/// Codex's state directory: `$CODEX_HOME` when set (the CLI's own override), else `~/.codex`.
+/// Codex's state directory: the account's, when an engine bound to one is asking (see
+/// `ai_accounts::with_account`); else `$CODEX_HOME` when set (the CLI's own override), else
+/// `~/.codex`.
 pub(crate) fn codex_home() -> Option<std::path::PathBuf> {
+    if let Some(dir) = crate::ai_accounts::current_var("codex", "CODEX_HOME") {
+        return Some(std::path::PathBuf::from(dir));
+    }
     if let Some(dir) = std::env::var_os("CODEX_HOME") {
         return Some(std::path::PathBuf::from(dir));
     }

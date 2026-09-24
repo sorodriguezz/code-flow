@@ -223,6 +223,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
         instruction: instruction.trim(),
         format,
         runId: id,
+        workspaceId,
       });
       const parsed = isSchema ? await validateDbml(raw) : asDrawing(parseAiGraph(raw));
       if ("error" in parsed) {

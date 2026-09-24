@@ -46,10 +46,14 @@ pub const TABLES: &[&str] = &[
     "workspaces",
     "app_settings",
     "projects",
+    // The AI accounts the user added — names only. What makes an account *signed in* lives in its
+    // CLI's own directory or keychain item and never travels: a restored account signs in again.
+    "ai_accounts",
     // Workspace-scoped configuration.
     "review_contexts",
     "workspace_prompts",
     "workspace_git_identity",
+    "workspace_ai_accounts",
     "review_engine_config",
     "workspace_skills",
     "workspace_agents",
@@ -200,9 +204,11 @@ pub const CORE_TABLES: &[&str] = &[
     "workspaces",
     "app_settings",
     "projects",
+    "ai_accounts",
     "review_contexts",
     "workspace_prompts",
     "workspace_git_identity",
+    "workspace_ai_accounts",
     "review_engine_config",
     "workspace_skills",
     "workspace_agents",

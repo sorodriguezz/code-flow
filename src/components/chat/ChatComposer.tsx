@@ -47,6 +47,7 @@ export function ChatComposer({
   onAttachBytes,
   onRemoveAttachment,
   onPickEngine,
+  account,
   onPickEffort,
   sending,
   cancelling,
@@ -85,8 +86,11 @@ export function ChatComposer({
   onAttachBytes?: (name: string, data: Uint8Array) => Promise<void>;
   onRemoveAttachment?: (attachmentId: string) => void;
   /** Re-points the conversation. Absent until there is a conversation to re-point: before that the
-   *  chip writes the workspace's chat routing itself, which is what the next question will run on. */
-  onPickEngine?: (provider: string, model: string) => void | Promise<void>;
+   *  chip writes the workspace's chat routing itself, which is what the next question will run on.
+   *  `account` is passed only when one was picked. */
+  onPickEngine?: (provider: string, model: string, account?: string) => void | Promise<void>;
+  /** The conversation's account — `null` for the system one; absent before there is a conversation. */
+  account?: string | null;
   onPickEffort?: (effort: string) => void | Promise<void>;
   sending: boolean;
   cancelling?: boolean;
@@ -296,7 +300,7 @@ export function ChatComposer({
             <ChatModelPicker
               liveModel={null}
               chatActive={turns > 0}
-              bound={{ provider, model }}
+              bound={onPickEngine ? { provider, model, account } : undefined}
               onPick={onPickEngine}
             />
 

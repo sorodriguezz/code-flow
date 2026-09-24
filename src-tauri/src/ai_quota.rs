@@ -91,6 +91,9 @@ pub struct ProviderQuota {
     /// RFC 3339 of when these numbers were actually read from the provider — not of this call.
     /// A cached answer says so by carrying its original timestamp.
     pub fetched_at: String,
+    /// Which account of the provider this is — `None` for the CLI's system account. See
+    /// `crate::ai_accounts`; a provider with several accounts has one row per account.
+    pub account_id: Option<String>,
 }
 
 /// One reading of every provider that could be asked, plus which of them this install routes work
@@ -132,6 +135,10 @@ pub mod reason {
     /// above because it is *this app's* problem to fix, and distinct from an empty `error` because
     /// "I could not read it" must never be reported as "there is nothing to read".
     pub const UNREADABLE: &str = "unreadable";
+    /// An account this app added, which has not run since the app started. Its windows are what
+    /// the CLI reports at the end of each run — this app reads no token for an account it added —
+    /// so there is nothing to show until it has been used once.
+    pub const NOT_YET: &str = "not_yet";
 }
 
 /// Providers whose back end publishes a plan limit at all. Everything outside this list is absent
@@ -148,10 +155,26 @@ pub const QUOTA_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "opencode"];
 #[derive(Debug, Clone)]
 pub struct QuotaEngine {
     pub provider: String,
+    /// The account to read, or `None` for the CLI's system account. See `crate::ai_accounts`.
+    pub account: Option<crate::ai_accounts::AccountEnv>,
     /// The resolved, existing path to the CLI — already found, so a module that has to launch one
     /// does not go looking again and cannot end up running a different binary than the rest of the
     /// app would.
     pub binary: std::path::PathBuf,
+}
+
+impl QuotaEngine {
+    /// The cache key: the provider for the system account, `provider|id` for an added one.
+    fn key(&self) -> String {
+        match &self.account {
+            Some(account) => account.key(),
+            None => self.provider.clone(),
+        }
+    }
+
+    fn account_id(&self) -> Option<String> {
+        self.account.as_ref().and_then(|a| a.account_id.clone())
+    }
 }
 
 /// Who asked for a reading, which governs two decisions the caller cannot make for itself.
@@ -263,11 +286,11 @@ fn remember(provider: &str, quota: ProviderQuota) {
 /// a minute ago depends on it holding the last **good** answer.
 static LAST_ATTEMPT: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
-fn attempted_recently(provider: &str) -> bool {
+fn attempted_recently(key: &str, provider: &str) -> bool {
     let Ok(guard) = LAST_ATTEMPT.lock() else { return false };
     guard
         .as_ref()
-        .and_then(|seen| seen.get(provider))
+        .and_then(|seen| seen.get(key))
         .is_some_and(|at| at.elapsed() < fresh_for(provider))
 }
 
@@ -306,6 +329,7 @@ fn failed(provider: &str, error: &str) -> ProviderQuota {
         plan: String::new(),
         error: error.to_string(),
         fetched_at: now_rfc3339(),
+        account_id: None,
     }
 }
 
@@ -317,16 +341,19 @@ fn failed(provider: &str, error: &str) -> ProviderQuota {
 /// `Result`.
 /// `trigger` says who asked, which decides two different things — see [`Trigger`].
 pub async fn fetch_all(engines: Vec<QuotaEngine>, trigger: Trigger) -> Vec<ProviderQuota> {
-    let names: Vec<String> = engines.iter().map(|e| e.provider.clone()).collect();
+    let names: Vec<(String, Option<String>)> = engines.iter().map(|e| (e.provider.clone(), e.account_id())).collect();
     let mut running = Vec::with_capacity(engines.len());
     for engine in engines {
         running.push(tokio::spawn(fetch(engine, trigger)));
     }
     let mut out = Vec::with_capacity(running.len());
-    for (provider, handle) in names.iter().zip(running) {
+    for ((provider, account_id), handle) in names.iter().zip(running) {
         // A panicked task is reported as a failed provider rather than propagated: the panel is
         // still owed the other engine's numbers.
-        out.push(handle.await.unwrap_or_else(|e| failed(provider, &e.to_string())));
+        let mut quota = handle.await.unwrap_or_else(|e| failed(provider, &e.to_string()));
+        // Stamped here, once, so no reader below has to remember to — every row says whose it is.
+        quota.account_id = account_id.clone();
+        out.push(quota);
     }
     out
 }
@@ -334,8 +361,10 @@ pub async fn fetch_all(engines: Vec<QuotaEngine>, trigger: Trigger) -> Vec<Provi
 /// One provider, through the cache.
 pub async fn fetch(engine: QuotaEngine, trigger: Trigger) -> ProviderQuota {
     let provider = engine.provider.as_str();
+    let key = engine.key();
+    let key = key.as_str();
     if trigger != Trigger::Refresh {
-        if let Some((at, hit)) = cached(provider) {
+        if let Some((at, hit)) = cached(key) {
             if at.elapsed() < fresh_for(provider) {
                 return hit;
             }
@@ -349,7 +378,7 @@ pub async fn fetch(engine: QuotaEngine, trigger: Trigger) -> ProviderQuota {
     // spawns to the moments the answer is on screen. The background poll keeps serving the cache,
     // so an already-read number stays visible and merely ages.
     if trigger == Trigger::Poll && fresh_for(provider) > FRESH_FOR {
-        return cached(provider)
+        return cached(key)
             .map(|(_, previous)| previous)
             .unwrap_or_else(|| pending(provider));
     }
@@ -366,17 +395,17 @@ pub async fn fetch(engine: QuotaEngine, trigger: Trigger) -> ProviderQuota {
     // that follows genuinely re-runs instead of finding its own answer still fresh.
     if fresh_for(provider) > FRESH_FOR {
         if trigger == Trigger::Refresh {
-            forget(provider);
+            forget(key);
         }
         // The button always goes — it is the user saying "go and ask", and a button that does
         // nothing is worse than a slow one. Everything else is floored on when the CLI was last
         // *started* rather than on when it last succeeded, so a provider whose read keeps failing
         // is retried on the same half-hour rhythm as one that works, instead of on every open.
-        if trigger == Trigger::Refresh || !attempted_recently(provider) {
-            mark_attempt(provider);
+        if trigger == Trigger::Refresh || !attempted_recently(key, provider) {
+            mark_attempt(key);
             refresh_detached(engine.clone());
         }
-        return cached(provider)
+        return cached(key)
             .map(|(_, previous)| previous)
             .unwrap_or_else(|| pending(provider));
     }
@@ -401,6 +430,7 @@ fn pending(provider: &str) -> ProviderQuota {
         plan: String::new(),
         error: String::new(),
         fetched_at: String::new(),
+        account_id: None,
     }
 }
 
@@ -414,7 +444,7 @@ fn refresh_detached(engine: QuotaEngine) {
     {
         let Ok(mut guard) = IN_FLIGHT.lock() else { return };
         let running = guard.get_or_insert_with(std::collections::HashSet::new);
-        if !running.insert(engine.provider.clone()) {
+        if !running.insert(engine.key()) {
             return;
         }
     }
@@ -423,7 +453,7 @@ fn refresh_detached(engine: QuotaEngine) {
         let _ = read_now(&engine).await;
         if let Ok(mut guard) = IN_FLIGHT.lock() {
             if let Some(running) = guard.as_mut() {
-                running.remove(&engine.provider);
+                running.remove(&engine.key());
             }
         }
     });
@@ -432,14 +462,28 @@ fn refresh_detached(engine: QuotaEngine) {
 /// Reads one provider for real and files the result.
 async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
     let provider = engine.provider.as_str();
-    let fresh = match provider {
-        "claude" => claude::quota().await,
-        "codex" => codex::quota().await,
+    let key = engine.key();
+    let key = key.as_str();
+    // An added account is read from its own directory — or, for Claude, from what its last run
+    // reported, because this app reads no token for an account it added. See `crate::ai_accounts`.
+    let account_dir = |name: &str| engine.account.as_ref().and_then(|a| a.var(name)).map(std::path::PathBuf::from);
+    let fresh = match (provider, engine.account.is_some()) {
+        ("claude", true) => claude::from_last_run(key),
+        ("claude", false) => claude::quota().await,
+        ("codex", true) => match account_dir("CODEX_HOME") {
+            Some(dir) => codex::quota_at(dir.join("auth.json")).await,
+            None => failed("codex", reason::SIGNED_OUT),
+        },
+        ("codex", false) => codex::quota().await,
         // The only one handed the binary: it is the only provider whose quota is read by launching
         // the CLI rather than by asking a back end.
-        "gemini" => gemini::quota(&engine.binary).await,
-        "opencode" => opencode::quota().await,
-        other => failed(other, "unsupported"),
+        ("gemini", _) => gemini::quota(&engine.binary).await,
+        ("opencode", true) => match account_dir("XDG_DATA_HOME") {
+            Some(dir) => opencode::quota_at(dir.join("opencode").join("auth.json")).await,
+            None => failed("opencode", reason::SIGNED_OUT),
+        },
+        ("opencode", false) => opencode::quota().await,
+        (other, _) => failed(other, "unsupported"),
     };
 
     // A failed read falls back to the last good one rather than blanking the row. The stale answer
@@ -447,7 +491,7 @@ async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
     // than implied — and the cache clock is *not* reset, so the next poll tries again immediately
     // instead of serving the stale copy for another minute.
     if !fresh.error.is_empty() {
-        if let Some((_, previous)) = cached(provider) {
+        if let Some((_, previous)) = cached(key) {
             if !previous.limits.is_empty() {
                 return previous;
             }
@@ -458,12 +502,12 @@ async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
         // behind it. The HTTP providers are re-read by the next poll a minute later, so theirs
         // stays honest as it is.
         if fresh_for(provider) > FRESH_FOR {
-            remember(provider, fresh.clone());
+            remember(key, fresh.clone());
         }
         return fresh;
     }
 
-    remember(provider, fresh.clone());
+    remember(key, fresh.clone());
     fresh
 }
 
@@ -533,6 +577,7 @@ mod live {
                 let binary = crate::ai::engine_for(provider).default_binary().to_string();
                 crate::ai::find_on_path(&binary).map(|binary| super::QuotaEngine {
                     provider: provider.to_string(),
+                    account: None,
                     binary,
                 })
             })
@@ -688,7 +733,48 @@ mod claude {
     /// signed out of their own terminal by a status widget. So an expired credential is reported as
     /// [`reason::STALE`] and left alone — Claude Code refreshes it the next time it runs, including
     /// every time this app runs it, which makes the panel correct exactly when the engine is in use.
-    pub async fn quota() -> ProviderQuota {
+/// An added account's windows, from what its last run reported rather than from its token.
+    ///
+    /// The run prints them anyway (`rate_limit_event`, see `crate::claude::last_rate_limit`), so
+    /// for an account this app added it never opens a credential at all — the thing Anthropic's
+    /// terms ask a third-party app not to do. The price is freshness: the numbers are as of the
+    /// account's last run, which `fetched_at` says, and an account that has not run since the app
+    /// started has nothing to show yet.
+    pub fn from_last_run(account_key: &str) -> ProviderQuota {
+        let Some((limit, at)) = crate::claude::last_rate_limit(account_key) else {
+            return failed("claude", reason::NOT_YET);
+        };
+        let when = |seconds: i64| {
+            (seconds > 0)
+                .then(|| chrono::DateTime::from_timestamp(seconds, 0).map(|d| d.to_rfc3339()))
+                .flatten()
+                .unwrap_or_default()
+        };
+        let limits = vec![
+            QuotaLimit {
+                kind: "session".to_string(),
+                scope: String::new(),
+                used_percent: limit.five_hour_pct,
+                resets_at: when(limit.five_hour_resets_at),
+            },
+            QuotaLimit {
+                kind: "weekly".to_string(),
+                scope: String::new(),
+                used_percent: limit.seven_day_pct,
+                resets_at: when(limit.seven_day_resets_at),
+            },
+        ];
+        ProviderQuota {
+            provider: "claude".to_string(),
+            limits: tighten(limits),
+            plan: String::new(),
+            error: String::new(),
+            fetched_at: at,
+            account_id: None,
+        }
+    }
+
+        pub async fn quota() -> ProviderQuota {
         // Off the runtime, and not as a micro-optimisation: on macOS the first read raises a
         // system dialog asking the user to let this app open Claude Code's keychain item, and
         // `get_password` does not return until they answer it. That is an unbounded wait on a
@@ -738,6 +824,7 @@ mod claude {
             plan: String::new(),
             error: String::new(),
             fetched_at: now_rfc3339(),
+            account_id: None,
         }
     }
 
@@ -941,6 +1028,7 @@ mod gemini {
             plan: String::new(),
             error: String::new(),
             fetched_at: now_rfc3339(),
+            account_id: None,
         }
     }
 
@@ -1113,14 +1201,22 @@ mod opencode {
         Some(base.join("opencode").join("auth.json"))
     }
 
-    fn go_key() -> Option<String> {
-        let raw = std::fs::read_to_string(auth_path()?).ok()?;
+    fn go_key(path: &std::path::Path) -> Option<String> {
+        let raw = std::fs::read_to_string(path).ok()?;
         let all: std::collections::HashMap<String, Credential> = serde_json::from_str(&raw).ok()?;
         all.get(GO_CREDENTIAL)?.key.clone().filter(|k| !k.is_empty())
     }
 
     pub async fn quota() -> ProviderQuota {
-        let Some(key) = go_key() else {
+        match auth_path() {
+            Some(path) => quota_at(path).await,
+            None => silent(),
+        }
+    }
+
+    /// The same read, from one account's own `auth.json` — see `crate::ai_accounts`.
+    pub async fn quota_at(auth_path: std::path::PathBuf) -> ProviderQuota {
+        let Some(key) = go_key(&auth_path) else {
             // opencode is installed and possibly signed in to Zen or to a model provider of its
             // own, none of which have a window. Not an error — just nothing to draw, so the panel
             // leaves opencode out entirely.
@@ -1157,6 +1253,7 @@ mod opencode {
             plan: String::new(),
             error: String::new(),
             fetched_at: now_rfc3339(),
+            account_id: None,
         }
     }
 
@@ -1169,6 +1266,7 @@ mod opencode {
             plan: String::new(),
             error: String::new(),
             fetched_at: now_rfc3339(),
+            account_id: None,
         }
     }
 
@@ -1293,13 +1391,21 @@ mod codex {
         Some(crate::codex::codex_home()?.join("auth.json"))
     }
 
-    fn tokens() -> Option<Tokens> {
-        let raw = std::fs::read_to_string(auth_path()?).ok()?;
+    fn tokens_at(path: &std::path::Path) -> Option<Tokens> {
+        let raw = std::fs::read_to_string(path).ok()?;
         serde_json::from_str::<AuthFile>(&raw).ok()?.tokens
     }
 
     pub async fn quota() -> ProviderQuota {
-        let Some(tokens) = tokens() else {
+        match auth_path() {
+            Some(path) => quota_at(path).await,
+            None => failed("codex", reason::SIGNED_OUT),
+        }
+    }
+
+    /// The same read, from one account's own `auth.json` — see `crate::ai_accounts`.
+    pub async fn quota_at(auth_path: std::path::PathBuf) -> ProviderQuota {
+        let Some(tokens) = tokens_at(&auth_path) else {
             return failed("codex", reason::SIGNED_OUT);
         };
         let Some(access) = tokens.access_token.filter(|t| !t.is_empty()) else {
@@ -1338,6 +1444,7 @@ mod codex {
             plan,
             error: String::new(),
             fetched_at: now_rfc3339(),
+            account_id: None,
         }
     }
 

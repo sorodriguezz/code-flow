@@ -78,9 +78,13 @@ pub fn acknowledge_shared_root() -> Result<(), String> {
 /// The only reader of what this app recorded, now that the status bar draws provider quota alone —
 /// which is also why the retention sweep rides on this call (see `queries::ai_usage_stats`).
 #[tauri::command]
-pub fn ai_usage_stats(db: State<Db>, window_hours: i64) -> Result<crate::ai_usage::UsageStats, String> {
+pub fn ai_usage_stats(
+    db: State<Db>,
+    window_hours: i64,
+    account: Option<String>,
+) -> Result<crate::ai_usage::UsageStats, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    crate::db::queries::ai_usage_stats(&conn, window_hours).map_err(|e| e.to_string())
+    crate::db::queries::ai_usage_stats(&conn, window_hours, account.as_deref()).map_err(|e| e.to_string())
 }
 
 /// How much of each provider's plan is left — the counterpart to [`ai_usage_stats`], read from
@@ -129,6 +133,9 @@ pub async fn ai_quota_status(
         // rows, and holding the global mutex across a network call would stall every other command.
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let routed = crate::commands::claude_cmd::routed_providers(&conn)?;
+        // Every account of every installed provider: the system one, then each the user added —
+        // one row per account in the panel. See `crate::ai_accounts`.
+        let accounts = crate::ai_accounts::list(&conn).map_err(|e| e.to_string())?;
         let engines = crate::ai_quota::QUOTA_PROVIDERS
             .iter()
             .filter_map(|provider| {
@@ -138,15 +145,30 @@ pub async fn ai_quota_status(
                     .filter(|path| !path.trim().is_empty());
                 let binary = configured
                     .unwrap_or_else(|| crate::ai::engine_for(provider).default_binary().to_string());
-                crate::ai::find_on_path(&binary).map(|binary| crate::ai_quota::QuotaEngine {
+                let binary = crate::ai::find_on_path(&binary)?;
+                let mut engines = vec![crate::ai_quota::QuotaEngine {
                     provider: provider.to_string(),
-                    binary,
-                })
+                    account: None,
+                    binary: binary.clone(),
+                }];
+                if crate::ai_accounts::supports_accounts(provider) {
+                    engines.extend(accounts.iter().filter(|a| a.provider == *provider).map(|account| {
+                        crate::ai_quota::QuotaEngine {
+                            provider: provider.to_string(),
+                            account: Some(crate::ai_accounts::AccountEnv::for_account(provider, &account.id)),
+                            binary: binary.clone(),
+                        }
+                    }));
+                }
+                Some(engines)
             })
+            .flatten()
             .collect::<Vec<_>>();
         // Sorted so the payload is stable between reads: it is compared as a set on the other side,
-        // and a `HashSet`'s order is not.
+        // and a `HashSet`'s order is not. Added accounts ride along as `provider|id` — only the ones
+        // a preference points at, for the same reason only routed providers are here at all.
         let mut routed = routed.into_iter().collect::<Vec<_>>();
+        routed.extend(crate::ai_accounts::referenced(&conn).map_err(|e| e.to_string())?);
         routed.sort();
         (engines, routed)
     };

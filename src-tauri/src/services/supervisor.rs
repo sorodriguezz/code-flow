@@ -715,7 +715,7 @@ impl Supervisor {
         let app = app.clone();
         let on_exit: Box<dyn FnOnce(Option<i32>) + Send> =
             Box::new(move |code: Option<i32>| sup.on_exit(&app, &key, spawn_id, code));
-        PtyHooks { env, on_output: Some(on_output), on_exit: Some(on_exit) }
+        PtyHooks { env, env_remove: Vec::new(), on_output: Some(on_output), on_exit: Some(on_exit) }
     }
 
     fn on_output(&self, id: &str, spawn_id: u64, seq: u64, data: &str) {

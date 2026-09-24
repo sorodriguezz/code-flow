@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { aiQuotaStatus, getSetting, setSetting, type QuotaTrigger } from "../lib/tauri/commands";
 import { onTurnSettled } from "./agentEvents";
 import type { ProviderQuota, QuotaLimit } from "../types/domain";
+import { accountKey } from "../lib/aiAccounts";
 
 /** Where the status-bar pick is stored. Blank — the default — means "whichever is fullest". */
 const PICK_SETTING = "quota_pill_limit";
@@ -181,10 +182,24 @@ onTurnSettled(() => {
   if (watchers > 0 && state.fetched) void state.refresh();
 });
 
+/** One limit of one account of one provider — what the pill shows and the picker names. */
+export interface PickedLimit {
+  provider: string;
+  /** The row it came from, which is also what names its account. */
+  quota: ProviderQuota;
+  limit: QuotaLimit;
+}
+
+/** Which row of the panel a reading is: `provider` for the system account, `provider|id` for an
+ * added one — the same spelling `routed` uses for accounts. */
+export function quotaKey(quota: ProviderQuota): string {
+  return accountKey(quota.provider, quota.account_id);
+}
+
 /** Every limit across every provider that reported one, fullest first. */
-export function allLimits(providers: ProviderQuota[]): { provider: string; limit: QuotaLimit }[] {
+export function allLimits(providers: ProviderQuota[]): PickedLimit[] {
   return providers
-    .flatMap((p) => p.limits.map((limit) => ({ provider: p.provider, limit })))
+    .flatMap((quota) => quota.limits.map((limit) => ({ provider: quota.provider, quota, limit })))
     .sort((a, b) => b.limit.used_percent - a.limit.used_percent);
 }
 
@@ -215,9 +230,13 @@ export function wholeWindows(quota: ProviderQuota): QuotaLimit[] {
  * nothing that moves. Deliberately **not** an index: the list is sorted by fullness, so position 0
  * is a different window every few hours, and a stored index would silently start pointing at
  * something else. The scope is the provider's own label for a model, which can change when the
- * provider renames one — that is what `pillLimit` falling back to the fullest is for. */
-export function limitKey(provider: string, limit: QuotaLimit): string {
-  return `${provider}|${limit.kind}|${limit.scope}`;
+ * provider renames one — that is what `pillLimit` falling back to the fullest is for.
+ *
+ * An added account's window takes its id as a fourth part. The system account's has none, so a pick
+ * stored before accounts existed still names the same window. */
+export function limitKey(provider: string, limit: QuotaLimit, accountId?: string | null): string {
+  const base = `${provider}|${limit.kind}|${limit.scope}`;
+  return accountId ? `${base}|${accountId}` : base;
 }
 
 /** The limit the status-bar pill should draw: the user's pick when they made one and it is still
@@ -227,18 +246,14 @@ export function limitKey(provider: string, limit: QuotaLimit): string {
  * the CLI is mid-read, or a model was renamed underneath it — all of them temporary, none of them
  * worth turning a one-number pill into an error. The panel behind it says what happened, and the
  * pick is kept in the setting so it resumes the moment its window comes back. */
-export function pillLimit(
-  providers: ProviderQuota[],
-  routed: readonly string[],
-  pick: string,
-): { provider: string; limit: QuotaLimit } | null {
+export function pillLimit(providers: ProviderQuota[], routed: readonly string[], pick: string): PickedLimit | null {
   if (pick) {
     for (const quota of providers) {
-      const found = quota.limits.find((limit) => limitKey(quota.provider, limit) === pick);
+      const found = quota.limits.find((limit) => limitKey(quota.provider, limit, quota.account_id) === pick);
       // An explicit pick ignores `routed`: naming a plan is a stronger statement of interest than
       // anything the routing table implies, and a user who asks for opencode's week in the corner
       // means it whether or not a task points there today.
-      if (found) return { provider: quota.provider, limit: found };
+      if (found) return { provider: quota.provider, quota, limit: found };
     }
   }
   return tightestLimit(providers, routed);
@@ -256,12 +271,15 @@ export function pillLimit(
  *
  * Passing no `routed` compares everything, which is what the callers that are already looking at
  * one provider want. */
-export function tightestLimit(
-  providers: ProviderQuota[],
-  routed?: readonly string[],
-): { provider: string; limit: QuotaLimit } | null {
-  const eligible = routed ? providers.filter((quota) => routed.includes(quota.provider)) : providers;
-  return allLimits(eligible.map((quota) => ({ ...quota, limits: wholeWindows(quota) })))[0] ?? null;
+export function tightestLimit(providers: ProviderQuota[], routed?: readonly string[]): PickedLimit | null {
+  // By row, not by provider: an added account is only eligible when a preference routes to it,
+  // which the backend reports as `provider|id` beside the provider ids.
+  const eligible = routed ? providers.filter((quota) => routed.includes(quotaKey(quota))) : providers;
+  const best = allLimits(eligible.map((quota) => ({ ...quota, limits: wholeWindows(quota) })))[0];
+  if (!best) return null;
+  // Handed back with the untrimmed row, so a caller naming its window sees what the panel does.
+  const quota = eligible.find((row) => quotaKey(row) === quotaKey(best.quota)) ?? best.quota;
+  return { ...best, quota };
 }
 
 /** `95%`, `4%`, `0%`. Rounded **up** on purpose, mirroring how it used to round down when it

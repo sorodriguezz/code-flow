@@ -10,6 +10,8 @@ import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useAiModelsStore } from "../../state/aiModelsStore";
+import { useAccountName, useAiAccountsStore, useProviderAccounts } from "../../state/aiAccountsStore";
+import { SYSTEM_ACCOUNT, validPreference } from "../../lib/aiAccounts";
 import { useT } from "../../state/languageStore";
 import type { WorkspaceAgent } from "../../types/domain";
 
@@ -45,6 +47,16 @@ export function AgentEditorModal({
   const [prompt, setPrompt] = useState(agent?.prompt ?? "");
   const [enabled, setEnabled] = useState(agent?.enabled ?? true);
   const [saving, setSaving] = useState(false);
+  /** `""` automatic, `"system"`, or an account id — copied onto every task this agent starts. */
+  const [account, setAccount] = useState(agent?.account_id ?? "");
+  const ensureAccounts = useAiAccountsStore((s) => s.ensure);
+  const allAccounts = useAiAccountsStore((s) => s.accounts);
+  const providerAccounts = useProviderAccounts(provider);
+  const nameOf = useAccountName();
+
+  useEffect(() => {
+    void ensureAccounts();
+  }, [ensureAccounts]);
 
   const options = useMemo(
     () => (provider ? modelOptionsFor(provider, modelsByProvider[provider]) : []),
@@ -82,6 +94,7 @@ export function AgentEditorModal({
         resolvedModel,
         prompt,
         enabled,
+        validPreference(allAccounts, provider, account) || null,
       );
       await useAgentsStore.getState().reloadRoster();
       onClose();
@@ -144,8 +157,10 @@ export function AgentEditorModal({
               value={provider}
               onChange={(value) => {
                 setProvider(value);
-                // The previous id means nothing to a different engine, so the field starts over.
+                // The previous id means nothing to a different engine, so the field starts over —
+                // and so does the account, which belongs to one CLI.
                 setModel({ choice: "", custom: "" });
+                setAccount("");
               }}
               options={[
                 { value: "", label: t("settings.sddAgentProviderDefault") },
@@ -174,6 +189,21 @@ export function AgentEditorModal({
             />
           </Field>
         </div>
+
+        {providerAccounts.length > 0 && (
+          <Field label={t("accounts.pickerLabel")}>
+            <Select
+              size="field"
+              value={validPreference(allAccounts, provider, account)}
+              onChange={setAccount}
+              options={[
+                { value: "", label: t("accounts.automatic") },
+                { value: SYSTEM_ACCOUNT, label: nameOf(provider, null) },
+                ...providerAccounts.map((a) => ({ value: a.id, label: a.label })),
+              ]}
+            />
+          </Field>
+        )}
 
         <Field label={t("agents.fieldInstructions")}>
           <textarea

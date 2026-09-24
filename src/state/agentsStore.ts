@@ -390,6 +390,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       goal,
       taskTitleFrom(goal),
       agentProjectId ?? "",
+      agent.account_id ?? null,
     );
     // Newest first, matching the backend's ordering so the list doesn't reshuffle on next load.
     set((s) => ({
@@ -556,6 +557,9 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       provider: task.provider,
       model: task.model,
       prompt: task.prompt,
+      // The agent's account preference, copied onto the task with its provider and model. Null is
+      // automatic — the task's workspace default, then the provider's.
+      account: task.account_id ?? null,
     })
       .then((reply) => {
         // The live log is already in memory and formatted; attaching it to the message is what

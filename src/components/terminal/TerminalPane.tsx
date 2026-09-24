@@ -129,6 +129,7 @@ export function TerminalPane({
   onCommand,
   onClose,
   closeLabel,
+  autoFocus = false,
 }: {
   sessionId: string;
   visible: boolean;
@@ -185,6 +186,9 @@ export function TerminalPane({
   /** Overrides the close entry's wording, for a surface where closing is not what it is called —
    *  the bench, where removing a tile deletes the terminal rather than putting it away. */
   closeLabel?: string;
+  /** Takes the keyboard as soon as the terminal exists — for a dialog whose only job is this
+   *  shell, like signing an AI account in. Read once, at mount. */
+  autoFocus?: boolean;
 }) {
   const t = useT();
   const resolved = useThemeStore((s) => s.resolved);
@@ -197,6 +201,7 @@ export function TerminalPane({
   const backlogRef = useRef(backlog);
   const readOnlyRef = useRef(readOnly);
   const quietExitRef = useRef(quietExit);
+  const autoFocusRef = useRef(autoFocus);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   /** The size the pty was last told about, so an unchanged fit costs nothing. See `fitAndReport`. */
@@ -333,6 +338,7 @@ export function TerminalPane({
     term.open(containerRef.current);
     termRef.current = term;
     fitRef.current = fitAddon;
+    if (autoFocusRef.current) term.focus();
     clipboardKeys(term, { copy: copySelection, paste: pasteClipboard });
 
     // Before `onData` is wired and before the output listener is attached, so the replay can never

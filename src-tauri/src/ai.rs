@@ -492,6 +492,11 @@ pub struct AiRateLimit {
     pub five_hour_pct: f64,
     /// The weekly window.
     pub seven_day_pct: f64,
+    /// When each window rolls over, as the CLI said — seconds since the epoch, `0` when it did not.
+    #[serde(default)]
+    pub five_hour_resets_at: i64,
+    #[serde(default)]
+    pub seven_day_resets_at: i64,
 }
 
 /// Where the intra-message chunks of one reply are to be delivered.
@@ -937,6 +942,15 @@ pub trait AiEngine: Send + Sync {
     fn model_supports_effort(&self, model: &str) -> bool {
         self.supports_effort() && !model_is_known_non_reasoning(model)
     }
+
+    /// The account this engine runs as, when it is not the CLI's system account — only
+    /// [`AccountEngine`] answers `Some`. See `crate::ai_accounts`.
+    ///
+    /// **A method added to this trait must also be forwarded by [`AccountEngine`]**, or an engine
+    /// bound to an account quietly falls back to the trait's default for it.
+    fn account(&self) -> Option<&crate::ai_accounts::AccountEnv> {
+        None
+    }
 }
 
 /// Model families that are known **not** to reason, matched on the id rather than listed by it.
@@ -1112,6 +1126,117 @@ pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
         // the engine that can still talk to that endpoint.
         "cline" | "ollama" | "local" | "openai" => Box::new(crate::cline::ClineEngine),
         _ => Box::new(crate::claude::ClaudeEngine),
+    }
+}
+
+/// The engine for `provider`, running as `account`.
+///
+/// What every command's config is built from (see `claude_cmd::load_ai_config`), so the account is
+/// carried by the engine a run is handed rather than threaded through the twenty operations that
+/// take one: a flow cannot forget to pass it, because there is nothing to pass. The system account
+/// — and a CLI that cannot hold several — is the plain engine, unchanged.
+pub fn engine_as(provider: &str, account: crate::ai_accounts::AccountEnv) -> Box<dyn AiEngine> {
+    if account.is_system() || !crate::ai_accounts::supports_accounts(provider) {
+        return engine_for(provider);
+    }
+    Box::new(AccountEngine { inner: engine_for(provider), account })
+}
+
+/// An engine bound to one account of its CLI.
+///
+/// Forwards every method, each inside [`crate::ai_accounts::with_account`] — which is what lets
+/// the few that read the CLI's state in this process (Codex's model catalogue, Claude's per-run
+/// report) read the account's rather than the system one. The environment itself is applied where
+/// the process is built, in [`spawn_once`] and for the auxiliary calls.
+pub struct AccountEngine {
+    inner: Box<dyn AiEngine>,
+    account: crate::ai_accounts::AccountEnv,
+}
+
+impl AccountEngine {
+    fn with<T>(&self, f: impl FnOnce(&dyn AiEngine) -> T) -> T {
+        crate::ai_accounts::with_account(&self.account, || f(&*self.inner))
+    }
+}
+
+impl AiEngine for AccountEngine {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+    fn label(&self) -> &'static str {
+        self.inner.label()
+    }
+    fn default_binary(&self) -> &'static str {
+        self.inner.default_binary()
+    }
+    fn commit_message_model(&self) -> &'static str {
+        self.inner.commit_message_model()
+    }
+    fn fix_tools(&self) -> Vec<String> {
+        self.with(|e| e.fix_tools())
+    }
+    fn build_command(&self, binary: &str, inv: &AiInvocation) -> Command {
+        self.with(|e| e.build_command(binary, inv))
+    }
+    fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
+        self.with(|e| e.interpret(success, status_label, stdout, stderr))
+    }
+    fn list_models_args(&self) -> Option<Vec<String>> {
+        self.with(|e| e.list_models_args())
+    }
+    fn parse_models(&self, stdout: &str) -> Vec<String> {
+        self.with(|e| e.parse_models(stdout))
+    }
+    fn cached_models(&self) -> Option<Vec<String>> {
+        self.with(|e| e.cached_models())
+    }
+    fn retry_once_on(&self, error: &str) -> bool {
+        self.with(|e| e.retry_once_on(error))
+    }
+    fn fetch_models(&self) -> Option<ModelListing> {
+        self.with(|e| e.fetch_models())
+    }
+    fn usage_probe_args(&self, session_id: &str) -> Option<Vec<String>> {
+        self.with(|e| e.usage_probe_args(session_id))
+    }
+    fn parse_usage_probe(&self, stdout: &str) -> Option<AiUsage> {
+        self.with(|e| e.parse_usage_probe(stdout))
+    }
+    fn agentic(&self) -> bool {
+        self.with(|e| e.agentic())
+    }
+    fn stdin_payload(&self, inv: &AiInvocation) -> String {
+        self.with(|e| e.stdin_payload(inv))
+    }
+    fn reads_claude_skills(&self) -> bool {
+        self.with(|e| e.reads_claude_skills())
+    }
+    fn resumes_sessions(&self) -> bool {
+        self.with(|e| e.resumes_sessions())
+    }
+    fn streams_partial(&self) -> bool {
+        self.with(|e| e.streams_partial())
+    }
+    fn parse_delta(&self, line: &str) -> Vec<AiDelta> {
+        self.with(|e| e.parse_delta(line))
+    }
+    fn read_only_tools(&self) -> Vec<String> {
+        self.with(|e| e.read_only_tools())
+    }
+    fn attachment_args(&self, attachments: &[AiAttachment]) -> Vec<String> {
+        self.with(|e| e.attachment_args(attachments))
+    }
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        self.with(|e| e.effort_args(effort))
+    }
+    fn supports_effort(&self) -> bool {
+        self.with(|e| e.supports_effort())
+    }
+    fn model_supports_effort(&self, model: &str) -> bool {
+        self.with(|e| e.model_supports_effort(model))
+    }
+    fn account(&self) -> Option<&crate::ai_accounts::AccountEnv> {
+        Some(&self.account)
     }
 }
 
@@ -1633,6 +1758,11 @@ async fn spawn_once(
     }
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     apply_path(&mut cmd, &dirs);
+    // The account, after the path and for the same reason: every engine's command passes through
+    // here, so an engine bound to an account cannot be started as anyone else. See `ai_accounts`.
+    if let Some(account) = engine.account() {
+        account.apply(&mut cmd);
+    }
     // The engines build their own `Command`, so the no-console-window flag is applied here —
     // the one place every engine's command passes through on its way to being spawned.
     crate::proc::hide_console(&mut cmd);
@@ -1736,8 +1866,11 @@ fn record_usage(
     let Ok(run) = outcome else { return };
     let model = run.model.clone().unwrap_or_else(|| inv.model.to_string());
     let task = inv.task;
+    // Spend belongs to the account that ran — `None` is the system account.
+    let account = engine.account().cloned();
+    let account_id = account.as_ref().and_then(|a| a.account_id.clone());
     if let Some(usage) = &run.usage {
-        crate::ai_usage::record(engine.id(), &model, task, usage);
+        crate::ai_usage::record(engine.id(), &model, task, account_id.as_deref(), usage);
         return;
     }
     // Nothing on the run itself. Some CLIs will say if asked separately — detached, because the
@@ -1749,11 +1882,13 @@ fn record_usage(
     // probe in the first place.
     let engine_id = engine.id();
     let probe_binary = binary.to_string();
+    // The probe must run as the same account: opencode's `export` looks the session up in the
+    // account's own database, and the system one has never heard of it.
     tokio::spawn(async move {
-        let Ok(output) = capture(&probe_binary, &args).await else { return };
+        let Ok(output) = capture_as(&probe_binary, &args, account.as_ref()).await else { return };
         let stdout = String::from_utf8_lossy(&output.stdout);
         if let Some(usage) = engine_for(engine_id).parse_usage_probe(&stdout) {
-            crate::ai_usage::record(engine_id, &model, task, &usage);
+            crate::ai_usage::record(engine_id, &model, task, account_id.as_deref(), &usage);
         }
     });
 }
@@ -1762,7 +1897,19 @@ fn record_usage(
 /// reusing [`run`]'s binary resolution + `PATH` augmentation. No stdin plumbing — this isn't for
 /// model invocations, just for asking the CLI about itself.
 async fn capture(binary: &str, args: &[String]) -> Result<std::process::Output, String> {
+    capture_as(binary, args, None).await
+}
+
+/// [`capture`], run as `account` when there is one.
+async fn capture_as(
+    binary: &str,
+    args: &[String],
+    account: Option<&crate::ai_accounts::AccountEnv>,
+) -> Result<std::process::Output, String> {
     let mut cmd = aux_command(binary);
+    if let Some(account) = account {
+        account.apply(&mut cmd);
+    }
     cmd.args(args);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.output().await.map_err(|e| format!("failed to launch '{binary}': {e}"))
@@ -1801,7 +1948,8 @@ pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<Stri
     let Some(args) = engine.list_models_args() else {
         return Ok(Vec::new());
     };
-    let output = capture(binary, &args).await?;
+    // Asked as the engine's account: a plan decides which models there are.
+    let output = capture_as(binary, &args, engine.account()).await?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
         let detail = detail.trim();

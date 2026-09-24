@@ -58,6 +58,8 @@ import { modelRouteLabel } from "../ai/ModelTag";
 import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { CUSTOM_MODEL, ModelField, customModelPlaceholder, modelOptionsFor, parseModel } from "./modelPicker";
+import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
+import { SYSTEM_ACCOUNT, resolveAccount, validPreference } from "../../lib/aiAccounts";
 
 /** A prompt's text as it stands, beside the built-in it would fall back to. */
 interface PromptState {
@@ -96,6 +98,11 @@ export function AiTasksSettings() {
   const [choice, setChoice] = useState<Record<string, string>>({});
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [routingLoaded, setRoutingLoaded] = useState(false);
+  const ensureAccounts = useAiAccountsStore((s) => s.ensure);
+
+  useEffect(() => {
+    void ensureAccounts();
+  }, [ensureAccounts]);
 
   // ---------- prompts ----------
   const [prompts, setPrompts] = useState<Record<string, PromptState> | null>(null);
@@ -462,7 +469,23 @@ function TaskRow({
   const inherited = !selectedProvider;
   const broken = task.agenticOnly && !isAgenticProvider(provider);
   const options = modelOptionsFor(provider, modelsByProvider[provider] ?? []);
-  const engineLabel = modelRouteLabel(provider, taskModels[task.key] ?? "", t);
+  const accounts = useAiAccountsStore((s) => s.accounts);
+  const taskPins = useAiAccountsStore((s) => s.taskPins);
+  const workspaceDefaults = useAiAccountsStore((s) => s.workspaceDefaults);
+  const providerDefaults = useAiAccountsStore((s) => s.providerDefaults);
+  const setTaskPin = useAiAccountsStore((s) => s.setTaskPin);
+  const nameOf = useAccountName();
+  const providerAccounts = accounts.filter((account) => account.provider === provider);
+  // Named on the closed row only where there is a choice, so a single-account install reads exactly
+  // as it did: "Opus · Trabajo".
+  const engineLabel =
+    modelRouteLabel(provider, taskModels[task.key] ?? "", t) +
+    (providerAccounts.length > 0
+      ? ` · ${nameOf(
+          provider,
+          resolveAccount({ accounts, taskPins, workspaceDefaults, providerDefaults }, provider, task.key, workspaceId),
+        )}`
+      : "");
 
   const editedCount = prompts.filter((prompt) => {
     const entry = state[prompt.id];
@@ -583,6 +606,21 @@ function TaskRow({
                 onCustom={onCustom}
               />
             </div>
+            {providerAccounts.length > 0 && (
+              <div className="min-w-[140px] flex-1">
+                <Select
+                  size="sm"
+                  ariaLabel={t("accounts.pickerLabel")}
+                  value={validPreference(accounts, provider, taskPins[task.key])}
+                  onChange={(value) => void setTaskPin(task.key, value)}
+                  options={[
+                    { value: "", label: t("accounts.automatic") },
+                    { value: SYSTEM_ACCOUNT, label: nameOf(provider, null) },
+                    ...providerAccounts.map((account) => ({ value: account.id, label: account.label })),
+                  ]}
+                />
+              </div>
+            )}
           </div>
 
           {broken && (

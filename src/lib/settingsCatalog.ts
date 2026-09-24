@@ -53,6 +53,7 @@ import {
   SquarePen,
   TerminalSquare,
   Upload,
+  UsersRound,
   Volume2,
   Waypoints,
   Wrench,
@@ -199,6 +200,14 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         hintKey: "settings.providersHint",
         icon: Server,
         searchKey: "settings.searchTermsProviders",
+      },
+      // Right after the providers: which engines exist, then which logins each one has.
+      {
+        id: "accounts",
+        labelKey: "accounts.title",
+        hintKey: "accounts.hint",
+        icon: UsersRound,
+        searchKey: "settings.searchTermsAccounts",
       },
       // One pane, not the two it used to be. See `AiTasksSettings` for the argument: routing and
       // the prompt are two halves of the same row.

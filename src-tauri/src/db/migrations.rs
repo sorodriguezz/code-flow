@@ -1942,6 +1942,53 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     file_loose_notes_into_a_book(conn)?;
     move_ollama_settings_to_cline(conn)?;
     move_openai_settings_to_cline(conn)?;
+    add_ai_accounts(conn)?;
+    Ok(())
+}
+
+/// Several accounts per AI CLI — see `crate::ai_accounts` for what an account is.
+///
+/// Two tables and one column in six more, and the column means two different things depending on
+/// the table, on purpose:
+///
+/// - **Stamps** — `chat_conversations`, `activity_log`, `ai_usage`: the account a turn actually ran
+///   as. `NULL` is the system account, which is also what every row written before this existed
+///   ran as, so no backfill is needed. A resume token is only reused under the account it was
+///   stamped with.
+/// - **Preferences** — `workspace_agents`, and the copies `agent_tasks` / `agent_chain_steps` take
+///   when they are created, the same way they copy the agent's provider and model: `NULL` means
+///   "automatic" (resolved per run from the workspace), `'system'` the system account, anything
+///   else an account id.
+///
+/// `workspace_ai_accounts` holds a workspace's default per provider — an id or `'system'`; no row
+/// means "inherit the provider's default".
+fn add_ai_accounts(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ai_accounts (
+            id          TEXT PRIMARY KEY,
+            provider    TEXT NOT NULL,
+            label       TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS workspace_ai_accounts (
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            provider     TEXT NOT NULL,
+            account      TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, provider)
+         );",
+    )?;
+    for table in [
+        "chat_conversations",
+        "activity_log",
+        "ai_usage",
+        "workspace_agents",
+        "agent_tasks",
+        "agent_chain_steps",
+    ] {
+        if table_exists(conn, table)? && !has_column(conn, table, "account_id")? {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN account_id TEXT;"))?;
+        }
+    }
     Ok(())
 }
 

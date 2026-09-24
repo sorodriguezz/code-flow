@@ -2,7 +2,10 @@ import { useEffect, useState } from "react";
 import { providerDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "./ProviderGlyph";
 import { useT } from "../../state/languageStore";
-import { formatResetIn, formatUsed, severityOf, useQuotaStore } from "../../state/quotaStore";
+import { formatResetIn, formatUsed, quotaKey, severityOf, useQuotaStore } from "../../state/quotaStore";
+import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
+import type { AccountNamer } from "../../lib/aiAccounts";
+import type { AiAccount } from "../../lib/tauri/accountCommands";
 import type { ProviderQuota, QuotaLimit } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -59,6 +62,13 @@ export function QuotaLimits({ compact = false }: { compact?: boolean }) {
   const providers = useQuotaStore((s) => s.providers);
   const loading = useQuotaStore((s) => s.loading);
   const fetched = useQuotaStore((s) => s.fetched);
+  const accounts = useAiAccountsStore((s) => s.accounts);
+  const ensureAccounts = useAiAccountsStore((s) => s.ensure);
+  const nameOf = useAccountName();
+
+  useEffect(() => {
+    void ensureAccounts();
+  }, [ensureAccounts]);
 
   // Re-renders the countdowns without re-reading anything. `Date.now()` is read at render time, so
   // the state itself only exists to schedule the re-render.
@@ -81,7 +91,13 @@ export function QuotaLimits({ compact = false }: { compact?: boolean }) {
   return (
     <div className={compact ? "space-y-2.5" : "space-y-3.5"}>
       {providers.map((quota, index) => (
-        <ProviderBlock key={quota.provider} quota={quota} compact={compact} first={index === 0} />
+        <ProviderBlock
+          key={quotaKey(quota)}
+          quota={quota}
+          account={quotaAccountLabel(quota, accounts, nameOf)}
+          compact={compact}
+          first={index === 0}
+        />
       ))}
     </div>
   );
@@ -89,10 +105,13 @@ export function QuotaLimits({ compact = false }: { compact?: boolean }) {
 
 function ProviderBlock({
   quota,
+  account,
   compact,
   first,
 }: {
   quota: ProviderQuota;
+  /** Which of the provider's accounts this row is — `null` where it has only the one. */
+  account: string | null;
   compact: boolean;
   /** The first block draws no rule above it — a line under the panel's own header would be a
    * second one. */
@@ -110,6 +129,7 @@ function ProviderBlock({
         <ProviderGlyph providerId={quota.provider} size={12} />
         <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold text-[var(--cf-text)]">
           {providerDisplayLabel(quota.provider, t)}
+          {account && <span className="font-normal text-[var(--cf-text-muted)]"> · {account}</span>}
         </span>
         {quota.plan && (
           <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
@@ -202,8 +222,23 @@ function LimitRow({ limit, narrowed }: { limit: QuotaLimit; narrowed: Set<string
  * Fable". The status bar puts it in a tooltip and the picker puts it in a dropdown, and both have
  * to say exactly what the row in the panel says — a menu entry that names a window differently
  * from the bar it selects is a menu you cannot trust. */
-export function limitTitle(quota: ProviderQuota, limit: QuotaLimit, t: Translate): string {
-  return `${providerDisplayLabel(quota.provider, t)} · ${limitLabel(limit, narrowedKinds(quota), t)}`;
+export function limitTitle(quota: ProviderQuota, limit: QuotaLimit, t: Translate, account?: string | null): string {
+  const who = account ? `${providerDisplayLabel(quota.provider, t)} · ${account}` : providerDisplayLabel(quota.provider, t);
+  return `${who} · ${limitLabel(limit, narrowedKinds(quota), t)}`;
+}
+
+/** Which account a reading belongs to, named — or `null` for a provider with only its system
+ * account, whose rows read exactly as they did before accounts existed. */
+export function quotaAccountLabel(
+  quota: ProviderQuota,
+  accounts: readonly AiAccount[],
+  nameOf: AccountNamer,
+): string | null {
+  // The backend only reads accounts that exist, so an id missing here is a list not loaded yet —
+  // not a deleted account — and the row waits for it rather than flashing the wrong name.
+  if (quota.account_id && !accounts.some((account) => account.id === quota.account_id)) return null;
+  const several = quota.account_id != null || accounts.some((account) => account.provider === quota.provider);
+  return several ? nameOf(quota.provider, quota.account_id) : null;
 }
 
 export function narrowedKinds(quota: ProviderQuota): Set<string> {
@@ -250,5 +285,7 @@ function emptyMessage(error: string, t: Translate): string {
   if (error === "signed_out") return t("quota.signedOut");
   if (error === "stale") return t("quota.stale");
   if (error === "no_plan") return t("quota.noPlan");
+  // An added Claude account: its numbers arrive with its runs, so there are none before the first.
+  if (error === "not_yet") return t("quota.notYet");
   return t("quota.unreadable");
 }

@@ -4,6 +4,7 @@ mod applog;
 mod api;
 mod appmenu;
 mod ai_locks;
+mod ai_accounts;
 mod ai_quota;
 mod ai_runs;
 mod ai_usage;
@@ -743,6 +744,14 @@ pub fn run() {
             commands::settings::get_setting,
             commands::settings::get_settings,
             commands::settings::set_setting,
+            commands::ai_accounts_cmd::ai_accounts_list,
+            commands::ai_accounts_cmd::ai_account_create,
+            commands::ai_accounts_cmd::ai_account_rename,
+            commands::ai_accounts_cmd::ai_account_delete,
+            commands::ai_accounts_cmd::ai_account_status,
+            commands::ai_accounts_cmd::ai_account_logout,
+            commands::ai_accounts_cmd::ai_account_set_workspace_default,
+            commands::ai_accounts_cmd::ai_account_resolve,
             commands::settings::get_locked_branch_rules,
             commands::settings::set_locked_branch_rules,
             commands::settings::default_locked_branch_rules,

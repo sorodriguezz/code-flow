@@ -97,7 +97,7 @@ export function InlineEditWidget({
     setRunning(true);
     onRunningChange?.(true);
     try {
-      const replacement = await inlineEditWithAi(filePath, fileContent, selection, text, runId);
+      const replacement = await inlineEditWithAi(filePath, fileContent, selection, text, runId, workspaceId);
       // The editor refuses a rewrite whose file is no longer the one on screen, or whose request
       // has been superseded by a later Ctrl+I — see `applyInlineEdit`; `editNonce` is what names
       // this request to it, read out of the closure this call started in rather than off a later

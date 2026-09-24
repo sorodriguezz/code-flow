@@ -9,7 +9,7 @@ import {
 import { useChatHistoryStore } from "./activityStore";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { translate } from "./languageStore";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, useToastStore } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { formatAgentLogLine } from "../lib/agentLog";
@@ -392,6 +392,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           updatedAt: Date.now(),
           persisted: true,
         }));
+        // This panel does not replay the transcript into a new session, so a thread that moved to
+        // another account (a routing change since its last turn) is talking to a model that has
+        // not seen the messages above. Said once, as it happens.
+        if (reply.account_changed) useToastStore.getState().pushToast(translate("accounts.sessionReset"), "info");
         void useChatHistoryStore.getState().load(projectId);
         // The turn is persisted by the time this resolves, so a phone can go and read it. Nothing
         // about a chat turn moves a byte on disk, and its output stream is one no phone subscribes

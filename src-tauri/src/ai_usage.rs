@@ -39,14 +39,16 @@ pub fn attach(app: AppHandle) {
 /// Files one finished run's usage. Never fails and never blocks the caller.
 ///
 /// `task` is the feature that spent it — one of [`crate::ai::task`]'s constants.
-pub fn record(provider: &str, model: &str, task: &str, usage: &AiUsage) {
+/// `account_id` is the account that ran it — `None` for the CLI's system account. See
+/// `crate::ai_accounts`.
+pub fn record(provider: &str, model: &str, task: &str, account_id: Option<&str>, usage: &AiUsage) {
     if usage.is_empty() {
         return;
     }
     let Some(app) = APP.get() else { return };
     let Ok(db) = app.try_state::<Db>().ok_or(()) else { return };
     let Ok(conn) = db.0.lock() else { return };
-    let _ = queries::record_ai_usage(&conn, provider, model, task, usage);
+    let _ = queries::record_ai_usage(&conn, provider, model, task, account_id, usage);
 }
 
 /// Rows older than this are swept when the statistics screen reads: a screen that only ever looks
@@ -113,6 +115,18 @@ pub struct UsageBucket {
     pub cost_usd: f64,
 }
 
+/// One account's share of a window. `account_id` is `None` for the system account, which is also
+/// what every row recorded before accounts existed ran as.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountStat {
+    pub provider: String,
+    pub account_id: Option<String>,
+    pub runs: i64,
+    pub tokens: i64,
+    pub cost_usd: f64,
+    pub costed_runs: i64,
+}
+
 /// Everything the statistics screen draws, for one window.
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageStats {
@@ -127,6 +141,9 @@ pub struct UsageStats {
     /// Every feature that spent anything in the window, busiest first. A feature absent from here
     /// spent nothing — which is either true, or the bug.
     pub tasks: Vec<TaskStat>,
+    /// Per account, across providers — the breakdown the account filter is chosen from, so it is
+    /// always computed over the whole window rather than over the filtered slice.
+    pub accounts: Vec<AccountStat>,
     /// The busiest single bucket, as tokens. Zero for an empty window — the chart needs a scale
     /// and dividing by the maximum is the only one that does not need a quota to exist.
     pub peak_tokens: i64,

@@ -144,7 +144,7 @@ export function PrCommentCard({
     });
     setDrafting(true);
     try {
-      const text = await draftPrCommentReply(threadAsText(thread), replyBody.trim() || null, id);
+      const text = await draftPrCommentReply(threadAsText(thread), replyBody.trim() || null, id, workspaceId);
       setReplyBody(text.trim());
       // The draft is sitting in this thread's reply box, inside the panel — nowhere else to go.
       // `projectId` is absent for a link review, which belongs to no repository here.

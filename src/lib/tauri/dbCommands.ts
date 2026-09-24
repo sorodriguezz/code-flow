@@ -260,6 +260,8 @@ export const dbAiAssist = (
   lastResults: DbRunOutcome[],
   history: DbAiHistoryTurn[],
   runId: string,
+  /** The workspace the console is in, so its default AI account applies. */
+  workspaceId?: string | null,
 ) =>
   invoke<DbAiAnswer>("db_ai_assist", {
     connectionId,
@@ -270,4 +272,5 @@ export const dbAiAssist = (
     lastResults,
     history,
     runId,
+    workspaceId: workspaceId ?? null,
   });

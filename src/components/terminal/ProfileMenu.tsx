@@ -4,7 +4,11 @@ import { ChevronDown, Settings2, TerminalSquare } from "lucide-react";
 import { listShellProfiles } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
+import { useAiAccountsStore } from "../../state/aiAccountsStore";
+import { providerDisplayLabel } from "../../lib/aiProviders";
+import type { AiAccount } from "../../lib/tauri/accountCommands";
 import type { ShellProfile } from "../../types/domain";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 
 /**
  * The shell picker hanging off the `+` button, VS Code style: `+` opens the default profile,
@@ -14,8 +18,20 @@ import type { ShellProfile } from "../../types/domain";
  * small, and reading it fresh means a shell installed while the app was running, or a profile
  * just added in Settings, is in the menu without a restart or any invalidation plumbing.
  */
-export function ProfileMenu({ onPick, disabled }: { onPick: (profileId: string) => void; disabled: boolean }) {
+export function ProfileMenu({
+  onPick,
+  onPickAccount,
+  disabled,
+}: {
+  onPick: (profileId: string) => void;
+  /** Opens a shell *as* one AI account: every `claude`/`codex`/… typed into it runs as that
+   *  account. Listed only when accounts have been added; see `lib/aiAccounts.ts`. */
+  onPickAccount?: (account: AiAccount, title: string) => void;
+  disabled: boolean;
+}) {
   const t = useT();
+  const accounts = useAiAccountsStore((s) => s.accounts);
+  const ensureAccounts = useAiAccountsStore((s) => s.ensure);
   const openSettings = useUiStore((s) => s.openSettings);
   const [open, setOpen] = useState(false);
   const [profiles, setProfiles] = useState<ShellProfile[]>([]);
@@ -60,6 +76,7 @@ export function ProfileMenu({ onPick, disabled }: { onPick: (profileId: string) 
     void listShellProfiles()
       .then(setProfiles)
       .catch(() => setProfiles([]));
+    if (onPickAccount) void ensureAccounts();
     const onDown = (e: MouseEvent) => {
       const target = e.target as Node;
       // Both nodes, since the menu is no longer a descendant of the trigger's wrapper.
@@ -117,6 +134,31 @@ export function ProfileMenu({ onPick, disabled }: { onPick: (profileId: string) 
                 <span className="truncate">{profile.name}</span>
               </button>
             ))}
+            {onPickAccount && accounts.length > 0 && (
+              <>
+                <div className="my-1 border-t border-[var(--cf-border)]" />
+                <p className="px-2 pb-0.5 pt-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                  {t("accounts.terminalHeading")}
+                </p>
+                {accounts.map((account) => {
+                  const title = `${providerDisplayLabel(account.provider, t)} · ${account.label}`;
+                  return (
+                    <button
+                      key={account.id}
+                      role="menuitem"
+                      onClick={() => {
+                        setOpen(false);
+                        onPickAccount(account, title);
+                      }}
+                      className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
+                    >
+                      <ProviderGlyph providerId={account.provider} size={12} />
+                      <span className="truncate">{title}</span>
+                    </button>
+                  );
+                })}
+              </>
+            )}
             <div className="my-1 border-t border-[var(--cf-border)]" />
             <button
               role="menuitem"

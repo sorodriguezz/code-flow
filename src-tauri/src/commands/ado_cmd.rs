@@ -4,7 +4,7 @@ use tauri::{AppHandle, State};
 use crate::ado;
 use crate::commands::review_pipeline;
 use crate::ai;
-use crate::commands::claude_cmd::{load_ai_config, AiTask};
+use crate::commands::claude_cmd::{load_ai_config_as, load_ai_config_in, AiTask};
 use crate::commands::skills_cmd;
 use crate::db::{
     models::Project,
@@ -899,9 +899,9 @@ pub async fn review_pr_from_link(
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                crate::commands::claude_cmd::load_ai_config_for(&conn, p, m)?
+                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::Auto, Some(AiTask::Review), Some(&workspace_id))?
             }
-            _ => load_ai_config(&conn, AiTask::Review)?,
+            _ => load_ai_config_in(&conn, AiTask::Review, Some(&workspace_id))?,
         };
         // The same methodology and the same level directive the project-backed pipeline uses — a
         // review with no clone is shallower in what it can *read*, not in the rules it is held to.
@@ -1309,7 +1309,7 @@ pub async fn generate_pr_description(
     let project = load_project(&db, &project_id)?;
     let (config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let config = load_ai_config(&conn, AiTask::PrDescription)?;
+        let config = load_ai_config_in(&conn, AiTask::PrDescription, Some(&project.workspace_id))?;
         // The PR-description template is now the workspace's own (editable) copy — provider-neutral,
         // seeded with the built-in default. Falls back to that default when blanked.
         let template = queries::get_workspace_prompt(&conn, &project.workspace_id, "pr_description")
@@ -1772,9 +1772,9 @@ pub async fn review_pull_request(
         // An active agent reviews on its own provider + model; otherwise the Review task routing.
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                crate::commands::claude_cmd::load_ai_config_for(&conn, p, m)?
+                load_ai_config_as(&conn, p, m, crate::ai_accounts::Choice::Auto, Some(AiTask::Review), Some(&workspace_id))?
             }
-            _ => load_ai_config(&conn, AiTask::Review)?,
+            _ => load_ai_config_in(&conn, AiTask::Review, Some(&workspace_id))?,
         };
         // The workspace's review policy: what this depth level costs, what fails the gate, what is
         // in scope. Resolved once here and frozen into the run's memory, so a review read months

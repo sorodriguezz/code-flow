@@ -49,7 +49,7 @@ const CONVERSATION_COLUMNS: &str = "c.id, c.workspace_id, c.project_id, p.name, 
                                     c.compacted_summary, c.compacted_through_turn, \
                                     c.context_tokens, c.caveman_level, c.engine_session_id, \
                                     c.pinned_at, c.archived_at, c.parent_conversation_id, \
-                                    c.branched_at_turn, c.created_at, c.updated_at";
+                                    c.branched_at_turn, c.created_at, c.updated_at, c.account_id";
 
 /// A **LEFT** join, and that is the whole point of writing it once: `project_id` is nullable and
 /// usually null, so an inner join would return an empty sidebar on a correctly working app.
@@ -105,6 +105,7 @@ fn map_conversation(row: &rusqlite::Row) -> rusqlite::Result<ChatConversation> {
         branched_at_turn: row.get(20)?,
         created_at: row.get(21)?,
         updated_at: row.get(22)?,
+        account_id: row.get(23)?,
     })
 }
 
@@ -316,11 +317,13 @@ pub fn set_conversation_group(
 /// No title. The row is named by its first user message through
 /// [`autotitle_from_first_message`], because the alternatives are a modal before the first word or
 /// a sidebar of rows all called "New chat".
+#[allow(clippy::too_many_arguments)]
 pub fn create_conversation(
     conn: &Connection,
     workspace_id: &str,
     project_id: Option<&str>,
     provider: &str,
+    account_id: Option<&str>,
     model: &str,
     system_prompt: &str,
 ) -> rusqlite::Result<ChatConversation> {
@@ -330,9 +333,9 @@ pub fn create_conversation(
         "INSERT INTO chat_conversations
              (id, workspace_id, project_id, title, provider, model, system_prompt,
               engine_session_id, pinned_at, archived_at, parent_conversation_id,
-              branched_at_turn, created_at, updated_at)
-         VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, NULL, NULL, NULL, NULL, NULL, ?7, ?7)",
-        params![id, workspace_id, project_id, provider, model, system_prompt, at],
+              branched_at_turn, created_at, updated_at, account_id)
+         VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, NULL, NULL, NULL, NULL, NULL, ?7, ?7, ?8)",
+        params![id, workspace_id, project_id, provider, model, system_prompt, at, account_id],
     )?;
     // Read back rather than assembling the struct from the arguments: the row is the truth, and
     // this is the one place where a column default (`title`, the NULLs) would otherwise have to be
@@ -389,19 +392,26 @@ pub fn get_conversation(
 /// and "this conversation has never been measured", and the meter draws them differently: the
 /// previous turn's figure is stale by one exchange, which is a far better answer than a gauge that
 /// empties itself every time a CLI is quiet about its usage.
+///
+/// **The provider and account are written with the token**, because a token only means something
+/// to the pair that minted it. Writing the token alone was a latent bug: a turn that ran on
+/// another engine than the row named (a per-turn override) left a token the row's own engine would
+/// then try to resume.
 pub fn update_session(
     conn: &Connection,
     id: &str,
     engine_session_id: Option<&str>,
+    provider: &str,
+    account_id: Option<&str>,
     model: &str,
     context_tokens: Option<i64>,
 ) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE chat_conversations
-         SET engine_session_id = ?2, model = ?3,
+         SET engine_session_id = ?2, model = ?3, provider = ?6, account_id = ?7,
              context_tokens = COALESCE(?5, context_tokens), updated_at = ?4
          WHERE id = ?1",
-        params![id, engine_session_id, model, now(), context_tokens],
+        params![id, engine_session_id, model, now(), context_tokens, provider, account_id],
     )?;
     Ok(())
 }
@@ -492,22 +502,38 @@ pub fn clear_compaction(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 /// The commonest caller is not a person browsing the picker. It is a run that failed with "model
 /// not found" and offered the ids it would have accepted: the user presses one, and this is what
 /// makes that press stick past the next launch.
-pub fn set_engine(conn: &Connection, id: &str, provider: &str, model: &str) -> rusqlite::Result<()> {
-    let current: Option<String> = conn
-        .query_row("SELECT provider FROM chat_conversations WHERE id = ?1", params![id], |row| row.get(0))
+///
+/// An **account** change drops the token for the same reason a provider change does: each account
+/// keeps its sessions in its own directory (see `crate::ai_accounts`), so the new one has never
+/// heard of it. `account_id` is `None` for the system account.
+pub fn set_engine(
+    conn: &Connection,
+    id: &str,
+    provider: &str,
+    account_id: Option<&str>,
+    model: &str,
+) -> rusqlite::Result<()> {
+    let current: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT provider, account_id FROM chat_conversations WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .optional()?;
-    let switched = current.as_deref().is_some_and(|p| p != provider);
+    let switched = current
+        .as_ref()
+        .is_some_and(|(p, a)| p != provider || a.as_deref() != account_id);
     if switched {
         conn.execute(
             "UPDATE chat_conversations
-             SET provider = ?2, model = ?3, engine_session_id = NULL, updated_at = ?4
+             SET provider = ?2, model = ?3, account_id = ?5, engine_session_id = NULL, updated_at = ?4
              WHERE id = ?1",
-            params![id, provider, model, now()],
+            params![id, provider, model, now(), account_id],
         )?;
     } else {
         conn.execute(
-            "UPDATE chat_conversations SET provider = ?2, model = ?3, updated_at = ?4 WHERE id = ?1",
-            params![id, provider, model, now()],
+            "UPDATE chat_conversations SET provider = ?2, model = ?3, account_id = ?5, updated_at = ?4 WHERE id = ?1",
+            params![id, provider, model, now(), account_id],
         )?;
     }
     Ok(())
@@ -918,7 +944,7 @@ mod tests {
             (&second, "2026-01-01T00:00:00+00:00"),
             (&third, "2026-01-02T00:00:00+00:00"),
         ] {
-            let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+            let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
             set_conversation_group(&conn, &chat.id, Some(&group.id)).unwrap();
             conn.execute(
                 "UPDATE chat_conversations SET updated_at = ?2 WHERE id = ?1",
@@ -951,7 +977,7 @@ mod tests {
         .unwrap();
 
         // `quiet` holds the newest turn in the database — but it is archived.
-        let shelved = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let shelved = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         set_conversation_group(&conn, &shelved.id, Some(&quiet.id)).unwrap();
         set_archived(&conn, &shelved.id, true).unwrap();
         conn.execute(
@@ -960,7 +986,7 @@ mod tests {
         )
         .unwrap();
 
-        let live = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let live = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         set_conversation_group(&conn, &live.id, Some(&busy.id)).unwrap();
         conn.execute(
             "UPDATE chat_conversations SET updated_at = '2026-01-01T00:00:00+00:00' WHERE id = ?1",
@@ -979,7 +1005,7 @@ mod tests {
     fn archiving_a_folder_keeps_its_conversations_filed() {
         let conn = seeded();
         let group = create_group(&conn, "project", "").unwrap();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         set_conversation_group(&conn, &chat.id, Some(&group.id)).unwrap();
 
         set_group_archived(&conn, &group.id, true).unwrap();
@@ -998,9 +1024,9 @@ mod tests {
     #[test]
     fn the_list_is_flat_with_pinned_threads_on_top() {
         let conn = seeded();
-        let first = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
-        let second = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
-        let third = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let first = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
+        let second = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
+        let third = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
 
         // Touch them in a known order — `updated_at` has microsecond resolution, but three inserts
         // in a row can still land inside one microsecond on a fast machine.
@@ -1038,7 +1064,7 @@ mod tests {
     #[test]
     fn archiving_hides_a_thread_without_losing_it() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
 
         set_archived(&conn, &chat.id, true).unwrap();
         assert!(list_conversations(&conn, false).unwrap().is_empty());
@@ -1053,8 +1079,8 @@ mod tests {
     #[test]
     fn the_list_labels_the_repo_bound_threads_and_keeps_the_rest() {
         let conn = seeded();
-        create_conversation(&conn, "w1", Some("p1"), "claude", "", "").unwrap();
-        create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        create_conversation(&conn, "w1", Some("p1"), "claude", None, "", "").unwrap();
+        create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
 
         let listed = list_conversations(&conn, false).unwrap();
         assert_eq!(listed.len(), 2, "a conversation about nothing is still a conversation");
@@ -1069,7 +1095,7 @@ mod tests {
     #[test]
     fn appending_advances_the_turn_and_bumps_the_thread() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         assert_eq!(next_turn(&conn, &chat.id).unwrap(), 0, "an empty thread starts at 0");
 
         conn.execute(
@@ -1102,7 +1128,7 @@ mod tests {
     #[test]
     fn a_transcript_without_traces_carries_none() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         let trace = r#"[{"stream":"stdout","line":"running"}]"#;
         append_message(&conn, &assistant_message(&chat.id, 0, "hecho", Some(trace))).unwrap();
 
@@ -1119,7 +1145,7 @@ mod tests {
     #[test]
     fn deleting_a_conversation_takes_its_messages() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         append_message(&conn, &user_message(&chat.id, 0, "hola")).unwrap();
         append_message(&conn, &assistant_message(&chat.id, 0, "adiós", None)).unwrap();
 
@@ -1145,7 +1171,7 @@ mod tests {
         // test *is* the schema's — so it has to be asked for explicitly here.
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
 
-        let chat = create_conversation(&conn, "w1", Some("p1"), "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", Some("p1"), "claude", None, "", "").unwrap();
         append_message(&conn, &user_message(&chat.id, 0, "por qué falla el build")).unwrap();
 
         conn.execute("DELETE FROM projects WHERE id = 'p1'", []).unwrap();
@@ -1167,7 +1193,7 @@ mod tests {
     #[test]
     fn a_thread_names_itself_from_the_first_message_and_only_once() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         append_message(
             &conn,
             &user_message(&chat.id, 0, "  cómo\n  configuro el despliegue automático  "),
@@ -1215,10 +1241,10 @@ mod tests {
     #[test]
     fn search_reads_titles_and_bodies_and_answers_once_per_thread() {
         let conn = seeded();
-        let named = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let named = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         rename(&conn, &named.id, "Notas de despliegue").unwrap();
 
-        let bodied = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let bodied = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         append_message(
             &conn,
             &user_message(&bodied.id, 0, "el despliegue falla y el despliegue vuelve a fallar"),
@@ -1239,10 +1265,10 @@ mod tests {
     #[test]
     fn search_treats_wildcards_as_characters() {
         let conn = seeded();
-        let plain = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let plain = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         append_message(&conn, &user_message(&plain.id, 0, "sin nada especial")).unwrap();
 
-        let literal = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let literal = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         append_message(&conn, &user_message(&literal.id, 0, "el disco al 100% lleno")).unwrap();
 
         let hits = search(&conn, "100%", 10).unwrap();
@@ -1256,7 +1282,7 @@ mod tests {
     #[test]
     fn an_empty_query_finds_nothing() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         append_message(&conn, &user_message(&chat.id, 0, "hola")).unwrap();
         assert!(search(&conn, "   ", 10).unwrap().is_empty());
     }
@@ -1266,17 +1292,17 @@ mod tests {
     #[test]
     fn the_engine_session_and_the_model_are_recorded_together() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
         assert!(chat.engine_session_id.is_none());
 
-        update_session(&conn, &chat.id, Some("sess-1"), "claude-sonnet-4-5", Some(12_000)).unwrap();
+        update_session(&conn, &chat.id, Some("sess-1"), "claude", None, "claude-sonnet-4-5", Some(12_000)).unwrap();
         let updated = get_conversation(&conn, &chat.id).unwrap().unwrap();
         assert_eq!(updated.engine_session_id.as_deref(), Some("sess-1"));
         assert_eq!(updated.model, "claude-sonnet-4-5");
         assert_eq!(updated.context_tokens, Some(12_000));
 
         // An engine that cannot resume clears it rather than keeping a stale id around.
-        update_session(&conn, &chat.id, None, "claude-sonnet-4-5", None).unwrap();
+        update_session(&conn, &chat.id, None, "claude", None, "claude-sonnet-4-5", None).unwrap();
         assert!(get_conversation(&conn, &chat.id).unwrap().unwrap().engine_session_id.is_none());
     }
 
@@ -1289,15 +1315,15 @@ mod tests {
     #[test]
     fn a_silent_turn_keeps_the_last_measured_context() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
 
-        update_session(&conn, &chat.id, Some("s"), "m", Some(48_000)).unwrap();
-        update_session(&conn, &chat.id, Some("s"), "m", None).unwrap();
+        update_session(&conn, &chat.id, Some("s"), "claude", None, "m", Some(48_000)).unwrap();
+        update_session(&conn, &chat.id, Some("s"), "claude", None, "m", None).unwrap();
         assert_eq!(get_conversation(&conn, &chat.id).unwrap().unwrap().context_tokens, Some(48_000));
 
         // And a turn that does report overwrites it, including downwards — which is exactly what a
         // compaction looks like from here.
-        update_session(&conn, &chat.id, Some("s"), "m", Some(3_000)).unwrap();
+        update_session(&conn, &chat.id, Some("s"), "claude", None, "m", Some(3_000)).unwrap();
         assert_eq!(get_conversation(&conn, &chat.id).unwrap().unwrap().context_tokens, Some(3_000));
     }
 
@@ -1312,8 +1338,8 @@ mod tests {
     #[test]
     fn a_style_change_costs_nothing_and_keeps_the_session() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
-        update_session(&conn, &chat.id, Some("sess-1"), "m", Some(9_000)).unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
+        update_session(&conn, &chat.id, Some("sess-1"), "claude", None, "m", Some(9_000)).unwrap();
 
         set_caveman_level(&conn, &chat.id, "ultra").unwrap();
         let on = get_conversation(&conn, &chat.id).unwrap().unwrap();
@@ -1334,8 +1360,8 @@ mod tests {
     #[test]
     fn compacting_files_a_summary_and_forgets_the_session() {
         let conn = seeded();
-        let chat = create_conversation(&conn, "w1", None, "claude", "", "").unwrap();
-        update_session(&conn, &chat.id, Some("sess-1"), "m", Some(90_000)).unwrap();
+        let chat = create_conversation(&conn, "w1", None, "claude", None, "", "").unwrap();
+        update_session(&conn, &chat.id, Some("sess-1"), "claude", None, "m", Some(90_000)).unwrap();
 
         set_compaction(&conn, &chat.id, "hablamos de migraciones", 11).unwrap();
         let after = get_conversation(&conn, &chat.id).unwrap().unwrap();

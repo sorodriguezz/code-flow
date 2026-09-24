@@ -181,6 +181,7 @@ export function NoteAiPanel({
         selection,
         instruction: instruction.trim(),
         runId: id,
+        workspaceId,
       });
       const written = markdown.trim().length > 0;
       // The insert proves its own identity — see `onInsert`. When it refuses, the text is kept

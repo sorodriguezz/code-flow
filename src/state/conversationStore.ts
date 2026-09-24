@@ -407,6 +407,9 @@ export interface ConversationSession {
   title: string;
   provider: string;
   model: string | null;
+  /** The account this thread runs as — `null` for the CLI's system account. A resume token belongs
+   *  to its account's directory, so changing this drops `sessionId` just as a provider change does. */
+  accountId: string | null;
   /** How hard this conversation asks the model to think. `""` means no flag is sent, which leaves
    *  the CLI's own configuration in charge — a real state, not a missing one. */
   effort: string;
@@ -458,6 +461,7 @@ function newSession(conversation: ChatConversation): ConversationSession {
     workspaceId: conversation.workspaceId,
     title: conversation.title,
     provider: conversation.provider,
+    accountId: conversation.accountId ?? null,
     effort: conversation.effort ?? "",
     model: conversation.model || null,
     sessionId: conversation.engineSessionId,
@@ -481,6 +485,7 @@ const EMPTY_CONVERSATION: ConversationSession = {
   workspaceId: "",
   title: "",
   provider: "",
+  accountId: null,
   effort: "",
   model: null,
   sessionId: null,
@@ -572,7 +577,7 @@ interface ConversationState {
   loadConversations: (includeArchived?: boolean) => Promise<void>;
   /** Creates a conversation and selects it. `projectId` `null` is the ordinary case and is what
    *  makes the conversation read-only. */
-  create: (projectId: string | null, provider: string, model: string) => Promise<string | null>;
+  create: (projectId: string | null, provider: string, model: string, account?: string | null) => Promise<string | null>;
   /** Selects a conversation, reading its transcript back from disk unless memory is the only copy
    *  of it. Also what drives the memory cap. */
   open: (conversationId: string) => Promise<void>;
@@ -600,7 +605,7 @@ interface ConversationState {
   /** Re-points this conversation at an engine. Switching provider mid-thread is a context
    *  transplant, not a resume: the transcript survives because it is this app's rows, but the
    *  engine's own memory of it does not, and the next turn re-sends what it needs. */
-  setEngine: (conversationId: string, provider: string, model: string) => Promise<void>;
+  setEngine: (conversationId: string, provider: string, model: string, account?: string | null) => Promise<void>;
   /** How hard the model thinks, for every future turn of this conversation. `""` clears it and
    *  hands the decision back to whatever the CLI itself is configured with. */
   setEffort: (conversationId: string, effort: string) => Promise<void>;
@@ -1050,7 +1055,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     }
   },
 
-  create: async (projectId, provider, model) => {
+  create: async (projectId, provider, model, account) => {
     // Captured before the await for the same reason a run's stamp is: this is the workspace the
     // conversation belongs to, and by the time the row comes back the user may be standing in a
     // different one. A repository-bound chat takes its repository's workspace; an unbound one takes
@@ -1059,7 +1064,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       (projectId ? useWorkspaceStore.getState().workspaceOfProject(projectId) : null) ??
       useWorkspaceStore.getState().activeWorkspaceId;
     if (!workspaceId) return null;
-    const created = await chatCreateConversation(workspaceId, projectId, provider, model);
+    const created = await chatCreateConversation(workspaceId, projectId, provider, model, account);
     // Applied before the row reaches the store, so the first turn — which `ChatView` sends as soon
     // as this resolves — already runs at the level the user picked. Writing it afterwards would
     // make the opening message the one turn in the thread that ignored the control.
@@ -1213,6 +1218,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
             // The *last* turn's session is the one to resume — earlier ones are stale, since a CLI
             // may hand out a new token per turn.
             sessionId: meta?.engineSessionId ?? base.sessionId,
+            accountId: meta ? (meta.accountId ?? null) : base.accountId,
             model: rows.reduce<string | null>((last, r) => r.model ?? last, base.model),
             persisted: true,
           },
@@ -1377,6 +1383,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
           ],
           sessionId: reply.session_id,
           model: reply.model ?? current.model,
+          accountId: reply.account_id !== undefined ? reply.account_id : current.accountId,
           sending: false,
           runId: null,
           runStartedAt: null,
@@ -1525,14 +1532,14 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     }));
   },
 
-  setEngine: async (conversationId, provider, model) => {
-    const previous = get().byConversation[conversationId]?.provider;
-    await chatSetEngine(conversationId, provider, model);
+  setEngine: async (conversationId, provider, model, account) => {
+    const before = get().byConversation[conversationId];
+    const accountId = await chatSetEngine(conversationId, provider, model, account);
     set((s) => {
       const session = s.byConversation[conversationId];
       return {
         conversations: s.conversations.map((c) =>
-          c.id === conversationId ? { ...c, provider, model } : c,
+          c.id === conversationId ? { ...c, provider, model, accountId } : c,
         ),
         byConversation: session
           ? {
@@ -1541,11 +1548,17 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
                 ...session,
                 provider,
                 model,
+                accountId,
                 // Mirrors what the backend just did. A session id belongs to the CLI that minted
                 // it, so switching engine leaves this conversation with no resume token and the
                 // next turn starts that engine fresh — keeping the old id here would send Codex a
-                // token Claude issued and fail the turn on an argument, not on the question.
-                sessionId: previous && previous !== provider ? null : session.sessionId,
+                // token Claude issued and fail the turn on an argument, not on the question. The
+                // same holds for another account of the same CLI: its sessions live in its own
+                // directory.
+                sessionId:
+                  before && (before.provider !== provider || before.accountId !== accountId)
+                    ? null
+                    : session.sessionId,
               },
             }
           : s.byConversation,

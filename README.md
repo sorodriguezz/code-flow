@@ -11,7 +11,7 @@ a backlog, and let AI write your commits, find your bugs and resolve your confli
 native app. Then test the endpoint you just changed, query the database behind it and SSH into the
 box it runs on without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-1.20.6-6C5CE7)
+![version](https://img.shields.io/badge/version-1.20.7-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -158,6 +158,15 @@ without going through Settings.
 > 🔒 **Code that can't leave the company?** Set Cline as your provider, point it at a local model
 > (`cline auth ollama`) and everything above runs on your machine, offline and with no cost per
 > token — fixing findings included, because Cline drives the model instead of just completing text.
+
+### Two subscriptions, side by side
+
+Claude Code, Codex, Grok and Open Code can each hold **several accounts** — personal and work, or
+two plans — and run them **at the same time**. Add one in **Settings › AI Assistant › Accounts**:
+CodeFlow opens a terminal *as* that account and runs the CLI's own sign-in, so it never sees a
+password or a token. Then choose which account each task, workspace, agent or chat runs on; limits
+and usage are shown per account. Gemini keeps a single login per machine, so there it is a quick
+switch instead.
 
 ### What it's costing you
 

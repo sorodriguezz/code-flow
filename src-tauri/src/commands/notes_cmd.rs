@@ -12,7 +12,7 @@
 
 use tauri::{AppHandle, State};
 
-use super::claude_cmd::{load_ai_config, AiTask};
+use super::claude_cmd::AiTask;
 use crate::ai;
 use crate::ai_runs;
 use crate::db::models::{
@@ -343,10 +343,13 @@ pub async fn notes_write_with_ai(
     selection: String,
     instruction: String,
     run_id: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<String, String> {
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        load_ai_config(&conn, AiTask::Notes)?
+    // The workspace the caller is in, so its default account applies. Optional: a caller that
+    // does not say gets the task's pin or the provider's default. See `crate::ai_accounts`.
+        crate::commands::claude_cmd::load_ai_config_in(&conn, AiTask::Notes, workspace_id.as_deref())?
     };
     // `scoped` is what puts the run in the AI run log and makes it cancellable, the same way every
     // other long call in the app is.

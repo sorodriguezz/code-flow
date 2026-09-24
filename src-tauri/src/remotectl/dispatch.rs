@@ -677,6 +677,7 @@ pub async fn dispatch(
         "ai_usage_stats" => ok(commands::app_cmd::ai_usage_stats(
             app.state::<Db>(),
             opt(args, "windowHours")?.unwrap_or(24),
+            opt(args, "account")?,
         )?),
         // `trigger` is forced to `poll`: `open` and `refresh` let a provider read its quota by
         // *running its CLI*, and a phone polling in somebody's pocket must never spawn a
@@ -890,6 +891,7 @@ pub async fn dispatch(
                 opt(args, "sessionId")?,
                 opt(args, "conversationId")?,
                 opt(args, "runId")?,
+                None,
                 None,
                 None,
                 None,

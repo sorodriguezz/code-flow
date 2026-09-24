@@ -9,6 +9,9 @@ import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore
 import { useProviderStatusStore } from "../../state/providerStatusStore";
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
+import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
+import { SYSTEM_ACCOUNT, resolveAccount, validPreference } from "../../lib/aiAccounts";
 
 const WIDTH = 236;
 const GAP = 6;
@@ -39,6 +42,17 @@ const EDGE = 8;
  *
  * So a caller that owns the answer passes it in, and takes the write. Both props or neither:
  * `bound` without `onPick` would render a value the menu cannot change.
+ *
+ * # Accounts
+ *
+ * The third coordinate, after provider and model, for a CLI with more than one login (see
+ * `lib/aiAccounts.ts`). It appears only where there is a choice — a provider with at least one
+ * added account — as a row of pills above that provider's versions, and on the chip after the
+ * model: "Opus · Trabajo". Unbound, a pill is the chat task's own account pin, and "Automatic"
+ * leaves it to the workspace; bound, it is the conversation's account, which is always a concrete
+ * one. Moving a thread to another account starts a fresh engine session — that account cannot see
+ * the other's — and the chat workspace replays the transcript into it, so it is allowed mid-thread
+ * where moving provider is not.
  */
 export function ChatModelPicker({
   liveModel,
@@ -48,10 +62,12 @@ export function ChatModelPicker({
 }: {
   liveModel: string | null;
   chatActive: boolean;
-  /** The engine this chip is describing, when it is not the workspace's chat routing. */
-  bound?: { provider: string; model: string };
-  /** Where a selection goes in bound mode. Without it the pick falls through to the routing. */
-  onPick?: (provider: string, model: string) => void | Promise<void>;
+  /** The engine this chip is describing, when it is not the workspace's chat routing. `account` is
+   *  the thread's account — `null` for the system one. */
+  bound?: { provider: string; model: string; account?: string | null };
+  /** Where a selection goes in bound mode. Without it the pick falls through to the routing.
+   *  `account` is only passed when one was picked; absent keeps the thread's own. */
+  onPick?: (provider: string, model: string, account?: string) => void | Promise<void>;
 }) {
   const t = useT();
   const routedProvider = useTaskProvider("chat");
@@ -64,6 +80,20 @@ export function ChatModelPicker({
   const statuses = useProviderStatusStore((s) => s.byProvider);
   const checkAll = useProviderStatusStore((s) => s.checkAll);
   const openSettings = useUiStore((s) => s.openSettings);
+  const accounts = useAiAccountsStore((s) => s.accounts);
+  const taskPins = useAiAccountsStore((s) => s.taskPins);
+  const workspaceDefaults = useAiAccountsStore((s) => s.workspaceDefaults);
+  const providerDefaults = useAiAccountsStore((s) => s.providerDefaults);
+  const ensureAccounts = useAiAccountsStore((s) => s.ensure);
+  const setTaskPin = useAiAccountsStore((s) => s.setTaskPin);
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const nameOf = useAccountName();
+  /** The account picked in the open submenu, before a version is — `null` until a pill is touched. */
+  const [accountChoice, setAccountChoice] = useState<string | null>(null);
+
+  useEffect(() => {
+    void ensureAccounts();
+  }, [ensureAccounts]);
 
   const [open, setOpen] = useState(false);
   /** `null` = the provider list; otherwise the provider whose versions are being shown. */
@@ -79,6 +109,29 @@ export function ChatModelPicker({
   const active = AI_PROVIDERS.find((p) => p.id === providerId) ?? AI_PROVIDERS[0];
   const activeLabel = active.label ?? (active.labelKey ? t(active.labelKey) : active.id);
 
+  const prefs = { accounts, taskPins, workspaceDefaults, providerDefaults };
+  const hasAccounts = (id: string) => accounts.some((account) => account.provider === id);
+  /** The account a thread (bound) or the next chat (unbound) of `id` runs as — `null` is system. */
+  const effectiveAccount = (id: string): string | null =>
+    bound && id === bound.provider ? (bound.account ?? null) : resolveAccount(prefs, id, "chat", workspaceId);
+  /** Which pill is lit for `id`. Unbound, the pin itself — "" is Automatic. */
+  const selectedPill = (id: string): string => {
+    if (accountChoice !== null) return accountChoice;
+    if (!bound) return validPreference(accounts, id, taskPins.chat);
+    return effectiveAccount(id) ?? SYSTEM_ACCOUNT;
+  };
+
+  const pickAccount = (id: string, value: string) => {
+    setAccountChoice(value);
+    if (!bound) {
+      void setTaskPin("chat", value);
+      return;
+    }
+    // Bound to the thread it is already on: applied now, keeping the model. On another provider it
+    // waits for the version, which is what moves the thread there.
+    if (id === providerId && onPick) void onPick(providerId, configuredModel, value);
+  };
+
   const labelOf = (id: string) => {
     const p = AI_PROVIDERS.find((x) => x.id === id);
     return p ? (p.label ?? (p.labelKey ? t(p.labelKey) : id)) : id;
@@ -86,12 +139,14 @@ export function ChatModelPicker({
 
   const openMenu = () => {
     setBrowsing(null);
+    setAccountChoice(null);
     setOpen(true);
     if (Object.keys(statuses).length === 0) void checkAll();
   };
 
   const browse = (id: string) => {
     setBrowsing(id);
+    setAccountChoice(null);
     // Only now do we ask this one provider for its list — and with an age, because opening this
     // submenu *is* the question "what can I pick". Cached for the whole session it answered with
     // whatever was installed when the app booted: a model pulled ten minutes ago was missing from
@@ -150,7 +205,7 @@ export function ChatModelPicker({
     // routing as well would change what every *future* chat starts on because someone re-pointed
     // one thread. The two are deliberately not kept in step.
     if (onPick) {
-      await onPick(nextProvider, model);
+      await onPick(nextProvider, model, accountChoice ?? undefined);
       return;
     }
     await setTaskRouting("chat", nextProvider, model);
@@ -180,6 +235,7 @@ export function ChatModelPicker({
         <span className="text-[var(--cf-text-muted)]/50">·</span>
         <span className="truncate font-medium text-[var(--cf-text)]/70">
           {modelDisplayLabel(providerId, shownModel, t)}
+          {hasAccounts(providerId) && ` · ${nameOf(providerId, effectiveAccount(providerId))}`}
         </span>
         <ChevronDown size={10} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
@@ -243,6 +299,39 @@ export function ChatModelPicker({
                   <ChevronLeft size={12} />
                   {labelOf(browsing)}
                 </button>
+                {hasAccounts(browsing) && (
+                  <div
+                    role="radiogroup"
+                    aria-label={t("accounts.pickerLabel")}
+                    className="flex shrink-0 flex-wrap gap-1 border-b border-[var(--cf-border)] px-2 py-1.5"
+                  >
+                    {[
+                      ...(bound ? [] : [{ value: "", label: t("accounts.automatic") }]),
+                      { value: SYSTEM_ACCOUNT, label: nameOf(browsing, null) },
+                      ...accounts
+                        .filter((account) => account.provider === browsing)
+                        .map((account) => ({ value: account.id, label: account.label })),
+                    ].map((option) => {
+                      const on = selectedPill(browsing) === option.value;
+                      return (
+                        <button
+                          key={option.value || "auto"}
+                          type="button"
+                          role="radio"
+                          aria-checked={on}
+                          onClick={() => pickAccount(browsing, option.value)}
+                          className={`max-w-full truncate rounded-full border px-2 py-0.5 text-[10.5px] ${
+                            on
+                              ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                              : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                          }`}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
                 <div className="min-h-0 flex-1 overflow-auto p-1">
                   {versions === undefined ? (
                     <p className="flex items-center gap-1.5 px-2 py-2 text-[11px] text-[var(--cf-text-muted)]">

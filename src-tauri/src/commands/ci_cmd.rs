@@ -277,9 +277,10 @@ pub async fn analyze_pipeline_failure(
 
     let (config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let config = crate::commands::claude_cmd::load_ai_config(
+        let config = crate::commands::claude_cmd::load_ai_config_in(
             &conn,
             crate::commands::claude_cmd::AiTask::Pipeline,
+            Some(&project.workspace_id),
         )?;
         // Shared with every other provider, like the rest of the templates — the prompt is about
         // reading a CI log, and nothing about that changes because the engine behind it changed.

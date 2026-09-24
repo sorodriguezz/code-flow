@@ -4,7 +4,8 @@ import { Gauge, RefreshCw } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { formatUsed, pillLimit, severityOf, useQuotaStore } from "../../state/quotaStore";
-import { QuotaLimits, limitTitle } from "../ai/QuotaLimits";
+import { QuotaLimits, limitTitle, quotaAccountLabel } from "../ai/QuotaLimits";
+import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 
 const PANEL_WIDTH = 300;
 
@@ -45,6 +46,14 @@ export function UsageMeter() {
   const quotaRouted = useQuotaStore((s) => s.routed);
   const quotaPick = useQuotaStore((s) => s.pick);
   const quotaLoading = useQuotaStore((s) => s.loading);
+  const accounts = useAiAccountsStore((s) => s.accounts);
+  const ensureAccounts = useAiAccountsStore((s) => s.ensure);
+  const nameOf = useAccountName();
+  // Only once a reading names an added account: an install without any never loads the list.
+  const anyAccount = quotaProviders.some((quota) => quota.account_id);
+  useEffect(() => {
+    if (anyAccount) void ensureAccounts();
+  }, [anyAccount, ensureAccounts]);
   const refreshQuota = useQuotaStore((s) => s.refresh);
   const watchQuota = useQuotaStore((s) => s.watch);
 
@@ -96,8 +105,9 @@ export function UsageMeter() {
   // Which window it is, for the tooltip only. It stays out of the pill itself: on the automatic
   // pick it changes as windows roll over, and a label flickering between "week" and "session" is
   // harder to read than the bare number the panel explains.
-  const shownQuota = shown && quotaProviders.find((quota) => quota.provider === shown.provider);
-  const shownLabel = shown && shownQuota ? limitTitle(shownQuota, shown.limit, t) : null;
+  const shownQuota = shown?.quota;
+  const shownLabel =
+    shown && shownQuota ? limitTitle(shownQuota, shown.limit, t, quotaAccountLabel(shownQuota, accounts, nameOf)) : null;
 
   return (
     <>

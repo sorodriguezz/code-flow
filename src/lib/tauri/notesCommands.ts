@@ -187,6 +187,8 @@ export const notesWriteWithAi = (args: {
   selection: string;
   instruction: string;
   runId?: string;
+  /** The note's workspace, so its default AI account applies. */
+  workspaceId?: string | null;
 }) =>
   invoke<string>("notes_write_with_ai", {
     title: args.title,
@@ -194,6 +196,7 @@ export const notesWriteWithAi = (args: {
     selection: args.selection,
     instruction: args.instruction,
     runId: args.runId ?? null,
+    workspaceId: args.workspaceId ?? null,
   });
 
 // ---------- scope ----------

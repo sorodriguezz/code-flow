@@ -142,6 +142,7 @@ export function SandboxAiFill({
           only,
           keys,
           runId: id,
+          workspaceId,
         });
         const parsed = parseAiRows(raw);
         // A pass that answered with nothing usable is *counted*, not skipped. Silently carrying on

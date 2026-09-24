@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef } from "react";
+import { AiAccountsSettings } from "./AiAccountsSettings";
 import { AiCompletionSettings } from "./AiCompletionSettings";
 import { AiTasksSettings } from "./AiTasksSettings";
 import { useT } from "../../state/languageStore";
@@ -16,6 +17,7 @@ import { Panel, SettingsHeader } from "../api/settingsChrome";
  *
  * The panes, in the order you'd actually set them up:
  *   1. **Providers** — which engines exist, whether they're installed, how each is configured.
+ *      **Accounts** follows it: the logins each of those engines has, and which one runs where.
  *   2. **Tasks and prompts** — which engine runs each action, and what it is told to do.
  *   3. **Autocomplete** — the model that runs on this machine and finishes what you type.
  *   4. **Limits** — how far through each provider's plan you are, as the provider reports it.
@@ -90,6 +92,7 @@ export function ClaudeSettings() {
             )}
 
             {tab === "providers" && <ProvidersSection />}
+            {tab === "accounts" && <AiAccountsSettings />}
             {tab === "tasks" && <AiTasksSettings />}
             {tab === "completion" && <AiCompletionSettings />}
             {tab === "limits" && <QuotaSection />}

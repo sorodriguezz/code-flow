@@ -333,7 +333,8 @@ export function QuickAskWindow() {
         // Before the first question there is no row to re-point, and the chip falls through to the
         // workspace's chat routing on its own — which is exactly what the next question will run
         // on. Once a conversation exists it owns its engine, so the pick goes to the row instead.
-        onPickEngine={conversationId ? (p, m) => setEngine(conversationId, p, m) : undefined}
+        onPickEngine={conversationId ? (p, m, a) => setEngine(conversationId, p, m, a) : undefined}
+        account={session.accountId}
         attachments={EMPTY_QUICK_ATTACHMENTS}
         sending={session.sending}
         turns={session.messages.length}

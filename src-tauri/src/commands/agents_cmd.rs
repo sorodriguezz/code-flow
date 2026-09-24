@@ -115,6 +115,7 @@ pub fn create_agent_task(
     goal: String,
     title: String,
     agent_project_id: String,
+    account: Option<String>,
 ) -> Result<AgentTask, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::create_agent_task(
@@ -129,6 +130,7 @@ pub fn create_agent_task(
         &goal,
         &title,
         &agent_project_id,
+        account.as_deref(),
     )
     .map_err(|e| e.to_string())
 }

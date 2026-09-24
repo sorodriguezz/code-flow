@@ -12,7 +12,7 @@ una sola app nativa y rápida. Después prueba el endpoint que acabas de cambiar
 datos que hay detrás y entra por SSH a la máquina donde corre, sin salir de la ventana. **Tú decides
 qué modelo hace qué.**
 
-![versión](https://img.shields.io/badge/versión-1.20.6-6C5CE7)
+![versión](https://img.shields.io/badge/versión-1.20.7-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-EN%20%7C%20ES-0984E3)
@@ -159,6 +159,15 @@ propio chat, sin pasar por Ajustes.
 > 🔒 **¿Código que no puede salir de la empresa?** Pon Cline como proveedor, apúntalo a un modelo
 > local (`cline auth ollama`) y todo lo anterior corre en tu máquina, sin conexión y sin coste por
 > token — corregir hallazgos incluido, porque Cline maneja el modelo en vez de solo completar texto.
+
+### Dos suscripciones, lado a lado
+
+Claude Code, Codex, Grok y Open Code pueden tener **varias cuentas** cada uno — personal y trabajo, o
+dos planes — y usarlas **a la vez**. Añade una en **Ajustes › Asistente de IA › Cuentas**: CodeFlow
+abre una terminal *como* esa cuenta y ejecuta el inicio de sesión del propio CLI, así que nunca ve
+una contraseña ni un token. Luego eliges con qué cuenta trabaja cada tarea, espacio de trabajo,
+agente o chat; los límites y el uso se muestran por cuenta. Gemini guarda una sola sesión por equipo,
+así que ahí es un cambio rápido de cuenta.
 
 ### Lo que te está costando
 

@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Gauge, RefreshCw } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { ageOf, limitKey, useQuotaStore } from "../../state/quotaStore";
-import { QuotaLimits, limitLabel, limitTitle } from "../ai/QuotaLimits";
+import { QuotaLimits, limitLabel, limitTitle, quotaAccountLabel } from "../ai/QuotaLimits";
+import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { providerDisplayLabel } from "../../lib/aiProviders";
 import { Select, type SelectOption } from "../common/Select";
@@ -57,13 +58,15 @@ function PillPicker() {
   const providers = useQuotaStore((s) => s.providers);
   const pick = useQuotaStore((s) => s.pick);
   const setPick = useQuotaStore((s) => s.setPick);
+  const accounts = useAiAccountsStore((s) => s.accounts);
+  const nameOf = useAccountName();
 
   const options: SelectOption[] = [
     { value: "", label: t("quota.pillAuto"), icon: Gauge },
     ...providers.flatMap((quota) =>
       quota.limits.map((limit) => ({
-        value: limitKey(quota.provider, limit),
-        label: limitTitle(quota, limit, t),
+        value: limitKey(quota.provider, limit, quota.account_id),
+        label: limitTitle(quota, limit, t, quotaAccountLabel(quota, accounts, nameOf)),
         leading: <ProviderGlyph providerId={quota.provider} size={13} />,
       })),
     ),
@@ -72,11 +75,14 @@ function PillPicker() {
   // Its name is rebuilt from the key itself, which is exactly why the key stores the parts a label
   // is made of instead of an index: a window that is not in this reading can still say what it is.
   if (pick && !options.some((option) => option.value === pick)) {
-    const [provider, kind, scope] = pick.split("|");
+    const [provider, kind, scope, account] = pick.split("|");
     const rebuilt = limitLabel({ kind, scope, used_percent: 0, resets_at: "" }, new Set(), t);
+    const who = account
+      ? `${providerDisplayLabel(provider, t)} · ${nameOf(provider, account)}`
+      : providerDisplayLabel(provider, t);
     options.push({
       value: pick,
-      label: t("quota.pillMissing", { limit: `${providerDisplayLabel(provider, t)} · ${rebuilt}` }),
+      label: t("quota.pillMissing", { limit: `${who} · ${rebuilt}` }),
       leading: <ProviderGlyph providerId={provider} size={13} />,
     });
   }

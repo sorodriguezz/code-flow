@@ -9,6 +9,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+use crate::ai_accounts;
 use crate::ai::{self, AiEngine};
 use crate::ai_locks;
 use crate::ai_runs;
@@ -34,6 +35,13 @@ pub struct ChatReply {
     created_at: String,
     /// How long the engine took to answer, in milliseconds — shown under the reply.
     response_time_ms: i64,
+    /// The account that answered — `None` for the CLI's system account.
+    account_id: Option<String>,
+    /// The thread had a session, and this turn started a fresh one because the account changed.
+    /// A session lives in its account's directory, so it could not be carried over — and this chat
+    /// does not replay history into a fresh session, so the panel says so rather than letting the
+    /// engine seem to have forgotten.
+    account_changed: bool,
 }
 
 /// The active AI provider id, from the `ai_provider` setting. Falls back to Claude when unset or
@@ -224,18 +232,41 @@ pub(crate) fn routed_providers(conn: &Connection) -> Result<std::collections::Ha
 /// [`AiTask`] requested (per-task override → base model → engine default). The prompt *templates*,
 /// by contrast, are shared across providers (see [`shared_template`]).
 pub(crate) struct AiConfig {
+    /// Already bound to [`AiConfig::account`] — every process it starts runs as that account.
     pub engine: Box<dyn AiEngine>,
     /// The provider id this config resolved to — kept so a caller can record *which* engine ran
     /// (the setting it came from is a moving target).
     pub provider: String,
+    /// The account the engine runs as. See `crate::ai_accounts` for how it was chosen.
+    pub account: ai_accounts::AccountEnv,
     pub binary: String,
     pub model: String,
     pub tools: Vec<String>,
 }
 
+impl AiConfig {
+    /// The account to stamp on what this run leaves behind — `None` is the system account.
+    pub fn account_id(&self) -> Option<&str> {
+        self.account.account_id.as_deref()
+    }
+}
+
+/// The configuration for `task`, with no workspace to consult — the task's own account pin, then
+/// the provider's default. Prefer [`load_ai_config_in`] wherever the run belongs to a workspace.
 pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig, String> {
+    load_ai_config_in(conn, task, None)
+}
+
+/// The configuration for `task`, for a run that belongs to `workspace_id` — which is what lets that
+/// workspace's default account apply.
+pub(crate) fn load_ai_config_in(
+    conn: &Connection,
+    task: AiTask,
+    workspace_id: Option<&str>,
+) -> Result<AiConfig, String> {
     let provider = provider_for(conn, task)?;
-    let engine = ai::engine_for(&provider);
+    let account = ai_accounts::resolve(conn, &provider, Some(task.key()), workspace_id, ai_accounts::Choice::Auto);
+    let engine = ai::engine_as(&provider, account.clone());
 
     let get = |suffix: &str| -> Result<Option<String>, String> {
         queries::get_setting(conn, &format!("{provider}_{suffix}")).map_err(|e| e.to_string())
@@ -266,14 +297,23 @@ pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig
         },
     };
 
-    Ok(AiConfig { engine, provider, binary, model, tools })
+    Ok(AiConfig { engine, provider, account, binary, model, tools })
 }
 
 /// Builds an [`AiConfig`] for an explicit provider + model (an SDD/Harness agent's own routing),
 /// bypassing per-task resolution — the binary path and tool allow-list still come from that
-/// provider's saved settings.
-pub(crate) fn load_ai_config_for(conn: &Connection, provider: &str, model: &str) -> Result<AiConfig, String> {
-    let engine = ai::engine_for(provider);
+/// provider's saved settings — run as `choice`: an explicit account, the system one, or automatic,
+/// in which case `task` and `workspace_id` are what the resolution consults.
+pub(crate) fn load_ai_config_as(
+    conn: &Connection,
+    provider: &str,
+    model: &str,
+    choice: ai_accounts::Choice,
+    task: Option<AiTask>,
+    workspace_id: Option<&str>,
+) -> Result<AiConfig, String> {
+    let account = ai_accounts::resolve(conn, provider, task.map(|t| t.key()), workspace_id, choice);
+    let engine = ai::engine_as(provider, account.clone());
     let get = |suffix: &str| -> Result<Option<String>, String> {
         queries::get_setting(conn, &format!("{provider}_{suffix}")).map_err(|e| e.to_string())
     };
@@ -285,7 +325,7 @@ pub(crate) fn load_ai_config_for(conn: &Connection, provider: &str, model: &str)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    Ok(AiConfig { engine, provider: provider.to_string(), binary, model: model.to_string(), tools })
+    Ok(AiConfig { engine, provider: provider.to_string(), account, binary, model: model.to_string(), tools })
 }
 
 /// Reads a shared (provider-independent) prompt template. New installs store these under an
@@ -335,10 +375,13 @@ pub async fn draft_pr_comment_reply(
     conversation: String,
     note: Option<String>,
     run_id: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<String, String> {
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        load_ai_config(&conn, AiTask::Chat)?
+        // The workspace the review is open in, when the caller says — what lets its account answer
+        // rather than the provider's default.
+        load_ai_config_in(&conn, AiTask::Chat, workspace_id.as_deref())?
     };
     ai_runs::scoped(app, run_id, async {
         ai::draft_comment_reply(&*config.engine, &config.binary, &config.model, &conversation, note.as_deref()).await
@@ -360,14 +403,25 @@ pub fn cancel_ai_run(run_id: String) -> bool {
 /// providers whose CLI has no such command (Claude/Gemini) — the frontend falls back to its curated
 /// list there.
 #[tauri::command]
-pub async fn list_ai_models(db: State<'_, Db>, provider: Option<String>) -> Result<Vec<String>, String> {
+///
+/// `account` lists what that account of the provider offers — a plan decides which models exist,
+/// and Codex keeps its catalogue per account. An id that no longer exists lists the system one.
+pub async fn list_ai_models(
+    db: State<'_, Db>,
+    provider: Option<String>,
+    account: Option<String>,
+) -> Result<Vec<String>, String> {
     let (engine, binary) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let provider = provider
             .filter(|p| !p.trim().is_empty())
             .map(Ok)
             .unwrap_or_else(|| active_provider(&conn))?;
-        let engine = ai::engine_for(&provider);
+        let explicit = match ai_accounts::Choice::parse(account.as_deref()) {
+            ai_accounts::Choice::Auto => ai_accounts::Choice::System,
+            other => other,
+        };
+        let engine = ai::engine_as(&provider, ai_accounts::resolve(&conn, &provider, None, None, explicit));
         let binary = queries::get_setting(&conn, &format!("{provider}_binary_path"))
             .map_err(|e| e.to_string())?
             .filter(|s| !s.trim().is_empty())
@@ -417,7 +471,8 @@ pub async fn resolve_conflict_with_ai(
 ) -> Result<String, String> {
     let (config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let config = load_ai_config(&conn, AiTask::Conflict)?;
+        let workspace = ai_accounts::workspace_of_repo(&conn, &repo_path);
+        let config = load_ai_config_in(&conn, AiTask::Conflict, workspace.as_deref())?;
         let template = shared_template(&conn, "resolve_conflict_template", "claude_resolve_conflict_template")?;
         (config, template)
     };
@@ -529,8 +584,15 @@ pub async fn analyze_working_changes(
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         // An active agent analyzes on its own provider + model; otherwise the Analyze routing.
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
-            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => load_ai_config_for(&conn, p, m)?,
-            _ => load_ai_config(&conn, AiTask::Analyze)?,
+            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => load_ai_config_as(
+                &conn,
+                p,
+                m,
+                ai_accounts::Choice::Auto,
+                Some(AiTask::Analyze),
+                Some(&workspace_id),
+            )?,
+            _ => load_ai_config_in(&conn, AiTask::Analyze, Some(&workspace_id))?,
         };
         let analyze_template = shared_template(&conn, "analyze_template", "claude_analyze_template")?;
         (contexts, skills, config, analyze_template)
@@ -608,7 +670,7 @@ pub async fn resolve_finding_with_ai(
 
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        load_ai_config(&conn, AiTask::Fix)?
+        load_ai_config_in(&conn, AiTask::Fix, Some(&project.workspace_id))?
     };
 
     let checkpoint = checkpoint_before(&project.local_path, "fix-finding");
@@ -640,18 +702,25 @@ pub async fn resolve_finding_with_ai(
 /// the paths it doesn't cover: routing edited in Settings, and a past conversation reopened after
 /// its provider changed. Anything it can't determine (no recorded provider, a read that failed)
 /// keeps the token — discarding a working session is the worse failure.
-fn session_for_provider(
+///
+/// **The account counts as much as the provider.** A CLI keeps its sessions in its state
+/// directory, and each account has its own (see `crate::ai_accounts`), so a token minted by the
+/// work account is as foreign to the personal one as a Claude token is to Codex. The second value
+/// says the token was dropped for that reason, which the panel turns into a notice.
+fn session_for_engine(
     conn: &Connection,
     project_id: &str,
     conversation_id: Option<&str>,
     session_id: Option<String>,
     provider: &str,
-) -> Option<String> {
-    let session_id = session_id?;
-    let Some(conversation_id) = conversation_id else { return Some(session_id) };
-    match queries::last_turn_provider(conn, project_id, conversation_id) {
-        Ok(Some(previous)) if previous != provider => None,
-        _ => Some(session_id),
+    account_id: Option<&str>,
+) -> (Option<String>, bool) {
+    let Some(session_id) = session_id else { return (None, false) };
+    let Some(conversation_id) = conversation_id else { return (Some(session_id), false) };
+    match queries::last_turn_engine(conn, project_id, conversation_id) {
+        Ok(Some((previous, _))) if previous != provider => (None, false),
+        Ok(Some((_, previous_account))) if previous_account.as_deref() != account_id => (None, true),
+        _ => (Some(session_id), false),
     }
 }
 
@@ -681,6 +750,7 @@ pub async fn send_chat_message(
     agent_provider: Option<String>,
     agent_model: Option<String>,
     agent_prompt: Option<String>,
+    agent_account: Option<String>,
 ) -> Result<ChatReply, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -701,17 +771,33 @@ pub async fn send_chat_message(
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        // An active agent runs on its own provider + model; otherwise the normal chat routing.
+        // An active agent runs on its own provider + model — and its own account, when it names
+        // one; otherwise the normal chat routing. Either way an automatic account is this
+        // repository's workspace's.
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
-            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => load_ai_config_for(&conn, p, m)?,
-            _ => load_ai_config(&conn, AiTask::Chat)?,
+            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => load_ai_config_as(
+                &conn,
+                p,
+                m,
+                ai_accounts::Choice::parse(agent_account.as_deref()),
+                Some(AiTask::Chat),
+                Some(&workspace_id),
+            )?,
+            _ => load_ai_config_in(&conn, AiTask::Chat, Some(&workspace_id))?,
         };
         // Shadows the argument on purpose: nothing below should see the unvalidated token, and the
         // turn is recorded against the session it actually ran under.
-        let session_id =
-            session_for_provider(&conn, &project_id, conversation_id.as_deref(), session_id, &config.provider);
-        (contexts, skills, config, session_id)
+        let (session_id, account_changed) = session_for_engine(
+            &conn,
+            &project_id,
+            conversation_id.as_deref(),
+            session_id,
+            &config.provider,
+            config.account_id(),
+        );
+        (contexts, skills, config, (session_id, account_changed))
     };
+    let (session_id, account_changed) = session_id;
 
     let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
 
@@ -784,6 +870,7 @@ pub async fn send_chat_message(
                         // *which* engine and version failed is exactly what makes it diagnosable.
                         queries::TurnMeta {
                             provider: Some(&config.provider),
+                            account_id: config.account_id(),
                             model: None,
                             engine_version: engine_version.as_deref(),
                             response_time_ms: Some(response_time_ms),
@@ -808,6 +895,7 @@ pub async fn send_chat_message(
             trace_json.as_deref(),
             queries::TurnMeta {
                 provider: Some(&config.provider),
+                account_id: config.account_id(),
                 model: run.model.as_deref(),
                 engine_version: engine_version.as_deref(),
                 response_time_ms: Some(response_time_ms),
@@ -821,6 +909,7 @@ pub async fn send_chat_message(
         .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339())
     };
 
+    let account_id = config.account_id().map(str::to_string);
     Ok(ChatReply {
         text: run.text,
         session_id: run.session_id,
@@ -829,6 +918,8 @@ pub async fn send_chat_message(
         engine_version,
         created_at,
         response_time_ms,
+        account_id,
+        account_changed,
     })
 }
 
@@ -844,10 +935,11 @@ pub async fn inline_edit_with_ai(
     selection: String,
     instruction: String,
     run_id: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<String, String> {
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        load_ai_config(&conn, AiTask::Inline)?
+        load_ai_config_in(&conn, AiTask::Inline, workspace_id.as_deref())?
     };
     ai_runs::scoped(app, run_id, async {
         ai::inline_edit(

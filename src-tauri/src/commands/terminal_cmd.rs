@@ -24,6 +24,9 @@ pub fn list_shell_profiles(db: State<Db>) -> Result<Vec<ShellProfile>, String> {
 /// it. The remote-control path goes through [`open_owned_terminal`] instead, which is the only way
 /// an owner is ever set — a command a phone could reach that took an owner as an argument would let
 /// it claim, or disclaim, whatever it liked.
+///
+/// `account_provider` + `account_id` open the shell *as* one account of an AI CLI — see
+/// `crate::ai_accounts`. An id that no longer exists opens an ordinary shell.
 #[tauri::command]
 pub fn open_terminal(
     app: AppHandle,
@@ -31,8 +34,20 @@ pub fn open_terminal(
     db: State<Db>,
     cwd: String,
     profile_id: Option<String>,
+    account_provider: Option<String>,
+    account_id: Option<String>,
 ) -> Result<TerminalOpened, String> {
-    open_shell(app, &registry, &db, cwd, profile_id, None)
+    let account = match (account_provider.as_deref(), account_id.as_deref()) {
+        (Some(provider), Some(id)) if !id.trim().is_empty() => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            crate::ai_accounts::get(&conn, id)
+                .map_err(|e| e.to_string())?
+                .filter(|account| account.provider == provider)
+                .map(|account| crate::ai_accounts::AccountEnv::for_account(provider, &account.id))
+        }
+        _ => None,
+    };
+    open_shell(app, &registry, &db, cwd, profile_id, None, account.as_ref())
 }
 
 /// The same shell, opened **for a paired device**.
@@ -54,7 +69,7 @@ pub fn open_owned_terminal(
     profile_id: Option<String>,
     owner: String,
 ) -> Result<TerminalOpened, String> {
-    open_shell(app, registry, db, cwd, profile_id, Some(owner))
+    open_shell(app, registry, db, cwd, profile_id, Some(owner), None)
 }
 
 fn open_shell(
@@ -64,12 +79,13 @@ fn open_shell(
     cwd: String,
     profile_id: Option<String>,
     owner: Option<String>,
+    account: Option<&crate::ai_accounts::AccountEnv>,
 ) -> Result<TerminalOpened, String> {
     let profile = shell_profiles::resolve(db, profile_id.as_deref())?;
     let record = owner
         .is_some()
         .then(|| terminal::Recording { key: None, seed: String::new() });
-    let id = terminal::open_terminal(app, registry, cwd, &profile, record, owner)?;
+    let id = terminal::open_terminal(app, registry, cwd, &profile, record, owner, account)?;
     // The resolved profile goes back with the session id so the tab can be titled after the shell
     // that actually started — which is not necessarily the one asked for, since an unset default
     // resolves here rather than on the frontend.
@@ -283,7 +299,7 @@ pub fn add_workspace_terminal(
             .map_err(|e| e.to_string())?
     };
     let recording = terminal::Recording { key: Some(row.id.clone()), seed: String::new() };
-    let session_id = terminal::open_terminal(app, &registry, cwd, &profile, Some(recording), None)?;
+    let session_id = terminal::open_terminal(app, &registry, cwd, &profile, Some(recording), None, None)?;
     Ok(BenchTerminal { row, session_id: Some(session_id) })
 }
 
@@ -354,6 +370,7 @@ pub fn resume_workspace_terminal(
         cwd,
         &profile,
         Some(terminal::Recording { key: Some(id), seed: seed.clone() }),
+        None,
         None,
     )?;
     Ok(ResumedTerminal { session_id, transcript: seed })

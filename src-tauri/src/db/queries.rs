@@ -934,7 +934,7 @@ pub fn delete_workspace_skill(conn: &Connection, id: &str) -> rusqlite::Result<(
 
 pub fn list_workspace_agents(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceAgent>> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at
+        "SELECT id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id
          FROM workspace_agents WHERE workspace_id = ?1 ORDER BY sort_order, created_at",
     )?;
     let rows = stmt.query_map(params![workspace_id], |row| {
@@ -949,6 +949,7 @@ pub fn list_workspace_agents(conn: &Connection, workspace_id: &str) -> rusqlite:
             enabled: row.get(7)?,
             sort_order: row.get(8)?,
             created_at: row.get(9)?,
+            account_id: row.get(10)?,
         })
     })?;
     rows.collect()
@@ -965,6 +966,7 @@ pub fn upsert_workspace_agent(
     model: &str,
     prompt: &str,
     enabled: bool,
+    account_id: Option<&str>,
 ) -> rusqlite::Result<WorkspaceAgent> {
     let existing = id.as_ref().and_then(|existing_id| {
         conn.query_row(
@@ -986,15 +988,17 @@ pub fn upsert_workspace_agent(
         enabled,
         sort_order,
         created_at,
+        account_id: account_id.map(str::to_string).filter(|a| !a.trim().is_empty()),
     };
     conn.execute(
-        "INSERT INTO workspace_agents (id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+        "INSERT INTO workspace_agents (id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(id) DO UPDATE SET name = excluded.name, role = excluded.role, provider = excluded.provider,
-            model = excluded.model, prompt = excluded.prompt, enabled = excluded.enabled",
+            model = excluded.model, prompt = excluded.prompt, enabled = excluded.enabled,
+            account_id = excluded.account_id",
         params![
             agent.id, agent.workspace_id, agent.name, agent.role, agent.provider, agent.model, agent.prompt,
-            agent.enabled, agent.sort_order, agent.created_at,
+            agent.enabled, agent.sort_order, agent.created_at, agent.account_id,
         ],
     )?;
     Ok(agent)
@@ -1163,7 +1167,7 @@ pub const AGENT_CONVERSATION_PREFIX: &str = "agent-";
 /// fifteen `row.get(..)` calls onto their neighbours.
 const AGENT_TASK_COLUMNS: &str = "id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt, \
      goal, title, conversation_id, status, turns, last_error, created_at, updated_at, \
-     agent_project_id, pinned";
+     agent_project_id, pinned, account_id";
 
 fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
     Ok(AgentTask {
@@ -1185,6 +1189,7 @@ fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
         updated_at: row.get(15)?,
         agent_project_id: row.get(16)?,
         pinned: row.get(17)?,
+        account_id: row.get(18)?,
     })
 }
 
@@ -1224,6 +1229,7 @@ pub fn create_agent_task(
     goal: &str,
     title: &str,
     agent_project_id: &str,
+    account_id: Option<&str>,
 ) -> rusqlite::Result<AgentTask> {
     let stamp = now();
     let task = AgentTask {
@@ -1245,11 +1251,13 @@ pub fn create_agent_task(
         last_error: String::new(),
         created_at: stamp.clone(),
         updated_at: stamp,
+        account_id: account_id.map(str::to_string).filter(|a| !a.trim().is_empty()),
     };
     conn.execute(
         "INSERT INTO agent_tasks (id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt,
-            goal, title, conversation_id, status, turns, last_error, created_at, updated_at, agent_project_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            goal, title, conversation_id, status, turns, last_error, created_at, updated_at, agent_project_id,
+            account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             task.id,
             task.workspace_id,
@@ -1268,6 +1276,7 @@ pub fn create_agent_task(
             task.created_at,
             task.updated_at,
             task.agent_project_id,
+            task.account_id,
         ],
     )?;
     Ok(task)
@@ -1535,7 +1544,7 @@ const STEP_COLUMNS: &str = "s.id, s.chain_id, s.step_index, s.project_id, COALES
      s.agent_id, s.agent_name, s.provider, s.model, s.prompt, s.instruction, s.gate, s.gate_cleared, \
      s.pending_input, s.task_id, s.run_id, s.log_count_at_dispatch, s.output_text, s.output_truncated, \
      s.status, s.attempts, s.last_error, s.check_command, s.on_pass, s.on_fail, s.feedback, \
-     s.created_at, s.updated_at";
+     s.created_at, s.updated_at, s.account_id";
 
 /// LEFT, not INNER: a repository removed from the workspace must not make the steps that ran in it
 /// disappear out of a finished plan.
@@ -1572,6 +1581,7 @@ fn map_step(row: &rusqlite::Row) -> rusqlite::Result<AgentChainStep> {
         feedback: row.get(26)?,
         created_at: row.get(27)?,
         updated_at: row.get(28)?,
+        account_id: row.get(29)?,
     })
 }
 
@@ -1950,9 +1960,10 @@ fn create_chain_inner(
             "INSERT INTO agent_chain_steps (id, chain_id, step_index, project_id, phase, agent_id,
                 agent_name, provider, model, prompt, instruction, gate, gate_cleared, pending_input,
                 task_id, run_id, log_count_at_dispatch, output_text, output_truncated, status,
-                attempts, last_error, check_command, on_pass, on_fail, feedback, created_at, updated_at)
+                attempts, last_error, check_command, on_pass, on_fail, feedback, created_at, updated_at,
+                account_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, '', '', '', -1, '', 0,
-                'pending', 0, '', ?14, ?15, ?16, '', ?13, ?13)",
+                'pending', 0, '', ?14, ?15, ?16, '', ?13, ?13, ?17)",
             params![
                 Uuid::new_v4().to_string(),
                 chain.id,
@@ -1970,6 +1981,7 @@ fn create_chain_inner(
                 step.check_command.trim(),
                 step.on_pass,
                 step.on_fail,
+                agent.and_then(|a| a.account_id.clone()),
             ],
         )?;
     }
@@ -2334,6 +2346,7 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
                 &step.instruction,
                 &title,
                 &chain.agent_project_id,
+                step.account_id.as_deref(),
             )?
         }
     };
@@ -3099,6 +3112,9 @@ pub fn delete_chain_template(conn: &Connection, id: &str) -> rusqlite::Result<()
 pub struct TurnMeta<'a> {
     /// Provider id the turn actually ran through (`claude`, `codex`, …).
     pub provider: Option<&'a str>,
+    /// The account it ran as — `None` for the CLI's system account. What decides, next turn,
+    /// whether the session this one left behind can be resumed at all.
+    pub account_id: Option<&'a str>,
     /// Model the CLI reported for the turn. `None` when it didn't report exactly one.
     pub model: Option<&'a str>,
     /// Version of the engine CLI. `None` for HTTP engines, or when the probe failed.
@@ -3133,8 +3149,8 @@ pub fn add_activity_log(
         engine_version: meta.engine_version.map(str::to_string),
     };
     conn.execute(
-        "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             entry.id,
             entry.project_id,
@@ -3148,7 +3164,8 @@ pub fn add_activity_log(
             entry.is_error,
             entry.provider,
             entry.model,
-            entry.engine_version
+            entry.engine_version,
+            meta.account_id
         ],
     )?;
     Ok(entry)
@@ -3380,17 +3397,19 @@ pub fn get_turn_trace(conn: &Connection, id: &str) -> rusqlite::Result<Option<St
 ///
 /// This is how the chat command tells whether a stored resume token still belongs to the engine
 /// about to run — see `claude_cmd::session_for_provider`.
-pub fn last_turn_provider(
+/// The provider and account the conversation's last recorded turn ran as — the pair a resume token
+/// belongs to. `None` for the account is the system account.
+pub fn last_turn_engine(
     conn: &Connection,
     project_id: &str,
     conversation_id: &str,
-) -> rusqlite::Result<Option<String>> {
+) -> rusqlite::Result<Option<(String, Option<String>)>> {
     conn.query_row(
-        "SELECT provider FROM activity_log
+        "SELECT provider, account_id FROM activity_log
          WHERE project_id = ?1 AND session_id = ?2 AND provider IS NOT NULL
          ORDER BY created_at DESC LIMIT 1",
         params![project_id, conversation_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
 }
@@ -4695,7 +4714,7 @@ mod tests {
         migrations::run(&conn).unwrap();
         let (ws, project) = workspace_with_project(&conn, "alpha");
         let agent =
-            upsert_workspace_agent(&conn, None, &ws, "Bot", "role", "claude", "sonnet", "", true).unwrap();
+            upsert_workspace_agent(&conn, None, &ws, "Bot", "role", "claude", "sonnet", "", true, None).unwrap();
         let detail = create_agent_chain(
             &conn,
             &[project.clone()],
@@ -4892,7 +4911,7 @@ mod tests {
         // check in `claim_next_chain_step`. That refusal is the whole reason this test drives the
         // scheduler instead of writing the status by hand.
         let agent =
-            upsert_workspace_agent(&conn, None, &ws, "Bot", "role", "claude", "sonnet", "", true).unwrap();
+            upsert_workspace_agent(&conn, None, &ws, "Bot", "role", "claude", "sonnet", "", true, None).unwrap();
         let detail = create_agent_chain(
             &conn,
             &[first.clone(), second.clone()],
@@ -5023,7 +5042,34 @@ mod tests {
         log_provider(&conn, &project, "conv-1", "opencode");
         log_provider(&conn, &project, "conv-1", "claude");
 
-        assert_eq!(last_turn_provider(&conn, &project, "conv-1").unwrap().as_deref(), Some("claude"));
+        assert_eq!(
+            last_turn_engine(&conn, &project, "conv-1").unwrap(),
+            Some(("claude".to_string(), None)),
+            "the system account is `None`"
+        );
+    }
+
+    /// The account rides with the provider: a turn run as an added account reports it, which is
+    /// what lets the next turn refuse to resume that account's session as another one.
+    #[test]
+    fn a_conversation_reports_the_account_of_its_latest_turn() {
+        let (conn, project) = fixture();
+        add_activity_log(
+            &conn,
+            &project,
+            "conv-1",
+            Some("engine-session"),
+            "pregunta",
+            "answer",
+            None,
+            TurnMeta { provider: Some("claude"), account_id: Some("acct-work"), ..TurnMeta::default() },
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            last_turn_engine(&conn, &project, "conv-1").unwrap(),
+            Some(("claude".to_string(), Some("acct-work".to_string())))
+        );
     }
 
     /// Turns recorded before provider tracking existed have nothing to compare against — the
@@ -5033,8 +5079,8 @@ mod tests {
         let (conn, project) = fixture();
         log(&conn, &project, "conv-1", "session-a", "pregunta");
 
-        assert_eq!(last_turn_provider(&conn, &project, "conv-1").unwrap(), None);
-        assert_eq!(last_turn_provider(&conn, &project, "conv-inexistente").unwrap(), None);
+        assert_eq!(last_turn_engine(&conn, &project, "conv-1").unwrap(), None);
+        assert_eq!(last_turn_engine(&conn, &project, "conv-inexistente").unwrap(), None);
     }
 
     /// Reopening a conversation has to resume the engine session its *latest* turn ran under.
@@ -5319,7 +5365,7 @@ mod tests {
             conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
                 .unwrap();
         let agent =
-            upsert_workspace_agent(conn, None, &workspace, "Bot", "role", "claude", "sonnet", "", true).unwrap();
+            upsert_workspace_agent(conn, None, &workspace, "Bot", "role", "claude", "sonnet", "", true, None).unwrap();
         let steps: Vec<NewChainStep> = plan
             .iter()
             .enumerate()
@@ -5341,7 +5387,7 @@ mod tests {
             conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
                 .unwrap();
         let agent =
-            upsert_workspace_agent(conn, None, &workspace, "Bot", "role", "claude", "sonnet", "", true).unwrap();
+            upsert_workspace_agent(conn, None, &workspace, "Bot", "role", "claude", "sonnet", "", true, None).unwrap();
         let plan: Vec<NewChainStep> = (0..steps)
             .map(|at| NewChainStep {
                 agent_id: agent.id.clone(),
@@ -5458,7 +5504,7 @@ mod tests {
         let chain_id = queued_chain(&conn, &project, 1).chain.id;
         claim_next_chain_step(&conn, &chain_id, "run-1").unwrap();
         let mine =
-            create_agent_task(&conn, &workspace, &project, "a", "Bot", "claude", "sonnet", "", "mi tarea", "mi tarea", "")
+            create_agent_task(&conn, &workspace, &project, "a", "Bot", "claude", "sonnet", "", "mi tarea", "mi tarea", "", None)
                 .unwrap();
 
         delete_chain(&conn, &chain_id).unwrap();
@@ -5709,6 +5755,7 @@ pub fn record_ai_usage(
     provider: &str,
     model: &str,
     task: &str,
+    account_id: Option<&str>,
     usage: &crate::ai::AiUsage,
 ) -> rusqlite::Result<()> {
     if usage.is_empty() {
@@ -5716,8 +5763,8 @@ pub fn record_ai_usage(
     }
     conn.execute(
         "INSERT INTO ai_usage (id, provider, model, task, input_tokens, output_tokens, cache_read_tokens,
-            cache_write_tokens, cost_usd, has_cost, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            cache_write_tokens, cost_usd, has_cost, created_at, account_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             Uuid::new_v4().to_string(),
             provider,
@@ -5730,6 +5777,7 @@ pub fn record_ai_usage(
             usage.cost_usd.unwrap_or(0.0),
             usage.cost_usd.is_some(),
             now(),
+            account_id,
         ],
     )?;
     Ok(())
@@ -5754,7 +5802,14 @@ pub fn record_ai_usage(
 /// The series is **gap-filled** afterwards: SQL only returns the buckets that have a row in them,
 /// and a chart drawn from those alone would silently close up the quiet hours and show a week of
 /// steady work where there was a burst and four idle days.
-pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<crate::ai_usage::UsageStats> {
+///
+/// `account` narrows every breakdown but the per-account one to a single account, written as
+/// `provider|account_id` — `claude|` for the system account. `None` is every account.
+pub fn ai_usage_stats(
+    conn: &Connection,
+    window_hours: i64,
+    account: Option<&str>,
+) -> rusqlite::Result<crate::ai_usage::UsageStats> {
     let hours = window_hours.clamp(1, 24 * 90);
     // Before anything is read, so `since` below reports the oldest row that actually survived.
     conn.execute(
@@ -5768,19 +5823,24 @@ pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<
     let now = Utc::now().trunc_subsecs(6);
     let from = now - chrono::Duration::hours(hours);
     let cutoff = from.to_rfc3339();
+    // One account, or all of them. Spelled as a comparison against the same `provider|id` key the
+    // frontend builds, so the system account (`NULL` id) is `claude|` rather than a special case.
+    let account = account.map(str::trim).filter(|key| !key.is_empty());
+    let only = |n: usize| format!("AND (?{n} IS NULL OR (provider || '|' || IFNULL(account_id, '')) = ?{n})");
 
     // Aligned to the epoch rather than to "now minus N": a bucket boundary that moves every time
     // the screen is opened makes two readings of the same window disagree about which column a
     // turn belongs in.
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT CAST(strftime('%s', created_at) AS INTEGER) / ?2 AS bucket,
                 COUNT(*),
                 COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0),
                 COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0)
-         FROM ai_usage WHERE created_at >= ?1
+         FROM ai_usage WHERE created_at >= ?1 {}
          GROUP BY bucket ORDER BY bucket",
-    )?;
-    let rows = stmt.query_map(params![cutoff, bucket_seconds], |row| {
+        only(3)
+    ))?;
+    let rows = stmt.query_map(params![cutoff, bucket_seconds, account], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, f64>(3)?))
     })?;
     let filled: std::collections::HashMap<i64, (i64, i64, f64)> =
@@ -5803,17 +5863,18 @@ pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<
         });
     }
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT provider, COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
                 COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
                 COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN has_cost THEN 1 ELSE 0 END), 0)
-         FROM ai_usage WHERE created_at >= ?1
+         FROM ai_usage WHERE created_at >= ?1 {}
          GROUP BY provider
          ORDER BY SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC",
-    )?;
+        only(2)
+    ))?;
     let providers = stmt
-        .query_map(params![cutoff], |row| {
+        .query_map(params![cutoff, account], |row| {
             Ok(crate::ai_usage::ProviderStat {
                 provider: row.get(0)?,
                 runs: row.get(1)?,
@@ -5829,16 +5890,17 @@ pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<
 
     // Capped: a workspace that routes per task across many models would otherwise turn the table
     // into the whole screen, and the tail of it is never the answer to anything.
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT provider, model, COUNT(*),
                 COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0) AS tokens,
                 COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN has_cost THEN 1 ELSE 0 END), 0)
-         FROM ai_usage WHERE created_at >= ?1
+         FROM ai_usage WHERE created_at >= ?1 {}
          GROUP BY provider, model ORDER BY tokens DESC LIMIT 24",
-    )?;
+        only(2)
+    ))?;
     let models = stmt
-        .query_map(params![cutoff], |row| {
+        .query_map(params![cutoff, account], |row| {
             Ok(crate::ai_usage::ModelStat {
                 provider: row.get(0)?,
                 model: row.get(1)?,
@@ -5852,22 +5914,45 @@ pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<
 
     // Uncapped, unlike the model table: the vocabulary is closed (`ai::task`) and short, and the
     // whole point of this breakdown is that a feature missing from it means something.
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT task, COUNT(*),
                 COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0) AS tokens,
                 COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN has_cost THEN 1 ELSE 0 END), 0)
-         FROM ai_usage WHERE created_at >= ?1
+         FROM ai_usage WHERE created_at >= ?1 {}
          GROUP BY task ORDER BY tokens DESC",
-    )?;
+        only(2)
+    ))?;
     let tasks = stmt
-        .query_map(params![cutoff], |row| {
+        .query_map(params![cutoff, account], |row| {
             Ok(crate::ai_usage::TaskStat {
                 task: row.get(0)?,
                 runs: row.get(1)?,
                 tokens: row.get(2)?,
                 cost_usd: row.get(3)?,
                 costed_runs: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Deliberately unfiltered: this is the list the filter is picked from.
+    let mut stmt = conn.prepare(
+        "SELECT provider, account_id, COUNT(*),
+                COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN has_cost THEN 1 ELSE 0 END), 0)
+         FROM ai_usage WHERE created_at >= ?1
+         GROUP BY provider, account_id ORDER BY tokens DESC",
+    )?;
+    let accounts = stmt
+        .query_map(params![cutoff], |row| {
+            Ok(crate::ai_usage::AccountStat {
+                provider: row.get(0)?,
+                account_id: row.get(1)?,
+                runs: row.get(2)?,
+                tokens: row.get(3)?,
+                cost_usd: row.get(4)?,
+                costed_runs: row.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -5884,6 +5969,7 @@ pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<
         providers,
         models,
         tasks,
+        accounts,
         peak_tokens,
         since: since.unwrap_or_default(),
     })

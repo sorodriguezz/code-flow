@@ -8,6 +8,8 @@ import { useAgentsStore } from "../../state/agentsStore";
 import { MODELS_MAX_AGE_MS, useAiModelsStore } from "../../state/aiModelsStore";
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
+import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
+import { resolveAccount } from "../../lib/aiAccounts";
 
 const WIDTH = 236;
 const GAP = 6;
@@ -33,6 +35,16 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
   const ensureModels = useAiModelsStore((s) => s.ensure);
   const openSettings = useUiStore((s) => s.openSettings);
   const activeView = useUiStore((s) => s.activeView);
+  const accounts = useAiAccountsStore((s) => s.accounts);
+  const taskPins = useAiAccountsStore((s) => s.taskPins);
+  const workspaceDefaults = useAiAccountsStore((s) => s.workspaceDefaults);
+  const providerDefaults = useAiAccountsStore((s) => s.providerDefaults);
+  const ensureAccounts = useAiAccountsStore((s) => s.ensure);
+  const nameOf = useAccountName();
+
+  useEffect(() => {
+    void ensureAccounts();
+  }, [ensureAccounts]);
 
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
@@ -131,6 +143,19 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
         <span className="text-[var(--cf-text-muted)]/50">·</span>
         <span className="truncate font-medium text-[var(--cf-text)]/70">
           {modelDisplayLabel(provider, task.model, t)}
+          {/* The account the next turn runs as: the agent's own, else the workspace's — named only
+              where the provider has more than one. */}
+          {accounts.some((account) => account.provider === provider) &&
+            ` · ${nameOf(
+              provider,
+              resolveAccount(
+                { accounts, taskPins, workspaceDefaults, providerDefaults },
+                provider,
+                "chat",
+                task.workspace_id,
+                task.account_id,
+              ),
+            )}`}
         </span>
         <ChevronDown size={10} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>

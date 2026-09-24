@@ -688,10 +688,22 @@ pub fn upsert_workspace_agent(
     model: String,
     prompt: String,
     enabled: bool,
+    account: Option<String>,
 ) -> Result<WorkspaceAgent, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::upsert_workspace_agent(&conn, id, &workspace_id, &name, &role, &provider, &model, &prompt, enabled)
-        .map_err(|e| e.to_string())
+    queries::upsert_workspace_agent(
+        &conn,
+        id,
+        &workspace_id,
+        &name,
+        &role,
+        &provider,
+        &model,
+        &prompt,
+        enabled,
+        account.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

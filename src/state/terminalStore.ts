@@ -58,7 +58,14 @@ interface TerminalState {
   openNew: (
     projectId: string,
     cwd: string,
-    opts?: { split?: boolean; profileId?: string; reuseKey?: string; title?: string },
+    opts?: {
+      split?: boolean;
+      profileId?: string;
+      reuseKey?: string;
+      title?: string;
+      /** Runs the shell as one AI account — see `lib/aiAccounts.ts`. */
+      account?: { provider: string; accountId: string };
+    },
   ) => Promise<string>;
   /**
    * Runs one line in the dock, reusing the terminal this same action opened for it last time.
@@ -239,7 +246,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     // Before the await, not after: the shell can print its first prompt while `open_terminal` is
     // still returning, and that chunk has to land in the router's buffer rather than on the floor.
     startTerminalRouter();
-    const { id, profile_name } = await openTerminal(cwd, opts?.profileId);
+    const { id, profile_name } = await openTerminal(cwd, opts?.profileId, opts?.account);
     set((s) => {
       const proj = s.byProject[projectId] ?? emptyProject();
       // A caller that opened this shell *for* something says what it is for; otherwise the shell's

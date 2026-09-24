@@ -840,11 +840,14 @@ pub async fn db_ai_assist(
     last_results: Vec<DbRunOutcome>,
     history: Vec<crate::ai::DbAssistantTurn>,
     run_id: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<DbAiAnswer, String> {
     let config = resolve_config(&db, &connection_id)?;
     let ai_config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        super::claude_cmd::load_ai_config(&conn, super::claude_cmd::AiTask::DbQuery)?
+        // The workspace the caller is in, so its default account applies. Optional: a caller that
+        // does not say gets the task's pin or the provider's default. See `crate::ai_accounts`.
+        super::claude_cmd::load_ai_config_in(&conn, super::claude_cmd::AiTask::DbQuery, workspace_id.as_deref())?
     };
 
     // The node the schema is read for: the schema when one is picked, the database otherwise. Mongo

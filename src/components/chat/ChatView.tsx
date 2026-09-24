@@ -781,7 +781,8 @@ export function ChatView() {
               model={model}
               effort={session.effort}
               effortSupported={effortSupported}
-              onPickEngine={activeId ? (p, m) => setEngine(activeId, p, m) : undefined}
+              onPickEngine={activeId ? (p, m, a) => setEngine(activeId, p, m, a) : undefined}
+              account={session.accountId}
               onPickEffort={activeId ? (e) => setEffort(activeId, e) : undefined}
               attachments={attachments}
               onAttachPath={activeId ? attachPath : undefined}

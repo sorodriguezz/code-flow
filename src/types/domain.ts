@@ -436,6 +436,10 @@ export interface WorkspaceAgent {
   enabled: boolean;
   sort_order: number;
   created_at: string;
+  /** Which account of `provider` this agent runs as: `null` automatic (the workspace's),
+   * `"system"` the CLI's own login, else an account id. Copied into the tasks and chain steps it
+   * starts. See `lib/aiAccounts.ts`. */
+  account_id?: string | null;
 }
 
 /** A folder for agent work. Not a repository: `AgentTask.project_id` is still the git working copy
@@ -490,6 +494,8 @@ export interface AgentTask {
   last_error: string;
   created_at: string;
   updated_at: string;
+  /** The agent's account preference, copied at creation — see `WorkspaceAgent.account_id`. */
+  account_id?: string | null;
 }
 
 /**
@@ -630,6 +636,8 @@ export interface AgentChainStep {
   feedback: string;
   created_at: string;
   updated_at: string;
+  /** The agent's account preference, copied at creation — see `WorkspaceAgent.account_id`. */
+  account_id?: string | null;
 }
 
 /** A chain step as the task list needs it — see the Rust `ChainStepBrief` for why it is not the
@@ -1590,6 +1598,17 @@ export interface TaskStat {
   costed_runs: number;
 }
 
+/** One account's share of a window. `account_id` is `null` for the CLI's system account, which
+ * is also what every run recorded before accounts existed ran as. */
+export interface AccountStat {
+  provider: string;
+  account_id: string | null;
+  runs: number;
+  tokens: number;
+  cost_usd: number;
+  costed_runs: number;
+}
+
 /** One column of the usage chart, closed at `start` and open at the next one. */
 export interface UsageBucket {
   start: string;
@@ -1610,6 +1629,9 @@ export interface UsageStats {
   models: ModelStat[];
   /** Busiest first. A feature missing from here spent nothing in the window. */
   tasks: TaskStat[];
+  /** Per account across providers, over the whole window whatever filter was asked for — it is
+   * the list the filter is picked from. */
+  accounts: AccountStat[];
   /** The busiest single bucket, as tokens — the chart's scale. */
   peak_tokens: number;
   since: string;
@@ -1647,6 +1669,9 @@ export interface ProviderQuota {
   /** RFC 3339 of when the numbers were read from the provider — a cached answer keeps its own, so
    * the UI can tell how old it is. */
   fetched_at: string;
+  /** Which account of the provider this row is — `null` for the CLI's system account. A provider
+   * with several accounts has one row per account. */
+  account_id: string | null;
 }
 
 /**

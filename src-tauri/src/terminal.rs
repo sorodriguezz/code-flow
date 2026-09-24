@@ -208,6 +208,9 @@ struct TerminalExitEvent {
 pub struct PtyHooks {
     /// Extra environment variables for the child, on top of this process's own.
     pub env: Vec<(String, String)>,
+    /// Variables to take *out* of the inherited environment — an account's terminal must not carry
+    /// a credential exported for something else. See `crate::ai_accounts::AccountEnv`.
+    pub env_remove: Vec<String>,
     /// Every chunk, with its sequence number, *before* it is emitted — so anything the callback
     /// records is guaranteed to contain every chunk a listener has been sent up to that number.
     pub on_output: Option<Arc<dyn Fn(u64, &str) + Send + Sync>>,
@@ -241,8 +244,13 @@ pub fn open_terminal(
     profile: &ShellProfile,
     record: Option<Recording>,
     owner: Option<String>,
+    account: Option<&crate::ai_accounts::AccountEnv>,
 ) -> Result<String, String> {
     let start = start_dir(&cwd);
+    if let Some(account) = account {
+        // The folder has to exist before the shell hands it to a CLI — see `ensure_dirs`.
+        account.ensure_dirs();
+    }
     open_pty(
         app,
         registry,
@@ -257,7 +265,13 @@ pub fn open_terminal(
             profile: profile.name.clone(),
             owner,
         },
-        PtyHooks::default(),
+        // A shell opened *as an account*: every `claude`, `codex`, `grok` or `opencode` typed into it
+        // runs as that account, because the variable is in the shell's own environment.
+        PtyHooks {
+            env: account.map(|a| a.set.clone()).unwrap_or_default(),
+            env_remove: account.map(|a| a.remove.clone()).unwrap_or_default(),
+            ..PtyHooks::default()
+        },
     )
 }
 
@@ -331,7 +345,7 @@ pub fn open_pty<R: Runtime>(
     origin: Origin,
     hooks: PtyHooks,
 ) -> Result<String, String> {
-    let PtyHooks { env, on_output, on_exit } = hooks;
+    let PtyHooks { env, env_remove, on_output, on_exit } = hooks;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -363,6 +377,9 @@ pub fn open_pty<R: Runtime>(
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     // After the two above, so a caller that genuinely wants a different `TERM` can still say so.
+    for key in &env_remove {
+        cmd.env_remove(key);
+    }
     for (key, value) in &env {
         cmd.env(key, value);
     }

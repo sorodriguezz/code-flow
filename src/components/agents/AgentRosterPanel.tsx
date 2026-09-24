@@ -55,6 +55,7 @@ export function AgentRosterPanel({
       agent.model,
       agent.prompt,
       enabled,
+      agent.account_id ?? null,
     );
     await useAgentsStore.getState().reloadRoster();
   };
@@ -70,6 +71,7 @@ export function AgentRosterPanel({
       agent.model,
       agent.prompt,
       agent.enabled,
+      agent.account_id ?? null,
     );
     await useAgentsStore.getState().reloadRoster();
   };

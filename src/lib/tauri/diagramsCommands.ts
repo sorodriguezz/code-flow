@@ -257,6 +257,8 @@ export const diagramsDrawWithAi = (args: {
    */
   format?: string;
   runId?: string;
+  /** The diagram's workspace, so its default AI account applies. */
+  workspaceId?: string | null;
 }) => invoke<string>("diagrams_draw_with_ai", args);
 
 /**
@@ -286,6 +288,8 @@ export const diagramsFillRowsWithAi = (args: {
    *  foreign keys at rows that exist instead of guessing ids. */
   keys?: string;
   runId?: string;
+  /** The diagram's workspace, so its default AI account applies. */
+  workspaceId?: string | null;
 }) => invoke<string>("diagrams_fill_rows_with_ai", args);
 
 // ---------- import ----------

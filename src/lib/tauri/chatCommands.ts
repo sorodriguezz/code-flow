@@ -33,6 +33,10 @@ import type { AiRunLine } from "../../state/aiRunStore";
 export interface ChatConversation {
   id: string;
   workspaceId: string;
+  /** The account this thread runs as — `null` for the CLI's system account. Fixed at creation and
+   *  changed only by picking another account for it, which drops the engine session: a session
+   *  lives in its account's own directory. See `lib/aiAccounts.ts`. */
+  accountId?: string | null;
   /** `null` for a conversation about no repository, which is the ordinary case here. It also goes
    *  back to `null` when the project is deleted (`ON DELETE SET NULL`): losing a repository must
    *  orphan the chats that mentioned it, never shred them. */
@@ -163,6 +167,8 @@ export interface ChatReply extends EngineReply {
   /** Relative paths of the files this turn produced, already persisted on the row. Returned as
    *  well so the window that asked can draw the chips without re-reading the transcript. */
   outputs: string[];
+  /** The account that answered — `null` for the system account. */
+  account_id?: string | null;
 }
 
 // ---------- conversations ----------
@@ -174,7 +180,16 @@ export const chatCreateConversation = (
   projectId: string | null,
   provider: string,
   model: string,
-) => invoke<ChatConversation>("chat_create_conversation", { workspaceId, projectId, provider, model });
+  /** An explicit account (id or `"system"`); omitted resolves the workspace's default. */
+  account?: string | null,
+) =>
+  invoke<ChatConversation>("chat_create_conversation", {
+    workspaceId,
+    projectId,
+    provider,
+    model,
+    account: account ?? null,
+  });
 
 /** The whole flat list, pinned first then by recency — **not** filtered by workspace. The workspace
  *  is still stored (backup grouping, the run-isolation stamp), but a chat list that hides
@@ -189,10 +204,11 @@ export const chatGetConversation = (conversationId: string, withTrace?: boolean)
 export const chatRenameConversation = (conversationId: string, title: string) =>
   invoke<void>("chat_rename_conversation", { conversationId, title });
 
-/** Re-points the conversation at an engine. A provider change also clears the resume token on the
- *  Rust side, because a session id minted by one CLI means nothing to another. */
-export const chatSetEngine = (conversationId: string, provider: string, model: string) =>
-  invoke<void>("chat_set_engine", { conversationId, provider, model });
+/** Re-points the conversation at an engine. A provider change — or an **account** change — also
+ *  clears the resume token on the Rust side, because a session id minted by one CLI (or one
+ *  account's directory) means nothing to another. `account` omitted keeps the thread's account. */
+export const chatSetEngine = (conversationId: string, provider: string, model: string, account?: string | null) =>
+  invoke<string | null>("chat_set_engine", { conversationId, provider, model, account: account ?? null });
 
 export const chatSetUnread = (conversationId: string, unread: boolean) =>
   invoke<void>("chat_set_unread", { conversationId, unread });
