@@ -57,11 +57,12 @@ const LIVE_MARGIN = "300% 0px";
  *
  * What survives the round trip is the *view*: the editor's scroll position, its folds and its
  * collapsed unchanged regions are saved the moment before it goes and restored when it comes back,
- * so returning to a file lands where you left it rather than at the top. The pane's own height is
- * fixed by `splitHeightOf` and is the same whether the editor is up or not, so the outer scroll
- * position never moves underneath any of this.
+ * so returning to a file lands where you left it rather than at the top. In a list of files the
+ * pane's own height is fixed by `splitHeightOf` and is the same whether the editor is up or not, so
+ * the outer scroll position never moves underneath any of this. When the file is the whole diff,
+ * `height` is `"100%"` instead and the editor fills whatever the view gives it.
  */
-export function SplitFileDiff({ file, height }: { file: FileDiffInfo; height: number }) {
+export function SplitFileDiff({ file, height }: { file: FileDiffInfo; height: number | string }) {
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
   const holderRef = useRef<HTMLDivElement>(null);
   const [live, setLive] = useState(false);

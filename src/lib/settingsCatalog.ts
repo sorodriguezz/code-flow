@@ -25,6 +25,7 @@ import {
   BookOpen,
   Bot,
   Braces,
+  BrainCircuit,
   Briefcase,
   ChartColumn,
   Compass,
@@ -46,6 +47,7 @@ import {
   ListChecks,
   Lock,
   MessageSquareText,
+  MonitorDot,
   Network,
   PackagePlus,
   Palette,
@@ -283,6 +285,16 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         icon: Sparkles,
         searchKey: "settings.searchTermsCompletion",
       },
+      // How the "a model is thinking" mark is drawn. Last of the panes that set something up, before
+      // the two that only report — and in this section rather than Appearance because the mark is
+      // the assistant's own, and this is where somebody looking for it is already standing.
+      {
+        id: "thinking",
+        labelKey: "settings.thinkingTitle",
+        hintKey: "settings.thinkingHint",
+        icon: BrainCircuit,
+        searchKey: "settings.searchTermsThinking",
+      },
       {
         id: "limits",
         labelKey: "quota.title",
@@ -378,9 +390,23 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     // The bell, the same glyph as the status bar's notification centre these settings are about.
     icon: Bell,
     group: "global",
-    // The two questions in the order they get asked: how loudly, and about what.
+    // The questions in the order they get asked: what it sounds like, whether it reaches me when I
+    // am not looking, and about what. The synonyms are per pane rather than on the section — a
+    // section-level list answers for every pane at once, so "sonido" used to list all of them.
     tabs: [
-      { id: "delivery", labelKey: "notifications.deliveryTitle", icon: Volume2 },
+      {
+        id: "sound",
+        labelKey: "notifications.soundTitle",
+        hintKey: "notifications.soundPaneHint",
+        icon: Volume2,
+        searchKey: "settings.searchTermsSound",
+      },
+      {
+        id: "delivery",
+        labelKey: "notifications.deliveryTitle",
+        icon: MonitorDot,
+        searchKey: "settings.searchTermsNotifications",
+      },
       {
         id: "sources",
         labelKey: "notifications.sourcesTitle",
@@ -388,7 +414,6 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         icon: Bell,
       },
     ],
-    searchKey: "settings.searchTermsNotifications",
   },
   {
     id: "backup",

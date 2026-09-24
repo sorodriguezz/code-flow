@@ -5,6 +5,7 @@ import { AiTasksSettings } from "./AiTasksSettings";
 import { useT } from "../../state/languageStore";
 import { ProvidersSection } from "./ProvidersSection";
 import { QuotaSection } from "./QuotaSection";
+import { ThinkingDesignSettings } from "./ThinkingDesignSettings";
 import { UsageStatsSection } from "./UsageStatsSection";
 import { SettingsRail, useSectionTab } from "./settingsNav";
 import { tabsFor } from "../../lib/settingsCatalog";
@@ -20,6 +21,8 @@ import { Panel, SettingsHeader } from "../api/settingsChrome";
  *      **Accounts** follows it: the logins each of those engines has, and which one runs where.
  *   2. **Tasks and prompts** — which engine runs each action, and what it is told to do.
  *   3. **Autocomplete** — the model that runs on this machine and finishes what you type.
+ *      **Thinking design** follows it: how the mark that means "a model is working" is drawn,
+ *      everywhere it is drawn.
  *   4. **Limits** — how far through each provider's plan you are, as the provider reports it.
  *   5. **Usage** — what all of that has actually spent, as this app measured it.
  *
@@ -95,6 +98,7 @@ export function ClaudeSettings() {
             {tab === "accounts" && <AiAccountsSettings />}
             {tab === "tasks" && <AiTasksSettings />}
             {tab === "completion" && <AiCompletionSettings />}
+            {tab === "thinking" && <ThinkingDesignSettings />}
             {tab === "limits" && <QuotaSection />}
             {tab === "usage" && <UsageStatsSection />}
           </Panel>

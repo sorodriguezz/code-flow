@@ -1,4 +1,5 @@
 import { DEFAULT_ICON_RULES, type IconRule } from "./rules";
+import { SHIPPED_PACKS } from "./packs";
 
 /**
  * Named sets of icon rules, one of which is active per repository.
@@ -36,82 +37,33 @@ export interface IconProfile {
   defaultFolderIcon: string | null;
 }
 
-/** The folder rules and the test-file rules — everything that means the same thing in every
- * TypeScript project, and therefore belongs in all three shipped profiles. */
-const COMMON: IconRule[] = [
-  { id: "d-spec", target: "file", match: "suffix", pattern: ".spec.ts", icon: "vscode-icons:file-type-testts", enabled: true },
-  { id: "d-test", target: "file", match: "suffix", pattern: ".test.ts", icon: "vscode-icons:file-type-testts", enabled: true },
-  { id: "d-src", target: "folder", match: "name", pattern: "src", icon: "vscode-icons:folder-type-src", enabled: true },
-  { id: "d-components", target: "folder", match: "name", pattern: "components", icon: "vscode-icons:folder-type-component", enabled: true },
-  { id: "d-tests", target: "folder", match: "name", pattern: "tests", icon: "vscode-icons:folder-type-test", enabled: true },
-  { id: "d-node-modules", target: "folder", match: "name", pattern: "node_modules", icon: "vscode-icons:folder-type-node", enabled: true },
-  { id: "d-git", target: "folder", match: "name", pattern: ".git", icon: "vscode-icons:folder-type-git", enabled: true },
-];
+/**
+ * The profile a repository falls back to when it has no choice of its own and its stack is not
+ * recognised (see `detectProfile.ts`).
+ *
+ * General, now that General is a whole icon theme rather than seven rules. It used to be Angular,
+ * kept for the sake of installs that never opened the panel — but a React or Spring checkout drawn
+ * with Angular's reading of `*.service.ts` was the wrong answer for everybody who was not writing
+ * Angular, and the repositories that *are* Angular now get Angular by detection instead of by luck.
+ */
+export const DEFAULT_PROFILE_ID = "base";
 
 /**
- * The profile a fresh install starts on.
+ * What the app ships: General and one pack per framework, each complete on its own (see `packs.ts`
+ * for how they are built and why each one repeats the base).
  *
- * Angular rather than the neutral set, because that is what this app has always shipped — changing
- * the default would move the icons of every existing install that never opened the panel, to fix a
- * problem those installs may not have. The switch is one click away and the other profiles are
- * already written; that is the fix.
+ * This was three profiles for a long time, on the argument that a profile is only worth shipping
+ * where the same filename means different things in different stacks. That argument is still why
+ * profiles are per repository; what changed is what a profile is *for*. The user asked for packs
+ * that make each stack look like itself out of the box — Spring's controllers and repositories,
+ * .NET's `appsettings`, FastAPI's `schemas.py` — and for General to stop looking empty.
  */
-export const DEFAULT_PROFILE_ID = "angular";
-
-/**
- * What the app ships with.
- *
- * Three, not thirty. A profile is only worth shipping where the *same* filename means different
- * things in different stacks, and that is overwhelmingly the Angular/Nest collision — everything
- * else (`.vue`, `.svelte`, `.rs`) is already answered by the extension, which the built-in Lucide
- * table and the catalogue cover without a rule. The rest is for the user to write, which is what
- * the profile list is for.
- */
-export const BUILT_IN_PROFILES: IconProfile[] = [
-  {
-    id: "angular",
-    name: "Angular",
-    defaultFolderIcon: null,
-    rules: [
-      { id: "a-component", target: "file", match: "suffix", pattern: ".component.ts", icon: "vscode-icons:file-type-ng-component-ts", enabled: true },
-      { id: "a-service", target: "file", match: "suffix", pattern: ".service.ts", icon: "vscode-icons:file-type-ng-service-ts", enabled: true },
-      // Above `.module.ts`, because a routing module ends in it too and the list is first-match-wins.
-      { id: "a-routing", target: "file", match: "suffix", pattern: "-routing.module.ts", icon: "vscode-icons:file-type-ng-routing-ts", enabled: true },
-      { id: "a-module", target: "file", match: "suffix", pattern: ".module.ts", icon: "vscode-icons:file-type-ng-module-ts", enabled: true },
-      { id: "a-directive", target: "file", match: "suffix", pattern: ".directive.ts", icon: "vscode-icons:file-type-ng-directive-ts", enabled: true },
-      { id: "a-pipe", target: "file", match: "suffix", pattern: ".pipe.ts", icon: "vscode-icons:file-type-ng-pipe-ts", enabled: true },
-      { id: "a-guard", target: "file", match: "suffix", pattern: ".guard.ts", icon: "vscode-icons:file-type-ng-guard-ts", enabled: true },
-      { id: "a-interceptor", target: "file", match: "suffix", pattern: ".interceptor.ts", icon: "vscode-icons:file-type-ng-interceptor-ts", enabled: true },
-      ...COMMON,
-    ],
-  },
-  {
-    id: "nestjs",
-    name: "NestJS",
-    defaultFolderIcon: null,
-    rules: [
-      { id: "n-controller", target: "file", match: "suffix", pattern: ".controller.ts", icon: "vscode-icons:file-type-nest-controller-ts", enabled: true },
-      { id: "n-service", target: "file", match: "suffix", pattern: ".service.ts", icon: "vscode-icons:file-type-nest-service-ts", enabled: true },
-      { id: "n-module", target: "file", match: "suffix", pattern: ".module.ts", icon: "vscode-icons:file-type-nest-module-ts", enabled: true },
-      { id: "n-guard", target: "file", match: "suffix", pattern: ".guard.ts", icon: "vscode-icons:file-type-nest-guard-ts", enabled: true },
-      { id: "n-pipe", target: "file", match: "suffix", pattern: ".pipe.ts", icon: "vscode-icons:file-type-nest-pipe-ts", enabled: true },
-      { id: "n-filter", target: "file", match: "suffix", pattern: ".filter.ts", icon: "vscode-icons:file-type-nest-filter-ts", enabled: true },
-      { id: "n-interceptor", target: "file", match: "suffix", pattern: ".interceptor.ts", icon: "vscode-icons:file-type-nest-interceptor-ts", enabled: true },
-      { id: "n-middleware", target: "file", match: "suffix", pattern: ".middleware.ts", icon: "vscode-icons:file-type-nest-middleware-ts", enabled: true },
-      { id: "n-gateway", target: "file", match: "suffix", pattern: ".gateway.ts", icon: "vscode-icons:file-type-nest-gateway-ts", enabled: true },
-      { id: "n-decorator", target: "file", match: "suffix", pattern: ".decorator.ts", icon: "vscode-icons:file-type-nest-decorator-ts", enabled: true },
-      ...COMMON,
-    ],
-  },
-  {
-    // The one to pick when a repository is neither, or is both: the suffixes that mean different
-    // things in different stacks are simply left to the plain TypeScript icon.
-    id: "base",
-    name: "General",
-    defaultFolderIcon: null,
-    rules: COMMON,
-  },
-];
+export const BUILT_IN_PROFILES: IconProfile[] = SHIPPED_PACKS.map((shipped) => ({
+  id: shipped.id,
+  name: shipped.name,
+  rules: shipped.rules,
+  defaultFolderIcon: null,
+}));
 
 /**
  * The version of a profile this app ships, if it ships one.

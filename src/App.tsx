@@ -51,6 +51,7 @@ import { useShortcutsStore } from "./state/shortcutsStore";
 import { useIconRulesStore } from "./state/iconRulesStore";
 import { useFileNestingStore } from "./state/fileNestingStore";
 import { useCsvStore } from "./state/csvStore";
+import { useThinkingDesignStore } from "./state/thinkingDesignStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
 import { useBlameStore } from "./state/blameStore";
@@ -565,6 +566,9 @@ export default function App() {
         // How delimited files are coloured. With the rest of the editor's look, so a `.csv` restored
         // into a tab at boot opens in its columns rather than as plain text that recolours a beat later.
         useCsvStore.getState().init(),
+        // How the thinking mark is drawn. With the rest of the look, so an orb already running when the
+        // window opens does not switch design a beat later.
+        useThinkingDesignStore.getState().init(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
         startWindowBoundsTracking(),
@@ -1095,8 +1099,14 @@ export default function App() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <Sidebar />
         {/* The work column: the view is a sheet, and the dock under it is a second one, 6px apart —
-            the frame shows between them. See the note atop `index.css`. */}
-        <div className="flex min-w-0 flex-1 flex-col gap-1.5 pb-1.5">
+            the frame shows between them. See the note atop `index.css`.
+
+            `pt-px` is the room for the sheet's hairline, which `.cf-sheet` draws as a ring *outside*
+            its box. Flush against the top of this row, whose `overflow-hidden` clips at exactly
+            that line, the ring's top edge was cut away: the two rounded corners still curved down
+            into view and then stopped dead, so the sheet looked tucked under the title bar with its
+            top edge missing in the middle (user report). The AI panel's wrapper does the same. */}
+        <div className="flex min-w-0 flex-1 flex-col gap-1.5 pb-1.5 pt-px">
           {/* A floor, not `min-h-0`, now that the terminal dock below yields space instead of
               overflowing: without one, a dock taller than the window would win the whole column
               and leave the view it docks *into* at zero height. This is the point past which the

@@ -116,7 +116,7 @@ export function ChromeScope() {
         >
           <span
             aria-label={t("tabbar.scopeRepository")}
-            className="flex h-7 min-w-0 shrink-0 cursor-default select-none items-center gap-2 pl-0.5 pr-1 text-[13px] font-semibold text-[var(--cf-text)]"
+            className="flex h-7 min-w-0 shrink-0 cursor-default select-none items-center gap-2 pl-1 pr-1 text-[13px] font-semibold text-[var(--cf-text)]"
           >
             {project ? (
               <span

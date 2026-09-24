@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { IconGlyph } from "../common/FileGlyph";
+import { buttonClass } from "../common/Button";
 import { Select } from "../common/Select";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import {
@@ -34,12 +35,11 @@ import {
   parseIconPattern,
   ruleMatches,
   ruleMatchesSearch,
-  sameRuleTarget,
   type IconRule,
 } from "../../lib/icons/rules";
 import { exportProfileFile, importProfileFile } from "../../lib/icons/profileFile";
-import { shippedProfile } from "../../lib/icons/profiles";
-import { useIconRulesStore } from "../../state/iconRulesStore";
+import { DEFAULT_PROFILE_ID, profileById, shippedProfile } from "../../lib/icons/profiles";
+import { AUTO_PROFILE, useIconRulesStore } from "../../state/iconRulesStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
@@ -291,6 +291,8 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
   const profiles = useIconRulesStore((s) => s.profiles);
   const activeId = useIconRulesStore((s) => s.activeId);
   const repoPath = useIconRulesStore((s) => s.repoPath);
+  const autoSelected = useIconRulesStore((s) => s.autoSelected);
+  const detectedId = useIconRulesStore((s) => s.detectedId);
   const selectProfile = useIconRulesStore((s) => s.selectProfile);
   const addProfile = useIconRulesStore((s) => s.addProfile);
   const duplicateProfile = useIconRulesStore((s) => s.duplicateProfile);
@@ -474,13 +476,31 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
           className="min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1.5 py-1 text-[12px] outline-none"
         />
       ) : (
-        <div className="min-w-0 flex-1">
+        // With a repository open, the first entry is "follow the stack": the pack detection picked for
+        // this checkout, named, so what "automatic" means is on the label rather than in a manual.
+        // Picking any profile pins it for this repository; picking this entry un-pins it.
+        <div
+          className="min-w-0 flex-1"
+          title={autoSelected ? t("icons.profileAutoHint") : undefined}
+        >
           <Select
             size="compact"
             ariaLabel={t("icons.profile")}
-            value={activeId}
+            value={autoSelected ? AUTO_PROFILE : activeId}
             onChange={(id) => void selectProfile(id)}
-            options={profiles.map((profile) => ({ value: profile.id, label: profile.name }))}
+            options={[
+              ...(repoPath
+                ? [
+                    {
+                      value: AUTO_PROFILE,
+                      label: t("icons.profileAuto", {
+                        name: profileById(profiles, detectedId ?? DEFAULT_PROFILE_ID)?.name ?? "",
+                      }),
+                    },
+                  ]
+                : []),
+              ...profiles.map((profile) => ({ value: profile.id, label: profile.name })),
+            ]}
           />
         </div>
       )}
@@ -539,9 +559,19 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
  * Every edit still writes through immediately, so any tree already drawn behind the Settings window
  * repaints as you type.
  */
+/**
+ * How many rules the list draws before it asks. A shipped pack is six hundred-odd rules and a row
+ * here is a field, a glyph and a menu — about a third of a millisecond each in a dev build, measured,
+ * so the whole list is a couple of hundred milliseconds the pane would spend on every opening to show
+ * rows nobody reads top to bottom. The filter above is how a rule is found; "show all" is one click
+ * for whoever does want to scroll, and at that cost it can draw the rest at once.
+ */
+const FIRST_ROWS = 60;
+
 export function IconRulesSettings() {
   const t = useT();
   const rules = useIconRulesStore((s) => s.rules);
+  const activeId = useIconRulesStore((s) => s.activeId);
   const save = useIconRulesStore((s) => s.save);
   const defaultFolderIcon = useIconRulesStore((s) => s.defaultFolderIcon);
   const setDefaultFolderIcon = useIconRulesStore((s) => s.setDefaultFolderIcon);
@@ -550,6 +580,8 @@ export function IconRulesSettings() {
   );
   const [query, setQuery] = useState("");
   const [pickingFolder, setPickingFolder] = useState(false);
+  /** Which profile "show all" was asked for — another profile starts from the first rows again. */
+  const [showAllFor, setShowAllFor] = useState<string | null>(null);
 
   /**
    * Which rules the search leaves on screen, and which of them wins.
@@ -577,14 +609,27 @@ export function IconRulesSettings() {
 
   /** Rules an identical one already covers. Keyed by id so the row can say so — and it is a fact
    * about the list, not a warning we invent: with first-match-wins, the second `src/` never fires. */
+  //
+  // One pass with the normalised target as the key — the same comparison `sameRuleTarget` makes. It
+  // used to compare every rule with every rule above it, which at a shipped pack's length is a quarter
+  // of a million comparisons on each edit.
   const shadowed = useMemo(() => {
     const dead = new Set<string>();
-    rules.forEach((rule, index) => {
-      if (!rule.pattern.trim()) return;
-      if (rules.slice(0, index).some((earlier) => sameRuleTarget(earlier, rule))) dead.add(rule.id);
-    });
+    const seen = new Set<string>();
+    for (const rule of rules) {
+      const pattern = rule.pattern.trim().toLowerCase();
+      if (!pattern) continue;
+      const key = `${rule.target}|${rule.match}|${pattern}`;
+      if (seen.has(key)) dead.add(rule.id);
+      else seen.add(key);
+    }
     return dead;
   }, [rules]);
+
+  /** Where each rule sits in the whole list, for the rows of a filtered view. */
+  const indexOf = useMemo(() => new Map(rules.map((rule, index) => [rule, index])), [rules]);
+  const searching = query.trim() !== "";
+  const drawn = searching || showAllFor === activeId ? visible : visible.slice(0, FIRST_ROWS);
 
   const update = (index: number, next: IconRule) =>
     void save(rules.map((rule, i) => (i === index ? next : rule)));
@@ -708,10 +753,10 @@ export function IconRulesSettings() {
             {t("icons.noMatches", { query: query.trim() })}
           </p>
         ) : (
-          visible.map((rule) => {
+          drawn.map((rule) => {
             // Indices come from the full list: reordering and deleting act on the real order, which
             // a filtered view must not renumber.
-            const index = rules.indexOf(rule);
+            const index = indexOf.get(rule) ?? rules.indexOf(rule);
             return (
               <RuleRow
                 key={rule.id}
@@ -726,6 +771,18 @@ export function IconRulesSettings() {
               />
             );
           })
+        )}
+        {drawn.length < visible.length && (
+          <div className="flex items-center gap-2 px-1 pt-1.5 text-[11px] text-[var(--cf-text-muted)]">
+            <span className="min-w-0 flex-1">{t("icons.moreRules", { n: visible.length - drawn.length })}</span>
+            <button
+              type="button"
+              onClick={() => setShowAllFor(activeId)}
+              className={buttonClass({ variant: "ghost", size: "sm" })}
+            >
+              {t("icons.showAllRules")}
+            </button>
+          </div>
         )}
       </div>
     </div>

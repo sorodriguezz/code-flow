@@ -869,6 +869,525 @@ body {
   }
 }
 
+/* The seven other looks of the thinking mark (`lib/thinkingDesigns`), picked in Settings › AI
+   assistant › Thinking design. The rules the reactor keeps, they keep: drawn only in the
+   assistant's own hues, so none can pass for the plain spinner non-AI work wears; `transform` and
+   `opacity` only, so twenty in a task list cost the compositor and not the page; and every
+   distance a fraction of `--cf-orb-size`, so each fills the same square at 14, 22 and 44px and
+   switching design moves no row by a pixel. */
+
+/* Destello — a four-pointed star (an astroid with its sides pulled in) that turns a quarter at a
+   time, swelling as it goes, while two small ones twinkle in the corners its arms never reach.
+   The sparkle is the glyph the app's AI buttons already wear (`Sparkles`); this is that, running.
+   Four-fold symmetry is what makes a 90° turn a seamless loop. */
+@keyframes cf-spark-turn {
+  0% {
+    transform: rotate(0deg) scale(0.8);
+  }
+  50% {
+    transform: rotate(45deg) scale(1);
+  }
+  100% {
+    transform: rotate(90deg) scale(0.8);
+  }
+}
+@keyframes cf-spark-twinkle {
+  0%,
+  100% {
+    transform: scale(0) rotate(0deg);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1) rotate(45deg);
+    opacity: 1;
+  }
+}
+.cf-orb-star,
+.cf-orb-twinkle {
+  position: absolute;
+  clip-path: polygon(100% 50%, 97.7% 49%, 91.3% 45%, 82.1% 37.8%, 71.8% 28.2%, 62.2% 17.9%, 55% 8.7%, 51% 2.3%, 50% 0%, 49% 2.3%, 45% 8.7%, 37.8% 17.9%, 28.2% 28.2%, 17.9% 37.8%, 8.7% 45%, 2.3% 49%, 0% 50%, 2.3% 51%, 8.7% 55%, 17.9% 62.2%, 28.2% 71.8%, 37.8% 82.1%, 45% 91.3%, 49% 97.7%, 50% 100%, 51% 97.7%, 55% 91.3%, 62.2% 82.1%, 71.8% 71.8%, 82.1% 62.2%, 91.3% 55%, 97.7% 51%);
+}
+/* 80% of the square: turned 45°, its arms stop just short of the corner twinkles. */
+.cf-orb-star {
+  inset: 10%;
+  background: linear-gradient(135deg, var(--cf-ai-c), var(--cf-ai-a) 55%, var(--cf-ai-b));
+  animation: cf-spark-turn 2.4s ease-in-out infinite;
+}
+.cf-orb-twinkle {
+  top: 0;
+  right: 0;
+  width: 26%;
+  height: 26%;
+  background: var(--cf-ai-c);
+  animation: cf-spark-twinkle 1.8s ease-in-out infinite;
+}
+.cf-orb-twinkle-2 {
+  top: auto;
+  right: auto;
+  bottom: 0;
+  left: 0;
+  background: var(--cf-accent);
+  animation-delay: -0.9s;
+}
+
+/* Aurora — a ball of the assistant's colours, swirling. Two discs turn against each other: one full
+   of colour, one carrying an off-centre lobe, and because that lobe's mask turns with it the outline
+   of the whole seems to change shape — without a blur or a filter anywhere. The glint on top is
+   still, which is what makes the rest read as a sphere turning rather than a picture spinning. */
+@keyframes cf-aurora-swirl {
+  0% {
+    transform: rotate(0deg) scale(0.88);
+  }
+  50% {
+    transform: rotate(180deg) scale(1);
+  }
+  100% {
+    transform: rotate(360deg) scale(0.88);
+  }
+}
+.cf-orb-aura {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, var(--cf-ai-a), var(--cf-ai-c), var(--cf-ai-b), var(--cf-accent), var(--cf-ai-a));
+  /* A narrow soft rim, not a wide one: at 14px a wide fade reads as a blurred image, not a glow. */
+  -webkit-mask: radial-gradient(closest-side, #000 78%, transparent 98%);
+  mask: radial-gradient(closest-side, #000 78%, transparent 98%);
+  animation: cf-aurora-swirl 3s linear infinite;
+}
+.cf-orb-aura-2 {
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    var(--cf-ai-c) 60deg,
+    transparent 140deg,
+    var(--cf-ai-a) 220deg,
+    transparent 300deg
+  );
+  -webkit-mask: radial-gradient(closest-side at 64% 38%, #000 30%, transparent);
+  mask: radial-gradient(closest-side at 64% 38%, #000 30%, transparent);
+  animation-duration: 1.9s;
+  animation-direction: reverse;
+}
+.cf-orb-glint {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 34% 30%, rgb(255 255 255 / 0.75), rgb(255 255 255 / 0) 30%);
+}
+
+/* Órbita — three particles on tilted ellipses around a breathing nucleus: an atom. Each plane is a
+   circle squashed to 38% and turned; the carrier inside it spins, and the particle on the carrier
+   turns back by the same angle and stretches by 1/0.38 — which cancels both, so it stays a round
+   dot all the way round its ellipse instead of flattening where the plane is squashed. Carrier and
+   particle share one duration and one delay for exactly that reason. The track is drawn only from
+   22px up: at 14px it is a smudge. */
+@keyframes cf-orbit-upright {
+  from {
+    transform: rotate(0deg) scaleY(2.6316);
+  }
+  to {
+    transform: rotate(-360deg) scaleY(2.6316);
+  }
+}
+@keyframes cf-orb-breathe {
+  0%,
+  100% {
+    transform: scale(0.82);
+  }
+  50% {
+    transform: scale(1);
+  }
+}
+.cf-orb-plane {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  transform: rotate(var(--cf-orbit-tilt)) scaleY(0.38);
+  box-shadow: inset 0 0 0 max(1px, calc(var(--cf-orb-size) * 0.035)) color-mix(in oklab, var(--cf-ai-b) 30%, transparent);
+}
+.cf-orb-sm .cf-orb-plane {
+  box-shadow: none;
+}
+.cf-orb-plane-1 {
+  --cf-orbit-tilt: 0deg;
+  --cf-orbit-period: 1.5s;
+  --cf-orbit-delay: 0s;
+  --cf-orbit-rest: 40deg;
+  --cf-orbit-color: var(--cf-ai-c);
+}
+.cf-orb-plane-2 {
+  --cf-orbit-tilt: 60deg;
+  --cf-orbit-period: 2.1s;
+  --cf-orbit-delay: -0.7s;
+  --cf-orbit-rest: 160deg;
+  --cf-orbit-color: var(--cf-ai-a);
+}
+.cf-orb-plane-3 {
+  --cf-orbit-tilt: 120deg;
+  --cf-orbit-period: 1.8s;
+  --cf-orbit-delay: -1.3s;
+  --cf-orbit-rest: 280deg;
+  --cf-orbit-color: var(--cf-accent);
+}
+.cf-orb-carrier {
+  position: absolute;
+  inset: 0;
+  animation: cf-orb-spin var(--cf-orbit-period) linear var(--cf-orbit-delay) infinite;
+}
+.cf-orb-electron {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: var(--cf-orb-dot);
+  height: var(--cf-orb-dot);
+  margin: calc(var(--cf-orb-dot) / -2) 0 0 calc(var(--cf-orb-dot) / -2);
+  border-radius: 50%;
+  background: var(--cf-orbit-color);
+  animation: cf-orbit-upright var(--cf-orbit-period) linear var(--cf-orbit-delay) infinite;
+}
+.cf-orb-nucleus {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: calc(var(--cf-orb-size) * 0.3);
+  height: calc(var(--cf-orb-size) * 0.3);
+  margin: calc(var(--cf-orb-size) * -0.15) 0 0 calc(var(--cf-orb-size) * -0.15);
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 35% 35%,
+    color-mix(in oklab, var(--cf-ai-a) 45%, white),
+    var(--cf-ai-a) 55%,
+    var(--cf-ai-b)
+  );
+  animation: cf-orb-breathe 1.4s ease-in-out infinite;
+}
+
+/* Pulso — a heart that beats twice (lub-dub) and sends a ring out on every beat. Two rings half a
+   cycle apart, so one leaves as the last one fades; each starts behind the heart, so it is seen
+   leaving it rather than appearing beside it. */
+@keyframes cf-pulse-ripple {
+  0% {
+    transform: scale(0.35);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+@keyframes cf-pulse-beat {
+  0%,
+  100% {
+    transform: scale(0.8);
+  }
+  18% {
+    transform: scale(1);
+  }
+  36% {
+    transform: scale(0.86);
+  }
+  54% {
+    transform: scale(0.95);
+  }
+}
+.cf-orb-ripple {
+  --cf-orb-stroke: calc(var(--cf-orb-size) * 0.1);
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(from 45deg, var(--cf-ai-c), var(--cf-ai-a), var(--cf-ai-b), var(--cf-ai-c));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--cf-orb-stroke)), #000 0);
+  mask: radial-gradient(farthest-side, transparent calc(100% - var(--cf-orb-stroke)), #000 0);
+  animation: cf-pulse-ripple 1.8s cubic-bezier(0.25, 0.6, 0.35, 1) infinite;
+}
+.cf-orb-ripple-2 {
+  animation-delay: -0.9s;
+}
+.cf-orb-heart {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: calc(var(--cf-orb-size) * 0.4);
+  height: calc(var(--cf-orb-size) * 0.4);
+  margin: calc(var(--cf-orb-size) * -0.2) 0 0 calc(var(--cf-orb-size) * -0.2);
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, color-mix(in oklab, var(--cf-ai-c) 50%, white), var(--cf-ai-a) 70%);
+  animation: cf-pulse-beat 0.9s ease-in-out infinite;
+}
+
+/* Voz — four bars rising and falling out of step, like a voice on a level meter: the model
+   talking. Four periods that share no divisor, so the shape never repeats in a way the eye learns. */
+@keyframes cf-voice {
+  0%,
+  100% {
+    transform: scaleY(0.38);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.cf-orb-bars {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--cf-orb-size) * 0.09);
+}
+.cf-orb-bar {
+  width: calc(var(--cf-orb-size) * 0.14);
+  height: calc(var(--cf-orb-size) * 0.8);
+  border-radius: calc(var(--cf-orb-size) * 0.07);
+  background: linear-gradient(to top, var(--cf-bar-from), var(--cf-bar-to));
+  animation: cf-voice 1s ease-in-out infinite;
+}
+.cf-orb-bar:nth-child(1) {
+  --cf-bar-from: var(--cf-ai-a);
+  --cf-bar-to: var(--cf-ai-b);
+  animation-duration: 0.95s;
+  animation-delay: -0.25s;
+}
+.cf-orb-bar:nth-child(2) {
+  --cf-bar-from: var(--cf-ai-b);
+  --cf-bar-to: var(--cf-ai-c);
+  animation-duration: 1.2s;
+  animation-delay: -0.7s;
+}
+.cf-orb-bar:nth-child(3) {
+  --cf-bar-from: var(--cf-ai-c);
+  --cf-bar-to: var(--cf-accent);
+  animation-duration: 0.85s;
+  animation-delay: -0.1s;
+}
+.cf-orb-bar:nth-child(4) {
+  --cf-bar-from: var(--cf-accent);
+  --cf-bar-to: var(--cf-ai-a);
+  animation-duration: 1.1s;
+  animation-delay: -0.5s;
+}
+
+/* Matriz — three by three, lit in a wave from one corner to the other and then a rest: something
+   being computed. The colour runs along the same diagonal as the wave, violet to cyan, so each cell
+   says where it sits in the order. */
+@keyframes cf-matrix {
+  0%,
+  60%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.45;
+  }
+  30% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.cf-orb-grid {
+  position: absolute;
+  inset: calc(var(--cf-orb-size) * 0.05);
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: calc(var(--cf-orb-size) * 0.12);
+}
+.cf-orb-cell {
+  border-radius: 30%;
+  background: color-mix(in oklab, var(--cf-ai-a), var(--cf-ai-c) var(--cf-cell-mix));
+  animation: cf-matrix 1.6s ease-in-out infinite;
+  animation-delay: calc(var(--cf-cell-step) * 0.16s - 1.6s);
+}
+.cf-orb-cell:nth-child(1) {
+  --cf-cell-step: 0;
+  --cf-cell-mix: 0%;
+}
+.cf-orb-cell:nth-child(2),
+.cf-orb-cell:nth-child(4) {
+  --cf-cell-step: 1;
+  --cf-cell-mix: 25%;
+}
+.cf-orb-cell:nth-child(3),
+.cf-orb-cell:nth-child(5),
+.cf-orb-cell:nth-child(7) {
+  --cf-cell-step: 2;
+  --cf-cell-mix: 50%;
+}
+.cf-orb-cell:nth-child(6),
+.cf-orb-cell:nth-child(8) {
+  --cf-cell-step: 3;
+  --cf-cell-mix: 75%;
+}
+.cf-orb-cell:nth-child(9) {
+  --cf-cell-step: 4;
+  --cf-cell-mix: 100%;
+}
+
+/* Hélice — two strands twisting past each other: four pairs of beads, each pair half a turn apart,
+   each column a quarter turn further round than the last. Depth is size and brightness only — a bead in
+   front is large and full, one behind is half the size and dim. Animating `z-index` for true
+   overlap would take this off the compositor, and at the one moment the two cross the difference
+   is a small dim dot inside a large bright one either way. */
+@keyframes cf-helix {
+  0% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+    animation-timing-function: ease-out;
+  }
+  25% {
+    transform: translateY(var(--cf-helix-amp)) scale(0.75);
+    opacity: 0.8;
+    animation-timing-function: ease-in;
+  }
+  50% {
+    transform: translateY(0) scale(0.5);
+    opacity: 0.45;
+    animation-timing-function: ease-out;
+  }
+  75% {
+    transform: translateY(calc(var(--cf-helix-amp) * -1)) scale(0.75);
+    opacity: 0.8;
+    animation-timing-function: ease-in;
+  }
+  100% {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+.cf-orb-strands {
+  --cf-helix-amp: calc(var(--cf-orb-size) * 0.3);
+  position: absolute;
+  inset: 0 calc(var(--cf-orb-size) * 0.07);
+  display: flex;
+  justify-content: space-between;
+}
+.cf-orb-strand {
+  position: relative;
+  width: calc(var(--cf-orb-size) * 0.17);
+}
+/* A quarter turn further round per column, so across the four the strands cross twice — the twisted
+   ladder of a helix. A smaller step bends both strands into one arc each, and the two arcs together
+   read as a ring of dots: a spinner, which is the one thing this may not look like. */
+.cf-orb-strand:nth-child(1) {
+  --cf-strand-delay: 0s;
+  --cf-strand-rest: 0;
+}
+.cf-orb-strand:nth-child(2) {
+  --cf-strand-delay: -0.4s;
+  --cf-strand-rest: 1;
+}
+.cf-orb-strand:nth-child(3) {
+  --cf-strand-delay: -0.8s;
+  --cf-strand-rest: 0;
+}
+.cf-orb-strand:nth-child(4) {
+  --cf-strand-delay: -1.2s;
+  --cf-strand-rest: -1;
+}
+.cf-orb-base {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: calc(var(--cf-orb-size) * 0.17);
+  height: calc(var(--cf-orb-size) * 0.17);
+  margin-top: calc(var(--cf-orb-size) * -0.085);
+  border-radius: 50%;
+  background: var(--cf-ai-c);
+  animation: cf-helix 1.6s infinite;
+  animation-delay: var(--cf-strand-delay);
+}
+.cf-orb-base-b {
+  background: var(--cf-ai-a);
+  animation-delay: calc(var(--cf-strand-delay) - 0.8s);
+}
+
+/* Still frames for the seven, under reduced motion — each one the moment of its own animation that
+   best says what it is, never a pile-up of parts at their starting positions. */
+@media (prefers-reduced-motion: reduce) {
+  .cf-orb-star,
+  .cf-orb-twinkle,
+  .cf-orb-aura,
+  .cf-orb-carrier,
+  .cf-orb-nucleus,
+  .cf-orb-ripple,
+  .cf-orb-heart,
+  .cf-orb-bar,
+  .cf-orb-cell,
+  .cf-orb-base {
+    animation: none;
+  }
+  .cf-orb-star {
+    transform: scale(0.9);
+  }
+  .cf-orb-twinkle {
+    transform: scale(0.8);
+  }
+  /* Spread round their ellipses, and upright: without the counter-turn a still particle would be
+     squashed flat by its plane. */
+  .cf-orb-carrier {
+    transform: rotate(var(--cf-orbit-rest));
+  }
+  .cf-orb-electron {
+    animation: none;
+    transform: rotate(calc(var(--cf-orbit-rest) * -1)) scaleY(2.6316);
+  }
+  .cf-orb-ripple {
+    transform: scale(0.72);
+    opacity: 0.6;
+  }
+  .cf-orb-ripple-2 {
+    display: none;
+  }
+  .cf-orb-bar:nth-child(1) {
+    transform: scaleY(0.5);
+  }
+  .cf-orb-bar:nth-child(2) {
+    transform: scaleY(0.9);
+  }
+  .cf-orb-bar:nth-child(3) {
+    transform: scaleY(0.62);
+  }
+  .cf-orb-bar:nth-child(4) {
+    transform: scaleY(0.8);
+  }
+  .cf-orb-cell {
+    transform: scale(0.8);
+    opacity: 0.85;
+  }
+  /* The two strands, frozen mid-twist: crossing, apart, crossing, apart the other way. */
+  .cf-orb-base {
+    transform: translateY(calc(var(--cf-helix-amp) * var(--cf-strand-rest)));
+  }
+  .cf-orb-base-b {
+    transform: translateY(calc(var(--cf-helix-amp) * var(--cf-strand-rest) * -1)) scale(0.7);
+    opacity: 0.6;
+  }
+}
+
+/* The playhead crossing a notification sound's piano roll while it plays (Settings › Notifications
+   › Sound). The layer is as wide as the glyph and carries the line on its left edge, so
+   `translateX(100%)` walks the line exactly from one end to the other with nothing measured. */
+@keyframes cf-score-playhead {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+.cf-score-playhead {
+  position: absolute;
+  inset: 0;
+  border-left: 1.5px solid var(--cf-accent);
+  animation: cf-score-playhead 1s linear forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-score-playhead {
+    display: none;
+  }
+}
+
 /* The confirm modal's flow diagram (src/components/common/ConfirmFlowDiagram.tsx): a light
    travelling along the connector, in the direction the change is about to move. The beam is as
    wide as its own track, so `translateX(±100%)` carries it exactly from one end to the other —
@@ -1295,8 +1814,11 @@ body {
 /* A colour chip that is also a button — the project's folder square in the sidebar. The ring is
    drawn with box-shadow rather than a border so hovering doesn't resize the square and shift the
    name beside it. */
+/* `!important` because the chip's tile is drawn by `monogramStyle`, whose hairline is an inline
+   box-shadow — and an inline style outranks this rule, so the hover ring had silently stopped
+   showing. */
 .cf-chip-button:hover {
-  box-shadow: 0 0 0 2px color-mix(in oklab, var(--cf-text) 38%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--cf-text) 38%, transparent) !important;
 }
 
 /* ==================================================================

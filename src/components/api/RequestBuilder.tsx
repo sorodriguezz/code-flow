@@ -21,10 +21,10 @@ import {
   menuItemClass,
   popoverClass,
   tabCountClass,
-  underlineStripClass,
   underlineTabClass,
 } from "../common/recipes";
 import { useShortcutChord } from "../../lib/useShortcutHint";
+import { scrollEdgeMask, useScrollEdges } from "../../lib/useScrollEdges";
 import { ensureSnippetPanelLoaded, useSnippetPanelStore } from "./snippetPanelState";
 import { KeyValueTable } from "./KeyValueTable";
 import { VariableInput } from "./VariableInput";
@@ -726,6 +726,9 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
 
   const isStreaming = STREAMING_PROTOCOLS.includes(protocol);
   const isGrpc = protocol === "grpc";
+  // The section tabs only exist on the HTTP/GraphQL branch below, so that is when to watch them.
+  const sectionTabsRef = useRef<HTMLDivElement>(null);
+  const sectionTabsMask = scrollEdgeMask(useScrollEdges(sectionTabsRef, !isStreaming && !isGrpc, "x"), 24, "x");
   const crumbs = breadcrumbFor(collections, folders, tab.collectionId, tab.folderId);
 
   const badgeCount = (id: PanelId): string | null => {
@@ -907,25 +910,6 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
         {tab.dirty && (
           <span className="shrink-0 text-[12px] text-[var(--cf-text-faint)]">{t("api.unsaved")}</span>
         )}
-        {/* The code snippet's switch. It used to be a 36px rail down the right edge with its title
-            written sideways — a whole column spent on a closed panel. Pressed while the panel is
-            open, and remembered either way (`snippetPanelState`). */}
-        <Tooltip label={snippetOpen ? t("api.snippet.collapse") : t("api.snippet.expand")} side="bottom">
-          <button
-            type="button"
-            onClick={() => setSnippetOpen(!snippetOpen)}
-            aria-pressed={snippetOpen}
-            className={buttonClass({
-              variant: "ghost",
-              size: "md",
-              className:
-                "aria-pressed:bg-[var(--cf-accent-soft)] aria-pressed:text-[var(--cf-accent)]",
-            })}
-          >
-            <Code2 size={14} />
-            {t("api.snippet.button")}
-          </button>
-        </Tooltip>
         <div className="relative shrink-0">
           {/* Live only when there's something to save. A button that looks the same whether or
               not it would do anything makes "is my work in?" a question you have to answer some
@@ -1157,28 +1141,65 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                 builder and above the body's own format picker — one kind of control per level, so
                 what depends on what reads off the shapes. A count says how many rows are on; a dot
                 says the section holds something without a number to give. */}
-            <div role="tablist" className={underlineStripClass}>
-              {PANEL_ORDER.map((id) => {
-                const count = badgeCount(id);
-                const active = panel === id;
-                return (
-                  <button
-                    key={id}
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => setPanel(id)}
-                    className={underlineTabClass(active)}
-                  >
-                    {panelLabel(id)}
-                    {count !== null && <span className={tabCountClass}>{count}</span>}
-                    {count === null && badgeDot(id) && (
-                      <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-[var(--cf-success)]" />
-                    )}
-                    {active && <ActiveUnderline layoutId="cf-api-request-panel" />}
-                  </button>
-                );
-              })}
+            {/* `underlineStripClass` split in two: the frame (height, rule, padding) and, inside it, the
+                part that scrolls. The code switch at the end has to stay outside the scroller — with
+                the snippet panel open the builder narrows, and inside it the switch slid out of view
+                exactly when its pressed state was the thing to see. */}
+            <div className="flex h-9 shrink-0 items-stretch gap-3 border-b border-[var(--cf-border)] px-3.5">
+              <div
+                ref={sectionTabsRef}
+                role="tablist"
+                // Faded where more tabs continue past the edge, rather than cut mid-word against the
+                // switch — the settings rail's cue (`scrollEdgeMask`), sideways.
+                style={{ maskImage: sectionTabsMask, WebkitMaskImage: sectionTabsMask }}
+                className="flex min-w-0 flex-1 items-stretch gap-4 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              >
+                {PANEL_ORDER.map((id) => {
+                  const count = badgeCount(id);
+                  const active = panel === id;
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      role="tab"
+                      aria-selected={active}
+                      onClick={() => setPanel(id)}
+                      className={underlineTabClass(active)}
+                    >
+                      {panelLabel(id)}
+                      {count !== null && <span className={tabCountClass}>{count}</span>}
+                      {count === null && badgeDot(id) && (
+                        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-[var(--cf-success)]" />
+                      )}
+                      {active && <ActiveUnderline layoutId="cf-api-request-panel" />}
+                    </button>
+                  );
+                })}
+              </div>
+              {/* The code snippet's switch, at the end of the sections: a view of the whole request,
+                  where the HTTP clients this one follows put "Code". It sat in the name row between
+                  "unsaved changes" and Save, where it read as part of the save status and looked out
+                  of place (user report); before that it was a 36px rail down the right edge with its
+                  title written sideways. Only in this row, so only for HTTP and GraphQL — the two
+                  protocols the snippet can speak (`generateSnippet`); the panel has its own close
+                  button for the rest. Pressed while open, and remembered (`snippetPanelState`). */}
+              <Tooltip label={snippetOpen ? t("api.snippet.collapse") : t("api.snippet.expand")} side="bottom">
+                <button
+                  type="button"
+                  onClick={() => setSnippetOpen(!snippetOpen)}
+                  aria-pressed={snippetOpen}
+                  className={buttonClass({
+                    variant: "ghost",
+                    size: "sm",
+                    className:
+                      // `-mr-0.5` puts the button's box on the same right edge as Save and Send above it.
+                      "-mr-0.5 shrink-0 self-center aria-pressed:bg-[var(--cf-accent-soft)] aria-pressed:text-[var(--cf-accent)]",
+                  })}
+                >
+                  <Code2 size={13} />
+                  {t("api.snippet.button")}
+                </button>
+              </Tooltip>
             </div>
 
             {/* No `overflow` here: every sibling panel roots at `h-full min-h-0` and owns its own

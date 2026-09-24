@@ -514,16 +514,20 @@ export function ReviewPrMenu({ projectId }: { projectId: string; variant?: "butt
   const ref = useRef<HTMLDivElement>(null);
   useDismiss(ref, open, () => setOpen(false));
   return (
-    <div ref={ref} className="relative">
+    // `flex`, so the wrapper is exactly the button: as a block it added a line box around it, and
+    // centred in the Inbox's row the button sat a pixel above its neighbours.
+    <div ref={ref} className="relative flex">
       <button
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className={buttonClass({ variant: "secondary", size: "md" })}
+        // The Inbox's other two actions' size, exactly — it sits between them. At `md` it stood 4px
+        // taller and a text step larger than its neighbours (user report).
+        className={buttonClass({ variant: "secondary", size: "sm" })}
       >
-        <GitPullRequest size={14} />
+        <GitPullRequest size={13} />
         {t("assistant.reviewPr")}
-        <ChevronDown size={13} className="text-[var(--cf-text-muted)]" />
+        <ChevronDown size={12} className="text-[var(--cf-text-muted)]" />
       </button>
       {open && (
         <div role="menu" className={`absolute left-0 top-full z-40 mt-1 w-72 ${popoverClass}`}>

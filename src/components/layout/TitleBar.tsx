@@ -7,6 +7,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { usePrStore } from "../../state/prStore";
 import { EMPTY_TABS, INBOX_KEY, NO_WORKSPACE, useAiPanelStore } from "../../state/aiPanelStore";
 import { useT } from "../../state/languageStore";
+import { useLayoutStore } from "../../state/layoutStore";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 import { ChromeScope } from "./TabBar";
 
@@ -41,9 +42,30 @@ function useIsFullscreen(): boolean {
 ///
 /// In fullscreen AppKit takes them away entirely — they only come back while the pointer is at the
 /// top edge, over an overlay of its own — so the gap is reserved for nothing, and 62px of nothing
-/// is what pushed the workspace name into the middle of an otherwise empty bar.
-function MacControlsSpacer({ fullscreen }: { fullscreen: boolean }) {
-  return <div aria-hidden className={fullscreen ? "w-1" : "w-[62px]"} />;
+/// is what pushed the workspace name into the middle of an otherwise empty bar. There, as on
+/// Windows and Linux, the bar has no spacer at all: see `leadingInset`.
+function MacControlsSpacer() {
+  return <div aria-hidden className="w-[62px]" />;
+}
+
+/**
+ * The bar's left padding, which is what lines its first tile up with the projects panel below it.
+ *
+ * Wherever the traffic lights are not on screen — Windows, Linux, macOS in fullscreen — the bar's
+ * first thing is the repository's (or the workspace's) 22px tile, and directly under it is the
+ * projects panel's column of tiles. Before, the bar kept 12px of padding plus a 4px spacer and a
+ * gap, so its tile sat 9px right of that column's axis and read as misaligned with everything
+ * below it (user report, on Windows). Both crumbs put their tile 4px inside themselves, so:
+ *
+ * - folded, the panel is 56px wide and its tiles are centred on 28 — 13 + 4 + 11 = 28;
+ * - unfolded, the workspace tile sits at `px-3` + its button's `pl-1` and is 28px wide, so its axis
+ *   is 30 — 15 + 4 + 11 = 30.
+ *
+ * With the lights the column is theirs and nothing lines up with the panel: the old 12px stays.
+ */
+function leadingInset(lights: boolean, sidebarFolded: boolean): string {
+  if (lights) return "pl-3";
+  return sidebarFolded ? "pl-[13px]" : "pl-[15px]";
 }
 
 function WindowsControls() {
@@ -183,6 +205,8 @@ export function TitleBar() {
   const platform = usePlatform();
   const isMac = platform === "macos";
   const fullscreen = useIsFullscreen();
+  const sidebarFolded = useLayoutStore((s) => s.flags.sidebarCollapsed);
+  const lights = isMac && !fullscreen;
   const t = useT();
   const [showAiMenu, setShowAiMenu] = useState(false);
 
@@ -202,7 +226,9 @@ export function TitleBar() {
       //
       // No background: the row is part of the frame now (see the note atop `index.css`). The brand
       // wash it wore was the loudest thing on screen at all times, and it framed nothing.
-      className={`relative z-30 flex h-11 shrink-0 items-center gap-2 pl-3 ${isMac ? "pr-2" : ""}`}
+      className={`relative z-30 flex h-11 shrink-0 items-center gap-2 ${leadingInset(lights, sidebarFolded)} ${
+        isMac ? "pr-2" : ""
+      }`}
     >
       {/* Nothing but the room the traffic lights need.
 
@@ -212,9 +238,11 @@ export function TitleBar() {
           Search and history keep their keyboard shortcuts — `app.commandPalette`, `nav.back`,
           `nav.forward` — and the palette is also reachable from every place that opens it; three
           buttons in the corner were three permanent pixels for what a chord already does. */}
-      <div className="flex shrink-0 items-center">
-        {isMac ? <MacControlsSpacer fullscreen={fullscreen} /> : <div className="w-1" />}
-      </div>
+      {lights && (
+        <div className="flex shrink-0 items-center">
+          <MacControlsSpacer />
+        </div>
+      )}
 
       {/* The title bar and the repository tab bar used to be two rows: 44px holding one button and
           40px holding the tabs. One row now, and 40px handed back to the work on every screen. The

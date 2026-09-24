@@ -72,3 +72,25 @@ export function ActiveUnderline({ layoutId }: { layoutId: string }) {
     />
   );
 }
+
+/**
+ * "You are here" on a rail: a short bar standing on the rail's own edge beside the selected item,
+ * in that item's colour — the open repository in the projects panel. The fill a list row wears says
+ * *which* row; this says it from across the window, where a tinted tile among tinted tiles did not
+ * (user report: which repository is open was not obvious in the folded rail).
+ *
+ * Same contract as [`ActivePill`]: render beside the selected item only, one `layoutId` per rail,
+ * and the parent must be `relative`. `className` places it — its edge offset and vertical inset.
+ */
+export function ActiveMarker({ layoutId, color, className }: { layoutId: string; color: string; className: string }) {
+  const reduceMotion = useReducedMotion();
+  return (
+    <motion.span
+      layoutId={layoutId}
+      aria-hidden
+      className={`pointer-events-none absolute w-1 rounded-r-full ${className}`}
+      style={{ background: color }}
+      transition={reduceMotion ? { duration: 0 } : SLIDE}
+    />
+  );
+}

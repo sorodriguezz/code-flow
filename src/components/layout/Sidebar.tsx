@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { ActivePill } from "../common/ActivePill";
+import { ActiveMarker, ActivePill } from "../common/ActivePill";
 import {
   Archive,
   ArrowUpRight,
@@ -79,7 +79,7 @@ import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
-import { monogram, monogramStyle } from "../../lib/monogram";
+import { monogram, monogramActiveStyle, monogramMarkColor, monogramStyle } from "../../lib/monogram";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ImportReposModal } from "./ImportReposModal";
 import { CreateBranchModal } from "./CreateBranchModal";
@@ -301,6 +301,10 @@ function CollapsedProjectChip({
 
   const held = drag?.key === project.id;
   const offset = drag ? (held ? drag.dy : slotShift(at, drag)) : 0;
+  // The repository everything on screen is about. Not one that lives in a window of its own: this
+  // chip only focuses that window.
+  const marked = !detachedTo && project.id === activeProjectId;
+  const tile = marked && !held ? monogramActiveStyle(project.color) : monogramStyle(project.color);
 
   const removeMissing = async () => {
     if (!(await confirmAction(t("settings.removeProjectConfirm", { name: project.name })))) return;
@@ -369,84 +373,90 @@ function CollapsedProjectChip({
   }
 
   return (
-          <Tooltip
-            side="right"
-            label={project.name}
-            description={detachedTo ? t("windows.focusWindow") : t("sidebar.reorderHint")}
-            // A label naming the chip under the pointer is a label about the wrong thing while
-            // that chip is being moved, and it would sit across the rail being rearranged.
-            disabled={drag !== null}
-            leading={
-              <span
-                className="h-2 w-2 shrink-0 rounded-full"
-                style={{ background: project.color }}
-              />
+    // A full-width row around the chip, so the marker can stand on the rail's own left edge — a
+    // fixed distance from the chip would drift off it once a scrollbar narrows the column.
+    <div className="relative flex w-full justify-center">
+      {/* Hidden while anything is being dragged: the chips are moving, and a bar sliding after the
+          open one would be a second thing travelling across the rail. */}
+      {marked && !drag && (
+        <ActiveMarker layoutId="cf-repo-marker-rail" color={monogramMarkColor(project.color)} className="-left-0.5 inset-y-1" />
+      )}
+      <Tooltip
+        side="right"
+        label={project.name}
+        description={detachedTo ? t("windows.focusWindow") : t("sidebar.reorderHint")}
+        // A label naming the chip under the pointer is a label about the wrong thing while
+        // that chip is being moved, and it would sit across the rail being rearranged.
+        disabled={drag !== null}
+        leading={
+          <span
+            className="h-2 w-2 shrink-0 rounded-full"
+            style={{ background: project.color }}
+          />
+        }
+      >
+        <button
+          data-reorder={project.id}
+          onPointerDown={(e) => reorder.beginHold(e, at, project.id)}
+          onClick={() => {
+            if (reorder.swallowsClick()) return;
+            if (detachedTo) {
+              void focusWindow(detachedTo);
+              return;
             }
-          >
-            <button
-              data-reorder={project.id}
-              onPointerDown={(e) => reorder.beginHold(e, at, project.id)}
-              onClick={() => {
-                if (reorder.swallowsClick()) return;
-                if (detachedTo) {
-                  void focusWindow(detachedTo);
-                  return;
-                }
-                onSelect(project.id);
-              }}
-              aria-label={
-                detachedTo ? `${project.name} — ${t("windows.inOtherWindow")}` : project.name
-              }
-              aria-current={!detachedTo && project.id === activeProjectId ? "true" : undefined}
-              style={{
-                ...riseDelay(at),
-                ...monogramStyle(project.color),
-                ...(drag && {
-                  transform: `translateY(${offset}px)${held ? " scale(1.12)" : ""}`,
-                }),
-              }}
-              className={`cf-rise relative flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-[11px] font-bold tracking-[0.02em] ${
-                // The held chip is pinned to the pointer and must not ease anywhere; the ones
-                // sliding aside must. See the same split in `AppRail`.
-                held
-                  ? "z-10 cursor-grabbing shadow-lg ring-2 ring-[var(--cf-accent)]"
-                  : drag
-                    ? "transition-transform duration-150 ease-out"
-                    : "transition-[box-shadow,opacity]"
-              } ${
-                !detachedTo && project.id === activeProjectId && !held
-                  ? "ring-2 ring-[var(--cf-accent)] ring-offset-2 ring-offset-[var(--cf-bg)]"
-                  : held
-                    ? ""
-                    : "opacity-70 hover:opacity-100"
-              }`}
+            onSelect(project.id);
+          }}
+          aria-label={
+            detachedTo ? `${project.name} — ${t("windows.inOtherWindow")}` : project.name
+          }
+          aria-current={marked ? "true" : undefined}
+          style={{
+            ...riseDelay(at),
+            ...tile,
+            // The lift's ring and shadow, composed into the tile's own box-shadow — as classes
+            // they lost to it, the same way the active ring did (see `monogramActiveStyle`).
+            ...(held && { boxShadow: `${tile.boxShadow}, 0 0 0 2px var(--cf-accent), var(--cf-shadow)` }),
+            ...(drag && {
+              transform: `translateY(${offset}px)${held ? " scale(1.12)" : ""}`,
+            }),
+          }}
+          className={`cf-rise relative flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px] text-[11px] font-bold tracking-[0.02em] ${
+            // The held chip is pinned to the pointer and must not ease anywhere; the ones
+            // sliding aside must. See the same split in `AppRail`.
+            held
+              ? "z-10 cursor-grabbing"
+              : drag
+                ? "transition-transform duration-150 ease-out"
+                : "transition-[box-shadow,opacity]"
+          } ${marked || held ? "" : "opacity-70 hover:opacity-100"}`}
+        >
+          {/* Keyed by the return, so a repository that comes back twice in a row drops in
+              twice — see `ReturnBurst`. */}
+          <span key={returning?.id ?? "rest"} className={returning ? "cf-return-land" : undefined}>
+            {monogram(project.name)}
+          </span>
+          {returning && (
+            <ReturnBurst
+              side="right"
+              tone={project.color}
+              label={t("windows.returned", { name: project.name })}
+              leading={<RepoMark project={project} />}
+            />
+          )}
+          {reorder.arming === project.id && <HoldProgress shape="ring" />}
+          {/* The rail is one chip wide, so the mark has to sit on the chip itself. A statement,
+              not a control: the chip underneath already goes to that window. */}
+          {detachedTo && (
+            <span
+              aria-hidden
+              className="pointer-events-none absolute -right-1 -top-1 flex h-3 w-3 items-center justify-center rounded-[3px] border border-[var(--cf-accent)] bg-[var(--cf-surface)] text-[var(--cf-accent)]"
             >
-              {/* Keyed by the return, so a repository that comes back twice in a row drops in
-                  twice — see `ReturnBurst`. */}
-              <span key={returning?.id ?? "rest"} className={returning ? "cf-return-land" : undefined}>
-                {monogram(project.name)}
-              </span>
-              {returning && (
-                <ReturnBurst
-                  side="right"
-                  tone={project.color}
-                  label={t("windows.returned", { name: project.name })}
-                  leading={<RepoMark project={project} />}
-                />
-              )}
-              {reorder.arming === project.id && <HoldProgress shape="ring" />}
-              {/* The rail is one chip wide, so the mark has to sit on the chip itself. A statement,
-                  not a control: the chip underneath already goes to that window. */}
-              {detachedTo && (
-                <span
-                  aria-hidden
-                  className="pointer-events-none absolute -right-1 -top-1 flex h-3 w-3 items-center justify-center rounded-[3px] border border-[var(--cf-accent)] bg-[var(--cf-surface)] text-[var(--cf-accent)]"
-                >
-                  <ArrowUpRight size={8} />
-                </span>
-              )}
-            </button>
-          </Tooltip>
+              <ArrowUpRight size={8} />
+            </span>
+          )}
+        </button>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -1451,6 +1461,12 @@ function ProjectRow({
             disappearing under an open project is exactly the case where "this is the repo
             everything else on screen is about" has stopped being true. */}
         {isActive && !broken && !detachedTo && <ActivePill layoutId="cf-project-pill" radius="rounded-lg" variant="raised" />}
+        {/* And the folded rail's marker, on the panel's own left edge (`-left-3` undoes the list's
+            `px-3`): the raised fill alone is a faint step on the dark frame. Its own `layoutId`,
+            so folding the panel does not send it flying to the rail. */}
+        {isActive && !broken && !detachedTo && !held && (
+          <ActiveMarker layoutId="cf-repo-marker-list" color={monogramMarkColor(project.color)} className="-left-3 inset-y-1.5" />
+        )}
         {/* After the pill, so the hold reads on the open repository too — which is the one most
             likely to be dragged, and the one whose selection fill would otherwise cover it. */}
         {!broken && reorder.arming === project.id && <HoldProgress shape="bar" />}

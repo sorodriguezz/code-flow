@@ -121,9 +121,13 @@ interface OpenToken {
 /**
  * Finds the token being typed at `caret`, or `null` when the caret isn't inside one.
  *
- * A token counts as "being typed" while no `}}` sits between its `{{` and the caret. The closing
- * braces that editors auto-pair, or that a previous accept left behind, are swallowed into `end`
- * so re-editing `{{ba|}}` replaces the whole token instead of nesting a second one inside it.
+ * A token counts as "being typed" while no `}}` sits between its `{{` and the caret. The rest of
+ * the token after the caret — its closing braces, and the end of its name when the caret is in the
+ * middle of one — is swallowed into `end`, so re-editing `{{ba|}}` or `{{DO|MINIO}}` replaces the
+ * whole token. It used to swallow only braces that sat right at the caret: accepting a completion in
+ * the middle of a name left its tail dangling after the new token, `{{$randomInt}}MINIO}}` (user
+ * report). The tail only counts while it could be the rest of a name — no braces, no whitespace —
+ * so an unclosed `{{ba|` never reaches forward into the text after it.
  */
 function openTokenAt(value: string, caret: number | null): OpenToken | null {
   if (caret === null) return null;
@@ -132,7 +136,9 @@ function openTokenAt(value: string, caret: number | null): OpenToken | null {
   if (start === -1) return null;
   const inner = before.slice(start + 2);
   if (inner.includes("}") || inner.includes("{")) return null;
-  const end = value.slice(caret).startsWith("}}") ? caret + 2 : caret;
+  const after = value.slice(caret);
+  const close = after.indexOf("}}");
+  const end = close !== -1 && !/[{}\s]/.test(after.slice(0, close)) ? caret + close + 2 : caret;
   return { start, end, query: inner.trim() };
 }
 

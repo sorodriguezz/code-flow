@@ -60,7 +60,7 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
 
   // Closed until asked for. The snippet is a "now show me how to do this in code" step, not
   // something you watch while composing a request — and it costs the builder ~420px of width to
-  // sit open. The switch is the "Code" button beside Save in the request's name row, and the
+  // sit open. The switch is the "Code" button at the end of the request's section tabs, and the
   // choice is remembered, like the target and the options below it (see `snippetPanelState`).
   const open = useSnippetPanelStore((s) => s.open);
   const setOpen = useSnippetPanelStore((s) => s.setOpen);

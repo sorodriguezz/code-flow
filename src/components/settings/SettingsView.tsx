@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronsLeft, ChevronsRight, CornerDownLeft, Search, X, type LucideIcon } from "lucide-react";
+import { ChevronDown, ChevronUp, ChevronsLeft, ChevronsRight, CornerDownLeft, Search, X, type LucideIcon } from "lucide-react";
 import { ThemeSettings } from "./ThemeSettings";
 import { ProjectsSettings } from "./ProjectsSettings";
 import { GitHostingSettings } from "./GitHostingSettings";
@@ -27,6 +27,7 @@ import { EditorSettings } from "./EditorSettings";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import { useFocusTrap } from "../../lib/useFocusTrap";
+import { scrollEdgeMask, useScrollEdges } from "../../lib/useScrollEdges";
 import {
   SELF_SCROLLING_SECTIONS,
   SETTINGS_SECTIONS,
@@ -237,6 +238,47 @@ function SearchResults({
   );
 }
 
+/**
+ * The arrow on a rail edge the list continues past. The fold toggle's shape — a 20px disc on the
+ * surface, hairline and small shadow — so the rail's two floating controls read as a pair.
+ * Unfolded, it centres on the rows rather than the whole nav: the scrollbar keeps a 10px gutter on
+ * the right that the rows never use.
+ */
+function NavScrollCue({
+  direction,
+  label,
+  folded,
+  onClick,
+}: {
+  direction: "up" | "down";
+  label: string;
+  folded: boolean;
+  onClick: () => void;
+}) {
+  const Icon = direction === "up" ? ChevronUp : ChevronDown;
+  return (
+    <div
+      // Up sits `top-3`, on the fold toggle's own line (the toggle is `top-6` of the body, and this
+      // scroller starts 12px down it) — side by side the two read as one row of rail controls; a
+      // few pixels higher they looked like two buttons that had collided.
+      className={`pointer-events-none absolute inset-x-0 flex justify-center ${direction === "up" ? "top-3" : "bottom-0.5"} ${
+        folded ? "" : "pr-2.5"
+      }`}
+    >
+      <Tooltip side="right" label={label}>
+        <button
+          type="button"
+          onClick={onClick}
+          aria-label={label}
+          className="cf-panel-in pointer-events-auto flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
+        >
+          <Icon size={12} />
+        </button>
+      </Tooltip>
+    </div>
+  );
+}
+
 export function SettingsView() {
   const open = useUiStore((s) => s.settingsOpen);
   const closeSettings = useUiStore((s) => s.closeSettings);
@@ -247,21 +289,8 @@ export function SettingsView() {
   // The window always opens with the nav folded to its icons (the user's call), and » unfolds it for
   // this visit only. It used to be a remembered layout flag that defaulted to unfolded.
   const [collapsed, setCollapsed] = useState(true);
-  // Set by the folded rail's magnifier: unfold, then put the caret in the search box once it exists.
-  const focusSearchOnUnfold = useRef(false);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
-  // Collapsed, the rail is 50px of pure content: the nav's horizontal padding moved onto its
-  // children and the gutter is suppressed there (`cf-no-scrollbar`), so a 14px icon centres on
-  // exactly 25.
-  //
-  // Measured, and worth recording because the obvious culprit was the wrong one. The padding was
-  // never what broke this: before the search box existed the span shrink-wrapped and the button's
-  // `justify-center` worked, landing the icon within a few pixels of centre even with 24px of
-  // padding and a 10px bar in the way. What broke it was the `flex-1` added to that span so labels
-  // could wrap — a growing sole child leaves `justify-center` no free space, and the icon dropped
-  // to 7px from the left edge. See `SectionButton`.
-  const railWidth = collapsed ? NAV_COLLAPSED : navWidth;
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const activeWorkspaceName = useWorkspaceStore(
     (s) => s.workspaces.find((w) => w.id === activeWorkspaceId)?.name,
@@ -272,9 +301,28 @@ export function SettingsView() {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
+  const navScrollRef = useRef<HTMLDivElement>(null);
+  // Whether the rail has sections out of view, above or below — see the cues around its scroller.
+  const navEdges = useScrollEdges(navScrollRef, open);
 
   const hits = useMemo(() => searchSettings(query, t), [query, t]);
   const searching = query.trim().length > 0;
+  // What the rail actually is: folded to its icons unless a search is showing results, which need
+  // the room. The search lives in the header now, so a folded rail no longer has a way into it of
+  // its own — it unfolds for as long as there is a query and folds back when the query goes
+  // (cleared, Escape, or a result picked). `collapsed` stays the user's own choice throughout.
+  const folded = collapsed && !searching;
+  // Collapsed, the rail is 50px of pure content: the nav's horizontal padding moved onto its
+  // children and the gutter is suppressed there (`cf-no-scrollbar`), so a 14px icon centres on
+  // exactly 25.
+  //
+  // Measured, and worth recording because the obvious culprit was the wrong one. The padding was
+  // never what broke this: before the search box existed the span shrink-wrapped and the button's
+  // `justify-center` worked, landing the icon within a few pixels of centre even with 24px of
+  // padding and a 10px bar in the way. What broke it was the `flex-1` added to that span so labels
+  // could wrap — a growing sole child leaves `justify-center` no free space, and the icon dropped
+  // to 7px from the left edge. See `SectionButton`.
+  const railWidth = folded ? NAV_COLLAPSED : navWidth;
 
   // A new query starts at the top. Without this the highlight stays on whatever index it was at,
   // which after narrowing the list is a different row than the one the user was looking at.
@@ -289,14 +337,17 @@ export function SettingsView() {
     setCollapsed(true);
   }, [open]);
 
-  useEffect(() => {
-    if (collapsed || !focusSearchOnUnfold.current) return;
-    focusSearchOnUnfold.current = false;
-    searchRef.current?.focus();
-  }, [collapsed]);
-
   const globalSections = SETTINGS_SECTIONS.filter((entry) => entry.group === "global");
   const workspaceSections = SETTINGS_SECTIONS.filter((entry) => entry.group === "workspace");
+
+  /** A cue's click: most of a rail's height onward, so the next sections land in view with the last
+   *  few seen still above them for context. */
+  const pageNav = (direction: 1 | -1) => {
+    const el = navScrollRef.current;
+    if (!el) return;
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollBy({ top: direction * el.clientHeight * 0.7, behavior: still ? "auto" : "smooth" });
+  };
 
   const pick = (hit: SettingsHit) => {
     if (hit.tab) openSettingsAt(hit.section.id, hit.tab.id);
@@ -348,8 +399,68 @@ export function SettingsView() {
         // The modal shape every dialog in the app shares: 14px corners and the modal shadow.
         className="flex h-[640px] max-h-[85vh] w-[1040px] max-w-[92vw] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)]"
       >
-        <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-[var(--cf-border)] pl-4 pr-3">
-          <h2 className="truncate text-[14px] font-semibold text-[var(--cf-text)]">{t("statusbar.settings")}</h2>
+        <div className="flex h-12 shrink-0 items-center gap-3 border-b border-[var(--cf-border)] pl-4 pr-3">
+          <h2 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--cf-text)]">
+            {t("statusbar.settings")}
+          </h2>
+          {/* The search box, in the header rather than atop the nav.
+              Fifteen sections and two dozen panes behind them is more than a list you scan —
+              somebody looking for "where do I change the font" has no reason to guess whether that
+              is Appearance, Editor or Terminal. See `settingsCatalog` for what it searches.
+
+              It used to head the nav, where a folded rail had to stand in for it with a magnifier:
+              a full row the size of a section, then the empty line kept for the group heading, so
+              the first section began 60px down a column of 40px steps (user report). Up here it is
+              out of the list in both states, the nav is the same list folded or not, and the field
+              is always one click away. `data-no-initial-focus`: the dialog's first focus still goes
+              to the close button — a field focused on every opening would wear its ring every
+              time, in a header meant to stay quiet. */}
+          <div className="relative w-[240px] min-w-0 shrink">
+            <Search
+              size={13}
+              className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
+            />
+            <input
+              ref={searchRef}
+              data-no-initial-focus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (!searching) return;
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setCursor((current) => Math.min(current + 1, hits.length - 1));
+                } else if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setCursor((current) => Math.max(current - 1, 0));
+                } else if (e.key === "Enter" && hits[cursor]) {
+                  e.preventDefault();
+                  pick(hits[cursor]);
+                }
+              }}
+              placeholder={t("settings.searchPlaceholder")}
+              aria-label={t("settings.searchPlaceholder")}
+              // The 26px strip field: a header control, not a form.
+              className={fieldClass({ size: "sm", className: "w-full pl-7 pr-8" })}
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => {
+                  setQuery("");
+                  searchRef.current?.focus();
+                }}
+                aria-label={t("settings.searchClear")}
+                // Inside the field, whose `pr-8` keeps the text clear of it.
+                className={iconButtonClass({
+                  size: "xs",
+                  className: "absolute right-1 top-1/2 -translate-y-1/2",
+                })}
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
           <Tooltip label={t("common.close")} trailing={<Kbd>esc</Kbd>} side="bottom">
             <button
               type="button"
@@ -378,172 +489,105 @@ export function SettingsView() {
             // Nothing about the scrollbar is decided here — this element is `overflow-hidden` and
             // never scrolls. That is the scroller below, which says why it is painted as it is.
             className={`flex shrink-0 flex-col overflow-hidden bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))] py-3 ${
-              collapsed ? "cf-fold-zone" : ""
+              folded ? "cf-fold-zone" : ""
             }`}
           >
-            {/* The search box, above everything.
-                Fifteen sections and two dozen panes behind them is more than a list you scan —
-                somebody looking for "where do I change the font" has no reason to guess whether
-                that is Appearance, Editor or Terminal. Hidden while the rail is folded to icons:
-                there is no room for a field, and folding is a deliberate "I know where I'm going".
-                See `settingsCatalog` for what it searches.
+            {/* "There is more this way." Folded, the rail has no scrollbar to say it, and on a short
+                screen the list just stopped at the window's edge with sections still under it (user
+                report). So an edge the list continues past fades out — `scrollEdgeMask`, on the
+                scroller itself so it works on any theme — and carries a small arrow that moves the
+                list on. Both only while there is something that way; a rail that fits shows neither. */}
+            <div className="relative flex min-h-0 flex-1 flex-col">
+              {/* Two different quiet scrollbars, because the two states have different problems —
+                  both spelled out in `index.css`. Folded: no gutter at all, or its 10px would be a
+                  fifth of the rail and would shove the centred icon off centre. Expanded: the gutter
+                  stays (so nothing reflows) but nothing is painted in it until you hover or scroll,
+                  because this edge is already the `ResizeHandle` seam and a resting hairline two
+                  pixels from it read as one doubled line.
 
-                `pr-[22px]` = the rows' own 12px plus the 10px gutter the scroller below keeps
-                reserved. This field sits *outside* that scroller, so at a plain `px-3` its right
-                edge ran 10px past every row under it, into the scrollbar's lane. */}
-            {collapsed && (
-              // Folded is how the window opens now, so the search cannot simply vanish with the
-              // field: this unfolds the rail and puts the caret in it. Same 36×32 as the rows under
-              // it, so the column of glyphs reads as one.
-              <Tooltip side="right" label={t("settings.searchPlaceholder")}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    focusSearchOnUnfold.current = true;
-                    setCollapsed(false);
-                  }}
-                  aria-label={t("settings.searchPlaceholder")}
-                  className="mx-auto mb-2 flex h-8 w-9 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-                >
-                  <Search size={16} />
-                </button>
-              </Tooltip>
-            )}
-            {!collapsed && (
-              <div className="relative mb-2 shrink-0 pl-3 pr-[22px]">
-                <Search
-                  size={13}
-                  // `left-5`, not `left-2`: an absolutely positioned child resolves `left`
-                  // against the wrapper's *padding box* (x=0), not against the padded content, so
-                  // at `left-2` the 13px glyph sat at 8..21 with the input's border drawn at 12 —
-                  // straight through it. 20 puts it 8px inside the field; `pl-7` still clears it.
-                  className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
-                />
-                <input
-                  ref={searchRef}
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (!searching) return;
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      setCursor((current) => Math.min(current + 1, hits.length - 1));
-                    } else if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setCursor((current) => Math.max(current - 1, 0));
-                    } else if (e.key === "Enter" && hits[cursor]) {
-                      e.preventDefault();
-                      pick(hits[cursor]);
-                    }
-                  }}
-                  placeholder={t("settings.searchPlaceholder")}
-                  aria-label={t("settings.searchPlaceholder")}
-                  // The 26px strip field: this sits in a nav of 32px rows, not in a form.
-                  className={fieldClass({ size: "sm", className: "w-full pl-7 pr-8" })}
-                />
-                {query && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setQuery("");
-                      searchRef.current?.focus();
-                    }}
-                    aria-label={t("settings.searchClear")}
-                    // Same padding-box origin as the magnifier above, and here it collided with
-                    // something: at `right-1` the button hung outside the input and overlapped the
-                    // fold toggle (`left: railWidth - 10`, `z-20`, opaque) — which painted over the
-                    // × and swallowed the clicks aimed at it. 24 = the wrapper's 22px plus 2, so the
-                    // 22px button sits inside the field (whose `pr-8` keeps the text clear of it)
-                    // and clear of the toggle. Tied to the `pr-[22px]` above; the two move together.
-                    className={iconButtonClass({
-                      size: "xs",
-                      className: "absolute right-[24px] top-1/2 -translate-y-1/2",
-                    })}
-                  >
-                    <X size={12} />
-                  </button>
-                )}
+                  `overflow-y-scroll`, not `auto`, for the reason the content pane below gives in
+                  full: a styled scrollbar is real layout, so a gutter that comes and goes moves every
+                  row sideways — here, each time a search narrows the list past the pane's height and
+                  back again. Free in the folded branch, where `cf-no-scrollbar` takes it to zero. */}
+              <div
+                ref={navScrollRef}
+                style={{ maskImage: scrollEdgeMask(navEdges), WebkitMaskImage: scrollEdgeMask(navEdges) }}
+                className={`min-h-0 flex-1 overflow-y-scroll ${
+                  folded ? "cf-no-scrollbar px-0" : "cf-quiet-scroll px-3"
+                }`}
+              >
+                {/* One wrapper, so `useScrollEdges` has a single child whose height is the list's. */}
+                <div>
+                  {searching ? (
+                    <SearchResults hits={hits} cursor={cursor} query={query.trim()} onPick={pick} onHover={setCursor} />
+                  ) : (
+                    <>
+                      {folded ? (
+                        // The group headings are the one thing with no icon to fall back on. A rule in
+                        // their place keeps the two groups visibly separate without inventing a glyph.
+                        // 15px, the heading's own fixed line (`leading-[15px]`), so unfolding does not
+                        // move a single icon down the rail.
+                        <div className="mb-1 h-[15px]" />
+                      ) : (
+                        <p className="mb-1 px-2.5 text-[11px] font-semibold uppercase leading-[15px] tracking-[0.06em] text-[var(--cf-text-faint)]">
+                          {t("settings.globalGroup")}
+                        </p>
+                      )}
+                      {globalSections.map((item) => (
+                        <SectionButton
+                          key={item.id}
+                          id={item.id}
+                          labelKey={item.labelKey}
+                          icon={item.icon}
+                          active={section === item.id}
+                          collapsed={folded}
+                          alpha={ALPHA_SECTIONS.has(item.id)}
+                          onSelect={setSection}
+                        />
+                      ))}
+
+                      {folded ? (
+                        // `mx-[15px]` leaves a 20px rule centred in the 50px rail, matching the
+                        // projects sidebar's folded separator (`mx-auto … w-5`). Without it the
+                        // border runs edge to edge — the scroller is `px-0` here and has no gutter —
+                        // and butts into the seam hairline, which reads as a divider *inside* one
+                        // list rather than as the break between two groups.
+                        <div className="mx-[15px] mb-1 mt-4 h-[15px] border-t border-[var(--cf-border)]" />
+                      ) : (
+                        <p className="mb-1 mt-4 break-words px-2.5 text-[11px] font-semibold uppercase leading-[15px] tracking-[0.06em] text-[var(--cf-text-faint)]">
+                          {activeWorkspaceName
+                            ? t("settings.workspaceGroup", { name: activeWorkspaceName })
+                            : t("settings.workspaceGroupGeneric")}
+                        </p>
+                      )}
+                      {workspaceSections.map((item) => (
+                        <SectionButton
+                          key={item.id}
+                          id={item.id}
+                          labelKey={item.labelKey}
+                          icon={item.icon}
+                          active={section === item.id}
+                          collapsed={folded}
+                          alpha={ALPHA_SECTIONS.has(item.id)}
+                          onSelect={setSection}
+                        />
+                      ))}
+                    </>
+                  )}
+                </div>
               </div>
-            )}
-
-            {/* Two different quiet scrollbars, because the two states have different problems —
-                both spelled out in `index.css`. Folded: no gutter at all, or its 10px would be a
-                fifth of the rail and would shove the centred icon off centre. Expanded: the gutter
-                stays (so nothing reflows) but nothing is painted in it until you hover or scroll,
-                because this edge is already the `ResizeHandle` seam and a resting hairline two
-                pixels from it read as one doubled line.
-
-                `overflow-y-scroll`, not `auto`, for the reason the content pane below gives in
-                full: a styled scrollbar is real layout, so a gutter that comes and goes moves every
-                row sideways — here, each time a search narrows the list past the pane's height and
-                back again. Free in the folded branch, where `cf-no-scrollbar` takes it to zero. */}
-            <div
-              className={`min-h-0 flex-1 overflow-y-scroll ${
-                collapsed ? "cf-no-scrollbar px-0" : "cf-quiet-scroll px-3"
-              }`}
-            >
-              {searching ? (
-                <SearchResults hits={hits} cursor={cursor} query={query.trim()} onPick={pick} onHover={setCursor} />
-              ) : (
-                <>
-                  {collapsed ? (
-                    // The group headings are the one thing with no icon to fall back on. A rule in
-                    // their place keeps the two groups visibly separate without inventing a glyph.
-                    // 15px, the heading's own fixed line (`leading-[15px]`), so unfolding does not
-                    // move a single icon down the rail.
-                    <div className="mb-1 h-[15px]" />
-                  ) : (
-                    <p className="mb-1 px-2.5 text-[11px] font-semibold uppercase leading-[15px] tracking-[0.06em] text-[var(--cf-text-faint)]">
-                      {t("settings.globalGroup")}
-                    </p>
-                  )}
-                  {globalSections.map((item) => (
-                    <SectionButton
-                      key={item.id}
-                      id={item.id}
-                      labelKey={item.labelKey}
-                      icon={item.icon}
-                      active={section === item.id}
-                      collapsed={collapsed}
-                      alpha={ALPHA_SECTIONS.has(item.id)}
-                      onSelect={setSection}
-                    />
-                  ))}
-
-                  {collapsed ? (
-                    // `mx-[15px]` leaves a 20px rule centred in the 50px rail, matching the
-                    // projects sidebar's folded separator (`mx-auto … w-5`). Without it the
-                    // border runs edge to edge — the scroller is `px-0` here and has no gutter —
-                    // and butts into the seam hairline, which reads as a divider *inside* one
-                    // list rather than as the break between two groups.
-                    <div className="mx-[15px] mb-1 mt-4 h-[15px] border-t border-[var(--cf-border)]" />
-                  ) : (
-                    <p className="mb-1 mt-4 break-words px-2.5 text-[11px] font-semibold uppercase leading-[15px] tracking-[0.06em] text-[var(--cf-text-faint)]">
-                      {activeWorkspaceName
-                        ? t("settings.workspaceGroup", { name: activeWorkspaceName })
-                        : t("settings.workspaceGroupGeneric")}
-                    </p>
-                  )}
-                  {workspaceSections.map((item) => (
-                    <SectionButton
-                      key={item.id}
-                      id={item.id}
-                      labelKey={item.labelKey}
-                      icon={item.icon}
-                      active={section === item.id}
-                      collapsed={collapsed}
-                      alpha={ALPHA_SECTIONS.has(item.id)}
-                      onSelect={setSection}
-                    />
-                  ))}
-                </>
+              {navEdges.start && (
+                <NavScrollCue direction="up" label={t("settings.navMoreAbove")} folded={folded} onClick={() => pageNav(-1)} />
+              )}
+              {navEdges.end && (
+                <NavScrollCue direction="down" label={t("settings.navMoreBelow")} folded={folded} onClick={() => pageNav(1)} />
               )}
             </div>
           </nav>
           {/* Collapsed, there is nothing to drag: the rail is exactly one icon wide by definition,
               and leaving a live handle there would let someone drag it to a width the labels are
               still hidden at. The stored width is untouched, so expanding returns to it. */}
-          {collapsed ? (
+          {folded ? (
             // Same rail-that-points-at-its-button as the projects sidebar's — see `index.css`.
             <div className="cf-fold-zone cf-seam-collapsed w-px shrink-0 bg-[var(--cf-border)]" />
           ) : (
@@ -570,18 +614,27 @@ export function SettingsView() {
               a group heading, which looks like a reason to nudge it down and is not one. The
               clearance it needs from the field is bought by the clear button's `right-[24px]`
               instead. */}
-          <Tooltip side="right" label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}>
+          <Tooltip side="right" label={folded ? t("settings.expandNav") : t("settings.collapseNav")}>
             <button
-              onClick={() => setCollapsed((was) => !was)}
-              aria-label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}
-              aria-expanded={!collapsed}
+              onClick={() => {
+                if (folded) {
+                  setCollapsed(false);
+                  return;
+                }
+                // Folding while a search is showing drops the search too: the results need the room
+                // the fold takes away, and a rail that stayed open over them would ignore the click.
+                setCollapsed(true);
+                setQuery("");
+              }}
+              aria-label={folded ? t("settings.expandNav") : t("settings.collapseNav")}
+              aria-expanded={!folded}
               style={{ left: railWidth - 10 }}
               // Unconditional, and for the reason the sidebar's twin gives in full: the seam half
               // of `cf-fold-toggle` self-gates on `cf-fold-zone` being in the DOM, so all this adds
               // when unfolded is the button's own hover colour — which it was missing.
               className="cf-fold-toggle absolute top-6 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors"
             >
-              {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
+              {folded ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
             </button>
           </Tooltip>
           {/* `overflow-y-scroll`, not `auto`: the app styles its scrollbars, which makes them a

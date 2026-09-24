@@ -9,6 +9,7 @@ import {
   Filter,
   Eraser,
   FileCode2,
+  Folder,
   FolderCode,
   FolderOpen,
   Globe,
@@ -1464,6 +1465,10 @@ function GroupNameInput({
  * folder icon and a name at the size of the connections, which made a shelf look like one more
  * thing on the shelf. A heading needs no indent under it to say what belongs to it, so the members
  * sit at the tree's own left edge and a connection's subtree never learns it is in a folder.
+ *
+ * It does carry a folder glyph, at the heading's own size (user request): a bare uppercase word read
+ * as a caption, not as "a group of connections". Closed while folded, open while its members show —
+ * the same folder the "new group" button and the naming row draw with a plus.
  */
 function GroupSection({
   group,
@@ -1630,6 +1635,11 @@ function GroupSection({
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         </span>
+        {collapsed ? (
+          <Folder size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+        ) : (
+          <FolderOpen size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+        )}
         {renaming ? (
           <GroupNameInput
             value={group}
@@ -2008,8 +2018,11 @@ export function DbExplorer() {
               className="min-h-0 flex-1 overflow-auto px-2 pb-2.5"
             >
               {creatingGroup && (
-                <div className="flex h-7 items-center gap-2 px-1.5">
-                  <FolderPlus size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
+                // Laid out like a heading — the chevron's room, then the folder — so the group being
+                // named has its glyph exactly where the finished heading will draw it.
+                <div className="flex h-7 items-center gap-1.5 px-1.5">
+                  <span aria-hidden className="w-3.5 shrink-0" />
+                  <FolderPlus size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
                   <GroupNameInput
                     value=""
                     onCommit={(value) => {

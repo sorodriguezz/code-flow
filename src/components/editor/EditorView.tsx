@@ -10,16 +10,18 @@ import {
   Bookmark,
   Bug,
   FileCode,
-  FileSearch,
   Files,
+  FileSearch,
   FolderInput,
   GitBranch,
   Keyboard,
+  Palette,
   PanelRightClose,
   Search,
   Tags,
 } from "lucide-react";
 import { FileTree, parentDir, type ExplorerCommand } from "./FileTree";
+import { IconProfilePanel } from "./IconProfilePanel";
 import { FilePalette } from "./FilePalette";
 import { SearchPanel } from "./SearchPanel";
 import { AnchorsPanel } from "./AnchorsPanel";
@@ -200,7 +202,7 @@ export function EditorView() {
   const [saving, setSaving] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<
-    "files" | "search" | "anchors" | "bookmarks" | "debug"
+    "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons"
   >("files");
   /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
    * step into while committing, not a layout preference — the editor's resting state is code. */
@@ -1208,7 +1210,8 @@ export function EditorView() {
               the name, never from a string next to the label: two of these used to carry a
               hand-written "(Ctrl+Shift+F)" that said Ctrl on a Mac and went stale the moment anyone
               rebound it. All five panels have a binding now, so every tooltip carries one — a rail
-              where some glyphs answer "and the key?" and some don't is the surprise this avoids.
+              where some glyphs answer "and the key?" and some don't is the surprise this avoids. (The icon
+              panel is the one exception, and says why where it is listed.)
               `aria-label` stays the bare name — a screen reader announces the key from the
               binding, not from the accessible name. */}
           {(
@@ -1218,9 +1221,12 @@ export function EditorView() {
               { id: "anchors", shortcut: "editor.anchors", icon: Tags, label: t("anchors.title") },
               { id: "bookmarks", shortcut: "editor.bookmarks", icon: Bookmark, label: t("bookmarks.title") },
               { id: "debug", shortcut: "editor.debug", icon: Bug, label: t("debug.title") },
+              // Under the debugger, as asked: which icon pack this repository is drawn with. The one
+              // panel with no chord of its own — a choice made now and then, not a place to go to.
+              { id: "icons", shortcut: null, icon: Palette, label: t("icons.panelTitle") },
             ] as const
           ).map(({ id, icon: Icon, label, shortcut }) => (
-            <Tooltip key={id} side="right" label={label} trailing={keyCap(shortcut)}>
+            <Tooltip key={id} side="right" label={label} trailing={shortcut ? keyCap(shortcut) : undefined}>
               <button
                 onClick={() => setSidePanel(id)}
                 aria-label={label}
@@ -1247,10 +1253,9 @@ export function EditorView() {
               Go to file leads them rather than getting a strip of its own: it's an action, not a
               panel, and it has to be reachable with no file open — which the tab bar isn't.
 
-              The iconography used to sit above this pair and is now a tab under Settings → Editor.
-              It was the one control here that was not about *this* repository — the profiles are
-              global (see `iconRulesStore`), so a preference every repo shares was being edited from
-              a rail that answers for one. */}
+              Editing the icon rules stays a tab under Settings → Editor: the profiles are global
+              (see `iconRulesStore`), a preference every repository shares. *Choosing* one is about
+              this repository, which is why that part is back in the rail — the Icons panel above. */}
           <Tooltip side="right" label={t("editor.goToFile")} trailing={keyCap("editor.goToFile")}>
             <button
               onClick={() => setPaletteOpen(true)}
@@ -1300,6 +1305,8 @@ export function EditorView() {
             />
           ) : sidePanel === "bookmarks" ? (
             <BookmarksPanel repoPath={project.local_path} onOpen={openHit} />
+          ) : sidePanel === "icons" ? (
+            <IconProfilePanel />
           ) : sidePanel === "debug" ? (
             <DebugPanel
               repoPath={project.local_path}

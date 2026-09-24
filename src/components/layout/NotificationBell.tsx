@@ -174,7 +174,12 @@ export function NotificationBell() {
     // Above the reduced-motion gate, deliberately. Someone who asked the system for less movement
     // did not ask for less sound — the two settings mean different things, and folding them
     // together would silently take the feature away from the users most likely to want it.
-    if (soundEnabled) playNotificationSound();
+    // Which sound and how loud are read at the moment of arrival rather than subscribed to: they
+    // only matter now, and depending on them would re-run this effect on every step of the slider.
+    if (soundEnabled) {
+      const { notificationSoundId, notificationSoundVolume } = usePreferencesStore.getState();
+      playNotificationSound(notificationSoundId, notificationSoundVolume);
+    }
     if (reduceMotion) return;
     setBurst((n) => n + 1);
     setBursting(true);
@@ -318,7 +323,10 @@ export function NotificationBell() {
                     // to wait for a random background job to learn what they just agreed to — and
                     // partly because this click is a user gesture, which is what an `AudioContext`
                     // needs to be born unsuspended. See `lib/notificationSound`.
-                    if (next) previewNotificationSound();
+                    if (next) {
+                      const { notificationSoundId, notificationSoundVolume } = usePreferencesStore.getState();
+                      previewNotificationSound(notificationSoundId, notificationSoundVolume);
+                    }
                   }}
                   title={soundEnabled ? t("notifications.soundDisable") : t("notifications.soundEnable")}
                   aria-label={soundEnabled ? t("notifications.soundDisable") : t("notifications.soundEnable")}

@@ -17,7 +17,7 @@
  * language. The rail is wider than it was (168 → 190) so most labels still take one line anyway.
  */
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
@@ -186,4 +186,22 @@ export function PaneBlock({ title, hint, children }: { title: string; hint?: Rea
       {children}
     </div>
   );
+}
+
+/**
+ * Arrow keys for a pane's radio group (`role="radiogroup"` around `role="radio"` buttons): they move
+ * through it and pick as they go, the way the platform's own radio groups do, and Tab leaves it —
+ * each button carries `tabIndex={selected ? 0 : -1}`. The move clicks the button it lands on, so
+ * choosing by keyboard does exactly what clicking does, preview included.
+ */
+export function onRadioKeys(event: KeyboardEvent<HTMLElement>) {
+  const step = ({ ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 } as Record<string, number>)[event.key];
+  if (!step) return;
+  const radios = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]'));
+  const from = radios.indexOf(document.activeElement as HTMLElement);
+  if (from < 0) return;
+  event.preventDefault();
+  const next = radios[(from + step + radios.length) % radios.length];
+  next.focus();
+  next.click();
 }

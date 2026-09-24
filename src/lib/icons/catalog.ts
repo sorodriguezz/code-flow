@@ -35,8 +35,9 @@
  * Fetching a set is not the same as holding it. The tree can only ever draw an icon some *rule*
  * names — there is no `file-type-<extension>` derivation anywhere in the app, so every id it can
  * ask for comes from `DEFAULT_ICON_RULES`, from a built-in profile, or from a rule the user wrote.
- * That is around sixty ids out of 1,572, and materialising the other 1,512 cost ~3.5 MB of SVG
- * markup, held for the life of the process, to draw nothing.
+ * Since the shipped packs became whole themes (see `packs.ts`) that is about 370 ids, plus ~100
+ * `-opened` twins — roughly 1.3 MB of markup — out of 1,572; materialising all of them cost ~3.5 MB,
+ * held for the life of the process, most of it to draw nothing.
  *
  * So a set is parsed whole (transient) and *ingested* through an allowlist (`wanted`). The
  * allowlist is seeded from the shipped rules and profiles, widened by `declareIconIds` when the

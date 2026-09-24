@@ -185,17 +185,24 @@ export function SatelliteTitleBar() {
           gap after it. AppKit draws the traffic lights at the same spot in both windows too
           (`windows.rs` copies the main window's `trafficLightPosition`), so the title sits on the
           lights' line and a step away from the last of them. At AppKit's default spot, with no
-          `pl-3`, it sat under their middle and hard against the green one. In fullscreen the
-          lights are gone, so the room is not reserved. */}
-      <div className="flex shrink-0 items-center">
-        {isMac ? <div aria-hidden className={fullscreen ? "w-1" : "w-[62px]"} /> : <div aria-hidden className="w-1" />}
-      </div>
+          `pl-3`, it sat under their middle and hard against the green one.
+
+          Where there are no lights — Windows, Linux, fullscreen — there is no spacer either, not
+          even a small one: the crumb's tile then lands at 12 + 4 = 16, on the same line as the
+          first repository tab's label below it (`px-1.5` + `px-2.5`) and the sheet's own content.
+          A 4px spacer plus the gap put it 12px further in, which read as a title that did not
+          belong to the window under it (user report, on Windows). */}
+      {isMac && !fullscreen && (
+        <div className="flex shrink-0 items-center">
+          <div aria-hidden className="w-[62px]" />
+        </div>
+      )}
 
       {spec?.kind === "repo" ? (
         // The repository crumb the main window's title row draws: its monogram and its name.
         // `min-w-0` so it gives when the bar runs out of room — a repository window also carries
         // the workspace, a branch and three buttons.
-        <span className="flex h-7 min-w-0 items-center gap-2 pl-0.5 pr-1 font-semibold text-[var(--cf-text)]">
+        <span className="flex h-7 min-w-0 items-center gap-2 pl-1 pr-1 font-semibold text-[var(--cf-text)]">
           {project && (
             <span
               aria-hidden

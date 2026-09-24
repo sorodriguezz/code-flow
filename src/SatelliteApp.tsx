@@ -12,6 +12,7 @@ import { ViewSkeleton } from "./components/common/ViewSkeleton";
 import { useAccentStore } from "./state/accentStore";
 import { useFileNestingStore } from "./state/fileNestingStore";
 import { useCsvStore } from "./state/csvStore";
+import { useThinkingDesignStore } from "./state/thinkingDesignStore";
 import { useIconRulesStore } from "./state/iconRulesStore";
 import { useLanguageStore, useT } from "./state/languageStore";
 import { useLayoutStore } from "./state/layoutStore";
@@ -130,6 +131,7 @@ function useSatelliteBoot(): boolean {
         useIconRulesStore.getState().init(),
         useFileNestingStore.getState().init(),
         useCsvStore.getState().init(),
+        useThinkingDesignStore.getState().init(),
         // The satellite draws its own title bar too, so the maximize button needs the same
         // rectangle tracking the main window's does.
         startWindowBoundsTracking(),

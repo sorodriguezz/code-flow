@@ -276,7 +276,6 @@ function VariablesPanel({ tab }: { tab: ApiEntityTab }) {
       <VariableTable
         rows={tab.draft.variables}
         onChange={(variables) => updateEntityDraft(tab.id, { variables })}
-        emptyLabel={t("api.env.noVariables")}
       />
     </div>
   );

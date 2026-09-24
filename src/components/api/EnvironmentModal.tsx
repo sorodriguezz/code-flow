@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Copy,
@@ -6,6 +6,7 @@ import {
   Globe,
   Layers,
   Loader2,
+  Pencil,
   Plus,
   RotateCcw,
   Save,
@@ -17,14 +18,7 @@ import { Checkbox } from "../common/Checkbox";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { ActiveUnderline } from "../common/ActivePill";
 import { Tooltip } from "../common/Tooltip";
-import {
-  explorerClass,
-  fieldClass,
-  rowClass,
-  sectionLabelClass,
-  underlineStripClass,
-  underlineTabClass,
-} from "../common/recipes";
+import { chipClass, explorerClass, rowClass, sectionLabelClass, underlineTabClass } from "../common/recipes";
 import { ApiModal } from "./ApiModal";
 import { VariableTable } from "./VariableTable";
 import { useApiStore } from "../../state/apiStore";
@@ -66,6 +60,7 @@ function ordered(environments: ApiEnvironment[]): ApiEnvironment[] {
 export function EnvironmentModal({ onClose }: { onClose: () => void }) {
   const t = useT();
   const environments = useApiStore((s) => s.environments);
+  const activeEnvironmentId = useApiStore((s) => s.activeEnvironmentId);
   const createEnvironment = useApiStore((s) => s.createEnvironment);
   const duplicateEnvironment = useApiStore((s) => s.duplicateEnvironment);
   const deleteEnvironment = useApiStore((s) => s.deleteEnvironment);
@@ -74,14 +69,36 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<"variables" | "dynamic">("variables");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [rows, setRows] = useState<ApiVariable[]>([]);
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState("");
+  /** What is being typed over the selected environment's name, while it is; `null` shows the stored
+   *  name. Not a copy kept in sync by an effect: the field has to hold the right name on the very
+   *  render that focuses it, or "select all" selects the previous environment's name and the new
+   *  one lands after it with the caret at its end. */
+  const [titleDraft, setTitleDraft] = useState<{ id: string; text: string } | null>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+  /** Set by "new" and by a row's rename: the title takes the caret, text selected, once it shows
+   *  that environment. */
+  const [renameFocusId, setRenameFocusId] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [includeSecrets, setIncludeSecrets] = useState(false);
   const [importing, setImporting] = useState(false);
 
   const list = ordered(environments);
   const selected = list.find((e) => e.id === selectedId) ?? null;
+  // Each row's count, parsed once per store change rather than once per keystroke in the table. The
+  // selected row reads the live draft instead (`rows`).
+  const counts = useMemo(
+    () => new Map(environments.map((e) => [e.id, parseVariables(e.variables).length])),
+    [environments],
+  );
+  const secretCount = rows.filter((row) => row.secret).length;
+  const selectedInUse = selected !== null && !selected.is_global && selected.id === activeEnvironmentId;
+
+  useEffect(() => {
+    if (!renameFocusId || selected?.id !== renameFocusId) return;
+    setRenameFocusId(null);
+    titleRef.current?.focus();
+    titleRef.current?.select();
+  }, [renameFocusId, selected?.id]);
 
   /**
    * Variable edits arrive per keystroke but each one rewrites the environment's whole JSON blob
@@ -143,15 +160,46 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
     if (!created) return;
     setSelectedId(created.id);
     setRows([]);
-    setRenamingId(created.id);
-    setRenameValue(created.name);
+    setRenameFocusId(created.id);
   };
 
-  const commitRename = (environment: ApiEnvironment) => {
-    const name = renameValue.trim();
-    setRenamingId(null);
-    if (!name || name === environment.name) return;
-    void useApiStore.getState().updateEnvironment({ ...environment, name });
+  /** From a row: open that environment, and put the caret in its title. */
+  const startRename = (environment: ApiEnvironment) => {
+    select(environment.id);
+    setRenameFocusId(environment.id);
+  };
+
+  /**
+   * The title's edit, on Enter or on leaving the field.
+   *
+   * One write for the name *and* any variable edits still waiting on the debounce: both are the same
+   * row, and two writes racing each other could land the old name back over the new one, or the old
+   * variables over the edits.
+   */
+  const commitTitle = () => {
+    if (!selected || selected.is_global || titleDraft?.id !== selected.id) return;
+    const id = selected.id;
+    const typed = titleDraft.text;
+    const name = typed.trim();
+    // Held until the write lands, so the old name doesn't flash back for the length of the round
+    // trip — and only this draft: one typed since is left alone.
+    const release = () => setTitleDraft((draft) => (draft?.id === id && draft.text === typed ? null : draft));
+    if (!name || name === selected.name) {
+      release();
+      return;
+    }
+    const store = useApiStore.getState();
+    const fresh = store.environments.find((e) => e.id === selected.id) ?? selected;
+    let variables = fresh.variables;
+    if (pendingRef.current?.id === selected.id) {
+      variables = JSON.stringify(pendingRef.current.rows);
+      pendingRef.current = null;
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    }
+    void store.updateEnvironment({ ...fresh, name, variables }).finally(release);
   };
 
   const remove = async (environment: ApiEnvironment) => {
@@ -245,15 +293,23 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
     <ApiModal
       icon={Layers}
       title={t("api.env.manage")}
-      width="max-w-5xl"
+      width="max-w-6xl"
       height="h-[80vh]"
       onClose={onClose}
     >
+      {/*
+        Redrawn after "everything looks cramped and flat, and the name can't be changed" (user
+        report). The list gained room, a count per environment and a mark on the one requests use;
+        the detail gained a head that says which environment this is — its name as an editable
+        title, what it holds, and the actions that act on it — in place of a table under two tabs
+        that named nothing. Renaming used to be a double-click nobody could guess, into a field the
+        row's hidden buttons squeezed to half its width.
+      */}
       <div className="flex min-h-0 flex-1">
         {/* Environment list — the explorer of this dialog, half a step into the sunken tone so the
             sheet beside it reads as the page. */}
-        <div className={`${explorerClass} w-[200px]`}>
-          <div className="shrink-0 px-2">
+        <div className={`${explorerClass} w-[240px]`}>
+          <div className="shrink-0 px-2.5">
             <div className={sectionLabelClass}>
               <span className="min-w-0 flex-1 truncate">{t("api.environments")}</span>
               <Tooltip label={t("api.env.import")}>
@@ -280,53 +336,72 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
             </div>
           </div>
 
-          <div className="flex min-h-0 flex-1 flex-col gap-px overflow-auto px-2 pb-2">
+          <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto px-2.5 pb-3">
             {list.length === 0 && (
               <p className="px-2 py-1.5 text-[12px] text-[var(--cf-text-muted)]">{t("api.env.noEnvironments")}</p>
             )}
-            {list.map((environment) => {
+            {list.map((environment, index) => {
               const active = environment.id === selectedId;
               const EnvIcon = environment.is_global ? Globe : Layers;
+              const count = active ? rows.length : (counts.get(environment.id) ?? 0);
+              const inUse = !environment.is_global && environment.id === activeEnvironmentId;
               return (
-                <div
-                  key={environment.id}
-                  onClick={() => select(environment.id)}
-                  onDoubleClick={() => {
-                    if (environment.is_global) return;
-                    setRenamingId(environment.id);
-                    setRenameValue(environment.name);
-                  }}
-                  className={rowClass(active, "group h-7 shrink-0 cursor-pointer")}
-                >
-                  <EnvIcon
-                    size={14}
-                    className={`shrink-0 ${active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-faint)]"}`}
-                  />
-                  {renamingId === environment.id ? (
-                    <input
-                      autoFocus
-                      value={renameValue}
-                      onChange={(e) => setRenameValue(e.target.value)}
-                      onBlur={() => commitRename(environment)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") commitRename(environment);
-                        if (e.key === "Escape") setRenamingId(null);
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                      aria-label={t("api.env.name")}
-                      className={fieldClass({ size: "sm", className: "flex-1" })}
+                <Fragment key={environment.id}>
+                  {/* Globals are always in scope, the rest are picked one at a time — a rule
+                      between them says they are not the same kind of thing. */}
+                  {index > 0 && list[index - 1].is_global && (
+                    <div aria-hidden className="mx-2 my-1.5 h-px shrink-0 bg-[var(--cf-border)]" />
+                  )}
+                  <div
+                    onClick={() => select(environment.id)}
+                    onDoubleClick={() => {
+                      if (!environment.is_global) startRename(environment);
+                    }}
+                    className={rowClass(active, "group h-8 shrink-0 cursor-pointer")}
+                  >
+                    <EnvIcon
+                      size={15}
+                      className={`shrink-0 ${active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`}
                     />
-                  ) : (
-                    <span className="min-w-0 flex-1 truncate">
+                    <span className={`min-w-0 flex-1 truncate ${active ? "font-medium" : ""}`}>
                       {environment.is_global ? t("api.env.globals") : environment.name}
                     </span>
-                  )}
-                  {/* Export used to live here too, as a hover-only icon that stripped secrets with
-                      no way to say otherwise. One export, in the toolbar, acting on the environment
-                      on screen — the same place Reset and Persist already act from. */}
-                  <span className="flex shrink-0 items-center opacity-0 focus-within:opacity-100 group-hover:opacity-100">
+                    {inUse && (
+                      <Tooltip label={t("api.env.inUse")} description={t("api.env.inUseHint")}>
+                        <span
+                          role="img"
+                          aria-label={t("api.env.inUse")}
+                          className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-success)]"
+                        />
+                      </Tooltip>
+                    )}
+                    {/* The count gives way to the row's actions under the pointer. */}
+                    <span
+                      className={`shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)] ${
+                        environment.is_global ? "" : "group-focus-within:hidden group-hover:hidden"
+                      }`}
+                    >
+                      {count}
+                    </span>
+                    {/* Export used to live here too, as a hover-only icon that stripped secrets with
+                        no way to say otherwise. One export, in the detail's head, acting on the
+                        environment on screen — the same place Reset and Persist act from. Zero wide
+                        rather than hidden until wanted, so Tab still reaches them. */}
                     {!environment.is_global && (
-                      <>
+                      <span className="flex w-0 shrink-0 items-center overflow-hidden opacity-0 focus-within:w-auto focus-within:opacity-100 group-hover:w-auto group-hover:opacity-100">
+                        <Tooltip label={t("api.rename")}>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              startRename(environment);
+                            }}
+                            aria-label={t("api.rename")}
+                            className={iconButtonClass({ size: "xs" })}
+                          >
+                            <Pencil size={12} />
+                          </button>
+                        </Tooltip>
                         <Tooltip label={t("api.duplicate")}>
                           <button
                             type="button"
@@ -353,10 +428,10 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
                             <Trash2 size={13} />
                           </button>
                         </Tooltip>
-                      </>
+                      </span>
                     )}
-                  </span>
-                </div>
+                  </div>
+                </Fragment>
               );
             })}
           </div>
@@ -364,82 +439,152 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
 
         {/* Detail */}
         <div className="flex min-w-0 flex-1 flex-col">
-          {/* The section tabs, and beside them — outside the tab list, on the same hairline — the
-              actions that belong to the variables of the environment on screen. */}
-          <div className="flex shrink-0 items-stretch">
-            <div role="tablist" className={`${underlineStripClass} grow`}>
-              {(
-                [
-                  ["variables", t("api.tab.variables")],
-                  ["dynamic", t("api.env.dynamicVariables")],
-                ] as const
-              ).map(([id, label]) => {
-                const active = tab === id;
-                return (
-                  <button
-                    key={id}
-                    type="button"
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => setTab(id)}
-                    className={underlineTabClass(active)}
-                  >
-                    {label}
-                    {active && <ActiveUnderline layoutId="cf-api-env-tab" />}
-                  </button>
-                );
-              })}
-            </div>
-
-            {tab === "variables" && selected && (
-              <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] pr-3">
-                <button type="button" onClick={resetToInitial} className={buttonClass({ variant: "ghost", size: "sm" })}>
-                  <RotateCcw size={13} />
-                  {t("api.env.reset")}
-                </button>
-                <button type="button" onClick={persistCurrent} className={buttonClass({ variant: "ghost", size: "sm" })}>
-                  <Save size={13} />
-                  {t("api.env.persist")}
-                </button>
-                {/* Only where it can mean something: an environment with no secret variable has
-                    nothing to hold back, and a permanently visible "include secrets" next to an
-                    export is how a warning stops being read. */}
-                {rows.some((row) => row.secret) && (
-                  <Tooltip label={t("api.export.secretsWarning")}>
-                    <label className="ml-1 flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
-                      <Checkbox checked={includeSecrets} onChange={setIncludeSecrets} />
-                      {t("api.env.exportSecrets")}
-                    </label>
-                  </Tooltip>
-                )}
-                <Tooltip label={t("api.export.environment")}>
-                  <button
-                    type="button"
-                    onClick={() => void exportOne(selected)}
-                    className={buttonClass({ variant: "ghost", size: "sm" })}
-                  >
-                    <Download size={13} />
-                    {t("api.export.title")}
-                  </button>
-                </Tooltip>
+          {selected && (
+            <div className="flex shrink-0 flex-wrap items-start gap-x-4 gap-y-3 px-6 pb-4 pt-5">
+              <div className="flex min-w-0 flex-1 basis-[260px] items-start gap-3">
+                <span
+                  aria-hidden
+                  className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[9px] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent-line)]"
+                >
+                  {selected.is_global ? <Globe size={17} /> : <Layers size={17} />}
+                </span>
+                <div className="min-w-0 flex-1">
+                  {selected.is_global ? (
+                    <h3 className="flex h-8 items-center truncate text-[17px] font-semibold text-[var(--cf-text)]">
+                      {t("api.env.globals")}
+                    </h3>
+                  ) : (
+                    // The name, as a title you can type into — the request builder's name field,
+                    // a size up. Enter or leaving it saves; Escape puts the stored name back, and
+                    // stops there rather than closing the dialog under it.
+                    <Tooltip label={t("api.env.renameHint")} side="bottom">
+                      <input
+                        ref={titleRef}
+                        value={titleDraft?.id === selected.id ? titleDraft.text : selected.name}
+                        onChange={(e) => setTitleDraft({ id: selected.id, text: e.target.value })}
+                        onBlur={commitTitle}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") e.currentTarget.blur();
+                          if (e.key === "Escape") {
+                            e.stopPropagation();
+                            setTitleDraft(null);
+                            requestAnimationFrame(() => titleRef.current?.blur());
+                          }
+                        }}
+                        spellCheck={false}
+                        aria-label={t("api.env.name")}
+                        className="-ml-1.5 h-8 w-full max-w-[460px] rounded-md bg-transparent px-1.5 text-[17px] font-semibold text-[var(--cf-text)] outline-none transition-[background-color,box-shadow] duration-100 hover:bg-[var(--cf-hover)] focus:bg-[var(--cf-field)] focus:shadow-[inset_0_0_0_1px_var(--cf-accent)]"
+                      />
+                    </Tooltip>
+                  )}
+                  <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px] text-[var(--cf-text-muted)]">
+                    <span>{t("api.env.variableCount", { n: String(rows.length) })}</span>
+                    {secretCount > 0 && (
+                      <>
+                        <span aria-hidden className="text-[var(--cf-text-faint)]">
+                          ·
+                        </span>
+                        <span>{t("api.env.secretCount", { n: String(secretCount) })}</span>
+                      </>
+                    )}
+                    {selectedInUse && (
+                      <Tooltip label={t("api.env.inUseHint")}>
+                        <span className={chipClass("ok", "ml-1")}>
+                          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+                          {t("api.env.inUse")}
+                        </span>
+                      </Tooltip>
+                    )}
+                  </p>
+                  {selected.is_global && (
+                    <p className="mt-1 text-[12px] text-[var(--cf-text-faint)]">{t("api.env.globalsHint")}</p>
+                  )}
+                </div>
               </div>
-            )}
+
+              {/* What acts on this environment's variables, beside its name — the short labels here,
+                  the whole sentence in each tooltip. */}
+              {tab === "variables" && (
+                <div className="flex shrink-0 flex-wrap items-center gap-1.5 pt-0.5">
+                  <Tooltip label={t("api.env.reset")}>
+                    <button type="button" onClick={resetToInitial} className={buttonClass({ variant: "ghost", size: "sm" })}>
+                      <RotateCcw size={13} />
+                      {t("api.env.resetShort")}
+                    </button>
+                  </Tooltip>
+                  <Tooltip label={t("api.env.persist")}>
+                    <button type="button" onClick={persistCurrent} className={buttonClass({ variant: "ghost", size: "sm" })}>
+                      <Save size={13} />
+                      {t("api.env.persistShort")}
+                    </button>
+                  </Tooltip>
+                  {/* Only where it can mean something: an environment with no secret variable has
+                      nothing to hold back, and a permanently visible "include secrets" next to an
+                      export is how a warning stops being read. */}
+                  {secretCount > 0 && (
+                    <Tooltip label={t("api.export.secretsWarning")}>
+                      <label className="ml-1 flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
+                        <Checkbox checked={includeSecrets} onChange={setIncludeSecrets} />
+                        {t("api.env.exportSecrets")}
+                      </label>
+                    </Tooltip>
+                  )}
+                  <Tooltip label={t("api.export.environment")}>
+                    <button
+                      type="button"
+                      onClick={() => void exportOne(selected)}
+                      className={buttonClass({ variant: "secondary", size: "sm" })}
+                    >
+                      <Download size={13} />
+                      {t("api.export.title")}
+                    </button>
+                  </Tooltip>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div
+            role="tablist"
+            className="flex h-10 shrink-0 items-stretch gap-5 overflow-x-auto border-b border-[var(--cf-border)] px-6 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          >
+            {(
+              [
+                ["variables", t("api.tab.variables")],
+                ["dynamic", t("api.env.dynamicVariables")],
+              ] as const
+            ).map(([id, label]) => {
+              const active = tab === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setTab(id)}
+                  className={underlineTabClass(active)}
+                >
+                  {label}
+                  {active && <ActiveUnderline layoutId="cf-api-env-tab" />}
+                </button>
+              );
+            })}
           </div>
 
           {tab === "dynamic" ? (
-            <div className="min-h-0 flex-1 overflow-auto px-3.5 py-3">
-              <p className="mb-2.5 flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
+            <div className="min-h-0 flex-1 overflow-auto px-6 py-4">
+              <p className="mb-3 flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
                 <Wand2 size={13} className="shrink-0" />
                 {t("api.env.dynamicHint")}
               </p>
-              <div className="overflow-hidden rounded-md border border-[var(--cf-border)]">
+              <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
                 {DYNAMIC_VARIABLES.map((variable, index) => (
                   <button
                     key={variable.name}
                     type="button"
                     onClick={() => copyToken(variable.name)}
                     title={t("api.snippet.copy")}
-                    className={`flex h-8 w-full items-center gap-3 px-2.5 text-left transition-colors duration-100 hover:bg-[var(--cf-hover)] ${
+                    className={`flex h-9 w-full items-center gap-3 px-3 text-left transition-colors duration-100 hover:bg-[var(--cf-hover)] ${
                       index === 0 ? "" : "border-t border-[var(--cf-border)]"
                     }`}
                   >
@@ -474,19 +619,10 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
               {t("api.env.noEnvironments")}
             </div>
           ) : (
-            <div className="min-h-0 flex-1 overflow-auto px-3.5 py-3">
-              {selected.is_global && (
-                <p className="mb-2.5 text-[12px] text-[var(--cf-text-muted)]">{t("api.env.globalsHint")}</p>
-              )}
-
+            <div className="min-h-0 flex-1 overflow-auto px-6 py-4">
               {/* Keyed by environment so switching brings the new list up with its secrets masked
                   rather than inheriting whatever the previous one had revealed. */}
-              <VariableTable
-                key={selected.id}
-                rows={rows}
-                onChange={commit}
-                emptyLabel={t("api.env.noVariables")}
-              />
+              <VariableTable key={selected.id} rows={rows} onChange={commit} />
             </div>
           )}
         </div>

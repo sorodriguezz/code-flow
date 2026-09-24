@@ -141,6 +141,16 @@ describe("searchSettings", () => {
     expect(searchSettings("zzzzzz", t)).toEqual([]);
   });
 
+  it("finds the sound and the thinking design by what people call them", () => {
+    // Neither pane is looked for by its own name: people type "volume" or "orb".
+    expect(searchSettings("volume", t).some((hit) => hit.section.id === "notifications" && hit.tab?.id === "sound")).toBe(true);
+    expect(searchSettings("orb", t).some((hit) => hit.section.id === "claude" && hit.tab?.id === "thinking")).toBe(true);
+    // Synonyms live on the panes, not the section: "sound" no longer answers with every
+    // notification pane.
+    const sound = searchSettings("sound", t).filter((hit) => hit.section.id === "notifications");
+    expect(sound.map((hit) => hit.tab?.id)).toEqual(["sound"]);
+  });
+
   it("reaches the panes that used to be unreachable", () => {
     // Terminal, Remote and Backup were missing from the command palette's hand-written list; the
     // catalog is what makes forgetting one impossible.

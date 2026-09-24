@@ -107,7 +107,9 @@ export function AiPanel() {
   return (
     // A sheet beside the rail. It appears at its width and its contents fade in: the width tween it
     // used to open with relaid out the whole window on every frame.
-    <div className="cf-panel-in flex shrink-0 overflow-hidden pb-1.5 pr-1.5">
+    // `pt-px`: room for the sheet's outside ring under this wrapper's `overflow-hidden` — the work
+    // column's reason, in `App.tsx`. Flush, the panel's top edge was clipped away.
+    <div className="cf-panel-in flex shrink-0 overflow-hidden pb-1.5 pr-1.5 pt-px">
       <ResizeHandle
         axis="x"
         value={width}

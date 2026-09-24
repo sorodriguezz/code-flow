@@ -57,8 +57,12 @@ export function useFocusTrap(ref: RefObject<HTMLElement | null>, active = true):
     // Focus the first thing in the dialog, unless something inside it already claimed focus —
     // several of these render an input with `autoFocus`, and stealing it back would put the caret
     // on the close button instead of in the field the user is meant to type in.
+    //
+    // `data-no-initial-focus` takes a control out of the running for this one move (Tab still
+    // reaches it): the settings window's search box sits before its close button, and a field that
+    // took focus on every opening would wear its focus ring every time.
     if (!container.contains(document.activeElement)) {
-      const first = focusable(container);
+      const first = focusable(container).filter((element) => !element.hasAttribute("data-no-initial-focus"));
       // The container itself as a last resort, so a dialog with no controls at all (a spinner, a
       // read-only report) still takes focus off whatever is behind it.
       (first[0] ?? container).focus?.();

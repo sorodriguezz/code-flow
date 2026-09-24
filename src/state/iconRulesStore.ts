@@ -10,6 +10,8 @@ import {
   shippedProfile,
   type IconProfile,
 } from "../lib/icons/profiles";
+import { upgradeShippedProfiles } from "../lib/icons/profileUpgrade";
+import { detectRepoProfile } from "../lib/icons/detectProfile";
 import { watchSettings } from "../lib/settingsSync";
 
 /**
@@ -29,6 +31,9 @@ import { watchSettings } from "../lib/settingsSync";
  * and avoid drawing every file with its default icon for a frame before the rules arrive.
  */
 const KEY = "editor_icon_profiles";
+/** Every shipped profile id this install has been given, so a new pack is added once and a deleted one
+ * stays deleted. See `lib/icons/profileUpgrade.ts`. */
+const OFFERED_KEY = "editor_icon_profiles_offered";
 /** Where the rules lived before profiles existed. Read once, at migration, and never written again. */
 const LEGACY_RULES_KEY = "editor_icon_rules";
 const LEGACY_FOLDER_KEY = "editor_default_folder_icon";
@@ -41,6 +46,47 @@ function selectionKey(repoPath: string): string {
   return `${SELECTION_PREFIX}${repoPath}`;
 }
 
+/**
+ * The selector's own entry for "this repository has no choice of its own": use the pack its stack
+ * calls for. Stored as an empty selection, which is also what a repository that never chose has.
+ */
+export const AUTO_PROFILE = "__auto__";
+
+/**
+ * What each repository's root says it is, asked once per repository per session: it is a directory
+ * listing and a manifest or two, and a checkout does not change stack while it is open.
+ */
+const detections = new Map<string, Promise<string | null>>();
+
+function detectedFor(repoPath: string): Promise<string | null> {
+  let pending = detections.get(repoPath);
+  if (!pending) {
+    pending = detectRepoProfile(repoPath);
+    detections.set(repoPath, pending);
+  }
+  return pending;
+}
+
+/** A repository's own choice, and what detection says about it — both, because the selector names
+ * the detected pack even while an explicit choice is in force. */
+async function readSelection(repoPath: string): Promise<{ chosen: string | null; detected: string | null }> {
+  const [raw, detected] = await Promise.all([
+    getSetting(selectionKey(repoPath)).catch(() => null),
+    detectedFor(repoPath),
+  ]);
+  return { chosen: raw?.trim() || null, detected };
+}
+
+function parseOffered(raw: string | null): string[] | null {
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : null;
+  } catch {
+    return null;
+  }
+}
+
 interface IconRulesState {
   profiles: IconProfile[];
   /** The repository `activeId` was read for. `null` before one is open — the app draws trees during
@@ -51,15 +97,20 @@ interface IconRulesState {
   rules: IconRule[];
   defaultFolderIcon: string | null;
   loaded: boolean;
+  /** Whether the open repository has no choice of its own, so `activeId` is the pack its stack called
+   * for (or the default). Always false with no repository open. */
+  autoSelected: boolean;
+  /** The pack the open repository's root was recognised as, `null` when it was not. */
+  detectedId: string | null;
 
   init: () => Promise<void>;
   /** Points the store at a repository and reads that repository's choice. */
   setRepo: (repoPath: string | null) => Promise<void>;
   /** Re-reads the current repository's choice after another window changed it. */
   refreshSelection: () => Promise<void>;
-  /** Switches the *current repository* to another profile. Writes nothing when none is open — there
-   * would be nowhere to write it, and a selection that silently applied everywhere is the behaviour
-   * profiles exist to end. */
+  /** Switches the *current repository* to another profile — or, given `AUTO_PROFILE`, back to the
+   * one its stack calls for. Writes nothing when none is open — there would be nowhere to write it,
+   * and a selection that silently applied everywhere is the behaviour profiles exist to end. */
   selectProfile: (id: string) => Promise<void>;
 
   /** Replaces the active profile's rule list. The panel edits an array and saves it whole, because
@@ -94,6 +145,45 @@ interface IconRulesState {
   resetAll: () => Promise<void>;
 }
 
+/** Whether two rule lists say the same thing, rule for rule — ids aside, which only key the panel. */
+function sameRuleList(a: IconRule[], b: IconRule[]): boolean {
+  if (a === b) return true;
+  return (
+    a.length === b.length &&
+    a.every((rule, index) => {
+      const other = b[index];
+      return (
+        rule.target === other.target &&
+        rule.match === other.match &&
+        rule.pattern === other.pattern &&
+        rule.icon === other.icon &&
+        rule.enabled === other.enabled
+      );
+    })
+  );
+}
+
+/**
+ * How a profile is written to settings. A shipped pack nobody has edited is stored as a reference —
+ * its id, its name, `shipped: true` — and its rules are read back from the code.
+ *
+ * The packs are six hundred-odd rules each and there are eleven of them: written out whole, the row
+ * was close to a megabyte, rewritten on every edit and re-parsed by every window on every change.
+ * As references it is a few hundred bytes until the user actually edits a pack, and an untouched
+ * pack follows whatever the next version ships without a migration.
+ */
+function storedForm(profile: IconProfile): unknown {
+  const shipped = shippedProfile(profile.id);
+  if (
+    shipped &&
+    profile.defaultFolderIcon === shipped.defaultFolderIcon &&
+    sameRuleList(profile.rules, shipped.rules)
+  ) {
+    return { id: profile.id, name: profile.name, defaultFolderIcon: profile.defaultFolderIcon, shipped: true };
+  }
+  return profile;
+}
+
 /** The same tolerance one level up. A profile without a usable rule list is dropped whole rather
  * than kept as an empty one the user would have to work out how to fix. */
 function parseProfiles(raw: string): IconProfile[] | null {
@@ -103,8 +193,14 @@ function parseProfiles(raw: string): IconProfile[] | null {
     const profiles: IconProfile[] = [];
     for (const entry of parsed) {
       if (!entry || typeof entry !== "object") continue;
-      const candidate = entry as Partial<IconProfile>;
-      const rules = parseIconRules(candidate.rules);
+      const candidate = entry as Partial<IconProfile> & { shipped?: unknown };
+      // A reference to a shipped pack takes that pack's rules — the array itself, which nothing ever
+      // mutates: every edit builds a new one. A reference to a pack this version no longer ships has
+      // nothing to point at and is dropped like any other unreadable entry.
+      const rules =
+        candidate.shipped === true && typeof candidate.id === "string"
+          ? (shippedProfile(candidate.id)?.rules ?? null)
+          : parseIconRules(candidate.rules);
       if (typeof candidate.id !== "string" || typeof candidate.name !== "string" || !rules) continue;
       profiles.push({
         id: candidate.id,
@@ -193,7 +289,7 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
       : (profileById(profiles, DEFAULT_PROFILE_ID)?.id ?? wanted);
 
   const persist = async (profiles: IconProfile[]) => {
-    await setSetting(KEY, JSON.stringify(profiles)).catch(() => {});
+    await setSetting(KEY, JSON.stringify(profiles.map(storedForm))).catch(() => {});
   };
 
   /** Rewrites the active profile in place. Every rule edit is one of these. */
@@ -211,15 +307,30 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
     rules: profileById(BUILT_IN_PROFILES, DEFAULT_PROFILE_ID)?.rules ?? DEFAULT_ICON_RULES,
     defaultFolderIcon: null,
     loaded: false,
+    autoSelected: false,
+    detectedId: null,
 
     init: async () => {
-      const raw = await getSetting(KEY).catch(() => null);
+      const [raw, offeredRaw] = await Promise.all([
+        getSetting(KEY).catch(() => null),
+        getSetting(OFFERED_KEY).catch(() => null),
+      ]);
       const stored = raw === null ? null : parseProfiles(raw);
       if (stored && stored.length > 0) {
+        // The packs this version ships, brought into a list that was written by an older one — new
+        // ones added, untouched old ones replaced, anything the user edited or deleted left as it is.
+        // Idempotent, which matters: this runs again every time the row below is rewritten.
+        const upgrade = upgradeShippedProfiles(stored, parseOffered(offeredRaw));
+        const profiles = upgrade.profiles;
         // `get().activeId` rather than the default: a `setWorkspace` that landed first already put
         // this repository's choice there, and this is the point where it can finally be checked
         // against a real list.
-        set({ ...applied(stored, resolve(stored, get().activeId)), loaded: true });
+        set({ ...applied(profiles, resolve(profiles, get().activeId)), loaded: true });
+        // `offered` first, so the re-read the profiles write triggers already knows what it was given.
+        if (upgrade.offeredChanged) {
+          await setSetting(OFFERED_KEY, JSON.stringify(upgrade.offered)).catch(() => {});
+        }
+        if (upgrade.changed) await persist(profiles);
         return;
       }
 
@@ -243,23 +354,31 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
       // Written now rather than on the first edit, so the migration happens once and the next launch
       // reads the profiles row instead of re-deriving it from keys that may since have been cleared.
       set({ ...applied(profiles, activeId), loaded: true });
+      await setSetting(OFFERED_KEY, JSON.stringify(BUILT_IN_PROFILES.map((profile) => profile.id))).catch(
+        () => {},
+      );
       await persist(profiles);
     },
 
     setRepo: async (repoPath) => {
       if (get().repoPath === repoPath) return;
       if (repoPath === null) {
-        set({ repoPath: null, ...applied(get().profiles, DEFAULT_PROFILE_ID) });
+        set({ repoPath: null, autoSelected: false, detectedId: null, ...applied(get().profiles, DEFAULT_PROFILE_ID) });
         return;
       }
-      const chosen = await getSetting(selectionKey(repoPath)).catch(() => null);
-      // A repository that has never chosen gets the default, not whatever the last one was using —
-      // which is the whole point: the Angular app and the Nest API are two checkouts, and opening
-      // the second must not inherit the first's answer to what `*.service.ts` is.
-      const wanted = chosen?.trim() || DEFAULT_PROFILE_ID;
+      // Claimed before the reads: a second switch that lands while these are out must not be
+      // overwritten by this one's answer, and the check after the await is what enforces it.
+      set({ repoPath });
+      const { chosen, detected } = await readSelection(repoPath);
+      if (get().repoPath !== repoPath) return;
+      // A repository that has never chosen gets the pack its stack calls for, then the default — never
+      // whatever the last one was using: the Angular app and the Nest API are two checkouts, and
+      // opening the second must not inherit the first's answer to what `*.service.ts` is.
+      const wanted = chosen ?? detected ?? DEFAULT_PROFILE_ID;
       const { profiles, loaded } = get();
       set({
-        repoPath,
+        autoSelected: chosen === null,
+        detectedId: detected,
         // Only checked against the list once there *is* a list — before that the id is carried as
         // written and `init` does the checking. See `applied`.
         ...applied(profiles, loaded ? resolve(profiles, wanted) : wanted),
@@ -269,17 +388,31 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
     refreshSelection: async () => {
       const { repoPath } = get();
       if (!repoPath) return;
-      const chosen = await getSetting(selectionKey(repoPath)).catch(() => null);
+      const { chosen, detected } = await readSelection(repoPath);
       // The repository may have changed while the read was out; its own `setRepo` has the answer.
       if (get().repoPath !== repoPath) return;
       const { profiles, loaded } = get();
-      const wanted = chosen?.trim() || DEFAULT_PROFILE_ID;
-      set(applied(profiles, loaded ? resolve(profiles, wanted) : wanted));
+      const wanted = chosen ?? detected ?? DEFAULT_PROFILE_ID;
+      set({
+        autoSelected: chosen === null,
+        detectedId: detected,
+        ...applied(profiles, loaded ? resolve(profiles, wanted) : wanted),
+      });
     },
 
     selectProfile: async (id) => {
-      const { profiles, repoPath } = get();
-      set(applied(profiles, id));
+      const { profiles, repoPath, detectedId } = get();
+      if (id === AUTO_PROFILE) {
+        // Back to what the stack says: the repository's own choice is cleared rather than set to the
+        // detected pack, so it keeps following detection if the stack — or the packs — change.
+        set({
+          autoSelected: repoPath !== null,
+          ...applied(profiles, resolve(profiles, detectedId ?? DEFAULT_PROFILE_ID)),
+        });
+        if (repoPath) await setSetting(selectionKey(repoPath), "").catch(() => {});
+        return;
+      }
+      set({ autoSelected: false, ...applied(profiles, id) });
       if (repoPath) await setSetting(selectionKey(repoPath), id).catch(() => {});
     },
 
@@ -302,7 +435,7 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
         defaultFolderIcon: null,
       };
       const next = [...get().profiles, profile];
-      set(applied(next, profile.id));
+      set({ autoSelected: false, ...applied(next, profile.id) });
       await persist(next);
       const { repoPath } = get();
       if (repoPath) await setSetting(selectionKey(repoPath), profile.id).catch(() => {});
@@ -320,7 +453,7 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
         rules: source.rules.map((rule) => ({ ...rule })),
       };
       const next = [...get().profiles, copy];
-      set(applied(next, copy.id));
+      set({ autoSelected: false, ...applied(next, copy.id) });
       await persist(next);
       const { repoPath } = get();
       if (repoPath) await setSetting(selectionKey(repoPath), copy.id).catch(() => {});
@@ -355,7 +488,7 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
         defaultFolderIcon: incoming.defaultFolderIcon,
       };
       const next = [...get().profiles, profile];
-      set(applied(next, profile.id));
+      set({ autoSelected: false, ...applied(next, profile.id) });
       await persist(next);
       const { repoPath } = get();
       if (repoPath) await setSetting(selectionKey(repoPath), profile.id).catch(() => {});
@@ -372,11 +505,19 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
     },
 
     removeProfile: async (id) => {
-      const { profiles, activeId, repoPath } = get();
+      const { profiles, activeId, repoPath, autoSelected, detectedId } = get();
       // The last one is not removable: with no profiles there is no rule list to fall back to, and
       // an explorer whose icons vanished with no way back is not a state worth being able to reach.
       if (profiles.length <= 1) return;
       const next = profiles.filter((profile) => profile.id !== id);
+      // A repository following detection keeps following it: nothing is written for it, and the pack
+      // its stack calls for is re-resolved against the shorter list (to the default if that was the
+      // one removed).
+      if (autoSelected) {
+        set(applied(next, resolve(next, detectedId ?? DEFAULT_PROFILE_ID)));
+        await persist(next);
+        return;
+      }
       // Resolved explicitly, because `applied` deliberately does not: deleting the profile a
       // repository was on is the one case where the id genuinely has to move, and the repo's
       // stored choice has to move with it or the next launch reads a profile that is gone.
@@ -411,12 +552,16 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
     },
 
     resetAll: async () => {
-      set(applied(BUILT_IN_PROFILES, DEFAULT_PROFILE_ID));
+      // Factory state includes "follow the stack": the open repository's own choice is cleared, not
+      // pinned to a pack, so it goes back to whatever detection says it is.
+      const { repoPath, detectedId } = get();
+      const wanted = repoPath ? (detectedId ?? DEFAULT_PROFILE_ID) : DEFAULT_PROFILE_ID;
+      set({ autoSelected: repoPath !== null, ...applied(BUILT_IN_PROFILES, resolve(BUILT_IN_PROFILES, wanted)) });
+      await setSetting(OFFERED_KEY, JSON.stringify(BUILT_IN_PROFILES.map((profile) => profile.id))).catch(
+        () => {},
+      );
       await persist(BUILT_IN_PROFILES);
-      const { repoPath } = get();
-      if (repoPath) {
-        await setSetting(selectionKey(repoPath), DEFAULT_PROFILE_ID).catch(() => {});
-      }
+      if (repoPath) await setSetting(selectionKey(repoPath), "").catch(() => {});
     },
   };
 });

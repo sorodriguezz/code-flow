@@ -31,3 +31,28 @@ export function monogramStyle(color: string): CSSProperties {
     boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${color} 38%, transparent)`,
   };
 }
+
+/**
+ * The colour that marks a repository as the open one — its ring and its rail marker. The project's
+ * own colour, pulled a fifth of the way toward the theme's text so a dark colour still stands out
+ * on the dark frame and a pale one on the light frame.
+ */
+export function monogramMarkColor(color: string): string {
+  return `color-mix(in oklab, ${color} 80%, var(--cf-text))`;
+}
+
+/**
+ * The tile of the repository that is open: a stronger wash, the letters closer to full strength,
+ * and a 2px ring in its mark colour standing 2px off the tile over the frame.
+ *
+ * The ring has to be part of this `boxShadow`. It used to be Tailwind's `ring-2 ring-offset-2` on
+ * the chip — which is also a box-shadow, and so lost to the inline one `monogramStyle` sets: the
+ * active chip had no ring at all and differed from the rest only by not being dimmed.
+ */
+export function monogramActiveStyle(color: string): CSSProperties {
+  return {
+    background: `color-mix(in oklab, ${color} 28%, transparent)`,
+    color: `color-mix(in oklab, ${color} 70%, var(--cf-text))`,
+    boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${color} 50%, transparent), 0 0 0 2px var(--cf-bg), 0 0 0 4px ${monogramMarkColor(color)}`,
+  };
+}

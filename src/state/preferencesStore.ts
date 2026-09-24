@@ -9,6 +9,12 @@ import {
 import { useRepoStore } from "./repoStore";
 import { DEFAULT_SATELLITE_LIMIT, useWindowStore } from "./windowStore";
 import { watchSettings } from "../lib/settingsSync";
+import {
+  DEFAULT_NOTIFICATION_SOUND,
+  DEFAULT_NOTIFICATION_VOLUME,
+  isNotificationSoundId,
+  type NotificationSoundId,
+} from "../lib/notificationSound";
 
 const NATIVE_NOTIFICATIONS_KEY = "native_notifications_enabled";
 const NATIVE_ONLY_BACKGROUND_KEY = "native_notifications_only_background";
@@ -17,6 +23,10 @@ const PIPELINE_POLL_KEY = "pipeline_poll_seconds";
 const KEY = "auto_fetch_interval_seconds";
 const SECRET_SCAN_KEY = "secret_scan_enabled";
 const NOTIFICATION_SOUND_KEY = "notification_sound_enabled";
+/** Which of the sounds in `lib/notificationSound` plays. Unset means the one the app always made. */
+const NOTIFICATION_SOUND_ID_KEY = "notification_sound_id";
+/** 0–100; unset means `DEFAULT_NOTIFICATION_VOLUME`, the level the sounds were tuned at. */
+const NOTIFICATION_SOUND_VOLUME_KEY = "notification_sound_volume";
 const BLAME_ANNOTATION_KEY = "blame_annotation_enabled";
 /** Whether a chat with no repository may produce files. Unset means on — the Rust side reads the
  *  same key and defaults the same way; see `CHAT_FILE_GENERATION_KEY` in `chat_cmd.rs`. */
@@ -54,6 +64,11 @@ interface PreferencesState {
    * start playing chords at them.
    */
   notificationSoundEnabled: boolean;
+  /** Which sound plays — see `NOTIFICATION_SOUNDS`. Kept apart from the switch above, so turning the
+   *  sound off and on again does not forget the choice. */
+  notificationSoundId: NotificationSoundId;
+  /** 0–100, where `DEFAULT_NOTIFICATION_VOLUME` is the level every sound was tuned at. */
+  notificationSoundVolume: number;
   /**
    * Whether finished work also raises an operating-system notification.
    *
@@ -150,6 +165,8 @@ interface PreferencesState {
   setAutoFetchSeconds: (seconds: number) => Promise<void>;
   setSecretScanEnabled: (enabled: boolean) => Promise<void>;
   setNotificationSoundEnabled: (enabled: boolean) => Promise<void>;
+  setNotificationSoundId: (id: NotificationSoundId) => Promise<void>;
+  setNotificationSoundVolume: (volume: number) => Promise<void>;
   setNativeNotificationsEnabled: (enabled: boolean) => Promise<void>;
   setNativeNotificationsOnlyBackground: (enabled: boolean) => Promise<void>;
   setNotificationSourceMuted: (source: string, muted: boolean) => Promise<void>;
@@ -166,6 +183,14 @@ interface PreferencesState {
   reloadLockedBranchRules: () => Promise<void>;
 }
 
+/** A stored volume, as a whole number from 0 to 100; anything unreadable is the tuned default. */
+function clampVolume(raw: string | undefined | null): number {
+  if (raw == null || raw === "") return DEFAULT_NOTIFICATION_VOLUME;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_NOTIFICATION_VOLUME;
+  return Math.max(0, Math.min(100, Math.round(parsed)));
+}
+
 function clamp(seconds: number): number {
   if (!Number.isFinite(seconds) || seconds <= 0) return 0;
   return Math.max(MIN_AUTO_FETCH_SECONDS, Math.round(seconds));
@@ -177,6 +202,8 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   chatFileGenerationEnabled: true,
   chatAutoCompactEnabled: true,
   notificationSoundEnabled: false,
+  notificationSoundId: DEFAULT_NOTIFICATION_SOUND,
+  notificationSoundVolume: DEFAULT_NOTIFICATION_VOLUME,
   nativeNotificationsEnabled: false,
   nativeNotificationsOnlyBackground: true,
   mutedNotificationSources: [],
@@ -196,6 +223,8 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         KEY,
         SECRET_SCAN_KEY,
         NOTIFICATION_SOUND_KEY,
+        NOTIFICATION_SOUND_ID_KEY,
+        NOTIFICATION_SOUND_VOLUME_KEY,
         NATIVE_NOTIFICATIONS_KEY,
         NATIVE_ONLY_BACKGROUND_KEY,
         MUTED_SOURCES_KEY,
@@ -224,6 +253,12 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       // The sound is the other way round: unset means silent, so `=== "true"` covers both an
       // absent setting and an explicit "false" without a special case for either.
       notificationSoundEnabled: soundRaw === "true",
+      // An id this release does not know — written by a newer one, or by hand — plays the default
+      // rather than nothing.
+      notificationSoundId: isNotificationSoundId(stored[NOTIFICATION_SOUND_ID_KEY])
+        ? (stored[NOTIFICATION_SOUND_ID_KEY] as NotificationSoundId)
+        : DEFAULT_NOTIFICATION_SOUND,
+      notificationSoundVolume: clampVolume(stored[NOTIFICATION_SOUND_VOLUME_KEY]),
       // Same shape: unset and explicit-false both mean "don't".
       nativeNotificationsEnabled: stored[NATIVE_NOTIFICATIONS_KEY] === "true",
       // The one boolean here that defaults to *on*, so unset has to be its own branch.
@@ -278,6 +313,17 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   setNotificationSoundEnabled: async (enabled) => {
     set({ notificationSoundEnabled: enabled });
     await setSetting(NOTIFICATION_SOUND_KEY, String(enabled));
+  },
+
+  setNotificationSoundId: async (id) => {
+    set({ notificationSoundId: id });
+    await setSetting(NOTIFICATION_SOUND_ID_KEY, id);
+  },
+
+  setNotificationSoundVolume: async (volume) => {
+    const value = clampVolume(String(volume));
+    set({ notificationSoundVolume: value });
+    await setSetting(NOTIFICATION_SOUND_VOLUME_KEY, String(value));
   },
 
   setNativeNotificationsEnabled: async (enabled) => {
@@ -349,6 +395,8 @@ watchSettings(
     KEY,
     SECRET_SCAN_KEY,
     NOTIFICATION_SOUND_KEY,
+    NOTIFICATION_SOUND_ID_KEY,
+    NOTIFICATION_SOUND_VOLUME_KEY,
     NATIVE_NOTIFICATIONS_KEY,
     NATIVE_ONLY_BACKGROUND_KEY,
     MUTED_SOURCES_KEY,

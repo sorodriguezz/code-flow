@@ -376,24 +376,37 @@ function DiffViewImpl({
       <div className="flex h-full flex-col">
         {toolbar}
         {contextLine}
-        <div className="flex min-h-0 flex-1">
-          <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
-            <div className="divide-y divide-[var(--cf-border)]">
-              {files.map((file, i) => (
-                <div key={i}>
-                  {!single && <FileHeader file={file} t={t} />}
-                  {/* The fallback is the very element `SplitFileDiff` itself renders until it
-                      intersects the viewport (and most panes in a long diff are showing exactly
-                      that at any moment), so the chunk arriving changes nothing on screen. */}
-                  <Suspense fallback={<div style={{ height: splitHeightOf(file) }} className="bg-[var(--cf-sunken)]" />}>
-                    <SplitFileDiff file={file} height={splitHeightOf(file)} />
-                  </Suspense>
-                </div>
-              ))}
-            </div>
+        {single ? (
+          // One file: the pane *is* that file, so its editor takes the whole height and scrolls
+          // itself. It used to get the list's per-file height — its line count, capped at 640px —
+          // which on a tall window ended the editor two thirds of the way down with bare pane under
+          // it (user report). No `ChangeMap` either: nothing out here scrolls any more, and Monaco's
+          // own overview ruler, inside the editor, already marks every change along its full height.
+          <div className="min-h-0 flex-1">
+            <Suspense fallback={<div className="h-full bg-[var(--cf-sunken)]" />}>
+              <SplitFileDiff file={single} height="100%" />
+            </Suspense>
           </div>
-          <ChangeMap files={files} containerRef={scrollRef} />
-        </div>
+        ) : (
+          <div className="flex min-h-0 flex-1">
+            <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
+              <div className="divide-y divide-[var(--cf-border)]">
+                {files.map((file, i) => (
+                  <div key={i}>
+                    <FileHeader file={file} t={t} />
+                    {/* The fallback is the very element `SplitFileDiff` itself renders until it
+                        intersects the viewport (and most panes in a long diff are showing exactly
+                        that at any moment), so the chunk arriving changes nothing on screen. */}
+                    <Suspense fallback={<div style={{ height: splitHeightOf(file) }} className="bg-[var(--cf-sunken)]" />}>
+                      <SplitFileDiff file={file} height={splitHeightOf(file)} />
+                    </Suspense>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <ChangeMap files={files} containerRef={scrollRef} />
+          </div>
+        )}
       </div>
     );
   }

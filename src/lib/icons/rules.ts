@@ -91,11 +91,85 @@ export function ruleMatches(rule: IconRule, name: string, isFolder: boolean): bo
   }
 }
 
-/** The catalogue icon for a path, or `null` to leave it to the built-in Lucide set. */
+/** A rule as the hot path reads it: enabled only, pattern already trimmed and lowercased. */
+interface CompiledRule {
+  folder: boolean;
+  match: IconRuleMatch;
+  pattern: string;
+  icon: string;
+}
+
+interface CompiledRules {
+  rules: CompiledRule[];
+  /** Answers already given, per name — `null` included, which is most of them. */
+  answers: Map<string, string | null>;
+}
+
+/** Past this many remembered names the cache starts over rather than growing without bound. */
+const ANSWER_LIMIT = 5000;
+
+/**
+ * Per rule list, keyed on the array itself. The store replaces the array whenever the rules change
+ * (an edit, a profile switch), so an entry can never answer for rules it was not built from, and a
+ * list nobody holds any more is collected with its cache.
+ */
+const compiledLists = new WeakMap<IconRule[], CompiledRules>();
+
+function compiled(rules: IconRule[]): CompiledRules {
+  let entry = compiledLists.get(rules);
+  if (!entry) {
+    entry = {
+      rules: rules
+        .filter((rule) => rule.enabled && rule.pattern.trim() !== "")
+        .map((rule) => ({
+          folder: rule.target === "folder",
+          match: rule.match,
+          pattern: rule.pattern.trim().toLowerCase(),
+          icon: rule.icon,
+        })),
+      answers: new Map(),
+    };
+    compiledLists.set(rules, entry);
+  }
+  return entry;
+}
+
+/**
+ * The catalogue icon for a path, or `null` to leave it to the built-in Lucide set.
+ *
+ * Asked by every file row on every repaint, and the shipped packs are a few hundred rules long — so
+ * the list is compiled once (lowercased, disabled rules dropped) and each name's answer is kept.
+ * Same answer `ruleMatches` gives rule by rule, first match wins; it just stops re-deriving it for
+ * the `index.ts` it already looked at a frame ago.
+ */
 export function customIconFor(rules: IconRule[], path: string, isFolder: boolean): string | null {
   const name = path.split(/[\\/]/).pop() ?? path;
   if (!name) return null;
-  return rules.find((rule) => ruleMatches(rule, name, isFolder))?.icon ?? null;
+  const candidate = name.toLowerCase();
+  const list = compiled(rules);
+  const key = `${isFolder ? "d" : "f"}${candidate}`;
+  const known = list.answers.get(key);
+  if (known !== undefined) return known;
+
+  let icon: string | null = null;
+  for (const rule of list.rules) {
+    if (rule.folder !== isFolder) continue;
+    const hit =
+      rule.match === "name"
+        ? candidate === rule.pattern
+        : rule.match === "suffix"
+          ? candidate.endsWith(rule.pattern)
+          : rule.match === "prefix"
+            ? candidate.startsWith(rule.pattern)
+            : candidate.includes(rule.pattern);
+    if (hit) {
+      icon = rule.icon;
+      break;
+    }
+  }
+  if (list.answers.size >= ANSWER_LIMIT) list.answers.clear();
+  list.answers.set(key, icon);
+  return icon;
 }
 
 /**
