@@ -808,6 +808,9 @@ export interface ActivityLogEntry {
   model: string | null;
   /** Version of the engine CLI that answered this turn. `null` for older turns. */
   engine_version: string | null;
+  /** The account the turn ran as — `null` for the CLI's system account and for older turns. Where
+   * it changes between two turns is where the engine lost the conversation (see `turnsToMessages`). */
+  account_id?: string | null;
 }
 
 export interface JobHistoryEntry {

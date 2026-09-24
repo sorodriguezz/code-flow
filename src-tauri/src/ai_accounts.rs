@@ -593,6 +593,17 @@ pub async fn probe(binary: &str, env: &AccountEnv) -> AccountStatus {
         checked_at: chrono::Utc::now().to_rfc3339(),
         ..AccountStatus::default()
     };
+    // agy has no status command, and it keeps one login for the whole machine — whose address it
+    // writes beside the credential. Reading that answers "who" without starting the CLI (which, asked
+    // anything it does not know as a command, sends it to the model and spends a turn).
+    if env.provider == "gemini" {
+        let active = dirs::home_dir()
+            .and_then(|home| std::fs::read_to_string(home.join(".gemini").join("google_accounts.json")).ok())
+            .and_then(|text| gemini_active_account(&text));
+        status.signed_in = Some(active.is_some());
+        status.email = active.unwrap_or_default();
+        return status;
+    }
     let Some(args) = status_args(&env.provider) else {
         status.error = "unsupported".into();
         return status;
@@ -631,6 +642,7 @@ pub async fn probe(binary: &str, env: &AccountEnv) -> AccountStatus {
             break;
         }
     }
+    identity_from_files(env, &mut status);
     status
 }
 
@@ -704,6 +716,151 @@ fn first_line(text: &str) -> Option<String> {
     text.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string)
 }
 
+// ---------------------------------------------------------------------------------------------
+// Who a login belongs to, from the CLI's own files
+// ---------------------------------------------------------------------------------------------
+
+/// Fills in what a CLI's status command leaves out — the address, and the plan where the CLI keeps
+/// one — from the file that CLI wrote when it signed in. Read-only and local: no request is made and
+/// no token is used, refreshed or kept. What is read is who the login belongs to, which each CLI
+/// stores beside it: Grok and opencode in plain fields, Codex in its ID token's claims — the same
+/// claims its own `/status` shows.
+///
+/// Only for a login the CLI has just confirmed: a file left behind by a CLI that is signed out would
+/// name someone who no longer is.
+fn identity_from_files(env: &AccountEnv, out: &mut AccountStatus) {
+    if out.signed_in != Some(true) {
+        return;
+    }
+    let read = |path: Option<PathBuf>| path.and_then(|path| std::fs::read_to_string(path).ok());
+    match env.provider.as_str() {
+        "codex" => {
+            let home = env.var("CODEX_HOME").map(PathBuf::from).or_else(crate::codex::codex_home);
+            if let Some((email, plan)) = read(home.map(|home| home.join("auth.json"))).and_then(|text| codex_identity(&text)) {
+                out.email = email;
+                if let Some(plan) = plan {
+                    out.plan = plan;
+                }
+            }
+        }
+        "grok" => {
+            if let Some(email) = read(grok_auth_path(env)).and_then(|text| grok_email(&text)) {
+                out.email = email;
+            }
+        }
+        "opencode" => {
+            if let Some(text) = read(opencode_auth_path(env)) {
+                out.plan = opencode_with_emails(&out.plan, &text);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Grok's login file: the account's own (`GROK_AUTH_PATH`), else wherever the user moved Grok's,
+/// else `~/.grok/auth.json`.
+fn grok_auth_path(env: &AccountEnv) -> Option<PathBuf> {
+    if let Some(path) = env.var("GROK_AUTH_PATH") {
+        return Some(PathBuf::from(path));
+    }
+    let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
+    set("GROK_AUTH_PATH")
+        .or_else(|| set("GROK_HOME").map(|home| home.join("auth.json")))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".grok").join("auth.json")))
+}
+
+/// opencode's login file under its XDG data directory — the account's own, else the user's, else
+/// `~/.local/share` (on Windows too, as opencode itself does; see `ai_quota`'s reader).
+fn opencode_auth_path(env: &AccountEnv) -> Option<PathBuf> {
+    let base = match env.var("XDG_DATA_HOME").map(str::to_string).or_else(|| std::env::var("XDG_DATA_HOME").ok()) {
+        Some(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+        _ => dirs::home_dir()?.join(".local").join("share"),
+    };
+    Some(base.join("opencode").join("auth.json"))
+}
+
+/// The address and plan in a Codex `auth.json`: its ChatGPT login's ID token carries both, as the
+/// `email` claim and `chatgpt_plan_type` under OpenAI's namespace. The token's payload is decoded,
+/// never verified or sent anywhere — this is a label, not an authorisation. An API-key login has no
+/// token and answers `None`, which keeps the status command's "API key".
+fn codex_identity(auth_json: &str) -> Option<(String, Option<String>)> {
+    use base64::Engine;
+    let value: serde_json::Value = serde_json::from_str(auth_json).ok()?;
+    let token = value.get("tokens")?.get("id_token")?.as_str()?;
+    let payload = token.split('.').nth(1)?.trim_end_matches('=');
+    let claims: serde_json::Value =
+        serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
+    let email = claims.get("email")?.as_str()?.trim().to_string();
+    if email.is_empty() {
+        return None;
+    }
+    let plan = claims
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_plan_type"))
+        .and_then(|plan| plan.as_str())
+        .map(str::trim)
+        .filter(|plan| !plan.is_empty())
+        .map(|plan| {
+            let mut letters = plan.chars();
+            let title: String = letters.next().map(|first| first.to_uppercase().chain(letters).collect()).unwrap_or_default();
+            format!("ChatGPT {title}")
+        });
+    Some((email, plan))
+}
+
+/// The address in Grok's `auth.json`: one entry per login, keyed by issuer and client, each with an
+/// `email` field. The most recent login wins when there are several.
+fn grok_email(auth_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(auth_json).ok()?;
+    value
+        .as_object()?
+        .values()
+        .filter_map(|entry| {
+            let email = entry.get("email")?.as_str()?.trim();
+            (!email.is_empty()).then(|| (entry.get("create_time").and_then(|t| t.as_str()).unwrap_or(""), email.to_string()))
+        })
+        .max_by(|a, b| a.0.cmp(b.0))
+        .map(|(_, email)| email)
+}
+
+/// opencode holds one login per provider — keys for its own Zen and Go, OAuth for some others — so
+/// there is no single address to show. The ones a login does carry go beside that provider's name in
+/// the list `providers list` produced: `OpenCode Zen, Google (ana@example.com), OpenCode Go`.
+///
+/// Names and keys are matched letters-only (`google` ↔ `Google`, `github-copilot` ↔ `GitHub Copilot`),
+/// and a name nothing matches is left as it was.
+fn opencode_with_emails(list: &str, auth_json: &str) -> String {
+    let Ok(serde_json::Value::Object(logins)) = serde_json::from_str::<serde_json::Value>(auth_json) else {
+        return list.to_string();
+    };
+    let letters = |text: &str| text.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let emails: Vec<(String, String)> = logins
+        .iter()
+        .filter_map(|(key, entry)| {
+            let email = entry.get("email")?.as_str()?.trim();
+            (!email.is_empty()).then(|| (letters(key), email.to_string()))
+        })
+        .collect();
+    if emails.is_empty() {
+        return list.to_string();
+    }
+    list.split(", ")
+        .map(|name| match emails.iter().find(|(key, _)| *key == letters(name)) {
+            Some((_, email)) => format!("{name} ({email})"),
+            None => name.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The account agy is signed in as: `active` in `~/.gemini/google_accounts.json`, the file the Gemini
+/// CLIs write when a Google login completes.
+fn gemini_active_account(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let active = value.get("active")?.as_str()?.trim();
+    (!active.is_empty()).then(|| active.to_string())
+}
+
 /// Signs an account's CLI out with its own logout command — the system account's too, which is the
 /// same login the user's terminal uses. Codex revokes the tokens on the server, Claude removes the
 /// keychain item it named after the directory, Grok clears its cached credentials: all of which
@@ -740,6 +897,63 @@ pub async fn logout(binary: &str, env: &AccountEnv) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unsigned JWT with `claims` as its payload — all `codex_identity` ever reads of one.
+    fn id_token(claims: serde_json::Value) -> String {
+        use base64::Engine;
+        let encode = |text: String| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+        format!("{}.{}.sig", encode(r#"{"alg":"none"}"#.to_string()), encode(claims.to_string()))
+    }
+
+    #[test]
+    fn codex_names_the_address_and_plan_its_token_carries() {
+        let auth = serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": { "id_token": id_token(serde_json::json!({
+                "email": "ana@example.com",
+                "https://api.openai.com/auth": { "chatgpt_plan_type": "plus" }
+            })) }
+        });
+        assert_eq!(
+            codex_identity(&auth.to_string()),
+            Some(("ana@example.com".to_string(), Some("ChatGPT Plus".to_string())))
+        );
+        // A login with no plan claim keeps the status command's own word for it.
+        let bare = serde_json::json!({ "tokens": { "id_token": id_token(serde_json::json!({ "email": "ana@example.com" })) } });
+        assert_eq!(codex_identity(&bare.to_string()), Some(("ana@example.com".to_string(), None)));
+        // An API-key login has no token at all.
+        assert_eq!(codex_identity(r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-x"}"#), None);
+    }
+
+    #[test]
+    fn grok_takes_the_newest_login_address() {
+        let auth = serde_json::json!({
+            "https://auth.x.ai::a": { "email": "old@example.com", "create_time": "2026-01-01T00:00:00Z" },
+            "https://auth.x.ai::b": { "email": "new@example.com", "create_time": "2026-09-01T00:00:00Z" }
+        });
+        assert_eq!(grok_email(&auth.to_string()), Some("new@example.com".to_string()));
+        assert_eq!(grok_email("{}"), None);
+    }
+
+    #[test]
+    fn opencode_puts_each_address_beside_its_provider() {
+        let auth = serde_json::json!({
+            "opencode": { "type": "api", "key": "k" },
+            "google": { "type": "oauth", "email": "ana@example.com" },
+            "opencode-go": { "type": "api", "key": "k" }
+        });
+        assert_eq!(
+            opencode_with_emails("OpenCode Zen, Google, OpenCode Go", &auth.to_string()),
+            "OpenCode Zen, Google (ana@example.com), OpenCode Go"
+        );
+        assert_eq!(opencode_with_emails("OpenCode Zen", "not json"), "OpenCode Zen");
+    }
+
+    #[test]
+    fn gemini_reads_the_active_google_login() {
+        assert_eq!(gemini_active_account(r#"{"active":"ana@example.com","old":[]}"#), Some("ana@example.com".to_string()));
+        assert_eq!(gemini_active_account(r#"{"active":null,"old":["ana@example.com"]}"#), None);
+    }
 
     fn conn() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

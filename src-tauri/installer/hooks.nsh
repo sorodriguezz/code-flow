@@ -31,6 +31,26 @@
 ; both are.
 ; ---------------------------------------------------------------------------------------------
 
+; ---------------------------------------------------------------------------------------------
+; After installing: make Explorer redraw the app's icon
+;
+; An update replaces the .exe at the same path, and Explorer keeps showing the icon it cached for
+; that path — so after the 2026-09-23 logo change, Windows users went on seeing Tauri's logo on the
+; Start menu, desktop and taskbar. Tauri's template calls SHChangeNotify only for file associations,
+; which this app has none of. Same call and same flags as its UPDATEFILEASSOC macro, then Windows'
+; own per-user icon-cache refresh; both are harmless when nothing changed. (The MSI has no hook: the
+; app does the same on the first launch of a new version — `refresh_icon_cache_after_update`.)
+; ---------------------------------------------------------------------------------------------
+
+!macro NSIS_HOOK_POSTINSTALL
+  System::Call "shell32::SHChangeNotify(i,i,i,i) (0x08000000, 0x1000, 0, 0)"
+  ; `ExecWait`, the instruction Tauri's own template uses, rather than a plugin: ie4uinit is not a
+  ; console program, so nothing flashes, and there is no plugin to be missing from the toolchain.
+  ${If} ${FileExists} "$SYSDIR\ie4uinit.exe"
+    ExecWait '"$SYSDIR\ie4uinit.exe" -show' $0
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_POSTUNINSTALL
   ; Problem 4. `$UpdateMode` is declared and set by tauri's own template before this hook is
   ; inserted, and the template's own app-data deletion twelve lines earlier is gated the same way:

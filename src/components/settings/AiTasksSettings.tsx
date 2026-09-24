@@ -78,10 +78,6 @@ function fold(text: string): string {
 export function AiTasksSettings() {
   const t = useT();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const fileGeneration = usePreferencesStore((s) => s.chatFileGenerationEnabled);
-  const setFileGeneration = usePreferencesStore((s) => s.setChatFileGenerationEnabled);
-  const autoCompact = usePreferencesStore((s) => s.chatAutoCompactEnabled);
-  const setAutoCompact = usePreferencesStore((s) => s.setChatAutoCompactEnabled);
 
   // ---------- routing ----------
   const defaultProvider = useAiProviderStore((s) => s.providerId);
@@ -277,38 +273,8 @@ export function AiTasksSettings() {
 
   return (
     <div>
-      {/* ---------- what a chat with no repository may do ----------
-
-          Here and not under a "chat" heading, because there is no chat section and this is a
-          statement about what an AI task is allowed to do — which is what this screen is. It sits
-          above the toolbar rather than among the task rows: it is not one task's setting, it
-          changes what every repo-less conversation can do. */}
-      <label className="mb-3 flex items-start gap-2 text-[13px]">
-        <span className="mt-[2px]">
-          <Checkbox checked={fileGeneration} onChange={(checked) => void setFileGeneration(checked)} />
-        </span>
-        <span>
-          {t("settings.chatFileGenerationLabel")}
-          <span className="mt-0.5 block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-            {t("settings.chatFileGenerationHint")}
-          </span>
-        </span>
-      </label>
-
-      {/* Beside it for the same reason it is on this screen at all: both are statements about what
-          a turn may do on its own. This one spends a turn without being asked for it, which is
-          exactly the kind of thing that has to be switchable and has to say so out loud. */}
-      <label className="mb-3 flex items-start gap-2 text-[13px]">
-        <span className="mt-[2px]">
-          <Checkbox checked={autoCompact} onChange={(checked) => void setAutoCompact(checked)} />
-        </span>
-        <span>
-          {t("settings.chatAutoCompactLabel")}
-          <span className="mt-0.5 block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-            {t("settings.chatAutoCompactHint")}
-          </span>
-        </span>
-      </label>
+      {/* ---------- what only the free chat may do ---------- */}
+      <FreeChatOptions query={query} t={t} />
 
       {/* ---------- the toolbar ---------- */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -410,6 +376,101 @@ export function AiTasksSettings() {
             </section>
           );
         })
+      )}
+    </div>
+  );
+}
+
+/**
+ * What the free chat may do on its own — the Chat tab and the quick ask, the conversations that run
+ * without a repository. Grouped under one row because neither switch touches anything else on this
+ * screen: the assistant's chat always runs in a repository (no files to build beside it) and resumes
+ * its engine's session instead of replaying the transcript (nothing to summarise). Both used to sit
+ * above the task list, reading as if they governed every task below them.
+ *
+ * Closed, the row says which switches are on. A search that names one of them opens it, the way a
+ * search that matches a prompt opens that task.
+ */
+function FreeChatOptions({ query, t }: { query: string; t: Translate }) {
+  const fileGeneration = usePreferencesStore((s) => s.chatFileGenerationEnabled);
+  const setFileGeneration = usePreferencesStore((s) => s.setChatFileGenerationEnabled);
+  const autoCompact = usePreferencesStore((s) => s.chatAutoCompactEnabled);
+  const setAutoCompact = usePreferencesStore((s) => s.setChatAutoCompactEnabled);
+  const [expanded, setExpanded] = useState(false);
+
+  const options = [
+    {
+      id: "files",
+      on: fileGeneration,
+      set: setFileGeneration,
+      label: t("settings.chatFileGenerationLabel"),
+      hint: t("settings.chatFileGenerationHint"),
+      short: t("settings.freeChatFilesShort"),
+    },
+    {
+      id: "compact",
+      on: autoCompact,
+      set: setAutoCompact,
+      label: t("settings.chatAutoCompactLabel"),
+      hint: t("settings.chatAutoCompactHint"),
+      short: t("settings.freeChatCompactShort"),
+    },
+  ];
+  const needle = fold(query.trim());
+  const matched = needle !== "" && options.some((option) => fold(`${option.label} ${option.hint}`).includes(needle));
+  const open = expanded || matched;
+  const on = options.filter((option) => option.on);
+
+  return (
+    <div
+      className={`mb-3 rounded-lg border transition-colors ${
+        open ? "border-[var(--cf-accent)]/40 bg-black/[0.015] dark:bg-white/[0.02]" : "border-[var(--cf-border)]"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((was) => !was)}
+        aria-expanded={open}
+        className="flex w-full items-start gap-2 px-2.5 py-2 text-left"
+      >
+        {open ? (
+          <ChevronDown size={13} className="mt-[3px] shrink-0 text-[var(--cf-text-muted)]" />
+        ) : (
+          <ChevronRight size={13} className="mt-[3px] shrink-0 text-[var(--cf-text-muted)]" />
+        )}
+        <span className="min-w-0 flex-1">
+          <span className="block text-[12.5px] font-medium leading-snug text-[var(--cf-text)]">{t("settings.freeChatTitle")}</span>
+          <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("settings.freeChatHint")}</span>
+        </span>
+        <span className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+          {on.length === 0 ? (
+            <span className="text-[10.5px] text-[var(--cf-text-muted)]">{t("settings.freeChatNoneOn")}</span>
+          ) : (
+            on.map((option) => (
+              <span
+                key={option.id}
+                className="rounded bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)] px-1.5 py-[1px] text-[10px] font-medium text-[var(--cf-accent)]"
+              >
+                {option.short}
+              </span>
+            ))
+          )}
+        </span>
+      </button>
+      {open && (
+        <div className="space-y-3 border-t border-[var(--cf-border)] px-2.5 py-2.5 pl-[29px]">
+          {options.map((option) => (
+            <label key={option.id} className="flex items-start gap-2 text-[13px]">
+              <span className="mt-[2px]">
+                <Checkbox checked={option.on} onChange={(checked) => void option.set(checked)} />
+              </span>
+              <span>
+                {option.label}
+                <span className="mt-0.5 block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">{option.hint}</span>
+              </span>
+            </label>
+          ))}
+        </div>
       )}
     </div>
   );

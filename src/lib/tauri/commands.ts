@@ -999,6 +999,10 @@ export function isRepoBusy(error: unknown): boolean {
   return String(error).includes(REPO_BUSY_MARKER);
 }
 
+/** The refusal `analyze_working_changes` returns when the working tree holds nothing it would read
+ * (`NOTHING_TO_ANALYZE_MARKER` in `claude_cmd.rs`). No engine ran and nothing was filed. */
+export const NOTHING_TO_ANALYZE_MARKER = "NOTHING_TO_ANALYZE::";
+
 // ---------- agent projects ----------
 
 export const listAgentProjects = (workspaceId: string) =>

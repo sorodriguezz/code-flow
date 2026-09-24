@@ -9,12 +9,13 @@ import {
 import { useChatHistoryStore } from "./activityStore";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { translate } from "./languageStore";
-import { pushErrorToast, useToastStore } from "./toastStore";
+import { pushErrorToast } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { formatAgentLogLine } from "../lib/agentLog";
 import { isQueuedCancellation, whenRepoFree } from "../lib/repoQueue";
 import { onAiChatDelta } from "../lib/tauri/events";
+import type { ActivityLogEntry } from "../types/domain";
 
 /** The repository name the backend puts after its busy marker. */
 function repoNameFromBusy(error: string): string {
@@ -45,6 +46,10 @@ export interface ChatMessage {
   /** The user stopped this turn. Not an error — it gets its own muted note in the transcript
    * rather than a red failure banner. */
   isCancelled?: boolean;
+  /** On a question: the engine took it with nothing above it in context, because it ran as another
+   * account than the turn before (see `turnsToMessages`). Who answered from here on, for the line
+   * the transcript draws above it. */
+  accountBreak?: { provider: string; accountId: string | null };
 }
 
 /** One conversation, live in memory for as long as the app runs.
@@ -163,6 +168,62 @@ export function parseTrace(raw: string | null): AiRunLine[] | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The live half of `turnsToMessages`: the reply said it ran as another account than the turn before
+ * (`account_changed`, the backend's own verdict), so the question it answered — the last one asked —
+ * gets the line. A mark in the transcript rather than a toast: a toast is gone in seconds, and this
+ * is a fact about the conversation for as long as it is read.
+ */
+function markAccountBreak(messages: ChatMessage[], answeredBy: ChatMessage["accountBreak"] | null): ChatMessage[] {
+  if (!answeredBy) return messages;
+  const question = messages.map((m) => m.role).lastIndexOf("user");
+  if (question < 0) return messages;
+  return messages.map((m, i) => (i === question ? { ...m, accountBreak: answeredBy } : m));
+}
+
+/**
+ * A conversation's stored turns as the transcript shows them: a question and its answer each.
+ *
+ * Also where the engine lost the thread. This chat resumes the engine's own session rather than
+ * replaying the transcript into it, and a session lives in the account that made it — so a turn that
+ * ran as another account than the one before it started over with nothing above it in context. Its
+ * question carries `accountBreak`, and the transcript draws the line there. Worked out from the rows
+ * rather than kept from the live reply, so a reopened conversation still shows where it happened.
+ *
+ * Mirrors `session_for_engine` in `claude_cmd.rs`: a turn is compared with the last one that recorded
+ * an engine (failed ones included, as the backend compares them), only once there was a session to
+ * lose, and only on the same provider — a provider change resets too, but the panel's picker does not
+ * allow one mid-conversation. A failed turn draws no line: the live reply that would have drawn it
+ * never arrived either, and the transcript has to read the same reopened as it did live.
+ */
+export function turnsToMessages(entries: ActivityLogEntry[]): ChatMessage[] {
+  let session: string | null = null;
+  let last: { provider: string; account: string | null } | null = null;
+  return entries.flatMap((e) => {
+    const account = e.account_id ?? null;
+    const broke =
+      !e.is_error && session !== null && last !== null && e.provider !== null && last.provider === e.provider && last.account !== account;
+    if (e.provider) last = { provider: e.provider, account };
+    session = e.engine_session_id ?? session;
+    const question: ChatMessage = { role: "user", content: e.question, createdAt: e.created_at };
+    if (broke && e.provider) question.accountBreak = { provider: e.provider, accountId: account };
+    return [
+      question,
+      {
+        role: "assistant" as const,
+        content: e.answer,
+        responseTimeMs: e.response_time_ms ?? undefined,
+        createdAt: e.created_at,
+        provider: e.provider ?? undefined,
+        model: e.model ?? undefined,
+        engineVersion: e.engine_version ?? undefined,
+        isError: e.is_error,
+        trace: parseTrace(e.trace),
+      },
+    ];
+  });
 }
 
 /** Stand-in for "this project has no conversation open" — a fresh, empty session the chat panel
@@ -448,7 +509,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         settle((session) => ({
           ...session,
           messages: [
-            ...session.messages,
+            ...markAccountBreak(session.messages, reply.account_changed ? { provider: reply.provider, accountId: reply.account_id ?? null } : null),
             {
               role: "assistant",
               content: reply.text,
@@ -469,10 +530,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           persisted: true,
           streamText: "",
         }));
-        // This panel does not replay the transcript into a new session, so a thread that moved to
-        // another account (a routing change since its last turn) is talking to a model that has
-        // not seen the messages above. Said once, as it happens.
-        if (reply.account_changed) useToastStore.getState().pushToast(translate("accounts.sessionReset"), "info");
         void useChatHistoryStore.getState().load(projectId);
         // The turn is persisted by the time this resolves, so a phone can go and read it. Nothing
         // about a chat turn moves a byte on disk, and its output stream is one no phone subscribes
@@ -620,20 +677,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!entries || entries.length === 0) return;
     // One stored row is one exchange, so both halves carry its timestamp — the question wasn't
     // recorded separately, and splitting hairs there would mean inventing a time.
-    const messages: ChatMessage[] = entries.flatMap((e) => [
-      { role: "user" as const, content: e.question, createdAt: e.created_at },
-      {
-        role: "assistant" as const,
-        content: e.answer,
-        responseTimeMs: e.response_time_ms ?? undefined,
-        createdAt: e.created_at,
-        provider: e.provider ?? undefined,
-        model: e.model ?? undefined,
-        engineVersion: e.engine_version ?? undefined,
-        isError: e.is_error,
-        trace: parseTrace(e.trace),
-      },
-    ]);
+    const messages = turnsToMessages(entries);
     // Continuing a reopened conversation resumes the engine session its *last* turn ran under —
     // earlier ones are stale (a CLI can hand out a new token per turn), and turns recorded before
     // the two ids were separated have none at all, which just means the next message starts a
@@ -689,20 +733,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       const added = entries.filter((e) => !known.has(e.created_at));
       if (added.length === 0) return s;
-      const messages: ChatMessage[] = added.flatMap((e) => [
-        { role: "user" as const, content: e.question, createdAt: e.created_at },
-        {
-          role: "assistant" as const,
-          content: e.answer,
-          responseTimeMs: e.response_time_ms ?? undefined,
-          createdAt: e.created_at,
-          provider: e.provider ?? undefined,
-          model: e.model ?? undefined,
-          engineVersion: e.engine_version ?? undefined,
-          isError: e.is_error,
-          trace: parseTrace(e.trace),
-        },
-      ]);
+      // Mapped over the whole conversation and then cut, not over the new rows alone: whether a
+      // turn changed account depends on the one before it, which this window may already hold.
+      const all = turnsToMessages(entries);
+      const messages = entries.flatMap((e, i) => (known.has(e.created_at) ? [] : all.slice(i * 2, i * 2 + 2)));
       return {
         byConversation: {
           ...s.byConversation,

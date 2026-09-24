@@ -725,7 +725,8 @@ pub async fn dispatch(
         )?),
         // One of the two arms whose *failure* is durable — see `DispatchError::Failed`. The engine
         // erroring still files a `job_history` row under the job id the phone minted, so the
-        // desktop has something new to read either way.
+        // desktop has something new to read either way. The one refusal that files nothing is an
+        // empty working tree (`NOTHING_TO_ANALYZE_MARKER`): no engine ran, so there is no run.
         "analyze_working_changes" => ok_with(
             commands::claude_cmd::analyze_working_changes(
                 app.clone(),

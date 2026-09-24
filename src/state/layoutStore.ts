@@ -199,19 +199,21 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
  * launch is the whole reason it needs to be remembered.
  *
  * `sidebarCollapsed` moved here from `uiStore` when the sidebar stopped disappearing entirely and
- * started collapsing to a rail of project chips, the way the settings nav collapses to its icons —
- * same control, same question, so the same answer about remembering it.
+ * started collapsing to a rail of project chips.
+ *
+ * The settings nav's own fold used to be one of these and is not any more: the user wants the
+ * Settings window to open with its nav folded to icons every time, so unfolding it lasts one opening
+ * and lives in `SettingsView`. (Its old `layout_settings_nav_collapsed` row may still sit in
+ * `app_settings`; nothing reads it.)
  */
-export type LayoutFlag = "settingsNavCollapsed" | "sidebarCollapsed" | "notesTagsByCount";
+export type LayoutFlag = "sidebarCollapsed" | "notesTagsByCount";
 
 const FLAG_STORAGE_KEYS: Record<LayoutFlag, string> = {
-  settingsNavCollapsed: "layout_settings_nav_collapsed",
   sidebarCollapsed: "layout_sidebar_collapsed",
   notesTagsByCount: "layout_notes_tags_by_count",
 };
 
 const FLAG_DEFAULTS: Record<LayoutFlag, boolean> = {
-  settingsNavCollapsed: false,
   sidebarCollapsed: false,
   // Alphabetical by default. Frequency reads as unsorted in a young workspace, where most tags have
   // been used once and the order is really "whatever the tie-break said" — a name is always

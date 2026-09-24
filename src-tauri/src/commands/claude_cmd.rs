@@ -553,6 +553,11 @@ fn checkpoint_after(repo_path: &str, checkpoint: Option<String>) {
     }
 }
 
+/// What [`analyze_working_changes`] fails with when the working tree holds nothing it would read
+/// (its diff is index → working tree, so unstaged and untracked changes only). A prefix the frontend
+/// matches, the same way it matches `ai_locks::BUSY_MARKER`.
+pub const NOTHING_TO_ANALYZE_MARKER: &str = "NOTHING_TO_ANALYZE::";
+
 #[tauri::command]
 pub async fn analyze_working_changes(
     app: AppHandle,
@@ -603,6 +608,13 @@ pub async fn analyze_working_changes(
     let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
 
     let diff_files = git::diff::get_working_diff(&project.local_path)?;
+    // An empty diff used to go to the engine anyway, which answered about nothing and left a red row
+    // in the history. The buttons that start an analysis are off when there is nothing to read; this
+    // is for a tree that emptied between the click and here — a commit from a terminal, a phone.
+    // Refused before any engine starts and filed nowhere: nothing to analyze is not a failed run.
+    if diff_files.is_empty() {
+        return Err(NOTHING_TO_ANALYZE_MARKER.to_string());
+    }
     let diff_text = git::diff::render_diff_for_prompt(&diff_files);
 
     let mut enabled_contexts: Vec<(String, String)> = contexts

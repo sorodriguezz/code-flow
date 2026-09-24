@@ -5,7 +5,8 @@ import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { usePlatform } from "../../lib/platform";
 import { Checkbox } from "../common/Checkbox";
-import { Actions, Group, Note, Panel, SettingsHeader, Status } from "../api/settingsChrome";
+import { Actions, Note, Status } from "../api/settingsChrome";
+import { RailSection } from "./settingsNav";
 import {
   closeTerminal,
   remotectlCancelPairing,
@@ -196,377 +197,377 @@ export function RemoteSettings() {
   const ownerLabel = (owner: string | null) => devices.find((d) => d.id === owner)?.name ?? owner ?? "";
 
   return (
-    // The frame every other settings section wears: a plain `<section>` filling the pane it is
-    // given, and the shared header on top of it. This used to be a 640px column centred with
-    // `mx-auto` inside a ~950px pane, which is the one shape the settings column deliberately does
-    // not have — see the note in `SettingsView` on why the per-section caps were removed. Arriving
-    // here from Backup or Git moved every control several centimetres sideways, which reads as the
-    // window resettling rather than as a different page of the same window.
-    <section>
-      <SettingsHeader title={t("remote.title")} hint={t("remote.subtitle")} />
-
-      {/* Above the panel rather than inside it: it is about the section, not about any group in
-          it. `warning` rather than the section's own amber paragraph — this is the tone the app
-          keeps for "this can cost you something", and opening a port on the machine qualifies.
-          What it no longer says is that the feature is young: that was a promise about the
-          *software*, and it has been kept long enough to stop making. This is a promise about the
-          *machine*, and it stays true whatever version this is. */}
-      <Note tone="warning">{t("remote.serverNote")}</Note>
-
-      {/* One panel of groups, the same surface the AI, backup and integrations sections are built
-          from. It replaced five separately bordered cards stacked down the column — a shape used
-          nowhere else in settings, and one that turned a section of five short blocks into five
-          boxes to parse. */}
-      <Panel>
-        <Group title={t("remote.groupServer")}>
-          <label className="flex cursor-pointer items-start gap-2.5">
-            <Checkbox
-              checked={status?.enabled ?? false}
-              onChange={(next) => void toggle(next)}
-              disabled={busy || !status}
-              className="mt-0.5"
-            />
-            <span className="min-w-0">
-              <span className="flex items-center gap-2 text-[13px] text-[var(--cf-text)]">
-                {t("remote.enable")}
-                {/* The shared dot-and-a-word, not a pill of its own: "running" has to mean the
-                    same thing here as it does in the API and collaboration panels. */}
-                <Status tone={live ? "success" : "muted"}>
-                  {live ? t("remote.running") : t("remote.stopped")}
-                </Status>
-              </span>
-              <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                {t("remote.enableHint")}
-              </span>
-            </span>
-          </label>
-
-          {/* The step that has no equivalent on macOS or Linux, and the one that makes this feature
-              look broken when it is skipped: binding `0.0.0.0` raises a Defender Firewall prompt,
-              and a dismissed prompt leaves a server that is genuinely listening and genuinely
-              unreachable. Said before the address rather than after, because by the time somebody is
-              typing a URL into a phone they have already formed the wrong theory about why. */}
-          {platform === "windows" && (
-            <div className="mt-2.5">
-              <Note>{t("remote.firewallWindows")}</Note>
-            </div>
-          )}
-
-          <div className="mt-2.5 flex items-center gap-2">
-            <span className="text-[13px] text-[var(--cf-text)]">{t("remote.port")}</span>
-            <input
-              value={portDraft}
-              onChange={(e) => setPortDraft(e.target.value.replace(/\D/g, "").slice(0, 5))}
-              onBlur={() => void commitPort()}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") e.currentTarget.blur();
-              }}
-              disabled={busy}
-              inputMode="numeric"
-              className="w-20 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[13px] tabular-nums outline-none focus:border-[var(--cf-accent)]"
-            />
-            <span className="min-w-0 flex-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-              {t("remote.portHint")}
-            </span>
-          </div>
-
-          {/* The one disagreement worth surfacing: the setting says on, nothing is bound. */}
-          {status?.enabled && !live && (
-            <div className="mt-2">
-              <Note tone="warning">{t("remote.enabledButNotRunning")}</Note>
-            </div>
-          )}
-        </Group>
-
-        {live && (
-          <Group title={t("remote.groupPairing")}>
-            <p className="mb-2 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
-              {t("remote.openOnPhone")}
-            </p>
-            {status?.url ? (
-              <div className="flex items-start gap-3">
-                <AddressQr url={status.url} />
-                <div className="min-w-0 flex-1">
-                  {/* `inline-block`, so the box is the width of the address rather than of the
-                      pane: a 25-character LAN URL stretched across a full-width panel reads as an
-                      empty field somebody forgot to fill in. */}
-                  <code className="inline-block max-w-full break-all rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] text-[var(--cf-text)]">
-                    {status.url}
-                  </code>
-                  <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                    {t("remote.scanHint")}
-                  </p>
-
-                  {code ? (
-                    <div className="mt-3">
-                      <p className="text-[11px] text-[var(--cf-text-muted)]">{t("remote.pairCodeLabel")}</p>
-                      <p className="mt-0.5 font-mono text-[26px] font-semibold tracking-[0.18em] text-[var(--cf-accent)]">
-                        {code}
-                      </p>
-                      <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                        {t("remote.pairCodeHint")}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => void cancelPairing()}
-                        disabled={busy}
-                        className="mt-2 text-[11.5px] text-[var(--cf-text-muted)] hover:underline"
-                      >
-                        {t("remote.pairCancel")}
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="mt-3">
-                      <Actions>
-                        <button
-                          type="button"
-                          onClick={() => void startPairing()}
-                          disabled={busy}
-                          className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] disabled:opacity-40"
-                        >
-                          <Smartphone size={13} />
-                          {active.length ? t("remote.pairAgain") : t("remote.pair")}
-                        </button>
-                      </Actions>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
-                {t("remote.noAddress")}
-              </p>
-            )}
-          </Group>
-        )}
-
-        <Group title={t("remote.devices")}>
-          {devices.length === 0 ? (
-            <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
-              {t("remote.devicesEmpty")}
-            </p>
-          ) : (
+    // A rail of panes now, like Editor and the AI section: the five groups the one long panel was
+    // built from, each on its own. Server first because nothing else here works without it.
+    <RailSection section="remote" title={t("remote.title")} hint={t("remote.subtitle")} fallback="server">
+      {(tab) => (
+        <>
+          {tab === "server" && (
             <>
-              {/* Ruled rows rather than a stack of individually bordered ones — the same list shape
-                  the backup section's contents use, and the reason a list of three devices no
-                  longer looks like three separate settings. */}
-              <ul className="divide-y divide-[var(--cf-border)] border-y border-[var(--cf-border)]">
-                {devices.map((device) => (
-                  <li key={device.id} className="flex items-center gap-2 py-2">
-                    <Smartphone
-                      size={14}
-                      className={device.revoked ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-accent)]"}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span
-                        className={`block truncate text-[13px] ${
-                          device.revoked
-                            ? "text-[var(--cf-text-muted)] line-through"
-                            : "text-[var(--cf-text)]"
-                        }`}
-                      >
-                        {device.name}
-                      </span>
-                      {/* "Conectado ahora" outranks any timestamp, and it is the line this panel
-                          was missing: a phone with an open socket writes `last_seen_at` once, at
-                          the moment it connected, so this row used to say "visto a las 13:04" about
-                          a device that was driving the machine as you read it. The shared dot, so
-                          "connected" looks the same here as running does above. */}
-                      {device.connected ? (
-                        <Status tone="success">{t("remote.connected")}</Status>
-                      ) : (
-                        <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
-                          {device.revoked
-                            ? t("remote.revoked")
-                            : device.last_seen_at
-                              ? t("remote.lastSeen", { when: whenLabel(device.last_seen_at) })
-                              : t("remote.neverSeen")}
-                        </span>
-                      )}
-                    </span>
-                    {/* A live device gets a cut-off button; a revoked one gets a remove-from-list
-                        button. The same slot, because a row only ever has one next step. */}
-                    {device.revoked ? (
-                      <button
-                        type="button"
-                        title={t("remote.forget")}
-                        onClick={() =>
-                          void guard(async () => {
-                            setDevices(await remotectlForgetDevice(device.id));
-                          })
-                        }
-                        disabled={busy}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                      >
-                        <X size={13} />
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        title={t("remote.revoke")}
-                        onClick={() =>
-                          void guard(async () => {
-                            setDevices(await remotectlRevokeDevice(device.id));
-                          })
-                        }
-                        disabled={busy}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-
-              {/* Under the list rather than beside the heading, which a `Group` has no slot for —
-                  and it is the better place anyway: both act on everything above them. Clearing
-                  revoked rows and revoking live ones stay different verbs and different hovers,
-                  because one tidies a list and the other cuts somebody off. */}
-              <div className="mt-2">
-                <Actions>
-                  {devices.some((device) => device.revoked) && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void guard(async () => {
-                          setDevices(await remotectlForgetAllRevoked());
-                        })
-                      }
-                      disabled={busy}
-                      className="text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] disabled:opacity-40"
-                    >
-                      {t("remote.forgetAllRevoked")}
-                    </button>
-                  )}
-                  {active.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void guard(async () => {
-                          setDevices(await remotectlRevokeAll());
-                        })
-                      }
-                      disabled={busy}
-                      className="text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-40"
-                    >
-                      {t("remote.revokeAll")}
-                    </button>
-                  )}
-                </Actions>
+              {/* Where the port is opened, so where the warning about opening one belongs. `warning`
+                  rather than the section's own amber paragraph — this is the tone the app keeps for
+                  "this can cost you something", and opening a port on the machine qualifies. */}
+              <div className="mb-3">
+                <Note tone="warning">{t("remote.serverNote")}</Note>
               </div>
+              <label className="flex cursor-pointer items-start gap-2.5">
+                <Checkbox
+                  checked={status?.enabled ?? false}
+                  onChange={(next) => void toggle(next)}
+                  disabled={busy || !status}
+                  className="mt-0.5"
+                />
+                <span className="min-w-0">
+                  <span className="flex items-center gap-2 text-[13px] text-[var(--cf-text)]">
+                    {t("remote.enable")}
+                    {/* The shared dot-and-a-word, not a pill of its own: "running" has to mean the
+                        same thing here as it does in the API and collaboration panels. */}
+                    <Status tone={live ? "success" : "muted"}>
+                      {live ? t("remote.running") : t("remote.stopped")}
+                    </Status>
+                  </span>
+                  <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("remote.enableHint")}
+                  </span>
+                </span>
+              </label>
+
+              {/* The step that has no equivalent on macOS or Linux, and the one that makes this feature
+                  look broken when it is skipped: binding `0.0.0.0` raises a Defender Firewall prompt,
+                  and a dismissed prompt leaves a server that is genuinely listening and genuinely
+                  unreachable. Said before the address rather than after, because by the time somebody is
+                  typing a URL into a phone they have already formed the wrong theory about why. */}
+              {platform === "windows" && (
+                <div className="mt-2.5">
+                  <Note>{t("remote.firewallWindows")}</Note>
+                </div>
+              )}
+
+              <div className="mt-2.5 flex items-center gap-2">
+                <span className="text-[13px] text-[var(--cf-text)]">{t("remote.port")}</span>
+                <input
+                  value={portDraft}
+                  onChange={(e) => setPortDraft(e.target.value.replace(/\D/g, "").slice(0, 5))}
+                  onBlur={() => void commitPort()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") e.currentTarget.blur();
+                  }}
+                  disabled={busy}
+                  inputMode="numeric"
+                  className="w-20 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[13px] tabular-nums outline-none focus:border-[var(--cf-accent)]"
+                />
+                <span className="min-w-0 flex-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                  {t("remote.portHint")}
+                </span>
+              </div>
+
+              {/* The one disagreement worth surfacing: the setting says on, nothing is bound. */}
+              {status?.enabled && !live && (
+                <div className="mt-2">
+                  <Note tone="warning">{t("remote.enabledButNotRunning")}</Note>
+                </div>
+              )}
             </>
           )}
-        </Group>
 
-        {/* Its own group rather than a row inside the server's, because it is its own decision and
-            the layout should say so. Shown even when the server is off so it can be set ahead of
-            time, and so its state is never a surprise discovered later. The amber border this used
-            to grow when switched on is gone with the card it was drawn on; the warning below says
-            the same thing in the tone the rest of the app says warnings in. */}
-        <Group title={t("remote.groupTerminal")}>
-          <label className="flex cursor-pointer items-start gap-2.5">
-            <Checkbox
-              checked={status?.allow_terminal ?? false}
-              onChange={(next) =>
-                void guard(async () => {
-                  setStatus(await remotectlSetAllowTerminal(next));
-                })
-              }
-              disabled={busy || !status}
-              className="mt-0.5"
-            />
-            <span className="min-w-0">
-              <span className="flex items-center gap-1.5 text-[13px] text-[var(--cf-text)]">
-                <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-                {t("remote.terminal")}
-              </span>
-              <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                {t("remote.terminalHint")}
-              </span>
-            </span>
-          </label>
-          {status?.allow_terminal && (
-            <div className="mt-2">
-              <Note tone="warning">{t("remote.terminalOnWarning")}</Note>
-            </div>
-          )}
+          {/* Pairing needs a server that is listening. With none, the pane says where to switch it on
+              rather than standing empty — the group used to vanish, which a pane cannot. */}
+          {tab === "pairing" &&
+            (live ? (
+              <>
+                <p className="mb-2 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                  {t("remote.openOnPhone")}
+                </p>
+                {status?.url ? (
+                  <div className="flex items-start gap-3">
+                    <AddressQr url={status.url} />
+                    <div className="min-w-0 flex-1">
+                      {/* `inline-block`, so the box is the width of the address rather than of the
+                          pane: a 25-character LAN URL stretched across a full-width panel reads as an
+                          empty field somebody forgot to fill in. */}
+                      <code className="inline-block max-w-full break-all rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] text-[var(--cf-text)]">
+                        {status.url}
+                      </code>
+                      <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                        {t("remote.scanHint")}
+                      </p>
 
-          {/* What is actually running, under the switch that permits it.
+                      {code ? (
+                        <div className="mt-3">
+                          <p className="text-[11px] text-[var(--cf-text-muted)]">{t("remote.pairCodeLabel")}</p>
+                          <p className="mt-0.5 font-mono text-[26px] font-semibold tracking-[0.18em] text-[var(--cf-accent)]">
+                            {code}
+                          </p>
+                          <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                            {t("remote.pairCodeHint")}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => void cancelPairing()}
+                            disabled={busy}
+                            className="mt-2 text-[11.5px] text-[var(--cf-text-muted)] hover:underline"
+                          >
+                            {t("remote.pairCancel")}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="mt-3">
+                          <Actions>
+                            <button
+                              type="button"
+                              onClick={() => void startPairing()}
+                              disabled={busy}
+                              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] disabled:opacity-40"
+                            >
+                              <Smartphone size={13} />
+                              {active.length ? t("remote.pairAgain") : t("remote.pair")}
+                            </button>
+                          </Actions>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("remote.noAddress")}
+                  </p>
+                )}
+                </>
+            ) : (
+              <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("remote.pairingNeedsServer")}</p>
+            ))}
 
-              Shown whenever there is something to show, even with the switch since turned off — a
-              session that outlived the grant is exactly the one worth seeing, and hiding it behind
-              the flag would mean the only case with no other trace anywhere is the one case this
-              list refuses to draw. (It cannot normally happen: withdrawing the grant reaps them.
-              A stale poll can still catch one mid-flight.) */}
-          {(status?.allow_terminal || terminals.length > 0) && (
-            <div className="mt-3">
-              <p className="text-[11.5px] font-medium text-[var(--cf-text)]">
-                {t("remote.liveTerminals")}
-              </p>
-              <p className="mt-0.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                {t("remote.liveTerminalsHint")}
-              </p>
-              {terminals.length === 0 ? (
-                <p className="mt-1.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
-                  {t("remote.liveTerminalsNone")}
+          {tab === "devices" && (
+            <>
+              {devices.length === 0 ? (
+                <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                  {t("remote.devicesEmpty")}
                 </p>
               ) : (
-                <ul className="mt-1.5 divide-y divide-[var(--cf-border)] border-y border-[var(--cf-border)]">
-                  {terminals.map((shell) => (
-                    <li key={shell.id} className="flex items-center gap-2 py-2">
-                      <TerminalSquare size={14} className="shrink-0 text-[var(--cf-accent)]" />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13px] text-[var(--cf-text)]">
-                          {ownerLabel(shell.owner)}
+                <>
+                  {/* Ruled rows rather than a stack of individually bordered ones — the same list shape
+                      the backup section's contents use, and the reason a list of three devices no
+                      longer looks like three separate settings. */}
+                  <ul className="divide-y divide-[var(--cf-border)] border-y border-[var(--cf-border)]">
+                    {devices.map((device) => (
+                      <li key={device.id} className="flex items-center gap-2 py-2">
+                        <Smartphone
+                          size={14}
+                          className={device.revoked ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-accent)]"}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span
+                            className={`block truncate text-[13px] ${
+                              device.revoked
+                                ? "text-[var(--cf-text-muted)] line-through"
+                                : "text-[var(--cf-text)]"
+                            }`}
+                          >
+                            {device.name}
+                          </span>
+                          {/* "Conectado ahora" outranks any timestamp, and it is the line this panel
+                              was missing: a phone with an open socket writes `last_seen_at` once, at
+                              the moment it connected, so this row used to say "visto a las 13:04" about
+                              a device that was driving the machine as you read it. The shared dot, so
+                              "connected" looks the same here as running does above. */}
+                          {device.connected ? (
+                            <Status tone="success">{t("remote.connected")}</Status>
+                          ) : (
+                            <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
+                              {device.revoked
+                                ? t("remote.revoked")
+                                : device.last_seen_at
+                                  ? t("remote.lastSeen", { when: whenLabel(device.last_seen_at) })
+                                  : t("remote.neverSeen")}
+                            </span>
+                          )}
                         </span>
-                        {/* The shell and where it is. Joined rather than templated because a
-                            session opened with no directory has none to name, and " · " with
-                            nothing after it reads as a value that failed to load. */}
-                        <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
-                          {[shell.profile, shell.cwd].filter(Boolean).join(" · ")}
-                        </span>
-                      </span>
-                      <button
-                        type="button"
-                        title={t("remote.killTerminal")}
-                        onClick={() =>
-                          void guard(async () => {
-                            await closeTerminal(shell.id);
-                            await reload();
-                          })
-                        }
-                        disabled={busy}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-        </Group>
+                        {/* A live device gets a cut-off button; a revoked one gets a remove-from-list
+                            button. The same slot, because a row only ever has one next step. */}
+                        {device.revoked ? (
+                          <button
+                            type="button"
+                            title={t("remote.forget")}
+                            onClick={() =>
+                              void guard(async () => {
+                                setDevices(await remotectlForgetDevice(device.id));
+                              })
+                            }
+                            disabled={busy}
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                          >
+                            <X size={13} />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            title={t("remote.revoke")}
+                            onClick={() =>
+                              void guard(async () => {
+                                setDevices(await remotectlRevokeDevice(device.id));
+                              })
+                            }
+                            disabled={busy}
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
 
-        {/* What this actually grants, spelled out rather than left to the reader's imagination. The
-            user is about to open a port on their machine, and "what can somebody with this token
-            do" is the only question that matters — answering it vaguely is how a feature like this
-            gets turned on by someone who would not have, had they known. */}
-        <Group title={t("remote.groupAccess")}>
-          <p className="mb-2 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
-            {t("remote.safety")}
-          </p>
-          <p className="flex gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-            <ShieldCheck size={13} className="mt-px shrink-0 text-[var(--cf-success)]" />
-            <span>{t("remote.safetyAllowed")}</span>
-          </p>
-          <p className="mt-1.5 flex gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-            <ShieldX size={13} className="mt-px shrink-0 text-[var(--cf-danger)]" />
-            <span>{t("remote.safetyDenied")}</span>
-          </p>
-        </Group>
-      </Panel>
-    </section>
+                  {/* Under the list rather than beside the heading, which a `Group` has no slot for —
+                      and it is the better place anyway: both act on everything above them. Clearing
+                      revoked rows and revoking live ones stay different verbs and different hovers,
+                      because one tidies a list and the other cuts somebody off. */}
+                  <div className="mt-2">
+                    <Actions>
+                      {devices.some((device) => device.revoked) && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void guard(async () => {
+                              setDevices(await remotectlForgetAllRevoked());
+                            })
+                          }
+                          disabled={busy}
+                          className="text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] disabled:opacity-40"
+                        >
+                          {t("remote.forgetAllRevoked")}
+                        </button>
+                      )}
+                      {active.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void guard(async () => {
+                              setDevices(await remotectlRevokeAll());
+                            })
+                          }
+                          disabled={busy}
+                          className="text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-40"
+                        >
+                          {t("remote.revokeAll")}
+                        </button>
+                      )}
+                    </Actions>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {/* Shown even when the server is off, so it can be set ahead of time and its state is never a
+              surprise discovered later. */}
+          {tab === "terminal" && (
+            <>
+              <label className="flex cursor-pointer items-start gap-2.5">
+                <Checkbox
+                  checked={status?.allow_terminal ?? false}
+                  onChange={(next) =>
+                    void guard(async () => {
+                      setStatus(await remotectlSetAllowTerminal(next));
+                    })
+                  }
+                  disabled={busy || !status}
+                  className="mt-0.5"
+                />
+                <span className="min-w-0">
+                  <span className="flex items-center gap-1.5 text-[13px] text-[var(--cf-text)]">
+                    <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+                    {t("remote.terminal")}
+                  </span>
+                  <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("remote.terminalHint")}
+                  </span>
+                </span>
+              </label>
+              {status?.allow_terminal && (
+                <div className="mt-2">
+                  <Note tone="warning">{t("remote.terminalOnWarning")}</Note>
+                </div>
+              )}
+
+              {/* What is actually running, under the switch that permits it.
+
+                  Shown whenever there is something to show, even with the switch since turned off — a
+                  session that outlived the grant is exactly the one worth seeing, and hiding it behind
+                  the flag would mean the only case with no other trace anywhere is the one case this
+                  list refuses to draw. (It cannot normally happen: withdrawing the grant reaps them.
+                  A stale poll can still catch one mid-flight.) */}
+              {(status?.allow_terminal || terminals.length > 0) && (
+                <div className="mt-3">
+                  <p className="text-[11.5px] font-medium text-[var(--cf-text)]">
+                    {t("remote.liveTerminals")}
+                  </p>
+                  <p className="mt-0.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("remote.liveTerminalsHint")}
+                  </p>
+                  {terminals.length === 0 ? (
+                    <p className="mt-1.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                      {t("remote.liveTerminalsNone")}
+                    </p>
+                  ) : (
+                    <ul className="mt-1.5 divide-y divide-[var(--cf-border)] border-y border-[var(--cf-border)]">
+                      {terminals.map((shell) => (
+                        <li key={shell.id} className="flex items-center gap-2 py-2">
+                          <TerminalSquare size={14} className="shrink-0 text-[var(--cf-accent)]" />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[13px] text-[var(--cf-text)]">
+                              {ownerLabel(shell.owner)}
+                            </span>
+                            {/* The shell and where it is. Joined rather than templated because a
+                                session opened with no directory has none to name, and " · " with
+                                nothing after it reads as a value that failed to load. */}
+                            <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
+                              {[shell.profile, shell.cwd].filter(Boolean).join(" · ")}
+                            </span>
+                          </span>
+                          <button
+                            type="button"
+                            title={t("remote.killTerminal")}
+                            onClick={() =>
+                              void guard(async () => {
+                                await closeTerminal(shell.id);
+                                await reload();
+                              })
+                            }
+                            disabled={busy}
+                            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* What this actually grants, spelled out rather than left to the reader's imagination. The
+              user is about to open a port on their machine, and "what can somebody with this token
+              do" is the only question that matters — answering it vaguely is how a feature like this
+              gets turned on by someone who would not have, had they known. */}
+          {tab === "access" && (
+            <>
+              <p className="mb-2 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                {t("remote.safety")}
+              </p>
+              <p className="flex gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                <ShieldCheck size={13} className="mt-px shrink-0 text-[var(--cf-success)]" />
+                <span>{t("remote.safetyAllowed")}</span>
+              </p>
+              <p className="mt-1.5 flex gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                <ShieldX size={13} className="mt-px shrink-0 text-[var(--cf-danger)]" />
+                <span>{t("remote.safetyDenied")}</span>
+              </p>
+            </>
+          )}
+        </>
+      )}
+    </RailSection>
   );
 }

@@ -38,8 +38,11 @@ import type { BranchInfo } from "../../types/domain";
  * preview has to keep up with a caret in a text box. The backend stays the authority: what a row
  * reports is cross-checked against the `is_locked` / `locked_by_rule` flags `list_branches` already
  * returns for the open repository.
+ *
+ * `bare` is for a pane of its own (Git → Locked branches): the rail names it and the pane's hint
+ * says what it is, so the heading, the description and the top border go.
  */
-export function LockedBranchRules() {
+export function LockedBranchRules({ bare = false }: { bare?: boolean }) {
   const t = useT();
   const rules = usePreferencesStore((s) => s.lockedBranchRules);
   const setRules = usePreferencesStore((s) => s.setLockedBranchRules);
@@ -144,7 +147,7 @@ export function LockedBranchRules() {
   // dark, and the way out is to ask again.
   if (rules === null) {
     return (
-      <Frame>
+      <Frame bare={bare}>
         <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
           <div className="flex items-start justify-between gap-3 bg-black/[0.02] px-3 py-2 dark:bg-white/[0.03]">
             <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
@@ -165,7 +168,7 @@ export function LockedBranchRules() {
   }
 
   return (
-    <Frame>
+    <Frame bare={bare}>
       <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
         {/* A literal tint rather than --cf-surface-raised: that var equals --cf-surface in the light
             theme, so the band would only be visible in dark mode. */}
@@ -315,8 +318,9 @@ export function LockedBranchRules() {
 
 /** The heading and description, shared by the loaded and the unknown state so the section reads the
  *  same either way — the only difference being what the card can honestly show. */
-function Frame({ children }: { children: ReactNode }) {
+function Frame({ bare, children }: { bare: boolean; children: ReactNode }) {
   const t = useT();
+  if (bare) return <div>{children}</div>;
   return (
     <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
       <h4 className="text-[13px] font-medium">{t("settings.lockedBranchesTitle")}</h4>

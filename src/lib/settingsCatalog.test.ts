@@ -72,7 +72,8 @@ describe("the settings catalog", () => {
 
   it("returns the panes of a section by id", () => {
     expect(tabsFor("claude").map((tab) => tab.id)).toContain("tasks");
-    expect(tabsFor("general")).toEqual([]);
+    expect(tabsFor("general").map((tab) => tab.id)).toContain("language");
+    expect(tabsFor("projects")).toEqual([]);
   });
 });
 

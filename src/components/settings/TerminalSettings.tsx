@@ -5,7 +5,7 @@ import type { ShellProfile } from "../../types/domain";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
-import { SettingsHeader } from "../api/settingsChrome";
+import { RailSection } from "./settingsNav";
 
 const PROFILES_KEY = "terminal_profiles";
 const DEFAULT_PROFILE_KEY = "terminal_default_profile";
@@ -90,98 +90,103 @@ export function TerminalSettings() {
   const incomplete = custom.some((p) => !p.command.trim());
 
   return (
-    <section>
-      <SettingsHeader title={t("settings.terminalTitle")} hint={t("settings.terminalHint")} />
+    <RailSection section="terminal" title={t("settings.terminalTitle")} hint={t("settings.terminalHint")} fallback="default">
+      {(tab) => (
+        <>
+          {tab === "default" && (
+            <Select
+              value={defaultId}
+              onChange={chooseDefault}
+              ariaLabel={t("settings.terminalDefault")}
+              placeholder={t("settings.terminalDefaultAuto")}
+              options={[
+                { value: "", label: t("settings.terminalDefaultAuto") },
+                ...[...builtins, ...custom].map((p) => ({
+                  value: p.id,
+                  label: p.name,
+                  disabled: !p.command.trim(),
+                })),
+              ]}
+            />
+          )}
 
-      <p className="mb-1.5 text-[13px] font-medium">{t("settings.terminalDefault")}</p>
-      <Select
-        value={defaultId}
-        onChange={chooseDefault}
-        ariaLabel={t("settings.terminalDefault")}
-        placeholder={t("settings.terminalDefaultAuto")}
-        options={[
-          { value: "", label: t("settings.terminalDefaultAuto") },
-          ...[...builtins, ...custom].map((p) => ({
-            value: p.id,
-            label: p.name,
-            disabled: !p.command.trim(),
-          })),
-        ]}
-      />
-      <p className="mb-5 mt-1 text-[11px] text-[var(--cf-text-muted)]">{t("settings.terminalDefaultHint")}</p>
-
-      <p className="mb-1.5 text-[13px] font-medium">{t("settings.terminalDetected")}</p>
-      <div className="mb-1 space-y-1">
-        {builtins.map((profile) => (
-          <div
-            key={profile.id}
-            className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-2 text-[13px]"
-          >
-            <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-            <span className="shrink-0 font-medium">{profile.name}</span>
-            <span className="truncate text-[11px] text-[var(--cf-text-muted)]" title={profile.command}>
-              {[profile.command, ...profile.args].join(" ")}
-            </span>
-          </div>
-        ))}
-      </div>
-      <p className="mb-5 text-[11px] text-[var(--cf-text-muted)]">{t("settings.terminalDetectedHint")}</p>
-
-      <div className="mb-1.5 flex items-center justify-between">
-        <p className="text-[13px] font-medium">{t("settings.terminalCustom")}</p>
-        <button
-          onClick={addProfile}
-          className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline"
-        >
-          <Plus size={13} /> {t("settings.terminalAddProfile")}
-        </button>
-      </div>
-
-      {custom.length === 0 ? (
-        <p className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.terminalCustomEmpty")}</p>
-      ) : (
-        <div className="space-y-2">
-          {custom.map((profile) => (
-            <div key={profile.id} className="rounded-lg border border-[var(--cf-border)] p-2.5">
-              <div className="mb-1.5 flex items-center gap-2">
-                <input
-                  value={profile.name}
-                  onChange={(e) => updateProfile(profile.id, { name: e.target.value })}
-                  placeholder={t("settings.terminalProfileName")}
-                  className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[13px] outline-none focus:border-[var(--cf-accent)]"
-                />
-                <button
-                  onClick={() => void removeProfile(profile)}
-                  title={t("common.delete")}
-                  className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+          {tab === "detected" && (
+            <div className="space-y-1">
+              {builtins.map((profile) => (
+                <div
+                  key={profile.id}
+                  className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-2 text-[13px]"
                 >
-                  <Trash2 size={13} />
+                  <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  <span className="shrink-0 font-medium">{profile.name}</span>
+                  <span className="truncate text-[11px] text-[var(--cf-text-muted)]" title={profile.command}>
+                    {[profile.command, ...profile.args].join(" ")}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {tab === "custom" && (
+            <>
+              <div className="mb-1.5 flex items-center justify-end">
+                <button
+                  onClick={addProfile}
+                  className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline"
+                >
+                  <Plus size={13} /> {t("settings.terminalAddProfile")}
                 </button>
               </div>
-              <div className="flex gap-2">
-                <input
-                  value={profile.command}
-                  onChange={(e) => updateProfile(profile.id, { command: e.target.value })}
-                  placeholder={t("settings.terminalProfileCommand")}
-                  className="flex-[2] rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)]"
-                />
-                <input
-                  value={argsDraft[profile.id] ?? profile.args.join(" ")}
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    setArgsDraft((prev) => ({ ...prev, [profile.id]: raw }));
-                    updateProfile(profile.id, { args: parseArgs(raw) });
-                  }}
-                  placeholder={t("settings.terminalProfileArgs")}
-                  className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)]"
-                />
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
 
-      {incomplete && <p className="mt-2 text-[11px] text-[var(--cf-warning)]">{t("settings.terminalMissingCommand")}</p>}
-    </section>
+              {custom.length === 0 ? (
+                <p className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.terminalCustomEmpty")}</p>
+              ) : (
+                <div className="space-y-2">
+                  {custom.map((profile) => (
+                    <div key={profile.id} className="rounded-lg border border-[var(--cf-border)] p-2.5">
+                      <div className="mb-1.5 flex items-center gap-2">
+                        <input
+                          value={profile.name}
+                          onChange={(e) => updateProfile(profile.id, { name: e.target.value })}
+                          placeholder={t("settings.terminalProfileName")}
+                          className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+                        />
+                        <button
+                          onClick={() => void removeProfile(profile)}
+                          title={t("common.delete")}
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                      <div className="flex gap-2">
+                        <input
+                          value={profile.command}
+                          onChange={(e) => updateProfile(profile.id, { command: e.target.value })}
+                          placeholder={t("settings.terminalProfileCommand")}
+                          className="flex-[2] rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                        />
+                        <input
+                          value={argsDraft[profile.id] ?? profile.args.join(" ")}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            setArgsDraft((prev) => ({ ...prev, [profile.id]: raw }));
+                            updateProfile(profile.id, { args: parseArgs(raw) });
+                          }}
+                          placeholder={t("settings.terminalProfileArgs")}
+                          className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {incomplete && <p className="mt-2 text-[11px] text-[var(--cf-warning)]">{t("settings.terminalMissingCommand")}</p>}
+            </>
+          )}
+        </>
+      )}
+    </RailSection>
   );
 }

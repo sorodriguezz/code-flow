@@ -17,7 +17,7 @@ import {
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { jobPrUrl } from "../../lib/activityEntries";
 import { workspaceActivityKey } from "../../lib/prTarget";
-import { openAnalysis, openNewChat } from "../../lib/aiPanelNav";
+import { openAnalysis, openNewChat, useChangesToAnalyze } from "../../lib/aiPanelNav";
 import { useRepoQueueStore } from "../../lib/repoQueue";
 import { useDismiss, useElementWidth } from "./docParts";
 import { EMPTY_JOBS, useJobsStore } from "../../state/jobsStore";
@@ -347,6 +347,7 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
   const project = useWorkspaceStore((s) => s.activeProject());
   const inWorkspace = useWorkspaceStore((s) => (project ? s.workspaceOfProject(project.id) === workspaceId : false));
   const projectId = project && inWorkspace ? project.id : null;
+  const changes = useChangesToAnalyze(projectId);
   return (
     <div ref={ref} className="relative shrink-0">
       <button
@@ -377,8 +378,9 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
           <MenuItem
             icon={ShieldCheck}
             label={t("assistant.analyze")}
-            detail={project?.name}
-            disabled={!projectId}
+            // In a menu the reason is read, not hovered for: it takes the repository's line.
+            detail={changes === 0 ? t("analyze.nothingToAnalyze") : project?.name}
+            disabled={!projectId || changes === 0}
             onClick={() => {
               setOpen(false);
               if (projectId) openAnalysis(projectId, { run: true });

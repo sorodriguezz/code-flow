@@ -59,7 +59,8 @@ export function AiAccountsSettings() {
   };
 
   const closeLogin = () => {
-    if (login && login.provider !== "gemini") void check(login.provider, login.accountId);
+    // Gemini too: switching its one login is exactly when the address on its row changes.
+    if (login) void check(login.provider, login.accountId);
     setLogin(null);
   };
 
@@ -295,7 +296,9 @@ function AccountRow({
       <Tooltip label={label} description={account ? undefined : t("accounts.systemHint")}>
         <span className="w-[110px] shrink-0 truncate text-[12px] text-[var(--cf-text)]">{label}</span>
       </Tooltip>
-      <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]">
+      {/* The whole line on hover: an address and a plan, or opencode's list of logins with theirs,
+          outgrow the row's width. */}
+      <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]" title={statusLine(status, checking, t)}>
         {statusLine(status, checking, t)}
       </span>
       <Tooltip label={t("accounts.check")}>
@@ -378,15 +381,28 @@ function statusLine(status: AccountStatus | undefined, checking: boolean, t: Ret
 }
 
 /** Gemini keeps one login in a keychain item with a fixed name — no second account can exist
- * beside it, so the most this can do is make switching it quick. */
+ * beside it, so the most this can do is say who it is signed in as and make switching it quick. The
+ * address comes from the file agy writes beside that login (see `ai_accounts::probe`); agy publishes
+ * no plan anywhere this can read, so none is shown. */
 function GeminiRow({ onSwitch }: { onSwitch: () => void }) {
   const t = useT();
+  const check = useAiAccountsStore((s) => s.check);
+  const status = useAiAccountsStore((s) => s.statuses[accountKey("gemini", null)]);
+  const checking = useAiAccountsStore((s) => Boolean(s.checking[accountKey("gemini", null)]));
+  useEffect(() => {
+    void check("gemini", null);
+  }, [check]);
+  const who = statusLine(status, checking, t);
   return (
     <div className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] px-2.5 py-2">
       <ProviderGlyph providerId="gemini" size={14} />
       <span className="text-[12.5px] font-medium text-[var(--cf-text)]">{providerDisplayLabel("gemini", t)}</span>
+      <StatusDot status={status} checking={checking} />
+      <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]" title={who}>
+        {who}
+      </span>
       <Tooltip label={t("accounts.geminiSingle")} description={t("accounts.geminiSingleHint")}>
-        <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text-muted)]">{t("accounts.geminiSingle")}</span>
+        <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{t("accounts.geminiSingle")}</span>
       </Tooltip>
       <button
         type="button"

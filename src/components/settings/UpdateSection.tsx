@@ -26,8 +26,11 @@ const openExternally = (url: string) => () => void openUrl(url).catch(() => {});
  * All of it — status, the pending release, download progress — lives in the update store, which
  * the hourly background check writes to as well. So this panel already knows about an update
  * found minutes ago instead of making the user press "Check for updates" to be told what the
- * title bar has been showing all along. */
-export function UpdateSection() {
+ * title bar has been showing all along.
+ *
+ * `bare` is for a block that already has a heading (General → Language and updates, under `PaneBlock`):
+ * this one's heading and top border go, the explanation stays. */
+export function UpdateSection({ bare = false }: { bare?: boolean }) {
   const t = useT();
   const locale = useLanguageStore((s) => (s.language === "es" ? "es-ES" : "en-US"));
   const version = useUpdateStore((s) => s.currentVersion);
@@ -48,8 +51,8 @@ export function UpdateSection() {
     "flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-[13px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]";
 
   return (
-    <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.updatesTitle")}</h3>
+    <div className={bare ? "" : "mt-6 border-t border-[var(--cf-border)] pt-4"}>
+      {!bare && <h3 className="mb-1 text-sm font-semibold">{t("settings.updatesTitle")}</h3>}
       <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">
         {t("settings.updatesHint")} {t("update.autoHint")}
       </p>

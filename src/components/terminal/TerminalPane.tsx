@@ -90,10 +90,21 @@ const COPIED_BADGE_MS = 1200;
  * The two actions themselves live on the component, because the right-click menu and copy-on-select
  * are the same two actions reached another way — one implementation, so a copy from the keyboard
  * flashes the same badge as a copy from the mouse.
+ *
+ * **Plain `Ctrl+V` pastes too, on Windows only** — the chord Windows Terminal, conhost and VS Code
+ * all paste on, so it is the one a Windows user presses; unhandled, xterm sent it to the shell as
+ * `^V`, which read as "paste does nothing" (reported from the CLI sign-in dialog, where the code has
+ * to be pasted). Linux keeps `Ctrl+V` for the shell, as its terminals do.
  */
 function clipboardKeys(term: Terminal, actions: { copy: () => boolean; paste: () => void }) {
+  const windows = currentPlatform() === "windows";
   term.attachCustomKeyEventHandler((event) => {
     if (event.type !== "keydown" || event.altKey) return true;
+    if (windows && event.ctrlKey && !event.shiftKey && !event.metaKey && event.key.toLowerCase() === "v") {
+      actions.paste();
+      event.preventDefault();
+      return false;
+    }
     const combo = isMac() ? event.metaKey && !event.ctrlKey : event.ctrlKey && event.shiftKey;
     if (!combo) return true;
 

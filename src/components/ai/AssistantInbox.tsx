@@ -36,6 +36,7 @@ import {
   openNewChat,
   openTrackedPr,
   tabKeyForJob,
+  useChangesToAnalyze,
 } from "../../lib/aiPanelNav";
 import { usePrStore } from "../../state/prStore";
 import { useRepoQueueStore } from "../../lib/repoQueue";
@@ -79,6 +80,7 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const projects = useWorkspaceStore((s) => s.projectsByWorkspace[workspaceId] ?? EMPTY_PROJECTS);
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
+  const changes = useChangesToAnalyze(activeProject?.id ?? null);
   const [scope, setScope] = useState<Scope>("repo");
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
@@ -200,7 +202,8 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
           <InboxAction
             icon={ShieldCheck}
             label={t("assistant.analyze")}
-            disabled={!activeProject}
+            disabled={!activeProject || changes === 0}
+            title={changes === 0 ? t("analyze.nothingToAnalyze") : undefined}
             onClick={() => activeProject && openAnalysis(activeProject.id, { run: true })}
           />
         </div>
@@ -659,17 +662,21 @@ function InboxAction({
   icon: Icon,
   label,
   disabled,
+  title,
   onClick,
 }: {
   icon: typeof Plus;
   label: string;
   disabled?: boolean;
+  /** Why it is off, when it is. */
+  title?: string;
   onClick: () => void;
 }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
+      title={title}
       className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
     >
       <Icon size={12} />

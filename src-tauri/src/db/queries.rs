@@ -3147,6 +3147,7 @@ pub fn add_activity_log(
         provider: meta.provider.map(str::to_string),
         model: meta.model.map(str::to_string),
         engine_version: meta.engine_version.map(str::to_string),
+        account_id: meta.account_id.map(str::to_string),
     };
     conn.execute(
         "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id)
@@ -3165,7 +3166,7 @@ pub fn add_activity_log(
             entry.provider,
             entry.model,
             entry.engine_version,
-            meta.account_id
+            entry.account_id
         ],
     )?;
     Ok(entry)
@@ -3178,7 +3179,7 @@ pub fn add_activity_log(
 /// go through [`conversation_turns`] instead, because `trace` is the heaviest column in the
 /// database and reading it to build a list of titles is pure waste.
 const ACTIVITY_COLUMNS: &str =
-    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version";
+    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id";
 
 /// [`ACTIVITY_COLUMNS`] with `trace` replaced by a literal `NULL`, so [`read_activity_row`] can
 /// read it unchanged and the turn comes back with `trace: None`.
@@ -3187,7 +3188,7 @@ const ACTIVITY_COLUMNS: &str =
 /// the 600 KB ceiling is ~18 MB in a single IPC response, which is a visible freeze on the click
 /// that opens it. A trace read this way is fetched per turn, on demand, by [`get_turn_trace`].
 const ACTIVITY_COLUMNS_NO_TRACE: &str =
-    "id, project_id, session_id, engine_session_id, question, answer, NULL, created_at, response_time_ms, is_error, provider, model, engine_version";
+    "id, project_id, session_id, engine_session_id, question, answer, NULL, created_at, response_time_ms, is_error, provider, model, engine_version, account_id";
 
 fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> {
     Ok(ActivityLogEntry {
@@ -3204,6 +3205,7 @@ fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> 
         provider: row.get(10)?,
         model: row.get(11)?,
         engine_version: row.get(12)?,
+        account_id: row.get(13)?,
     })
 }
 

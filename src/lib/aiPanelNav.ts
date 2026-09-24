@@ -1,4 +1,4 @@
-import { analyzeWorkingChanges } from "./tauri/commands";
+import { analyzeWorkingChanges, NOTHING_TO_ANALYZE_MARKER } from "./tauri/commands";
 import { workspaceIdFromBucket } from "./prTarget";
 import { whenRepoFree } from "./repoQueue";
 import { jobPrUrl, type ActivityEntry } from "./activityEntries";
@@ -6,6 +6,10 @@ import { useJobsStore, type Job } from "../state/jobsStore";
 import { linkSessionFromMeta, usePrStore } from "../state/prStore";
 import { useChatStore } from "../state/chatStore";
 import { translate } from "../state/languageStore";
+import { useRepoStore } from "../state/repoStore";
+import { useToastStore } from "../state/toastStore";
+import { useWorkspaceStore } from "../state/workspaceStore";
+import { CANCELLED_MARKER } from "../state/aiRunStore";
 import {
   analysisTabKey,
   chatTabKey,
@@ -131,12 +135,49 @@ export async function openTrackedPr(entry: TrackedPr): Promise<boolean> {
   return true;
 }
 
+/** The two spellings of one folder: a trailing separator is not a different repository. */
+function samePath(a: string | null, b: string | null): boolean {
+  return a !== null && b !== null && a.replace(/[/\\]+$/, "") === b.replace(/[/\\]+$/, "");
+}
+
+function projectPath(projectId: string): string | null {
+  const projects = Object.values(useWorkspaceStore.getState().projectsByWorkspace).flat();
+  return projects.find((p) => p.id === projectId)?.local_path ?? null;
+}
+
+/**
+ * How many files an analysis of `projectId` would read: its unstaged and untracked changes, which is
+ * the diff `analyze_working_changes` takes (index → working tree — staged changes are not in it).
+ *
+ * `null` when this window holds no status for that repository — it keeps the open repository's
+ * only — and `null` is not a no: the backend refuses an empty tree on its own.
+ */
+export function changesToAnalyze(projectId: string): number | null {
+  const { repoPath, status } = useRepoStore.getState();
+  if (!status || !samePath(repoPath, projectPath(projectId))) return null;
+  return status.unstaged.length + status.untracked.length;
+}
+
+/** `changesToAnalyze`, kept current — what turns every "Analyze changes" button off. */
+export function useChangesToAnalyze(projectId: string | null): number | null {
+  const localPath = useWorkspaceStore((s) =>
+    projectId ? (Object.values(s.projectsByWorkspace).flat().find((p) => p.id === projectId)?.local_path ?? null) : null,
+  );
+  const repoPath = useRepoStore((s) => s.repoPath);
+  const status = useRepoStore((s) => s.status);
+  if (!status || !samePath(repoPath, localPath)) return null;
+  return status.unstaged.length + status.untracked.length;
+}
+
 /**
  * Starts a change analysis of `projectId`'s working tree and points its tab at the new run.
  *
  * Refuses to start a second one while one is running or queued there — the button that calls this
  * would otherwise be a way to pile up identical runs. Waits for the repository instead of failing
  * when a chat or a fix holds it (see `repoQueue`).
+ *
+ * Refuses, too, when there is nothing to analyze. The buttons are off by then; this is for whatever
+ * calls it without one. An empty diff used to reach the engine and come back as a failed run.
  */
 export function startAnalysis(projectId: string): string | null {
   const running = (useJobsStore.getState().byProject[projectId] ?? []).find(
@@ -146,6 +187,10 @@ export function startAnalysis(projectId: string): string | null {
     useAiPanelStore.getState().setAnalysisJob(projectId, running.id);
     return running.id;
   }
+  if (changesToAnalyze(projectId) === 0) {
+    useToastStore.getState().pushToast(translate("analyze.nothingToAnalyze"), "info");
+    return null;
+  }
   const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const id = useJobsStore.getState().run({
     projectId,
@@ -153,7 +198,17 @@ export function startAnalysis(projectId: string): string | null {
     // A per-run time stamp in the label so each analysis is identifiable in the history instead of
     // every entry reading the same "Change analysis".
     label: `${translate("analyze.title")} · ${time}`,
-    task: (jobId) => whenRepoFree(projectId, jobId, () => analyzeWorkingChanges(projectId, jobId)),
+    task: (jobId) =>
+      whenRepoFree(projectId, jobId, () => analyzeWorkingChanges(projectId, jobId)).catch((e: unknown) => {
+        if (!String(e).includes(NOTHING_TO_ANALYZE_MARKER)) throw e;
+        // The tree emptied between the click and the run. Not a failed analysis — there was nothing
+        // to analyze — so the row goes rather than turning red, and the reason is said once. Thrown
+        // on as a cancellation, which is what keeps the job runner from notifying a failure.
+        void useJobsStore.getState().remove(projectId, jobId);
+        useAiPanelStore.getState().setAnalysisJob(projectId, null);
+        useToastStore.getState().pushToast(translate("analyze.nothingToAnalyze"), "info");
+        throw new Error(`${CANCELLED_MARKER}nothing-to-analyze`);
+      }),
   });
   useAiPanelStore.getState().setAnalysisJob(projectId, id);
   return id;

@@ -19,12 +19,16 @@
  */
 
 import {
+  AppWindow,
   Bell,
   Blocks,
   Bot,
   BookOpen,
+  Briefcase,
   Braces,
   ChartColumn,
+  Compass,
+  Database,
   DatabaseBackup,
   Download,
   FileCode2,
@@ -32,27 +36,39 @@ import {
   Gauge,
   GitBranch,
   Globe,
+  GraduationCap,
+  HardDrive,
+  History,
   Keyboard,
   KeyRound,
+  Languages,
+  LayoutGrid,
   ListChecks,
+  Lock,
   MessageSquareText,
   Network,
   PackagePlus,
+  PanelsTopLeft,
   RefreshCw,
   Route,
+  ScanSearch,
   Palette,
+  QrCode,
   Rainbow,
   Scissors,
   Server,
   Settings2,
   Share2,
+  ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
   Smartphone,
   Sparkles,
+  SunMoon,
   SquarePen,
   TerminalSquare,
   Upload,
+  UserRound,
   UsersRound,
   Volume2,
   Waypoints,
@@ -105,20 +121,51 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.general",
     icon: Globe,
     group: "global",
-    searchKey: "settings.searchTermsGeneral",
+    // The grouping the user chose: the language beside the version (updates, the site, Ko-fi — all in
+    // `UpdateSection`), the window limit on its own, the tours on their own, and the app's own files.
+    tabs: [
+      { id: "language", labelKey: "settings.tabLanguageUpdates", icon: Languages, searchKey: "settings.searchTermsLanguageUpdates" },
+      { id: "windows", labelKey: "windows.limitLabel", hintKey: "windows.limitHint", icon: AppWindow, searchKey: "settings.searchTermsWindows" },
+      { id: "tours", labelKey: "tour.settingsTitle", hintKey: "tour.settingsHint", icon: GraduationCap, searchKey: "settings.searchTermsTours" },
+      { id: "data", labelKey: "settings.tabAppData", icon: HardDrive, searchKey: "settings.searchTermsAppData" },
+    ],
   },
   {
     id: "appearance",
     labelKey: "settings.appearance",
     icon: Palette,
     group: "global",
-    searchKey: "settings.searchTermsAppearance",
+    // The two small choices about the whole app's look share a pane; the schemes, a grid per mode,
+    // are a visit of their own.
+    tabs: [
+      { id: "look", labelKey: "settings.tabModeColor", icon: SunMoon, searchKey: "settings.searchTermsModeColor" },
+      { id: "themes", labelKey: "settings.editorThemes", hintKey: "settings.codeThemeHint", icon: Palette, searchKey: "settings.searchTermsThemes" },
+    ],
   },
   {
     id: "keybindings",
     labelKey: "shortcuts.title",
     icon: Keyboard,
     group: "global",
+    // One pane per group of commands, in the order the list used to run — a list that took six
+    // screens to scroll through. Ids are `ShortcutGroup`s and the labels the groups' own
+    // (`SHORTCUT_GROUP_LABELS`); a test holds the two lists to each other.
+    tabs: [
+      { id: "general", labelKey: "shortcuts.groupGeneral", hintKey: "shortcuts.recordHint", icon: Keyboard },
+      { id: "panels", labelKey: "shortcuts.groupPanels", hintKey: "shortcuts.recordHint", icon: PanelsTopLeft },
+      { id: "views", labelKey: "shortcuts.groupViews", hintKey: "shortcuts.recordHint", icon: LayoutGrid },
+      { id: "editor", labelKey: "shortcuts.groupEditor", hintKey: "shortcuts.recordHint", icon: FileCode2 },
+      { id: "database", labelKey: "shortcuts.groupDatabase", hintKey: "shortcuts.recordHint", icon: Database },
+      { id: "navigation", labelKey: "shortcuts.navigation", hintKey: "shortcuts.recordHint", icon: Compass },
+      { id: "workspace", labelKey: "shortcuts.groupWorkspace", hintKey: "shortcuts.recordHint", icon: Briefcase },
+      { id: "git", labelKey: "shortcuts.groupGit", hintKey: "shortcuts.recordHint", icon: GitBranch },
+      // The three the old hand-written group list never had — so ⌘⏎, ⌘L, ⌘⇧H and ⌘⇧K could not be
+      // rebound at all. The pane list is this one now, which is what keeps a new group from being
+      // left out again.
+      { id: "api", labelKey: "api.title", hintKey: "shortcuts.recordHint", icon: Wrench },
+      { id: "vault", labelKey: "tabbar.vault", hintKey: "shortcuts.recordHint", icon: KeyRound },
+      { id: "chat", labelKey: "tabbar.chat", hintKey: "shortcuts.recordHint", icon: MessageSquareText },
+    ],
     searchKey: "settings.searchTermsKeys",
   },
   {
@@ -169,13 +216,24 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "settings.git",
     icon: GitBranch,
     group: "global",
-    searchKey: "settings.searchTermsGit",
+    tabs: [
+      { id: "identity", labelKey: "settings.tabGitIdentity", hintKey: "settings.gitIdentityHint", icon: UserRound, searchKey: "settings.searchTermsGitIdentity" },
+      { id: "fetch", labelKey: "settings.tabAutoFetch", hintKey: "settings.autoFetchDescription", icon: RefreshCw, searchKey: "settings.searchTermsAutoFetch" },
+      { id: "secrets", labelKey: "settings.tabSecretScan", hintKey: "settings.secretScanDescription", icon: ShieldAlert, searchKey: "settings.searchTermsSecretScan" },
+      { id: "blame", labelKey: "settings.tabBlame", hintKey: "settings.blameDescription", icon: History, searchKey: "settings.searchTermsBlame" },
+      { id: "locked", labelKey: "settings.tabLockedBranches", hintKey: "settings.lockedBranchesDescription", icon: Lock, searchKey: "settings.searchTermsLockedBranches" },
+    ],
   },
   {
     id: "terminal",
     labelKey: "settings.terminal",
     icon: TerminalSquare,
     group: "global",
+    tabs: [
+      { id: "default", labelKey: "settings.terminalDefault", hintKey: "settings.terminalDefaultHint", icon: TerminalSquare },
+      { id: "detected", labelKey: "settings.terminalDetected", hintKey: "settings.terminalDetectedHint", icon: ScanSearch },
+      { id: "custom", labelKey: "settings.terminalCustom", icon: SquarePen },
+    ],
     searchKey: "settings.searchTermsTerminal",
   },
   {
@@ -264,6 +322,15 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     labelKey: "remote.title",
     icon: Smartphone,
     group: "global",
+    // The groups the one long panel was built from, each now its own pane — in the order they are
+    // needed: switch the server on, pair a phone, then look after what is paired and what it may do.
+    tabs: [
+      { id: "server", labelKey: "remote.groupServer", icon: Server },
+      { id: "pairing", labelKey: "remote.groupPairing", icon: QrCode },
+      { id: "devices", labelKey: "remote.devices", icon: Smartphone },
+      { id: "terminal", labelKey: "remote.groupTerminal", icon: TerminalSquare },
+      { id: "access", labelKey: "remote.groupAccess", icon: ShieldCheck },
+    ],
     searchKey: "settings.searchTermsRemote",
   },
   {
@@ -376,6 +443,12 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
  * The test beside this file makes that omission impossible to ship.
  */
 export const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>([
+  "general",
+  "appearance",
+  "keybindings",
+  "git",
+  "terminal",
+  "remote",
   "claude",
   "backup",
   "api",

@@ -126,6 +126,43 @@ fn hide_to_background(window: &tauri::Window) {
 ///
 /// macOS is deliberately not part of this: `orderOut:` already parks WKWebView's display link, and
 /// the macOS variant above has the fullscreen dance to do first.
+/// The version whose first launch last refreshed the shell's icons — see
+/// [`refresh_icon_cache_after_update`].
+const LAST_RUN_VERSION_KEY: &str = "last_run_version";
+
+/// On the first launch of a new version on Windows, asks Explorer to rebuild its icon cache.
+///
+/// Explorer caches the icon of every shortcut and pinned app by the path it points at, and an
+/// update replaces the `.exe` in place: same path, so the Start menu, the desktop and the taskbar
+/// went on showing the icon the old binary had — Tauri's logo, long after the app itself carried
+/// its own (reported on Windows after the 2026-09-23 logo change). Neither installer tells the
+/// shell: Tauri's NSIS template only calls `SHChangeNotify` for file associations, which this app
+/// has none of, and the MSI has no hook at all. The NSIS side is also handled in
+/// `installer/hooks.nsh`; this covers the MSI, and any install the hook predates.
+///
+/// `ie4uinit.exe -show` is Windows' own "refresh the icon cache" for the signed-in user. Run once per
+/// version, detached, with its console hidden; a failure changes nothing but the icon. Compiled on
+/// every platform (`cfg!`, not `#[cfg]`) so the non-Windows builds still type-check it.
+fn refresh_icon_cache_after_update(app: &tauri::AppHandle) {
+    if !cfg!(windows) {
+        return;
+    }
+    let version = app.package_info().version.to_string();
+    let db = app.state::<db::Db>();
+    let Ok(conn) = db.0.lock() else { return };
+    let last = db::queries::get_setting(&conn, LAST_RUN_VERSION_KEY).ok().flatten();
+    if last.as_deref() == Some(version.as_str()) {
+        return;
+    }
+    let _ = db::queries::set_setting(&conn, LAST_RUN_VERSION_KEY, &version);
+    drop(conn);
+    std::thread::spawn(|| {
+        if let Err(e) = proc::std_command("ie4uinit.exe").arg("-show").status() {
+            applog::info(&format!("icons: could not refresh the shell's icon cache — {e}"));
+        }
+    });
+}
+
 #[cfg(not(target_os = "macos"))]
 fn hide_to_background(window: &tauri::Window) {
     #[cfg(windows)]
@@ -343,11 +380,34 @@ pub fn run() {
         // both, and the first time that was forgotten the limit would be silently gone.
         .manage(sandbox::SandboxRegistry::default())
         .setup(|app| {
+            // The main window, built here from its own entry in `tauri.conf.json` (which says
+            // `"create": false`) rather than by Tauri before `setup` runs — the one difference being
+            // `enable_clipboard_access`, which that config has no field for. Without it WebView2 (and
+            // WebKitGTK) refuse `navigator.clipboard.readText()`, so on Windows nothing that reads the
+            // clipboard worked: pasting into a terminal — the CLI sign-in dialog's pasted code among
+            // them — the vault, a PR link. macOS ignores the flag; WKWebView always allowed it.
+            //
+            // Safe to allow because no third-party script runs in these webviews: the draw.io editor
+            // is vendored and same-origin, and API responses render in `sandbox=""` frames.
+            //
+            // Only when no `main` exists yet. A `tauri dev` started before `"create": false` was in
+            // the config keeps building with the config it read at its start, so Tauri had already
+            // made the window — and a second `build()` of the same label failed `setup`, which is a
+            // panic at launch. That window simply goes without clipboard access until the next
+            // `tauri dev`; a build never sees two configs.
+            if app.get_webview_window("main").is_none() {
+                if let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() {
+                    tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+                        .enable_clipboard_access()
+                        .build()?;
+                }
+            }
             // First, and before anything that can fail out of this closure: the window is created
             // hidden (`"visible": false` in `tauri.conf.json`) so that being resized and maximized
             // back to where the last session left it does not happen in front of the user, and
             // this is what ends that — a `?` above it would leave the app running with no window.
             window_state::restore(app.handle());
+            refresh_icon_cache_after_update(app.handle());
             // A row an earlier build left behind: it held the satellites open at the last quit, and
             // reopening them at launch turned out to be the wrong idea twice over. See
             // `windows::SatelliteRegistry::parked`.

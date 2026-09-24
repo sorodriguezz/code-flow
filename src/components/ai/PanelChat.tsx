@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Clock, FilePen, Lock, Square } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, FilePen, Lock, Square, UsersRound } from "lucide-react";
 import { useIsQueued, repoHolder } from "../../lib/repoQueue";
 import { resolveAccount } from "../../lib/aiAccounts";
 import { ChatMessageBubble, dayDivider } from "../chat/ChatMessageBubble";
@@ -10,7 +10,7 @@ import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activitySt
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
-import { useAiAccountsStore } from "../../state/aiAccountsStore";
+import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 
@@ -50,6 +50,7 @@ export function PanelChat({
 }) {
   const t = useT();
   const locale = useLanguageStore((s) => s.language) === "es" ? "es-ES" : "en-US";
+  const accountName = useAccountName();
   const session = useChatStore((s) => s.byConversation[conversationId]) ?? EMPTY_CHAT;
   const picked = useChatStore((s) => s.engineByConversation[conversationId]);
   const send = useChatStore((s) => s.send);
@@ -200,6 +201,15 @@ export function PanelChat({
                     <div className="h-px flex-1 bg-[var(--cf-border)]" />
                   </div>
                 )}
+                {message.accountBreak && (
+                  // Where the engine lost the thread: nothing above this line is in its context.
+                  <AccountBreak
+                    label={t("assistant.accountBreak")}
+                    detail={t("assistant.accountBreakHint", {
+                      account: accountName(message.accountBreak.provider, message.accountBreak.accountId),
+                    })}
+                  />
+                )}
                 <ChatMessageBubble
                   message={message}
                   actions={message.isError ? { onPickModel: (next) => pickEngine(provider, next) } : undefined}
@@ -297,6 +307,20 @@ export function PanelChat({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The line drawn above the first question another account answered — see `turnsToMessages`. */
+function AccountBreak({ label, detail }: { label: string; detail: string }) {
+  return (
+    <div role="separator" aria-label={`${label}. ${detail}`} title={detail} className="flex items-center gap-2 pt-1.5">
+      <div className="h-px flex-1 bg-[color-mix(in_oklab,var(--cf-warning)_40%,transparent)]" />
+      <span className="flex min-w-0 items-center gap-1 text-[10px] font-medium text-[var(--cf-warning)]">
+        <UsersRound size={10} className="shrink-0" />
+        <span className="truncate">{label}</span>
+      </span>
+      <div className="h-px flex-1 bg-[color-mix(in_oklab,var(--cf-warning)_40%,transparent)]" />
     </div>
   );
 }

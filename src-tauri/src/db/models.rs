@@ -746,6 +746,12 @@ pub struct ActivityLogEntry {
     /// Whether this turn failed — `answer` then holds the engine's error rather than a reply, so
     /// a run that died (out of credit, CLI missing) is still there tomorrow.
     pub is_error: bool,
+    /// The account this turn ran as — `None` for the CLI's system account, and for turns recorded
+    /// before accounts existed. A session lives in its account's state directory, so a change of
+    /// account between two turns is where the engine lost the conversation — and a reopened chat
+    /// has to be able to say so, not only the reply that happened to be on screen.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 /// A finished PR review or pre-commit analysis run — `meta` is a small JSON blob (e.g.

@@ -1,5 +1,4 @@
-import { useState, type ReactNode } from "react";
-import { Check, ChevronDown, ChevronRight, Droplet, Laptop, Moon, Palette, Sun } from "lucide-react";
+import { Check, Laptop, Moon, Sun } from "lucide-react";
 import { useThemeStore } from "../../state/themeStore";
 import { findTheme, themesFor } from "../../lib/codeThemes";
 import { ACCENT_OPTIONS, useAccentStore } from "../../state/accentStore";
@@ -7,66 +6,13 @@ import { ActivePill } from "../common/ActivePill";
 import type { ThemePreference } from "../../types/domain";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import { SettingsHeader } from "../api/settingsChrome";
+import { PaneBlock, RailSection } from "./settingsNav";
 
 const OPTIONS: { id: ThemePreference; labelKey: TranslationKey; icon: typeof Sun }[] = [
   { id: "light", labelKey: "settings.themeLight", icon: Sun },
   { id: "dark", labelKey: "settings.themeDark", icon: Moon },
   { id: "system", labelKey: "settings.themeSystem", icon: Laptop },
 ];
-
-/** A settings row that folds away. The `summary` is what makes folding safe here: the current
- * choice stays readable while closed, so nothing has to be expanded just to check it. */
-function Panel({
-  icon: Icon,
-  title,
-  summary,
-  defaultOpen = false,
-  children,
-}: {
-  icon: typeof Sun;
-  title: string;
-  summary?: ReactNode;
-  defaultOpen?: boolean;
-  children: ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className="rounded-lg border border-[var(--cf-border)]">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-2.5 py-2 text-left"
-      >
-        {open ? (
-          <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-        ) : (
-          <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-        )}
-        <Icon size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-        <span className="text-[13px] font-medium">{title}</span>
-        <span className="ml-auto flex min-w-0 items-center gap-1.5">{summary}</span>
-      </button>
-      {open && <div className="border-t border-[var(--cf-border)] p-2.5">{children}</div>}
-    </div>
-  );
-}
-
-/** The chosen accent, shown in a collapsed header — the dot is the actual color in force for
- * the mode on screen, since each accent carries a different shade per mode. */
-function AccentSummary() {
-  const resolved = useThemeStore((s) => s.resolved);
-  const accentId = useAccentStore((s) => s.accentId);
-  const option = ACCENT_OPTIONS.find((o) => o.id === accentId) ?? ACCENT_OPTIONS[0];
-  return (
-    <>
-      <span
-        className="h-3.5 w-3.5 shrink-0 rounded-full"
-        style={{ background: resolved === "dark" ? option.dark : option.light }}
-      />
-      <span className="break-words text-[12px] leading-snug text-[var(--cf-text-muted)]">{option.label}</span>
-    </>
-  );
-}
 
 /** Accent swatches plus a live preview of the three places the accent actually lands: a solid
  * button, a soft-tinted selection, and a link. Picking a color from a row of identical dots is
@@ -177,59 +123,64 @@ export function ThemeSettings() {
   const preference = useThemeStore((s) => s.preference);
   const setPreference = useThemeStore((s) => s.setPreference);
   const resolved = useThemeStore((s) => s.resolved);
+  // The mode you are looking at comes first — the other is a deliberate visit.
+  const modes: ("light" | "dark")[] = resolved === "dark" ? ["dark", "light"] : ["light", "dark"];
 
   return (
-    <section>
-      <SettingsHeader title={t("settings.appearance")} hint={t("settings.chooseTheme")} />
-      <div className="flex gap-2">
-        {OPTIONS.map(({ id, labelKey, icon: Icon }) => (
-          <button
-            key={id}
-            onClick={() => setPreference(id)}
-            className={`relative flex flex-1 flex-col items-center gap-1.5 rounded-lg border px-3 py-3 text-[13px] ${
-              preference === id
-                ? "border-transparent text-[var(--cf-accent)]"
-                : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-            }`}
-          >
-            {preference === id && <ActivePill layoutId="cf-theme-mode-pill" inset="-inset-px" radius="rounded-lg" />}
-            <span className="relative flex flex-col items-center gap-1.5">
-              <Icon size={18} />
-              {t(labelKey)}
-            </span>
-          </button>
-        ))}
-      </div>
+    <RailSection section="appearance" title={t("settings.appearance")} hint={t("settings.chooseTheme")} fallback="look">
+      {(tab) => (
+        <>
+          {tab === "look" && (
+            <>
+              <PaneBlock title={t("settings.tabThemeMode")}>
+                <div className="flex gap-2">
+                  {OPTIONS.map(({ id, labelKey, icon: Icon }) => (
+                    <button
+                      key={id}
+                      onClick={() => setPreference(id)}
+                      className={`relative flex flex-1 flex-col items-center gap-1.5 rounded-lg border px-3 py-3 text-[13px] ${
+                        preference === id
+                          ? "border-transparent text-[var(--cf-accent)]"
+                          : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                      }`}
+                    >
+                      {preference === id && <ActivePill layoutId="cf-theme-mode-pill" inset="-inset-px" radius="rounded-lg" />}
+                      <span className="relative flex flex-col items-center gap-1.5">
+                        <Icon size={18} />
+                        {t(labelKey)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </PaneBlock>
 
-      <h3 className="mb-1 mt-6 text-sm font-semibold">{t("settings.codeTheme")}</h3>
-      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.codeThemeHint")}</p>
-      <div className="space-y-2">
-        {/* Accent first: it's one decision, and it's the one people change most. */}
-        <Panel icon={Droplet} title={t("settings.accentColor")} summary={<AccentSummary />}>
-          <AccentPicker />
-        </Panel>
-        <Panel icon={Palette} title={t("settings.editorThemes")} summary={<ThemeSummary mode={resolved} />}>
-          <div className="space-y-2">
-            {/* The mode you're actually looking at opens first — the other is a deliberate visit. */}
-            <Panel
-              icon={Moon}
-              title={t("settings.forDarkMode")}
-              summary={<ThemeSummary mode="dark" />}
-              defaultOpen={resolved === "dark"}
-            >
-              <ThemeGrid mode="dark" />
-            </Panel>
-            <Panel
-              icon={Sun}
-              title={t("settings.forLightMode")}
-              summary={<ThemeSummary mode="light" />}
-              defaultOpen={resolved === "light"}
-            >
-              <ThemeGrid mode="light" />
-            </Panel>
-          </div>
-        </Panel>
-      </div>
-    </section>
+              {/* The picker says what an accent is for in its own first line. */}
+              <PaneBlock title={t("settings.accentColor")}>
+                <AccentPicker />
+              </PaneBlock>
+            </>
+          )}
+
+          {tab === "themes" && (
+            <div className="space-y-4">
+              {modes.map((mode) => (
+                <div key={mode}>
+                  {/* The scheme in force is named beside its heading, so it reads without hunting
+                      the grid for the ticked card. */}
+                  <p className="mb-2 flex items-center gap-2 text-[12.5px] font-medium text-[var(--cf-text)]">
+                    {mode === "dark" ? <Moon size={13} /> : <Sun size={13} />}
+                    {t(mode === "dark" ? "settings.forDarkMode" : "settings.forLightMode")}
+                    <span className="ml-auto flex min-w-0 items-center gap-1.5 font-normal">
+                      <ThemeSummary mode={mode} />
+                    </span>
+                  </p>
+                  <ThemeGrid mode={mode} />
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </RailSection>
   );
 }

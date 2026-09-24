@@ -17,12 +17,13 @@
  * language. The rail is wider than it was (168 → 190) so most labels still take one line anyway.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
+import { Panel, SettingsHeader } from "../api/settingsChrome";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
-import type { SettingsTabDef } from "../../lib/settingsCatalog";
+import { tabsFor, type SettingsTabDef } from "../../lib/settingsCatalog";
 
 /** Wide enough for every shipped label in both languages on one line, bar two that wrap. */
 export const RAIL_WIDTH = 190;
@@ -109,5 +110,76 @@ export function SettingsRail({
         </button>
       ))}
     </motion.nav>
+  );
+}
+
+/**
+ * A section drawn as a rail of panes — the shape Editor and the AI section have, written once for
+ * the sections that moved onto it (General, Appearance, Shortcuts, Git, Terminal, Remote) rather
+ * than copied into each of them.
+ *
+ * The same three decisions as those two, which is the point of sharing it: the header and the rail
+ * stay put and only the pane beside them scrolls; a pane arrives at its top, before the frame is
+ * painted, rather than wherever the previous one was left; and the rail names the pane, so the pane
+ * repeats no heading — only the one-line hint the label cannot say. Its section must be listed in
+ * `SELF_SCROLLING_SECTIONS`, or there is no height for the pane to scroll within.
+ */
+export function RailSection({
+  section,
+  title,
+  hint,
+  fallback,
+  children,
+}: {
+  section: SettingsSectionId;
+  title: string;
+  hint: ReactNode;
+  /** The pane shown when nothing asked for another. */
+  fallback: string;
+  /** The pane for a tab id. */
+  children: (tab: string) => ReactNode;
+}) {
+  const t = useT();
+  const tabs = tabsFor(section);
+  const [tab, setTab] = useSectionTab(section, tabs, fallback);
+  const active = tabs.find((entry) => entry.id === tab) ?? tabs[0];
+
+  const paneRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    paneRef.current?.scrollTo({ top: 0 });
+  }, [tab]);
+
+  return (
+    <section className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0">
+        <SettingsHeader title={title} hint={hint} />
+      </div>
+      <div className="flex min-h-0 flex-1 gap-4">
+        <SettingsRail tabs={tabs} active={tab} onSelect={setTab} layoutId={`cf-${section}-settings-pill`} />
+        <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
+          <Panel>
+            {active?.hintKey && (
+              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+            )}
+            {children(tab)}
+          </Panel>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * One block of a pane that holds several: a heading, the line under it, and a rule above every
+ * block but the first. For panes that keep together what is read together — General's preferences,
+ * its help and updates — rather than giving every block a pane of its own.
+ */
+export function PaneBlock({ title, hint, children }: { title: string; hint?: ReactNode; children: ReactNode }) {
+  return (
+    <div className="mt-5 border-t border-[var(--cf-border)] pt-4 first:mt-0 first:border-t-0 first:pt-0">
+      <h3 className="mb-1 text-sm font-semibold">{title}</h3>
+      {hint && <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{hint}</p>}
+      {children}
+    </div>
   );
 }

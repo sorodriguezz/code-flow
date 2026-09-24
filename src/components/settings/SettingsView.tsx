@@ -92,8 +92,11 @@ function SectionButton({
       // Selection changes colour and nothing else — no weight change, exactly like the tabs.
       // Bolding on select re-measures the text and made the row jump every time it was picked.
       // Colour plus the pill is already the whole signal.
-      className={`relative mb-0.5 flex w-full items-start rounded-md py-1.5 text-left text-[13px] leading-[1.35] transition-colors ${
-        collapsed ? "justify-center px-0" : "px-2.5"
+      // Folded, a fixed 36px centred in the 50px rail rather than the rail's full width: the pill was
+      // drawn edge to edge and read as a band across the rail, not as a mark on one icon. The 7px
+      // either side and the extra 2px between rows are the breathing room the user asked for.
+      className={`relative flex items-start rounded-md py-1.5 text-left text-[13px] leading-[1.35] transition-colors ${
+        collapsed ? "mx-auto mb-1 w-9 justify-center px-0" : "mb-0.5 w-full px-2.5"
       } ${
         active
           ? "text-[var(--cf-accent)]"
@@ -228,10 +231,13 @@ export function SettingsView() {
   const setSection = useUiStore((s) => s.openSettings);
   const openSettingsAt = useUiStore((s) => s.openSettingsAt);
   const navWidth = useLayoutStore((s) => s.sizes.settingsNavWidth);
-  const collapsed = useLayoutStore((s) => s.flags.settingsNavCollapsed);
+  // The window always opens with the nav folded to its icons (the user's call), and » unfolds it for
+  // this visit only. It used to be a remembered layout flag that defaulted to unfolded.
+  const [collapsed, setCollapsed] = useState(true);
+  // Set by the folded rail's magnifier: unfold, then put the caret in the search box once it exists.
+  const focusSearchOnUnfold = useRef(false);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
-  const toggleFlag = useLayoutStore((s) => s.toggleFlag);
   // Collapsed, the rail is 50px of pure content: the nav's horizontal padding moved onto its
   // children and the gutter is suppressed there (`cf-no-scrollbar`), so a 14px icon centres on
   // exactly 25.
@@ -261,11 +267,20 @@ export function SettingsView() {
   // which after narrowing the list is a different row than the one the user was looking at.
   useEffect(() => setCursor(0), [query]);
 
-  // Every opening starts with an empty box: a search left over from last time makes the window
-  // open on a filtered list with no obvious cause.
+  // Every opening starts with an empty box and the nav folded: a search left over from last time
+  // makes the window open on a filtered list with no obvious cause, and a nav unfolded last visit is
+  // not how the user wants the next one to start.
   useEffect(() => {
-    if (!open) setQuery("");
+    if (open) return;
+    setQuery("");
+    setCollapsed(true);
   }, [open]);
+
+  useEffect(() => {
+    if (collapsed || !focusSearchOnUnfold.current) return;
+    focusSearchOnUnfold.current = false;
+    searchRef.current?.focus();
+  }, [collapsed]);
 
   const globalSections = SETTINGS_SECTIONS.filter((entry) => entry.group === "global");
   const workspaceSections = SETTINGS_SECTIONS.filter((entry) => entry.group === "workspace");
@@ -354,6 +369,22 @@ export function SettingsView() {
                 `pr-[22px]` = the rows' own 12px plus the 10px gutter the scroller below keeps
                 reserved. This field sits *outside* that scroller, so at a plain `px-3` its right
                 edge ran 10px past every row under it, into the scrollbar's lane. */}
+            {collapsed && (
+              // Folded is how the window opens now, so the search cannot simply vanish with the
+              // field: this unfolds the rail and puts the caret in it.
+              <button
+                type="button"
+                onClick={() => {
+                  focusSearchOnUnfold.current = true;
+                  setCollapsed(false);
+                }}
+                title={t("settings.searchPlaceholder")}
+                aria-label={t("settings.searchPlaceholder")}
+                className="mx-auto mb-2 flex w-9 shrink-0 justify-center rounded-md py-1.5 text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+              >
+                <Search size={14} />
+              </button>
+            )}
             {!collapsed && (
               <div className="relative mb-2 shrink-0 pl-3 pr-[22px]">
                 <Search
@@ -511,7 +542,7 @@ export function SettingsView() {
               instead. */}
           <Tooltip side="right" label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}>
             <button
-              onClick={() => toggleFlag("settingsNavCollapsed")}
+              onClick={() => setCollapsed((was) => !was)}
               aria-label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}
               aria-expanded={!collapsed}
               style={{ left: railWidth - 10 }}

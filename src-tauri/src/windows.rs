@@ -228,6 +228,8 @@ pub async fn open_satellite(
     }
 
     let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        // As the main window (see `lib.rs`): without it WebView2 refuses every clipboard read.
+        .enable_clipboard_access()
         .title(&title)
         .inner_size(1100.0, 760.0)
         .min_inner_size(560.0, 420.0)
@@ -501,6 +503,8 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
     let url = format!("window.html?kind={}&ref={}", SatelliteKind::Quick.slug(), QUICK_REF_ID);
 
     let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        // As the main window (see `lib.rs`): without it WebView2 refuses every clipboard read.
+        .enable_clipboard_access()
         .title("CodeFlow")
         .inner_size(720.0, 420.0)
         .min_inner_size(520.0, 220.0)

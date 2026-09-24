@@ -166,7 +166,7 @@ function Group({
  * the worst place to be told "you may not" by a heuristic — but a critical secret hit is drawn in
  * the danger colour and is impossible to miss.
  */
-function PreCommit({ repoPath, projectId }: { repoPath: string; projectId: string }) {
+function PreCommit({ repoPath, projectId, pending }: { repoPath: string; projectId: string; pending: number }) {
   const run = useMobileStore((s) => s.run);
   const busy = useBusy("repo");
   // Its own group. `analyze_working_changes` runs an engine and is awaited inline in the request,
@@ -197,6 +197,9 @@ function PreCommit({ repoPath, projectId }: { repoPath: string; projectId: strin
             full
             size="sm"
             loading={analyzeBusy}
+            // The analysis reads the unstaged and untracked changes and nothing else — with none, the
+            // desktop refuses it before any engine starts, so the button is off here too.
+            disabled={pending === 0}
             icon={<Sparkles size={14} />}
             onClick={() =>
               void run(
@@ -542,7 +545,7 @@ export function RepoScreen() {
               </Button>
             </div>
 
-            {projectId && <PreCommit repoPath={repoPath} projectId={projectId} />}
+            {projectId && <PreCommit repoPath={repoPath} projectId={projectId} pending={pending.length} />}
           </>
         )}
 

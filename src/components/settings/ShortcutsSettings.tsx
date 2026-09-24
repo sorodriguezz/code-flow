@@ -2,25 +2,9 @@ import { useCallback, useEffect } from "react";
 import { AlertTriangle, RotateCcw, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useShortcutsStore, activeChords, bindingFor } from "../../state/shortcutsStore";
-import {
-  SHORTCUT_COMMANDS,
-  SHORTCUT_GROUP_LABELS,
-  type ShortcutGroup,
-  type ShortcutId,
-} from "../../lib/shortcuts";
+import { SHORTCUT_COMMANDS, type ShortcutId } from "../../lib/shortcuts";
 import { chordKeycaps, eventToChord, isBindable } from "../../lib/keys";
-import { SettingsHeader } from "../api/settingsChrome";
-
-const GROUP_ORDER: ShortcutGroup[] = [
-  "general",
-  "panels",
-  "views",
-  "editor",
-  "database",
-  "navigation",
-  "workspace",
-  "git",
-];
+import { RailSection } from "./settingsNav";
 
 /**
  * Captures the next chord the user presses and hands it back.
@@ -156,34 +140,27 @@ export function ShortcutsSettings() {
     );
   };
 
+  // One pane per group — the panes are the catalog's, whose ids are `ShortcutGroup`s. The reset
+  // is under every one of them because it resets every one of them, and a list rebound across three
+  // panes should not have to be walked back to find it.
   return (
-    <section>
-      <SettingsHeader title={t("shortcuts.title")} hint={t("settings.keybindingsHint")} />
-      <p className="-mt-2 mb-4 text-[11px] text-[var(--cf-text-muted)]">{t("shortcuts.recordHint")}</p>
+    <RailSection section="keybindings" title={t("shortcuts.title")} hint={t("settings.keybindingsHint")} fallback="general">
+      {(tab) => (
+        <>
+          {SHORTCUT_COMMANDS.filter((command) => command.group === tab).map((command) => rowFor(command.id))}
 
-      {GROUP_ORDER.map((group) => {
-        const commands = SHORTCUT_COMMANDS.filter((c) => c.group === group);
-        if (commands.length === 0) return null;
-        return (
-          <div key={group} className="mb-5">
-            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t(SHORTCUT_GROUP_LABELS[group])}
-            </p>
-            {commands.map((command) => rowFor(command.id))}
+          <div className="mt-4 border-t border-[var(--cf-border)] pt-4">
+            <button
+              onClick={() => void resetAll()}
+              disabled={Object.keys(overrides).length === 0}
+              className="flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-[13px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.04]"
+            >
+              <RotateCcw size={14} />
+              {t("shortcuts.resetAll")}
+            </button>
           </div>
-        );
-      })}
-
-      <div className="border-t border-[var(--cf-border)] pt-4">
-        <button
-          onClick={() => void resetAll()}
-          disabled={Object.keys(overrides).length === 0}
-          className="flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-[13px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.04]"
-        >
-          <RotateCcw size={14} />
-          {t("shortcuts.resetAll")}
-        </button>
-      </div>
-    </section>
+        </>
+      )}
+    </RailSection>
   );
 }

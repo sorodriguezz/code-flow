@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Loader2, RefreshCw, ShieldCheck, Square } from "lucide-react";
 import { parseAnalysis, type AnalysisFinding } from "../../lib/parseAnalysis";
-import { startAnalysis } from "../../lib/aiPanelNav";
+import { startAnalysis, useChangesToAnalyze } from "../../lib/aiPanelNav";
 import { useIsQueued } from "../../lib/repoQueue";
 import { Markdown } from "../common/Markdown";
 import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
@@ -53,6 +53,7 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
   const jobs = useJobsStore((s) => s.byProject[projectId] ?? EMPTY_JOBS);
   const runs = useMemo(() => jobs.filter((j) => j.kind === "analyze-changes"), [jobs]);
   const runningJob = runs.find((j) => j.status === "running") ?? null;
+  const changes = useChangesToAnalyze(projectId);
   const doneRuns = useMemo(() => runs.filter((j) => j.status === "done"), [runs]);
   // The tab's own run when it names one that is finished; otherwise the newest finished one. A run
   // still going is shown *above* it rather than instead of it.
@@ -264,7 +265,8 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
           </span>
           <button
             onClick={run}
-            disabled={Boolean(runningJob)}
+            disabled={Boolean(runningJob) || changes === 0}
+            title={!runningJob && changes === 0 ? t("analyze.nothingToAnalyze") : undefined}
             className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white disabled:opacity-50"
           >
             {runningJob ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
