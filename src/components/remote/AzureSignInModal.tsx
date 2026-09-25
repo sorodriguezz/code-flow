@@ -152,7 +152,7 @@ export function AzureSignInModal({ onClose }: { onClose: () => void }) {
                   <span
                     className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
                       picked
-                        ? "border-[var(--cf-accent)] bg-[var(--cf-accent)] text-[var(--cf-on-accent)]"
+                        ? "border-[var(--cf-accent)] bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)]"
                         : "border-[var(--cf-border)]"
                     }`}
                   >

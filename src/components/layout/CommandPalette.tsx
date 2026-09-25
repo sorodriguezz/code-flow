@@ -21,10 +21,10 @@ import {
   MonitorSmartphone,
   Plus,
   Route,
-  TerminalSquare,
   Workflow,
   Zap,
 } from "lucide-react";
+import { ServicesDockIcon } from "../services/ServicesDockIcon";
 import { fetchNow, pullNow, pushNow } from "../../lib/gitActions";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useMissingProjectsStore } from "../../state/missingProjectsStore";
@@ -195,7 +195,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       },
       {
         key: "view:terminal",
-        icon: TerminalSquare,
+        icon: ServicesDockIcon,
         label: t("tabbar.terminal"),
         group: "views" as const,
         onSelect: () => toggleTerminalPanel(),

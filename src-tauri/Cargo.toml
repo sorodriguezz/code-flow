@@ -80,7 +80,11 @@ lto = "thin"
 strip = "symbols"
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# `macos-private-api` is what lets a macOS window be transparent at all (WKWebView's
+# `drawsBackground`); it pairs with `app.macOSPrivateApi` in `tauri.conf.json`, and tauri-build
+# refuses a build where the two disagree. It costs the Mac App Store, which this app is not in.
+# See `glass.rs`.
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-os = "2"
@@ -396,6 +400,13 @@ windows-sys = { version = "0.60", features = [
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
 ] }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# The native half of the see-through window (`glass.rs`): vibrancy on macOS, the DWM backdrops on
+# Windows. Tauri already depends on this exact version on both platforms, so naming it compiles
+# nothing new — it is here so the effect view can be *removed* again, which Tauri's own
+# `setEffects` cannot do on macOS.
+window-vibrancy = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

@@ -52,7 +52,7 @@ function Bar({ done, total }: { done: number; total: number }) {
   return (
     <div className="h-1 w-full overflow-hidden rounded-full bg-[var(--cf-border)]">
       <div
-        className="h-full rounded-full bg-[var(--cf-accent)]"
+        className="h-full rounded-full bg-[var(--cf-accent-fill)]"
         style={{ width: `${percent}%` }}
       />
     </div>

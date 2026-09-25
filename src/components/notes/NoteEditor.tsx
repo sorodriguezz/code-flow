@@ -557,7 +557,7 @@ export function NoteEditor() {
         <span className="ml-auto flex items-center gap-1.5">
           {saving ? (
             <>
-              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--cf-accent)]" />
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--cf-accent-fill)]" />
               {t("notes.saving")}
             </>
           ) : draft.dirty ? (

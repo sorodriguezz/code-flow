@@ -344,7 +344,7 @@ export function HoldProgress({ shape }: { shape: "ring" | "bar" }) {
     return (
       <span
         aria-hidden
-        className="cf-hold-bar pointer-events-none absolute inset-y-0 left-0 w-full origin-left rounded-[inherit] bg-[var(--cf-accent)] opacity-[0.14]"
+        className="cf-hold-bar pointer-events-none absolute inset-y-0 left-0 w-full origin-left rounded-[inherit] bg-[var(--cf-accent-fill)] opacity-[0.14]"
         style={{ animationDuration: `${HOLD_PROGRESS_MS}ms` }}
       />
     );

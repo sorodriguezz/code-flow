@@ -126,9 +126,10 @@ export function ServiceList({
       {/* The two ways in, and nothing around them. This sits above the terminals in every
           workspace without services, so it is kept to what can be pressed: no box, no heading, no
           paragraph — the user took each of those out. The Detect button's tooltip still says what
-          it reads. */}
+          it reads. Centred under the heading rather than hung off its left edge (the user's ask,
+          2026-09-25): alone in the section, two buttons pushed left read as a row that ran out. */}
       {services.length === 0 && (
-        <div className="mx-2 mb-1.5 mt-1 flex flex-wrap gap-1.5">
+        <div className="mx-2 mb-1.5 mt-1 flex flex-wrap justify-center gap-1.5">
           <Tooltip side="top" label={t("services.detect")} description={t("services.detectHint")}>
             <button
               onClick={onImport}

@@ -1098,7 +1098,7 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
         className={`flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md transition-[filter] ${
           running
             ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-            : "bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:opacity-40 disabled:hover:bg-[var(--cf-accent)]"
+            : "bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40 disabled:hover:bg-[var(--cf-accent-fill)]"
         }`}
       >
         {running ? <Square size={12} /> : <Play size={12} />}

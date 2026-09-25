@@ -29,6 +29,7 @@ import { BookmarksPanel } from "./BookmarksPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
 import { clearFullDiffCache, EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
+import { EditorStatusLine } from "./EditorStatusLine";
 import { ChangesPanel } from "../git/ChangesPanel";
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
 import { setDefinitionContext } from "../../lib/goToDefinition";
@@ -1476,13 +1477,16 @@ export function EditorView() {
                 {/* Only while shut — which is the only state this rail has. Open, the panel itself
                     is the count, and a badge over it would be the same number twice. */}
                 {uncommittedCount > 0 && (
-                  <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />
+                  <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent-fill)]" />
                 )}
               </button>
             </Tooltip>
           </div>
         )}
       </div>
+      {/* The Editor's own status line — see `EditorStatusLine`. A row of this view, not of the app's
+          status bar, because everything on it is about the file in front of you. */}
+      <EditorStatusLine />
       {/* The drop affordance: an outline around what will take the files, and a banner naming the
           folder they will land in — named rather than merely lit, because the same gesture lands
           somewhere different depending on which row the pointer is over, and a copy that went to

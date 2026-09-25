@@ -11,7 +11,7 @@
 //! worse than no poll.
 
 use serde::Serialize;
-use starship_battery::{Manager, State};
+use starship_battery::{Battery, Manager, State};
 
 /// What the machine's power situation is, when it has one.
 #[derive(Debug, Clone, Serialize)]
@@ -27,6 +27,69 @@ pub struct PowerStatus {
     /// the OS will not estimate it, which it routinely refuses to do for the first minutes after a
     /// cable is moved.
     pub minutes_left: Option<i64>,
+}
+
+/// What a battery gauge reports, in minutes, when it has no estimate yet.
+///
+/// The Smart Battery "unknown" value, 0xFFFF. On macOS starship-battery hands the gauge's own
+/// `TimeRemaining` through untouched and filters only `i32::MAX`, so for the first minutes after the
+/// cable comes out — while the gauge is still measuring — 65535 minutes arrived here as a real runway:
+/// "quedan 1092 h 15 min" at 8% (user report, 2026-09-25). `pmset -g batt` says "(no estimate)" at
+/// the same moment, and so should we.
+const GAUGE_UNKNOWN_MINUTES: i64 = 0xFFFF;
+
+/// The longest runway believed, per direction: the bounds starship-battery itself applies on the
+/// platforms where it computes the estimate from energy and draw (Windows, Linux). macOS reads the
+/// gauge's figure instead and gets no bound at all, so it is applied here, once, for every platform.
+const MAX_MINUTES_TO_FULL: i64 = 10 * 60;
+const MAX_MINUTES_TO_EMPTY: i64 = 10 * 24 * 60;
+
+/// A runway in whole minutes, or `None` for anything that is not one: nothing left, the gauge's
+/// "unknown", or a figure no battery could honour.
+fn runway_minutes(seconds: f64, charging: bool) -> Option<i64> {
+    let minutes = (seconds / 60.0).round() as i64;
+    let max = if charging { MAX_MINUTES_TO_FULL } else { MAX_MINUTES_TO_EMPTY };
+    (minutes > 0 && minutes != GAUGE_UNKNOWN_MINUTES && minutes <= max).then_some(minutes)
+}
+
+/// macOS's own time to empty: the smoothed estimate its battery menu and `pmset -g batt` show.
+///
+/// Not the gauge's `TimeRemaining`, which is what starship-battery reads and which follows the draw
+/// of the moment — on one machine a few minutes apart it said 49 and then 14 (a build was running)
+/// while macOS said "(no estimate)" and then "0:58". A runway that disagrees with the one the OS
+/// shows beside it reads as wrong whichever of the two is nearer the truth. `None` while macOS is
+/// still estimating (it answers -1, `kIOPSTimeRemainingUnknown`) and on the mains (-2,
+/// `kIOPSTimeRemainingUnlimited`). There is no such call for time to full, so charging keeps the
+/// gauge's figure — which is steadier while charging, the current being set by the charger.
+#[cfg(target_os = "macos")]
+fn os_minutes_to_empty() -> Option<i64> {
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOPSGetTimeRemainingEstimate() -> f64;
+    }
+    // SAFETY: takes nothing and returns a plain `CFTimeInterval`; a read of powerd's estimate.
+    let seconds = unsafe { IOPSGetTimeRemainingEstimate() };
+    if seconds > 0.0 { runway_minutes(seconds, false) } else { None }
+}
+
+/// The runway worth showing: to full while charging, to empty while discharging.
+fn runway(batteries: &[Battery], charging: bool) -> Option<i64> {
+    #[cfg(target_os = "macos")]
+    {
+        if !charging {
+            return os_minutes_to_empty();
+        }
+    }
+    batteries
+        .iter()
+        .filter_map(|battery| {
+            let remaining = if charging { battery.time_to_full() } else { battery.time_to_empty() };
+            // `Time` is in seconds whatever unit the platform read it in.
+            remaining.and_then(|time| runway_minutes(f64::from(time.value), charging))
+        })
+        // The one that runs out first is the one that matters; a sum would promise a runway the
+        // machine does not have.
+        .min()
 }
 
 /// Reads the batteries, or `None` for a machine that has none.
@@ -74,21 +137,7 @@ pub fn status() -> Option<PowerStatus> {
     // nothing is filling, and the time-to-empty the OS may still offer describes a machine that
     // would have to be unplugged first — shown beside a plug icon it reads as "your battery is
     // draining", which is the opposite of what is happening.
-    let minutes_left = if plugged_in && !charging {
-        None
-    } else {
-        batteries
-            .iter()
-            .filter_map(|battery| {
-                let remaining =
-                    if charging { battery.time_to_full() } else { battery.time_to_empty() };
-                remaining.map(|time| (f64::from(time.value) / 60.0).round() as i64)
-            })
-            // The one that runs out first is the one that matters; a sum would promise a runway the
-            // machine does not have.
-            .min()
-            .filter(|minutes| *minutes > 0)
-    };
+    let minutes_left = if plugged_in && !charging { None } else { runway(&batteries, charging) };
 
     Some(PowerStatus {
         percent: percent.clamp(0.0, 100.0),
@@ -100,6 +149,33 @@ pub fn status() -> Option<PowerStatus> {
 
 #[cfg(test)]
 mod tests {
+    use super::runway_minutes;
+
+    const MINUTE: f64 = 60.0;
+
+    #[test]
+    fn a_real_runway_is_kept() {
+        assert_eq!(runway_minutes(49.0 * MINUTE, false), Some(49));
+        assert_eq!(runway_minutes(3.0 * 60.0 * MINUTE, true), Some(180));
+        assert_eq!(runway_minutes(5.0 * 24.0 * 60.0 * MINUTE, false), Some(7200));
+    }
+
+    /// The report: the gauge's "unknown", shown as "quedan 1092 h 15 min".
+    #[test]
+    fn the_gauge_unknown_value_is_no_estimate() {
+        assert_eq!(runway_minutes(65535.0 * MINUTE, false), None);
+        assert_eq!(runway_minutes(65535.0 * MINUTE, true), None);
+    }
+
+    #[test]
+    fn nothing_left_or_past_belief_is_no_estimate() {
+        assert_eq!(runway_minutes(0.0, false), None);
+        assert_eq!(runway_minutes(11.0 * 60.0 * MINUTE, true), None);
+        assert_eq!(runway_minutes(11.0 * 24.0 * 60.0 * MINUTE, false), None);
+        // Windows' own "unknown", should a platform ever pass it through in seconds.
+        assert_eq!(runway_minutes(f64::from(u32::MAX), false), None);
+    }
+
     /// Prints what this machine actually reports. `#[ignore]` because the answer depends entirely
     /// on the hardware it runs on — a desktop correctly prints nothing, which no assertion could
     /// tell apart from a broken read.

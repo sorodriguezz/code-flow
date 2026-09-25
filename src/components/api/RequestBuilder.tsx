@@ -1089,7 +1089,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                       aria-haspopup="menu"
                       aria-expanded={menuOpen}
                       disabled={spec.url.trim() === ""}
-                      className="inline-flex w-7 shrink-0 items-center justify-center rounded-r-md bg-[var(--cf-accent)] text-[var(--cf-on-accent)] shadow-[inset_1px_0_0_color-mix(in_oklab,var(--cf-on-accent)_25%,transparent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:pointer-events-none disabled:opacity-45"
+                      className="inline-flex w-7 shrink-0 items-center justify-center rounded-r-md bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] shadow-[inset_1px_0_0_color-mix(in_oklab,var(--cf-on-accent)_25%,transparent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:pointer-events-none disabled:opacity-45"
                     >
                       <ChevronDown size={14} />
                     </button>

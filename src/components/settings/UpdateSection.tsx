@@ -144,7 +144,7 @@ export function UpdateSection({ bare = false }: { bare?: boolean }) {
               layout for a bar that moves many times a second. */}
           <div className="h-1.5 w-full max-w-xs overflow-hidden rounded-full bg-[var(--cf-border)]">
             <div
-              className="h-full w-full origin-left rounded-full bg-[var(--cf-accent)] transition-transform duration-200 ease-out"
+              className="h-full w-full origin-left rounded-full bg-[var(--cf-accent-fill)] transition-transform duration-200 ease-out"
               style={{ transform: `scaleX(${Math.min(Math.max(progress, 0), 100) / 100})` }}
             />
           </div>

@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "CodeFlow",
@@ -18,6 +19,7 @@
         "minWidth": 1024,
         "minHeight": 640,
         "decorations": false,
+        "transparent": true,
         "visible": false,
         "create": false
       }

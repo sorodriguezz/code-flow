@@ -146,7 +146,7 @@ export const NoteTreeRow = memo(function NoteTreeRow({
       {(dropEdge === "before" || dropEdge === "after") && (
         <span
           aria-hidden
-          className={`pointer-events-none absolute inset-x-0 h-0.5 rounded-full bg-[var(--cf-accent)] ${
+          className={`pointer-events-none absolute inset-x-0 h-0.5 rounded-full bg-[var(--cf-accent-fill)] ${
             dropEdge === "before" ? "-top-px" : "-bottom-px"
           }`}
           style={{ left: indent }}

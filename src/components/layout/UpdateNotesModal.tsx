@@ -115,7 +115,7 @@ export function UpdateNotesModal() {
               </p>
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--cf-border)]">
                 <div
-                  className="h-full origin-left rounded-full bg-[var(--cf-accent)] transition-transform duration-200"
+                  className="h-full origin-left rounded-full bg-[var(--cf-accent-fill)] transition-transform duration-200"
                   style={{ transform: `scaleX(${Math.min(100, Math.max(0, progress)) / 100})` }}
                 />
               </div>

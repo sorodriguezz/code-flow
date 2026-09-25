@@ -1670,6 +1670,11 @@ export const listDir = (repoPath: string, subPath?: string) =>
 export const readFileText = (repoPath: string, relPath: string) =>
   invoke<string>("read_file_text", { repoPath, relPath });
 
+/** What the editor's gutter compares the buffer against: the file's index copy, or HEAD's when
+ *  `staged`. `null` for a file git has no text copy of. See `git::diff::quick_diff_base`. */
+export const quickDiffBase = (repoPath: string, filePath: string, staged: boolean) =>
+  invoke<string | null>("quick_diff_base", { repoPath, filePath, staged });
+
 export const writeFileText = (repoPath: string, relPath: string, content: string) =>
   invoke<void>("write_file_text", { repoPath, relPath, content });
 

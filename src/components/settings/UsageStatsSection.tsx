@@ -430,7 +430,7 @@ function TaskTable({ tasks }: { tasks: TaskStat[] }) {
             </div>
             <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
               <div
-                className="h-full rounded-full bg-[var(--cf-accent)]"
+                className="h-full rounded-full bg-[var(--cf-accent-fill)]"
                 style={{ width: `${Math.max((task.tokens / peak) * 100, 2)}%` }}
               />
             </div>

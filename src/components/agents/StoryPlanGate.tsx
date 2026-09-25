@@ -196,7 +196,7 @@ export function StoryPlanGate({
           onClick={approve}
           className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium disabled:opacity-50 ${
             chosen.length > 0
-              ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))]"
+              ? "bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))]"
               : "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-accent)]"
           }`}
         >

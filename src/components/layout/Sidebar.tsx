@@ -28,6 +28,7 @@ import {
   LockOpen,
   Pencil,
   Plus,
+  Settings,
   Trash2,
   Undo2,
   Unlink,
@@ -48,6 +49,8 @@ import {
 } from "../../state/missingProjectsStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
+import { useTerminalStore } from "../../state/terminalStore";
+import { ServicesDockIcon } from "../services/ServicesDockIcon";
 import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
 import { useAiPanelStore, useVisiblePrId } from "../../state/aiPanelStore";
@@ -1473,7 +1476,7 @@ function ProjectRow({
         {dropEdge && (
           <span
             aria-hidden
-            className={`pointer-events-none absolute inset-x-1 h-0.5 rounded-full bg-[var(--cf-accent)] ${
+            className={`pointer-events-none absolute inset-x-1 h-0.5 rounded-full bg-[var(--cf-accent-fill)] ${
               dropEdge === "top" ? "-top-px" : "-bottom-px"
             }`}
           />
@@ -1925,6 +1928,84 @@ function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
+/**
+ * The services dock and settings, at the foot of this panel — moved here from the status bar and
+ * made bigger at the user's ask (2026-09-25), which left that bar to the repository it reports on.
+ * The dock above, the gear at the very bottom: the user's order.
+ *
+ * Two controls about the whole app rather than about a repository, in the corner the app rail across
+ * the window keeps for its own one: the same 32px square as the tour's cap there, the same short rule
+ * above, lit in the accent while their panel is open.
+ *
+ * **Folded they are icons; unfolded they are rows with their names**, the way the projects above
+ * them are chips folded and named rows unfolded. A column of bare icons hard against the left of a
+ * 300px panel read as something that had failed to lay out ("expandido se ve horrible"). Either way
+ * the icon sits in the same 32px box on the rail's axis — folded the rail is 56px and centres it on
+ * 28, unfolded `px-3` starts the row at 12 — so folding never moves the glyphs, and the status bar
+ * starts on that same axis (see `StatusBar`). The `data-tour` anchors travel with them; the tour's
+ * terminal step points at `toggle-terminal`.
+ */
+function SidebarFoot({ collapsed }: { collapsed: boolean }) {
+  const settingsOpen = useUiStore((s) => s.settingsOpen);
+  const toggleSettings = useUiStore((s) => s.toggleSettings);
+  const terminalOpen = useTerminalStore((s) => s.panelOpen);
+  const toggleTerminal = useTerminalStore((s) => s.togglePanel);
+  const t = useT();
+  const hint = useShortcutHint();
+
+  const items = [
+    {
+      tour: "toggle-terminal",
+      open: terminalOpen,
+      onClick: toggleTerminal,
+      icon: <ServicesDockIcon size={17} />,
+      label: t("sidebar.servicesDock"),
+      tip: hint("panel.terminal", t("terminal.toggle")),
+    },
+    {
+      tour: "open-settings",
+      open: settingsOpen,
+      onClick: toggleSettings,
+      icon: <Settings size={17} />,
+      label: t("statusbar.settings"),
+      tip: hint("app.settings", t("statusbar.settings")),
+    },
+  ];
+
+  return (
+    <>
+      <div
+        className={
+          collapsed ? "mx-auto h-px w-5 shrink-0 bg-[var(--cf-border)]" : "mx-3 h-px shrink-0 bg-[var(--cf-border)]"
+        }
+      />
+      <div className={`flex shrink-0 flex-col gap-0.5 pb-2 pt-2 ${collapsed ? "items-center" : "px-3"}`}>
+        {items.map((item) => (
+          <Tooltip key={item.tour} side="right" label={item.tip}>
+            <button
+              onClick={item.onClick}
+              data-tour={item.tour}
+              aria-label={item.label}
+              className={`flex h-8 shrink-0 items-center rounded-lg transition-colors duration-100 hover:bg-[var(--cf-hover)] ${
+                collapsed ? "w-8 justify-center hover:text-[var(--cf-accent)]" : "w-full pr-2 hover:text-[var(--cf-text)]"
+              } ${item.open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`}
+            >
+              {collapsed ? (
+                item.icon
+              ) : (
+                <>
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center">{item.icon}</span>
+                  <span className="min-w-0 truncate text-[13px] font-medium">{item.label}</span>
+                </>
+              )}
+            </button>
+          </Tooltip>
+        ))}
+      </div>
+    </>
+  );
+}
+
 export function Sidebar() {
   const collapsed = useLayoutStore((s) => s.flags.sidebarCollapsed);
   const toggleFlag = useLayoutStore((s) => s.toggleFlag);
@@ -1943,7 +2024,7 @@ export function Sidebar() {
   const openCloneModal = useUiStore((s) => s.openCloneModal);
   const closeCloneModal = useUiStore((s) => s.closeCloneModal);
   const t = useT();
-  // ⌘B still folds the panel; the button that used to carry that hint left the title bar with it.
+  // ⌘B still folds the panel; the fold toggle on the seam shows the chord in its tooltip.
   const hint = useShortcutHint();
   /** The repositories a pick turned up, waiting for the user to choose which to import. */
   const [folderScan, setFolderScan] = useState<{
@@ -1962,7 +2043,7 @@ export function Sidebar() {
 
   // Folded, the panel narrows to a rail of project chips rather than disappearing — which is what
   // it used to do, and what stopped being possible the moment the control that unfolds it moved
-  // onto the panel's own seam. See `SIDEBAR_COLLAPSED`.
+  // into the panel itself (onto its seam then, into `SidebarFoot` now). See `SIDEBAR_COLLAPSED`.
   const railWidth = collapsed ? SIDEBAR_COLLAPSED : sidebarWidth;
 
 
@@ -2135,7 +2216,7 @@ export function Sidebar() {
   };
 
   return (
-    // `relative` so the fold button below can be positioned against the seam rather than against
+    // `relative` so the fold toggle below can be positioned against the seam rather than against
     // the window.
     <div className="relative flex shrink-0">
       <aside
@@ -2147,13 +2228,11 @@ export function Sidebar() {
         // live half sat off to the right, against the panel it isn't part of. Dropping it leaves one
         // line, centred in the handle's own six pixels, with equal space to each panel.
         //
-        // `cf-fold-zone` only while folded: the whole rail is the fold button's hover target, which
+        // `cf-fold-zone` only while folded: the whole rail is the fold toggle's hover target, which
         // is the only way a control that small gets found by someone not already looking for it.
         // Unfolded it is absent, so brushing a 300px panel on the way somewhere else lights nothing
         // — there the handle is a live control with its own hover and needs no help. See `index.css`.
-        className={`flex shrink-0 flex-col overflow-hidden ${
-          collapsed ? "cf-fold-zone" : ""
-        }`}
+        className={`flex shrink-0 flex-col overflow-hidden ${collapsed ? "cf-fold-zone" : ""}`}
       >
         {/* Laid out at the width the panel is *heading for* rather than the width it currently is.
             The outer eases; this doesn't — so the contents are clipped by the fold instead of
@@ -2255,6 +2334,8 @@ export function Sidebar() {
               </div>
             </div>
           )}
+
+          <SidebarFoot collapsed={collapsed} />
         </div>
 
         {folderScan && (
@@ -2280,7 +2361,7 @@ export function Sidebar() {
           live handle there would let someone drag it to a width the names are still hidden at. The
           stored width is untouched, so unfolding returns to it. */}
       {collapsed ? (
-        // Part of the fold button's hover zone, along with the rail itself — `cf-seam-collapsed`
+        // Part of the fold toggle's hover zone, along with the rail itself — `cf-seam-collapsed`
         // is what gives this hairline four pixels of reach so the approach from the *content* side
         // answers too, which the rail on the other side cannot cover. See `index.css`.
         <div className="cf-fold-zone cf-seam-collapsed w-px shrink-0" />
@@ -2296,51 +2377,31 @@ export function Sidebar() {
         />
       )}
 
-      {/* The fold control, riding the seam the way the settings nav's does — inside the panel it
-          would be clipped by that panel's own `overflow-y-auto` and would scroll away with the
-          list. `z-20` because the handle it rides is `z-[15]`: any lower and the seam's accent glow
-          paints across the button, and the handle's grab area takes the clicks aimed at it.
+      {/* The fold toggle, riding the seam — outside the panel, because inside it the panel's own
+          `overflow-hidden` would clip the half that crosses the line.
 
-          The *height* is where the two part company, deliberately: this one is centred and the
-          settings one sits at the top. Its reason is on its own side and does not generalise —
-          `top-6` puts it on the line of the content pane's heading, which that dialog has and this
-          panel does not. (The claim that used to be here, that the settings seam is "short, fixed
-          and never dragged", was wrong on all three counts: it carries a live `ResizeHandle` from
-          160 to 320, and since the search box arrived that nav scrolls.)
+          Level with the workspace switcher, on the row that names what the panel holds (the
+          user's call, 2026-09-25). It has been in two other places and each was wrong in its own
+          way: halfway down the seam it floated over whatever the content pane had at that height —
+          a diff, a service's buttons — and belonged to neither side; at the panel's foot, among
+          the dock and settings, it was one more square in a column that already said "app
+          controls". Beside the switcher it reads as the panel's own header control, and it never
+          lands on content, because the content's own header row is what sits across from it.
 
-          Centred on the seam rather than at its top. Up there it came out level with the tab bar's
-          own row of controls, close enough to read as one more of them — a button about the *panel*
-          sitting in the strip that belongs to the tabs, which is the wrong thing for it to look
-          like. Halfway down it is the only thing on that line, and it is already where the hand
-          goes to grab the divider. The cost is those same 20px: centred, they are the middle of the
-          drag strip rather than a corner of it — worth it against a full-height handle, and the
-          same trade the button was already making at the top. */}
+          `top` is the switcher row's centre: `pt-3` plus half the trigger — the 28px tile folded,
+          the 36px button unfolded. */}
       <Tooltip
         side="right"
-        label={hint(
-          "panel.sidebar",
-          collapsed ? t("sidebar.expandProjects") : t("sidebar.collapseProjects"),
-        )}
+        label={hint("panel.sidebar", collapsed ? t("sidebar.expandProjects") : t("sidebar.collapseProjects"))}
       >
-        {/* Animated on the same `fold`, because the seam it rides is moving: left as a plain style
-            it teleported to the folded position and then waited there for the panel to catch up.
-            The vertical centring moves into framer's own `translateY` rather than staying a
-            Tailwind transform — this element's transform is framer's to write now. */}
         <button
           onClick={() => toggleFlag("sidebarCollapsed")}
           aria-label={collapsed ? t("sidebar.expandProjects") : t("sidebar.collapseProjects")}
           aria-expanded={!collapsed}
-          style={{ left: railWidth - 10, transform: "translateY(-50%)" }}
-          // `cf-fold-toggle` in both states, not just folded. It used to be conditional on the
-          // theory that an unfolded seam has a live `ResizeHandle` to speak for itself — but that
-          // reasoning only ever applied to the half of the class driven by the *seam*, and it left
-          // the button with no colour of its own under the pointer, which is the half that is about
-          // the button. Nothing needs gating to fix that: `cf-fold-zone` is only in the DOM while
-          // folded, so the sibling half of the rule cannot match here anyway.
-          //
-          // No `hover:text-…` any more — the class covers direct hover in both states now, so the
-          // Tailwind one was shadowed and only survived on source order.
-          className="cf-fold-toggle absolute top-1/2 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors"
+          style={{ left: railWidth - 10, top: collapsed ? 26 : 30, transform: "translateY(-50%)" }}
+          // `cf-fold-toggle` in both states: it is what lights the toggle under the pointer, and
+          // while folded (where `cf-fold-zone` is in the DOM) under the whole rail as well.
+          className="cf-fold-toggle absolute z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors"
         >
           {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
         </button>

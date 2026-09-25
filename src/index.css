@@ -70,6 +70,14 @@
      in that set — amber, green, violet, blue — and it is the one hue on this canvas no accent can
      collide with, since the accent picker offers none. */
   --cf-teal: #0d9488;
+  /* The commit graph's ref chips, one hue per kind: a local branch teal, a remote-tracking branch
+     blue, a tag amber (the user's call, 2026-09-25 — the chips had been painted in their lane's
+     colour, and a one-line history came out all accent). Their own tokens, like the schema legend
+     above, because what they must be is distinct from each other on one row, whatever the accent.
+     The 700 shades on this theme, since they are read as text: teal-600 sat at 3.7:1 on white. */
+  --cf-ref-branch: #0f766e;
+  --cf-ref-remote: #2563eb;
+  --cf-ref-tag: #b45309;
   /* BSON value colours for the document list. Their own tokens rather than borrowed semantics:
      `--cf-danger` happens to be the right red for an ObjectId today, and the day someone retunes
      what "danger" means, every id in every document would move with it. Chosen to sit at similar
@@ -112,6 +120,12 @@
   --cf-press: color-mix(in oklab, var(--cf-text) 9%, transparent);
   --cf-accent-line: color-mix(in oklab, var(--cf-accent) 40%, var(--cf-surface));
   --cf-focus: color-mix(in oklab, var(--cf-accent) 60%, transparent);
+  /* What a control is filled with: a secondary button or the selected pill, and the accent and
+     danger fills. Exactly the tokens they alias, until a see-through window lets some of the
+     backdrop through them (see "See-through" below) — which is why the recipes paint with these. */
+  --cf-control: var(--cf-surface);
+  --cf-accent-fill: var(--cf-accent);
+  --cf-danger-fill: var(--cf-danger);
   /* The brand stroke: the logo's violet → indigo → cyan. Reserved for a model at work (the orb, the
      run beam) — the mark people already read as "the AI is running". */
   --cf-ai-a: #8b5cf6;
@@ -141,6 +155,9 @@
   --cf-violet: #c084fc;
   --cf-blue: #60a5fa;
   --cf-teal: #2dd4bf;
+  --cf-ref-branch: #2dd4bf;
+  --cf-ref-remote: #60a5fa;
+  --cf-ref-tag: #fbbf24;
   /* Same five, lifted for a dark background — see the light theme's note. */
   --cf-bson-string: #6ee7a8;
   --cf-bson-number: #93b4fd;
@@ -182,6 +199,9 @@
     --cf-violet: #c084fc;
     --cf-blue: #60a5fa;
     --cf-teal: #2dd4bf;
+    --cf-ref-branch: #2dd4bf;
+    --cf-ref-remote: #60a5fa;
+    --cf-ref-tag: #fbbf24;
     --cf-bson-string: #6ee7a8;
     --cf-bson-number: #93b4fd;
     --cf-bson-id: #fbbf5c;
@@ -214,7 +234,20 @@ body {
   color: var(--cf-text);
   font-family: var(--font-sans);
   overflow: hidden;
+  /* Both spellings. WKWebView reads only the prefixed one, and the dev server does not add it, so
+     with the plain property alone every label in a macOS window could be swept by a drag or ⌘A —
+     reported on the API client's explorer, 2026-09-25. */
+  -webkit-user-select: none;
   user-select: none;
+}
+
+/* …and what somebody typed stays theirs to select and copy. Declared on the field itself, so it
+   beats the `none` every field inherits — WebKit applies an inherited `none` inside inputs too. */
+input,
+textarea,
+[contenteditable]:not([contenteditable="false"]) {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 /* Scrollbars: a hairline to read, a full-width target to grab.
@@ -602,12 +635,52 @@ body {
 
    Two sibling selectors per trigger because the button may or may not be wrapped: `Tooltip` renders
    a `display: contents` span around its child, which changes nothing about layout and everything
-   about which combinator reaches it. */
-.cf-fold-toggle:hover,
-.cf-fold-zone:hover ~ .cf-fold-toggle,
-.cf-fold-zone:hover ~ * .cf-fold-toggle {
-  color: var(--cf-accent);
-  border-color: var(--cf-accent);
+   about which combinator reaches it.
+
+   What lights is the edge alone, and it breathes rather than switching on (the user, 2026-09-25:
+   "que se vea como pulsante, no tan luminoso y solo los bordes"). It used to turn the whole disc
+   accent, chevrons included, which made it the brightest thing on the rail. The ring is a
+   pseudo-element laid exactly over the resting border, so the pulse is an opacity animation the
+   compositor runs — not a border-colour repaint every frame — and the chevrons keep their colour.
+   Then "que ilumine un poquito más": the peak went from 0.7 to full, and the ring carries a soft
+   glow of its own. The glow is a static shadow on the pseudo-element, so the same opacity fades it
+   and nothing new is painted per frame. */
+.cf-fold-toggle::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border: 1px solid var(--cf-accent);
+  border-radius: inherit;
+  box-shadow: 0 0 6px color-mix(in oklab, var(--cf-accent) 45%, transparent);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.cf-fold-toggle:hover::after,
+.cf-fold-zone:hover ~ .cf-fold-toggle::after,
+.cf-fold-zone:hover ~ * .cf-fold-toggle::after {
+  will-change: opacity;
+  animation: cf-fold-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes cf-fold-pulse {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Still marked for reduced motion: the ring holds between the two ends instead of breathing. */
+@media (prefers-reduced-motion: reduce) {
+  .cf-fold-toggle:hover::after,
+  .cf-fold-zone:hover ~ .cf-fold-toggle::after,
+  .cf-fold-zone:hover ~ * .cf-fold-toggle::after {
+    animation: none;
+    opacity: 0.65;
+  }
 }
 
 /* A card arriving in a list — same move as cf-fade-in but slow enough to register as one, and
@@ -696,6 +769,83 @@ body {
   }
   .cf-bell-breath {
     animation: none;
+  }
+}
+
+/* The title bar's AI button, beating in the accent while the assistant is closed (the user's ask,
+   2026-09-25: "un latido para que se vea que es importante"). A heartbeat rather than the breath
+   the bell and the battery share, because it says something else: those report a state, this marks
+   the way in. Lub-dub then rest, the first beat the stronger as a heart's is, and one faint glow
+   behind the glyph swelling with each beat.
+
+   The accent and never the AI hues: the ThinkingOrb's colours mean a model is working, and this
+   beats whether anything is working or not. `TitleBar` drops both classes while the panel is open.
+
+   Transform and opacity only, composited, for the reason `cf-bell-halo` gives: this loops for most
+   of a session. Once every 3s, and the user tuned both numbers: the cycle (it was 1.5s) and the
+   glow's strength (it peaked at 0.6). The two beats keep a heart's own pace — both inside the first
+   half second of the cycle — and the rest of it is the pause, so a longer cycle reads as a slower
+   pulse rather than as a heartbeat played in slow motion. */
+@keyframes cf-ai-beat {
+  0%,
+  18%,
+  100% {
+    transform: scale(1);
+  }
+  6% {
+    transform: scale(1.2);
+  }
+  10% {
+    transform: scale(1.02);
+  }
+  14% {
+    transform: scale(1.12);
+  }
+}
+
+@keyframes cf-ai-beat-glow {
+  0% {
+    opacity: 0;
+    transform: scale(0.55);
+  }
+  6% {
+    opacity: 0.3;
+    transform: scale(1);
+  }
+  10% {
+    opacity: 0.15;
+    transform: scale(0.92);
+  }
+  14% {
+    opacity: 0.25;
+    transform: scale(1.08);
+  }
+  32%,
+  100% {
+    opacity: 0;
+    transform: scale(1.3);
+  }
+}
+
+.cf-ai-beat {
+  will-change: transform;
+  animation: cf-ai-beat 3s ease-in-out infinite;
+}
+
+.cf-ai-beat-glow {
+  will-change: transform, opacity;
+  animation: cf-ai-beat-glow 3s ease-out infinite;
+}
+
+/* Still for reduced motion, but still marked: the glow stays, held faint, so the button keeps
+   reading as the important one without moving. */
+@media (prefers-reduced-motion: reduce) {
+  .cf-ai-beat {
+    animation: none;
+  }
+  .cf-ai-beat-glow {
+    animation: none;
+    opacity: 0.15;
   }
 }
 
@@ -2762,6 +2912,103 @@ body.cf-dragging * {
   border-radius: var(--cf-sheet-radius);
   box-shadow: 0 0 0 1px var(--cf-border);
   overflow: hidden;
+}
+
+/* The frame, as a class rather than `bg-[var(--cf-bg)]` on each window's root, so the see-through
+   rules below have one thing to aim at. */
+.cf-frame {
+  background: var(--cf-bg);
+}
+
+/* See-through — Apariencia › Modo y color › Transparencia (`state/glassStore`, `glass.rs`).
+
+   Every window is built transparent. With the setting off, `body` paints its opaque tone edge to
+   edge and nothing below it shows: the window the app always had. On, the platform draws a blurred
+   backdrop under the page (vibrancy on macOS, Acrylic/Mica on Windows) and the page lets it through
+   in exactly two layers — the frame, and each sheet on it — covering it with `--cf-glass-frame` and
+   `--cf-glass-sheet` of their own colour, the slider's two numbers (`lib/windowGlass`).
+
+   **One layer per sheet, not one per element.** Views paint the sheet's own tone again and again —
+   a root, a pane, a toolbar — which costs nothing while it is opaque and would compound into patches
+   of different transparency once it is not. So inside a sheet `--cf-surface` and `--cf-bg` are
+   cleared, and whatever paints them paints through to the sheet. The derived tones keep their solid
+   values: they are resolved on `:root`, before anything here clears the names they mix.
+
+   **Controls are glass too** (the user's call, 2026-09-25): fields, raised cards, `--cf-control`
+   (a secondary button, the selected pill) and the accent and danger fills keep their colour and let
+   some of the backdrop through — on the frame as in a sheet.
+
+   **What floats keeps a ground**, because text over text is unreadable: anything `fixed` (a dialog,
+   the palette, a toast), a dialog or menu by role, and a panel pinned over what it covers —
+   `absolute`/`sticky` with the sheet's or a raised tone, the headers content scrolls under. Each
+   gets every solid tone back, for itself and for what is inside it. Portalled popovers never sat in
+   a see-through region at all. */
+:root[data-glass] {
+  /* The solid tones, resolved once, here — the regions below redefine the plain names. */
+  --cf-surface-solid: var(--cf-surface);
+  --cf-surface-raised-solid: var(--cf-surface-raised);
+  --cf-bg-solid: var(--cf-bg);
+  --cf-sunken-solid: var(--cf-sunken);
+  --cf-field-solid: var(--cf-field);
+  --cf-accent-soft-solid: var(--cf-accent-soft);
+  --cf-glass-frame-fill: color-mix(in oklab, var(--cf-bg) var(--cf-glass-frame, 47.5%), transparent);
+  --cf-glass-sheet-fill: color-mix(in oklab, var(--cf-surface) var(--cf-glass-sheet, 55%), transparent);
+  --cf-glass-solo-fill: color-mix(in oklab, var(--cf-surface) var(--cf-glass-solo, 76.4%), transparent);
+}
+
+:root[data-glass] body {
+  background: transparent;
+}
+
+/* Every see-through region: what its controls are filled with. */
+:root[data-glass] :is(.cf-frame, .cf-sheet, .cf-glass-solo) {
+  --cf-field: color-mix(in oklab, var(--cf-field-solid) 50%, transparent);
+  --cf-surface-raised: color-mix(in oklab, var(--cf-surface-raised-solid) 55%, transparent);
+  --cf-control: color-mix(in oklab, var(--cf-surface-raised-solid) 50%, transparent);
+  --cf-accent-fill: color-mix(in oklab, var(--cf-accent) 80%, transparent);
+  --cf-danger-fill: color-mix(in oklab, var(--cf-danger) 80%, transparent);
+  --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 18%, transparent);
+}
+
+/* The frame: its own tone as one layer, and what sits on it — a well, a chip — as a tint over it. */
+:root[data-glass] .cf-frame {
+  background: var(--cf-glass-frame-fill);
+  --cf-surface: color-mix(in oklab, var(--cf-surface-solid) 55%, transparent);
+  --cf-sunken: color-mix(in oklab, var(--cf-sunken-solid) 45%, transparent);
+  --cf-surface-2: var(--cf-sunken);
+}
+
+/* `.cf-glass-solo`: a window that is one sheet and no frame (the quick-ask box), so its one layer
+   carries what the frame and a sheet carry together. */
+:root[data-glass] :is(.cf-sheet, .cf-glass-solo) {
+  background: var(--cf-glass-sheet-fill);
+  --cf-surface: transparent;
+  --cf-bg: transparent;
+  /* Wells and strips stay a step darker than the sheet, as a tint over it rather than a solid
+     patch. */
+  --cf-sunken: color-mix(in oklab, var(--cf-sunken-solid) 45%, transparent);
+  --cf-surface-2: var(--cf-sunken);
+}
+
+:root[data-glass] .cf-glass-solo {
+  background: var(--cf-glass-solo-fill);
+}
+
+/* `~=` matches the whole class, so `hover:bg-[…]` and `bg-[…]/70` are not taken for it. */
+:root[data-glass] :is(.cf-frame, .cf-sheet, .cf-glass-solo) :is(.fixed, [role="dialog"], [role="menu"], [aria-modal="true"]),
+:root[data-glass]
+  :is(.cf-frame, .cf-sheet, .cf-glass-solo)
+  :is(.absolute, .sticky):is([class~="bg-[var(--cf-surface)]"], [class~="bg-[var(--cf-surface-raised)]"]) {
+  --cf-surface: var(--cf-surface-solid);
+  --cf-surface-raised: var(--cf-surface-raised-solid);
+  --cf-bg: var(--cf-bg-solid);
+  --cf-sunken: var(--cf-sunken-solid);
+  --cf-surface-2: var(--cf-sunken-solid);
+  --cf-field: var(--cf-field-solid);
+  --cf-control: var(--cf-surface-solid);
+  --cf-accent-soft: var(--cf-accent-soft-solid);
+  --cf-accent-fill: var(--cf-accent);
+  --cf-danger-fill: var(--cf-danger);
 }
 
 /* A panel appearing: its content fades in rather than the panel growing from zero width — a width

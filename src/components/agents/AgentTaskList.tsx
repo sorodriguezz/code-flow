@@ -537,7 +537,7 @@ function NewSplitButton({
   // Both halves wear the primary fill themselves, so each lights on its own hover; the hairline
   // between them is the one thing that says there are two.
   const half =
-    "flex items-center bg-[var(--cf-accent)] text-[var(--cf-on-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))]";
+    "flex items-center bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))]";
 
   return (
     <div ref={boxRef} className="flex h-[26px] min-w-0 shrink items-stretch">

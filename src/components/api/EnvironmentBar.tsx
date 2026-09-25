@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Eye, Layers, Settings2 } from "lucide-react";
+import { Eye, Layers, RotateCcw, Settings2 } from "lucide-react";
 import { Select } from "../common/Select";
 import { Tooltip } from "../common/Tooltip";
 import { iconButtonClass } from "../common/Button";
@@ -38,6 +38,12 @@ interface QuickLookRow {
   secret: boolean;
   /** A lower-precedence scope also defines this name, so this row is not what a send would use. */
   shadowed: boolean;
+  /** A stored row, so its current value can be changed right here. Script and runner values are
+   *  rewritten on every run and have nothing behind them to write to. */
+  editable: boolean;
+  /** The initial value, when the current one overrides it with something else — what "back to the
+   *  initial value" restores. `null` when nothing is overridden. */
+  overrides: string | null;
 }
 
 function rowsForScope(scope: VariableScope, ctx: VariableContext): QuickLookRow[] {
@@ -48,6 +54,8 @@ function rowsForScope(scope: VariableScope, ctx: VariableContext): QuickLookRow[
       value,
       secret: false,
       shadowed: shadowed(key),
+      editable: false,
+      overrides: null,
     }));
   }
   return ctx[scope]
@@ -57,7 +65,101 @@ function rowsForScope(scope: VariableScope, ctx: VariableContext): QuickLookRow[
       value: variable.currentValue !== "" ? variable.currentValue : variable.initialValue,
       secret: variable.secret,
       shadowed: shadowed(variable.key),
+      editable: true,
+      overrides:
+        variable.currentValue !== "" && variable.currentValue !== variable.initialValue ? variable.initialValue : null,
     }));
+}
+
+/**
+ * One row's value, and the fast way to change it: click it, type, Enter.
+ *
+ * Only the **current** value is written (`setVariable`), the one a send uses and scripts write —
+ * the initial value, which is what an export shares and "Restablecer" goes back to, stays exactly
+ * as it was (user's call). Leaving the field saves too; Escape abandons the edit.
+ */
+function QuickLookValue({
+  row,
+  scope,
+  collectionId,
+}: {
+  row: QuickLookRow;
+  scope: VariableScope;
+  collectionId: string | null;
+}) {
+  const t = useT();
+  const setVariable = useApiStore((s) => s.setVariable);
+  const [draft, setDraft] = useState<string | null>(null);
+  /** Escape blurs the field like Enter does; this is what tells the blur not to save. */
+  const abandon = useRef(false);
+
+  const commit = () => {
+    const next = draft;
+    setDraft(null);
+    if (abandon.current || next === null || next === row.value) {
+      abandon.current = false;
+      return;
+    }
+    void setVariable(scope, row.key, next, collectionId);
+  };
+
+  const shown = row.secret ? "••••••••" : row.value;
+
+  if (draft !== null) {
+    return (
+      <input
+        autoFocus
+        type={row.secret ? "password" : "text"}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          else if (e.key === "Escape") {
+            // The panel closes on Escape elsewhere; here it only means "not this value".
+            e.stopPropagation();
+            abandon.current = true;
+            e.currentTarget.blur();
+          }
+        }}
+        aria-label={t("api.env.currentValue")}
+        spellCheck={false}
+        autoCapitalize="off"
+        className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1.5 py-0.5 font-mono text-[12px] text-[var(--cf-text)] outline-none"
+      />
+    );
+  }
+
+  if (!row.editable) {
+    return <span className="min-w-0 flex-1 truncate text-right font-mono text-[12px] text-[var(--cf-text)]">{shown}</span>;
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setDraft(row.value)}
+        title={t("api.env.editValue")}
+        className="min-w-0 flex-1 cursor-text truncate rounded px-1 text-right font-mono text-[12px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
+      >
+        {shown === "" ? <span className="text-[var(--cf-text-faint)]">—</span> : shown}
+      </button>
+      {row.overrides !== null && (
+        <Tooltip label={t("api.env.backToInitial", { value: row.secret ? "••••••••" : row.overrides || "—" })}>
+          <button
+            type="button"
+            // An empty current value is "not overridden" — the initial one shows through again.
+            onClick={() => void setVariable(scope, row.key, "", collectionId)}
+            aria-label={t("api.env.backToInitial", { value: row.secret ? "••••••••" : row.overrides || "—" })}
+            className={iconButtonClass({ size: "xs" })}
+          >
+            <RotateCcw size={12} />
+          </button>
+        </Tooltip>
+      )}
+    </>
+  );
 }
 
 /**
@@ -177,16 +279,14 @@ function VariableQuickLook({ collectionId }: { collectionId: string | null }) {
                       <div
                         key={`${scope}:${row.key}`}
                         title={row.shadowed ? t("api.env.shadowed") : undefined}
-                        className={`flex items-baseline gap-2 rounded-md px-1.5 py-1 ${
+                        className={`flex items-center gap-2 rounded-md px-1.5 py-0.5 ${
                           row.shadowed ? "opacity-45 line-through" : ""
                         }`}
                       >
                         <span className="min-w-0 max-w-[45%] shrink-0 truncate font-mono text-[12px] text-[var(--cf-accent)]">
                           {row.key}
                         </span>
-                        <span className="min-w-0 flex-1 truncate text-right font-mono text-[12px] text-[var(--cf-text)]">
-                          {row.secret ? "••••••••" : row.value}
-                        </span>
+                        <QuickLookValue row={row} scope={scope} collectionId={collectionId} />
                       </div>
                     ))}
                   </div>

@@ -449,7 +449,7 @@ export function StepBadge({ status, index, gate = false }: { status: ChainStepSt
           : status === "running"
             ? "cf-step-ring bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
             : gate && status === "pending"
-              ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]"
+              ? "bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)]"
               : "bg-[var(--cf-press)] text-[var(--cf-text-muted)]";
 
   return (

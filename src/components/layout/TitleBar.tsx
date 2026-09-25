@@ -1,13 +1,11 @@
-import { useState, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronDown, Copy, Glasses, MessageCircle, Minus, Sparkles, Square, X, Zap } from "lucide-react";
+import { Copy, Minus, Sparkles, Square, X } from "lucide-react";
 import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
-import { useUiStore } from "../../state/uiStore";
-import { useWorkspaceStore } from "../../state/workspaceStore";
-import { usePrStore } from "../../state/prStore";
-import { EMPTY_TABS, INBOX_KEY, NO_WORKSPACE, useAiPanelStore } from "../../state/aiPanelStore";
-import { useT } from "../../state/languageStore";
+import { useShortcutHint } from "../../lib/useShortcutHint";
 import { useLayoutStore } from "../../state/layoutStore";
+import { useUiStore } from "../../state/uiStore";
+import { useT } from "../../state/languageStore";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 import { ChromeScope } from "./TabBar";
 
@@ -124,80 +122,44 @@ function WindowsControls() {
   );
 }
 
-function AiActionsMenu({ onClose }: { onClose: () => void }) {
+/**
+ * The way into the assistant, at the end of the bar where the "Acciones IA" menu used to be — the
+ * user had that menu removed and this button moved up here from the status bar (2026-09-25), over
+ * the panel it opens.
+ *
+ * Always in the accent, and beating lub-dub while the panel is closed, so it reads as the important
+ * door rather than as one more glyph (also the user's ask). Open, there is nowhere left for it to
+ * lead, so it stops and holds a tinted pill instead, the way a pressed toggle does. See `cf-ai-beat`
+ * in `index.css`.
+ */
+function AssistantButton() {
+  const open = useUiStore((s) => s.aiPanelOpen);
+  const toggle = useUiStore((s) => s.toggleAiPanel);
   const t = useT();
-  const openAiPanel = useUiStore((s) => s.openAiPanel);
-  const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
-  /**
-   * The pull request the assistant is showing, if it is showing one.
-   *
-   * Its tab names its own project, so "review this PR" can never mix one repository's number with
-   * another's working copy — the hazard the old `selectedPrProjectId` guard existed for.
-   */
-  const panelOpen = useUiStore((s) => s.aiPanelOpen);
-  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId) ?? NO_WORKSPACE;
-  const shownTab = useAiPanelStore((s) => {
-    const key = s.activeByWorkspace[workspaceId] ?? INBOX_KEY;
-    return (s.tabsByWorkspace[workspaceId] ?? EMPTY_TABS).find((tab) => tab.key === key) ?? null;
-  });
-  const shown = panelOpen && shownTab?.kind === "pr" ? shownTab : null;
-  const selectedPr = shown?.pr ?? null;
-  const reviewPr = usePrStore((s) => s.reviewPr);
-
-  const openChat = () => {
-    openAiPanel();
-    onClose();
-  };
-
-  const reviewFromLink = () => {
-    openPrLinkModal();
-    onClose();
-  };
-
-  // Same rule as the PR panel: a merged or closed pull request is settled and takes no more
-  // actions. Without this the menu would be a way around the panel's own lock.
-  const prSettled = selectedPr?.status === "merged" || selectedPr?.status === "closed";
-
-  const reviewCurrentPr = () => {
-    if (!shown || !selectedPr || prSettled) return;
-    openAiPanel();
-    reviewPr({ kind: "project", projectId: shown.projectId }, selectedPr);
-    onClose();
-  };
+  const hint = useShortcutHint();
 
   return (
-    <>
-      <div className="fixed inset-0 z-10" onClick={onClose} />
-      <div className="cf-fade-in absolute right-0 top-full z-20 mt-1.5 w-72 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)]">
-        <button
-          onClick={openChat}
-          className="flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
-        >
-          <MessageCircle size={15} className="text-[var(--cf-text-muted)]" />
-          {t("titlebar.openChat")}
-        </button>
-        <button
-          onClick={reviewCurrentPr}
-          disabled={!selectedPr || prSettled}
-          title={prSettled ? t("pr.stateLockedHint") : undefined}
-          className="flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)] disabled:opacity-40 disabled:hover:bg-transparent"
-        >
-          <Sparkles size={15} className="text-[var(--cf-text-muted)]" />
-          <span className="min-w-0 flex-1 truncate">
-            {selectedPr ? t("titlebar.reviewCurrentPr", { title: selectedPr.title }) : t("titlebar.noPrSelected")}
-          </span>
-        </button>
-        {/* Works with no project open and no PR selected — that's the point: the link is the
-            only input needed. */}
-        <button
-          onClick={reviewFromLink}
-          className="flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
-        >
-          <Glasses size={15} className="text-[var(--cf-text-muted)]" />
-          {t("prLink.menuItem")}
-        </button>
-      </div>
-    </>
+    <button
+      onClick={toggle}
+      data-tour="toggle-ai-panel"
+      title={hint("panel.ai", t("statusbar.aiPanel"))}
+      className={`relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-accent)] ${
+        open ? "bg-[var(--cf-accent)]/15 hover:bg-[var(--cf-accent)]/20" : "hover:bg-[var(--cf-hover)]"
+      }`}
+    >
+      {!open && (
+        <span
+          aria-hidden
+          className="cf-ai-beat-glow absolute -inset-[3px] rounded-full bg-[radial-gradient(circle,var(--cf-accent)_0%,var(--cf-accent)_30%,transparent_70%)]"
+        />
+      )}
+      {/* A span around the glyph rather than the class on the `<svg>`: the beat scales a plain box
+          about its centre, with none of an SVG root's transform-origin questions. `relative` keeps
+          it painting over the glow, which is positioned and comes first. */}
+      <span className={`relative flex ${open ? "" : "cf-ai-beat"}`}>
+        <Sparkles size={15} />
+      </span>
+    </button>
   );
 }
 
@@ -207,8 +169,6 @@ export function TitleBar() {
   const fullscreen = useIsFullscreen();
   const sidebarFolded = useLayoutStore((s) => s.flags.sidebarCollapsed);
   const lights = isMac && !fullscreen;
-  const t = useT();
-  const [showAiMenu, setShowAiMenu] = useState(false);
 
   return (
     <header
@@ -233,11 +193,10 @@ export function TitleBar() {
       {/* Nothing but the room the traffic lights need.
 
           Search and the two history arrows are gone, and the workspace switcher before them moved
-          to the head of the projects panel. What is left is a bar that holds the two controls that
-          are genuinely about the whole window, at the end where the window's own buttons aren't.
-          Search and history keep their keyboard shortcuts — `app.commandPalette`, `nav.back`,
-          `nav.forward` — and the palette is also reachable from every place that opens it; three
-          buttons in the corner were three permanent pixels for what a chord already does. */}
+          to the head of the projects panel. Search and history keep their keyboard shortcuts —
+          `app.commandPalette`, `nav.back`, `nav.forward` — and the palette is also reachable from
+          every place that opens it; three buttons in the corner were three permanent pixels for
+          what a chord already does. */}
       {lights && (
         <div className="flex shrink-0 items-center">
           <MacControlsSpacer />
@@ -251,32 +210,12 @@ export function TitleBar() {
       <ChromeScope />
       <div className="min-w-0 flex-1 self-stretch" />
 
+      {/* The "Acciones IA" menu that ended this row is gone (2026-09-25), and the assistant's own
+          button took its place: each of the menu's rows had a quicker door already — this button
+          opens the assistant, a pull request's own tab reviews it, and the sidebar's glasses (or
+          the palette) review one from its link. */}
       <div className="flex shrink-0 items-center gap-2 self-stretch">
-        {/* The graduation cap that used to sit here is at the foot of the app rail now, merged with
-            the launcher the five workspace apps already had. Two buttons with the same glyph, one
-            in this corner and one in the rail, meaning "the tour" and "a different tour" — the
-            difference was carried entirely by which of them you happened to click. See
-            `TourLauncher`. */}
-        {/* Opted out of the header's drag region: the open menu hangs a full-screen backdrop and a
-            popover off this wrapper, and both are plain divs — under `deep` they would turn a press
-            anywhere on screen into a window drag instead of closing the menu. */}
-        <div data-tauri-drag-region="false" className="relative">
-          <button
-            onClick={() => setShowAiMenu((v) => !v)}
-            aria-haspopup="menu"
-            aria-expanded={showAiMenu}
-            className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium transition-colors ${
-              showAiMenu
-                ? "bg-[var(--cf-hover)] text-[var(--cf-text)]"
-                : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-            }`}
-          >
-            <Zap size={14} />
-            {t("titlebar.aiActions")}
-            <ChevronDown size={12} className="opacity-70" />
-          </button>
-          {showAiMenu && <AiActionsMenu onClose={() => setShowAiMenu(false)} />}
-        </div>
+        <AssistantButton />
         {!isMac && <WindowsControls />}
       </div>
     </header>

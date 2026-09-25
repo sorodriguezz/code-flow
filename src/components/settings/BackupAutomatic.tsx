@@ -729,7 +729,7 @@ export function BackupAutomatic({
                 <span
                   className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full text-[11px] font-semibold tabular-nums ${
                     active
-                      ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]"
+                      ? "bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)]"
                       : "shadow-[inset_0_0_0_1.5px_var(--cf-border-strong)]"
                   }`}
                 >

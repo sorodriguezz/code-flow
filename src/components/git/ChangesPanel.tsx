@@ -965,7 +965,7 @@ export function ChangesPanel({
           <button
             disabled={busy || aiBusy || scanning || !message.trim() || status.staged.length === 0}
             onClick={handleCommit}
-            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] py-1.5 text-[13px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
+            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent-fill)] py-1.5 text-[13px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
           >
             {scanning && <Loader2 size={13} className="animate-spin" />}
             {scanning ? t("secrets.scanning") : t("changes.commit")}{" "}

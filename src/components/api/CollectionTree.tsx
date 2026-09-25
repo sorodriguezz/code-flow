@@ -1377,7 +1377,7 @@ export function CollectionTree() {
     if (over.index !== storeIndex(gap, at)) return null;
     return (
       <div style={{ marginLeft: depth * INDENT + ROW_PAD }} className="relative h-0">
-        <span className="pointer-events-none absolute -top-px left-0 right-2 h-[2px] rounded-full bg-[var(--cf-accent)]" />
+        <span className="pointer-events-none absolute -top-px left-0 right-2 h-[2px] rounded-full bg-[var(--cf-accent-fill)]" />
       </div>
     );
   };

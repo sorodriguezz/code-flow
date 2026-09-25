@@ -404,7 +404,7 @@ export function TourOverlay() {
           {/* Scaled, not sized: stepping moves the fill with a transform, so the bar costs no layout. */}
           <div className="mt-3.5 h-[3px] w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
             <div
-              className="h-full w-full origin-left rounded-full bg-[var(--cf-accent)] transition-transform duration-300 ease-out"
+              className="h-full w-full origin-left rounded-full bg-[var(--cf-accent-fill)] transition-transform duration-300 ease-out"
               style={{ transform: `scaleX(${progress})` }}
             />
           </div>

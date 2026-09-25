@@ -225,10 +225,10 @@ function Row({ label, percent, detail }: { label: string; percent: number; detai
         <span
           className={`block h-full origin-left rounded-full transition-transform duration-300 ${
             severity === "critical"
-              ? "bg-[var(--cf-danger)]"
+              ? "bg-[var(--cf-danger-fill)]"
               : severity === "high"
                 ? "bg-[var(--cf-warning)]"
-                : "bg-[var(--cf-accent)]"
+                : "bg-[var(--cf-accent-fill)]"
           }`}
           style={{ transform: `scaleX(${Math.max(2, Math.min(100, percent)) / 100})` }}
         />

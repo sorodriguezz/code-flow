@@ -583,7 +583,7 @@ export function SearchPanel({
                   {bufferHits?.has(path) && (
                     <span
                       title={t("editor.searchUnsaved")}
-                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent)]"
+                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent-fill)]"
                     />
                   )}
                   <span className="ml-auto shrink-0 pr-1 text-[11px] tabular-nums text-[var(--cf-text-faint)]">

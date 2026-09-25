@@ -619,9 +619,10 @@ export function findTheme(id: string, mode: "light" | "dark"): CodeTheme {
 }
 
 /** Monaco's registered name for a scheme. Namespaced so it can't collide with the built-in
- * `vs`/`vs-dark` themes. */
-export function monacoThemeName(id: string): string {
-  return `cf-${id}`;
+ * `vs`/`vs-dark` themes. `glass` is the same scheme with its backgrounds cleared, for a window that
+ * is see-through (`lib/windowGlass`) — see `monacoSetup`, which registers both. */
+export function monacoThemeName(id: string, glass = false): string {
+  return glass ? `cf-${id}-glass` : `cf-${id}`;
 }
 
 export interface TokenRule {

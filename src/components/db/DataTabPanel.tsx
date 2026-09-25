@@ -1225,7 +1225,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
                 {!optionsOpen && hasQueryOptions(tab.options) && (
                   <span
                     aria-hidden
-                    className="pointer-events-none absolute -right-[1px] -top-[1px] h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]"
+                    className="pointer-events-none absolute -right-[1px] -top-[1px] h-1.5 w-1.5 rounded-full bg-[var(--cf-accent-fill)]"
                   />
                 )}
               </span>

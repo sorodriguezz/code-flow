@@ -218,7 +218,7 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
         ) : (
           <span
             className={`h-1.5 w-1.5 rounded-full ${
-              run.attention ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-accent)]"
+              run.attention ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-accent-fill)]"
             }`}
           />
         )}

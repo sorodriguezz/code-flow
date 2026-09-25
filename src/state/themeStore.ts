@@ -9,6 +9,7 @@ import {
 } from "../lib/codeThemes";
 import { withThemeTransition } from "../lib/themeTransition";
 import { watchSettings } from "../lib/settingsSync";
+import { isGlassPainted } from "../lib/windowGlass";
 import { useAccentStore } from "./accentStore";
 import type { ThemePreference } from "../types/domain";
 
@@ -26,6 +27,9 @@ interface ThemeState {
   sync: () => Promise<void>;
   setPreference: (pref: ThemePreference) => Promise<void>;
   setThemeId: (mode: "light" | "dark", id: string) => Promise<void>;
+  /** Re-picks the Monaco theme after the window turned see-through or opaque — the scheme is the
+   *  same, but a see-through window gets its variant with the backgrounds cleared. */
+  syncMonacoTheme: () => void;
 }
 
 const SETTING_KEY = "theme_preference";
@@ -74,7 +78,7 @@ function applyToDocument(resolved: "light" | "dark", themeId: string): string {
   const theme = findTheme(themeId, resolved);
   applyThemeVars(theme);
   useAccentStore.getState().apply(resolved);
-  return monacoThemeName(theme.id);
+  return monacoThemeName(theme.id, isGlassPainted());
 }
 
 export const useThemeStore = create<ThemeState>((set, get) => ({
@@ -82,7 +86,12 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   resolved: resolve("system"),
   darkThemeId: DEFAULT_DARK_THEME,
   lightThemeId: DEFAULT_LIGHT_THEME,
-  monacoTheme: monacoThemeName(resolve("system") === "dark" ? DEFAULT_DARK_THEME : DEFAULT_LIGHT_THEME),
+  // `isGlassPainted` already, not only after `glassStore` boots: a window built see-through has its
+  // `data-glass` from `glass.rs`'s first-paint script before any module runs.
+  monacoTheme: monacoThemeName(
+    resolve("system") === "dark" ? DEFAULT_DARK_THEME : DEFAULT_LIGHT_THEME,
+    isGlassPainted(),
+  ),
 
   init: async () => {
     const { preference, darkThemeId, lightThemeId } = (await readStored()) ?? {
@@ -178,6 +187,12 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     }
 
     await setSetting(mode === "dark" ? DARK_KEY : LIGHT_KEY, theme.id);
+  },
+
+  syncMonacoTheme: () => {
+    const { resolved, darkThemeId, lightThemeId, monacoTheme } = get();
+    const next = monacoThemeName(findTheme(resolved === "dark" ? darkThemeId : lightThemeId, resolved).id, isGlassPainted());
+    if (next !== monacoTheme) set({ monacoTheme: next });
   },
 }));
 

@@ -299,7 +299,7 @@ export function PanelChat({
                 disabled={!draft.trim()}
                 title={holder ? t("assistant.sendQueued") : t("chat.send")}
                 aria-label={t("chat.send")}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:opacity-40"
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40"
               >
                 {holder ? <Clock size={12} /> : <ArrowUp size={13} />}
               </button>

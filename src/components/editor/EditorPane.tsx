@@ -36,7 +36,9 @@ import { FileGlyph } from "../common/FileGlyph";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
 import { changeBlocksOf, sameHunk, type ChangeBlock, type GutterMark } from "../../lib/diffBlocks";
 import { diffSignature, reconstructSides } from "../../lib/diffText";
-import { getCommitFileDiff, getFileDiff } from "../../lib/tauri/commands";
+import { getCommitFileDiff, getFileDiff, quickDiffBase } from "../../lib/tauri/commands";
+import { liveGutterMarks } from "../../lib/liveGutter";
+import { useEditorStatus } from "./useEditorStatus";
 import { anchorColor, anchorTagClass, parseAnchors } from "../../lib/anchors";
 import { blameLabel, blameStatusText } from "../../lib/blameText";
 import { formatWhen } from "../remote/remoteChrome";
@@ -366,6 +368,12 @@ function sizePeekDom(ed: MonacoEditorNS.IStandaloneCodeEditor, dom: HTMLDivEleme
  * `deleted` has no line class: there is no changed line to tint, and tinting the line that survived
  * would blame it for the deletion.
  */
+/**
+ * How long typing has to pause before the change marks are re-drawn from the buffer. Short enough to
+ * read as immediate; long enough that a burst of keys costs one diff, not one per key.
+ */
+const LIVE_MARKS_DEBOUNCE_MS = 120;
+
 const MARK_STYLES = {
   added: {
     gutter: "cf-editor-gutter-added",
@@ -508,7 +516,7 @@ function Breadcrumb({
       </span>
       <span className="truncate text-[var(--cf-text)]">{name}</span>
       {/* The same dot the tab wears in its × slot, so "unsaved" is one mark wherever it shows. */}
-      {dirty && <span aria-hidden className="ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent)]" />}
+      {dirty && <span aria-hidden className="ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent-fill)]" />}
       {loading && <Loader2 size={12} className="ml-0.5 shrink-0 animate-spin" />}
       {compare && (
         <span className="ml-1.5 flex min-w-0 items-center gap-1.5">
@@ -886,6 +894,15 @@ export function EditorPane({
   const viewMode: ViewMode =
     activeTab?.viewMode === "diff" && !activeDiff && !compare ? "code" : (activeTab?.viewMode ?? "code");
 
+  // The Editor's status line — caret, indentation, line endings, language — for as long as this pane
+  // has focus and Monaco is what it shows (code and split; not preview, diff or a file still loading).
+  useEditorStatus(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {
+    groupId,
+    focused,
+    path: activeTab && !activeTab.loading && (viewMode === "code" || viewMode === "split") ? activeTab.path : null,
+    fileKey: activeModelPath ?? null,
+  });
+
   /**
    * What the side-by-side is a view of, as a cache key.
    *
@@ -994,6 +1011,74 @@ export function EditorPane({
     [diffKey],
   );
 
+  /**
+   * The change marks drawn from the **buffer**, as it is typed, the way VS Code draws them — see
+   * `lib/liveGutter`. The marks above come from git's diff of the file on disk, so until now a line
+   * typed and not yet saved had no mark at all (the user's report, 2026-09-25).
+   *
+   * The base is the file's index copy — HEAD's for a staged-only change, i.e. the old side of whatever
+   * the marks from disk show — read once per state of the repository rather than per keystroke:
+   * refetched when the file's change on disk or HEAD moves, and the previous copy kept while that is
+   * in flight, so a save never blinks the marks off and back on. A file git has no text copy of
+   * (untracked, binary) has no base, and keeps its marks from disk.
+   */
+  const liveBaseHeadOid = useRepoStore((s) => s.status?.head_oid ?? null);
+  const liveStaged = activeDiffEntry?.staged ?? false;
+  const liveBaseKey =
+    activePath && !compare
+      ? `${project.local_path}\0${activePath}\0${liveStaged ? "head" : "index"}\0${liveBaseHeadOid ?? ""}\0${diffKey ?? ""}`
+      : null;
+  const [liveBase, setLiveBase] = useState<{ path: string; text: string | null } | null>(null);
+  useEffect(() => {
+    if (!liveBaseKey || !activePath) return;
+    let cancelled = false;
+    const path = activePath;
+    quickDiffBase(project.local_path, path, liveStaged).then(
+      (text) => {
+        if (!cancelled) setLiveBase({ path, text });
+      },
+      () => {
+        if (!cancelled) setLiveBase({ path, text: null });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // Keyed on the string, which already names every input that can change the answer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveBaseKey]);
+  const liveBaseText = liveBase && liveBase.path === activePath ? liveBase.text : null;
+
+  const [liveMarks, setLiveMarks] = useState<{ path: string; marks: GutterMark[] } | null>(null);
+  const tabLoading = activeTab?.loading ?? false;
+  useEffect(() => {
+    if (!activePath || liveBaseText === null || tabLoading) {
+      setLiveMarks(null);
+      return;
+    }
+    const path = activePath;
+    const timer = setTimeout(() => {
+      const computed = liveGutterMarks(liveBaseText, content);
+      setLiveMarks(computed ? { path, marks: computed } : null);
+    }, LIVE_MARKS_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [activePath, liveBaseText, content, tabLoading]);
+
+  /**
+   * What the gutter draws: the live marks whenever there are some for this file, the ones from disk
+   * otherwise. A clean buffer *is* the file on disk, so there each live mark is handed the hunk it
+   * sits in and a click still opens the peek; an unsaved one has no hunk on disk yet, and its marks
+   * keep `-1`, which `openPeek` ignores.
+   */
+  const shownMarks = useMemo(() => {
+    if (!liveMarks || liveMarks.path !== activePath) return marks;
+    if (dirty) return liveMarks.marks;
+    return liveMarks.marks.map((mark) => {
+      const blockIndex = blocks.findIndex((block) => block.firstLine <= mark.end && mark.start <= block.lastLine);
+      return blockIndex === mark.blockIndex ? mark : { ...mark, blockIndex };
+    });
+  }, [liveMarks, activePath, marks, dirty, blocks]);
+
   // Marks changed lines directly on Monaco's own minimap + overview ruler + gutter, rather
   // than a bespoke strip — this *is* the "code map" the Changes tab has, just reused where
   // Monaco already renders one.
@@ -1011,7 +1096,7 @@ export function EditorPane({
     const model = ed?.getModel();
     if (!ed || !mon || !activePath || !model) return;
     const lineCount = model.getLineCount();
-    const decorations: MonacoEditorNS.IModelDeltaDecoration[] = marks.map((mark) => {
+    const decorations: MonacoEditorNS.IModelDeltaDecoration[] = shownMarks.map((mark) => {
       const style = MARK_STYLES[mark.kind];
       const color = resolveCssColor(style.token, style.fallback);
       // A deletion at the end of the file anchors one line past the last one there is — clamp, or the
@@ -1035,7 +1120,7 @@ export function EditorPane({
     });
     const previous = decorationIdsRef.current.get(activePath) ?? [];
     decorationIdsRef.current.set(activePath, ed.deltaDecorations(previous, decorations));
-  }, [marks, activePath, themeMode, editorReady, activeTab?.loading]);
+  }, [shownMarks, activePath, themeMode, editorReady, activeTab?.loading]);
 
   // ---------------------------------------------------------------------------
   // Inline change peek
@@ -1069,8 +1154,8 @@ export function EditorPane({
   // otherwise close over whichever change was on screen at mount.
   const blocksRef = useRef(blocks);
   blocksRef.current = blocks;
-  const marksRef = useRef<GutterMark[]>(marks);
-  marksRef.current = marks;
+  const marksRef = useRef<GutterMark[]>(shownMarks);
+  marksRef.current = shownMarks;
 
   /**
    * Takes the panel down: the zone, the highlight, both copies of the state.

@@ -25,6 +25,7 @@ mod codex;
 mod gdrive;
 mod gemini;
 mod git;
+mod glass;
 mod grok;
 mod github;
 mod gitlab;
@@ -395,11 +396,22 @@ pub fn run() {
             // made the window — and a second `build()` of the same label failed `setup`, which is a
             // panic at launch. That window simply goes without clipboard access until the next
             // `tauri dev`; a build never sees two configs.
+            //
+            // The see-through setting rides along for the same reason — it needs the builder: a
+            // script that stamps the look before the first paint, and the native backdrop put on
+            // while the window is still hidden. See `glass`. Which is also why
+            // `tauri.macos.conf.json` says `"create": false` now: its `windows` array replaces this
+            // file's wholesale, so without it macOS had Tauri build the window and never came here.
             if app.get_webview_window("main").is_none() {
                 if let Some(config) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() {
-                    tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
-                        .enable_clipboard_access()
-                        .build()?;
+                    let look = glass::stored(app.handle());
+                    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+                        .enable_clipboard_access();
+                    if let Some(script) = glass::init_script(&look) {
+                        builder = builder.initialization_script(script);
+                    }
+                    let window = builder.build()?;
+                    glass::on_create(&window, &look);
                 }
             }
             // First, and before anything that can fail out of this closure: the window is created
@@ -623,6 +635,7 @@ pub fn run() {
             windows::quick_ask_close,
             windows::show_main_window,
             windows::register_quick_ask_shortcut,
+            glass::set_window_glass,
             commands::chat_cmd::chat_create_conversation,
             commands::chat_cmd::chat_send,
             commands::chat_cmd::chat_list_conversations,
@@ -764,6 +777,7 @@ pub fn run() {
             commands::git_ops::unstage_file,
             commands::git_ops::unstage_all,
             commands::git_ops::discard_file_changes,
+            commands::git_ops::quick_diff_base,
             commands::git_ops::discard_all_changes,
             commands::git_ops::stage_hunk,
             commands::git_ops::unstage_hunk,

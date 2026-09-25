@@ -271,7 +271,7 @@ export function RequestTabs() {
                       modified tab is still one click from closing. */}
                   {tab.dirty ? (
                     <>
-                      <span className="h-2 w-2 rounded-full bg-[var(--cf-accent)] group-hover/doctab:hidden" />
+                      <span className="h-2 w-2 rounded-full bg-[var(--cf-accent-fill)] group-hover/doctab:hidden" />
                       <X size={13} className="hidden group-hover/doctab:block" />
                     </>
                   ) : (

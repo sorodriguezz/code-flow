@@ -241,7 +241,7 @@ export function EditorTabs({
     window.addEventListener("pointercancel", onUp);
   };
 
-  const dropBar = <div className="my-1 w-0.5 shrink-0 rounded-full bg-[var(--cf-accent)]" />;
+  const dropBar = <div className="my-1 w-0.5 shrink-0 rounded-full bg-[var(--cf-accent-fill)]" />;
 
   const menuItems = (tab: EditorTabItem): MenuItem[] => [
     {
@@ -371,7 +371,7 @@ export function EditorTabs({
                         focus, so a modified tab is still one click from closing. */}
                     {tab.dirty ? (
                       <>
-                        <span className="h-[7px] w-[7px] rounded-full bg-[var(--cf-accent)] group-focus-within/doctab:hidden group-hover/doctab:hidden" />
+                        <span className="h-[7px] w-[7px] rounded-full bg-[var(--cf-accent-fill)] group-focus-within/doctab:hidden group-hover/doctab:hidden" />
                         {tab.pinned ? (
                           <PinOff size={12} className="hidden group-focus-within/doctab:block group-hover/doctab:block" />
                         ) : (

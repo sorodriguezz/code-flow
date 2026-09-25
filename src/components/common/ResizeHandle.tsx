@@ -169,7 +169,7 @@ export function ResizeHandle({
       {!quiet && (
         <span
           aria-hidden
-          className={`pointer-events-none absolute rounded-full bg-[var(--cf-text-muted)]/20 transition-colors group-hover:bg-[var(--cf-accent)] group-active:bg-[var(--cf-accent)] ${
+          className={`pointer-events-none absolute rounded-full bg-[var(--cf-text-muted)]/20 transition-colors group-hover:bg-[var(--cf-accent-fill)] group-active:bg-[var(--cf-accent-fill)] ${
             axis === "x"
               ? "left-1/2 top-1/2 h-5 w-[2px] -translate-x-1/2 -translate-y-1/2"
               : "left-1/2 top-1/2 h-[2px] w-5 -translate-x-1/2 -translate-y-1/2"

@@ -25,7 +25,8 @@ export interface GraphLayout {
  * **Lane 0 follows the accent.** It is the first-parent line of whatever sits on top of the history
  * — almost always the branch being worked on — so the line you are standing on wears the app's own
  * colour, and changes with it when the accent does. A CSS variable rather than a hex, which the SVG
- * strokes and the ref chips' `color-mix` washes both resolve at paint time.
+ * strokes resolve at paint time. (The ref chips no longer wear their lane: they are coloured by kind
+ * — see `REF_HUE` in `GraphView`.)
  *
  * **The rest avoid red and green.** Everywhere else in this app those two already mean state — an
  * added line, a deleted file, a failed job — and a lane that happened to come out green read as

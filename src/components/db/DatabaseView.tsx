@@ -252,7 +252,7 @@ function DbTabStrip() {
                 <span
                   title={t("db.unsaved")}
                   aria-label={t("db.unsaved")}
-                  className="h-[7px] w-[7px] rounded-full bg-[var(--cf-accent)] group-hover/doctab:hidden"
+                  className="h-[7px] w-[7px] rounded-full bg-[var(--cf-accent-fill)] group-hover/doctab:hidden"
                 />
               )}
               <button

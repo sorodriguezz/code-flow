@@ -194,7 +194,7 @@ export function VaultSettingsBody({ onReset }: { onReset?: () => void }) {
                   key={step}
                   className={`h-1 flex-1 rounded-full ${
                     passwordStrength(next) > step
-                      ? "bg-[var(--cf-accent)]"
+                      ? "bg-[var(--cf-accent-fill)]"
                       : "bg-[var(--cf-border)]"
                   }`}
                 />

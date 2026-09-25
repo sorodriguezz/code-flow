@@ -218,6 +218,13 @@ pub fn unstage_all(repo_path: String) -> Result<(), String> {
     diff::unstage_all(&repo_path)
 }
 
+/// The text the editor's gutter measures the buffer against — see [`diff::quick_diff_base`].
+/// `None` when the file has no base (untracked, binary, not UTF-8).
+#[tauri::command(async)]
+pub fn quick_diff_base(repo_path: String, file_path: String, staged: bool) -> Result<Option<String>, String> {
+    diff::quick_diff_base(&repo_path, &file_path, staged)
+}
+
 // `(async)` runs this sync body on a worker instead of the main thread. Both discards open the
 // repository and, for the whole-panel one, walk the working tree with untracked recursion — on a
 // repo with a real `node_modules` that is seconds, and on the main thread those are seconds the

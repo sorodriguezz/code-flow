@@ -373,7 +373,7 @@ export function ChatComposer({
                 disabled={!draft.trim() || disabled}
                 title={t("chat.send")}
                 aria-label={t("chat.send")}
-                className="ml-auto flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent)] text-[var(--cf-on-accent)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:opacity-40"
+                className="ml-auto flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40"
               >
                 <ArrowUp size={15} />
               </button>

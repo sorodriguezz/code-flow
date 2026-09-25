@@ -61,7 +61,7 @@ function UnreadDot({ burst }: { burst: number }) {
       {[0, 1].map((index) => (
         <motion.span
           key={`${burst}-${index}`}
-          className="absolute inset-0 rounded-full bg-[var(--cf-accent)]"
+          className="absolute inset-0 rounded-full bg-[var(--cf-accent-fill)]"
           initial={{ scale: 1, opacity: 0.5 }}
           animate={{ scale: 3, opacity: 0 }}
           transition={{ duration: 1.05, delay: index * 0.4, ease: "easeOut" }}
@@ -87,7 +87,7 @@ function UnreadDot({ burst }: { burst: number }) {
       <span className="cf-bell-breath absolute inset-0">
         <motion.span
           key={burst}
-          className="block h-full w-full rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-bg)]"
+          className="block h-full w-full rounded-full bg-[var(--cf-accent-fill)] ring-2 ring-[var(--cf-bg)]"
           initial={{ scale: 0.2 }}
           animate={{ scale: 1 }}
           transition={{ type: "spring", stiffness: 700, damping: 14 }}
@@ -259,7 +259,7 @@ export function NotificationBell() {
             24px button is unreadable, and the question the bell answers is yes/no. */}
         {unseen > 0 &&
           (reduceMotion ? (
-            <span className="absolute right-0.5 top-0.5 h-[6px] w-[6px] rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-bg)]" />
+            <span className="absolute right-0.5 top-0.5 h-[6px] w-[6px] rounded-full bg-[var(--cf-accent-fill)] ring-2 ring-[var(--cf-bg)]" />
           ) : (
             <UnreadDot burst={burst} />
           ))}
@@ -430,7 +430,7 @@ function Row({
       {/* Unread gets a rail rather than only a tint: the tint alone is nearly invisible on some
           themes, and this is the thing the dot promised. */}
       {!item.seen && (
-        <span className="absolute inset-y-1.5 left-0 w-[2.5px] rounded-r-full bg-[var(--cf-accent)]" />
+        <span className="absolute inset-y-1.5 left-0 w-[2.5px] rounded-r-full bg-[var(--cf-accent-fill)]" />
       )}
       <Icon size={15} className="mt-px shrink-0" style={{ color: STATUS_COLOR[item.status] }} />
 

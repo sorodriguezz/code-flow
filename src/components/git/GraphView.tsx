@@ -117,42 +117,42 @@ function formatFullDateTime(ts: number): string {
 const MAX_REF_CHIPS = 2;
 
 /**
- * The glyph for each kind of ref — and the *only* thing that carries the kind.
- *
- * Colour used to do this job too: local branches accent, tags amber, remotes muted. That was an
- * improvement on the one soft-accent pill they all used to be, and it was still spending the
- * strongest channel on the question you can already answer from the shape. A tag looks like a tag.
- *
- * What colour is now spent on is the question the shape *cannot* answer: **which line in the graph
- * is this?** See [`RefChip`].
+ * The glyph for each kind of ref. It says what the chip's colour says (see [`REF_HUE`]), on purpose:
+ * a glyph survives colour-blindness and small type, which is where two hues start to converge.
  */
 const REF_GLYPH: Record<RefKind, LucideIcon> = { branch: GitBranch, remote: Cloud, tag: Tag };
 
 /**
- * One ref, as a chip, in the colour of the lane its commit sits on.
+ * The colour for each kind of ref: a local branch teal, a remote-tracking branch blue, a tag amber.
  *
- * **That is the whole point.** The refs used to be a column inches away from the graph that told you
- * nothing about it: `feat/thing` came out indigo whether its commit was the tip of the indigo line,
- * the teal one or the amber one, so matching a name to a line meant tracing the row across by eye
- * and counting lanes. Painted in `laneColor(lane)` the chip *is* the line — the same hue as the dot
- * at the start of the row and the stroke running out of it — and the match is made before you have
- * finished reading the name.
+ * Colour follows the *kind* again, not the lane (the user's call, 2026-09-25: "antes estaba más
+ * colorido"). For a while each chip wore the colour of the graph line its commit sat on, and lane 0
+ * is the accent — so on a history that is one line, which is most of them, every branch, remote and
+ * tag came out the same accent pill and the chips said nothing a glance could pick up. The dot at
+ * the start of the row still says which line it is.
  *
- * The palette is safe to read as text: lane 0 is the accent, which already carries text everywhere
- * in the app, and the other five sit in the same 55–70% lightness band as the workspace colours —
- * the band chosen precisely because one hex has to work on both themes (see `lib/workspaceColors`).
+ * Fixed hues rather than accent-derived ones, for the schema legend's reason: they sit next to each
+ * other on one row, so what they must be is distinct from each other whatever the accent is. The
+ * values are theme tokens (`--cf-ref-*` in `index.css`), a darker shade on light and a lighter one
+ * on dark, because they are read as text.
+ */
+const REF_HUE: Record<RefKind, string> = {
+  branch: "var(--cf-ref-branch)",
+  remote: "var(--cf-ref-remote)",
+  tag: "var(--cf-ref-tag)",
+};
+
+/**
+ * One ref, as a chip, in the colour of its kind — see [`REF_HUE`].
  *
- * **Three channels, three questions, no overlap.**
- * - *Hue* — which line. From the graph, never from the kind.
- * - *Glyph* — what it is. A branch, a remote-tracking branch, a tag.
+ * **Three channels, and each answers what it is best at.**
+ * - *Hue* — what it is: a branch, a remote-tracking branch, a tag. Doubled by the glyph.
  * - *Fill* — how present it is. A remote is an outline with no fill, because it is a record of where
  *   a branch stood on the server rather than a thing in this working copy, and a column where
  *   `origin/*` shouts as loudly as `main` is the column this replaces. The branch you are actually
  *   *on* fills harder and goes semibold — the answer to "where am I", which can only ever be true
  *   on one row.
- *
- * Tags take the pill shape as well as the tag glyph. Cheap, and shape is the one channel that
- * survives both colour-blindness and small type, which is where two small icons start to converge.
+ * - *Shape* — tags are pills, everything else a square-cornered chip.
  *
  * `title` rather than the app's own `Tooltip`: the name is *truncated*, not missing, so this is the
  * fallback case that `Tooltip`'s own note reserves for the platform's — and it is per-row in a list
@@ -165,16 +165,15 @@ const REF_GLYPH: Record<RefKind, LucideIcon> = { branch: GitBranch, remote: Clou
  */
 function RefChip({
   commitRef,
-  lane,
   isCurrent,
   display,
 }: {
   commitRef: CommitRef;
-  lane: string;
   isCurrent: boolean;
   display: string;
 }) {
   const Icon = REF_GLYPH[commitRef.kind];
+  const hue = REF_HUE[commitRef.kind];
   const outline = commitRef.kind === "remote";
   return (
     <span
@@ -183,13 +182,13 @@ function RefChip({
         commitRef.kind === "tag" ? "rounded-full" : "rounded-[4px]"
       } ${isCurrent ? "font-semibold" : "font-medium"}`}
       style={{
-        // The lane's own hue for the text, and washes of it for the box. Not a solid fill with
-        // white on top, which is what the checked-out branch used to get: at these lightnesses
-        // white is comfortable on the indigo and unreadable on the amber, and a treatment that
-        // depends on which lane you happen to be on is not a treatment.
-        color: lane,
-        background: outline ? "transparent" : `color-mix(in oklab, ${lane} ${isCurrent ? 26 : 14}%, transparent)`,
-        borderColor: `color-mix(in oklab, ${lane} ${outline || isCurrent ? 55 : 28}%, transparent)`,
+        // The kind's hue for the text, and washes of it for the box. Not a solid fill with white on
+        // top, which is what the checked-out branch once got: at these lightnesses white is
+        // comfortable on the blue and unreadable on the amber, and a treatment that depends on which
+        // kind of ref it is would not be one treatment.
+        color: hue,
+        background: outline ? "transparent" : `color-mix(in oklab, ${hue} ${isCurrent ? 26 : 14}%, transparent)`,
+        borderColor: `color-mix(in oklab, ${hue} ${outline || isCurrent ? 55 : 28}%, transparent)`,
       }}
     >
       <Icon size={11} className="shrink-0" />
@@ -230,15 +229,7 @@ function RefOverflow({ refs, display }: { refs: CommitRef[]; display: string }) 
  * for its own case — drawn in both, drawn only while roomy, drawn only while narrow — and each
  * layout gets its own counter, so "+N" is always the number actually hidden.
  */
-function RefChips({
-  refs,
-  lane,
-  currentBranch,
-}: {
-  refs: CommitRef[];
-  lane: string;
-  currentBranch: string | null;
-}) {
+function RefChips({ refs, currentBranch }: { refs: CommitRef[]; currentBranch: string | null }) {
   if (refs.length === 0) return null;
   const narrowShown = refs.filter((ref) => ref.kind !== "tag").slice(0, MAX_REF_CHIPS);
   const roomyHidden = refs.slice(MAX_REF_CHIPS);
@@ -253,8 +244,6 @@ function RefChips({
           <RefChip
             key={`${ref.kind}:${ref.name}`}
             commitRef={ref}
-            // The same call the dot at the start of the row makes, so chip and dot cannot disagree.
-            lane={lane}
             isCurrent={ref.kind === "branch" && ref.name === currentBranch}
             display={
               roomy && narrow
@@ -902,7 +891,7 @@ const CommitTable = memo(function CommitTable() {
                   <span style={{ width: graphWidth }} className="shrink-0" aria-hidden />
                   <span style={{ width: messageWidth }} className="flex min-w-0 shrink-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[var(--cf-text)]">{r.commit.summary}</span>
-                    <RefChips refs={r.commit.refs} lane={laneColor(r.lane)} currentBranch={currentBranch} />
+                    <RefChips refs={r.commit.refs} currentBranch={currentBranch} />
                   </span>
                   <span style={{ width: colAuthor }} className="shrink-0 truncate text-[12px] text-[var(--cf-text-muted)]">
                     {r.commit.author_name}

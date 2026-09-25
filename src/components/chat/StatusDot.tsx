@@ -53,7 +53,7 @@ export function StatusDot({ status }: { status: ConversationStatus }) {
   return (
     <span
       title={status === "running" ? t("chat.statusRunning") : t("chat.statusUnread")}
-      className={`h-[7px] w-[7px] shrink-0 rounded-full bg-[var(--cf-accent)] ${
+      className={`h-[7px] w-[7px] shrink-0 rounded-full bg-[var(--cf-accent-fill)] ${
         status === "running" ? "animate-pulse" : ""
       }`}
     />

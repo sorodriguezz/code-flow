@@ -53,3 +53,11 @@ export const satelliteSpec = (label: string) =>
  * `windows.rs` for the rest of what restoring actually involves.
  */
 export const showMainWindow = () => invoke<void>("show_main_window");
+
+/**
+ * Puts the native backdrop of the see-through window on or off — for the window that calls it, and
+ * only that one: every window's own `glassStore` asks for itself. `theme` is the stored light/dark
+ * preference, which the backdrop is tinted by; see `apply_native` in `glass.rs`.
+ */
+export const setWindowGlass = (enabled: boolean, theme: "light" | "dark" | "system") =>
+  invoke<void>("set_window_glass", { enabled, theme });

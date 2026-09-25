@@ -52,6 +52,8 @@ import { useIconRulesStore } from "./state/iconRulesStore";
 import { useFileNestingStore } from "./state/fileNestingStore";
 import { useCsvStore } from "./state/csvStore";
 import { useThinkingDesignStore } from "./state/thinkingDesignStore";
+import { useGlassStore } from "./state/glassStore";
+import { useLanguageOverrideStore } from "./state/languageOverrideStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
 import { useBlameStore } from "./state/blameStore";
@@ -569,6 +571,11 @@ export default function App() {
         // How the thinking mark is drawn. With the rest of the look, so an orb already running when the
         // window opens does not switch design a beat later.
         useThinkingDesignStore.getState().init(),
+        // Whether the window is see-through, and how much. With the look, though a window that opens
+        // see-through was already stamped before its first paint (`glass.rs`) — this is the re-read
+        // that keeps it right from here on.
+        useGlassStore.getState().init(),
+        useLanguageOverrideStore.getState().init(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
         startWindowBoundsTracking(),
@@ -1088,7 +1095,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-[var(--cf-bg)]">
+    <div className="cf-frame flex h-screen flex-col overflow-hidden">
       <TitleBar />
       {/* `overflow-hidden` is load-bearing, not tidiness.
           This row is `min-h-0` so the column inside it can shrink, but nothing was clipping that

@@ -922,7 +922,7 @@ function ConsoleAiPanel({
                 disabled={!ai.question.trim()}
                 title={t("db.aiAsk")}
                 aria-label={t("db.aiAsk")}
-                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:cursor-not-allowed disabled:opacity-30"
+                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <ArrowUp size={12} />
               </button>

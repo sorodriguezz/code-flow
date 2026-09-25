@@ -5,7 +5,7 @@ export function BouncingDots({ label }: { label?: string }) {
         {[0, 1, 2].map((i) => (
           <span
             key={i}
-            className="cf-bounce-dot h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]"
+            className="cf-bounce-dot h-1.5 w-1.5 rounded-full bg-[var(--cf-accent-fill)]"
             style={{ animationDelay: `${i * 0.15}s` }}
           />
         ))}

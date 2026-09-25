@@ -920,6 +920,7 @@ dependencies = [
  "url",
  "uuid",
  "webview2-com",
+ "window-vibrancy",
  "windows-core 0.61.2",
  "windows-sys 0.60.2",
  "zeroize",

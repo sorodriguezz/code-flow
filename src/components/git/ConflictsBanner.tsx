@@ -99,7 +99,7 @@ export function ConflictsBanner() {
         <button
           disabled={busy || conflicts.length > 0 || !message.trim()}
           onClick={() => completeMerge(message.trim())}
-          className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
+          className="flex items-center gap-1 rounded-md bg-[var(--cf-accent-fill)] px-2.5 py-1 text-[12px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
         >
           <GitMerge size={12} />
           {t("conflicts.completeMerge")}

@@ -820,7 +820,7 @@ export function RunnerModal({
                 return (
                   <div key={id} data-cf-runid={id}>
                     {dropIndex === index && dragId !== null && (
-                      <div className="mx-2 h-[2px] rounded bg-[var(--cf-accent)]" />
+                      <div className="mx-2 h-[2px] rounded bg-[var(--cf-accent-fill)]" />
                     )}
                     {/* Hairline rows, the verb in the tree's own badge — this list is a pointer at
                         requests the same way the tree is, so it wears the tree's column. */}
@@ -847,7 +847,7 @@ export function RunnerModal({
                       </span>
                     </div>
                     {dropIndex === index + 1 && dragId !== null && index === order.length - 1 && (
-                      <div className="mx-2 h-[2px] rounded bg-[var(--cf-accent)]" />
+                      <div className="mx-2 h-[2px] rounded bg-[var(--cf-accent-fill)]" />
                     )}
                   </div>
                 );

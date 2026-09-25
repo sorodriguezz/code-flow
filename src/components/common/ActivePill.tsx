@@ -45,7 +45,9 @@ export function ActivePill({
       aria-hidden
       className={`absolute ${inset} ${radius} ${
         variant === "raised"
-          ? "bg-[var(--cf-surface)] shadow-[var(--cf-shadow-lift),0_0_0_1px_var(--cf-border)]"
+          ? // `--cf-control`, not the sheet's tone: a see-through window clears that inside a sheet,
+            // and the lifted pill has to keep reading as something lifted (see `index.css`).
+            "bg-[var(--cf-control)] shadow-[var(--cf-shadow-lift),0_0_0_1px_var(--cf-border)]"
           : "bg-[var(--cf-accent-soft)]"
       }`}
       transition={reduceMotion ? { duration: 0 } : SLIDE}
@@ -67,7 +69,7 @@ export function ActiveUnderline({ layoutId }: { layoutId: string }) {
     <motion.span
       layoutId={layoutId}
       aria-hidden
-      className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-[var(--cf-accent)]"
+      className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-[var(--cf-accent-fill)]"
       transition={reduceMotion ? { duration: 0 } : SLIDE}
     />
   );

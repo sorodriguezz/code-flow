@@ -1,9 +1,13 @@
+import { useState } from "react";
 import { Check, Laptop, Moon, Sun } from "lucide-react";
 import { useThemeStore } from "../../state/themeStore";
+import { useGlassStore } from "../../state/glassStore";
 import { findTheme, themesFor, type CodeThemeUi } from "../../lib/codeThemes";
+import { usePlatform } from "../../lib/platform";
 import { ACCENT_OPTIONS, useAccentStore } from "../../state/accentStore";
 import { buttonClass } from "../common/Button";
 import { chipClass } from "../common/recipes";
+import { Segmented } from "../common/Segmented";
 import { Tooltip } from "../common/Tooltip";
 import type { ThemePreference } from "../../types/domain";
 import { useT } from "../../state/languageStore";
@@ -176,6 +180,67 @@ function AccentPicker() {
   );
 }
 
+/**
+ * Whether the window lets the desktop through, and how much — Sí/No, and the level once it is Sí.
+ *
+ * The slider repaints this window on every step (three CSS properties, see `glassStore.preview`)
+ * and saves on release, which is when the other windows follow: a setting write per pixel would be
+ * announced to all of them. Same shape as the notification volume.
+ */
+function TransparencyControl() {
+  const t = useT();
+  const enabled = useGlassStore((s) => s.enabled);
+  const level = useGlassStore((s) => s.level);
+  const setEnabled = useGlassStore((s) => s.setEnabled);
+  const setLevel = useGlassStore((s) => s.setLevel);
+  const preview = useGlassStore((s) => s.preview);
+  const [draft, setDraft] = useState<number | null>(null);
+  const shown = draft ?? level;
+
+  const commit = () => {
+    if (draft === null) return;
+    void setLevel(draft);
+    setDraft(null);
+  };
+
+  return (
+    <div className="space-y-3">
+      <Segmented
+        ariaLabel={t("settings.transparency")}
+        layoutId="cf-glass-switch"
+        value={enabled ? "on" : "off"}
+        onChange={(value) => void setEnabled(value === "on")}
+        options={[
+          { value: "on", label: t("settings.transparencyOn") },
+          { value: "off", label: t("settings.transparencyOff") },
+        ]}
+      />
+      {enabled && (
+        <label className="flex items-center gap-2.5">
+          <span className="w-[72px] shrink-0 text-[13px] text-[var(--cf-text)]">{t("settings.transparencyLevel")}</span>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={shown}
+            onChange={(event) => {
+              const value = Number(event.target.value);
+              setDraft(value);
+              preview(value);
+            }}
+            onPointerUp={commit}
+            onKeyUp={commit}
+            onBlur={commit}
+            className="w-full max-w-[280px] accent-[var(--cf-accent)]"
+          />
+          <span className="w-10 shrink-0 text-right text-[12px] tabular-nums text-[var(--cf-text-muted)]">{shown}%</span>
+        </label>
+      )}
+    </div>
+  );
+}
+
 /** The selected scheme, shown in a collapsed header: its name next to a chip painted in its own
  * background and border, so the palette is recognizable before opening anything. */
 function ThemeSummary({ mode }: { mode: "light" | "dark" }) {
@@ -238,6 +303,10 @@ function ThemeGrid({ mode }: { mode: "light" | "dark" }) {
 export function ThemeSettings() {
   const t = useT();
   const resolved = useThemeStore((s) => s.resolved);
+  // The two platforms with a backdrop to show: vibrancy on macOS, Acrylic/Mica on Windows. Anywhere
+  // else a see-through window would be a sharp, unblurred desktop behind the text.
+  const platform = usePlatform();
+  const glassAvailable = platform === "macos" || platform === "windows";
   // The mode you are looking at comes first — the other is a deliberate visit.
   const modes: ("light" | "dark")[] = resolved === "dark" ? ["dark", "light"] : ["light", "dark"];
 
@@ -255,6 +324,12 @@ export function ThemeSettings() {
               <PaneBlock title={t("settings.accentColor")}>
                 <AccentPicker />
               </PaneBlock>
+
+              {glassAvailable && (
+                <PaneBlock title={t("settings.transparency")}>
+                  <TransparencyControl />
+                </PaneBlock>
+              )}
             </>
           )}
 

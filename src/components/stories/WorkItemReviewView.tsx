@@ -496,7 +496,7 @@ function RunStage({ stage, label }: { stage: WorkItemReviewStage; label: string 
       className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-medium transition-[filter,border-color,color] disabled:cursor-not-allowed disabled:opacity-40 ${
         running
           ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-          : "bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))]"
+          : "bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))]"
       }`}
     >
       {running ? <Square size={10} /> : <Play size={10} />}
@@ -2430,7 +2430,7 @@ function TabBar() {
               {counts[at] > 0 && (
                 <span
                   className={`rounded-full px-1.5 text-[10.5px] font-semibold tabular-nums ${
-                    active ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]" : "bg-[var(--cf-border)] text-[var(--cf-text-muted)]"
+                    active ? "bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)]" : "bg-[var(--cf-border)] text-[var(--cf-text-muted)]"
                   }`}
                 >
                   {counts[at]}

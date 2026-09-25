@@ -251,7 +251,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
             {body}
             <span
               aria-hidden="true"
-              className="ml-[1px] inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-[var(--cf-accent)] align-baseline"
+              className="ml-[1px] inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-[var(--cf-accent-fill)] align-baseline"
             />
           </span>
         ) : (

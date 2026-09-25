@@ -369,6 +369,42 @@ pub fn file_at_ref(path: &str, refname: &str, file_path: &str) -> Result<String,
     Ok(String::from_utf8_lossy(blob.content()).into_owned())
 }
 
+/// What the editor's gutter compares the buffer against, as text — VS Code's "quick diff" base.
+///
+/// The index copy of the file, which is what `git diff` (index → working tree) measures from, or —
+/// with `staged` — HEAD's copy, the old side of a staged-only change. Either way it is the old side
+/// of the change the editor already draws from disk, so marks drawn live against the buffer agree
+/// with the ones drawn after a save instead of jumping between two different bases.
+///
+/// `Ok(None)` for a file with no base at all — untracked, deleted from the index, binary, or not
+/// UTF-8. The editor then keeps its marks from disk, which is what it did before there was a live
+/// base to read.
+pub fn quick_diff_base(path: &str, file_path: &str, staged: bool) -> Result<Option<String>, String> {
+    let repo = open(path)?;
+    let rel = Path::new(file_path);
+    let blob_id = if staged {
+        None
+    } else {
+        let index = repo.index().map_err(|e| e.message().to_string())?;
+        index.get_path(rel, 0).map(|entry| entry.id)
+    };
+    let blob_id = match blob_id {
+        Some(id) => Some(id),
+        // Staged, or not in the index: HEAD's tree. An unborn HEAD (a repository with no commits yet)
+        // simply has no base.
+        None => match repo.head().ok().and_then(|head| head.peel_to_tree().ok()) {
+            Some(tree) => tree.get_path(rel).ok().map(|entry| entry.id()),
+            None => None,
+        },
+    };
+    let Some(blob_id) = blob_id else { return Ok(None) };
+    let blob = repo.find_blob(blob_id).map_err(|e| e.message().to_string())?;
+    if blob.is_binary() {
+        return Ok(None);
+    }
+    Ok(std::str::from_utf8(blob.content()).ok().map(str::to_owned))
+}
+
 /// Every file path under `refname`, repository-relative with forward slashes.
 ///
 /// From the commit's tree rather than from `search::list_files`, which walks the working directory:
@@ -722,6 +758,32 @@ mod tests {
             repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
         (dir, repo)
+    }
+
+    /// The gutter's base is the index copy: an unsaved or unstaged edit is measured from it, and
+    /// staging moves the base with it — exactly what `git diff` shows.
+    #[test]
+    fn quick_diff_base_is_the_index_copy() {
+        let (dir, repo) = fixture();
+        let root = dir.to_str().unwrap();
+        fs::write(dir.join("tracked.txt"), "staged\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        fs::write(dir.join("tracked.txt"), "working\n").unwrap();
+
+        assert_eq!(quick_diff_base(root, "tracked.txt", false).unwrap().as_deref(), Some("staged\n"));
+        // A staged-only change is drawn from HEAD, so that is its base.
+        assert_eq!(quick_diff_base(root, "tracked.txt", true).unwrap().as_deref(), Some("original\n"));
+    }
+
+    /// No base at all for a file git does not track — the editor falls back to its marks from disk.
+    #[test]
+    fn quick_diff_base_is_none_for_an_untracked_file() {
+        let (dir, _repo) = fixture();
+        fs::write(dir.join("scratch.txt"), "new\n").unwrap();
+
+        assert_eq!(quick_diff_base(dir.to_str().unwrap(), "scratch.txt", false).unwrap(), None);
     }
 
     /// The bug this function was rewritten for: an untracked file is not in the index, so the

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 /**
- * What the status bar says about the line the caret is on — one entry, written only by the editor
+ * What the Editor's status line says about the line the caret is on — one entry, written only by the editor
  * group that has focus.
  *
  * **Why a store of its own, and why it holds exactly one thing.** The caret moves at key-repeat rate,
@@ -9,7 +9,7 @@ import { create } from "zustand";
  * any store `EditorView` or `EditorPane` already subscribe to — would re-render every live Monaco
  * pane *and* the whole file tree on each caret move; the comment in `EditorView.syncOpenTabs` is a
  * bug report about exactly that cost, arrived at from the other direction. A separate store means the
- * only component whose selector output can change is the status bar's blame leaf, and zustand
+ * only component whose selector output can change is `EditorStatusLine`'s blame item, and zustand
  * re-renders nothing else.
  *
  * The shape is `rowHoverStore`'s, for the same reason: holding **one** entry bounds the failure mode

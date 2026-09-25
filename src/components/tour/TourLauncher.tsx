@@ -58,7 +58,7 @@ export function TourLauncher() {
           // Ringed in the frame's colour so the dot separates from the glyph it sits on.
           <span
             aria-hidden
-            className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)] shadow-[0_0_0_2px_var(--cf-bg)]"
+            className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent-fill)] shadow-[0_0_0_2px_var(--cf-bg)]"
           />
         )}
       </button>

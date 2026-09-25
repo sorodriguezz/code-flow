@@ -442,7 +442,7 @@ function NeedsRow({ row }: { row: NeedRow }) {
           <span className="block truncate text-[13px] font-medium text-[var(--cf-text)]">{row.title}</span>
           <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{row.detail}</span>
         </span>
-        {row.unread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent)]" aria-label={t("assistant.unread")} />}
+        {row.unread && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent-fill)]" aria-label={t("assistant.unread")} />}
       </button>
       <button
         onClick={row.open}

@@ -63,7 +63,7 @@ const BranchSwitcherModal = lazy(() =>
  *
  * # Why it is not `TitleBar`
  *
- * The main bar carries the workspace switcher, the search box, the AI actions menu, back/forward
+ * The main bar carries the workspace switcher, the search box, back/forward
  * and the chat toggle — every one of which is a way to make the window show something else, which
  * is the one thing a satellite must not offer. Sharing the component and hiding two-thirds of it
  * would leave the shell's imports in this window's bundle, which is the cost `window.html` exists

@@ -414,7 +414,7 @@ export function TransferBar({ progress }: { progress: RemoteTransferEvent }) {
       </div>
       <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-[var(--cf-press)]">
         <div
-          className="h-full rounded-full bg-[var(--cf-accent)] transition-[width] duration-150"
+          className="h-full rounded-full bg-[var(--cf-accent-fill)] transition-[width] duration-150"
           style={{ width: `${percent}%` }}
         />
       </div>
@@ -483,7 +483,7 @@ export function WorkBar({
       </div>
       <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-[var(--cf-press)]">
         <div
-          className={`h-full rounded-full bg-[var(--cf-accent)] ${
+          className={`h-full rounded-full bg-[var(--cf-accent-fill)] ${
             total > 0 ? "transition-[width] duration-150" : "animate-pulse"
           }`}
           style={{ width: total > 0 ? `${(done / total) * 100}%` : "100%" }}

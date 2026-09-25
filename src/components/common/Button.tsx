@@ -28,13 +28,15 @@ const SIZES: Record<ButtonSize, string> = {
 };
 
 const VARIANTS: Record<ButtonVariant, string> = {
+  // The `-fill` and `--cf-control` aliases rather than the tokens themselves: identical until the
+  // window is see-through, when a control lets some of the backdrop through (see `index.css`).
   primary:
-    "bg-[var(--cf-accent)] font-semibold text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))]",
+    "bg-[var(--cf-accent-fill)] font-semibold text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))]",
   secondary:
-    "bg-[var(--cf-surface)] text-[var(--cf-text)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] hover:bg-[color-mix(in_oklab,var(--cf-text)_4%,var(--cf-surface))]",
+    "bg-[var(--cf-control)] text-[var(--cf-text)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] hover:bg-[color-mix(in_oklab,var(--cf-text)_4%,var(--cf-control))]",
   ghost: "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]",
   danger:
-    "bg-[var(--cf-danger)] font-semibold text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-danger)_86%,var(--cf-text))]",
+    "bg-[var(--cf-danger-fill)] font-semibold text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-danger-fill)_86%,var(--cf-text))]",
   "danger-ghost":
     "text-[var(--cf-danger)] hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)]",
 };

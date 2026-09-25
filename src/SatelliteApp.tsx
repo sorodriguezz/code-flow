@@ -13,6 +13,8 @@ import { useAccentStore } from "./state/accentStore";
 import { useFileNestingStore } from "./state/fileNestingStore";
 import { useCsvStore } from "./state/csvStore";
 import { useThinkingDesignStore } from "./state/thinkingDesignStore";
+import { useGlassStore } from "./state/glassStore";
+import { useLanguageOverrideStore } from "./state/languageOverrideStore";
 import { useIconRulesStore } from "./state/iconRulesStore";
 import { useLanguageStore, useT } from "./state/languageStore";
 import { useLayoutStore } from "./state/layoutStore";
@@ -132,6 +134,8 @@ function useSatelliteBoot(): boolean {
         useFileNestingStore.getState().init(),
         useCsvStore.getState().init(),
         useThinkingDesignStore.getState().init(),
+        useGlassStore.getState().init(),
+        useLanguageOverrideStore.getState().init(),
         // The satellite draws its own title bar too, so the maximize button needs the same
         // rectangle tracking the main window's does.
         startWindowBoundsTracking(),
@@ -417,7 +421,8 @@ export default function SatelliteApp() {
   // that is holding a screen, and this one is holding a question.
   if (ready && spec && kind === "quick") {
     return (
-      <div className="flex h-screen flex-col overflow-hidden">
+      // One sheet and no frame, so see-through it is a single layer — see `.cf-glass-solo`.
+      <div className="cf-glass-solo flex h-screen flex-col overflow-hidden">
         <QuickWindow refId={spec.refId} />
         <TitleTooltips />
       </div>
@@ -428,7 +433,7 @@ export default function SatelliteApp() {
     // The frame and its sheets, as in the main window: the title row sits on the frame's tone and
     // what the window holds is a sheet inset from its edges. A repository window adds its tab row
     // on the frame and the terminal dock as a second sheet, both inside `RepoWindow`.
-    <div className="flex h-screen flex-col overflow-hidden bg-[var(--cf-bg)]">
+    <div className="cf-frame flex h-screen flex-col overflow-hidden">
       <SatelliteTitleBar />
       <div className="flex min-h-0 flex-1 flex-col px-1.5 pb-1.5">
         {!ready || !spec ? (

@@ -227,15 +227,22 @@ pub async fn open_satellite(
         url.push_str(&format!("&ws={}", urlencode(workspace)));
     }
 
+    let look = crate::glass::stored(&app);
     let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         // As the main window (see `lib.rs`): without it WebView2 refuses every clipboard read.
         .enable_clipboard_access()
+        // Always, as the main window is (`tauri.conf.json`): the see-through setting can only be
+        // switched live on a window that was built able to show it. See `glass`.
+        .transparent(true)
         .title(&title)
         .inner_size(1100.0, 760.0)
         .min_inner_size(560.0, 420.0)
         // Cascaded off the main window rather than centred: four centred windows land on top of
         // each other, which looks exactly like nothing happening.
         .position(cascade_offset(&app), cascade_offset(&app) + 24.0);
+    if let Some(script) = crate::glass::init_script(&look) {
+        builder = builder.initialization_script(script);
+    }
 
     // Same chrome as the main window, because a satellite draws the same title bar. On macOS that
     // means keeping the real decorations (and with them the rounded corners and a working green
@@ -268,7 +275,8 @@ pub async fn open_satellite(
         builder = builder.decorations(false);
     }
 
-    builder.build().map_err(|e| e.to_string())?;
+    let window = builder.build().map_err(|e| e.to_string())?;
+    crate::glass::on_create(&window, &look);
 
     if let Ok(mut held) = registry.open.lock() {
         held.insert(
@@ -516,9 +524,12 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
 
     let url = format!("window.html?kind={}&ref={}", SatelliteKind::Quick.slug(), QUICK_REF_ID);
 
+    let look = crate::glass::stored(&app);
     let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         // As the main window (see `lib.rs`): without it WebView2 refuses every clipboard read.
         .enable_clipboard_access()
+        // As every other window — see `open_satellite`.
+        .transparent(true)
         .title("CodeFlow")
         .inner_size(720.0, 420.0)
         .min_inner_size(520.0, 220.0)
@@ -544,15 +555,21 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
         // most disorienting thing a global hotkey can do.
         builder = builder.visible_on_all_workspaces(true);
     }
+    if let Some(script) = crate::glass::init_script(&look) {
+        builder = builder.initialization_script(script);
+    }
 
-    if let Err(e) = builder.build() {
-        // Hands the claim back. A slot held for a window that failed to open would count against
-        // `MAX_SATELLITES` for the life of the process, and — worse here — the guard above would
-        // read it as "already open" and answer every future press of the chord with a no-op.
-        if let Ok(mut held) = registry.open.lock() {
-            held.remove(&label);
+    match builder.build() {
+        Ok(window) => crate::glass::on_create(&window, &look),
+        Err(e) => {
+            // Hands the claim back. A slot held for a window that failed to open would count against
+            // `MAX_SATELLITES` for the life of the process, and — worse here — the guard above would
+            // read it as "already open" and answer every future press of the chord with a no-op.
+            if let Ok(mut held) = registry.open.lock() {
+                held.remove(&label);
+            }
+            return Err(e.to_string());
         }
-        return Err(e.to_string());
     }
 
     announce(&app);

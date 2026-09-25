@@ -114,7 +114,7 @@ const TONE_DOT: Record<Tone, string> = {
   muted: "bg-[var(--cf-text-muted)]",
   warning: "bg-[var(--cf-warning)]",
   success: "bg-[var(--cf-success)]",
-  accent: "bg-[var(--cf-accent)]",
+  accent: "bg-[var(--cf-accent-fill)]",
 };
 
 /**

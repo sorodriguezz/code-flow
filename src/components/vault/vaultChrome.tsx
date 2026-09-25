@@ -40,7 +40,7 @@ export const INPUT =
   "w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-field)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]";
 
 export const BUTTON =
-  "rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-on-accent)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
+  "rounded-md bg-[var(--cf-accent-fill)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-on-accent)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
 
 export const BUTTON_QUIET =
   "rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] text-[var(--cf-text)] transition-colors hover:bg-[var(--cf-hover)] disabled:opacity-40";

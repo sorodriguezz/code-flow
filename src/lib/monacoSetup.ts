@@ -78,39 +78,65 @@ monaco.typescript.javascriptDefaults.setDiagnosticsOptions(isolatedFileDiagnosti
 // stores a rule list), and having them all present means switching themes — or mounting an
 // editor that already has one selected — can never race a definition that hasn't happened yet.
 for (const theme of ALL_THEMES) {
+  const base = theme.mode === "dark" ? "vs-dark" : "vs";
+  // Same rule list the code-snapshot renderer paints from — see `tokenRulesFor`. Only the
+  // catch-all needs the extra `background`, which is a Monaco-only concern.
+  const rules = tokenRulesFor(theme).map((rule) => ({
+    token: rule.token,
+    foreground: bare(rule.foreground),
+    ...(rule.fontStyle ? { fontStyle: rule.fontStyle } : {}),
+    ...(rule.token === "" ? { background: bare(theme.ui.bg) } : {}),
+  }));
+  const colors = {
+    "editor.background": theme.ui.bg,
+    "editor.foreground": theme.tokens.variable,
+    "editorLineNumber.foreground": theme.ui.textMuted,
+    "editorLineNumber.activeForeground": theme.ui.text,
+    "editorCursor.foreground": theme.ui.text,
+    "editor.lineHighlightBackground": theme.ui.surfaceRaised,
+    // Alpha so the selection tints the code rather than hiding it.
+    "editor.selectionBackground": `${theme.ui.border}cc`,
+    "editor.inactiveSelectionBackground": `${theme.ui.border}80`,
+    "editorIndentGuide.background1": theme.ui.border,
+    "editorWhitespace.foreground": theme.ui.border,
+    "editorWidget.background": theme.ui.surface,
+    "editorWidget.border": theme.ui.border,
+    "editorSuggestWidget.background": theme.ui.surface,
+    "editorGutter.background": theme.ui.bg,
+    "diffEditor.insertedTextBackground": "#22c55e22",
+    "diffEditor.removedTextBackground": "#ef444422",
+    "scrollbarSlider.background": `${theme.ui.border}99`,
+    "minimap.background": theme.ui.bg,
+  };
   monaco.editor.defineTheme(monacoThemeName(theme.id), {
-    base: theme.mode === "dark" ? "vs-dark" : "vs",
+    base,
     // Inherit so anything the palette doesn't name (regex literals, embedded languages) still
     // gets a sensible color from Monaco's own base theme instead of falling back to plain text.
     inherit: true,
-    // Same rule list the code-snapshot renderer paints from — see `tokenRulesFor`. Only the
-    // catch-all needs the extra `background`, which is a Monaco-only concern.
-    rules: tokenRulesFor(theme).map((rule) => ({
-      token: rule.token,
-      foreground: bare(rule.foreground),
-      ...(rule.fontStyle ? { fontStyle: rule.fontStyle } : {}),
-      ...(rule.token === "" ? { background: bare(theme.ui.bg) } : {}),
-    })),
+    rules,
+    colors,
+  });
+  // The same scheme for a see-through window (`lib/windowGlass`): the editor's own grounds cleared,
+  // so the sheet under it shows through as it does everywhere else in the window. What floats over
+  // code keeps a ground — the suggest, hover and find widgets, and the sticky-scroll band, which
+  // code scrolls under. The current line becomes a tint rather than a solid bar across the glass.
+  //
+  // The catch-all rule keeps its opaque `background` all the same: Monaco copies `editor.background`
+  // into the token theme's default background, whose colour map has no alpha — `#00000000` arrives
+  // there as black — and the overview ruler falls back to that default when it has no colour of
+  // its own. The rule wins over the copy (it comes later), and the ruler gets its own clear colour.
+  monaco.editor.defineTheme(monacoThemeName(theme.id, true), {
+    base,
+    inherit: true,
+    rules,
     colors: {
-      "editor.background": theme.ui.bg,
-      "editor.foreground": theme.tokens.variable,
-      "editorLineNumber.foreground": theme.ui.textMuted,
-      "editorLineNumber.activeForeground": theme.ui.text,
-      "editorCursor.foreground": theme.ui.text,
-      "editor.lineHighlightBackground": theme.ui.surfaceRaised,
-      // Alpha so the selection tints the code rather than hiding it.
-      "editor.selectionBackground": `${theme.ui.border}cc`,
-      "editor.inactiveSelectionBackground": `${theme.ui.border}80`,
-      "editorIndentGuide.background1": theme.ui.border,
-      "editorWhitespace.foreground": theme.ui.border,
-      "editorWidget.background": theme.ui.surface,
-      "editorWidget.border": theme.ui.border,
-      "editorSuggestWidget.background": theme.ui.surface,
-      "editorGutter.background": theme.ui.bg,
-      "diffEditor.insertedTextBackground": "#22c55e22",
-      "diffEditor.removedTextBackground": "#ef444422",
-      "scrollbarSlider.background": `${theme.ui.border}99`,
-      "minimap.background": theme.ui.bg,
+      ...colors,
+      "editor.background": "#00000000",
+      "editorGutter.background": "#00000000",
+      "minimap.background": "#00000000",
+      "editorOverviewRuler.background": "#00000000",
+      "editor.lineHighlightBackground": `${theme.ui.surfaceRaised}99`,
+      "editorStickyScroll.background": theme.ui.surface,
     },
   });
 }

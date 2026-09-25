@@ -70,7 +70,7 @@ export function ChainStrip({ taskId }: { taskId: string }) {
                   : marks[i] === "r"
                     ? "h-1.5 w-1.5 bg-[color-mix(in_oklab,var(--cf-accent)_60%,transparent)]"
                     : marks[i] === "e"
-                      ? "h-1.5 w-1.5 bg-[var(--cf-danger)]"
+                      ? "h-1.5 w-1.5 bg-[var(--cf-danger-fill)]"
                       : "h-1.5 w-1.5 border border-[var(--cf-text-faint)]"
             }`}
           />

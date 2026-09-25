@@ -326,7 +326,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
                 onClick={submit}
                 disabled={!input.trim() || blockedBy !== null || chainLocked}
                 aria-label={t("agents.send")}
-                className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent)] text-[var(--cf-on-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent)_86%,var(--cf-text))] disabled:pointer-events-none disabled:opacity-40"
+                className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:pointer-events-none disabled:opacity-40"
               >
                 <Send size={14} />
               </button>

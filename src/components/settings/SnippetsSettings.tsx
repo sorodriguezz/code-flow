@@ -407,7 +407,7 @@ function SnippetRow({
                     <span
                       key={at}
                       aria-hidden
-                      className="inline-block h-[11px] w-[2px] translate-y-[2px] rounded-full bg-[var(--cf-accent)]"
+                      className="inline-block h-[11px] w-[2px] translate-y-[2px] rounded-full bg-[var(--cf-accent-fill)]"
                     />
                   ),
                 )}

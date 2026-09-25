@@ -1,4 +1,4 @@
-import { ChevronDown, GitBranch, Lock, Settings, Sparkles, TerminalSquare } from "lucide-react";
+import { ChevronDown, GitBranch, Lock } from "lucide-react";
 import { NotificationBell } from "./NotificationBell";
 import { RemoteActions } from "../git/RemoteActions";
 import { AgentActivity } from "./AgentActivity";
@@ -10,103 +10,20 @@ import { UsageMeter } from "./UsageMeter";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
-import { useTerminalStore } from "../../state/terminalStore";
-import { useCursorBlameStore } from "../../state/cursorBlameStore";
 import { useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
-
-/**
- * Who last changed the line the caret is on — the always-visible half of the blame annotation.
- *
- * Kept even though the editor already draws a label inline, because the two are not redundant: the
- * inline one rides the end of a possibly long line and can be scrolled out of view horizontally, and
- * this bar cannot. It carries the short form (`who, when`) without the commit summary, which is what
- * makes it affordable on a row whose only elastic element is the branch name.
- *
- * **Its own leaf component, and this is the load-bearing part.** `StatusBar` does not subscribe to the
- * caret at all — its subscription list is untouched by this feature. Only this `<span>` reads
- * `cursorBlameStore`, so a caret move re-renders one span rather than a footer full of buttons. Two
- * reinforcements on top of that: the selector returns a **string**, so moving within one blame hunk
- * yields an identical value and React bails out entirely; and the footer already re-renders once a
- * second from the fetch countdown, so even a per-second blame update would not be a new class of cost.
- *
- * `null` when no pane has anything to say, including an entry whose `text` is empty — a focused pane
- * that owns the slot with no answer (see `cursorBlameStore`). So the bar is byte-identical for anyone
- * with the setting off.
- */
-function BlameStatusItem() {
-  const text = useCursorBlameStore((s) => s.entry?.text ?? "");
-  if (!text) return null;
-  // Its own `min-w-0 truncate`, which is not optional here. Everything on this bar except the branch
-  // name is pinned `shrink-0` on purpose; a second variable-length string dropped in without a floor
-  // of its own would compete with the branch for the same slack and make both of them jump as the
-  // caret moved between a short line and a long one.
-  return (
-    <span className="min-w-0 shrink truncate italic" title={text}>
-      {text}
-    </span>
-  );
-}
 
 export function StatusBar() {
   const project = useWorkspaceStore((s) => s.activeProject());
   const status = useRepoStore((s) => s.status);
   const branches = useRepoStore((s) => s.branches);
-  const settingsOpen = useUiStore((s) => s.settingsOpen);
-  const toggleSettings = useUiStore((s) => s.toggleSettings);
-  const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
-  const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
-  const aiPanelOpen = useUiStore((s) => s.aiPanelOpen);
-  const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
   const toggleBranchSwitcher = useUiStore((s) => s.toggleBranchSwitcher);
   const t = useT();
   const hint = useShortcutHint();
 
-  const settingsButton = (
-    <button
-      onClick={toggleSettings}
-      data-tour="open-settings"
-      title={hint("app.settings", t("statusbar.settings"))}
-      className={`flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
-        settingsOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-      }`}
-    >
-      <Settings size={14} />
-    </button>
-  );
-
-  const terminalButton = (
-    <button
-      onClick={toggleTerminalPanel}
-      data-tour="toggle-terminal"
-      title={hint("panel.terminal", t("terminal.toggle"))}
-      className={`flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
-        terminalPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-      }`}
-    >
-      <TerminalSquare size={14} />
-    </button>
-  );
-
-  const aiPanelButton = (
-    <button
-      onClick={toggleAiPanel}
-      data-tour="toggle-ai-panel"
-      title={hint("panel.ai", t("statusbar.aiPanel"))}
-      className={`flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md hover:bg-[var(--cf-hover)] ${
-        aiPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-      }`}
-    >
-      <Sparkles size={14} />
-    </button>
-  );
-
   if (!project) {
     return (
-      <footer className="flex h-7 shrink-0 items-center gap-2 px-2 text-[12px] text-[var(--cf-text-muted)]">
-        {settingsButton}
-        {terminalButton}
-        {aiPanelButton}
+      <footer className="flex h-7 shrink-0 items-center gap-2 pl-[24.5px] pr-2 text-[12px] text-[var(--cf-text-muted)]">
         <span>{t("statusbar.openProject")}</span>
         {/* Also here, with no project open: agent runs, generations and API work are scoped to the
             workspace, not to a repository, so they can finish while this bar is in its empty state. */}
@@ -126,11 +43,11 @@ export function StatusBar() {
   const current = branches.find((b) => b.is_head);
 
   return (
-    <footer className="flex h-7 shrink-0 items-center gap-2.5 px-2 text-[12px] text-[var(--cf-text-muted)]">
-      {settingsButton}
-      {terminalButton}
-      {aiPanelButton}
-
+    <footer className="flex h-7 shrink-0 items-center gap-2.5 pl-[24.5px] pr-2 text-[12px] text-[var(--cf-text-muted)]">
+      {/* The settings and services buttons that used to open this row sit at the foot of the
+          projects panel now (`SidebarFoot`, 2026-09-25), so the repository leads it — and starts
+          on their axis, not against the window's edge (the user's ask): `24.5px` puts the 7px dot's
+          centre on 28, the centre of the column those two buttons stand in, folded or not. */}
       {/* Never truncated. This is the answer to "which repository am I about to push?", and a name
           cut at 140px turned two repos that share a prefix — `acme-api-gateway` and
           `acme-api-gateway-v2` — into the same label on the one bar that is always on screen.
@@ -177,10 +94,9 @@ export function StatusBar() {
 
       <RemoteActions />
 
-      {/* Between the git actions and the right-hand cluster: it belongs to the file being read rather
-          than to the repository, so it sits after everything that acts on the repository and before
-          everything that reports on the workspace. */}
-      <BlameStatusItem />
+      {/* The line blame that sat here moved to the Editor's own status line (2026-09-25), with the
+          caret, indentation and line endings: it is about the file being read, not the repository —
+          see `EditorStatusLine`. */}
 
       {/* The one thing on the right. It is not a git action — it reports on agent runs, generations
           and API work, which are the workspace's business rather than this repository's — and it is

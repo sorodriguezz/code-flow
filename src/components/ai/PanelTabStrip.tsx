@@ -249,7 +249,7 @@ function TabShell({
             <span
               role="img"
               aria-label={t("assistant.unread")}
-              className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-surface)]"
+              className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent-fill)] ring-2 ring-[var(--cf-surface)]"
             />
           )}
           {dot === "error" && (

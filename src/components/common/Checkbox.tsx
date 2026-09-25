@@ -48,7 +48,8 @@ export function Checkbox({
         className="pointer-events-none flex h-4 w-4 items-center justify-center rounded-[4px] border transition-colors duration-100 peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--cf-accent)] peer-focus-visible:ring-offset-1 peer-focus-visible:ring-offset-[var(--cf-surface)]"
         style={{
           borderColor: filled ? "var(--cf-accent)" : "var(--cf-field-border)",
-          backgroundColor: filled ? "var(--cf-accent)" : "transparent",
+          // The fill alias, like every accent fill: a see-through window lets some backdrop through it.
+          backgroundColor: filled ? "var(--cf-accent-fill)" : "transparent",
           opacity: disabled ? 0.4 : 1,
         }}
       >

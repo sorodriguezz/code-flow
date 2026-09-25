@@ -147,7 +147,7 @@ export function VaultLockScreen() {
                       <span
                         key={step}
                         className={`h-1 flex-1 rounded-full ${
-                          strength > step ? "bg-[var(--cf-accent)]" : "bg-[var(--cf-border)]"
+                          strength > step ? "bg-[var(--cf-accent-fill)]" : "bg-[var(--cf-border)]"
                         }`}
                       />
                     ))}
