@@ -168,7 +168,7 @@ export function TitleBar() {
 
       {/* The "Acciones IA" menu that ended this row is gone (2026-09-25): each of its rows had a
           quicker door already — the assistant's own button, a pull request's own tab to review it,
-          and the sidebar's glasses (or the palette) to review one from its link. That button took
+          and the assistant's "+" menu (or the palette, or ⌘⇧L) to review one from its link. That button took
           the menu's place here for a day, then moved to the foot of the app rail, where it reads as
           the app it opens — see `AssistantButton` in `AppRail`. */}
       {!isMac && (

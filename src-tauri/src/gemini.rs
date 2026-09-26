@@ -328,7 +328,8 @@ fn interpret_output(
             err.to_string()
         });
     }
-    if refusal_reply(&text) {
+    let generated = parsed.as_ref().and_then(|result| result.usage.as_ref()).map(|u| u.output_tokens + u.thinking_tokens);
+    if refusal_reply(&text, generated) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
     let usage = parsed.and_then(|result| result.usage).map(|u| AiUsage {

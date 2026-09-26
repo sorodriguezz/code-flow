@@ -1,6 +1,6 @@
 import { useId, useMemo, type ReactNode } from "react";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
-import { BRAND_LOGOS } from "../../lib/icons/brandLogos";
+import { BRAND_LOGOS, type BrandLogo } from "../../lib/icons/brandLogos";
 
 /**
  * A brand mark by id — an AI engine's or a platform's — with a caller-supplied fallback for the
@@ -18,17 +18,21 @@ import { BRAND_LOGOS } from "../../lib/icons/brandLogos";
  */
 export function BrandGlyph({
   id,
+  logo: given,
   size = 14,
   className = "",
   fallback = null,
 }: {
   id: string;
+  /** A mark from a set of its own rather than `BRAND_LOGOS` — the project initializer's framework
+   *  logos, which live in that feature's lazy chunk (see `lib/scaffold/logos.ts`). */
+  logo?: BrandLogo;
   size?: number;
   className?: string;
   /** Drawn when nothing here has a mark for `id`. */
   fallback?: ReactNode;
 }) {
-  const logo = BRAND_LOGOS[id];
+  const logo = given ?? BRAND_LOGOS[id];
   /**
    * A per-instance suffix for the ids inside the markup.
    *
@@ -89,15 +93,23 @@ export function ProviderGlyph({
 /**
  * Makes every id a body defines unique to one instance, references included.
  *
- * Deliberately literal: it rewrites `id="x"` and `url(#x)` for the ids the body itself declares,
- * and touches nothing else. A regex over the whole markup would be shorter and would also rewrite
- * an `id` that appeared inside path data or a title.
+ * Deliberately literal: it rewrites `id="x"`, `url(#x)` and `href="#x"` for the ids the body itself
+ * declares, and touches nothing else. A regex over the whole markup would be shorter and would also
+ * rewrite an `id` that appeared inside path data or a title. `href` is the `<use>` reference —
+ * Next.js's mark masks with a `<use href="#circle">`, and left pointing at the old id the mask was
+ * empty and the whole mark vanished.
  */
 function scopeIds(body: string, suffix: string): string {
   const declared = [...body.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
   return declared.reduce(
     (markup, id) =>
-      markup.split(`id="${id}"`).join(`id="${id}-${suffix}"`).split(`url(#${id})`).join(`url(#${id}-${suffix})`),
+      markup
+        .split(`id="${id}"`)
+        .join(`id="${id}-${suffix}"`)
+        .split(`url(#${id})`)
+        .join(`url(#${id}-${suffix})`)
+        .split(`href="#${id}"`)
+        .join(`href="#${id}-${suffix}"`),
     body,
   );
 }

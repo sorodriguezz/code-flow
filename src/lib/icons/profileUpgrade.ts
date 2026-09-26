@@ -13,16 +13,21 @@ import { BUILT_IN_PROFILES, type IconProfile } from "./profiles";
  *   compared rule by rule against the version that install was given (`SHIPPED_V1` below). One
  *   edited rule — a toggle, a reorder, an icon — and the copy is the user's, left alone; the panel's
  *   restore button is how they take the new pack when they want it. The name is kept either way.
- * - **A pack the install has never been offered is added**, at the end of its list. "Offered" is
- *   remembered separately (`offered`), so a pack the user deleted stays deleted: absent from the
- *   list and already offered means "removed on purpose", not "new".
+ * - **A shipped pack missing from the list is added**, at the end of it — unless the user deleted
+ *   it. That is known only from `removed`, the record `removeProfile` writes, and never inferred
+ *   from absence. Absence used to be read against `offered` ("given before and gone now means
+ *   deleted on purpose"), and it lied: v2.0.0, opened after a newer build, could not read the
+ *   newer list, rewrote it with its own three packs, and every later launch read the eight it had
+ *   dropped as deleted by the user — so they never came back (2026-09-24). A pack an older build
+ *   drops now returns on the next launch of this one.
  *
  * Pure, so it can be tested without a settings store, and idempotent: run on its own output it
  * changes nothing, which matters because the store runs it every time the profiles row is re-read.
  */
 
-/** The ids every install before this change was given. They count as already offered for an install
- * that has no `offered` record yet — otherwise a user who deleted NestJS would have it back. */
+/** The ids every install before packs was given. On an install that predates both records, one of
+ * these missing is the one deletion that can be taken as deliberate — nothing but the user removed
+ * profiles then — so a user who deleted NestJS does not get it back. */
 export const V1_OFFERED_IDS = ["angular", "nestjs", "base"] as const;
 
 type V1Rule = Pick<IconRule, "target" | "match" | "pattern" | "icon" | "enabled">;
@@ -103,20 +108,37 @@ function copy(profile: IconProfile): IconProfile {
 
 export interface ProfileUpgrade {
   profiles: IconProfile[];
-  /** Every shipped id this install has now been offered. */
+  /** Every shipped id this install has now been offered. No longer decides anything here; kept
+   * current because v2.0.1–2.0.3 still read it, and to them a pack absent and offered is deleted. */
   offered: string[];
+  /** The shipped packs the user deleted that are still gone. */
+  removed: string[];
   /** Whether `profiles` differs from what was stored, and so has to be written back. */
   changed: boolean;
   /** Whether `offered` differs from what was stored. */
   offeredChanged: boolean;
+  /** Whether `removed` differs from what was stored. */
+  removedChanged: boolean;
 }
 
 /**
- * `offered` is the stored record, or `null` for an install that predates it — see
- * `V1_OFFERED_IDS`.
+ * `offered` and `removed` are the stored records, each `null` for an install that predates it.
+ *
+ * With no `removed` record yet, nothing counts as deleted except a V1 pack missing from an install
+ * that also predates `offered` — see `V1_OFFERED_IDS`. The price: a pack deliberately deleted on
+ * v2.0.1–2.0.3 comes back once. That is the right way round: the other reading is what kept eight
+ * packs away for good from a user who had deleted none of them.
  */
-export function upgradeShippedProfiles(stored: IconProfile[], offered: string[] | null): ProfileUpgrade {
+export function upgradeShippedProfiles(
+  stored: IconProfile[],
+  offered: string[] | null,
+  removed: string[] | null,
+): ProfileUpgrade {
   const known = new Set<string>(offered ?? V1_OFFERED_IDS);
+  const present = (id: string) => stored.some((profile) => profile.id === id);
+  // Still gone, and only those: a pack the user brought back (an import under its id) is no longer
+  // deleted, and the record is trimmed to say so.
+  const deleted = [...new Set(removed ?? (offered === null ? V1_OFFERED_IDS : []))].filter((id) => !present(id));
   let changed = false;
 
   const profiles = stored.map((profile) => {
@@ -130,9 +152,8 @@ export function upgradeShippedProfiles(stored: IconProfile[], offered: string[] 
   });
 
   for (const shipped of BUILT_IN_PROFILES) {
-    if (known.has(shipped.id)) continue;
     known.add(shipped.id);
-    if (profiles.some((profile) => profile.id === shipped.id)) continue;
+    if (deleted.includes(shipped.id) || profiles.some((profile) => profile.id === shipped.id)) continue;
     profiles.push(copy(shipped));
     changed = true;
   }
@@ -141,7 +162,9 @@ export function upgradeShippedProfiles(stored: IconProfile[], offered: string[] 
   return {
     profiles,
     offered: nextOffered,
+    removed: deleted,
     changed,
     offeredChanged: offered === null || nextOffered.length !== offered.length,
+    removedChanged: removed === null || deleted.length !== removed.length,
   };
 }

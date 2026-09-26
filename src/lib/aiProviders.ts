@@ -62,6 +62,11 @@ export interface AiProviderOption {
    *  here takes one on stdin). Where this is false the paste target is visibly disabled, because the
    *  only other option is accepting an image and quietly dropping it. */
   acceptsImages?: boolean;
+  /** The model a commit message is written with when the commit task pins none — the engine's own
+   *  fast pick, tried before its base model. Mirrors `COMMIT_MESSAGE_MODEL` in the engine's Rust
+   *  module (only `claude.rs` sets one), so the routing mirror in `aiProviderStore`, and every chip
+   *  that reads it, names the model a commit actually runs on. */
+  commitMessageModel?: string;
   /** Where to go to get this provider working. Shown in its Settings row, and surfaced up front
    * when the provider isn't detected — so "Not found" always comes with a way out. */
   setup?: {
@@ -84,6 +89,7 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     available: true,
     defaultBinary: "claude",
     usesToolAllowlist: true,
+    commitMessageModel: "claude-haiku-4-5-20251001",
     // The only engine here that can type. `--include-partial-messages` on a `-p` run with
     // `--output-format stream-json --verbose` emits `content_block_delta` events carrying both
     // `text_delta` and `thinking_delta`, which is what the transcript and the reasoning block are

@@ -372,7 +372,7 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
             err.to_string()
         });
     }
-    if refusal_reply(&text) {
+    if refusal_reply(&text, events.as_ref().and_then(|events| events.usage.as_ref()).map(|usage| usage.output_tokens)) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
     Ok(AiRun {

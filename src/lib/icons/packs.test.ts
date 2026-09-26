@@ -191,11 +191,13 @@ describe("upgradeShippedProfiles", () => {
 
   it("replaces an untouched old General, keeps its name, and adds the packs it never had", () => {
     const stored = [{ ...v1("base"), name: "Mi General" }];
-    const result = upgradeShippedProfiles(stored, null);
+    const result = upgradeShippedProfiles(stored, null, null);
     expect(result.changed).toBe(true);
     expect(result.profiles[0].name).toBe("Mi General");
     expect(result.profiles[0].rules).toEqual(pack("base").rules);
-    // Angular and Nest were offered to every install before this — absent means deleted on purpose.
+    // Angular and Nest were given to every install before packs, when only the user removed profiles —
+    // absent there means deleted on purpose, and that becomes the record.
+    expect(result.removed).toEqual(["angular", "nestjs"]);
     expect(result.profiles.map((profile) => profile.id)).toEqual([
       "base",
       "react",
@@ -214,23 +216,52 @@ describe("upgradeShippedProfiles", () => {
   it("leaves an edited copy alone", () => {
     const edited = v1("base");
     edited.rules = edited.rules.map((rule, index) => (index === 0 ? { ...rule, enabled: false } : rule));
-    const result = upgradeShippedProfiles([edited], null);
+    const result = upgradeShippedProfiles([edited], null, null);
     expect(result.profiles[0]).toBe(edited);
   });
 
   it("is idempotent, so re-reading its own output writes nothing", () => {
-    const first = upgradeShippedProfiles([v1("base")], null);
-    const second = upgradeShippedProfiles(first.profiles, first.offered);
+    const first = upgradeShippedProfiles([v1("base")], null, null);
+    const second = upgradeShippedProfiles(first.profiles, first.offered, first.removed);
     expect(second.changed).toBe(false);
     expect(second.offeredChanged).toBe(false);
+    expect(second.removedChanged).toBe(false);
     expect(second.profiles).toEqual(first.profiles);
   });
 
-  it("does not bring back a new pack the user has since deleted", () => {
-    const first = upgradeShippedProfiles([v1("base")], null);
+  it("does not bring back a pack the user deleted", () => {
+    const first = upgradeShippedProfiles([v1("base")], null, null);
     const withoutReact = first.profiles.filter((profile) => profile.id !== "react");
-    const second = upgradeShippedProfiles(withoutReact, first.offered);
+    // What `removeProfile` records before it writes the shorter list.
+    const second = upgradeShippedProfiles(withoutReact, first.offered, [...first.removed, "react"]);
     expect(second.profiles.some((profile) => profile.id === "react")).toBe(false);
+    expect(second.changed).toBe(false);
+    expect(second.removedChanged).toBe(false);
+  });
+
+  // The row an install was left with on 2026-09-24, verbatim in shape: v2.0.0, opened after a newer
+  // build, could not read the eleven references, rewrote the list with its own three, and `offered`
+  // still named all eleven. Nobody deleted anything — so nothing may stay missing, whether or not
+  // the deletion record exists yet.
+  it.each([
+    ["before the deletion record existed", null],
+    ["after it", [] as string[]],
+  ])("brings back packs an older build dropped, %s", (_label, removed) => {
+    const stored = ["angular", "nestjs", "base"].map((id) => pack(id));
+    const all = BUILT_IN_PROFILES.map((profile) => profile.id);
+    const result = upgradeShippedProfiles(stored, all, removed);
+    expect(result.profiles.map((profile) => profile.id).sort()).toEqual([...all].sort());
+    expect(result.changed).toBe(true);
+    expect(result.removed).toEqual([]);
+    expect(result.removedChanged).toBe(removed === null);
+  });
+
+  it("stops counting a pack as deleted once it is back in the list", () => {
+    const stored = BUILT_IN_PROFILES.map((profile) => pack(profile.id));
+    const result = upgradeShippedProfiles(stored, BUILT_IN_PROFILES.map((profile) => profile.id), ["react"]);
+    expect(result.removed).toEqual([]);
+    expect(result.removedChanged).toBe(true);
+    expect(result.changed).toBe(false);
   });
 });
 

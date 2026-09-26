@@ -590,11 +590,12 @@ fn interpret_output(
         if text.is_empty() {
             return Err("cline no devolvió contenido".to_string());
         }
-        if refusal_reply(&text) {
+        let usage = usage_of(&result);
+        if refusal_reply(&text, usage.as_ref().map(|u| u.output_tokens)) {
             return Err(format!("{QUOTA_MARKER}{text}"));
         }
         return Ok(AiRun {
-            usage: usage_of(&result),
+            usage,
             model: model_of(&result),
             text,
             // No resumable session exists to report — see the module docs.

@@ -2,7 +2,7 @@
 //! that lives beside the repository tools rather than inside one.
 //!
 //! This is the successor to [`crate::commands::claude_cmd::send_chat_message`], not a second copy
-//! of it, and the routing helpers are shared with it rather than duplicated ([`load_ai_config`],
+//! of it, and the routing helpers are shared with it rather than duplicated ([`load_ai_config_in`],
 //! [`load_ai_config_as`], [`AiTask`]). What is different here is everything that follows from one
 //! premise: **a conversation does not have to be about a repository.** Three of this module's
 //! decisions come straight out of that, and each is a decision rather than a default.

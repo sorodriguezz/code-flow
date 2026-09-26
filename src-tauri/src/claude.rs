@@ -560,10 +560,12 @@ fn interpret_output(
         let failed = !success || parsed.as_ref().is_some_and(|p| p.is_error);
         // Which question to ask depends on whether this text is a *reason* or an *answer*: on a
         // failed run any signal anywhere explains the failure, but on a successful one only a
-        // message that is nothing but the refusal counts. See `refusal_reply`.
+        // message that is nothing but the refusal counts — and never one the model generated.
+        // See `refusal_reply`.
+        let generated = parsed.as_ref().and_then(|p| p.usage.as_ref()).map(|u| u.output_tokens);
         let refused = match failed {
             true => quota_signal(text),
-            false => refusal_reply(text),
+            false => refusal_reply(text, generated),
         };
         if refused {
             return Err(format!("{QUOTA_MARKER}{text}"));
@@ -602,7 +604,7 @@ fn interpret_output(
     if fallback.is_empty() {
         return Err("claude produced no output".to_string());
     }
-    if refusal_reply(fallback) {
+    if refusal_reply(fallback, None) {
         return Err(format!("{QUOTA_MARKER}{fallback}"));
     }
     Ok(AiRun { text: fallback.to_string(), session_id: None, model: None, usage: None, context_tokens: None })
@@ -700,6 +702,31 @@ mod tests {
     fn a_quota_failure_still_gets_the_marker_the_frontend_looks_for() {
         let stdout = r#"{"is_error":true,"result":"Claude usage limit reached, resets at 5pm"}"#;
         let err = interpret_output(false, "exit status: 1", stdout, "").unwrap_err();
+        assert!(err.starts_with(QUOTA_MARKER), "got {err}");
+    }
+
+    /// The run behind a "usage limit" banner over a commit message, trimmed from a real `claude -p
+    /// … --model claude-haiku-4-5-20251001 --output-format stream-json --verbose` on 2.1.266: the
+    /// plan window `allowed`, a clean result, 547 tokens generated — and a message that is about
+    /// rate limiting, because the diff was. That is an answer, not the provider saying no.
+    #[test]
+    fn a_generated_commit_message_about_rate_limiting_is_not_a_refusal() {
+        let stdout = concat!(
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour"}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"feat: add rate limiting and idempotency to order creation","usage":{"input_tokens":9,"output_tokens":547},"modelUsage":{"claude-haiku-4-5-20251001":{}}}"#,
+            "\n",
+        );
+        let run = interpret_output(true, "exit status: 0", stdout, "").unwrap();
+        assert_eq!(run.text, "feat: add rate limiting and idempotency to order creation");
+    }
+
+    /// And the counts only ever clear an answer: a clean exit that generated nothing and says
+    /// "limit reached" is still the refusal older CLIs reported that way.
+    #[test]
+    fn a_clean_exit_that_generated_nothing_can_still_be_a_refusal() {
+        let stdout = r#"{"type":"result","is_error":false,"result":"Claude AI usage limit reached|1751234567","usage":{"input_tokens":0,"output_tokens":0}}"#;
+        let err = interpret_output(true, "exit status: 0", stdout, "").unwrap_err();
         assert!(err.starts_with(QUOTA_MARKER), "got {err}");
     }
 

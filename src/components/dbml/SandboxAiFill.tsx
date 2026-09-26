@@ -2,8 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
-import { ProviderGlyph } from "../ai/ProviderGlyph";
-import { AI_PROVIDERS } from "../../lib/aiProviders";
+import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { diagramsFillRowsWithAi } from "../../lib/tauri/diagramsCommands";
 import {
   AI_FILL_BATCH,
@@ -18,7 +17,6 @@ import {
 } from "../../lib/dbml/aiFill";
 import { orderTables } from "../../lib/dbml/sqlite";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
-import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useSandboxStore } from "../../state/sandboxStore";
 import { useDiagramsStore } from "../../state/diagramsStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -67,15 +65,6 @@ export function SandboxAiFill({
   disabled: boolean;
 }) {
   const t = useT();
-  const defaultProvider = useAiProviderStore((state) => state.providerId);
-  const routedProvider = useAiProviderStore((state) => state.taskProviders["sample_rows"]);
-  const routedModel = useAiProviderStore((state) => state.taskModels["sample_rows"]);
-  const provider = routedProvider?.trim() || defaultProvider;
-  const option = AI_PROVIDERS.find((entry) => entry.id === provider);
-  // `label` for the engines that carry a fixed name, the translated one otherwise, and the raw id
-  // as the last resort — a provider added by a newer build than this window's strings still reads
-  // as something rather than as a blank line where the engine's name should be.
-  const providerName = option?.label ?? (option ? t(option.labelKey!) : provider);
 
   const [open, setOpen] = useState(false);
   const [instruction, setInstruction] = useState("");
@@ -222,21 +211,18 @@ export function SandboxAiFill({
              the toolbar wraps, so the button's own edge is the only stable anchor. */
           className="absolute bottom-full right-0 z-30 mb-1.5 w-[340px] overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
         >
-          {/* The header carries the one fact the old panel left out: *which engine and which
-              model* is about to write your data. A generation whose cost and quality depend
-              entirely on that, with no way to see it from where you press the button, is the
-              complaint this whole row answers — and the hint under it says where to change it,
-              because "you can route this" is not discoverable from a provider name alone. */}
+          {/* The header carries the one fact the old panel left out: *which engine, which model and
+              whose login* is about to write your data — and it is where that is changed: the
+              `sample_rows` row of the routing, the same one Settings shows (`ChatModelPicker`). */}
           <div className="flex items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 py-2">
-            <ProviderGlyph providerId={provider} size={14} />
+            <AiSparkles size={14} />
             <div className="min-w-0 flex-1">
               <p className="truncate text-[11px] font-semibold text-[var(--cf-text)]">
                 {t("dbml.sandbox.aiFillTitle")}
               </p>
-              <p className="truncate text-[10.5px] text-[var(--cf-text-muted)]">
-                {providerName}
-                {routedModel?.trim() ? ` · ${routedModel.trim()}` : ` · ${t("dbml.sandbox.aiFillDefaultModel")}`}
-              </p>
+              <div className="mt-0.5 flex min-w-0">
+                <ChatModelPicker task="sample_rows" variant="tag" liveModel={null} chatActive={false} />
+              </div>
             </div>
             <button
               type="button"

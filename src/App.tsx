@@ -138,6 +138,11 @@ const CommandPalette = lazy(loadCommandPalette);
 const ShortcutsModal = lazy(loadShortcutsModal);
 const BranchSwitcherModal = lazy(loadBranchSwitcherModal);
 const OpenPrLinkModal = lazy(loadOpenPrLinkModal);
+/** The project initializer. Not warmed: it is opened by a click, never by a reflex, and its chunk
+ *  carries the framework logos. */
+const ProjectInitModal = lazy(() =>
+  import("./components/scaffold/ProjectInitModal").then((m) => ({ default: m.ProjectInitModal })),
+);
 
 /**
  * The chunks above that open from a keystroke, warmed once the app has finished starting.
@@ -511,6 +516,8 @@ export default function App() {
   const closeBranchSwitcher = useUiStore((s) => s.closeBranchSwitcher);
   const prLinkModalOpen = useUiStore((s) => s.prLinkModalOpen);
   const closePrLinkModal = useUiStore((s) => s.closePrLinkModal);
+  const projectInitOpen = useUiStore((s) => s.projectInitOpen);
+  const closeProjectInit = useUiStore((s) => s.closeProjectInit);
   // Read here, not only inside `SettingsView`, because the panel is a lazy chunk now and this is
   // the flag that decides whether that chunk is ever asked for. See the render below.
   const settingsOpen = useUiStore((s) => s.settingsOpen);
@@ -1190,6 +1197,11 @@ export default function App() {
       {prLinkModalOpen && (
         <Suspense fallback={<PaletteSkeleton />}>
           <OpenPrLinkModal onClose={closePrLinkModal} />
+        </Suspense>
+      )}
+      {projectInitOpen && (
+        <Suspense fallback={<PaletteSkeleton />}>
+          <ProjectInitModal onClose={closeProjectInit} />
         </Suspense>
       )}
       {/* Owns its own open flag rather than one in uiStore: nothing but the update badge and the

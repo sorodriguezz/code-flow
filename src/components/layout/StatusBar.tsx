@@ -1,4 +1,4 @@
-import { ChevronDown, GitBranch, Lock } from "lucide-react";
+import { ChevronDown, GitBranch, Lock, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { NotificationBell } from "./NotificationBell";
 import { RemoteActions } from "../git/RemoteActions";
 import { AgentActivity } from "./AgentActivity";
@@ -12,6 +12,49 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
+import { useLayoutStore } from "../../state/layoutStore";
+import { iconButtonClass } from "../common/Button";
+
+/**
+ * Folds and unfolds the projects panel. First thing on the bar, standing on the axis of the panel's
+ * foot — the dock and settings buttons directly above it — so it reads as the last of that column
+ * rather than as a bar control, and it never lands on content: the bar runs under both panels.
+ *
+ * This is the fourth place it has been, and the one the user chose (2026-09-26). On the seam, level
+ * with the workspace switcher, it collided with whatever an app drew against the seam — the
+ * Editor's activity rail, Settings' nav; in the title row it was "muy aparte del panel" and, with no
+ * traffic lights, sat where macOS puts them; beside the switcher it was noise in the panel's first
+ * row. The seam is a plain seam again — see `Sidebar`, which also carries the `id` named here.
+ *
+ * `PanelLeft*` rather than the chevrons the seam disc wore: a bare `«` on a status bar reads as
+ * "back", and this pair is what the Changes dock and the GraphQL explorer already flip for theirs.
+ * The key cap comes from the binding registry through `hint`, never from a hand-written chord.
+ *
+ * What did move with it is the panel's way of pointing at it: hover anywhere on the projects panel,
+ * folded or not, and the glyph turns the accent colour — the glyph alone, no ring and no pulse (the
+ * user's call when the button moved: the seam disc's breathing ring was "para que el usuario sepa
+ * dónde hacer clic", and a coloured icon says the same with less). `cf-sidebar-fold` is the hook
+ * `index.css` reaches from the panel through the frame; see `.cf-sidebar-zone` there.
+ */
+function SidebarFoldButton() {
+  const collapsed = useLayoutStore((s) => s.flags.sidebarCollapsed);
+  const toggleFlag = useLayoutStore((s) => s.toggleFlag);
+  const t = useT();
+  const hint = useShortcutHint();
+  const label = collapsed ? t("sidebar.expandProjects") : t("sidebar.collapseProjects");
+  return (
+    <button
+      onClick={() => toggleFlag("sidebarCollapsed")}
+      aria-label={label}
+      aria-expanded={!collapsed}
+      aria-controls="cf-sidebar"
+      title={hint("panel.sidebar", label)}
+      className={`cf-sidebar-fold ${iconButtonClass({ size: "xs" })}`}
+    >
+      {collapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
+    </button>
+  );
+}
 
 export function StatusBar() {
   const project = useWorkspaceStore((s) => s.activeProject());
@@ -23,7 +66,8 @@ export function StatusBar() {
 
   if (!project) {
     return (
-      <footer className="flex h-7 shrink-0 items-center gap-2 pl-[24.5px] pr-2 text-[12px] text-[var(--cf-text-muted)]">
+      <footer className="flex h-7 shrink-0 items-center gap-2 pl-[17px] pr-2 text-[12px] text-[var(--cf-text-muted)]">
+        <SidebarFoldButton />
         <span>{t("statusbar.openProject")}</span>
         {/* Also here, with no project open: agent runs, generations and API work are scoped to the
             workspace, not to a repository, so they can finish while this bar is in its empty state. */}
@@ -43,11 +87,13 @@ export function StatusBar() {
   const current = branches.find((b) => b.is_head);
 
   return (
-    <footer className="flex h-7 shrink-0 items-center gap-2.5 pl-[24.5px] pr-2 text-[12px] text-[var(--cf-text-muted)]">
-      {/* The settings and services buttons that used to open this row sit at the foot of the
-          projects panel now (`SidebarFoot`, 2026-09-25), so the repository leads it — and starts
-          on their axis, not against the window's edge (the user's ask): `24.5px` puts the 7px dot's
-          centre on 28, the centre of the column those two buttons stand in, folded or not. */}
+    <footer className="flex h-7 shrink-0 items-center gap-2.5 pl-[17px] pr-2 text-[12px] text-[var(--cf-text-muted)]">
+      {/* The fold button leads the row, on the axis of the panel's foot: `17px` puts the 22px
+          button's centre on 28, the centre of the column the dock and settings buttons stand in
+          (`SidebarFoot`), folded or not. The repository follows after the row's own gap. Before the
+          button arrived the 7px dot stood on that axis itself (`pl-[24.5px]`) — the alignment the
+          user asked for, which the button now inherits. */}
+      <SidebarFoldButton />
       {/* Never truncated. This is the answer to "which repository am I about to push?", and a name
           cut at 140px turned two repos that share a prefix — `acme-api-gateway` and
           `acme-api-gateway-v2` — into the same label on the one bar that is always on screen.

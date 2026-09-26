@@ -78,6 +78,17 @@
   --cf-ref-branch: #0f766e;
   --cf-ref-remote: #2563eb;
   --cf-ref-tag: #b45309;
+  /* The API client's verbs past the three that carry a meaning of their own (GET success, POST
+     warning, DELETE danger): one fixed hue each, so no two verbs share one (the user's call,
+     2026-09-26 — PUT and PATCH were both the accent, and HEAD, OPTIONS and TRACE were grey). Never
+     the accent, which the user picks and would collide with one of them. Around the wheel from the
+     three above: HEAD teal beside GET's green (it is GET without the body), PUT blue, PATCH violet,
+     OPTIONS pink, TRACE lime in the gap between POST and GET. 700 shades here, read as text. */
+  --cf-method-put: #1d4ed8;
+  --cf-method-patch: #7e22ce;
+  --cf-method-head: #0f766e;
+  --cf-method-options: #be185d;
+  --cf-method-trace: #4d7c0f;
   /* BSON value colours for the document list. Their own tokens rather than borrowed semantics:
      `--cf-danger` happens to be the right red for an ObjectId today, and the day someone retunes
      what "danger" means, every id in every document would move with it. Chosen to sit at similar
@@ -158,6 +169,11 @@
   --cf-ref-branch: #2dd4bf;
   --cf-ref-remote: #60a5fa;
   --cf-ref-tag: #fbbf24;
+  --cf-method-put: #60a5fa;
+  --cf-method-patch: #c084fc;
+  --cf-method-head: #2dd4bf;
+  --cf-method-options: #f472b6;
+  --cf-method-trace: #a3e635;
   /* Same five, lifted for a dark background — see the light theme's note. */
   --cf-bson-string: #6ee7a8;
   --cf-bson-number: #93b4fd;
@@ -202,6 +218,11 @@
     --cf-ref-branch: #2dd4bf;
     --cf-ref-remote: #60a5fa;
     --cf-ref-tag: #fbbf24;
+    --cf-method-put: #60a5fa;
+    --cf-method-patch: #c084fc;
+    --cf-method-head: #2dd4bf;
+    --cf-method-options: #f472b6;
+    --cf-method-trace: #a3e635;
     --cf-bson-string: #6ee7a8;
     --cf-bson-number: #93b4fd;
     --cf-bson-id: #fbbf5c;
@@ -582,7 +603,10 @@ textarea,
 }
 
 /* The seam of a *folded* panel, and the fold button riding it.
-   Used by the projects sidebar and by Settings' section nav — the same control on two seams.
+   Used by Settings' section nav. The projects sidebar had the same control on its seam until
+   2026-09-26, when its button moved to the status bar (`SidebarFoldButton`): riding the seam it
+   collided with whatever an app drew against it — the Editor's activity rail first of all. The
+   prose below still says "rail" and "panel"; read it as the settings nav.
 
    Folded, the seam is a hairline and nothing else. The `ResizeHandle` that normally draws it is
    gone (there is nothing left to drag at one chip wide), and with it went the grip, the glow and
@@ -663,6 +687,21 @@ textarea,
   animation: cf-fold-pulse 1.6s ease-in-out infinite;
 }
 
+/* The projects panel's button lives in the status bar (2026-09-26), under the panel rather than
+   beside it, so no sibling combinator reaches it from the panel; the frame answers instead. The
+   zone is `cf-sidebar-zone` — the panel alone, not `cf-fold-zone`, which Settings' nav also wears
+   for its own toggle and which must not light this button from across the window.
+
+   What lights is the glyph alone, in the accent: no ring, no pulse (the user's call — "solo
+   márcalo de color el icono como tal, no el alrededor"). Kept at all because the seam disc's cue
+   was worth keeping: "funcionaba bien para que el usuario sepa dónde hacer clic". The button's
+   own hover says the same, so arriving on it never drops the colour the panel just promised.
+   Both outrank the recipe's `hover:text-*` utility by specificity, not by source order. */
+.cf-frame:has(.cf-sidebar-zone:hover) .cf-sidebar-fold,
+.cf-frame .cf-sidebar-fold:hover {
+  color: var(--cf-accent);
+}
+
 @keyframes cf-fold-pulse {
   0%,
   100% {
@@ -693,6 +732,13 @@ textarea,
 .cf-fold-zone:has(.fixed:hover) ~ * .cf-fold-toggle::after {
   animation: none;
   opacity: 0;
+}
+
+/* The status bar's button, same exception: the sidebar's dialogs are children of the panel, so
+   with one open the pointer is "on the panel" wherever it is, and the glyph would stay lit behind
+   the dim for as long as the dialog stood. */
+.cf-frame:has(.cf-sidebar-zone .fixed:hover) .cf-sidebar-fold {
+  color: var(--cf-text-muted);
 }
 
 /* A card arriving in a list — same move as cf-fade-in but slow enough to register as one, and

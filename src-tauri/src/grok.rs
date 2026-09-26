@@ -282,7 +282,7 @@ fn interpret_output(
     // back to treating stdout as the reply rather than failing: a usable answer in the wrong shape
     // still beats an error, and this is also what a future `--output-format` change would look like.
     let Ok(reply) = serde_json::from_str::<GrokReply>(raw) else {
-        if refusal_reply(raw) {
+        if refusal_reply(raw, None) {
             return Err(format!("{QUOTA_MARKER}{raw}"));
         }
         return Ok(AiRun { text: raw.to_string(), session_id: None, model: None, usage: None, context_tokens: None });
@@ -292,7 +292,7 @@ fn interpret_output(
     if text.is_empty() {
         return Err("grok produced no output".to_string());
     }
-    if refusal_reply(text) {
+    if refusal_reply(text, reply.usage.as_ref().map(|u| u.output_tokens)) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
 

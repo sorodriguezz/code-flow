@@ -8,7 +8,7 @@ import { Markdown } from "../common/Markdown";
 import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
 import { AiErrorBanner } from "./AiErrorBanner";
 import { AiRunLog } from "./AiRunLog";
-import { useTaskModelLabel } from "./ModelTag";
+import { ChatModelPicker } from "./ChatModelPicker";
 import { ActionBar, DocHeader, RunMenu, SPLIT_MIN_WIDTH, relativeTime, useElementWidth, type RunChoice } from "./docParts";
 import { EMPTY_JOBS, useJobsStore } from "../../state/jobsStore";
 import { useResolutionsStore } from "../../state/resolutionsStore";
@@ -40,7 +40,6 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
       .flat()
       .find((p) => p.id === projectId) ?? null,
   );
-  const analyzeModel = useTaskModelLabel("analyze");
 
   const loadJobs = useJobsStore((s) => s.load);
   useEffect(() => {
@@ -261,9 +260,11 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
 
       <ActionBar>
         <div className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]" title={analyzeModel}>
-            {analyzeModel}
-          </span>
+          {/* The engine the next analysis runs on, and where it changes: the `analyze` row, the same
+              one the 🛡's chip in Changes and Settings write. */}
+          <div className="min-w-0 flex-1">
+            <ChatModelPicker task="analyze" liveModel={null} chatActive={false} />
+          </div>
           {/* The reason it is off rides on a wrapper: a disabled recipe button takes no pointer
               events, and "nothing to analyze" is exactly what the disabled one has to say. */}
           <span className="flex shrink-0" title={!runningJob && changes === 0 ? t("analyze.nothingToAnalyze") : undefined}>

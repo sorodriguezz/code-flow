@@ -35,12 +35,12 @@ pub const QUOTA_MARKER: &str = "QUOTA_EXCEEDED::";
 /// something is broken. The billing ones matter for the credit-based CLIs (opencode bills per
 /// token, so it answers with "Insufficient balance" rather than a rate limit) — and it has more
 /// than one wording for it, which is why the gateway's is listed separately below.
-const QUOTA_SIGNALS: [&str; 12] = [
+const QUOTA_SIGNALS: [&str; 11] = [
     "usage limit",
     "rate limit",
     "quota exceeded",
     "resets at",
-    "try again in",
+    // "try again in" is not here: it only counts with a number after it — see [`waits_on_a_clock`].
     "limit reached",
     "insufficient balance",
     "insufficient credit",
@@ -60,7 +60,18 @@ const QUOTA_SIGNALS: [&str; 12] = [
 /// shared by every engine's output interpreter.
 pub(crate) fn quota_signal(text: &str) -> bool {
     let lower = text.to_lowercase();
-    QUOTA_SIGNALS.iter().any(|s| lower.contains(s))
+    QUOTA_SIGNALS.iter().any(|s| lower.contains(s)) || waits_on_a_clock(&lower)
+}
+
+/// "Try again in 3 hours" is a window that reopens on a clock. "Try again in a moment" is a server
+/// that fell over — Claude Code's own wording for a `529 Overloaded` and a `500` — and matching the
+/// bare phrase told the user their quota was spent while it was the provider that was down. So it
+/// counts only when a number follows it.
+fn waits_on_a_clock(lower: &str) -> bool {
+    const PHRASE: &str = "try again in";
+    lower
+        .match_indices(PHRASE)
+        .any(|(at, _)| lower[at + PHRASE.len()..].trim_start().starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// The longest a message can be and still be *only* a refusal.
@@ -78,7 +89,19 @@ const MAX_REFUSAL_CHARS: usize = 400;
 /// billing, and it does: a story review that reported "the appointment search is an HTTP call to
 /// SAP, which has a rate limit" was matched on its own prose, thrown away, and shown to the user
 /// as "you are out of quota" with the finished analysis as the error text.
-pub(crate) fn refusal_reply(text: &str) -> bool {
+///
+/// **And a reply the model generated is never a refusal**, however short. `output_tokens` is what
+/// the run reported generating, when its engine reports it. A provider turns a run down *instead
+/// of* generating — Claude Code's refusals are synthetic messages billed at zero output tokens — so
+/// a run that generated anything was answered by the model, whatever the answer is about. Length
+/// could never protect a commit message: it is short by definition, and "feat: add rate limiting
+/// and idempotency to order creation" — a clean, finished answer, 547 tokens of Haiku — was shown
+/// as "you've hit your usage limit" (2026-09-26). The words are the fallback for a run that reports
+/// no counts at all, which opencode's never does.
+pub(crate) fn refusal_reply(text: &str, output_tokens: Option<i64>) -> bool {
+    if output_tokens.is_some_and(|generated| generated > 0) {
+        return false;
+    }
     text.chars().count() <= MAX_REFUSAL_CHARS && quota_signal(text)
 }
 
@@ -314,11 +337,11 @@ Reglas:
 /// every time.
 ///
 /// **It must answer at length, in a fixed shape.** Partly because three headings are what makes an
-/// answer usable, and partly for a reason that is pure implementation: [`refusal_reply`] turns any
-/// reply under 400 characters that mentions "rate limit" or "quota" into a *quota exhausted*
-/// error. An analysis whose honest conclusion is "the job died on a registry rate limit" is
-/// exactly that shape, and a two-line version of it would be swallowed and shown as CodeFlow
-/// having run out of credit.
+/// answer usable, and partly for a reason that is pure implementation: on an engine that reports
+/// no token counts (opencode), [`refusal_reply`] turns any reply under 400 characters that
+/// mentions "rate limit" or "quota" into a *quota exhausted* error. An analysis whose honest
+/// conclusion is "the job died on a registry rate limit" is exactly that shape, and a two-line
+/// version of it would be swallowed and shown as CodeFlow having run out of credit.
 pub const DEFAULT_PIPELINE_TEMPLATE: &str =
     "Eres un ingeniero de plataforma senior. Se te entrega por stdin la información de una \
      ejecución de CI/CD que ha fallado: los datos del pipeline, el job concreto que falló, la \
@@ -1131,7 +1154,7 @@ pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
 
 /// The engine for `provider`, running as `account`.
 ///
-/// What every command's config is built from (see `claude_cmd::load_ai_config`), so the account is
+/// What every command's config is built from (see `claude_cmd::load_ai_config_in`), so the account is
 /// carried by the engine a run is handed rather than threaded through the twenty operations that
 /// take one: a flow cannot forget to pass it, because there is nothing to pass. The system account
 /// — and a CLI that cannot hold several — is the plain engine, unchanged.
@@ -5322,7 +5345,7 @@ mod tests {
     #[test]
     fn an_ordinary_decline_in_a_reply_is_not_a_refusal() {
         assert!(!quota_signal("the transfer fails with insufficient funds and returns 402"));
-        assert!(!refusal_reply("`TransferError::InsufficientFunds` is what that branch returns."));
+        assert!(!refusal_reply("`TransferError::InsufficientFunds` is what that branch returns.", None));
     }
 
     /// The bug this guards: a *finished* review whose own prose mentioned a rate limit was read
@@ -5337,16 +5360,43 @@ mod tests {
             "Detalle adicional del análisis. ".repeat(20),
         );
         assert!(quota_signal(&analysis), "the phrases really are in there");
-        assert!(!refusal_reply(&analysis));
+        assert!(!refusal_reply(&analysis, None));
     }
 
     /// The other side of the same line: a real refusal is short, and still has to be caught even
     /// when the CLI reports it on a run that exited cleanly.
     #[test]
     fn a_short_standalone_refusal_still_reads_as_one() {
-        assert!(refusal_reply("Claude AI usage limit reached|1751234567"));
-        assert!(refusal_reply("Error: Insufficient balance. Manage your billing here: https://x/billing"));
-        assert!(!refusal_reply("error: unknown flag --nope"));
+        assert!(refusal_reply("Claude AI usage limit reached|1751234567", None));
+        assert!(refusal_reply("Error: Insufficient balance. Manage your billing here: https://x/billing", None));
+        assert!(!refusal_reply("error: unknown flag --nope", None));
+        // A refusal generates nothing, and saying so does not make it an answer.
+        assert!(refusal_reply("Claude AI usage limit reached|1751234567", Some(0)));
+    }
+
+    /// The bug that put "you've hit your usage limit" over a finished commit message. Haiku wrote
+    /// this, verbatim, for a diff adding a rate limiter — 547 output tokens, the plan window
+    /// `allowed` — and length could not tell it from a refusal, because every commit message is
+    /// short. A run that generated its reply was answered, whatever the reply is about.
+    #[test]
+    fn a_reply_the_model_generated_is_never_a_refusal() {
+        let message = "feat: add rate limiting and idempotency to order creation";
+        assert!(refusal_reply(message, None), "with no counts, the words alone still decide");
+        assert!(!refusal_reply(message, Some(547)));
+        assert!(!refusal_reply("feat(billing): add invoice export", Some(12)));
+    }
+
+    /// Claude Code's wording for a server that fell over, verbatim from a real run. It says "try
+    /// again in", and it is not a limit: reading it as one told the user their quota was spent
+    /// while the provider was the one down. A window that reopens on a clock names the time.
+    #[test]
+    fn only_a_retry_with_a_time_is_a_quota_signal() {
+        assert!(!quota_signal(
+            "API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a \
+             moment. If it persists, check https://status.claude.com."
+        ));
+        assert!(quota_signal("Please try again in 20 minutes."));
+        assert!(quota_signal("slow down; try again in  3h"));
     }
 
     /// The reply shape the whole commit-message salvage exists for: Claude Code reports only its

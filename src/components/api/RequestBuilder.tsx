@@ -1187,6 +1187,9 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                 <button
                   type="button"
                   onClick={() => setSnippetOpen(!snippetOpen)}
+                  // The API tour's snippet step falls back to this switch when the panel is closed,
+                  // which it is by default — the switch is what the step's words point at anyway.
+                  data-tour="api-snippet-toggle"
                   aria-pressed={snippetOpen}
                   className={buttonClass({
                     variant: "ghost",

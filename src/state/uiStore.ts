@@ -133,13 +133,16 @@ interface UiState {
   /** Branch picking has its own modal (it checks out, rather than just navigating), so it gets
    * its own flag instead of a palette scope. */
   branchSwitcherOpen: boolean;
-  /** "Review a PR from its link" — reachable from the title bar, the command palette, the
-   * sidebar and a shortcut, none of which own the modal, so it lives here and is rendered once
-   * at the app root. */
+  /** "Review a PR from its link" — reachable from the assistant's "+" menu, the command palette
+   * and a shortcut, none of which own the modal, so it lives here and is rendered once at the app
+   * root. */
   prLinkModalOpen: boolean;
   /** "Clone a repository", lifted out of the sidebar's local state so the command palette can open
    *  it too — the sidebar still owns the modal and renders it. */
   cloneModalOpen: boolean;
+  /** The project initializer — new projects from a framework template. Rendered once at the app
+   *  root (`App.tsx`); opened from the projects panel and the command palette. */
+  projectInitOpen: boolean;
   /** Which sub-tab the API client's settings section should open on, when asked for a specific one. */
   apiSettingsTab: ApiSettingsTab | undefined;
   /** Which of the API tab's two workspaces is on screen. */
@@ -215,6 +218,8 @@ interface UiState {
   openPrLinkModal: () => void;
   openCloneModal: () => void;
   closeCloneModal: () => void;
+  openProjectInit: () => void;
+  closeProjectInit: () => void;
   togglePrLinkModal: () => void;
   closePrLinkModal: () => void;
 }
@@ -239,6 +244,7 @@ export const useUiStore = create<UiState>((set) => ({
   branchSwitcherOpen: false,
   prLinkModalOpen: false,
   cloneModalOpen: false,
+  projectInitOpen: false,
   setActiveView: (view) => set({ activeView: view, settingsOpen: false }),
   setStoriesMode: (mode) => set({ storiesMode: mode }),
   // Settings closed too: it covers the whole app, and landing behind it looks like nothing
@@ -301,6 +307,8 @@ export const useUiStore = create<UiState>((set) => ({
   openPrLinkModal: () => set({ prLinkModalOpen: true }),
   openCloneModal: () => set({ cloneModalOpen: true }),
   closeCloneModal: () => set({ cloneModalOpen: false }),
+  openProjectInit: () => set({ projectInitOpen: true }),
+  closeProjectInit: () => set({ projectInitOpen: false }),
   togglePrLinkModal: () => set((s) => ({ prLinkModalOpen: !s.prLinkModalOpen })),
   closePrLinkModal: () => set({ prLinkModalOpen: false }),
 }));

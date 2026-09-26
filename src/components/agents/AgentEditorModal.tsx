@@ -11,7 +11,7 @@ import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useAccountName, useAiAccountsStore, useProviderAccounts } from "../../state/aiAccountsStore";
-import { SYSTEM_ACCOUNT, validPreference } from "../../lib/aiAccounts";
+import { SYSTEM_ACCOUNT, resolveAccount, validPreference } from "../../lib/aiAccounts";
 import { useT } from "../../state/languageStore";
 import type { WorkspaceAgent } from "../../types/domain";
 import { fieldClass } from "../common/recipes";
@@ -52,8 +52,19 @@ export function AgentEditorModal({
   const [account, setAccount] = useState(agent?.account_id ?? "");
   const ensureAccounts = useAiAccountsStore((s) => s.ensure);
   const allAccounts = useAiAccountsStore((s) => s.accounts);
+  const taskPins = useAiAccountsStore((s) => s.taskPins);
+  const workspaceDefaults = useAiAccountsStore((s) => s.workspaceDefaults);
+  const providerDefaults = useAiAccountsStore((s) => s.providerDefaults);
   const providerAccounts = useProviderAccounts(provider);
   const nameOf = useAccountName();
+  /** Who "automatic" is in this workspace today — the workspace's default for the provider, then
+   *  the provider's, then the system login. A bare "Automatic" named no subscription at all, which
+   *  is the one thing the field is for. A task with an account of its own still overrides it when
+   *  the agent runs that task, as it does for everything automatic. */
+  const automaticAs = nameOf(
+    provider,
+    resolveAccount({ accounts: allAccounts, taskPins, workspaceDefaults, providerDefaults }, provider, null, workspaceId),
+  );
 
   useEffect(() => {
     void ensureAccounts();
@@ -198,7 +209,7 @@ export function AgentEditorModal({
               value={validPreference(allAccounts, provider, account)}
               onChange={setAccount}
               options={[
-                { value: "", label: t("accounts.automatic") },
+                { value: "", label: t("accounts.automaticNamed", { account: automaticAs }) },
                 { value: SYSTEM_ACCOUNT, label: nameOf(provider, null) },
                 ...providerAccounts.map((a) => ({ value: a.id, label: a.label })),
               ]}

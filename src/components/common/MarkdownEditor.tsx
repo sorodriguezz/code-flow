@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import {
   Bold,
   Code,
@@ -37,6 +37,12 @@ import { segItemClass, segTrackClass } from "./recipes";
  * `readOnly` drops to the preview alone. A closed review has nothing to type into, and showing a
  * disabled toolbar over an inert textarea would say "you may edit this later", which is not true.
  */
+
+/** A toolbar button's look — exported for `toolbarExtra`, so a caller's button sits in the row as
+ *  one of its own. */
+export const MARKDOWN_TOOL_CLASS =
+  "flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]";
+
 export function MarkdownEditor({
   value,
   onChange,
@@ -44,6 +50,8 @@ export function MarkdownEditor({
   readOnly = false,
   ariaLabel,
   historyKey,
+  toolbarExtra,
+  overlay,
 }: {
   value: string;
   /** Absent only where `readOnly` is on — a field with no handler and no lock is a field that
@@ -56,6 +64,13 @@ export function MarkdownEditor({
    *  changes, because the same editor is reused for the next item without unmounting, and a step
    *  back into the previous item's prose would be data loss wearing an undo's clothes. */
   historyKey?: string | number;
+  /** The caller's own buttons, right after the marks — the wiki's AI button beside "link". Kept on a
+   *  read-only field, unlike the marks: a run that locked the text is followed and stopped from it. */
+  toolbarExtra?: ReactNode;
+  /** Floats over the text, under the toolbar however many rows it wraps to — the window the
+   *  wiki's AI button opens. Only then is the text wrapped in a positioned box; without one the
+   *  field is laid out exactly as before. */
+  overlay?: ReactNode;
 }) {
   const t = useT();
   const area = useRef<HTMLTextAreaElement>(null);
@@ -149,8 +164,7 @@ export function MarkdownEditor({
     },
   ];
 
-  const tool =
-    "flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]";
+  const tool = MARKDOWN_TOOL_CLASS;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)]">
@@ -190,6 +204,13 @@ export function MarkdownEditor({
                 <Icon size={12} />
               </button>
             ))}
+            {toolbarExtra}
+            <span className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" aria-hidden />
+          </>
+        )}
+        {readOnly && toolbarExtra && (
+          <>
+            {toolbarExtra}
             <span className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" aria-hidden />
           </>
         )}
@@ -228,38 +249,52 @@ export function MarkdownEditor({
         </span>
       </div>
 
-      {preview ? (
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-          {value.trim() ? (
-            // Memoised on `value`: this pane re-renders with every parent update and with every
-            // toolbar/undo-state change, but the text itself only moves when the user types. Same
-            // HTML as before — `Markdown` runs the same `renderMarkdown`, just not on every render.
-            <Markdown source={value} className="cf-markdown-preview text-[13px]" />
-          ) : (
-            <p className="text-[12px] italic text-[var(--cf-text-muted)]">{placeholder}</p>
-          )}
-        </div>
-      ) : (
-        <textarea
-          ref={area}
-          value={value}
-          readOnly={readOnly}
-          onChange={(e) => {
-            const el = e.currentTarget;
-            // `merge`: a keystroke joins the run of typing in progress rather than becoming a step
-            // of its own, so undo walks back words instead of letters.
-            history.record({ value: el.value, start: el.selectionStart, end: el.selectionEnd }, true);
-            write(el.value);
-          }}
-          onKeyDown={history.onKeyDown}
-          placeholder={placeholder}
-          aria-label={ariaLabel}
-          spellCheck={false}
-          // `resize-none` because it already fills the panel: a drag handle here would fight the
-          // column's own height rather than give the user more room.
-          className="min-h-0 flex-1 resize-none bg-transparent px-3 py-2 font-mono text-[12px] leading-relaxed text-[var(--cf-text)] outline-none placeholder:italic placeholder:text-[var(--cf-text-muted)]"
-        />
+      {withOverlay(
+        overlay,
+        preview ? (
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+            {value.trim() ? (
+              // Memoised on `value`: this pane re-renders with every parent update and with every
+              // toolbar/undo-state change, but the text itself only moves when the user types. Same
+              // HTML as before — `Markdown` runs the same `renderMarkdown`, just not on every render.
+              <Markdown source={value} className="cf-markdown-preview text-[13px]" />
+            ) : (
+              <p className="text-[12px] italic text-[var(--cf-text-muted)]">{placeholder}</p>
+            )}
+          </div>
+        ) : (
+          <textarea
+            ref={area}
+            value={value}
+            readOnly={readOnly}
+            onChange={(e) => {
+              const el = e.currentTarget;
+              // `merge`: a keystroke joins the run of typing in progress rather than becoming a step
+              // of its own, so undo walks back words instead of letters.
+              history.record({ value: el.value, start: el.selectionStart, end: el.selectionEnd }, true);
+              write(el.value);
+            }}
+            onKeyDown={history.onKeyDown}
+            placeholder={placeholder}
+            aria-label={ariaLabel}
+            spellCheck={false}
+            // `resize-none` because it already fills the panel: a drag handle here would fight the
+            // column's own height rather than give the user more room.
+            className="min-h-0 flex-1 resize-none bg-transparent px-3 py-2 font-mono text-[12px] leading-relaxed text-[var(--cf-text)] outline-none placeholder:italic placeholder:text-[var(--cf-text-muted)]"
+          />
+        ),
       )}
+    </div>
+  );
+}
+
+/** The text pane, and — when there is one — what floats over it, in the box it is placed against. */
+function withOverlay(overlay: ReactNode, body: ReactNode): ReactNode {
+  if (!overlay) return body;
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      {body}
+      {overlay}
     </div>
   );
 }

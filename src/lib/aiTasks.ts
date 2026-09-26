@@ -16,6 +16,9 @@ export interface AiTaskDef {
    * one you came for is in the group you already had in mind.
    */
   area: AiTaskArea;
+  /** "Model for …", heading the model picker wherever this task's route can be changed in place
+   *  (`ChatModelPicker`). Absent: the picker is headed with the task's own name. */
+  modelForKey?: TranslationKey;
 }
 
 /** The groups the AI tasks table is divided into, in the order it shows them. */
@@ -34,33 +37,33 @@ export const AI_TASK_AREAS: { id: AiTaskArea; labelKey: TranslationKey }[] = [
 /** Every AI action that can be pointed at its own provider + model, in the order the settings
  * table lists them (most-used first). */
 export const AI_TASKS: AiTaskDef[] = [
-  { key: "chat", labelKey: "task.chat", hintKey: "task.chatHint", area: "other" },
-  { key: "commit", labelKey: "task.commit", hintKey: "task.commitHint", area: "git" },
-  { key: "analyze", labelKey: "task.analyze", hintKey: "task.analyzeHint", area: "git" },
-  { key: "review", labelKey: "task.review", hintKey: "task.reviewHint", area: "review" },
+  { key: "chat", labelKey: "task.chat", hintKey: "task.chatHint", area: "other", modelForKey: "chat.modelForChat" },
+  { key: "commit", labelKey: "task.commit", hintKey: "task.commitHint", area: "git", modelForKey: "task.commitModelFor" },
+  { key: "analyze", labelKey: "task.analyze", hintKey: "task.analyzeHint", area: "git", modelForKey: "task.analyzeModelFor" },
+  { key: "review", labelKey: "task.review", hintKey: "task.reviewHint", area: "review", modelForKey: "task.reviewModelFor" },
   { key: "pr_description", labelKey: "task.prDescription", hintKey: "task.prDescriptionHint", area: "git" },
   { key: "fix", labelKey: "task.fix", hintKey: "task.fixHint", agenticOnly: true, area: "code" },
   { key: "conflict", labelKey: "task.conflict", hintKey: "task.conflictHint", area: "git" },
-  { key: "inline", labelKey: "task.inline", hintKey: "task.inlineHint", area: "code" },
+  { key: "inline", labelKey: "task.inline", hintKey: "task.inlineHint", area: "code", modelForKey: "task.inlineModelFor" },
   // Text-only for the same reason `inline` is: the schema is read by CodeFlow's own driver and put
   // on stdin, so the engine never reaches the database and any provider can answer.
-  { key: "db_query", labelKey: "task.dbQuery", hintKey: "task.dbQueryHint", area: "data" },
+  { key: "db_query", labelKey: "task.dbQuery", hintKey: "task.dbQueryHint", area: "data", modelForKey: "task.dbQueryModelFor" },
   // Text-only too: the note goes to the engine on stdin, nothing is read from disk. Its own row
   // rather than riding on `inline` because the two are different jobs — prose in a document versus
   // a rewrite of a code fragment — and which engine writes your notes is a matter of taste in a way
   // that inline edit is not.
-  { key: "notes", labelKey: "task.notes", hintKey: "task.notesHint", area: "docs" },
+  { key: "notes", labelKey: "task.notes", hintKey: "task.notesHint", area: "docs", modelForKey: "task.notesModelFor" },
   // Text-only, like `notes` above it: the engine is asked to *describe* a diagram as nodes and
   // edges and never places anything, so nothing is read from disk and any provider can answer.
   // Its own row rather than sharing the notes one, because the two produce different things and a
   // team routinely wants the cheaper engine for one of them.
-  { key: "diagram", labelKey: "task.diagram", hintKey: "task.diagramHint", area: "data" },
+  { key: "diagram", labelKey: "task.diagram", hintKey: "task.diagramHint", area: "data", modelForKey: "task.diagramModelFor" },
   // Its own row rather than riding on `diagram`, which is its closest relative: drawing a schema is
   // one short answer and filling it is fifteen tables of data, so this is the long, cheap,
   // repetitive one — exactly the job a team points at a different engine. Text-only: the reply is
   // JSON that CodeFlow validates against the schema and inserts itself, so it routes anywhere.
-  { key: "sample_rows", labelKey: "task.sampleRows", hintKey: "task.sampleRowsHint", area: "data" },
-  { key: "stories", labelKey: "task.stories", hintKey: "task.storiesHint", area: "stories" },
+  { key: "sample_rows", labelKey: "task.sampleRows", hintKey: "task.sampleRowsHint", area: "data", modelForKey: "task.sampleRowsModelFor" },
+  { key: "stories", labelKey: "task.stories", hintKey: "task.storiesHint", area: "stories", modelForKey: "task.storiesModelFor" },
   // Reads the repository to answer, so it needs an engine with tools — a text-only local model
   // would answer from the criteria alone, which is the confident-and-wrong verdict this whole
   // feature exists to avoid.
@@ -74,8 +77,9 @@ export const AI_TASKS: AiTaskDef[] = [
     hintKey: "task.workItemReviewHint",
     agenticOnly: true,
     area: "review",
+    modelForKey: "task.workItemReviewModelFor",
   },
-  { key: "wiki", labelKey: "task.wiki", hintKey: "task.wikiHint", agenticOnly: true, area: "docs" },
+  { key: "wiki", labelKey: "task.wiki", hintKey: "task.wikiHint", agenticOnly: true, area: "docs", modelForKey: "task.wikiModelFor" },
   // Reads the repository — that is the entire value of asking it here rather than pasting the
   // log into a chat window — so it needs an engine with tools. Its own row rather than sharing
   // `analyze`'s: that one is handed a diff and answers about the diff, this one is handed a log

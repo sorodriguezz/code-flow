@@ -408,7 +408,9 @@ fn interpret_output(
         if text.is_empty() {
             return Err("opencode produced no output".to_string());
         }
-        if refusal_reply(text) {
+        // `None`: the run reports no counts (they come from a detached probe afterwards), so the
+        // words are all there is to judge by.
+        if refusal_reply(text, None) {
             return Err(format!("{QUOTA_MARKER}{text}"));
         }
         return Ok(AiRun {
@@ -448,7 +450,7 @@ fn interpret_output(
             err.to_string()
         });
     }
-    if refusal_reply(text) {
+    if refusal_reply(text, None) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
     // No events means no session id to report. `None` costs this conversation its continuity (the

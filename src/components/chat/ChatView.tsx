@@ -44,15 +44,17 @@ const NEW_CHAT_DRAFT = "";
  * That restraint is the feature. A chat is a reading surface, and the measure of one is how much of
  * the window is the words.
  *
- * # The one thing that is not obvious: what a conversation with no repository means
+ * # The one thing that is not obvious: a conversation here has no repository
  *
- * A conversation here is **not bound to a project by default**, and that is the case the whole
- * workspace is designed around rather than a degraded one. Which means the read-only shield in the
- * header is load-bearing and not a badge: with no repository there is no working copy to edit, the
- * backend refuses `auto_approve_edits` and passes a read-only tool set to the engines that honour
- * one, and the run happens in a scratch directory the app owns. A user who does want file edits
- * opens the chat from a repository, and the header says which one. Both states are normal; only one
- * of them can write to your disk, and the header is where that is said.
+ * Every conversation this workspace starts is created with a null project — here, in `GroupView`
+ * and in `QuickAskWindow` — and nothing offers to attach one. That is the design, not a degraded
+ * mode: a chat about a repository is the Assistant's (`PanelChat`), inside the project. So the
+ * shield in the header is load-bearing and not a badge. A turn runs in a folder of the
+ * conversation's own (`paths::chat_conversation_outputs_dir`), which holds nothing of the user's.
+ * With file generation off, the backend also withholds `auto_approve_edits` and passes a read-only
+ * tool set to the engines that honour one; with it on, what a turn writes there appears under the
+ * answer that made it. Either way no repository is in reach, and the header is where that is said.
+ * The `writable` branch below only serves a row bound to a project, which nothing here creates.
  */
 export function ChatView() {
   const t = useT();
@@ -670,6 +672,7 @@ export function ChatView() {
             (writable ? (
               <span
                 title={t("chat.repoBadge", { name: repoName })}
+                data-tour="chat-scope"
                 className="flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-2 text-[10.5px] leading-[18px] text-[var(--cf-text-muted)]"
               >
                 <FolderGit2 size={10} />
@@ -688,6 +691,7 @@ export function ChatView() {
                */
               <span
                 title={t(fileGeneration ? "chat.noRepoWritableHint" : "chat.noRepoHint")}
+                data-tour="chat-scope"
                 className="flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-2 text-[10.5px] leading-[18px] text-[var(--cf-text-muted)]"
               >
                 <ShieldCheck size={10} />

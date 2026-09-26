@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ArrowLeft, ArrowRight, PartyPopper, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
@@ -23,6 +23,33 @@ interface Size {
 }
 
 const CARD_WIDTH = 384;
+
+/**
+ * The copy's own emphasis — `**strong**`, `*em*` and `` `code` `` — drawn instead of shown.
+ *
+ * The cards were written with these markers from the start ("**deleting a book deletes every note in
+ * it**", "`{{date}}`") and rendered them as literal asterisks and backticks, which is the opposite of
+ * the emphasis they were put there for. Three patterns and nothing else: the strings are the app's own
+ * dictionary, never user input, so there is no markup to escape and no reason for a Markdown parser.
+ */
+function inlineMarks(text: string): ReactNode[] {
+  return text.split(/(\*\*[^*]+\*\*|\*[^*\s][^*]*\*|`[^`]+`)/g).map((part, at) => {
+    if (part.length > 4 && part.startsWith("**") && part.endsWith("**"))
+      return (
+        <strong key={at} className="font-semibold text-[var(--cf-text)]">
+          {part.slice(2, -2)}
+        </strong>
+      );
+    if (part.length > 2 && part.startsWith("`") && part.endsWith("`"))
+      return (
+        <code key={at} className="rounded-[4px] bg-[var(--cf-hover)] px-1 font-mono text-[12px] text-[var(--cf-text)]">
+          {part.slice(1, -1)}
+        </code>
+      );
+    if (part.length > 2 && part.startsWith("*") && part.endsWith("*")) return <em key={at}>{part.slice(1, -1)}</em>;
+    return part;
+  });
+}
 /** Closest the card ever gets to the window edge. */
 const EDGE = 16;
 /** Space between the spotlight and the card beside it. */
@@ -424,7 +451,7 @@ export function TourOverlay() {
           >
             {/* `{key}` is rendered in the running platform's notation — ⌘I on a Mac, Ctrl+I on
                 Windows — so no card ever spells out both and leaves the reader to pick. */}
-            {t(step.bodyKey, step.chord ? { key: chordLabel(step.chord) } : undefined)}
+            {inlineMarks(t(step.bodyKey, step.chord ? { key: chordLabel(step.chord) } : undefined))}
           </p>
 
           {/* Scaled, not sized: stepping moves the fill with a transform, so the bar costs no layout. */}

@@ -42,6 +42,7 @@ mod pr_link;
 mod proc;
 mod remote;
 mod sandbox;
+mod scaffold;
 /// Driving this install from a phone on the same network. Off unless the user turns it on.
 mod remotectl;
 mod remotes;
@@ -596,6 +597,13 @@ pub fn run() {
             npm::npm_latest_versions,
             npm::npm_search,
             npm::npm_package_sizes,
+            scaffold::scaffold_detect_tools,
+            scaffold::scaffold_versions,
+            scaffold::scaffold_spring_metadata,
+            scaffold::scaffold_spring_generate,
+            scaffold::scaffold_check_dest,
+            scaffold::scaffold_write_files,
+            scaffold::scaffold_run,
             commands::app_cmd::quit_app,
             commands::app_cmd::check_requirements,
             commands::app_cmd::reset_app_data,

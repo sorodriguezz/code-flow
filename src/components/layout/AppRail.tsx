@@ -504,8 +504,8 @@ export function AppRail() {
                 </span>
               )}
               {/* The word, not a dot. A coloured dot in the corner of a control already means
-                  "something new is waiting for you" everywhere else in this app — the title bar's
-                  tour button, the notification bell — and it read as an alert here rather than as a
+                  "something new is waiting for you" everywhere else in this app — the tour's
+                  launcher, the notification bell — and it read as an alert here rather than as a
                   status. Spelled out there is nothing to decode, and at 6.5px in the warning colour
                   it is legible without competing with the glyph it labels.
 

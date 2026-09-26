@@ -18,6 +18,7 @@ import {
   RotateCcw,
   ShieldCheck,
   Trash2,
+  Undo2,
   Copy,
   History,
 } from "lucide-react";
@@ -34,6 +35,7 @@ import { CollapsibleSection } from "../common/CollapsibleSection";
 import { BouncingDots } from "../common/BouncingDots";
 import { generateCommitMessage, getFileDiff, getStagedDiff, scanStagedSecrets } from "../../lib/tauri/commands";
 import { useTaskModelLabel } from "../ai/ModelTag";
+import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { diffToText } from "../../lib/diffText";
 import { parseClaudeError, type ClaudeErrorInfo } from "../../lib/claudeError";
 import { confirmAction } from "../../state/confirmStore";
@@ -157,6 +159,18 @@ interface RowAction {
   /** A *different* action (on this row or another) is in flight — dims and blocks clicks
    * so two git-index-mutating actions can never race each other. */
   disabled?: boolean;
+}
+
+/**
+ * The glyph for "discard" on one file: what the action actually does to it.
+ *
+ * On a tracked file it puts the index's copy back, so it is the undo arrow — the hook-shaped one
+ * VS Code uses, not the circular `RotateCcw`, which reads as "reload". A trash can there read as
+ * "delete this file" (user report, 2026-09-26). On an untracked file there is nothing to go back
+ * to and `discard_file_changes` deletes it from disk, so there the trash can is the honest one.
+ */
+function discardIcon(entry: FileStatusEntry): LucideIcon {
+  return entry.status === "untracked" ? Trash2 : Undo2;
 }
 
 function FileRow({
@@ -582,9 +596,7 @@ export function ChangesPanel({
         disabled: blocked,
       },
       {
-        // A trash can, not a circular arrow: discarding throws the change away (and deletes the
-        // file outright when it's untracked) — the arrow reads as "reload/restart" and undersells it.
-        icon: Trash2,
+        icon: discardIcon(entry),
         title: t("changes.discardChanges"),
         danger: true,
         onClick: async () => {
@@ -644,7 +656,7 @@ export function ChangesPanel({
     if (!staged) {
       items.push({
         label: t("changes.discardChanges"),
-        icon: Trash2,
+        icon: discardIcon(entry),
         danger: true,
         separated: true,
         onClick: () =>
@@ -669,8 +681,11 @@ export function ChangesPanel({
       // of each change instead of the surrounding code is a real, silent downgrade in the messages
       // it writes — a perf change has no business costing that. So this one caller still pays for
       // whole-file context, once, on an explicit click, rather than several times a second.
+      // Read before the first await: the account a commit runs as can depend on the workspace, and
+      // the chip beside Commit resolved it against this one.
+      const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
       const full = await getStagedDiff(repoPath);
-      const text = await generateCommitMessage(diffToText(full));
+      const text = await generateCommitMessage(diffToText(full), undefined, workspaceId);
       setMessage(text);
     } catch (e) {
       setAiError(parseClaudeError(String(e)));
@@ -858,6 +873,17 @@ export function ChangesPanel({
                     <ShieldCheck size={13} />
                   </button>
                 )}
+                {/* The 🛡's engine, right after it: the analysis routes through `analyze`, and this
+                    is where that row changes without a trip to Settings. */}
+                {unstagedAndUntracked.length > 0 && (
+                  <ChatModelPicker
+                    task="analyze"
+                    variant="icon"
+                    liveModel={null}
+                    chatActive={false}
+                    title={t("changes.analyzeModelHint")}
+                  />
+                )}
                 {unstagedAndUntracked.length > 0 && (
                   <button
                     onClick={async () => {
@@ -879,7 +905,7 @@ export function ChangesPanel({
                     {pending?.path === "__discard_all__" ? (
                       <Loader2 size={13} className="animate-spin" />
                     ) : (
-                      <Trash2 size={13} />
+                      <Undo2 size={13} />
                     )}
                   </button>
                 )}
@@ -962,15 +988,28 @@ export function ChangesPanel({
             ) : (
               <p className="mt-1 text-[11px] text-[var(--cf-danger)]">{aiError.message}</p>
             ))}
-          <button
-            disabled={busy || aiBusy || scanning || !message.trim() || status.staged.length === 0}
-            onClick={handleCommit}
-            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent-fill)] py-1.5 text-[13px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
-          >
-            {scanning && <Loader2 size={13} className="animate-spin" />}
-            {scanning ? t("secrets.scanning") : t("changes.commit")}{" "}
-            {!scanning && status.staged.length > 0 ? `(${status.staged.length})` : ""}
-          </button>
+          {/* Commit, and beside it the model the ✨ writes its message with: the `commit` row of the
+              routing, behind the provider's mark because the button already takes the row. */}
+          <div className="mt-2 flex items-stretch gap-1.5">
+            <button
+              disabled={busy || aiBusy || scanning || !message.trim() || status.staged.length === 0}
+              onClick={handleCommit}
+              className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent-fill)] py-1.5 text-[13px] font-medium text-[var(--cf-on-accent)] disabled:opacity-40"
+            >
+              {scanning && <Loader2 size={13} className="animate-spin" />}
+              {scanning ? t("secrets.scanning") : t("changes.commit")}{" "}
+              {!scanning && status.staged.length > 0 ? `(${status.staged.length})` : ""}
+            </button>
+            <ChatModelPicker
+              task="commit"
+              variant="icon"
+              size="md"
+              liveModel={null}
+              chatActive={false}
+              title={t("changes.commitModelHint")}
+              className="border border-[var(--cf-border)]"
+            />
+          </div>
         </div>
       </div>
 

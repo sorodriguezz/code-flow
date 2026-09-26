@@ -40,8 +40,8 @@ interface AiProviderState {
   model: string;
   /** Raw per-task provider overrides, keyed by task. Absent/blank = inherit `providerId`. */
   taskProviders: Record<string, string>;
-  /** Effective model id per task (its own override, else its provider's base model). Empty means
-   * the provider picks. Recomputed by `refresh`. */
+  /** Effective model id per task (its own override, else — commits only — the engine's fast model,
+   * else its provider's base model). Empty means the provider picks. Recomputed by `refresh`. */
   taskModels: Record<string, string>;
   init: () => Promise<void>;
   /** Re-reads the routing table — call after Settings writes a provider/model so the chat chip and
@@ -99,7 +99,12 @@ async function loadRouting(defaultProvider: string, prefetched?: Record<string, 
   for (const { key } of AI_TASKS) {
     const override = models[taskModelKey(providerFor[key], key)];
     const base = models[modelKey(providerFor[key])];
-    taskModels[key] = override?.trim() || base?.trim() || "";
+    // Commits alone have a step between the two: the engine's own fast model, which is what
+    // `load_ai_config_in` runs one on when the row names none. Without it every chip for commits
+    // named the base model — Opus, say — over a run that went to Haiku.
+    const dedicated =
+      key === "commit" ? AI_PROVIDERS.find((p) => p.id === providerFor[key])?.commitMessageModel : undefined;
+    taskModels[key] = override?.trim() || dedicated || base?.trim() || "";
   }
   // Handed back rather than read again by the caller: it rode along in the wave-two call, and
   // `?? null` restores exactly the `string | null` the old `read(modelKey(providerId))` returned.

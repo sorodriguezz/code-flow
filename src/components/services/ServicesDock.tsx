@@ -259,13 +259,6 @@ export function ServicesDock() {
                   onPick={(profileId) =>
                     project && void openNew(project.id, project.local_path, { profileId })
                   }
-                  onPickAccount={(account, title) =>
-                    project &&
-                    void openNew(project.id, project.local_path, {
-                      account: { provider: account.provider, accountId: account.id },
-                      title,
-                    }).catch((e: unknown) => pushErrorToast(String(e)))
-                  }
                 />
               </>
             }

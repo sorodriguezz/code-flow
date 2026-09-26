@@ -198,6 +198,60 @@ fn write_cache(path: &str) {
 #[cfg(target_os = "windows")]
 pub fn import_login_path() {}
 
+/// The `PATH` a terminal opened **right now** would have — for the one caller that cannot live with
+/// the launch-old value this process adopted: the project initializer, which installs a runtime and
+/// must then find it without asking for a relaunch.
+///
+/// Returned, never adopted. The rule in [`import_login_path`] stands — only startup writes the
+/// environment — so the answer goes to the children that need it (`Command::env`, `PtyHooks::env`)
+/// and nowhere else. The process `PATH` is merged in behind it, exactly as at startup, so this can
+/// only ever widen what a child sees. A fresh answer is also banked as the next launch's cache: it is
+/// the newest one there is.
+///
+/// Blocking — it runs a login shell (up to [`REFRESH_TIMEOUT`]) — so call it off the UI thread.
+/// `None` when the shell will not answer; callers fall back to the process `PATH`.
+#[cfg(not(target_os = "windows"))]
+pub fn fresh_path() -> Option<String> {
+    let shell = std::env::var_os("SHELL").map(std::path::PathBuf::from)?;
+    let rx = probe(&shell)?;
+    let imported = collect(&rx, REFRESH_TIMEOUT)?;
+    write_cache(&imported);
+    let merged = merge(&imported, std::env::var("PATH").ok().as_deref());
+    (!merged.is_empty() && !merged.contains('\0')).then_some(merged)
+}
+
+/// Windows keeps `PATH` in the registry, where an installer writes it — and a running process keeps
+/// the copy it was started with, so a runtime installed by winget a minute ago is invisible to it.
+/// Asking PowerShell for the machine and user values reads what the next console would get; the
+/// process's own entries follow, for anything a launcher injected.
+#[cfg(target_os = "windows")]
+pub fn fresh_path() -> Option<String> {
+    let output = crate::proc::std_command("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + \
+             [Environment]::GetEnvironmentVariable('Path','User')",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let registry = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let merged: Vec<&str> = registry
+        .split(';')
+        .chain(current.split(';'))
+        .filter(|entry| !entry.trim().is_empty() && seen.insert(entry.to_ascii_lowercase()))
+        .collect();
+    (!merged.is_empty()).then(|| merged.join(";"))
+}
+
 /// Starts the shell and hands back the channel its output will arrive on.
 ///
 /// Split from the waiting half ([`collect`]) so that the deadline is the *caller's* and can change

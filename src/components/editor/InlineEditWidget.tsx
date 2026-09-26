@@ -4,6 +4,7 @@ import { AiSparkles } from "../common/AiGlyph";
 import { inlineEditWithAi } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { RunEngineChip } from "../ai/AiRunLog";
+import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { notify } from "../../state/notificationStore";
 import { useT } from "../../state/languageStore";
@@ -79,7 +80,11 @@ export function InlineEditWidget({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      // The model menu opened from the ✨ takes Escape first: dismissing the list of engines must
+      // not throw away the instruction being written.
+      if (document.querySelector('[role="menu"]')) return;
+      onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -154,7 +159,17 @@ export function InlineEditWidget({
   return (
     <div className="absolute inset-x-3 top-3 z-20 rounded-lg border border-[var(--cf-accent)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
       <div className="flex items-center gap-2 px-2.5 py-1.5">
-        <AiSparkles size={13} className="shrink-0" />
+        {/* The ✨ is the door to the engine: the chat's model menu on the `inline` row — the one
+            Settings shows — so the model that rewrites the selection is picked where it is asked. */}
+        <ChatModelPicker
+          task="inline"
+          variant="icon"
+          liveModel={null}
+          chatActive={false}
+          title={t("editor.inlineEditModelHint")}
+        >
+          <AiSparkles size={13} />
+        </ChatModelPicker>
         <input
           autoFocus
           value={instruction}

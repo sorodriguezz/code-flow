@@ -109,7 +109,13 @@ export function AiPanel() {
     // used to open with relaid out the whole window on every frame.
     // `pt-px`: room for the sheet's outside ring under this wrapper's `overflow-hidden` — the work
     // column's reason, in `App.tsx`. Flush, the panel's top edge was clipped away.
-    <div className="cf-panel-in flex shrink-0 overflow-hidden pb-1.5 pr-1.5 pt-px">
+    //
+    // `pl-1.5` goes *before* the handle, and the sheet sits flush after it. The sheet's hairline is
+    // a ring drawn one pixel outside its box, so the handle's one pixel of layout is exactly the
+    // column that ring paints — the glow and the grip light the edge that moves. With the gap
+    // between them instead (it used to be the sheet's `ml-1.5`) they lit a line of frame 6px to the
+    // left of it, and the real edge never changed (user report, 2026-09-26).
+    <div className="cf-panel-in flex shrink-0 overflow-hidden px-1.5 pb-1.5 pt-px">
       <ResizeHandle
         axis="x"
         value={width}
@@ -127,8 +133,8 @@ export function AiPanel() {
       <aside
         style={{ width }}
         data-tour="ai-panel"
-        // No `border-l`: the handle to its left is already the seam.
-        className="cf-sheet ml-1.5 flex shrink-0 flex-col"
+        // No `border-l`, and no margin: the handle to its left sits on this sheet's own hairline.
+        className="cf-sheet flex shrink-0 flex-col"
       >
         <PanelTabStrip
           workspaceId={workspaceId}

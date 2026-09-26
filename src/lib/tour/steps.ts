@@ -3,6 +3,7 @@ import {
   ClipboardList,
   Database,
   KeyRound,
+  MessagesSquare,
   MonitorSmartphone,
   NotebookPen,
   Route,
@@ -81,20 +82,24 @@ export type TourId =
   | "notes"
   | "diagrams"
   | "vault"
-  /** The CI screen. Added last because it was the only app without one — and the one whose central
-   *  idea (a run is a waterfall, not a list) most needs saying out loud. */
+  /** The chat workspace. Until it had one, the launcher on the chat screen fell back to the main
+   *  tour — whose first stage is the repository graph, so asking for help about chat took you away
+   *  from it. */
+  | "chat"
+  /** The CI screen — the one whose central idea (a run has a shape, not a list) most needs saying
+   *  out loud. */
   | "pipelines";
 
 /**
  * The one-screen tour of the main window.
  *
- * The order goes **outside in**: what a workspace is, then the repositories in it, then the three
- * views onto one repository, then the panels around the work, then the workspace apps as a set, and
- * only at the end the settings — because settings is where you go once you know what you are
+ * The order goes **outside in**: what a workspace is, then the repositories in it, then the views
+ * onto one repository, then the panels around the work, then the apps on the rail as a set, and only
+ * at the end the settings — because settings is where you go once you know what you are
  * configuring, and a tour that opens with a preferences dialog has taught nothing yet.
  *
- * What is deliberately *not* here: anything that lives inside one of the six workspace apps. Those
- * are one step each at most, naming the app and saying it has a tour of its own.
+ * What is deliberately *not* here: anything that lives inside one of the apps on the rail. Those are
+ * named together in one step, which says each has a tour of its own.
  */
 const MAIN_TOUR: TourStep[] = [
   {
@@ -159,13 +164,19 @@ const MAIN_TOUR: TourStep[] = [
     padding: 6,
     stage: { ai: true },
   },
+  // On the assistant's "+" rather than in the projects panel: the glasses that used to open a pull
+  // request from its link gave their place to the project initializer (2026-09-26), and "From a
+  // link…" in this menu, plus the chord the body names, are the ways in that stayed. Staged with the
+  // panel open, like the step before it, so the button exists to be pointed at.
   {
     id: "prReview",
     chapterKey: "tour.chapter.ai",
     titleKey: "tour.prReview.title",
     bodyKey: "tour.prReview.body",
-    anchors: ['[data-tour="pr-link"]'],
+    chord: "Mod+Shift+L",
+    anchors: ['[data-tour="ai-new"]', '[data-tour="ai-panel"]'],
     padding: 6,
+    stage: { ai: true },
   },
   {
     id: "terminal",
@@ -176,16 +187,16 @@ const MAIN_TOUR: TourStep[] = [
     padding: 6,
     stage: { terminal: true },
   },
-  // Also the handover, which is why it is staged on an app rather than left on the graph: the
-  // spotlight takes in the menu *and* the graduation cap beside it, and the cap only exists while
-  // one of the five is open. Two adjacent controls under one ring, because they are one sentence —
-  // here are the apps, and here is how each one explains itself.
+  // Also the handover, which is why it is staged on an app rather than left on the graph: with one
+  // of them open, the rail shows what "the app on screen" means — the lit icon is the one the
+  // graduation cap at the rail's foot would explain. The ring takes the apps only; the cap gets its
+  // own step at the very end.
   {
     id: "workspaceApps",
     chapterKey: "tour.chapter.tools",
     titleKey: "tour.workspaceApps.title",
     bodyKey: "tour.workspaceApps.body",
-    anchors: ['[data-tour="workspace-tools"]', '[data-tour="workspace-menu"]'],
+    anchors: ['[data-tour="workspace-tools"]'],
     padding: 6,
     stage: { view: "api", apiWorkspace: "requests" },
   },
@@ -249,7 +260,7 @@ const MAIN_TOUR: TourStep[] = [
  * Both halves are the point. A reader who has just been walked through the API client is one click
  * from wanting it again, and the button that does that is a graduation cap they have seen exactly
  * once. And "where is this configured" is the question an app tour exists to answer — the settings
- * for four of the five are two levels into a dialog that is not on screen while you use them.
+ * for most of them are two levels into a dialog that is not on screen while you use them.
  */
 function closingStep(
   id: TourId,
@@ -346,7 +357,9 @@ const API_TOUR: TourStep[] = [
     chapterKey: "tour.chapter.api",
     titleKey: "tour.api.snippet.title",
     bodyKey: "tour.api.snippet.body",
-    anchors: ['[data-tour="api-snippet"]', '[data-tour="main-content"]'],
+    // The panel starts closed; the switch that opens it is what the step's words point at when it is.
+    anchors: ['[data-tour="api-snippet"]', '[data-tour="api-snippet-toggle"]', '[data-tour="main-content"]'],
+    padding: 6,
     stage: API_STAGE,
   },
   {
@@ -715,9 +728,9 @@ const NOTES_STAGE: TourStage = { view: "notes" };
  * Shorter than the others on purpose. A notes app has almost no concepts to explain — you type and
  * it saves — so the tour's job is what is *not* obvious from looking at it: that filing is
  * drag-and-drop and deleting a folder keeps what is in it, that the search box reads bodies and not
- * just titles, that templates exist at all, and that the two icons at the end of the toolbar — the
- * sparkle and the reference — are how you get an engine to write a paragraph and how you link one
- * note to another, neither of which has an obvious keyboard shortcut to stumble onto.
+ * just titles, that templates exist at all, and that two of the toolbar's icons — the sparkle and
+ * the reference — are how you get an engine to write a paragraph and how you link one note to
+ * another, neither of which has an obvious keyboard shortcut to stumble onto.
  */
 const NOTES_TOUR: TourStep[] = [
   {
@@ -819,8 +832,8 @@ const DIAGRAMS_AI_STAGE: TourStage = { ...DIAGRAMS_STAGE, diagramsAi: true };
  * and the four are the reason the tour exists.
  *
  * The canvas itself is draw.io in an iframe, which sets the one hard constraint on the whole tour:
- * **nothing inside that frame can be spotlighted.** The three buttons this app injects into the
- * editor's toolbar — save as template, export, the AI sparkle — are in another document, where a
+ * **nothing inside that frame can be spotlighted.** The four buttons this app injects into the
+ * editor's toolbar — save as template, export, the AI sparkle, version history — are in another document, where a
  * selector from here reaches nothing and a rectangle means something else. So the steps about them
  * point at what they *produce* (the AI window, which the stage opens) or at the pane that holds
  * them, and say where the button is in words.
@@ -1108,18 +1121,93 @@ const VAULT_TOUR: TourStep[] = [
   ),
 ];
 
+/**
+ * The chat workspace's stage — the view and nothing else, for the vault's reason: a stage is applied
+ * in both directions and the app snapshot cannot put back which conversation was open, so the tour
+ * never opens or switches one. Every step is written to read with or without a chat on screen.
+ */
+const CHAT_STAGE: TourStage = { view: "chat" };
+
+/**
+ * The Chat tour.
+ *
+ * About what the screen does not say by itself: that the list is one flat list that ignores the
+ * workspace, that "new chat" creates nothing until the first message, what the composer's `/`, the
+ * paperclip and a selection in an answer do, why the engine locks once a conversation has turns, and
+ * — the one worth a step of its own — that a chat never reaches a repository, only a folder of its
+ * own when file generation is on.
+ */
+const CHAT_TOUR: TourStep[] = [
+  {
+    id: "chat.intro",
+    chapterKey: "tour.chapter.chat",
+    titleKey: "tour.chat.intro.title",
+    bodyKey: "tour.chat.intro.body",
+    chord: "Mod+L",
+    anchors: ['[data-tour="chat-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: CHAT_STAGE,
+  },
+  {
+    id: "chat.sidebar",
+    chapterKey: "tour.chapter.chat",
+    titleKey: "tour.chat.sidebar.title",
+    bodyKey: "tour.chat.sidebar.body",
+    anchors: ['[data-tour="chat-sidebar"]', '[data-tour="chat-view"]'],
+    stage: CHAT_STAGE,
+  },
+  {
+    id: "chat.new",
+    chapterKey: "tour.chapter.chat",
+    titleKey: "tour.chat.new.title",
+    bodyKey: "tour.chat.new.body",
+    anchors: ['[data-tour="chat-new"]', '[data-tour="chat-sidebar"]', '[data-tour="chat-view"]'],
+    padding: 6,
+    stage: CHAT_STAGE,
+  },
+  {
+    id: "chat.composer",
+    chapterKey: "tour.chapter.chat",
+    titleKey: "tour.chat.composer.title",
+    bodyKey: "tour.chat.composer.body",
+    anchors: ['[data-tour="chat-composer"]', '[data-tour="chat-view"]'],
+    stage: CHAT_STAGE,
+  },
+  {
+    id: "chat.model",
+    chapterKey: "tour.chapter.chat",
+    titleKey: "tour.chat.model.title",
+    bodyKey: "tour.chat.model.body",
+    anchors: ['[data-tour="chat-model"]', '[data-tour="chat-composer"]', '[data-tour="chat-view"]'],
+    padding: 6,
+    stage: CHAT_STAGE,
+  },
+  // The header's badge exists only with a conversation open; from the empty screen the step lands on
+  // the capabilities checklist, which says the same thing from the composer's side.
+  {
+    id: "chat.files",
+    chapterKey: "tour.chapter.chat",
+    titleKey: "tour.chat.files.title",
+    bodyKey: "tour.chat.files.body",
+    anchors: ['[data-tour="chat-scope"]', '[data-tour="chat-capabilities"]', '[data-tour="chat-view"]'],
+    padding: 6,
+    stage: CHAT_STAGE,
+  },
+  closingStep("chat", "tour.chapter.chat", "tour.chat.done.title", "tour.chat.done.body", CHAT_STAGE),
+];
+
 const PIPELINES_STAGE: TourStage = { view: "pipelines" };
 
 /**
  * The CI tour.
  *
  * Short on purpose — five steps — because the screen is three panes and one idea. The idea is the
- * second step: the graph is a *waterfall*, so four jobs that ran at once are drawn side by side
- * rather than stacked, which is the whole reason to look at it here instead of on the host.
+ * third step: a run has a *shape* — jobs in columns with what waited on what, or bars on a clock in
+ * the waterfall — which is the whole reason to look at it here instead of on the host.
  *
  * It is the only tour whose screen may not exist: the tab appears only on a repository linked to a
- * host with CI. The launcher offers it from that tab, so by the time anybody starts it the tab is
- * there.
+ * host with CI. The launcher offers it from that tab, and Settings offers it only while that tab is
+ * there (`GeneralSettings`), so by the time anybody starts it the tab is real.
  */
 const PIPELINES_TOUR: TourStep[] = [
   {
@@ -1182,17 +1270,18 @@ export const TOURS: Record<TourId, TourStep[]> = {
   notes: NOTES_TOUR,
   diagrams: DIAGRAMS_TOUR,
   vault: VAULT_TOUR,
+  chat: CHAT_TOUR,
   pipelines: PIPELINES_TOUR,
 };
 
 /**
  * Which app tour belongs to the screen you are looking at.
  *
- * The launcher in the tab bar is one button that changes what it starts, rather than five buttons
- * bolted into five different panel headers. Those five headers are five different shapes — the API
- * client has no header row at all — and a control that moves and resizes depending on which app is
- * open is a control nobody learns the position of. Beside the workspace menu, which is what names
- * the app you are in, it is always in the same place and always about the thing that menu says.
+ * The launcher is one button that changes what it starts, rather than a button bolted into each
+ * app's header. Those headers are different shapes — the API client has no header row at all — and a
+ * control that moves and resizes depending on which app is open is a control nobody learns the
+ * position of. At the foot of the app rail, under the icons that open the apps, it is always in the
+ * same place and always about the app the rail shows as open.
  */
 export interface AppTour {
   tour: TourId;
@@ -1201,16 +1290,16 @@ export interface AppTour {
   workspace?: ApiWorkspace;
   /** The app's own name, for the button's tooltip — the tour is "of this app", not "of the app". */
   labelKey: TranslationKey;
-  /** The same glyph the workspace menu gives the app, so a tour is recognisable as belonging to the
-   * row that opens it. Carried here rather than looked up per caller: two lists of the five apps
-   * drift, and the one in Settings is far from the one in the menu. */
+  /** The same glyph the app rail gives the app, so a tour is recognisable as belonging to the icon
+   * that opens it. Carried here rather than looked up per caller: two lists of the apps drift, and
+   * the one in Settings is far from the one on the rail. */
   icon: LucideIcon;
 }
 
-/** Every app tour, in the order the workspace menu lists the apps — Settings offers them in that
- * order too, because a reader who knows where an app sits in the menu should not have to re-find it
- * here. Append rather than insert: a new app goes at the end of the rail, so it goes at the end of
- * this. */
+/** Every app tour, in the order the app rail starts in — Settings offers them in that order too,
+ * because a reader who knows where an app sits on the rail should not have to re-find it here. A new
+ * app goes where it goes on the rail; Pipelines stays last, being a repository tab rather than an
+ * app. */
 export const APP_TOURS: AppTour[] = [
   { tour: "api", view: "api", workspace: "requests", labelKey: "tabbar.api", icon: Send },
   { tour: "db", view: "api", workspace: "database", labelKey: "tabbar.databases", icon: Database },
@@ -1220,13 +1309,14 @@ export const APP_TOURS: AppTour[] = [
   { tour: "notes", view: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
   { tour: "diagrams", view: "diagrams", labelKey: "tabbar.diagrams", icon: Workflow },
   { tour: "vault", view: "vault", labelKey: "tabbar.vault", icon: KeyRound },
+  { tour: "chat", view: "chat", labelKey: "tabbar.chat", icon: MessagesSquare },
   // Last, and the only one on a repository-scoped view: the tab exists only where the repository
   // is linked to a host with CI, so the launcher offers this exactly where the screen is real.
   { tour: "pipelines", view: "pipelines", labelKey: "tabbar.pipelines", icon: Route },
 ];
 
-/** The app tour for the current view, or `null` on the three repository views — which are what the
- * main tour is about, and so have no second tour to offer. */
+/** The app tour for the current view, or `null` on the repository views (Pipelines aside) — which
+ * are what the main tour is about, and so have no second tour to offer. */
 export function appTourFor(view: MainView, workspace: ApiWorkspace): AppTour | null {
   return (
     APP_TOURS.find((entry) => entry.view === view && (entry.workspace ?? workspace) === workspace) ??

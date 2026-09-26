@@ -4,12 +4,10 @@ import { AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { DiagramPreview } from "./DiagramPreview";
 import { DbmlCanvas } from "../dbml/DbmlCanvas";
-import { AI_PROVIDERS, DEFAULT_AI_PROVIDER } from "../../lib/aiProviders";
-import { ProviderGlyph } from "../ai/ProviderGlyph";
+import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { diagramsDrawWithAi } from "../../lib/tauri/diagramsCommands";
 import { documentOutline, graphToMxGraph, parseAiGraph } from "../../lib/diagrams/aiLayout";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
-import { useAiProviderStore } from "../../state/aiProviderStore";
 import { FORMAT_DBML } from "../../lib/diagrams/doc";
 import { readLayout } from "../../lib/dbml/layout";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
@@ -43,8 +41,9 @@ const MARGIN = 12;
  * which resets draw.io's own undo stack — `⌘Z` will not take it back out. `diagramsStore` keeps the
  * document as it was and the view offers an undo button until the next real edit.
  *
- * **The engine is not picked here**, the same as in Notes: it routes through the `diagram` task
- * like every other AI call in the app, and this window only *says* what it will run on.
+ * **The engine is picked on the `diagram` row**, as in Notes: it routes through that task like
+ * every other AI call in the app, and the chip here writes the same row Settings shows
+ * (`ChatModelPicker`) — a second door to one setting, not a second setting.
  *
  * **It speaks both of the workspace's dialects.** A drawing's answer is a graph, previewed by
  * `DiagramPreview` and merged as mxGraph cells; a schema's is DBML, previewed by the same canvas
@@ -58,9 +57,6 @@ const MARGIN = 12;
  * `DiagramAiRun`.
  */
 export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onClose: () => void }) {
-  const defaultProvider = useAiProviderStore((s) => s.providerId);
-  const routedProvider = useAiProviderStore((s) => s.taskProviders[TASK]);
-  const routedModel = useAiProviderStore((s) => s.taskModels[TASK]);
   const applyGenerated = useDiagramsStore((s) => s.applyGenerated);
   const settleAiRun = useDiagramsStore((s) => s.settleAiRun);
   /** This diagram's run, and only this diagram's. A stable object reference, so a generation on
@@ -112,13 +108,6 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
    *  a pane resize keeps it in the corner instead of stranding it at coordinates from a wider one. */
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const drag = useRef<{ dx: number; dy: number } | null>(null);
-
-  // The engine, resolved through the same fallback chain the backend uses, so this cannot disagree
-  // with what actually runs. Blank is a real state and not a missing read.
-  const providerId = routedProvider?.trim() || defaultProvider || DEFAULT_AI_PROVIDER;
-  const provider = AI_PROVIDERS.find((entry) => entry.id === providerId);
-  const providerLabel = provider?.label ?? (provider?.labelKey ? t(provider.labelKey) : providerId);
-  const modelLabel = routedModel?.trim() || t("diagrams.ai.defaultModel");
 
   /** Keeps the window inside the editor pane. Called while dragging and whenever the pane resizes. */
   const clamp = useCallback((x: number, y: number) => {
@@ -173,7 +162,11 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
     // the run lives on the diagram, so leaving is just leaving. The Stop button is what stops it,
     // and it is here again the moment the window is re-opened.
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      // The model menu owns Escape first: dismissing the list of engines must not close the
+      // window with the instruction in it.
+      if (document.querySelector('[role="menu"]')) return;
+      onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -420,12 +413,9 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
         )}
 
         <div className="flex items-center gap-2">
-          <span className="flex min-w-0 flex-1 items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)]">
-            <ProviderGlyph providerId={providerId} size={11} />
-            <span className="truncate">
-              {providerLabel} · {modelLabel}
-            </span>
-          </span>
+          <div className="min-w-0 flex-1">
+            <ChatModelPicker task={TASK} liveModel={null} chatActive={false} />
+          </div>
 
           {busy ? (
             <>

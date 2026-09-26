@@ -527,9 +527,11 @@ const ICONS = {
     '<rect x="3" y="13" width="8" height="8" rx="1"/>' +
     '<rect x="15" y="13" width="6" height="8" rx="1"/>',
   download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M4 20h16"/>',
+  // Lucide's sparkles, the glyph `AiGlyph` masks — this one is stroked with the logo's gradient
+  // instead (see `flowingStroke`), so it is the same drawing as every other AI door in the app.
   sparkles:
-    '<path d="m12 3 2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z"/>' +
-    '<path d="M19 3v3"/><path d="M20.5 4.5h-3"/>',
+    '<path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"/>' +
+    '<path d="M20 2v4"/><path d="M22 4h-4"/><circle cx="4" cy="20" r="2"/>',
   // A clock with the arrow going back round it: the same drawing every other history button in the
   // app wears, transcribed here because the icon set this toolbar is in is this object rather than
   // the component library the rest of the UI imports from.
@@ -541,10 +543,47 @@ const ICONS = {
 
 export type ToolbarIcon = keyof typeof ICONS;
 
+/** One loop of the AI glyphs' flow, in ms — `cf-ai-flow` in `index.css`, `FLOW_MS` in `AiGlyph`. */
+const AI_FLOW_MS = 3000;
+
+/**
+ * The `stroke` and `<defs>` that make an injected glyph flow like `AiGlyph`.
+ *
+ * `AiGlyph` is a CSS mask over a sliding gradient, and none of that CSS exists in draw.io's document.
+ * So the same motion is written into the SVG itself: a gradient one period `a b c b a` wide, two
+ * glyphs long and repeating, slid one period rightward per loop by SMIL — which is what the mask's
+ * strip does. The hues are read off this window's `--cf-ai-*` so there is still one place they are
+ * defined, and the loop starts where the page's other glyphs already are (the `begin` offset), so the
+ * sparkle in the editor's toolbar flows in step with the ones around it. Still under reduced motion,
+ * at the frame the others rest on.
+ */
+function flowingStroke(): { stroke: string; defs: string } {
+  const root = getComputedStyle(document.documentElement);
+  const hue = (name: string, fallback: string) => root.getPropertyValue(name).trim() || fallback;
+  const [a, b, c] = [hue("--cf-ai-a", "#8b5cf6"), hue("--cf-ai-b", "#6366f1"), hue("--cf-ai-c", "#06b6d4")];
+  const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  const begin = -((performance.now() % AI_FLOW_MS) / 1000);
+  const motion = still
+    ? ""
+    : `<animateTransform attributeName="gradientTransform" type="translate" from="-48 0" to="0 0" ` +
+      `dur="${AI_FLOW_MS / 1000}s" begin="${begin.toFixed(3)}s" repeatCount="indefinite"/>`;
+  return {
+    stroke: "url(#cf-ai-flow)",
+    defs:
+      `<defs><linearGradient id="cf-ai-flow" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="48" y2="0" ` +
+      `spreadMethod="repeat">` +
+      `<stop offset="0" stop-color="${a}"/><stop offset="0.25" stop-color="${b}"/>` +
+      `<stop offset="0.5" stop-color="${c}"/><stop offset="0.75" stop-color="${b}"/>` +
+      `<stop offset="1" stop-color="${a}"/>${motion}</linearGradient></defs>`,
+  };
+}
+
 export interface ToolbarButton {
   /** Stable, and the handle this module removes a previous injection by. */
   id: string;
   icon: ToolbarIcon;
+  /** Stroked with the logo's flowing gradient rather than the toolbar's ink — the AI button. */
+  flowing?: boolean;
   title: string;
   /** `at` is in the **parent document's** coordinates, so a menu opened from here lands under the
    *  pointer rather than offset by the iframe's position. */
@@ -592,10 +631,11 @@ export function injectToolbarButtons(
     element.className = "geButton";
     element.title = button.title;
     element.setAttribute(INJECTED, button.id);
+    const paint = button.flowing ? flowingStroke() : { stroke: "currentColor", defs: "" };
     element.innerHTML =
-      `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
+      `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="${paint.stroke}" ` +
       `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ` +
-      `style="margin:5px">${ICONS[button.icon]}</svg>`;
+      `style="margin:5px">${paint.defs}${ICONS[button.icon]}</svg>`;
     element.addEventListener("click", (event) => {
       event.preventDefault();
       const box = offset();

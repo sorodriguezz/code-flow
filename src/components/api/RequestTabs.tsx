@@ -201,10 +201,10 @@ export function RequestTabs() {
                 void requestClose(tab);
               }}
               style={{ width: TAB_W }}
-              // The active tab takes the sheet's colour and melts into the page below it; there is no
-              // accent bar over it any more. A tab owing a conflict decision keeps its warning wash
-              // whichever tab is active, and the active one of those also keeps a warning rule on
-              // top — it outranks everything else on the strip for attention.
+              // The active tab takes the sheet's colour, melts into the page below it and wears the
+              // recipe's accent rule on top. A tab owing a conflict decision keeps its warning wash
+              // whichever tab is active, and the active one of those draws a warning rule over the
+              // accent one — it outranks everything else on the strip for attention.
               className={docTabClass(
                 active,
                 `cursor-pointer select-none ${

@@ -4,17 +4,21 @@ import type { ApiProtocol } from "../../types/api";
 /**
  * The colour of the verb badge in the tab strip, the tree and the URL bar.
  *
- * Only palette tokens appear here, never a literal — the app has themes and a user-chosen accent,
- * and a hardcoded green would survive exactly one theme. That's also why PUT and PATCH share the
- * accent instead of the blue/purple Postman gives them: there is no fifth semantic colour to
- * spend, and inventing one would break the moment the user picks a different accent.
+ * Only palette tokens appear here, never a literal — the app has light and dark themes, and a
+ * hardcoded green would survive exactly one of them. Every verb has a hue no other verb has: the
+ * three with a meaning take the semantic tokens, and the rest take `--cf-method-*`, fixed hues with
+ * a light and a dark value (see `index.css`). Not the accent — PUT and PATCH used to share it, and
+ * the user picks it, so whichever verb it drew would collide with the day's accent choice.
  */
 const METHOD_COLORS: Record<string, string> = {
   GET: "var(--cf-success)",
   POST: "var(--cf-warning)",
-  PUT: "var(--cf-accent)",
-  PATCH: "var(--cf-accent)",
+  PUT: "var(--cf-method-put)",
+  PATCH: "var(--cf-method-patch)",
   DELETE: "var(--cf-danger)",
+  HEAD: "var(--cf-method-head)",
+  OPTIONS: "var(--cf-method-options)",
+  TRACE: "var(--cf-method-trace)",
 };
 
 /** Protocol abbreviations are product names, not UI copy — they read the same in every language. */
@@ -71,7 +75,7 @@ export function badgeColor(protocol: ApiProtocol, method: string): string {
  * A glyph per protocol, so a list of them is scannable by shape before it's read.
  *
  * Shape carries the whole distinction on purpose: the colours here come from `badgeColor`, which
- * has only four semantic tokens to spend and gives every non-HTTP protocol the same muted one.
+ * spends its hues on HTTP verbs and gives every non-HTTP protocol the same muted one.
  * Inventing a brand colour per protocol would be the literal-colour mistake this file exists to
  * avoid — so an icon has to be recognisable in grey.
  */

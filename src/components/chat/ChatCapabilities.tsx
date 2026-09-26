@@ -99,6 +99,7 @@ export function ChatCapabilities({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
+        data-tour="chat-capabilities"
         title={t("chat.capabilitiesTitle")}
         aria-label={t("chat.capabilitiesTitle")}
         aria-expanded={open}

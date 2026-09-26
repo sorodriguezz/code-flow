@@ -1,7 +1,7 @@
 //! Tauri commands for the AI features (commit messages, pre-commit analysis, chat, "fix with
 //! AI"). Despite the file name — kept stable so the frontend command bindings don't move — these
 //! are provider-neutral: each resolves the active engine from the `ai_provider` setting via
-//! [`load_ai_config`] and dispatches through [`crate::ai`], so switching Claude ⇆ Gemini ⇆ … is a
+//! [`load_ai_config_in`] and dispatches through [`crate::ai`], so switching Claude ⇆ Gemini ⇆ … is a
 //! settings change, not a code change. The PR-review command lives in `ado_cmd` (it needs the VCS
 //! dispatch first) but shares these same helpers.
 
@@ -251,12 +251,6 @@ impl AiConfig {
     }
 }
 
-/// The configuration for `task`, with no workspace to consult — the task's own account pin, then
-/// the provider's default. Prefer [`load_ai_config_in`] wherever the run belongs to a workspace.
-pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig, String> {
-    load_ai_config_in(conn, task, None)
-}
-
 /// The configuration for `task`, for a run that belongs to `workspace_id` — which is what lets that
 /// workspace's default account apply.
 pub(crate) fn load_ai_config_in(
@@ -348,10 +342,13 @@ pub async fn generate_commit_message(
     db: State<'_, Db>,
     diff: String,
     run_id: Option<String>,
+    workspace_id: Option<String>,
 ) -> Result<String, String> {
     let (config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let config = load_ai_config(&conn, AiTask::Commit)?;
+        // The caller's workspace, so its default account applies — the one the chip beside Commit
+        // names. Optional: a caller that does not say gets the task's pin or the provider's default.
+        let config = load_ai_config_in(&conn, AiTask::Commit, workspace_id.as_deref())?;
         let template = shared_template(&conn, "commit_template", "claude_commit_template")?;
         (config, template)
     };

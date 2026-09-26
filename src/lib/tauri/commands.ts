@@ -1239,8 +1239,8 @@ export const githubAuthenticatedUser = (host: string) =>
 
 // ---------- claude ----------
 
-export const generateCommitMessage = (diff: string, runId?: string) =>
-  invoke<string>("generate_commit_message", { diff, runId });
+export const generateCommitMessage = (diff: string, runId?: string, workspaceId?: string | null) =>
+  invoke<string>("generate_commit_message", { diff, runId, workspaceId: workspaceId ?? null });
 
 /** Stops a run by the id it was started with. Resolves `false` when it had already finished. */
 export const cancelAiRun = (runId: string) => invoke<boolean>("cancel_ai_run", { runId });

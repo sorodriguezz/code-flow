@@ -673,7 +673,17 @@ function TaskRow({
                   value={validPreference(accounts, provider, taskPins[task.key])}
                   onChange={(value) => void setTaskPin(task.key, value)}
                   options={[
-                    { value: "", label: t("accounts.automatic") },
+                    {
+                      value: "",
+                      // What the row falls back to without a pin of its own: the workspace's
+                      // default, then the provider's, then the system login.
+                      label: t("accounts.automaticNamed", {
+                        account: nameOf(
+                          provider,
+                          resolveAccount({ accounts, taskPins, workspaceDefaults, providerDefaults }, provider, null, workspaceId),
+                        ),
+                      }),
+                    },
                     { value: SYSTEM_ACCOUNT, label: nameOf(provider, null) },
                     ...providerAccounts.map((account) => ({ value: account.id, label: account.label })),
                   ]}

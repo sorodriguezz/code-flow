@@ -31,9 +31,13 @@ import { watchSettings } from "../lib/settingsSync";
  * and avoid drawing every file with its default icon for a frame before the rules arrive.
  */
 const KEY = "editor_icon_profiles";
-/** Every shipped profile id this install has been given, so a new pack is added once and a deleted one
- * stays deleted. See `lib/icons/profileUpgrade.ts`. */
+/** Every shipped profile id this install has been given. Nothing here decides by it any more; it is
+ * kept current for v2.0.1–2.0.3, which read it. See `lib/icons/profileUpgrade.ts`. */
 const OFFERED_KEY = "editor_icon_profiles_offered";
+/** The shipped packs the user deleted, written by `removeProfile` before the list without them. The
+ * only thing that keeps a deleted pack deleted: absence alone is also what an older build writing
+ * over the list looks like. See `lib/icons/profileUpgrade.ts`. */
+const REMOVED_KEY = "editor_icon_profiles_removed";
 /** Where the rules lived before profiles existed. Read once, at migration, and never written again. */
 const LEGACY_RULES_KEY = "editor_icon_rules";
 const LEGACY_FOLDER_KEY = "editor_default_folder_icon";
@@ -77,7 +81,8 @@ async function readSelection(repoPath: string): Promise<{ chosen: string | null;
   return { chosen: raw?.trim() || null, detected };
 }
 
-function parseOffered(raw: string | null): string[] | null {
+/** A stored list of profile ids — `offered` or `removed`. `null` when there is none, or none readable. */
+function parseIds(raw: string | null): string[] | null {
   if (raw === null) return null;
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -292,6 +297,14 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
     await setSetting(KEY, JSON.stringify(profiles.map(storedForm))).catch(() => {});
   };
 
+  /** Writes down that the user deleted a shipped pack. Read from the row rather than kept in memory,
+   * because every window runs this store and only the row is shared. */
+  const recordRemoved = async (id: string) => {
+    const removed = parseIds(await getSetting(REMOVED_KEY).catch(() => null)) ?? [];
+    if (removed.includes(id)) return;
+    await setSetting(REMOVED_KEY, JSON.stringify([...removed, id])).catch(() => {});
+  };
+
   /** Rewrites the active profile in place. Every rule edit is one of these. */
   const patchActive = async (patch: (profile: IconProfile) => IconProfile) => {
     const { profiles, activeId } = get();
@@ -311,26 +324,41 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
     detectedId: null,
 
     init: async () => {
-      const [raw, offeredRaw] = await Promise.all([
-        getSetting(KEY).catch(() => null),
+      const [raw, offeredRaw, removedRaw] = await Promise.all([
+        // `undefined`, not `null`, when the read itself fails: that says nothing about what is stored,
+        // and "no row" is the one answer that lets the migration below write over it.
+        getSetting(KEY).catch(() => undefined),
         getSetting(OFFERED_KEY).catch(() => null),
+        getSetting(REMOVED_KEY).catch(() => null),
       ]);
-      const stored = raw === null ? null : parseProfiles(raw);
+      const stored = typeof raw === "string" ? parseProfiles(raw) : null;
       if (stored && stored.length > 0) {
         // The packs this version ships, brought into a list that was written by an older one — new
         // ones added, untouched old ones replaced, anything the user edited or deleted left as it is.
         // Idempotent, which matters: this runs again every time the row below is rewritten.
-        const upgrade = upgradeShippedProfiles(stored, parseOffered(offeredRaw));
+        const upgrade = upgradeShippedProfiles(stored, parseIds(offeredRaw), parseIds(removedRaw));
         const profiles = upgrade.profiles;
         // `get().activeId` rather than the default: a `setWorkspace` that landed first already put
         // this repository's choice there, and this is the point where it can finally be checked
         // against a real list.
         set({ ...applied(profiles, resolve(profiles, get().activeId)), loaded: true });
-        // `offered` first, so the re-read the profiles write triggers already knows what it was given.
+        // The records first, so the re-read the profiles write triggers already knows them.
+        if (upgrade.removedChanged) {
+          await setSetting(REMOVED_KEY, JSON.stringify(upgrade.removed)).catch(() => {});
+        }
         if (upgrade.offeredChanged) {
           await setSetting(OFFERED_KEY, JSON.stringify(upgrade.offered)).catch(() => {});
         }
         if (upgrade.changed) await persist(profiles);
+        return;
+      }
+
+      if (raw !== null) {
+        // A row this version cannot read — written by a newer build, or damaged — or a read that
+        // failed. Keep drawing what is in memory and write nothing. Running the migration below over
+        // it is exactly how v2.0.0, opened after a newer build, replaced eleven packs with its own
+        // three (2026-09-24). A user edit may still write over it; that at least is a choice.
+        set({ ...applied(get().profiles, resolve(get().profiles, get().activeId)), loaded: true });
         return;
       }
 
@@ -354,6 +382,7 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
       // Written now rather than on the first edit, so the migration happens once and the next launch
       // reads the profiles row instead of re-deriving it from keys that may since have been cleared.
       set({ ...applied(profiles, activeId), loaded: true });
+      await setSetting(REMOVED_KEY, "[]").catch(() => {});
       await setSetting(OFFERED_KEY, JSON.stringify(BUILT_IN_PROFILES.map((profile) => profile.id))).catch(
         () => {},
       );
@@ -510,6 +539,9 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
       // an explorer whose icons vanished with no way back is not a state worth being able to reach.
       if (profiles.length <= 1) return;
       const next = profiles.filter((profile) => profile.id !== id);
+      // Before the list that no longer has it: the re-read that write triggers in every window must
+      // already find the pack recorded as deleted, or `init` would put it straight back.
+      if (shippedProfile(id)) await recordRemoved(id);
       // A repository following detection keeps following it: nothing is written for it, and the pack
       // its stack calls for is re-resolved against the shorter list (to the default if that was the
       // one removed).
@@ -557,6 +589,7 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
       const { repoPath, detectedId } = get();
       const wanted = repoPath ? (detectedId ?? DEFAULT_PROFILE_ID) : DEFAULT_PROFILE_ID;
       set({ autoSelected: repoPath !== null, ...applied(BUILT_IN_PROFILES, resolve(BUILT_IN_PROFILES, wanted)) });
+      await setSetting(REMOVED_KEY, "[]").catch(() => {});
       await setSetting(OFFERED_KEY, JSON.stringify(BUILT_IN_PROFILES.map((profile) => profile.id))).catch(
         () => {},
       );

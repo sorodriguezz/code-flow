@@ -43,13 +43,17 @@ function slug(text: string, seen: Set<string>): string {
   return id;
 }
 
-/** Only the HTTP verbs get a colour; everything else is a protocol name and reads as a label. */
+/** Only the HTTP verbs get a colour, one each — the app's own hues (`methodStyle.ts`), so a verb
+ * reads the same in the exported document; everything else is a protocol name and reads as a label. */
 const METHOD_CLASS: Record<string, string> = {
   GET: "get",
   POST: "post",
   PUT: "put",
-  PATCH: "put",
+  PATCH: "patch",
   DELETE: "delete",
+  HEAD: "head",
+  OPTIONS: "options",
+  TRACE: "trace",
 };
 
 function methodTag(method: string): string {
@@ -150,12 +154,14 @@ const CSS = `
   --bg:#ffffff; --panel:#f7f8fa; --text:#1b1f24; --muted:#6a737d; --line:#e3e6ea;
   --accent:#4f46e5; --code-bg:#f4f5f7;
   --get:#0a7d3f; --post:#a15c00; --put:#0b5fa5; --delete:#b3261e; --other:#5a6270;
+  --patch:#7e22ce; --head:#0f766e; --options:#be185d; --trace:#4d7c0f;
 }
 @media (prefers-color-scheme:dark){
   :root{
     --bg:#0f1115; --panel:#161a21; --text:#e6e8ec; --muted:#9099a6; --line:#262c36;
     --accent:#8b85ff; --code-bg:#171b22;
-    --get:#4ade80; --post:#fbbf24; --delete:#f87171; --put:#7dd3fc; --other:#98a2b3;
+    --get:#4ade80; --post:#fbbf24; --delete:#f87171; --put:#60a5fa; --other:#98a2b3;
+    --patch:#c084fc; --head:#2dd4bf; --options:#f472b6; --trace:#a3e635;
   }
 }
 html{-webkit-text-size-adjust:100%}
@@ -199,6 +205,8 @@ p{margin:0 0 10px}
 }
 .method.get{color:var(--get)} .method.post{color:var(--post)}
 .method.put{color:var(--put)} .method.delete{color:var(--delete)}
+.method.patch{color:var(--patch)} .method.head{color:var(--head)}
+.method.options{color:var(--options)} .method.trace{color:var(--trace)}
 .endpoint{
   border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:0 0 14px;background:var(--panel);
 }
@@ -235,6 +243,7 @@ footer{margin-top:48px;padding-top:14px;border-top:1px solid var(--line);color:v
   :root{
     --bg:#fff;--panel:#fff;--text:#000;--muted:#444;--line:#bbb;--code-bg:#f4f4f4;
     --get:#0a7d3f;--post:#8a4f00;--put:#0b5fa5;--delete:#b3261e;--other:#444;
+    --patch:#7e22ce;--head:#0f766e;--options:#be185d;--trace:#4d7c0f;
   }
   .nav{display:none}
   .layout{display:block;max-width:none;padding:0}

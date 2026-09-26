@@ -34,7 +34,11 @@ const COLORS = {
   get: "#0a7d3f",
   post: "#a15c00",
   put: "#0b5fa5",
+  patch: "#7e22ce",
   delete: "#b3261e",
+  head: "#0f766e",
+  options: "#be185d",
+  trace: "#4d7c0f",
   other: "#5a6270",
 };
 
@@ -45,10 +49,17 @@ function methodColor(method: string): string {
     case "POST":
       return COLORS.post;
     case "PUT":
-    case "PATCH":
       return COLORS.put;
+    case "PATCH":
+      return COLORS.patch;
     case "DELETE":
       return COLORS.delete;
+    case "HEAD":
+      return COLORS.head;
+    case "OPTIONS":
+      return COLORS.options;
+    case "TRACE":
+      return COLORS.trace;
     default:
       return COLORS.other;
   }

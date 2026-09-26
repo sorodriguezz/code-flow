@@ -214,9 +214,8 @@ export function ChangePeek({
             onStageClick,
             { spinning: running },
           )}
-          {/* `Undo2` rather than the `Trash2` the Changes panel argues for, and the divergence is
-              deliberate. That argument is about a *file*: discarding one deletes it outright when it is
-              untracked, so the arrow undersells it. At hunk scope it inverts — nothing is deleted, the
+          {/* `Undo2`, the same glyph the Changes panel gives a tracked file's discard (its trash can is
+              only for an untracked file, which discarding deletes). Nothing is deleted here — the
               operation really is "put these lines back", and a trash can beside a `+` reads as "delete
               the file". The destructive weight is carried by the confirm dialog naming the range. */}
           {canDiscard &&

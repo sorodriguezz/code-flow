@@ -384,6 +384,9 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
       <Tooltip label={t("assistant.openNew")} side="bottom" disabled={open}>
         <button
           onClick={() => setOpen((v) => !v)}
+          // The main tour's pull-request step points here: "From a link…" in this menu is the way in
+          // that stayed when the projects panel's glasses gave their place to the project initializer.
+          data-tour="ai-new"
           aria-label={t("assistant.openNew")}
           aria-haspopup="menu"
           aria-expanded={open}

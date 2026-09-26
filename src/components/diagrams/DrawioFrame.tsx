@@ -270,6 +270,8 @@ export function DrawioFrame({
                 {
                   id: "ai",
                   icon: "sparkles",
+                  // In the logo's flowing gradient, as every AI door in the app is.
+                  flowing: true,
                   title: labels.current.ai,
                   onClick: () => actions.current.onAskAi(),
                 },

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Lock, Settings2 } from "lucide-react";
 import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
@@ -12,6 +12,7 @@ import { useT } from "../../state/languageStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { SYSTEM_ACCOUNT, resolveAccount, validPreference } from "../../lib/aiAccounts";
+import { AI_TASKS } from "../../lib/aiTasks";
 
 const WIDTH = 236;
 const GAP = 6;
@@ -25,6 +26,20 @@ const EDGE = 8;
  * The pick is written to the **chat task's** routing (`ai_provider_chat` + `{provider}_chat_model`),
  * the same settings the routing table owns, so it's a real configuration change rather than a
  * per-conversation override. No other task is touched.
+ *
+ * `task` names another row of that table for a surface that answers under its own: the database
+ * console's assistant is `db_query`, the ✨ by Commit is `commit`. Everything above holds with that
+ * key in place of `chat` — the chip reads that row, writes that row and its account pin, and nothing
+ * else — and the menu is headed with the row's own "Model for …" (`AiTaskDef.modelForKey`).
+ *
+ * # Triggers (`variant`)
+ *
+ * The menu is always the same; what opens it depends on the room. `chip` spells the route out
+ * ("Claude Code · Opus · Trabajo") and belongs in a composer. `tag` is `ModelTag`'s pill — the model,
+ * and the account where there is a choice ("Haiku 4.5 · Sistema") — for a toolbar or a footer that
+ * already had that pill. `icon` is the provider's mark
+ * alone, beside a button whose run it routes (Commit, the 🛡). The two small ones put the whole route
+ * in their tooltip, above `title`.
  *
  * While a conversation is open (`chatActive`) only the *current* provider's versions can be picked.
  * Switching provider mid-chat can't work: each CLI keeps its own session store, so the turns so far
@@ -48,7 +63,7 @@ const EDGE = 8;
  * The third coordinate, after provider and model, for a CLI with more than one login (see
  * `lib/aiAccounts.ts`). It appears only where there is a choice — a provider with at least one
  * added account — as a row of pills above that provider's versions, and on the chip after the
- * model: "Opus · Trabajo". Unbound, a pill is the chat task's own account pin, and "Automatic"
+ * model: "Opus · Trabajo". Unbound, a pill is the task's own account pin, and "Automatic"
  * leaves it to the workspace; bound, it is the conversation's account, which is always a concrete
  * one. Moving a thread to another account starts a fresh engine session — that account cannot see
  * the other's — and the chat workspace replays the transcript into it, so it is allowed mid-thread
@@ -59,6 +74,12 @@ export function ChatModelPicker({
   chatActive,
   bound,
   onPick,
+  task = "chat",
+  title,
+  variant = "chip",
+  size = "sm",
+  className = "",
+  children,
 }: {
   liveModel: string | null;
   chatActive: boolean;
@@ -68,10 +89,24 @@ export function ChatModelPicker({
   /** Where a selection goes in bound mode. Without it the pick falls through to the routing.
    *  `account` is only passed when one was picked; absent keeps the thread's own. */
   onPick?: (provider: string, model: string, account?: string) => void | Promise<void>;
+  /** The routing row this chip reads and, unbound, writes — an `AI_TASKS` key, the same string as
+   *  Rust's `AiTask::key()`. */
+  task?: string;
+  /** The chip's tooltip; on `tag` and `icon`, the line under the route. */
+  title?: string;
+  variant?: "chip" | "tag" | "icon";
+  /** `icon` only: `md` beside a full-size button (Commit), `sm` in a row of icon buttons (the 🛡's). */
+  size?: "sm" | "md";
+  /** Added to the trigger's classes, for a place that has to match a neighbour (the Commit button's
+   *  border). Only for what the variant leaves unset — two utilities for one property do not stack. */
+  className?: string;
+  /** `icon` only: the mark to show in place of the provider's — the editor's inline edit keeps the
+   *  ✨ it always had, which is the thing its user reaches for. */
+  children?: ReactNode;
 }) {
   const t = useT();
-  const routedProvider = useTaskProvider("chat");
-  const routedModel = useAiProviderStore((s) => s.taskModels.chat ?? s.model);
+  const routedProvider = useTaskProvider(task);
+  const routedModel = useAiProviderStore((s) => s.taskModels[task] ?? s.model);
   const providerId = bound?.provider ?? routedProvider;
   const configuredModel = bound?.model ?? routedModel;
   const setTaskRouting = useAiProviderStore((s) => s.setTaskRouting);
@@ -113,18 +148,23 @@ export function ChatModelPicker({
   const hasAccounts = (id: string) => accounts.some((account) => account.provider === id);
   /** The account a thread (bound) or the next chat (unbound) of `id` runs as — `null` is system. */
   const effectiveAccount = (id: string): string | null =>
-    bound && id === bound.provider ? (bound.account ?? null) : resolveAccount(prefs, id, "chat", workspaceId);
+    bound && id === bound.provider ? (bound.account ?? null) : resolveAccount(prefs, id, task, workspaceId);
+  const modelLabel = modelDisplayLabel(providerId, shownModel, t);
+  const accountLabel = hasAccounts(providerId) ? nameOf(providerId, effectiveAccount(providerId)) : null;
+  /** The whole route — what the chip spells out and the two small triggers keep in their tooltip. */
+  const routeLabel = [activeLabel, modelLabel, accountLabel].filter(Boolean).join(" · ");
+  const taskDef = AI_TASKS.find((entry) => entry.key === task);
   /** Which pill is lit for `id`. Unbound, the pin itself — "" is Automatic. */
   const selectedPill = (id: string): string => {
     if (accountChoice !== null) return accountChoice;
-    if (!bound) return validPreference(accounts, id, taskPins.chat);
+    if (!bound) return validPreference(accounts, id, taskPins[task]);
     return effectiveAccount(id) ?? SYSTEM_ACCOUNT;
   };
 
   const pickAccount = (id: string, value: string) => {
     setAccountChoice(value);
     if (!bound) {
-      void setTaskPin("chat", value);
+      void setTaskPin(task, value);
       return;
     }
     // Bound to the thread it is already on: applied now, keeping the model. On another provider it
@@ -208,7 +248,7 @@ export function ChatModelPicker({
       await onPick(nextProvider, model, accountChoice ?? undefined);
       return;
     }
-    await setTaskRouting("chat", nextProvider, model);
+    await setTaskRouting(task, nextProvider, model);
   };
 
   /** Live list when the CLI gave us one, else the curated fallback — via `modelOptionsFor`, which
@@ -221,38 +261,94 @@ export function ChatModelPicker({
   };
 
   const versions = browsing ? versionsFor(browsing) : undefined;
+  const heading = t(taskDef?.modelForKey ?? taskDef?.labelKey ?? "chat.modelForChat");
+
+  /** What every trigger shares: the anchor the menu is placed against, and saying it opens one. */
+  const trigger = {
+    ref: triggerRef,
+    type: "button" as const,
+    onClick: () => (open ? setOpen(false) : openMenu()),
+    "aria-haspopup": "menu" as const,
+    "aria-expanded": open,
+  };
+  const chevron = (size: number) => (
+    <ChevronDown size={size} className={`shrink-0 opacity-70 transition-transform ${open ? "rotate-180" : ""}`} />
+  );
 
   return (
     <>
-      <button
-        ref={triggerRef}
-        onClick={() => (open ? setOpen(false) : openMenu())}
-        title={t("chat.changeModelTitle")}
-        className={`flex h-[26px] max-w-full items-center gap-1.5 rounded-md px-2 text-[12px] transition-colors hover:bg-[var(--cf-hover)] ${
-          open ? "bg-[var(--cf-hover)] text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
-        }`}
-      >
-        <ProviderGlyph providerId={active.id} size={13} />
-        {activeLabel}
-        <span className="text-[var(--cf-text-muted)]/50">·</span>
-        <span className="truncate font-medium text-[var(--cf-text)]/70">
-          {modelDisplayLabel(providerId, shownModel, t)}
-          {hasAccounts(providerId) && ` · ${nameOf(providerId, effectiveAccount(providerId))}`}
-        </span>
-        <ChevronDown size={12} className={`shrink-0 opacity-70 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
+      {variant === "tag" ? (
+        <button
+          {...trigger}
+          title={[routeLabel, title].filter(Boolean).join("\n")}
+          className={`inline-flex min-w-0 max-w-[16rem] shrink items-center gap-1 rounded-full border bg-[var(--cf-surface)] px-1.5 py-px text-[10.5px] transition-colors ${
+            open
+              ? "border-[var(--cf-accent)] text-[var(--cf-text)]"
+              : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))] hover:text-[var(--cf-text)]"
+          } ${className}`}
+        >
+          <ProviderGlyph providerId={active.id} size={9} />
+          {/* `ModelTag`'s fact — the model's own name, a gateway route's last segment, or the engine
+              when none is pinned, where "Default" alone would not say who answers — then whose login
+              runs it, as the chip says it, wherever there is more than one to choose from. A long
+              model id gives way first: the account is the half that tells two otherwise equal
+              routes apart. */}
+          <span className="min-w-0 truncate font-mono">
+            {shownModel.trim() ? modelLabel.split("/").pop() || modelLabel : activeLabel}
+          </span>
+          {accountLabel && <span className="max-w-[7rem] shrink-0 truncate font-mono">· {accountLabel}</span>}
+          {chevron(9)}
+        </button>
+      ) : variant === "icon" ? (
+        <button
+          {...trigger}
+          title={[routeLabel, title].filter(Boolean).join("\n")}
+          aria-label={routeLabel}
+          className={`flex min-h-[22px] shrink-0 items-center justify-center rounded-md transition-colors ${
+            size === "md" ? "gap-1 px-2.5" : "gap-0.5 px-1"
+          } ${
+            open
+              ? "bg-[var(--cf-hover)] text-[var(--cf-text)]"
+              : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+          } ${className}`}
+        >
+          {children ?? <ProviderGlyph providerId={active.id} size={size === "md" ? 16 : 12} />}
+          {chevron(size === "md" ? 12 : 10)}
+        </button>
+      ) : (
+        <button
+          {...trigger}
+          title={title ?? t("chat.changeModelTitle")}
+          className={`flex h-[26px] max-w-full items-center gap-1.5 rounded-md px-2 text-[12px] transition-colors hover:bg-[var(--cf-hover)] ${
+            open ? "bg-[var(--cf-hover)] text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
+          } ${className}`}
+        >
+          <ProviderGlyph providerId={active.id} size={13} />
+          {activeLabel}
+          <span className="text-[var(--cf-text-muted)]/50">·</span>
+          <span className="truncate font-medium text-[var(--cf-text)]/70">
+            {modelLabel}
+            {accountLabel && ` · ${accountLabel}`}
+          </span>
+          {chevron(12)}
+        </button>
+      )}
 
       {open &&
         createPortal(
           <div
             ref={menuRef}
+            // `menu` is also what a dialog underneath asks before taking Escape for itself
+            // (`ApiModal`): pressing it here closes this list, not the form the chip sits in.
+            role="menu"
+            aria-label={heading}
             style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, width: WIDTH, visibility: pos ? "visible" : "hidden" }}
             className="fixed z-[9999] flex max-h-[60vh] flex-col rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
           >
             {browsing === null ? (
               <>
                 <p className="shrink-0 px-2.5 py-1.5 text-[10.5px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
-                  {t("chat.modelForChat")}
+                  {heading}
                 </p>
                 <div className="min-h-0 flex-1 overflow-auto p-1 pt-0">
                   {selectable.map((p) => {
@@ -308,7 +404,18 @@ export function ChatModelPicker({
                     className="flex shrink-0 flex-wrap gap-1 border-b border-[var(--cf-border)] px-2 py-1.5"
                   >
                     {[
-                      ...(bound ? [] : [{ value: "", label: t("accounts.automatic") }]),
+                      // "Automatic" says who it comes to without a pin of its own — the workspace's
+                      // default, the provider's, or the system login — or it names no account at all.
+                      ...(bound
+                        ? []
+                        : [
+                            {
+                              value: "",
+                              label: t("accounts.automaticNamed", {
+                                account: nameOf(browsing, resolveAccount(prefs, browsing, null, workspaceId)),
+                              }),
+                            },
+                          ]),
                       { value: SYSTEM_ACCOUNT, label: nameOf(browsing, null) },
                       ...accounts
                         .filter((account) => account.provider === browsing)

@@ -51,6 +51,12 @@ export function fieldClass({ size = "md", className = "" }: { size?: "sm" | "md"
  * database, the sessions of Remoto. The active one takes the sheet's own colour so it reads as the
  * top of the page below it; the others sit on the strip, muted, and lift to a hover tint.
  *
+ * It also wears a 2px accent rule along its top edge — a `::before`, so every strip gets it from here
+ * without an element of its own. The sheet's colour alone left two open requests with the same name
+ * nearly indistinguishable on a dark strip (user, 2026-09-26: "marca con una franja con el acento").
+ * A strip with something more urgent to say draws its own rule over this one, later in the DOM (the
+ * API client's conflict warning).
+ *
  * The strip itself is `docStripClass` — the sunken tone with a bottom hairline the active tab
  * covers (`-mb-px` on the tab makes that work without a second border).
  */
@@ -60,7 +66,7 @@ export const docStripClass =
 export function docTabClass(active: boolean, className = ""): string {
   return `group/doctab relative -mb-px flex min-w-0 max-w-[220px] shrink-0 items-center gap-1.5 border-r border-[var(--cf-border)] pl-3 pr-1.5 text-[13px] transition-colors duration-100 ${
     active
-      ? "border-b border-b-[var(--cf-surface)] bg-[var(--cf-surface)] text-[var(--cf-text)]"
+      ? "border-b border-b-[var(--cf-surface)] bg-[var(--cf-surface)] text-[var(--cf-text)] before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-[2px] before:bg-[var(--cf-accent)] before:content-['']"
       : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
   } ${className}`;
 }

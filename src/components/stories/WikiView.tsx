@@ -1,18 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookText,
-  Boxes,
   CircleAlert,
   CloudDownload,
   ExternalLink,
   FileCode2,
-  FolderGit2,
   History,
   Loader2,
   MoreHorizontal,
   Network,
   Pencil,
-  Play,
   Plug,
   Plus,
   Save,
@@ -21,12 +18,12 @@ import {
   UploadCloud,
   X,
 } from "lucide-react";
-import { TaskModelTag } from "../ai/ModelTag";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
-import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
-import { MarkdownEditor } from "../common/MarkdownEditor";
+import { MARKDOWN_TOOL_CLASS, MarkdownEditor } from "../common/MarkdownEditor";
+import { AiGlyph } from "../common/AiGlyph";
+import { DocAiPanel } from "./DocAiPanel";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
@@ -34,7 +31,7 @@ import { ThinkingOrb } from "../common/ThinkingOrb";
 import { chipClass } from "../common/recipes";
 import { buttonClass } from "../common/Button";
 import { confirmAction } from "../../state/confirmStore";
-import { NO_DOC_PARAMS, useDocsStore } from "../../state/docsStore";
+import { useDocsStore } from "../../state/docsStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { translate, useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
@@ -954,159 +951,6 @@ function RenameRow({
   );
 }
 
-/** What the generation reads, and the button that starts it. */
-function GenerationBar({ page, body }: { page: DocPage; body: string }) {
-  const t = useT();
-  const repos = useActiveProjects();
-  // This document's composer and this document's run. Both used to be one slot for the whole store,
-  // so ticking a repository for one document ticked it for all of them and a single generation drew
-  // every other document's button as a Stop — one that cancelled the run it did not belong to.
-  const { projectIds: picked, instructions, useContext } = useDocsStore(
-    (s) => s.paramsByDoc[page.id] ?? NO_DOC_PARAMS,
-  );
-  const myRun = useDocsStore((s) => s.runByDoc[page.id]);
-  const [open, setOpen] = useState(false);
-
-  const running = Boolean(myRun);
-  const isRepo = page.scope === "repo";
-  const subject = repos.find((r) => r.id === page.project_id);
-  /**
-   * Whether there is anything for a run to read.
-   *
-   * A repository document is bound to one checkout, and that repository can be removed from the
-   * workspace after the document was written — the chip beside this button already says so. Without
-   * this the button stayed live and answered with "pick at least one repository to read", which is
-   * advice about a picker this scope does not have: `generate` takes the subject from the row, and
-   * the row's repository is what is gone. Stopping at the button says the true thing instead.
-   */
-  const canGenerate = isRepo ? Boolean(subject) : picked.length > 0;
-
-  return (
-    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
-      {isRepo ? (
-        <span
-          title={t("docs.repoSubjectHint")}
-          className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] text-[var(--cf-text)]"
-        >
-          <FolderGit2 size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-          <span className="min-w-0 truncate">{subject?.name ?? t("docs.repoGone")}</span>
-        </span>
-      ) : (
-        <div className="relative shrink-0">
-          <button
-            type="button"
-            onClick={() => setOpen((was) => !was)}
-            aria-expanded={open}
-            title={t("docs.whichReposHint")}
-            className="flex max-w-[22rem] items-center gap-1.5 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] transition-colors hover:border-[var(--cf-accent)]"
-          >
-            <Boxes size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-            <span className={`min-w-0 truncate ${picked.length ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"}`}>
-              {picked.length === 0
-                ? t("docs.whichRepos")
-                : repos
-                    .filter((r) => picked.includes(r.id))
-                    .map((r) => r.name)
-                    .join(" · ")}
-            </span>
-            {picked.length > 1 && (
-              <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10.5px] font-semibold tabular-nums text-[var(--cf-accent)]">
-                {picked.length}
-              </span>
-            )}
-          </button>
-          {open && (
-            <>
-              <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-              <div className="cf-fade-in absolute left-0 top-full z-20 mt-1 max-h-72 w-72 overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
-                <p className="px-2 py-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                  {t("docs.whichReposHint")}
-                </p>
-                {repos.map((repo) => (
-                  <label
-                    key={repo.id}
-                    className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12px] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
-                  >
-                    <Checkbox
-                      checked={picked.includes(repo.id)}
-                      onChange={() => store().toggleProject(page.id, repo.id)}
-                    />
-                    <span className="min-w-0 truncate">{repo.name}</span>
-                  </label>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      <button
-        type="button"
-        onClick={() => store().setUseContext(page.id, !useContext)}
-        aria-pressed={useContext}
-        title={t("huReview.useContextHint")}
-        className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1.5 text-[12px] transition-colors ${
-          useContext
-            ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-            : "border-[var(--cf-field-border)] bg-[var(--cf-field)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)]"
-        }`}
-      >
-        <BookText size={12} />
-        {t("huReview.useContext")}
-      </button>
-
-      <input
-        value={instructions}
-        onChange={(e) => store().setInstructions(page.id, e.target.value)}
-        placeholder={t("docs.instructionsPlaceholder")}
-        aria-label={t("docs.instructionsPlaceholder")}
-        className={`${FIELD} min-w-[12rem] max-w-md flex-1`}
-      />
-
-      {/* Pushed to the right so it reads as part of the Generate control rather than as another
-          field: this button rewrites the whole document, and which model does it is the one thing
-          the toolbar could not say. `wiki` is the task `generate_doc_page` routes to in Rust. */}
-      <span className="ml-auto flex min-w-0 items-center">
-        <TaskModelTag task="wiki" title={t("docs.modelTagHint")} />
-      </span>
-
-      <button
-        type="button"
-        onClick={() => {
-          if (running) {
-            void store().stop(page.id);
-            return;
-          }
-          // Regenerating replaces the body outright, and nothing keeps the previous version — so
-          // a document that already says something has to ask first. An empty one does not.
-          if (!body.trim()) {
-            void store().generate(page.id);
-            return;
-          }
-          void confirmAction(t("docs.regenerateConfirm")).then((ok) => {
-            if (ok) void store().generate(page.id);
-          });
-        }}
-        // Stop is always available — it acts on a run that is already going, whatever the row can
-        // still read. Only starting one is gated.
-        disabled={!running && !canGenerate}
-        title={running ? t("docs.stopHint") : canGenerate ? t("docs.generateHint") : isRepo ? t("docs.repoGone") : t("docs.pickReposFirst")}
-        // Icon only: the toolbar has four controls competing for one row, and this is the one whose
-        // label can go without losing meaning — the glyph already carries the state the words did
-        // (play against stop), and the name of the action stays in the tooltip and the aria-label.
-        aria-label={running ? t("docs.stop") : body.trim() ? t("docs.regenerate") : t("docs.generate")}
-        className={`flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md transition-[filter] ${
-          running
-            ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-            : "bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40 disabled:hover:bg-[var(--cf-accent-fill)]"
-        }`}
-      >
-        {running ? <Square size={12} /> : <Play size={12} />}
-      </button>
-    </div>
-  );
-}
-
 /**
  * Where this document publishes: organisation, project, wiki, page path.
  *
@@ -1297,6 +1141,27 @@ export function WikiView() {
   // typed into while the backend believes it is being written.
   const generating = Boolean(myRun) || page?.status === "generating";
 
+  /** The generate window over the editor. Per document: switching to another closes it, since
+   *  everything it holds — what to read, the instruction, the run — belongs to the one it was
+   *  opened on. */
+  const [aiOpen, setAiOpen] = useState(false);
+  const closeAi = useCallback(() => setAiOpen(false), []);
+  useEffect(() => {
+    setAiOpen(false);
+  }, [selectedId]);
+  /** Whether the run going now was started from the window — which then closes when it lands, as
+   *  the document under it is the answer. Not for a run the window only found: it was opened to
+   *  watch or stop that one. */
+  const aiStartedRun = useRef(false);
+  const markAiStarted = useCallback(() => {
+    aiStartedRun.current = true;
+  }, []);
+  useEffect(() => {
+    if (myRun || !aiStartedRun.current) return;
+    aiStartedRun.current = false;
+    if (useDocsStore.getState().pages.find((p) => p.id === selectedId)?.status !== "error") setAiOpen(false);
+  }, [myRun, selectedId]);
+
   // Mod+S, because this is now a field you save rather than one that saves itself. Bound while
   // this view is mounted — it unmounts when the section switches tab, so nothing else on screen
   // has to be asked whether the chord was meant for it.
@@ -1370,8 +1235,6 @@ export function WikiView() {
               </button>
             </div>
 
-            <GenerationBar page={page} body={body} />
-
             {page.status === "error" && page.last_error && (
               <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-danger)_7%,transparent)] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-danger)]">
                 <CircleAlert size={11} className="mt-[2px] shrink-0" />
@@ -1379,13 +1242,29 @@ export function WikiView() {
               </p>
             )}
 
-            <div className="min-h-0 flex-1 overflow-hidden p-3">
+            {/* `relative` for the one case the editor is not here to hold the generate window: a
+                first run, still reading, with no text yet (below). */}
+            <div className="relative min-h-0 flex-1 overflow-hidden p-3">
               {generating && !page.content.trim() ? (
                 <div className="flex h-full flex-col items-center justify-center gap-2">
                   <ThinkingOrb size="lg" />
                   <p className="text-[12px] text-[var(--cf-text-muted)]">
                     {t(page.scope === "repo" ? "docs.readingRepo" : "docs.readingRepos")}
                   </p>
+                  {/* No editor yet, so no toolbar and no AI button to follow the run from: the way
+                      to stop it is here. Only for a run of this session — one from before a reload
+                      has no handle left to stop. */}
+                  {myRun && (
+                    <button
+                      type="button"
+                      onClick={() => void store().stop(page.id)}
+                      title={t("docs.stopHint")}
+                      className={buttonClass({ variant: "secondary", size: "sm" })}
+                    >
+                      <Square size={11} />
+                      {t("docs.stop")}
+                    </button>
+                  )}
                 </div>
               ) : (
                 <MarkdownEditor
@@ -1400,7 +1279,29 @@ export function WikiView() {
                   // document's editor away as well.
                   readOnly={generating}
                   historyKey={page.id}
+                  // Beside "link", in the flowing gradient every AI door in the app wears; the orb
+                  // while this document is being written, so the run can be followed from here.
+                  toolbarExtra={
+                    <button
+                      type="button"
+                      onClick={() => setAiOpen((was) => !was)}
+                      aria-pressed={aiOpen}
+                      aria-label={t("docs.aiButton")}
+                      title={generating ? t("docs.aiButtonRunning") : t("docs.aiButton")}
+                      className={`${MARKDOWN_TOOL_CLASS} ${aiOpen ? "bg-[var(--cf-accent-soft)]" : ""}`}
+                    >
+                      {generating ? <ThinkingOrb size="sm" /> : <AiGlyph size={13} still={aiOpen} />}
+                    </button>
+                  }
+                  // Over the text and under the toolbar, however many rows that wraps to — the
+                  // button that opened the window stays where it can close it again.
+                  overlay={
+                    aiOpen && <DocAiPanel page={page} body={body} onStarted={markAiStarted} onClose={closeAi} />
+                  }
                 />
+              )}
+              {aiOpen && generating && !page.content.trim() && (
+                <DocAiPanel page={page} body={body} onStarted={markAiStarted} onClose={closeAi} />
               )}
             </div>
           </div>

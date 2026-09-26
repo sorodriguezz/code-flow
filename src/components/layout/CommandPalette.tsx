@@ -21,6 +21,7 @@ import {
   MessagesSquare,
   MonitorSmartphone,
   Plus,
+  Rocket,
   Route,
   Workflow,
   Zap,
@@ -141,6 +142,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const openApiModal = useApiModalStore((s) => s.openApiModal);
   const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
   const openCloneModal = useUiStore((s) => s.openCloneModal);
+  const openProjectInit = useUiStore((s) => s.openProjectInit);
   const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
   const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
 
@@ -254,6 +256,14 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
         group: "actions",
         onSelect: () => openCloneModal(),
       },
+      // The third way a repository gets into the app: made from a framework template.
+      {
+        key: "action:new-project",
+        icon: Rocket,
+        label: t("scaffold.open"),
+        group: "actions",
+        onSelect: () => openProjectInit(),
+      },
       // Where VS Code users look for it (⇧⌘P, "paste json"). Listed only with a file open in the
       // Editor — there is nothing to paste into anywhere else, and every row here has to do
       // something. Runs from this very click or Enter, which the clipboard read needs.
@@ -358,6 +368,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     openApiModal,
     openPrLinkModal,
     openCloneModal,
+    openProjectInit,
     toggleAiPanel,
     toggleTerminalPanel,
   ]);

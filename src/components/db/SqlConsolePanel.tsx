@@ -53,13 +53,7 @@ import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { RunEngineChip } from "../ai/AiRunLog";
-import { ProviderGlyph } from "../ai/ProviderGlyph";
-import {
-  AI_PROVIDERS,
-  DEFAULT_AI_PROVIDER,
-  modelDisplayLabel,
-} from "../../lib/aiProviders";
-import { useAiProviderStore } from "../../state/aiProviderStore";
+import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { Markdown } from "../common/Markdown";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
@@ -614,8 +608,8 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 // Assistant
 // ---------------------------------------------------------------------------
 
-/** The routing key this assistant runs under — the same one Settings' "Model per task" writes,
- *  and `AiTask::DbQuery` on the Rust side. */
+/** The routing key this assistant runs under — the same one Settings' "Model per task" and the
+ *  composer's chip write, and `AiTask::DbQuery` on the Rust side. */
 const TASK = "db_query";
 
 /**
@@ -749,9 +743,6 @@ function ConsoleAiPanel({
   const store = useDbStore.getState();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
-  const defaultProvider = useAiProviderStore((s) => s.providerId);
-  const routedProvider = useAiProviderStore((s) => s.taskProviders[TASK]);
-  const engineModel = useAiProviderStore((s) => s.taskModels[TASK]) ?? "";
 
   // Opening the panel puts the caret in it — the point of the shortcut is to type the question, and
   // a second ⌘I with it already open comes back here rather than closing what is being read.
@@ -781,13 +772,6 @@ function ConsoleAiPanel({
     const scroller = scrollerRef.current;
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   }, [ai.messages.length, ai.running]);
-
-  // Resolved through the same fallback chain the backend uses (`ai_provider_db_query` → the global
-  // default; `{provider}_db_query_model` → the provider's base model), so what this names cannot
-  // disagree with what actually runs.
-  const engineId = routedProvider?.trim() || defaultProvider || DEFAULT_AI_PROVIDER;
-  const engineMeta = AI_PROVIDERS.find((entry) => entry.id === engineId);
-  const engineLabel = engineMeta?.label ?? (engineMeta?.labelKey ? t(engineMeta.labelKey) : engineId);
 
   const replace = (sql: string) => store.updateConsole(tab.id, { body: sql, dirty: true });
 
@@ -898,15 +882,20 @@ function ConsoleAiPanel({
             className="block max-h-[160px] w-full resize-none bg-transparent px-2.5 pb-1 pt-2 text-[13px] leading-[18px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
           />
           <div className="flex items-center gap-1.5 px-2 pb-1.5">
-            {/* A label, never a control. Changing the routing is Settings' job — a picker here would
-                be the second place to set it, which is how two places end up disagreeing. */}
-            <ProviderGlyph providerId={engineId} size={11} />
-            <span
-              className="min-w-0 flex-1 truncate text-[10.5px] text-[var(--cf-text-muted)]"
-              title={`${engineLabel} · ${modelDisplayLabel(engineId, engineModel, t)}`}
-            >
-              {engineLabel} · {modelDisplayLabel(engineId, engineModel, t)}
-            </span>
+            {/* The chat's own picker, on this task's row: what it writes is the "Database console"
+                routing Settings shows, so it is a second door to one setting rather than a second
+                setting — the two cannot disagree. Never locked mid-conversation, unlike a chat:
+                this assistant keeps no engine session and sends the transcript with every question
+                (`db_ai_assist`), so the next one simply goes to the new engine with everything said
+                so far, and each answer's own chip still names the engine that wrote it. */}
+            <div className="min-w-0 flex-1">
+              <ChatModelPicker
+                task={TASK}
+                liveModel={null}
+                chatActive={false}
+                title={t("db.aiChangeModelTitle")}
+              />
+            </div>
             {ai.running ? (
               <button
                 onClick={() => void store.cancelConsoleAi(tab.id)}

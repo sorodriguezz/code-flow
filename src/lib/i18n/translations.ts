@@ -2148,7 +2148,7 @@ const en = {
      is how it is reached — somebody asks for a spreadsheet and wants to know why they got a CSV. */
   "settings.chatFileGenerationLabel": "Let chats without a repository create files",
   "settings.chatFileGenerationHint":
-    "A chat with no repository open runs in a folder of its own and can build the files you ask it for \u2014 a spreadsheet, a slide deck, a PDF \u2014 which then appear above the composer, ready to save. It still cannot reach any of your repositories. Turn it off and those chats can only answer in text, which they save as code blocks.",
+    "A chat with no repository open runs in a folder of its own and can build the files you ask it for \u2014 a spreadsheet, a slide deck, a PDF \u2014 which then appear under the answer that made them, ready to save. It still cannot reach any of your repositories. Turn it off and those chats can only answer in text, which they save as code blocks.",
   "settings.chatAutoCompactLabel":
     "Summarise a conversation before it overflows",
   "settings.chatAutoCompactHint":
@@ -2336,16 +2336,33 @@ const en = {
   "notes.backlinks": "Links here",
   "notes.backlinksEmpty": "No note links to this one yet. Write [[its title]] in another note to connect them.",
   "tour.chapter.pipelines": "Pipelines",
+  "tour.chapter.chat": "Chat",
+  "tour.chat.intro.title": "Conversations that need no repository",
+  "tour.chat.intro.body": "A chat window for the AI command-line tools you have set up — Claude Code, Codex, Gemini, Grok, Open Code, Cline — kept as one flat list, the way ChatGPT keeps it. It belongs to no workspace and no repository: switching either changes nothing here, so a question you asked this morning is still one click away this afternoon. The list is on the left, the conversation in the middle, and the box you type into sits right under the last answer. {key} takes you straight to that box from anywhere in the app.",
+  "tour.chat.sidebar.title": "Pinned, projects, chats",
+  "tour.chat.sidebar.body": "Pinned first, then your projects, then every other chat by when it last moved; archiving puts one away behind “Show archived” at the foot instead of deleting it. The dot on a row says a reply is still being written, arrived while you were elsewhere, or failed. The search box matches titles as you type and, a moment later, the messages themselves — those come back under “Found in messages” with the line that matched. Every row's ⋯ menu renames it, pins it, archives it, moves it into a project, branches it from the last turn, or deletes it — and a chat can simply be dragged onto a project.",
+  "tour.chat.new.title": "A new chat is an empty box",
+  "tour.chat.new.body": "This button creates nothing: it clears the screen, and the conversation only exists once you send its first message — so changing your mind leaves no empty row behind. The cards on an empty chat are openers, not demos: one click puts a well-shaped first paragraph in the box and stops right where you paste the error, the diff or the snippet. The folder button beside it makes a **project** — drag chats into it, and open it to give every chat inside the same standing instructions and the same reference documents. Deleting a project keeps its chats.",
+  "tour.chat.composer.title": "Ask, attach, and point at a sentence",
+  "tour.chat.composer.body": "Enter sends and Shift+Enter breaks the line. Type `/` for the app's own commands — `/new`, `/export` to Markdown, `/branch`, `/compact` with what to keep, `/caveman` for terse answers — listed apart from the ones the engine itself understands. The paperclip attaches any file, and a pasted screenshot is saved as one; only Claude Code and Codex *look* at an image, the rest read it as a file. Hover a message for its actions: copy, regenerate an answer, edit and resend a question — which asks again as a new turn and never rewrites the old one — or branch from that point; select a passage in an answer to reply to just that part, or to carry it into a new chat.",
+  "tour.chat.model.title": "Which engine answers, and what it can do",
+  "tour.chat.model.body": "This chip picks the engine: the tool first, then its model, and the account when you have more than one. On an empty chat it sets what the next conversation starts on — the same setting as the “Chat” row in Settings. Once a conversation has turns its tool is fixed, because each CLI keeps its own memory of the thread; the model and the account can still change, and the other tools are one new chat away. Beside it are the reasoning dial, where the model takes one; the checklist of what this chat can do — see images, create files, write as it thinks, pick up where it left off; and a ring for how full the context is, with Compact the conversation to summarise the older turns. Only Claude Code streams its answer; the others deliver it in one piece.",
+  "tour.chat.files.title": "It never touches your repositories",
+  "tour.chat.files.body": "The badge in the header says what a chat can reach, and the answer is always none of your repositories. With file generation off it is read-only and answers in text — code blocks carry their own copy and save buttons. Turn it on and every chat gets a folder of its own where the engine can build what you ask for: a real spreadsheet, a slide deck, a PDF, a chart. The files appear as chips under the answer that made them, images drawn in place; saving copies them out and leaves the original, so the next turn can still add a column to the same file.",
+  "tour.chat.done.title": "That's Chat",
+  "tour.chat.done.body": "Its switches live in Settings → AI assistant → Tasks and prompts: the “Chat” row is the engine and the prompt new conversations start with, and “Free chat” holds the two that matter here — letting chats without a repository create files, and summarising a conversation before it overflows instead of letting the model quietly forget how it began. The same two apply to Quick ask, the one-question window its global shortcut opens over any app. This tour is always in the graduation cap at the foot of the app rail.",
+  "tour.pipelinesUnavailable": "Open a repository linked to a host with CI to take this tour",
+
   "tour.pipelines.intro.title": "The build that follows the push",
   "tour.pipelines.intro.body": "This tab appears only on repositories linked to a host that has CI — GitHub Actions, GitLab CI or Azure Pipelines — so it is never an empty screen waiting for a connection you have not made.",
   "tour.pipelines.list.title": "Runs, newest first",
   "tour.pipelines.list.body": "Status, branch, commit and how long it took. Filter by branch or by status when you are looking for one build in a busy week. A run that is still going refreshes itself and keeps counting.",
-  "tour.pipelines.graph.title": "A run is a waterfall, not a list",
-  "tour.pipelines.graph.body": "This is the reason to look here instead of in the browser: jobs that ran at the same time are drawn side by side, and the ones that were waiting sit where the wait was. That is where the minutes actually went.",
+  "tour.pipelines.graph.title": "A run has a shape, not a list",
+  "tour.pipelines.graph.body": "This is the reason to look here instead of in the browser. Graph, the default, lays the jobs out in columns — by declared stage, by the workflow's needs:, or by overlapping times when the file cannot be read, and the badge above says which — with arrows for what waited on what. Switch to Waterfall and each job is a bar on a clock: bars that overlap ran at once, and the gaps are waiting. That is where the minutes actually went.",
   "tour.pipelines.actions.title": "Run it again, or stop it",
   "tour.pipelines.actions.body": "Re-run the whole thing, re-run only the jobs that failed, or cancel one that is still going — without leaving for the browser. The buttons name what your host actually does: the three of them do not agree, and the labels say so.",
   "tour.pipelines.log.title": "The log, colours intact",
-  "tour.pipelines.log.body": "Pick a job above and its output lands here with its ANSI colours, so a red build does not send you to a browser tab. Ask the assistant about a failed job and it reads the log with the pipeline definition beside it.",
+  "tour.pipelines.log.body": "Pick a job above and its output lands here with its ANSI colours, so a red build does not send you to a browser tab. Search it, jump to the first error, or copy it; on a failed job, **Why did it fail?** hands the log to an engine that reads it against your working copy — pipeline definition included — and explains what broke.",
   "tour.pipelines.done.title": "That's the CI tab",
   "tour.pipelines.done.body": "How often a live run is re-read is yours to set, in Settings → Pipelines: five seconds is the default, and it costs a request against your host's rate limit every time.",
   "sidebar.menuOpen": "Open this repository",
@@ -2835,6 +2852,17 @@ const en = {
   "ai.setupUntrustedDir": "The CLI refused to run in this directory. Updating it usually fixes this — the app already passes the flag it is asking for.",
   "chat.changeModelTitle": "Change the model this chat uses",
   "chat.modelForChat": "Model for chat",
+  "task.commitModelFor": "Model for commit messages",
+  "task.analyzeModelFor": "Model for the analysis",
+  "task.inlineModelFor": "Model for inline edits",
+  "task.reviewModelFor": "Model for PR reviews",
+  "task.diagramModelFor": "Model for diagrams",
+  "task.sampleRowsModelFor": "Model for sample data",
+  "task.dbQueryModelFor": "Model for the database",
+  "task.notesModelFor": "Model for notes",
+  "task.storiesModelFor": "Model for stories",
+  "task.workItemReviewModelFor": "Model for work item reviews",
+  "task.wikiModelFor": "Model for documentation",
   "chat.loadingModels": "Loading versions…",
   "chat.noModels": "This provider didn't report any models. Set one in Settings.",
   "chat.configureModels": "Configure providers and tasks",
@@ -2916,7 +2944,7 @@ const en = {
   "settings.taskAgenticRequired": "This provider can't apply changes — pick an agentic one.",
   "settings.taskAgenticInherited": "The inherited provider can't apply changes — pick an agentic one here.",
   "task.chat": "Chat",
-  "task.chatHint": "Open questions about the repository.",
+  "task.chatHint": "Free chat (no repository) and the Assistant's chat.",
   "task.commit": "Commit message",
   "task.commitHint": "Drafted from the staged diff.",
   "task.analyze": "Pre-commit analysis",
@@ -3222,6 +3250,8 @@ const en = {
     "Discard all {n} unstaged change(s)? Modified files go back to their last staged state and new files are deleted. Staged changes are kept. This can't be undone.",
   "changes.openInEditor": "Open in editor",
   "changes.openDiff": "Compare side by side",
+  "changes.commitModelHint": "The model that writes the commit message with AI. Click to change it.",
+  "changes.analyzeModelHint": "The model that analyzes the changes. Click to change it.",
   "changes.generateWithAi": "Generate with AI",
   "changes.stageFirst": "Stage changes first",
   "changes.noRepo": "No repository loaded",
@@ -3798,6 +3828,7 @@ const en = {
   "editor.replaceNeedsSave": "Save this file before replacing in it — replace writes to disk, and the unsaved buffer would overwrite it.",
   "editor.replaceUnsavedNote": " {d} of them have unsaved changes that would overwrite the replacement on save.",
   "editor.inlineEditPlaceholder": "Describe the change to {n} selected line(s)…",
+  "editor.inlineEditModelHint": "The model that rewrites the selection. Click to change it.",
   "editor.inlineEditApply": "Rewrite",
   "editor.closeTab": "Close",
   "editor.closeDirtyConfirm": "\"{name}\" has unsaved changes. Close it anyway?",
@@ -4022,7 +4053,7 @@ const en = {
   "chat.capImagesInNo": "{provider} reads an attached image as bytes, not as a picture.",
   "chat.capFilesOut": "Create files you can download",
   "chat.capFilesOutYes": "They appear under the answer that made them, ready to save.",
-  "chat.capFilesOutNo": "Turn it on in Settings \u203a AI tasks. Until then it can only answer in text.",
+  "chat.capFilesOutNo": "Turn it on in Settings \u203a AI assistant \u203a Tasks and prompts \u203a Free chat. Until then it can only answer in text.",
   "chat.capStreams": "Write the answer as it thinks",
   "chat.capStreamsNo": "This CLI sends the reply in one piece: it appears when it is ready.",
   "chat.capResume": "Pick this conversation up again",
@@ -4130,8 +4161,8 @@ const en = {
      — and keeps the one that is still true and is the one people are actually asking about. */
   "chat.noRepoWritableBadge": "No repository · own folder",
   "chat.noRepoWritableHint":
-    "This conversation cannot reach any of your repositories. It runs in a folder of its own, where it can write the files you ask it for — they appear above the composer, ready to save. Turn this off in Settings › AI tasks.",
-  "chat.noRepoHint": "This conversation reaches no repository, and right now it cannot write files either. Turn on file generation in Settings › AI tasks.",
+    "This conversation cannot reach your repositories. It writes the files you ask for in a folder of its own; they appear under the answer that made them. Turn this off in Settings › AI assistant › Tasks and prompts › Free chat.",
+  "chat.noRepoHint": "This conversation reaches no repository and cannot write files. Turn on file generation in Settings › AI assistant › Tasks and prompts › Free chat.",
   "chat.repoBadge": "Repository · {name}",
   "chat.commandsApp": "CodeFlow",
   "chat.commandsProvider": "{provider} commands",
@@ -4195,9 +4226,7 @@ const en = {
   "pr.sectionReview": "Review",
   "pr.sectionDecision": "Decision",
   "pr.levelLabel": "Depth",
-  "pr.reviewEngineDefaultModel": "CLI default",
-  "pr.reviewEngineHint":
-    "This review will run on {provider}, model {model}. Change it in Settings → AI → routing, row \"PR review\".",
+  "pr.reviewEngineHint": "The engine and model this review will run on. Click to change it.",
   "pr.postSummary": "Include the summary",
   "pr.postSummaryHint": "Also post a summary comment (Quality Gate + findings table).",
   "pr.fixpack": "Fix-pack",
@@ -4511,7 +4540,6 @@ const en = {
   "diagrams.ai.generate": "Generate",
   "diagrams.ai.apply": "Add to canvas",
   "diagrams.ai.cancel": "Stop",
-  "diagrams.ai.defaultModel": "default model",
   "diagrams.ai.runKind": "Drawing a diagram",
   "diagrams.ai.preview": "{shapes} shapes · {arrows} arrows",
   "diagrams.ai.previewZoom": "See it bigger",
@@ -4709,8 +4737,7 @@ const en = {
   "dbml.sandbox.aiFillPlaceholder": "A bike shop in Chile: customers, orders and a small catalogue.",
   "dbml.sandbox.aiFillRows": "Rows per table",
   "dbml.sandbox.aiFillLabel": "What are these data about?",
-  "dbml.sandbox.aiFillDefaultModel": "the engine's default model",
-  "dbml.sandbox.aiFillPlan": "{tables} tables, in {passes} passes. Change the engine in Settings → AI assistants → Tasks and prompts.",
+  "dbml.sandbox.aiFillPlan": "{tables} tables, in {passes} passes.",
   "dbml.sandbox.aiFillProgress": "Pass {done} of {total} — each one is written before the next is asked for.",
   "dbml.sandbox.aiFillEmpty": "{count} tables came back empty",
   "dbml.sandbox.aiFillRepaired": "{count} references pointed at real rows",
@@ -4962,9 +4989,6 @@ const en = {
   "notes.ai.willReplace": "This will be replaced",
   "notes.ai.instruction": "What should it write?",
   "notes.ai.instructionPlaceholder": "Say what to write: it lands at the caret, or replaces the selection",
-  "notes.ai.defaultModel": "default model",
-  "notes.ai.engineHint":
-    "This will run on {provider}, model {model}. Change it in Settings → AI → model per task, row “Write in a note”.",
   "notes.ai.write": "Write",
   "notes.ai.writing": "Writing\u2026",
   "notes.ai.stop": "Stop",
@@ -5805,12 +5829,16 @@ const en = {
   "docs.repoGone": "Repository no longer in the workspace",
   "docs.titlePlaceholder": "Document title",
   "docs.contentPlaceholder": "Markdown. Generate it from the code, or write it yourself.",
-  "docs.instructionsPlaceholder": "Optional: steer the generation",
+  "docs.instructionsPlaceholder": "Context for the AI: what it should cover, who it is for, what to leave out… (optional)",
+  "docs.aiButton": "Generate with AI",
+  "docs.aiButtonRunning": "Generating — open to follow or stop it",
+  "docs.aiTitleGenerate": "Generate documentation",
+  "docs.aiTitleRegenerate": "Regenerate documentation",
+  "docs.aiGenerating": "Generating…",
+  "docs.aiReads": "Reads",
   "docs.generate": "Generate",
   "docs.regenerate": "Regenerate",
   "docs.generateHint": "Reads the code and writes the document. It replaces what is here.",
-  "docs.modelTagHint":
-    "The engine and model Generate will run on. Change it in Settings → AI assistant → Documentation.",
   "docs.generated": "Document generated",
   "docs.regenerateConfirm": "Regenerate this document? What it says now is replaced, and there is no going back to it. Anything already published to the wiki stays as it is until you publish again.",
   "docs.stop": "Stop",
@@ -5886,7 +5914,7 @@ const en = {
   "huReview.fieldArea": "Area",
   "huReview.fieldIteration": "Iteration",
   "huReview.fieldTags": "Tags",
-  "huReview.modelTagHint": "The engine and model this tab's Generate will run. Change it in Settings → AI assistant.",
+  "huReview.modelTagHint": "The engine and model this tab's Generate will run. Click to change it.",
   "huReview.generateDescription": "Generate description",
   "huReview.generateCriteria": "Generate criteria",
   "huReview.generateTasks": "Generate tasks",
@@ -6132,7 +6160,7 @@ const en = {
   "stories.newBatchTitle": "New set of stories",
   "stories.newBatchSubtitle": "Pick the documentation to derive the backlog from",
   "stories.modelTagHint":
-    "The engine and model this generation will run on, whichever source you pick. Change it in Settings → AI assistant → Stories.",
+    "The engine and model this generation will run on, whichever source you pick. Click to change it.",
   "stories.generatedWithHint":
     "The engine and model that wrote these stories, {when}. The next generation runs on whatever Settings → AI assistant routes stories to today.",
   "stories.createAndGenerate": "Create and generate",
@@ -6785,6 +6813,7 @@ const en = {
   "db.aiReplace": "Replace console",
   "db.aiTablesSeen": "{count} relations read",
   "db.aiSchemaTruncated": "Schema too large to send whole — narrow the database or schema.",
+  "db.aiChangeModelTitle": "Change the model that answers here — in every database console",
   "db.cancel": "Cancel",
   "db.running": "Running…",
   "db.loading": "Loading…",
@@ -7070,6 +7099,139 @@ const en = {
   // one paragraph that answers three questions in order: what this is, what it does for you, and
   // the one thing that isn't obvious from looking at it.
   //
+  // ── Project initializer (`components/scaffold/`) ─────────────────────────────────────────
+  "scaffold.open": "New project from a template",
+  "scaffold.openHint": "React, Angular, Spring Boot, Django… with what it needs installed",
+  "scaffold.title": "New project",
+  "scaffold.search": "Search templates",
+  "scaffold.noMatch": "No template matches",
+  "scaffold.cat.frontend": "Frontend",
+  "scaffold.cat.backend": "Backend",
+  "scaffold.cat.mobile": "Mobile",
+  "scaffold.version": "Version",
+  "scaffold.latest": "Latest",
+  "scaffold.loading": "Loading…",
+  "scaffold.eol": "end of life",
+  "scaffold.channel.latest": "latest",
+  "scaffold.versionsOffline": "Registry unreachable — the latest will be used",
+  "scaffold.name": "Name",
+  "scaffold.location": "Location",
+  "scaffold.browse": "Choose folder",
+  "scaffold.remove": "Remove",
+  "scaffold.opt.language": "Language",
+  "scaffold.opt.packageManager": "Packages",
+  "scaffold.opt.framework": "Framework",
+  "scaffold.opt.template": "Template",
+  "scaffold.opt.style": "Styles",
+  "scaffold.opt.routing": "Routing",
+  "scaffold.opt.ssr": "Server rendering (SSR)",
+  "scaffold.opt.srcDir": "src/ folder",
+  "scaffold.opt.agents": "AGENTS.md",
+  "scaffold.opt.types": "Types",
+  "scaffold.opt.none": "None",
+  "scaffold.opt.env": "Environment",
+  "scaffold.opt.module": "Module",
+  "scaffold.opt.kind": "Type",
+  "scaffold.opt.library": "Library",
+  "scaffold.opt.binary": "Application",
+  "scaffold.opt.include": "Include",
+  "scaffold.opt.expoDefault": "Default (router)",
+  "scaffold.opt.expoBlankTs": "Blank · TypeScript",
+  "scaffold.opt.expoBlank": "Blank",
+  "scaffold.opt.expoTabs": "Tabs",
+  "scaffold.spring.build": "Build",
+  "scaffold.spring.packaging": "Packaging",
+  "scaffold.spring.group": "Group",
+  "scaffold.spring.package": "Package",
+  "scaffold.spring.dependencies": "Dependencies",
+  "scaffold.spring.add": "Add",
+  "scaffold.spring.search": "Search starters",
+  "scaffold.spring.incompatible": "Not available for this Spring Boot version ({range})",
+  "scaffold.env.title": "Environment",
+  "scaffold.env.refresh": "Check again",
+  "scaffold.env.refreshHint": "Re-reads your shell's PATH, for something installed outside CodeFlow",
+  "scaffold.env.needs": "Needs {range}",
+  "scaffold.env.found": "found",
+  "scaffold.env.missing": "not installed",
+  "scaffold.env.install": "Install",
+  "scaffold.env.update": "Update",
+  "scaffold.env.installAll": "Install what's missing",
+  "scaffold.env.installAllHint": "One tool at a time, each through its default route, checking again between them",
+  "scaffold.env.version": "Version to install",
+  "scaffold.env.via": "Install with",
+  "scaffold.env.viaPrefix": "via",
+  "scaffold.env.run": "Run",
+  "scaffold.env.sudo": "It may ask for your password in the terminal.",
+  "scaffold.env.noRecipe": "No installer found on this machine. Get it from",
+  "scaffold.hint.useLine": "or use {name} {version}, which works with what you have",
+  "scaffold.hint.useJava": "or target Java {version}, which your JDK can build",
+  "scaffold.hint.useUv": "or use uv, which downloads the Python it needs",
+  "scaffold.err.name": "Give the project a name",
+  "scaffold.err.npmLowercase": "npm names are lowercase",
+  "scaffold.err.npmChars": "Use lowercase letters, digits, - _ and .",
+  "scaffold.err.goModule": "A module path is lowercase, with no spaces",
+  "scaffold.err.javaPackage": "Not a valid Java package",
+  "scaffold.blocked.env": "Install what the environment is missing first",
+  "scaffold.blocked.workspace": "Name the new workspace",
+  "scaffold.ws.label": "Import into",
+  "scaffold.ws.new": "New workspace…",
+  "scaffold.ws.newName": "Workspace name",
+  "scaffold.ws.none": "Don't import",
+  "scaffold.commit": "Initial commit",
+  "scaffold.commitHint": "The project is always a git repository; this also commits what the generator made",
+  "scaffold.create": "Create project",
+  "scaffold.run.creating": "Creating {name}",
+  "scaffold.run.installing": "Installing {name}",
+  "scaffold.run.running": "Running…",
+  "scaffold.run.spring": "Downloading from start.spring.io…",
+  "scaffold.run.files": "Writing files…",
+  "scaffold.run.importing": "Importing…",
+  "scaffold.run.rechecking": "Checking the environment…",
+  "scaffold.run.ok": "Done",
+  "scaffold.run.failed": "Stopped",
+  "scaffold.run.failedCode": "Failed (exit {code})",
+  "scaffold.run.skipped": "skipped",
+  "scaffold.run.done": "Done",
+  "scaffold.run.stop": "Stop",
+  "scaffold.run.back": "Back",
+  "scaffold.run.continue": "Continue",
+  "scaffold.done.imported": "Imported into {workspace}",
+  "scaffold.done.notImported": "Not imported",
+  "scaffold.done.reveal": "Show folder",
+  "scaffold.done.another": "Another one",
+  "scaffold.done.editor": "Open in the editor",
+  "scaffold.step.generate": "Generating the project",
+  "scaffold.step.install": "Installing dependencies",
+  "scaffold.step.deps": "Adding dependencies",
+  "scaffold.step.devDeps": "Adding development dependencies",
+  "scaffold.step.env": "Creating the Python environment",
+  "scaffold.step.pin": "Pinning the Python version",
+  "scaffold.step.freeze": "Writing requirements.txt",
+  "scaffold.step.module": "Creating the Go module",
+  "scaffold.step.gitignore": "Adding .gitignore",
+  "scaffold.step.git": "Initializing Git",
+  "scaffold.step.commit": "Initial commit",
+  "scaffold.tpl.react": "Vite + React, in TypeScript or JavaScript",
+  "scaffold.tpl.vue": "Vue 3 with Vite, Router and Pinia",
+  "scaffold.tpl.angular": "An Angular workspace from the Angular CLI",
+  "scaffold.tpl.next": "React with server rendering and the App Router",
+  "scaffold.tpl.nuxt": "Vue with server rendering, file routing and modules",
+  "scaffold.tpl.svelte": "SvelteKit, from the official sv CLI",
+  "scaffold.tpl.astro": "Content-first sites that ship little JavaScript",
+  "scaffold.tpl.vite": "Vite with any framework: Preact, Lit, Solid, Qwik…",
+  "scaffold.tpl.expo": "React Native apps for iOS and Android",
+  "scaffold.tpl.node": "A plain Node.js project, TypeScript-ready",
+  "scaffold.tpl.express": "A minimal HTTP API with Express",
+  "scaffold.tpl.nest": "Structured Node.js APIs with NestJS",
+  "scaffold.tpl.spring": "Java or Kotlin services from start.spring.io",
+  "scaffold.tpl.go": "A Go module with an HTTP server, stdlib or framework",
+  "scaffold.tpl.django": "Django with its settings package, via uv or venv",
+  "scaffold.tpl.fastapi": "A typed Python API with FastAPI",
+  "scaffold.tpl.flask": "A small Python web app with Flask",
+  "scaffold.tpl.laravel": "Laravel via Composer, SQLite ready",
+  "scaffold.tpl.dotnet": "ASP.NET, Blazor, workers and console apps",
+  "scaffold.tpl.rust": "A Cargo binary or library",
+
   // There is one tour of the main window and one per workspace app. The main one opens itself
   // after installing and stops at the edge of that window; the rest sit behind each app's own
   // launcher, so nobody is walked through the database client on the way to their first commit.
@@ -7078,7 +7240,7 @@ const en = {
   "tour.restart": "Take the guided tour",
   "tour.settingsTitle": "Guided tour",
   "tour.settingsHint":
-    "A short walk through the main window — repositories, pull requests, the AI panel, the services panel, and where everything is configured. Each workspace app has a detailed tour of its own behind the graduation cap beside the workspace menu. It all runs over the real app and puts every panel back the way you left it.",
+    "A short walk through the main window — repositories, pull requests, the assistant, services and terminals, and where everything is configured. Each app on the rail down the right has a detailed tour of its own, behind the graduation cap at the foot of that rail. It all runs over the real app and puts every panel back the way you left it.",
   "tour.skip": "Skip",
   "tour.back": "Back",
   "tour.next": "Continue",
@@ -7087,7 +7249,7 @@ const en = {
   "tour.stepCount": "{n} steps",
   "tour.settingsApps": "Per-app tours",
   "tour.settingsAppsHint":
-    "Each one walks a single workspace app and ends at where that app is configured. The same tours are one click away while you are in the app itself, from the graduation cap beside the workspace menu.",
+    "Each one walks a single app and ends at where that app is configured. The same tours are one click away while you are in the app itself, from the graduation cap at the foot of the app rail.",
 
   "tour.chapter.start": "Getting started",
   "tour.chapter.repos": "Repositories",
@@ -7106,27 +7268,27 @@ const en = {
   // ── The main window ──────────────────────────────────────────────────────────────────────
   "tour.welcome.title": "Welcome to CodeFlow",
   "tour.welcome.body":
-    "A quick walk through this window — about a minute. Everything you see is the real app, not screenshots: panels will open and close as we go, and they all go back the way you left them at the end. It stops at the edge of this window on purpose. The workspace apps inside it — the API client, databases, agents, specs, remote — each have a detailed tour of their own, and we will pass the button that opens them on the way through.",
+    "A quick walk through this window — about a minute. Everything you see is the real app, not screenshots: panels will open and close as we go, and they all go back the way you left them at the end. It stops at the edge of this window on purpose. The apps on the rail down its right side — the API client, databases, agents, specs, remote, notes, diagrams, the keyring and chat — each have a detailed tour of their own, and we will end on the button that opens them.",
 
   "tour.workspaces.title": "Workspaces: the outermost box",
   "tour.workspaces.body":
-    "A workspace groups everything that belongs to one context — a client, a product, a team. Repositories, API collections, database connections, agents and servers all live inside one. Click here to switch between them or create a new one; nothing is shared across workspaces, so you can keep unrelated work cleanly apart.",
+    "A workspace groups everything that belongs to one context — a client, a product, a team. Repositories, API collections, database connections, agents and servers all live inside one. Click here to switch between them or create a new one; apart from the keyring and your chats, nothing is shared across workspaces, so you can keep unrelated work cleanly apart.",
 
-  "tour.addRepo.title": "Adding a repository",
+  "tour.addRepo.title": "Three ways to add a project",
   "tour.addRepo.body":
-    "Three ways in, left to right. The glasses review a pull request from a pasted link. The branch icon clones a repository from a URL. The plus adds repositories already on your disk — pick one folder or several at once, and CodeFlow works out which of them are git repositories and leaves the rest out.",
+    "Left to right. The rocket starts a new project from a template (React, Angular, Next.js, Spring Boot, Django, Laravel, Go and more): it checks that this machine has what the template needs, at the version it needs, offers to install whatever is missing, and imports the result into the workspace you choose. The branch icon clones a repository from a URL. The plus adds repositories already on your disk — pick one folder or several at once, and CodeFlow works out which of them are git repositories and leaves the rest out.",
 
   "tour.projects.title": "Your repositories, and everything inside one",
   "tour.projects.body":
-    "Every repository in the active workspace is listed here. Click one to make it the current repository: branches, history, pending changes and pull requests all follow whichever you pick. Expand a row and the whole repository unfolds without leaving the list — local branches, the remote ones, the tags, the stashes, the remote URL, and the pull requests open against it. Click a pull request to open it, and a branch to switch to it. Moving that branch is the other end of the window: fetch, pull and push sit on the status bar beside the branch name, each carrying the count of what it has to move — so \"is there anything to send?\" is answered without clicking anything.",
+    "Every repository in the active workspace is listed here. Click one to make it the current repository: branches, history, pending changes and pull requests all follow whichever you pick, and the one you pick unfolds right there in the list — local branches, the remote ones, the remote URL, the stashes, and its pull requests. Click a pull request to open it, and a branch to switch to it. Moving that branch is the other end of the window: fetch, pull and push sit on the status bar beside the branch name, pull and push each carrying the number of commits waiting and fetch counting down to the next automatic fetch — so \"is there anything to send?\" is answered without clicking anything.",
 
   "tour.repoTabs.title": "Three views of the same repository",
   "tour.repoTabs.body":
-    "History shows the commit graph and what each commit changed. Changes is where you stage files, write a message and commit — the number beside it counts the files waiting, and the shield inside it runs an AI review over what you have not committed yet, which is the cheapest possible moment to catch a bug, a leftover console.log or a risky edit. Editor is the built-in code editor. All three follow whichever repository is selected on the left.",
+    "Graph shows the commit history and what each commit changed. Changes is where you stage files, write a message and commit — the number beside it counts the files waiting, and the shield inside it runs an AI review over what you have not committed yet, which is the cheapest possible moment to catch a bug, a leftover console.log or a risky edit. Editor is the built-in code editor. On a repository linked to a host with CI, a fourth tab, Pipelines, shows its runs. All of them follow whichever repository is selected on the left.",
 
   "tour.editor.title": "The editor",
   "tour.editor.body":
-    "A real code editor inside the git client, so reading a diff and fixing what it turned up don't happen in two different apps. Tabs across the top, a pane you can split in two to compare files side by side, and a view mode per file — the code, a rendered preview for Markdown, or the diff against what is committed. The strip on the left switches between five panels: the file tree, search across every file at once, the TODO- and FIXME-style anchors the code itself carries, your own bookmarks, and the debugger. And the one thing with no button anywhere: select some code, press {key}, and say what you want changed in words — the rewrite lands in the buffer, one undo away and unsaved until you save it.",
+    "A real code editor inside the git client, so reading a diff and fixing what it turned up don't happen in two different apps. Tabs across the top, panes you can keep splitting to compare files side by side, and a view mode per file — the code, a rendered preview for Markdown (or both side by side), or the diff against what is committed. The strip on the left switches between six panels: the file tree, search across every file at once, the TODO- and FIXME-style anchors the code itself carries, your own bookmarks, the debugger, and the icon pack this repository is drawn with. And the one thing with no button anywhere: select some code, press {key}, and say what you want changed in words — the rewrite lands in the buffer, one undo away and unsaved until you save it.",
 
   "tour.aiPanel.title": "The assistant",
   "tour.aiPanel.body":
@@ -7134,19 +7296,19 @@ const en = {
 
   "tour.prReview.title": "Reviewing a pull request, with or without cloning",
   "tour.prReview.body":
-    "Two ways, and neither needs the code checked out. The pull requests of the repositories you have added are listed in the sidebar: pick one and it opens in its own tab of the assistant, where CodeFlow reviews the diff and can post the comments back to Azure DevOps, GitHub or GitLab. Or press these glasses and paste the URL of any pull request — the diff comes over the API and nothing is cloned.",
+    "Two ways, and neither needs the code checked out. The pull requests of the repositories you have added are listed in the sidebar, and under this + for the repository on screen: pick one and it opens in its own tab of the assistant, where CodeFlow reviews the diff and can post the comments back to Azure DevOps, GitHub or GitLab. Or choose From a link… in the same menu — or press {key} from anywhere — and paste the URL of any pull request: the diff comes over the API and nothing is cloned.",
 
   "tour.terminal.title": "Services and terminals",
   "tour.terminal.body":
     "Everything this workspace has running, in one panel. Above: services — a command with a name, a folder and a definition of being up, so a group of them starts in the right order. Below: ordinary shells, one set per repository, starting in that repository's folder. Both survive switching views, so a build left running keeps running while you read a diff. Drag the top edge to make it taller.",
 
-  "tour.workspaceApps.title": "The apps, and a tour for each",
+  "tour.workspaceApps.title": "The apps, and their tours",
   "tour.workspaceApps.body":
-    "Everything in this menu belongs to the workspace rather than to one repository — which is exactly why it is not a tab beside the other three: switching repository does not change what is in here. The API client sends HTTP; Databases connects to your databases; Agents runs AI tasks on their own; Specs turns documentation into a backlog and back again; Remote holds the machines you deploy to; Notes is the Markdown notebook; Diagrams is the drawing board; and the keyring keeps your credentials. Each is a screen in its own right, and that is what the graduation cap beside the menu is for: it opens a detailed tour of whichever of them is on screen. Open a different app and the cap follows.\n\nThe small arrow on an icon opens that app in a window of its own — useful when you are hitting the API and watching the database at the same time. It *moves* rather than copying: the icon stays here, marked, and pressing it brings that window forward instead of opening a second copy.",
+    "Everything on this rail sits beside your repositories rather than inside one — which is exactly why none of it is a tab next to the repository's own: switching repository does not change what is in here. The API client sends HTTP; Databases connects to your databases; Agents runs AI tasks on their own; Specs turns documentation into a backlog and back again; Remote holds the machines you deploy to; Notes is the Markdown notebook; Diagrams is the drawing board; the keyring keeps your credentials; and Chat keeps your conversations with the AI CLIs in one list. All of it belongs to the workspace except the last two, which follow you into every one. Each is a screen in its own right, and that is what the graduation cap at the foot of this rail is for: it opens a detailed tour of whichever of them is on screen. Open a different app and the cap follows.\n\nThe small arrow on an icon opens that app in a window of its own — useful when you are hitting the API and watching the database at the same time. It *moves* rather than copying: the icon stays here, marked, and pressing it brings that window forward instead of opening a second copy.",
 
   "tour.settingsAi.title": "Settings, and the AI models",
   "tour.settingsAi.body":
-    "The gear at the foot of the left-hand column opens this over whatever you were doing, and closing it puts you back exactly where you were; the rail down the side splits what applies everywhere from what applies only to the active workspace. This section is where you choose which model does what: pick a provider, sign in, set a default — then, if you want, route the heavy jobs like a full PR review to a stronger model and leave the quick ones on a faster, cheaper one. The prompt templates every AI feature starts from, and the review standard the AI is held to, live here too — so \"the reviews are too picky\" or \"always answer in Spanish\" is an edit on this screen rather than something you repeat in every chat.",
+    "The gear at the foot of the left-hand column opens this over whatever you were doing, and closing it puts you back exactly where you were; the rail down the side splits what applies everywhere from what applies only to the active workspace. This section is where you choose which model does what: pick a provider, sign in, set a default — then, if you want, route the heavy jobs like a full PR review to a stronger model and leave the quick ones on a faster, cheaper one. The prompt templates every AI feature starts from live here too, and the standard reviews are held to has its own section, PR review, in the workspace half of the rail — so \"the reviews are too picky\" or \"always answer in Spanish\" is an edit in settings rather than something you repeat in every chat.",
 
   "tour.settingsIntegrations.title": "Integrations",
   "tour.settingsIntegrations.body":
@@ -7154,7 +7316,7 @@ const en = {
 
   "tour.settingsProjects.title": "Workspaces and projects",
   "tour.settingsProjects.body":
-    "The other end of what you saw in the sidebar: rename a workspace, give it a colour, delete one, and manage the repositories inside it — including moving a repository from one workspace to another, which only changes which workspace tracks it and never touches the folder on disk.",
+    "The other end of what you saw in the sidebar: rename a workspace, give it a colour, delete an empty one, and manage the repositories inside it — their order, their colour, and taking one off the list. Moving a repository to another workspace is done from its row in the sidebar, and it only changes which workspace tracks it: the folder on disk is never touched.",
 
   "tour.backup.title": "Backup",
   "tour.backup.body":
@@ -7162,12 +7324,12 @@ const en = {
 
   "tour.finish.title": "That is the tour",
   "tour.finish.body":
-    "You have the map of this window. This is the button that brings it back — press it whenever you want to walk through something again, or take it from Settings → General. For anything inside one of the five apps, open the app and press the cap beside the workspace menu. Enjoy CodeFlow.",
+    "You have the map of this window. This is the button that brings it back — press it whenever you want to walk through something again, or take it from Settings → General. It also knows where you are: open any app on the rail and the same button walks you through that app instead. Enjoy CodeFlow.",
 
   // ── API client ───────────────────────────────────────────────────────────────────────────
   "tour.api.intro.title": "The API client",
   "tour.api.intro.body":
-    "A full HTTP client built into the app, and everything in it belongs to the workspace rather than to a repository — so it is usable before you have cloned anything at all. Three columns: your collections on the left, the request being built in the middle, its response underneath, and the generated code on the right. This tour walks all of them and ends where the client itself is configured.",
+    "A full API client built into the app, and everything in it belongs to the workspace rather than to a repository — a collection can even be made available in every workspace — so it is usable before you have cloned anything at all. Your collections sit on the left and the request you are building in the middle, with its response underneath; the generated code is a third column that opens on the right only when you ask for it. This tour walks all of them and ends where the client itself is configured.",
 
   "tour.api.sidebar.title": "Collections",
   "tour.api.sidebar.body":
@@ -7175,52 +7337,52 @@ const en = {
 
   "tour.api.actions.title": "Creating, importing, sharing",
   "tour.api.actions.body":
-    "Left to right: a new collection; the runner, which fires a whole collection or folder in order and reports what passed; import, which reads Postman, OpenAPI, Insomnia and a plain curl command; and the two people, which is where you paste an invitation to a collection a colleague shared with you. The rest — cookies, environments, the client's own settings — is behind the last button.",
+    "Left to right: new, which asks whether you want a request — ready to send before it is filed anywhere — or a collection; the runner, which fires a whole collection or folder in order and reports what passed; import, which reads Postman, OpenAPI or Swagger, HAR, Insomnia and a plain curl command, from a file or straight from a URL; and the two people, which is where you paste an invitation to a collection a colleague shared with you. Cookies and the client's own settings are behind the last button; environments have their own section in the switch above.",
 
   "tour.api.builder.title": "Building a request",
   "tour.api.builder.body":
-    "Method, URL and Send along the top; below them the tabs that make up the request — query parameters, path variables, headers, the body in whichever format it takes, authentication, and the scripts that run before and after it. Anything written as {{name}} is a variable resolved when the request is sent, which is what lets one saved request run against local, staging and production without a single edit.",
+    "The request's name along the top with Save beside it, then method, URL and Send; below them the tabs that make up the request — Params, with the query string and any path variables; Authorization; Headers; the Body in whichever format it takes; the pre-request script and the tests that run after it; Settings that override the global ones for this request alone; and Docs. Anything written as {{name}} is a variable resolved when the request is sent, which is what lets one saved request run against local, staging and production without a single edit.",
 
   "tour.api.protocols.title": "More than REST",
   "tour.api.protocols.body":
-    "The picker beside the URL chooses the protocol, not just the method. Alongside plain HTTP the client speaks GraphQL, with the schema read from the endpoint, and WebSocket, MQTT and gRPC — each of which replaces the response pane with a live stream you can keep sending into while the connection is open, rather than a single answer that arrives and ends.",
+    "The icon at the start of the request's name row chooses the protocol — and only until the request is saved; the method has its own picker beside the URL. Alongside plain HTTP the client speaks GraphQL, with the schema read from the endpoint; WebSocket, Socket.IO and MQTT, each of which replaces the response pane with a live stream you can keep sending into while the connection is open; and gRPC, with the service read from a .proto file or from server reflection and the call's reply, status and trailers in a pane of its own.",
 
   "tour.api.response.title": "Reading the response",
   "tour.api.response.body":
-    "Status, time and size across the top, the body underneath in whichever view suits it — pretty-printed, raw, or previewed — and the headers, cookies and the exact request that went out alongside. A response worth keeping can be saved onto the request as an example, so the next person to open it sees what it is supposed to return before they send anything.",
+    "Status, time and size across the top, then the body in whichever view suits it — pretty-printed, raw, previewed, or drawn by a visualizer script — with tabs beside it for the headers, the cookies, your test results, the console your scripts wrote to, and a timeline of where the time went, from DNS to the last byte. A response worth keeping can be saved onto the request as an example, so the next person to open it sees what it is supposed to return before they send anything.",
 
   "tour.api.env.title": "Environments and variables",
   "tour.api.env.body":
-    "The picker at the foot of the sidebar chooses which environment is active, and the icon beside it lists every variable in scope right now and where each one comes from — the environment, the collection, or the request itself. That is the whole trick behind {{name}}: switch the environment here and every request that mentions a variable follows, with nothing edited and nothing to remember.",
+    "The picker at the foot of the sidebar chooses which environment is active, and the eye beside it lists every variable in scope right now, grouped by where it comes from in the order a send resolves them — what a script set during this run, the runner's data row, the environment, the collection, the globals — and lets you change a current value in place. That is the whole trick behind {{name}}: switch the environment here and every request that mentions a variable follows, with nothing edited and nothing to remember.",
 
   "tour.api.snippet.title": "The same request, as code",
   "tour.api.snippet.body":
-    "The panel on the right turns whatever is in the builder into working code — curl, JavaScript, Python, Go, C# and dozens more — regenerated as you type and copied with one click. It is the fastest way to hand a working call to somebody who is not using this app, or to paste one into the codebase you are actually writing.",
+    "Code, at the end of the request's tabs, opens a panel on the right that turns whatever is in the builder into working code — curl, JavaScript, Python, Go, C# and nearly thirty more — regenerated as you type and copied with one click. It is there for HTTP and GraphQL requests, and it stays open or closed the way you last left it. It is the fastest way to hand a working call to somebody who is not using this app, or to paste one into the codebase you are actually writing.",
 
   "tour.api.settings.title": "Where the client is configured",
   "tour.api.settings.body":
-    "Settings → API client. Network holds the request timeout, redirects, SSL verification and whether cookies are sent automatically; Proxy, the proxy everything goes through; Certificates, the client certificates a mutual-TLS API asks for. History and cookies belong to the current workspace, while network, proxy and certificates apply everywhere — the screen says which is which as you go.",
+    "Settings → API client settings. Network holds the request timeout, redirects, SSL verification and whether cookies are sent automatically; Proxy, the proxy everything goes through; Certificates, the client certificates a mutual-TLS API asks for and a custom CA bundle; General, the response size limit, pretty-printing and how much history to keep. History and cookies belong to the current workspace, while the settings apply everywhere — and a single request can still override them from its own Settings tab.",
 
   "tour.api.collab.title": "Sharing a collection with your team",
   "tour.api.collab.body":
-    "A collection does not have to stay on one machine. From this tab you point CodeFlow at a Supabase project you own, share a collection, and hand the token to whoever needs it — they paste it into the two-people button you saw earlier and get the same requests and environments, kept in step from then on. What is shared is the collection, not the workspace, and if two people edit the same request the change is held as a conflict for someone to settle rather than one side quietly winning.",
+    "A collection does not have to stay on one machine. From this tab you point CodeFlow at a Supabase project you own, share a collection, and hand its invitation code to whoever needs it — they paste it into the two-people button you saw earlier and get the same folders and requests, with the collection's own variables, auth and scripts, kept in step from then on. Environments stay on each machine. What is shared is the collection, not the workspace, and if two people edit the same request the change is held as a conflict for someone to settle rather than one side quietly winning.",
 
   "tour.api.done.title": "That is the API client",
   "tour.api.done.body":
-    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening Databases from the menu beside it gives you that one's tour instead — and the same goes for agents, specs and remote.",
+    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening Databases from the app rail above it gives you that one's tour instead — and the same goes for agents, specs, remote, notes, diagrams, the keyring and chat.",
 
   // ── Databases ────────────────────────────────────────────────────────────────────────────
   "tour.db.intro.title": "The database client",
   "tour.db.intro.body":
-    "A database client sharing a tab with the API one, and workspace-scoped in the same way: the connections belong to the workspace and do not change when you click a different repository. PostgreSQL, MySQL, SQL Server, Oracle and InterSystems IRIS, in the same three-column shape — connections on the left, tabs in the middle, results underneath.",
+    "A database client with its own icon on the rail, beside the API client's, and workspace-scoped in the same way: the connections belong to the workspace and do not change when you click a different repository. Ten engines — PostgreSQL, Supabase, MySQL, MariaDB, SQL Server, Oracle, InterSystems IRIS and SQLite, plus MongoDB and Redis for documents and keys — in the same shape as the API client: connections on the left, tabs in the middle, results underneath.",
 
   "tour.db.connect.title": "Connecting to a database",
   "tour.db.connect.body":
-    "Connections are made here rather than in Settings, because they belong to the workspace and not to the app — this is the only place in CodeFlow where one is defined. The gear opens the whole set at once; the buttons beside it make a group to file connections under and re-read the tree from the server. Let us open the gear.",
+    "Connections are made here rather than in Settings, because they belong to the workspace and not to the app — this is the only place in CodeFlow where one is defined. The gear opens the whole set at once; beside it, one button makes a group to file connections under and the plus adds a new connection, starting from which engine it is. Let us open the gear.",
 
   "tour.db.sources.title": "Data sources",
   "tour.db.sources.body":
-    "Every connection this workspace has, and the form for whichever one is selected. The list down the left adds, removes and duplicates them — their order is arranged by dragging them in the tree, where a drag also files one into another group; the tabs on the right are the connection itself — General for the engine, host, port, database and user, or a plain URL if you would rather paste one; Options for the driver's own switches and Read-only, which refuses anything that is not a read before it is sent; SSH/SSL for a tunnel, forwarded through your own ssh so your keys and ~/.ssh/config work exactly as they do for git; and Schemas for which of them to read. Test connection proves it before you save, and passwords stay on this machine.",
+    "Every connection this workspace has, and the form for whichever one is selected. The list down the left adds, removes and duplicates them — their order is arranged by dragging them in the tree, where a drag also files one into another group. On the right, name and engine sit above the tabs, and the tabs are the connection itself — General for host, port, database and user, or a plain URL if you would rather paste one; Options for Read-only, which refuses anything that is not a read before it is sent, plus browsing the whole server, timeouts and a startup script; SSH/SSL for a tunnel, forwarded through your own ssh so your keys and ~/.ssh/config work exactly as they do for git, and for TLS; Schemas for which of them to read; and Advanced for the driver's own switches. Test connection proves it before you save, and passwords stay on this machine.",
 
   "tour.db.explorer.title": "The tree",
   "tour.db.explorer.body":
@@ -7231,40 +7393,40 @@ const en = {
     "{key}, or the sparkle in the console toolbar. Ask for a query — \"how many users have payments over a thousand\" — or paste one that is misbehaving and ask why it returns nothing. It is shown the schema of the database and schema this console is scoped to, what is in the editor, and how the last run went, so the answer names your tables rather than plausible ones. It is a conversation, in a column beside the query: ask a follow-up — \"now group that by month\" — and it answers against what it just wrote. What it proposes you insert, replace with, or run from the panel; the engine itself never touches the database.",
   "tour.db.console.title": "Running SQL",
   "tour.db.console.body":
-    "A SQL editor per tab, bound to the connection the tab was opened from. Run runs one statement — the first one, or whatever you highlighted — and the button beside it runs the script end to end. Read the server's messages beside the grid, and save the console under its connection so it is there tomorrow. Tabs keep unsaved text while you work elsewhere, and closing one with work in it asks first.",
+    "An editor per tab, bound to the connection the tab was opened from — SQL on the relational engines, find() on MongoDB, commands on Redis — with the database, schema and row limit it runs against along the toolbar. Run runs one statement — the first one, or whatever you highlighted — the button beside it runs the script end to end, and EX shows the plan without running anything. The server's messages fold out under the grid; save the console under its connection so it is there tomorrow. Tabs keep unsaved text while you work elsewhere, and closing one with work in it asks first.",
 
   "tour.db.grid.title": "Editing rows, safely",
   "tour.db.grid.body":
-    "Table data comes back in a grid you can type into — and this is the part worth knowing: an edit is staged, not sent. Changed cells are marked, the count rides on the tab, and nothing reaches the database until you apply it — which is also when you are shown the exact statements that are about to run. A stray keystroke is never a write, and closing a tab with edits still pending asks before it drops them.",
+    "Table data comes back in a grid you can type into — and this is the part worth knowing: an edit is staged, not sent. Changed cells are marked, the tab gets a dot, the Apply button carries the count, and nothing reaches the database until you press it — which is also when you are shown every change about to be made, one line each, to confirm or cancel; on a SQL engine they then run in one transaction, all or none. A stray keystroke is never a write, and closing a tab with edits still pending asks before it drops them.",
 
   "tour.db.tools.title": "Diagrams, schema and DDL",
   "tour.db.tools.body":
-    "Three more views over the same objects: a diagram of the tables and how they relate, a schema summary of what a table is made of, and the DDL the server generates for anything that has one. Underneath it all, the log keeps every statement this workspace has sent and how long it took — which is where you go when something was slow and you want to know what actually ran.",
+    "Three more views over the same objects, all from a right-click in the tree: a diagram of a schema's tables and how they relate, every object of a schema listed side by side — tables, views, routines and sequences, with their sizes, dates and comments — and the definition the server gives for anything that has one. Underneath it all, Statements run keeps every statement this workspace has sent and how long it took — which is where you go when something was slow and you want to know what actually ran.",
 
   "tour.db.done.title": "That is the database client",
   "tour.db.done.body":
-    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so switching to the API client from the menu beside it gives you that one's tour instead.",
+    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so switching to the API client from the app rail above it gives you that one's tour instead.",
 
   // ── Agents ───────────────────────────────────────────────────────────────────────────────
   "tour.agents.intro.title": "The agent console",
   "tour.agents.intro.body":
     "Where AI work that runs on its own lives. A task is a conversation with a role attached: an agent, one repository of this workspace, and what you asked for. It runs in the background — leave the view, switch repositories, keep working — and the bell tells you when it is finished. Same engine and same history as the AI panel, so nothing here is a second, separate kind of chat.",
 
-  "tour.agents.tree.title": "One tree, four kinds of row",
+  "tour.agents.tree.title": "One tree, three sections",
   "tour.agents.tree.body":
-    "Projects are folders you create, and they are not repositories: a project is a piece of work, and it can span several repos or none yet. Inside them sit tasks, chains of tasks, and the plans you saved as templates. Pinned rows ride at the top and are global to the workspace, so whatever you are running all week is one click away no matter which folder is open.",
+    "Projects are folders you create, and they are not repositories: a project is a piece of work, and it can span several repos or none yet. Inside them sit tasks and chains, each chain opening into the tasks its steps produced; anything not filed waits under Tasks. Pinned rows get a section of their own, right under the projects and outside every folder, so whatever you are running all week is one click away. The switch above regroups the same work by status, and keeps the plans you saved as templates on a tab of their own.",
 
   "tour.agents.actions.title": "Starting something",
   "tour.agents.actions.body":
-    "Left to right: a new task, a new chain, a story run, a new folder, the roster of agents, and the manual. The first four ask which folder they belong to as they open, so you can start from up here without having selected anything first.",
+    "New task, the one filled button, is the thing done most, and its caret holds the other ways to start: a new chain, realizing a story, and a new project. Then, left to right, the terminals, the roster of agents, and the manual. Task, chain and story each ask which project they belong to as they open, so you can start from up here without having selected anything first.",
 
   "tour.agents.task.title": "A task",
   "tour.agents.task.body":
     "Opening one shows the conversation and every turn in it. You choose the agent and the repository when you create it, and you can keep replying afterwards — a task is a thread you come back to, not a single shot. The detail pane is where you follow what it is doing, stop it, or continue it with a different agent.",
 
-  "tour.agents.chains.title": "Chains, templates and story runs",
+  "tour.agents.chains.title": "Chains, templates and realizing a story",
   "tour.agents.chains.body":
-    "A chain is several steps in order, each with its own agent and prompt, each starting from what the step before it produced. Save one as a template and it becomes a plan you can run again on another folder or another repository. The story run is a chain with a human gate in the middle: it plans first, waits for you to read and approve the plan, and only then writes anything — which is what makes it safe to point at more than one repository at a time.",
+    "A chain is several steps in order, each with its own agent and prompt, each starting from what the step before it produced — and any step can pause for your approval or run a check that sends it back. Save one as a template and it becomes a plan, kept on the Templates tab, that you can run again on another project or another repository. Realizing a story is a chain with a human gate in the middle: it reads a work item from your board, plans in every repository it might touch, waits for you to approve the plan, and only then writes anything — which is what makes it safe to point at more than one repository at a time.",
 
   "tour.agents.bench.title": "Terminals for the workspace",
   "tour.agents.bench.body":
@@ -7275,65 +7437,65 @@ const en = {
 
   "tour.agents.settings.title": "Where the models come from",
   "tour.agents.settings.body":
-    "The providers and models themselves are in Settings → AI: which ones you have signed into, the default model, and the stronger one the heavy jobs are routed to. The roster picks from what is configured here, so a provider you have not connected simply will not appear in it. The prompt templates on this screen are the starting point every agent inherits before its own instructions are added.",
+    "The engines themselves are in Settings → AI assistant. Providers, where this lands, is which engines are installed and the binary, model and tools each one uses; Accounts, the logins each one has; Tasks and prompts, which engine runs each of the app's AI actions — the heavy ones on a stronger model, if you like — and what it is told. The roster offers every engine CodeFlow supports, and an agent whose engine is not installed here is marked Not found rather than hidden. An agent brings its own instructions, followed by the workspace's notes from PR review → Context; the prompts under Tasks and prompts belong to the app's other AI actions, not to agents.",
 
   "tour.agents.done.title": "That is the agent console",
   "tour.agents.done.body":
-    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening Specs or the API client from the menu beside it gives you that one's tour instead.",
+    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening Specs or the API client from the app rail above it gives you that one's tour instead.",
 
   // ── Specs ────────────────────────────────────────────────────────────────────────────────
   "tour.stories.intro.title": "Three directions, one screen",
   "tour.stories.intro.body":
-    "Everything around the requirements themselves, in three directions — and this strip is the choice of which one you are working in. Write turns documentation into a backlog. Review takes a work item that already exists and says what it is missing. Wiki runs the other way round and writes the documentation from the code. They share the workspace, the Azure connection and the repositories, so you move between them without leaving the screen.",
+    "Everything around the requirements themselves, in three directions — and this switch, up in the title row beside the app's name, is the choice of which one you are working in. Write turns documentation into a backlog. Review takes a work item that already exists and rewrites what it is missing, publishing only what you keep. Wiki runs the other way round and writes the documentation from the code. They share the workspace, the board connections and the repositories, so you move between them without leaving the screen.",
 
   "tour.stories.write.title": "Write: documentation in, backlog out",
   "tour.stories.write.body":
     "Give it the documentation — an Azure DevOps wiki page, Markdown from a repository, or text you paste — and it writes the user stories with their acceptance criteria. Anything the documentation left unsaid comes back as open questions for you to answer, and the next pass takes your answers into account rather than guessing again.",
 
-  "tour.stories.list.title": "Batches",
+  "tour.stories.list.title": "Sets",
   "tour.stories.list.body":
-    "Every batch in this workspace, with the state it is in. A batch is one run held together: the source it came from, the stories it produced, your answers to its open questions, and where it was published. They are kept, so coming back to one next week opens the same set rather than generating a new one — and the search finds a batch by the story inside it.",
+    "Every set in this workspace, with the state it is in. A set is one run held together: the source it came from, the stories it produced, your answers to its open questions, and where it was published. They are kept, so coming back to one next week opens the same stories rather than generating new ones — and the search finds a set by its name, its source or the project it publishes to.",
 
-  "tour.stories.publish.title": "Publishing to Azure Boards",
+  "tour.stories.publish.title": "Where a set publishes",
   "tour.stories.publish.body":
-    "The rail on the right is the other half of Write: organisation, project, work item type, area and iteration, each list fetched from the one above it. It is a rail rather than a dialog because you read it while you review — seeing which board a story is bound for while you are still editing its criteria is what stops a whole batch landing in another team's backlog.",
+    "The rail on the right is the other half of Write. First the board — Azure Boards, Jira or monday.com — then where on it: the organisation, site or account, the project or board, and the type of item, plus area and iteration on Azure; each list is fetched from the one above it. It appears once a set is open, and Target, over the list, hides or shows it. It is a rail rather than a dialog because you read it while you review — seeing which board a story is bound for while you are still editing its criteria is what stops a whole set landing in another team's backlog.",
 
   "tour.stories.review.title": "Review: what a work item is missing",
   "tour.stories.review.body":
-    "For the items that already exist. Paste the link — or the number — of a story or a bug, pick which repositories to read it against, and it reports what the item lacks: INVEST and testable Gherkin for a story, reproduction steps and a closing condition for a bug. It can also draft the missing scenarios and break the item into [DEV] and [QA] tasks. It only ever proposes: nothing on this tab writes back to the board.",
+    "For the items that already exist. Paste the link or the number of a story or a bug — from Azure DevOps, Jira or monday.com — pick which repositories to read it against, if any, and work through it tab by tab: a rewritten description, or reproduction steps for a bug; acceptance criteria as Gherkin, a checklist or both; and the item broken into [DEV] and [QA] tasks. Each proposal is yours to edit or drop. Nothing reaches the board until you send it to the Draft tab and publish it from there.",
 
   "tour.stories.wiki.title": "Wiki: documentation from the code",
   "tour.stories.wiki.body":
-    "The opposite direction, and the one that fills the gap the other two assume somebody filled. It reads a repository and writes its technical documentation — environment variables, running it locally, integrations, database — or reads several at once and writes how they fit together as a system. Edit what comes out, then publish it to the wiki.",
+    "The opposite direction, and the one that fills the gap the other two assume somebody filled. It reads one repository and writes its technical documentation — environment variables, running it locally, integrations, database — or reads several together as a system. The AI button in the editor's toolbar opens a floating window where you choose what it reads and say what to cover; edit what comes out, then publish it to the Azure DevOps wiki.",
 
-  "tour.stories.settings.title": "Where Azure DevOps is connected",
+  "tour.stories.settings.title": "Where the boards are connected",
   "tour.stories.settings.body":
-    "All three tabs talk to Azure DevOps, and that connection is in Settings → Integrations: the organisation and one token. Without it the stories still get written — what you lose is reading a work item by its number, publishing onto Boards and writing to the wiki. The token is stored on this machine and never becomes part of a repository.",
+    "All three tabs talk to a board, and those connections are in Settings → Integrations: Azure DevOps — one token per organisation — Jira and monday.com. Without them the stories still get written; what you lose is reading a work item by its link or number, publishing stories and review drafts onto a board, and, on Azure DevOps alone, reading and writing the wiki. Tokens are stored on this machine and never become part of a repository.",
 
   "tour.stories.done.title": "That is Specs",
   "tour.stories.done.body":
-    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening the agent console from the menu beside it gives you that one's tour instead.",
+    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening the agent console from the app rail above it gives you that one's tour instead.",
 
   // ── Remote ───────────────────────────────────────────────────────────────────────────────
   "tour.remote.intro.title": "Your machines",
   "tour.remote.intro.body":
-    "The machines this workspace deploys to, and most of what you would otherwise open a separate terminal for. Save a host once — SSH, SFTP, FTP, or a remote desktop — and open a shell on it, forward a port, or move a file without leaving the app. Hosts belong to the workspace, like the collections and connections in the other apps.",
+    "The machines this workspace deploys to, and most of what you would otherwise open a separate terminal for. Save a host once — SSH, SFTP, FTP or FTPS, an SMB share, or a remote desktop over VNC or RDP — and open a shell on it, forward a port, or move a file without leaving the app. S3 buckets and Azure Storage accounts live in the same list; more on those further on. Hosts belong to the workspace, like the collections and connections in the other apps.",
 
   "tour.remote.hosts.title": "The host list",
   "tour.remote.hosts.body":
-    "Your saved machines, in groups you make, with a search over the lot and a choice of grid or list. Each row says how it authenticates and how far away it is. Nothing has to be typed twice, either: the import reads this computer's ~/.ssh/config and brings in the hosts already defined there as they are.",
+    "Your saved machines, in groups you make — drag a host onto a group to file it — with a search over the lot. Each row shows the machine's OS and what kind of connection it is, a dot that lights while something of it is open, and its address when you hover; with no tab open, the same estate fills the main pane as cards or a list, with tag filters. How the selected host authenticates and how far away it is sit in the status line under the session. Nothing has to be typed twice, either: the import reads this computer's ~/.ssh/config and lists the hosts defined there to tick, with the ones you already have left unticked.",
 
   "tour.remote.connect.title": "Connecting without saving anything",
   "tour.remote.connect.body":
-    "For the machine you are not going to keep. Type or paste an ssh command — user, host, port, the usual flags — and it is parsed as you type, showing what it understood before it connects, including which key on this machine it would use. If it turns out to be somewhere you go often, one button saves it as a host.",
+    "For the machine you are not going to keep. Type or paste an ssh command — user, host, port, -J, -i, the usual flags — and it is parsed as you type, showing what it understood before it connects, and naming any flag it will not apply, so a pasted -L cannot leave you believing you have a tunnel. Connect opens a session and saves nothing; the save button beside it keeps it as a host. The same box takes an Azure connection string — that one is saved, as an account — and the cloud button signs in with Microsoft and lists the storage accounts you can already reach.",
 
   "tour.remote.session.title": "A session is a real terminal",
   "tour.remote.session.body":
     "Not a rendering of one: it is your shell on the far side, with your prompt and your colours, because CodeFlow runs the same ssh your terminal would. Sessions stay alive while you look at something else, so a build left running keeps running — and a session whose connection ends keeps its scrollback instead of closing itself, since the error on screen is usually why you came back to it.",
 
-  "tour.remote.files.title": "Files over SFTP",
+  "tour.remote.files.title": "Files, both sides at once",
   "tour.remote.files.body":
-    "Two panes: this machine on one side, the host on the other. Upload, download, make a folder, rename, delete — over the same SSH the shell uses, so a host that can open a shell needs nothing else configured to move a file. Deleting on the far side is permanent: there is no trash over there.",
+    "Two panes: this machine on one side, the host on the other — an SSH or SFTP host, an FTP or FTPS server, or an SMB share, whose top level lists its shares. Upload, download, drag a file from one pane to the other, make a folder, rename, delete. Over SSH it rides the same connection the shell uses, so a host that can open a shell needs nothing else configured to move a file. Deleting on the far side is permanent: there is no trash over there.",
 
   "tour.remote.cloud.title": "Buckets and storage accounts",
   "tour.remote.cloud.body":
@@ -7344,30 +7506,30 @@ const en = {
 
   "tour.remote.screen.title": "Remote desktops, and the log",
   "tour.remote.screen.body":
-    "A desktop is a host of its own — type VNC or RDP — drawn in a tab beside the terminal, or handed to your platform's own viewer, and reachable over SSH either way, so a server bound to 127.0.0.1 stays unexposed. A machine you both administer and look at is two rows, and each shows only what it can actually do. And the log keeps every shell, tunnel, transfer and desktop this workspace has opened, with whether it worked — so a failure outlives the toast that announced it.",
+    "A desktop is a host of its own — type VNC or RDP. VNC is drawn in a tab beside the terminal, or in your system's viewer if you prefer; RDP, which has no in-app client, always opens your platform's own. Tick the host's SSH tunnel and either is reached over SSH, so a server bound to 127.0.0.1 stays unexposed. A machine you both administer and look at is two rows, and each shows only what it can actually do. And the log keeps every shell, tunnel, transfer and desktop this workspace has opened, with whether it worked — so a failure outlives the toast that announced it.",
 
   "tour.remote.done.title": "That is Remote",
   "tour.remote.done.body":
-    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening the API client or Specs from the menu beside it gives you that one's tour instead.",
+    "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening the API client or Specs from the rail just above it gives you that one's tour instead.",
 
   "tour.notes.intro.title": "Everything you write that isn't code",
   "tour.notes.intro.body":
     "A Markdown notebook that belongs to the workspace, not to a repository — the decision you argued out in March, the runbook for the 3am page, last Tuesday's meeting. It saves as you type; there is no save button and nothing to lose. The list on the left is what you have written, the pane on the right is where you write it, and the two things worth knowing about are the search box and the templates — both a few steps away.",
-  "tour.notes.tree.title": "Books, and what deleting one does",
+  "tour.notes.tree.title": "Books, and what deleting one takes with it",
   "tour.notes.tree.body":
-    "A book is a shelf of notes, and books nest as deep as you like. Drag a note onto a book to file it, drag a book onto another to move it with everything inside, and drop onto the empty strip under the tree to pull something back out to the shelf root. The part worth reading twice: **deleting a book never deletes the notes in it.** The book and the books inside it go; the writing surfaces at the root, where you can see it and refile it. Throwing away a note stays a separate, explicit act.",
+    "A book is a shelf of notes, books nest as deep as you like, and every note lives in one — a new note goes into the book you are in, or into a “General” book if there is none. Drag a note onto a book to file it, onto the edge of a row to put it in order by hand, and drag a book onto another to move it with everything inside; the empty strip under the tree takes books only, and lifts a sub-book back to the top. The part worth reading twice: **deleting a book deletes every note in it**, and the books inside it with theirs. You are told how many first, and it cannot be undone — move out what you want to keep before you throw away the shelf.",
   "tour.notes.search.title": "It reads the notes, not just their titles",
   "tour.notes.search.body":
     "Titles and tags filter as you type, with no delay at all — that list is already in memory. Bodies are searched in the database a moment later, and a note that matched on its *contents* shows you the sentence that matched instead of its opening line. So \"what was that thing about the retry budget\" is a question you can actually ask, without remembering which note you put it in.",
   "tour.notes.tags.title": "Tags cut across the books",
   "tour.notes.tags.body":
-    "A book is one place; a tag is every place. Add them under the title of any note — the field completes against the tags you already use, which is the whole point: it is what stops `deploy`, `deploys` and `deployment` becoming three tags for one idea. Every tag in the workspace is listed at the foot of this sidebar with its count. Click to filter, click more than one to narrow further.",
+    "A book is one place; a tag is every place. Add them under the title of any note — the field completes against the tags you already use, which is the whole point: it is what stops `deploy`, `deploys` and `deployment` becoming three tags for one idea. Every tag in the workspace is at the foot of this sidebar with its count, folded away until you open it: search the list, sort it by name or by use, and “Untagged” finds what you never labelled. Click to filter, click more than one to narrow further.",
   "tour.notes.editor.title": "Write, split, or read",
   "tour.notes.editor.body":
     "Three modes in the header: the editor alone, the editor beside a live preview, or the preview alone for reading. The toolbar's marks toggle — press Bold on bold text and it comes off — and the table, code-block and rule buttons drop in the shapes nobody remembers the syntax of. The outline button opens a rail of the note's headings, which is how you move around something long. Along the bottom: words, characters, reading time, and whether the last keystroke is saved yet.",
   "tour.notes.ai.title": "Ask it to write the paragraph",
   "tour.notes.ai.body":
-    "The sparkle at the end of the toolbar opens a small window over the editor rather than covering it — drag it aside by its header if it sits over something you need to see. Say what you want in a sentence and press Write: the result lands at the caret, or replaces whatever you had selected, as one edit, so one undo takes it back out and nothing is ever saved over. Which engine it runs on is set once, in Settings → AI → model per task.",
+    "The sparkle at the end of the toolbar opens a small window over the editor rather than covering it — drag it aside by its header if it sits over something you need to see. Say what you want in a sentence and press Write: the result lands at the caret, or replaces whatever you had selected, as one edit, so one undo takes it back out and nothing is ever saved over. Which engine writes it is the chip at the bottom of the window — switch it right there; it is the same setting as “Write in a note” in Settings → AI assistant → Tasks and prompts, so changing one changes the other.",
   "tour.notes.reference.title": "Link one note to another",
   "tour.notes.reference.body":
     "This button — or typing `[[` yourself — turns whatever is selected into the start of a reference and searches every note in the workspace by title, wherever it's filed. Pick one and the closing brackets are written for you. In the preview it becomes a real link that opens that note; **one that doesn't match anything yet is drawn struck through rather than hidden**, so a broken reference is something you notice, not something you silently believe.",
@@ -7376,7 +7538,7 @@ const en = {
     "Six templates ship with the app — meeting, daily note, technical decision, runbook, feature brief, retrospective — and they fill in `{{date}}` and `{{title}}` as they open. Any note you write can become one of your own from its ⋯ menu, placeholders included. That is most of what makes a notebook get used: the second time you write a meeting note, you shouldn't have to remember how you laid out the first.",
   "tour.notes.done.title": "That's Notes",
   "tour.notes.done.body":
-    "Anything you write is saved as you go and travels with your backups. A note can be exported as a plain `.md` from its ⋯ menu, so nothing here is locked in. This tour is always in the cap beside the app rail if you want it again.",
+    "Anything you write is saved as you go and travels with your backups. A note can be exported as a plain `.md` from its ⋯ menu, so nothing here is locked in. This tour is always in the graduation cap at the foot of the app rail if you want it again.",
   // ---------------- Tour: Llavero ----------------
   "tour.chapter.vault": "Keyring",
   "tour.chapter.vaultEntry": "An entry",
@@ -7384,19 +7546,19 @@ const en = {
 
   "tour.vault.intro.title": "Your keyring",
   "tour.vault.intro.body":
-    "Passwords, API keys, cards, documents and the files that go with them — encrypted on this machine and readable only with your master password. It is the one app on this rail that is **not** tied to a workspace: a password does not belong to the repository you were looking at when you saved it.",
+    "Passwords, API keys, cards, documents, database and server credentials, and the files that go with them — encrypted on this machine and readable only with your master password. It is one of only two apps on this rail — Chat is the other — that is **not** tied to a workspace: a password does not belong to the repository you were looking at when you saved it.",
   "tour.vault.master.title": "The master password is the whole design",
   "tour.vault.master.body":
-    "CodeFlow never stores it. It derives a key from it, uses that key to unwrap the one your entries are actually encrypted with, and forgets it again. That is what makes a copy of the database useless to anyone else — and it is also why **nobody can recover a forgotten master password**. There is no reset. Write it down somewhere real, once.",
+    "CodeFlow derives a key from it, uses that key to unwrap the one your entries are actually encrypted with, and forgets it again — unless you tick “Remember on this machine”, which keeps it in the OS credential store so the keyring opens without asking, and makes it exactly as safe as your OS account. That is what makes a copy of the database useless to anyone else — and it is also why **nobody can recover a forgotten master password**. There is no recovery: “I have lost my master password” only lets you erase the keyring and start over. Write it down somewhere real, once.",
   "tour.vault.tree.title": "Folders on the left, entries under them",
   "tour.vault.tree.body":
-    "Folders are for tidiness, not for finding things — the search box above them is how anyone actually finds a password. Right-click a folder or an entry to rename it, file it under one workspace, or move it to another.",
+    "Folders are for tidiness, not for finding things — the search box above them is how anyone actually finds a password. Right-click a folder to rename it, file it under one workspace, or move it to another; right-click an entry to add it to favourites — which keeps it at the top — or to file or move it the same way.",
   "tour.vault.search.title": "Search is the way in",
   "tour.vault.search.body":
     "Two letters of a site name is usually enough. It matches titles, account lines, sites and tags — never the secrets themselves, which are not held in memory to match against and would mean decrypting the whole keyring on every keystroke.",
-  "tour.vault.new.title": "Six kinds of entry",
+  "tour.vault.new.title": "Nine kinds of entry",
   "tour.vault.new.body":
-    "A login, a key or token, a card, an identity document, a secure note, or an entry that is mostly its attachments. The kind decides which fields you get and which of them are treated as secret.",
+    "A login, a key or token, a database, a server, object storage, a card, an identity document, a secure note, or an entry that is mostly its files. The kind decides which fields you get and which of them are treated as secret.",
   "tour.vault.drag.title": "Drag an entry into a folder",
   "tour.vault.drag.body":
     "Pick an entry up and drop it on a folder to file it there. Dropping it on **Everything** takes it back out of every folder. Filing does not count as editing, so a tidy-up does not reshuffle your \"recently changed\" order.",
@@ -7429,47 +7591,47 @@ const en = {
     "The keyring is its own switch in Settings → Backup. Everything in it stays sealed inside the file, and the master password is deliberately left out — a backup holding both the vault and the key to it would be a backup with no encryption at all. A restored machine gets the keyring back and asks you for the password.",
   "tour.vault.done.title": "That is the keyring",
   "tour.vault.done.body":
-    "The habit worth picking up: let the generator make the password, copy rather than reveal, and let the thing lock itself. This tour is always here, in the graduation cap beside the app rail.",
+    "The habit worth picking up: let the generator make the password, copy rather than reveal, and let the thing lock itself. This tour is always here, in the graduation cap at the foot of the app rail.",
 
   "tour.chapter.diagrams": "Diagrams",
   "tour.chapter.diagramsAi": "Drawing with AI",
 
   "tour.diagrams.intro.title": "The drawing that goes around the code",
   "tour.diagrams.intro.body":
-    "Flowcharts, architecture, sequences, ER — kept in the workspace rather than in any one repository, because the picture of how four services fit together does not belong inside one of them. The canvas is the whole of draw.io, shipped inside the app and running on your machine: no account, no network, and it works on a plane. The tree on the left is what you have drawn; it saves as you draw, and there is no save button.",
+    "Flowcharts, architecture, sequences — and database schemas — kept in the workspace rather than in any one repository, because the picture of how four services fit together does not belong inside one of them. A drawing opens in the whole of draw.io, shipped inside the app and running on your machine: no account, no network, and it works on a plane. A schema is DBML and opens in an editor of its own — the code beside a diagram you can edit by hand, and a Data view that builds a real SQLite database from it — and a `.dbml` file in a repository can be opened here and kept in step with it. The tree on the left is what you have made; it saves as you go, and there is no save button.",
   "tour.diagrams.tree.title": "Folders, and what deleting one takes with it",
   "tour.diagrams.tree.body":
-    "Folders nest as deep as you like, take a colour from their right-click menu, and diagrams can be dragged between them. Read this twice, because it is the opposite of what Notes does: **deleting a folder deletes every diagram inside it**, and its subfolders with it. You are asked first, and it cannot be undone. Pinning from the same menu floats a diagram to the top of the tree.",
+    "Folders nest as deep as you like, take a colour from their right-click menu, and diagrams can be dragged between them — or onto the edge of a row, to order them by hand. Read this twice: **deleting a folder deletes every diagram inside it**, and its subfolders with it — the same rule as a book in Notes. You are asked first, and it cannot be undone. A folder's menu also starts a drawing or a database schema right inside it, and a diagram's own menu pins it to the top of the tree.",
   "tour.diagrams.new.title": "Start from a shape, not a blank sheet",
   "tour.diagrams.new.body":
-    "This opens a picker rather than making an empty diagram outright — blank is simply its first entry. Five drawings ship with it: flowchart, C4 containers, sequence, entity relationship and network, each a real diagram you edit rather than a stencil. Any drawing of your own becomes a template from the editor's toolbar, so the second architecture diagram starts where the first ended up. New diagrams are filed into whichever folder the tree is showing.",
+    "This opens a picker rather than making an empty diagram outright, and its first choice is the one that sticks: a blank drawing or a new database schema — which editor a diagram opens in is decided here and never again. Six templates ship with it: five drawings — flowchart, C4 containers, sequence, entity relationship and network — and a two-table schema in DBML, each a real document you edit rather than a stencil. Anything of your own becomes a template from its editor's toolbar, and new diagrams are filed into whichever folder the tree is showing.",
   "tour.diagrams.search.title": "Titles and tags",
   "tour.diagrams.search.body":
     "Filters as you type, across titles and tags. It does **not** read what is inside the drawings — unlike the search in Notes, which does read bodies. So name things the way you would look for them later, and lean on tags for the cut that folders cannot make: one diagram is in one folder, but it can carry `onboarding` and `payments` at once.",
   "tour.diagrams.gallery.title": "The wall of what you have drawn",
   "tour.diagrams.gallery.body":
-    "With nothing open you get cards instead of an empty canvas, each showing the diagram itself — the picture is re-exported every time you edit, so a card is never a drawing from last week. Switch between grid and list, filter by folder or tag, and reorder by hand if the order means something. Opening a card is what puts the editor on screen.",
+    "With nothing open you get cards instead of an empty canvas, each showing the diagram itself — the picture is re-exported every time you edit, so a card is never a drawing from last week. Switch between grid and list, filter by folder or tag, and sort by “My order” — the one you set by dragging in the tree — if the order means something. Opening a card is what puts the editor on screen.",
   "tour.diagrams.canvas.title": "All of draw.io, and it saves itself",
   "tour.diagrams.canvas.body":
-    "The shape palette, the format panel, the right-click menu, every shape library including the cloud sets — none of it is a reduced version. What this app adds is at the far end of the editor's own toolbar: save this drawing as a template, export it, and a sparkle. Edits are written for you a moment after you stop moving things, and the header tells you when the last one landed.",
+    "For a drawing: the shape palette, the format panel, the right-click menu, every shape library including the cloud sets — none of it is a reduced version. What this app adds is at the far end of the editor's own toolbar: save as template, export, a sparkle, and version history. Edits are written for you a moment after you stop moving things, and the header tells you when the last one landed. A schema carries the same four in its own toolbar, plus a Diagram/Data switch and three tools: generate code for ten targets, import SQL, and compare.",
   "tour.diagrams.ai.title": "Describe the diagram, and it draws it",
   "tour.diagrams.ai.body":
-    "The sparkle opens this window over the canvas — drag it by its header if it covers what you are looking at. Write what you want in a sentence: *\"the review pipeline: fetch the diff, scan for secrets, send it to the engine, comment on the PR\"*. Enter sends, Shift+Enter breaks the line, and while it is thinking the button becomes Stop — it is a normal run, so it shows up with your other AI work and can be abandoned. Which engine answers is set once, in Settings → AI, per task.",
+    "The sparkle opens this window over the canvas — drag it by its header if it covers what you are looking at. Write what you want in a sentence: *\"the review pipeline: fetch the diff, scan for secrets, send it to the engine, comment on the PR\"*. Enter sends, Shift+Enter breaks the line, and while it is thinking the button becomes Stop — it is a normal run, so it shows up with your other AI work and can be abandoned. Which engine answers is the chip at the bottom of the window — switch it right there; it is the same setting as “Draw a diagram” in Settings → AI assistant → Tasks and prompts. On a schema the same window asks for DBML instead of shapes.",
   "tour.diagrams.aiApply.title": "Nothing is drawn until you say so",
   "tour.diagrams.aiApply.body":
-    "The answer comes back as a **picture** — the shapes, arranged exactly as they will land, above a count of them — and stays there. The canvas is untouched until you press **Add to canvas**, so an answer you do not like costs you a rephrase and nothing else. The preview is fitted to the window; the button beside the count draws it at a size you can read. And it *adds*: what is already drawn is never replaced, and the new shapes are given ids of their own so they cannot land on top of a box you drew by hand. Laying out a rough shape yourself and asking for the rest is a perfectly good way to use it.",
+    "The answer comes back as a **picture** — a count of the shapes, and under it the shapes themselves, arranged exactly as they will land — and stays there, even if you close the window: a sparkle beside the title brings it back. The canvas is untouched until you press **Add to canvas**, so an answer you do not like costs you a rephrase and nothing else. The preview is fitted to the window; the button beside the count draws it at a size you can read. And it *adds*: what is already drawn is never replaced, and the new shapes are given ids of their own so they cannot land on top of a box you drew by hand. Laying out a rough shape yourself and asking for the rest is a perfectly good way to use it. On a schema the preview is the tables and their relations, and adding never overwrites a table you already wrote.",
   "tour.diagrams.aiPrivacy.title": "What actually leaves the machine",
   "tour.diagrams.aiPrivacy.body":
-    "Three things: the diagram's title, the sentence you wrote, and a list of the **labels** already on the canvas — the words in the boxes, so the answer connects to what is there instead of drawing a second copy of it. The document itself is never sent. Nothing is uploaded when you simply draw, either; the editor is local, and the only moment anything is transmitted is the one where you press Generate.",
+    "For a drawing, three things: the diagram's title, the sentence you wrote, and a list of the **labels** already on the canvas — the words in the boxes, so the answer connects to what is there instead of drawing a second copy of it. The drawing itself is never sent. A **schema** is different, and worth knowing: its DBML text goes with your sentence, because a schema *is* its names — only the box positions stay behind. Nothing is uploaded when you simply draw, either; both editors are local, and the only moment anything is transmitted is the one where you press Generate.",
   "tour.diagrams.aiUndo.title": "The undo that ⌘Z cannot do",
   "tour.diagrams.aiUndo.body":
     "Handing a document to draw.io resets its undo stack, so its own undo cannot take a generation back out — this arrow, next to the title, is what does. It appears once something has been generated and **disappears on your next real edit**: by then, going back would be throwing away what you drew on top rather than what the engine drew. If a generation is not what you wanted, take it back before you build on it.",
   "tour.diagrams.export.title": "Out, and back in",
   "tour.diagrams.export.body":
-    "The download button in the editor's toolbar writes the drawing as PNG, SVG or PDF, at twice the resolution, wherever you choose. In the other direction, a `.drawio` file from anywhere — a colleague, diagrams.net in a browser, an old repository — is imported from the tree's toolbar and opens here as an ordinary diagram. It is the same format underneath, which is what keeps any of this from being a place drawings go and do not come back from.",
+    "The download button in the editor's toolbar offers PNG, SVG or PDF — each opens a short dialog with the options that format allows: zoom (200% by default), border, transparency, shadow, grid, page or just the drawing, light or dark — and a `.drawio` copy that leaves still editable. A schema exports PNG, SVG or `.dbml` from its own toolbar, and generates code besides. In the other direction, a `.drawio` or `.dbml` file from anywhere — a colleague, diagrams.net in a browser, an old repository — is opened from the tree's toolbar as an ordinary diagram. It is the same format underneath, which is what keeps any of this from being a place drawings go and do not come back from.",
   "tour.diagrams.done.title": "That's Diagrams",
   "tour.diagrams.done.body":
-    "Everything is stored in the workspace and travels with your backups. The one habit worth forming: when a drawing is going to take a while, describe it first and correct what comes back — starting from twelve roughly-right boxes is faster than starting from none. This tour is always in the cap beside the app rail.",
+    "Everything is stored in the workspace and travels with your backups. The one habit worth forming: when a drawing is going to take a while, describe it first and correct what comes back — starting from twelve roughly-right boxes is faster than starting from none. This tour is always in the graduation cap at the foot of the app rail.",
 
   // --- Pipelines (CI/CD) ---
   "tabbar.pipelines": "Pipelines",
@@ -7587,7 +7749,7 @@ const en = {
   "accounts.byWorkspaceHint": "Which account runs in each workspace. A task's own account still wins.",
   "accounts.pickerLabel": "Account",
   "accounts.automatic": "Automatic",
-  "accounts.terminalHeading": "As an AI account",
+  "accounts.automaticNamed": "Automatic ({account})",
   "quota.notYet": "Shows up after this account's first run.",
   "usage.allAccounts": "All accounts",
   "usage.accountFilter": "Account",

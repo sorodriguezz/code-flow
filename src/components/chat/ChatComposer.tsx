@@ -266,7 +266,10 @@ export function ChatComposer({
           </div>
         )}
 
-        <div className="flex flex-col gap-1.5 rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 shadow-[var(--cf-shadow)] focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]">
+        <div
+          data-tour="chat-composer"
+          className="flex flex-col gap-1.5 rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 shadow-[var(--cf-shadow)] focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]"
+        >
           {/* Above the input, not below it: the chips are context for what is about to be sent, and a
               row that appears under the send button reads as a result rather than as an ingredient. */}
           <AttachmentBar
@@ -297,12 +300,15 @@ export function ChatComposer({
             {/* `bound` is what makes this chip tell the truth: the conversation's engine, not the
                 workspace's chat routing. Without it the padlock lands on the provider the thread is
                 actually running on, because "locked" is computed against the routing. */}
-            <ChatModelPicker
-              liveModel={null}
-              chatActive={turns > 0}
-              bound={onPickEngine ? { provider, model, account } : undefined}
-              onPick={onPickEngine}
-            />
+            {/* A box of its own only so the Chat tour has something with a size to point at. */}
+            <div data-tour="chat-model" className="flex min-w-0 shrink items-center">
+              <ChatModelPicker
+                liveModel={null}
+                chatActive={turns > 0}
+                bound={onPickEngine ? { provider, model, account } : undefined}
+                onPick={onPickEngine}
+              />
+            </div>
 
             {onPickEffort && (
               <EffortPicker

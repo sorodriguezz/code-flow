@@ -13,6 +13,8 @@ import { useDataDirsStore } from "../../state/dataDirsStore";
 import { useToastStore } from "../../state/toastStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { useWindowStore } from "../../state/windowStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
+import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 // Shared with the backup panel, which formats the same kind of number for the same reason.
 import { formatBytes } from "../../lib/tauri/backupCommands";
 import { UpdateSection } from "./UpdateSection";
@@ -37,6 +39,12 @@ export function GeneralSettings() {
   const language = useLanguageStore((s) => s.language);
   const setLanguage = useLanguageStore((s) => s.setLanguage);
   const startTour = useTourStore((s) => s.start);
+  // The CI tour walks a tab that exists only on a repository linked to a host with CI; started
+  // anywhere else, `App` sends the view straight back to the graph and every step lands on its
+  // fallback. So it is offered exactly where the tab is real, as the tour launcher already does.
+  const project = useWorkspaceStore((s) => s.activeProject());
+  const connections = useVcsConnectionsStore();
+  const ciHere = pipelinesAvailable(project, connections);
   // Asked, not guessed. This line used to be
   // `platform === "windows" ? "C:\\CodeFlow" : "~/CodeFlow"` — a second, independent copy of
   // `paths.rs`'s platform branch, which was right until the v1.19 layout change made it wrong and
@@ -127,9 +135,10 @@ export function GeneralSettings() {
 
           {tab === "tours" && (
             <>
-              {/* Every tour there is, from one screen. The launchers in the chrome are contextual by
-                  design — the cap in the tab bar only offers the app you already have open — which is
-                  right when you are working and wrong when you are looking for one. This is the list. */}
+              {/* Every tour there is, from one screen. The launcher in the chrome is contextual by
+                  design — the cap at the foot of the app rail only offers the app you already have
+                  open — which is right when you are working and wrong when you are looking for one.
+                  This is the list. */}
               <button
                 type="button"
                 onClick={() => launch()}
@@ -153,6 +162,8 @@ export function GeneralSettings() {
                     key={tour}
                     type="button"
                     onClick={() => launch(tour)}
+                    disabled={tour === "pipelines" && !ciHere}
+                    title={tour === "pipelines" && !ciHere ? t("tour.pipelinesUnavailable") : undefined}
                     // The secondary button, let grow past its 32px so a long name wraps (`h-auto`;
                     // the label span takes back the wrapping the recipe's `nowrap` takes away).
                     className={buttonClass({

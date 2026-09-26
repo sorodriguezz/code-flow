@@ -1,5 +1,6 @@
 import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "./ProviderGlyph";
+import { ChatModelPicker } from "./ChatModelPicker";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -93,15 +94,15 @@ export function ModelTag({
  * The chip for a run that hasn't happened yet: it reads the routing table for `task` rather than a
  * record, so it always names the engine the next click will actually reach.
  *
+ * And it is where that is changed. The same pill as `ModelTag`, opening the chat's model menu on
+ * this task's row (`ChatModelPicker`, `tag`) — which writes the routing Settings shows, so it is a
+ * second door to one setting rather than a second setting. The run it describes has no session to
+ * strand, so every provider stays open.
+ *
  * `task` is the settings-key fragment from `AI_TASKS` — the same string Rust's `AiTask::key()`
  * returns. It has to be the task the button really routes to: a chip naming a task that does not
  * run here would be worse than no chip, because it would be believed.
  */
 export function TaskModelTag({ task, title }: { task: string; title?: string }) {
-  const taskProviders = useAiProviderStore((s) => s.taskProviders);
-  const taskModels = useAiProviderStore((s) => s.taskModels);
-  const defaultProvider = useAiProviderStore((s) => s.providerId);
-
-  const providerId = taskProviders[task]?.trim() || defaultProvider;
-  return <ModelTag providerId={providerId} model={taskModels[task] ?? ""} title={title} />;
+  return <ChatModelPicker task={task} variant="tag" title={title} liveModel={null} chatActive={false} />;
 }
