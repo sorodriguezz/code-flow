@@ -11,12 +11,12 @@ import {
   MessageSquareShare,
   RefreshCw,
   SkipForward,
-  Sparkles,
   Square,
   ThumbsDown,
   ThumbsUp,
   type LucideIcon,
 } from "lucide-react";
+import { AiGlyph } from "../common/AiGlyph";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { chipClass, popoverClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
@@ -912,7 +912,7 @@ export function PrDocument({
               disabled={Boolean(runningJob)}
               className={buttonClass({ variant: "primary", size: "md", className: "ml-auto" })}
             >
-              {runningJob ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+              {runningJob ? <Loader2 size={14} className="animate-spin" /> : <AiGlyph size={14} onFill />}
               {runningJob ? t("chat.reviewing") : t("chat.reviewWithClaude")}
             </button>
           </div>

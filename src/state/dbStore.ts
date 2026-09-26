@@ -2059,7 +2059,7 @@ export const useDbStore = create<DbState>((set, get) => ({
     const filter =
       value === null
         ? ""
-        : `${quoteIdent(key.ref_column, kind)} = ${quoteLiteral(value)}`;
+        : `${quoteIdent(key.ref_column, kind)} = ${quoteLiteral(value, kind)}`;
     get().openData(tab.connectionId, node, key.ref_table, filter);
   },
 
@@ -2778,13 +2778,17 @@ function contextOf(tab: DbConsoleTab) {
  */
 function quoteIdent(name: string, kind: DbKind): string {
   if (kind === "sqlserver") return `[${name.replace(/]/g, "]]")}]`;
+  if (engineInfo(kind).databaseIsSchema) return `\`${name.replace(/`/g, "``")}\``;
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-/** A string literal. Every SQL engine here spells one the same way, and every engine here coerces
- * it to the column's type — so a numeric key quoted this way still compares correctly. */
-function quoteLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
+/** A string literal. Every SQL engine here spells one the same way but MySQL, and every engine here
+ * coerces it to the column's type — so a numeric key quoted this way still compares correctly.
+ * MySQL's default mode reads `\` as an escape inside a string, so there it is doubled first, as
+ * `sqlgen::literal` does for the statements the backend writes. */
+function quoteLiteral(value: string, kind: DbKind): string {
+  const text = engineInfo(kind).databaseIsSchema ? value.replace(/\\/g, "\\\\") : value;
+  return `'${text.replace(/'/g, "''")}'`;
 }
 
 /** The connection's saved settings. Returns null on a blob that predates a field rename rather than

@@ -48,14 +48,50 @@ const DRIVER = {
 };
 
 /**
- * What the runtime has to carry. `jdeps --print-module-deps` on the driver answers
+ * Oracle's thin JDBC driver, which rides the same sidecar (`datasource/oracle.rs`): pure Java, so
+ * Oracle works without an Oracle client installed — the reason it goes through the JVM at all.
+ *
+ * Licensed under the Oracle Free Use Terms and Conditions, which allow redistribution; the jar
+ * carries that licence itself (`META-INF/license.txt`) and is shipped unmodified. Pinned the same
+ * way as the IRIS driver, and for the same reason.
+ */
+const ORACLE_DRIVER = {
+  version: "23.26.3.0.0",
+  sha256: "764cc3f88454d1be117e155d01ed617467b984c9c68f13090dd6083799d2bb8c",
+  get jar() {
+    return `ojdbc11-${this.version}.jar`;
+  },
+  get url() {
+    return `https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/${this.version}/${this.jar}`;
+  },
+};
+
+/** Every driver the sidecar carries, each with the file-name prefix its superseded versions share. */
+const DRIVERS = [
+  { ...DRIVER, jar: DRIVER.jar, url: DRIVER.url, stale: "intersystems-jdbc-" },
+  { ...ORACLE_DRIVER, jar: ORACLE_DRIVER.jar, url: ORACLE_DRIVER.url, stale: "ojdbc" },
+];
+
+/**
+ * What the runtime has to carry. `jdeps --print-module-deps` on the IRIS driver answers
  * `java.base,java.security.jgss,java.sql`; `java.naming` is added because `DriverManager` reaches
  * for JNDI on some paths, and `java.logging` because the driver's own tracing writes through it.
+ * Oracle's adds `java.management` (the driver registers diagnostic MBeans), `jdk.net` (socket
+ * options) and `jdk.security.jgss` (Kerberos) — `jdeps --print-module-deps` on `ojdbc11`.
  *
  * Adding a module is cheap. Guessing one away is not: the failure is a `NoClassDefFoundError` deep
  * inside a connection attempt, months later, on a machine you don't have.
  */
-const MODULES = ["java.base", "java.sql", "java.naming", "java.logging", "java.security.jgss"];
+const MODULES = [
+  "java.base",
+  "java.sql",
+  "java.naming",
+  "java.logging",
+  "java.security.jgss",
+  "java.management",
+  "jdk.net",
+  "jdk.security.jgss",
+];
 
 /** The oldest Java the bridge is compiled for, and so the oldest JDK that can build it. */
 const RELEASE = "17";
@@ -333,6 +369,12 @@ async function makeWritable(dir) {
 // ---------------------------------------------------------------------------
 
 async function fetchDriver() {
+  for (const driver of DRIVERS) {
+    await fetchOne(driver);
+  }
+}
+
+async function fetchOne(DRIVER) {
   const target = join(OUT, DRIVER.jar);
 
   if (!force && existsSync(target)) {
@@ -345,8 +387,8 @@ async function fetchDriver() {
   }
 
   // Any older pinned version left behind would land on the classpath beside the new one, and two
-  // copies of the driver is a coin flip over which `IRISDriver` wins.
-  await removeStaleDrivers(target);
+  // copies of a driver is a coin flip over which one's classes win.
+  await removeStaleDrivers(target, DRIVER.stale);
 
   console.log(`iris-runtime: downloading ${DRIVER.url}`);
   const response = await fetch(DRIVER.url);
@@ -366,10 +408,10 @@ async function fetchDriver() {
   console.log(`iris-runtime: ${DRIVER.jar} verified (sha256 ${digest.slice(0, 16)}…)`);
 }
 
-async function removeStaleDrivers(keep) {
+async function removeStaleDrivers(keep, prefix) {
   const entries = await readdir(OUT).catch(() => []);
   for (const entry of entries) {
-    if (entry.startsWith("intersystems-jdbc-") && entry.endsWith(".jar") && join(OUT, entry) !== keep) {
+    if (entry.startsWith(prefix) && entry.endsWith(".jar") && join(OUT, entry) !== keep) {
       console.log(`iris-runtime: removing superseded ${entry}`);
       await rm(join(OUT, entry), { force: true });
     }

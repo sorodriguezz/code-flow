@@ -118,8 +118,15 @@ for (const theme of ALL_THEMES) {
   });
   // The same scheme for a see-through window (`lib/windowGlass`): the editor's own grounds cleared,
   // so the sheet under it shows through as it does everywhere else in the window. What floats over
-  // code keeps a ground — the suggest, hover and find widgets, and the sticky-scroll band, which
-  // code scrolls under. The current line becomes a tint rather than a solid bar across the glass.
+  // code keeps a ground — the suggest, hover and find widgets. The current line becomes a tint
+  // rather than a solid bar across the glass.
+  //
+  // The sticky-scroll band is frosted by `index.css`, which paints it once on `.sticky-widget`; its
+  // own colours are cleared here because Monaco paints them on the gutter, the lines box and every
+  // line inside it (`background-color: inherit`) — a see-through colour stacks three deep, and the
+  // solid surface it had read as a black (or white) bar across the glass, the line numbers of the
+  // code under it showing through its clear gutter. No shadow under it or under the scrolled top
+  // edge either: `scrollbar.shadow` is pure black on a dark base, a dark line on the glass.
   //
   // The catch-all rule keeps its opaque `background` all the same: Monaco copies `editor.background`
   // into the token theme's default background, whose colour map has no alpha — `#00000000` arrives
@@ -136,7 +143,12 @@ for (const theme of ALL_THEMES) {
       "minimap.background": "#00000000",
       "editorOverviewRuler.background": "#00000000",
       "editor.lineHighlightBackground": `${theme.ui.surfaceRaised}99`,
-      "editorStickyScroll.background": theme.ui.surface,
+      "editorStickyScroll.background": "#00000000",
+      "editorStickyScrollGutter.background": "#00000000",
+      "editorStickyScrollHover.background": `${theme.ui.surfaceRaised}99`,
+      "editorStickyScroll.border": theme.ui.border,
+      "editorStickyScroll.shadow": "#00000000",
+      "scrollbar.shadow": "#00000000",
     },
   });
 }

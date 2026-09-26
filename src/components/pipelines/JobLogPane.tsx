@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDownToLine, Copy, Search, Sparkles, X } from "lucide-react";
+import { ArrowDownToLine, Copy, Search, X } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { analyzePipelineFailure, isRepoBusy, REPO_BUSY_MARKER } from "../../lib/tauri/commands";
 import { parseClaudeError } from "../../lib/claudeError";
 import { firstErrorIndex, looksLikeError, parseLog, type LogLine } from "../../lib/ansiLog";
@@ -313,7 +314,7 @@ export function JobLogPane({
             onClick={() => void askWhy()}
             className="flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)] px-2.5 text-[12px] font-semibold text-[var(--cf-accent)] transition-colors hover:bg-[color-mix(in_oklab,var(--cf-accent)_22%,transparent)]"
           >
-            <Sparkles size={12} />
+            <AiSparkles size={12} />
             {t("pipelines.whyDidItFail")}
           </button>
         )}

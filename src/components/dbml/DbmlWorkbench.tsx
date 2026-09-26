@@ -30,13 +30,13 @@ import {
   SlidersHorizontal,
   Spline,
   X,
-  Sparkles,
   Table2,
   Wand2,
   Wrench,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import "../../lib/monacoSetup";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { DbmlCanvas, DBML_CANVAS_ID, type DbmlCanvasHandle } from "./DbmlCanvas";
@@ -1504,7 +1504,7 @@ export function DbmlWorkbench({
           {/* The sparkle, in this workbench's own toolbar — the same place draw.io's injected one
               sits, and it opens the same panel. See `DiagramsView`. */}
           <ToolButton onClick={onAskAi} label={t("diagrams.ai.title")}>
-            <Sparkles size={15} />
+            <AiSparkles size={15} />
           </ToolButton>
           {/* Full screen last, next to the sparkle: both are things you do *to the view* rather
               than to the document. Disabled on the Datos surface — there is no canvas to fill. */}

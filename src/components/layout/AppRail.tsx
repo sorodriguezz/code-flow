@@ -19,7 +19,9 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useWindowStore } from "../../state/windowStore";
 import { useT } from "../../state/languageStore";
 import { Tooltip } from "../common/Tooltip";
+import { AiGlyph } from "../common/AiGlyph";
 import { TourLauncher } from "../tour/TourLauncher";
+import { useShortcutHint } from "../../lib/useShortcutHint";
 import { useAiRunStore } from "../../state/aiRunStore";
 
 /** The runs the Agentes app owns: a task's turn and a chain's step. See `aiRunStore`. */
@@ -526,17 +528,60 @@ export function AppRail() {
       </div>
 
       {/* Pinned to the foot of the rail rather than trailing the apps: the apps above are a list
-          you pick from and this is not one of them, so a fixed corner tells them apart better than
-          a rule does. It also stops the cap moving up and down as apps are added.
+          you pick from and neither of these is one of them, so a fixed corner tells them apart
+          better than a rule does. It also stops them moving up and down as apps are added.
 
-          Unconditional now. It used to come and go with whether the screen had an app tour, which
-          left the three repository views with an empty corner and their tour up in the title bar —
-          the split this button exists to have ended. A control that is always in the same place is
-          the whole argument for putting it here. */}
+          The assistant above the rule and the tour's cap below it, because the two have nothing to
+          do with each other (the user's placement, 2026-09-25). `my-1` on the rule, as on the one
+          under the workspace tile, so both rules on the rail keep the same room either side.
+
+          The cap is unconditional now. It used to come and go with whether the screen had an app
+          tour, which left the three repository views with an empty corner and their tour up in the
+          title bar — the split this button exists to have ended. A control that is always in the
+          same place is the whole argument for putting it here. */}
       <div className="mt-auto flex w-full flex-col items-center gap-1 pt-2">
-        <span className="h-px w-5 bg-[var(--cf-border)]" />
+        <AssistantButton />
+        <span className="my-1 h-px w-5 bg-[var(--cf-border)]" />
         <TourLauncher />
       </div>
     </aside>
+  );
+}
+
+/**
+ * The way into the assistant, at the foot of the rail — the user's placement (2026-09-25: "dejalo
+ * sobre el icono del tour guiado, pero sobre la linea … esto seria una app pero debe ir aparte al
+ * final abajo"). Shaped like an app, the same 36px square and 18px glyph, because that is what it
+ * reads as; kept apart from the list above because it is not one of the places that list switches
+ * between — the panel it opens docks beside whichever of them is on screen.
+ *
+ * It spent a day in the title bar beating in the accent. Here the glyph is painted in the logo's
+ * stroke instead, flowing while the panel is closed so it still reads as the door that matters (see
+ * `AiGlyph`). Open, there is nowhere left for it to lead: the flow stops and it
+ * holds a tinted pill, the way a pressed toggle does. Not the lifted sheet of the active app — on
+ * this rail that sheet means "the view you are in", and with the panel open beside an app the rail
+ * would claim two of them.
+ */
+function AssistantButton() {
+  const open = useUiStore((s) => s.aiPanelOpen);
+  const toggle = useUiStore((s) => s.toggleAiPanel);
+  const t = useT();
+  const hint = useShortcutHint();
+
+  return (
+    <Tooltip side="left" label={hint("panel.ai", t("statusbar.aiPanel"))}>
+      <button
+        type="button"
+        onClick={toggle}
+        data-tour="toggle-ai-panel"
+        aria-label={t("statusbar.aiPanel")}
+        aria-expanded={open}
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors ${
+          open ? "bg-[var(--cf-accent)]/15 hover:bg-[var(--cf-accent)]/20" : "hover:bg-[var(--cf-hover)]"
+        }`}
+      >
+        <AiGlyph size={18} still={open} />
+      </button>
+    </Tooltip>
   );
 }

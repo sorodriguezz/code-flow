@@ -1,11 +1,8 @@
 import { useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Copy, Minus, Sparkles, Square, X } from "lucide-react";
+import { Copy, Minus, Square, X } from "lucide-react";
 import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
-import { useShortcutHint } from "../../lib/useShortcutHint";
 import { useLayoutStore } from "../../state/layoutStore";
-import { useUiStore } from "../../state/uiStore";
-import { useT } from "../../state/languageStore";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 import { ChromeScope } from "./TabBar";
 
@@ -122,47 +119,6 @@ function WindowsControls() {
   );
 }
 
-/**
- * The way into the assistant, at the end of the bar where the "Acciones IA" menu used to be — the
- * user had that menu removed and this button moved up here from the status bar (2026-09-25), over
- * the panel it opens.
- *
- * Always in the accent, and beating lub-dub while the panel is closed, so it reads as the important
- * door rather than as one more glyph (also the user's ask). Open, there is nowhere left for it to
- * lead, so it stops and holds a tinted pill instead, the way a pressed toggle does. See `cf-ai-beat`
- * in `index.css`.
- */
-function AssistantButton() {
-  const open = useUiStore((s) => s.aiPanelOpen);
-  const toggle = useUiStore((s) => s.toggleAiPanel);
-  const t = useT();
-  const hint = useShortcutHint();
-
-  return (
-    <button
-      onClick={toggle}
-      data-tour="toggle-ai-panel"
-      title={hint("panel.ai", t("statusbar.aiPanel"))}
-      className={`relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-accent)] ${
-        open ? "bg-[var(--cf-accent)]/15 hover:bg-[var(--cf-accent)]/20" : "hover:bg-[var(--cf-hover)]"
-      }`}
-    >
-      {!open && (
-        <span
-          aria-hidden
-          className="cf-ai-beat-glow absolute -inset-[3px] rounded-full bg-[radial-gradient(circle,var(--cf-accent)_0%,var(--cf-accent)_30%,transparent_70%)]"
-        />
-      )}
-      {/* A span around the glyph rather than the class on the `<svg>`: the beat scales a plain box
-          about its centre, with none of an SVG root's transform-origin questions. `relative` keeps
-          it painting over the glow, which is positioned and comes first. */}
-      <span className={`relative flex ${open ? "" : "cf-ai-beat"}`}>
-        <Sparkles size={15} />
-      </span>
-    </button>
-  );
-}
-
 export function TitleBar() {
   const platform = usePlatform();
   const isMac = platform === "macos";
@@ -210,14 +166,16 @@ export function TitleBar() {
       <ChromeScope />
       <div className="min-w-0 flex-1 self-stretch" />
 
-      {/* The "Acciones IA" menu that ended this row is gone (2026-09-25), and the assistant's own
-          button took its place: each of the menu's rows had a quicker door already — this button
-          opens the assistant, a pull request's own tab reviews it, and the sidebar's glasses (or
-          the palette) review one from its link. */}
-      <div className="flex shrink-0 items-center gap-2 self-stretch">
-        <AssistantButton />
-        {!isMac && <WindowsControls />}
-      </div>
+      {/* The "Acciones IA" menu that ended this row is gone (2026-09-25): each of its rows had a
+          quicker door already — the assistant's own button, a pull request's own tab to review it,
+          and the sidebar's glasses (or the palette) to review one from its link. That button took
+          the menu's place here for a day, then moved to the foot of the app rail, where it reads as
+          the app it opens — see `AssistantButton` in `AppRail`. */}
+      {!isMac && (
+        <div className="flex shrink-0 items-center self-stretch">
+          <WindowsControls />
+        </div>
+      )}
     </header>
   );
 }

@@ -5,12 +5,17 @@ Everything else in this directory is a build output of `scripts/build-iris-runti
 | | |
 |---|---|
 | `runtime/` | a `jlink`-trimmed Java runtime (~36 MB) |
-| `intersystems-jdbc-<version>.jar` | the driver, from Maven Central, verified against a pinned SHA-256 |
+| `intersystems-jdbc-<version>.jar` | the IRIS driver, from Maven Central, verified against a pinned SHA-256 |
+| `ojdbc11-<version>.jar` | Oracle's thin JDBC driver, from Maven Central, pinned the same way |
 | `iris-bridge.jar` | compiled from `src-tauri/java/` |
 
 InterSystems IRIS has no Rust driver, so `datasource/iris.rs` drives the vendor's JDBC driver
-through a small Java sidecar. Shipping the runtime is what keeps that invisible to users — they
-install nothing.
+through a small Java sidecar. Oracle rides the same sidecar (`datasource/oracle.rs`): its thin
+driver is pure Java, which is what lets Oracle work without an Oracle client installed. Shipping the
+runtime is what keeps both invisible to users — they install nothing.
+
+`ojdbc11` is distributed under the Oracle Free Use Terms and Conditions, which permit redistribution;
+the jar carries that licence itself (`META-INF/license.txt`) and is shipped unmodified.
 
 ## Building them
 

@@ -1,6 +1,6 @@
 //! Identifier quoting, paging and the DML the data editor generates.
 //!
-//! One module for all three SQL dialects because the *shape* of these statements is identical and
+//! One module for every SQL dialect because the *shape* of these statements is identical and
 //! only the punctuation differs — writing them out per driver would be three copies of the same
 //! `UPDATE … WHERE` with the brackets changed, and the day one copy gained a fix the others
 //! wouldn't.
@@ -20,10 +20,13 @@ use super::{DbCell, DbNodeRef, DbRowEdit, DbRowEditKind, DbSortKey, SqlDialect};
 
 /// Wraps an identifier so a name that is a keyword, mixed-case or contains a space still resolves.
 ///
-/// Postgres and IRIS use `"…"`; T-SQL uses `[…]`. In each, the closer is escaped by doubling it.
+/// Postgres, IRIS, SQLite and Oracle use `"…"`; T-SQL uses `[…]`; MySQL and MariaDB use backticks,
+/// which work whatever the session's `sql_mode` (`"…"` only means an identifier there under
+/// `ANSI_QUOTES`). In each, the closer is escaped by doubling it.
 pub fn quote_ident(name: &str, dialect: SqlDialect) -> String {
     match dialect {
         SqlDialect::TSql => format!("[{}]", name.replace(']', "]]")),
+        SqlDialect::MySql { .. } => format!("`{}`", name.replace('`', "``")),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
 }
@@ -43,6 +46,72 @@ pub fn quote_literal(value: Option<&str>) -> Result<String, String> {
         );
     }
     Ok(format!("'{}'", value.replace('\'', "''")))
+}
+
+/// A value as a literal *in this dialect* — the one every generated statement goes through.
+///
+/// [`quote_literal`] is right for every dialect but one. In MySQL and MariaDB's default mode a
+/// backslash escapes the character after it inside a string, so doubling quotes alone is not
+/// enough: the value `\' OR 1=1 --` would become `'\'' OR 1=1 --'`, where `\'` is an escaped quote,
+/// the next `'` closes the literal, and the rest runs as SQL. So there the backslash is doubled
+/// first. A server running with `NO_BACKSLASH_ESCAPES` reads a backslash as itself, and doubling it
+/// there would *store two* — which is why the session reads its `sql_mode` and the dialect carries
+/// the answer, instead of this guessing.
+pub fn literal(value: Option<&str>, dialect: SqlDialect) -> Result<String, String> {
+    match (value, dialect) {
+        (Some(text), SqlDialect::MySql { backslash_escapes: true }) => {
+            quote_literal(Some(&text.replace('\\', "\\\\")))
+        }
+        _ => quote_literal(value),
+    }
+}
+
+/// One cell's value as a literal, knowing its column.
+///
+/// Only binary columns differ from [`literal`]: the drivers that render a blob as the engine's own
+/// hex literal — SQLite's `X'00FF'`, MySQL's `0x00FF` — need it written back *unquoted*, or the
+/// blob would be replaced by the text of its own literal. It is emitted verbatim only when it is
+/// exactly that shape and nothing but hex digits, so there is nothing in it to escape.
+fn cell_literal(cell: &DbCell, dialect: SqlDialect) -> Result<String, String> {
+    if let Some(value) = cell.value.as_deref() {
+        let binary_column = {
+            let t = cell.type_name.to_ascii_uppercase();
+            // MySQL's `BIT(n)` is a bit string: its value arrives as bytes, is shown as `0x01`, and
+            // has to go back as that literal too — quoted, it is a string too long for the column.
+            t.contains("BLOB") || t.contains("BINARY") || (matches!(dialect, SqlDialect::MySql { .. }) && t.starts_with("BIT"))
+        };
+        let hex = |digits: &str| digits.chars().all(|c| c.is_ascii_hexdigit());
+        let verbatim = binary_column
+            && match dialect {
+                SqlDialect::Sqlite | SqlDialect::MySql { .. } => {
+                    let quoted = (value.starts_with("X'") || value.starts_with("x'"))
+                        && value.ends_with('\'')
+                        && value.len() >= 3
+                        && hex(&value[2..value.len() - 1]);
+                    let prefixed = matches!(dialect, SqlDialect::MySql { .. })
+                        && value.len() > 2
+                        && (value.starts_with("0x") || value.starts_with("0X"))
+                        && hex(&value[2..]);
+                    quoted || prefixed
+                }
+                _ => false,
+            };
+        if verbatim {
+            return Ok(value.to_string());
+        }
+        // Oracle has no hex literal at all; the JDBC bridge shows `RAW`/`BLOB` bytes as `0x…`, and
+        // `HEXTORAW` is how those bytes go back in.
+        let upper = cell.type_name.to_ascii_uppercase();
+        if dialect == SqlDialect::Oracle
+            && (upper.contains("RAW") || upper.contains("BLOB"))
+            && value.len() > 2
+            && (value.starts_with("0x") || value.starts_with("0X"))
+            && hex(&value[2..])
+        {
+            return Ok(format!("HEXTORAW('{}')", &value[2..]));
+        }
+    }
+    literal(cell.value.as_deref(), dialect)
 }
 
 /// `schema.table`, both quoted, with the schema left off when there isn't one.
@@ -90,10 +159,16 @@ pub fn select_page(
     let order = (!keys.is_empty()).then(|| format!(" ORDER BY {}", keys.join(", ")));
 
     Ok(match dialect {
-        SqlDialect::Postgres => format!(
+        SqlDialect::Postgres | SqlDialect::MySql { .. } | SqlDialect::Sqlite => format!(
             "SELECT * FROM {target}{where_clause}{}{}",
             order.unwrap_or_default(),
             format_args!(" LIMIT {limit} OFFSET {offset}"),
+        ),
+        // 12c's row-limiting clause. Unlike T-SQL's it needs no `ORDER BY` to be legal — without
+        // one the window is simply whatever order the scan produced, as it is for `LIMIT` elsewhere.
+        SqlDialect::Oracle => format!(
+            "SELECT * FROM {target}{where_clause}{} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY",
+            order.unwrap_or_default(),
         ),
         SqlDialect::TSql => {
             // `OFFSET … FETCH` is only valid after an `ORDER BY`; ordering by the first column of
@@ -151,7 +226,7 @@ fn identity_clause(keys: &[DbCell], dialect: SqlDialect) -> Result<String, Strin
         let column = quote_ident(&key.column, dialect);
         match &key.value {
             None => parts.push(format!("{column} IS NULL")),
-            Some(value) => parts.push(format!("{column} = {}", quote_literal(Some(value))?)),
+            Some(_) => parts.push(format!("{column} = {}", cell_literal(key, dialect)?)),
         }
     }
     Ok(parts.join(" AND "))
@@ -182,7 +257,7 @@ pub fn edit_statement(
                 edit.values.iter().map(|cell| quote_ident(&cell.column, dialect)).collect();
             let mut values = Vec::with_capacity(edit.values.len());
             for cell in &edit.values {
-                values.push(quote_literal(cell.value.as_deref())?);
+                values.push(cell_literal(cell, dialect)?);
             }
             Ok(format!(
                 "INSERT INTO {target} ({}) VALUES ({})",
@@ -199,7 +274,7 @@ pub fn edit_statement(
                 assignments.push(format!(
                     "{} = {}",
                     quote_ident(&cell.column, dialect),
-                    quote_literal(cell.value.as_deref())?
+                    cell_literal(cell, dialect)?
                 ));
             }
             Ok(format!(
@@ -331,6 +406,64 @@ mod tests {
         ];
         let sql = select_page(&node(), SqlDialect::Postgres, "", &sort, 0, 50).unwrap();
         assert!(sql.contains(r#"ORDER BY "created_at" DESC, "name" ASC"#), "{sql}");
+    }
+
+    const MYSQL: SqlDialect = SqlDialect::MySql { backslash_escapes: true };
+
+    /// The MySQL twin of the test above, and as important: in its default mode a backslash escapes
+    /// the next character, so a value ending in one must not be able to swallow the closing quote.
+    #[test]
+    fn a_backslash_in_a_value_cannot_escape_its_literal_in_mysql() {
+        assert_eq!(literal(Some("\\' OR 1=1 --"), MYSQL).unwrap(), "'\\\\'' OR 1=1 --'");
+        assert_eq!(literal(Some("C:\\dir\\"), MYSQL).unwrap(), "'C:\\\\dir\\\\'");
+        assert_eq!(literal(Some("it's"), MYSQL).unwrap(), "'it''s'");
+        assert_eq!(literal(None, MYSQL).unwrap(), "NULL");
+        // Under `NO_BACKSLASH_ESCAPES` a backslash is plain text, and doubling it would store two.
+        let plain = SqlDialect::MySql { backslash_escapes: false };
+        assert_eq!(literal(Some("C:\\dir"), plain).unwrap(), "'C:\\dir'");
+        // Every other dialect is untouched by this.
+        assert_eq!(literal(Some("a\\b"), SqlDialect::Oracle).unwrap(), "'a\\b'");
+    }
+
+    #[test]
+    fn a_mysql_edit_escapes_through_the_dialect() {
+        let edit = DbRowEdit {
+            kind: DbRowEditKind::Update,
+            values: vec![cell("name", Some("x\\"))],
+            keys: vec![cell("id", Some("1"))],
+            document: None,
+        };
+        let sql = edit_statement(&node(), MYSQL, &edit).unwrap();
+        assert_eq!(sql, "UPDATE `public`.`users` SET `name` = 'x\\\\' WHERE `id` = '1'");
+    }
+
+    /// A blob shown as its hex literal goes back as that literal — and nothing that merely looks
+    /// like one can ride through unquoted.
+    #[test]
+    fn a_binary_cell_is_written_back_as_hex_and_only_hex() {
+        let blob = |value: &str, type_name: &str| DbCell { column: "b".into(), value: Some(value.into()), type_name: type_name.into() };
+        assert_eq!(cell_literal(&blob("X'00FF'", "BLOB"), SqlDialect::Sqlite).unwrap(), "X'00FF'");
+        assert_eq!(cell_literal(&blob("0x00ff", "varbinary(16)"), MYSQL).unwrap(), "0x00ff");
+        assert_eq!(cell_literal(&blob("0x01", "bit(1)"), MYSQL).unwrap(), "0x01");
+        assert_eq!(cell_literal(&blob("0x00ff", "RAW(16)"), SqlDialect::Oracle).unwrap(), "HEXTORAW('00ff')");
+        assert_eq!(cell_literal(&blob("0xZZ", "BLOB"), SqlDialect::Oracle).unwrap(), "'0xZZ'");
+        // Not hex, or not a binary column: an ordinary quoted literal.
+        assert_eq!(cell_literal(&blob("X'00'); DROP TABLE t; --'", "BLOB"), SqlDialect::Sqlite).unwrap(), "'X''00''); DROP TABLE t; --'''");
+        assert_eq!(cell_literal(&blob("X'00FF'", "TEXT"), SqlDialect::Sqlite).unwrap(), "'X''00FF'''");
+        assert_eq!(cell_literal(&blob("0x41", "BLOB"), SqlDialect::Sqlite).unwrap(), "'0x41'");
+    }
+
+    #[test]
+    fn the_newer_dialects_quote_and_page_their_own_way() {
+        assert_eq!(quote_ident("a`b", MYSQL), "`a``b`");
+        assert_eq!(quote_ident("order", SqlDialect::Sqlite), "\"order\"");
+        let mysql = select_page(&node(), MYSQL, "", &[], 20, 10).unwrap();
+        assert!(mysql.ends_with("LIMIT 10 OFFSET 20"), "{mysql}");
+        let sqlite = select_page(&node(), SqlDialect::Sqlite, "", &[], 0, 10).unwrap();
+        assert!(sqlite.ends_with("LIMIT 10 OFFSET 0"), "{sqlite}");
+        let oracle = select_page(&node(), SqlDialect::Oracle, "", &[], 20, 10).unwrap();
+        assert!(oracle.ends_with("OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY"), "{oracle}");
+        assert!(!oracle.contains("ORDER BY"), "{oracle}");
     }
 
     #[test]

@@ -15,8 +15,8 @@ import {
   RotateCcw,
   Square,
   Trash2,
-  Wand2,
 } from "lucide-react";
+import { AiWand } from "../common/AiGlyph";
 import { AGENT_STATUS } from "./agentStatus";
 import { chainRollup } from "./chainStatus";
 import { RenameRow, Row, menuBlocks } from "./TreeRow";
@@ -936,7 +936,7 @@ function menuItemsFor(
       [
         { label: t("agents.newTaskHere"), icon: Plus, onClick: () => ctx.onNewTask(project.id) },
         { label: t("agents.newChainHere"), icon: Link2, onClick: () => ctx.onNewChain(project.id) },
-        { label: t("agents.newStoryHere"), icon: Wand2, onClick: () => ctx.onNewStory(project.id) },
+        { label: t("agents.newStoryHere"), icon: AiWand, onClick: () => ctx.onNewStory(project.id) },
       ],
       [
         { label: t("agents.renameProject"), icon: Pencil, onClick: () => ctx.startRename("project", project.id) },

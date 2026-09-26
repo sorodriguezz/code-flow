@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from "react";
-import { Sparkles, X } from "lucide-react";
+import { X } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
@@ -202,7 +203,7 @@ export function SandboxAiFill({
             : "border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
         }`}
       >
-        {runId ? <ThinkingOrb size="sm" /> : <Sparkles size={12} />}
+        {runId ? <ThinkingOrb size="sm" /> : <AiSparkles size={12} />}
         {t("dbml.sandbox.aiFillShort")}
         {pass && (
           <span className="font-mono tabular-nums opacity-70">
@@ -300,7 +301,7 @@ export function SandboxAiFill({
                   onClick={() => void generate()}
                   className="inline-flex h-[26px] items-center gap-1.5 rounded-lg border border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] px-3 text-[11px] font-semibold text-[var(--cf-accent)] transition-colors hover:brightness-110"
                 >
-                  <Sparkles size={11} />
+                  <AiSparkles size={11} />
                   {t("dbml.sandbox.aiFillGo")}
                 </button>
               )}

@@ -142,19 +142,45 @@ function placeCard(box: Box | null, placement: TourPlacement, card: Size, vp: Si
 }
 
 /** The arrow: a rotated square wearing the card's own fill and two of its borders, so it reads as a
- * corner of the card rather than a separate diamond parked next to it. */
+ * corner of the card rather than a separate diamond parked next to it. Clipped to the half that
+ * sticks out — the corner with its two borders — because in a see-through window the card's fill is
+ * see-through too, and the half lying over the card would show as a darker triangle. */
 function Arrow({ side, at }: { side: Exclude<Side, null>; at: number }) {
-  const base = "absolute h-3 w-3 rotate-45 bg-[var(--cf-surface-raised)] border-[var(--cf-border)]";
+  const base = "cf-tour-arrow absolute h-3 w-3 rotate-45 bg-[var(--cf-surface-raised)] border-[var(--cf-border)]";
   if (side === "top") {
-    return <span aria-hidden style={{ left: at }} className={`${base} -top-[6px] -translate-x-1/2 border-l border-t`} />;
+    return (
+      <span
+        aria-hidden
+        style={{ left: at, clipPath: "polygon(0 0, 100% 0, 0 100%)" }}
+        className={`${base} -top-[6px] -translate-x-1/2 border-l border-t`}
+      />
+    );
   }
   if (side === "bottom") {
-    return <span aria-hidden style={{ left: at }} className={`${base} -bottom-[6px] -translate-x-1/2 border-b border-r`} />;
+    return (
+      <span
+        aria-hidden
+        style={{ left: at, clipPath: "polygon(100% 0, 100% 100%, 0 100%)" }}
+        className={`${base} -bottom-[6px] -translate-x-1/2 border-b border-r`}
+      />
+    );
   }
   if (side === "left") {
-    return <span aria-hidden style={{ top: at }} className={`${base} -left-[6px] -translate-y-1/2 border-b border-l`} />;
+    return (
+      <span
+        aria-hidden
+        style={{ top: at, clipPath: "polygon(0 0, 100% 100%, 0 100%)" }}
+        className={`${base} -left-[6px] -translate-y-1/2 border-b border-l`}
+      />
+    );
   }
-  return <span aria-hidden style={{ top: at }} className={`${base} -right-[6px] -translate-y-1/2 border-r border-t`} />;
+  return (
+    <span
+      aria-hidden
+      style={{ top: at, clipPath: "polygon(0 0, 100% 0, 100% 100%)" }}
+      className={`${base} -right-[6px] -translate-y-1/2 border-r border-t`}
+    />
+  );
 }
 
 /**

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Check, GripHorizontal, Sparkles, X } from "lucide-react";
+import { Check, GripHorizontal, X } from "lucide-react";
+import { AiGlyph, AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { AI_PROVIDERS, DEFAULT_AI_PROVIDER } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
@@ -270,7 +271,7 @@ export function NoteAiPanel({
         onPointerCancel={onDragEnd}
         className="flex cursor-grab touch-none items-center gap-1.5 border-b border-[var(--cf-border)] px-2.5 py-1.5 active:cursor-grabbing"
       >
-        <Sparkles size={13} className="shrink-0 text-[var(--cf-accent)]" />
+        <AiSparkles size={13} className="shrink-0" />
         <h2 className="min-w-0 flex-1 truncate text-[12px] font-semibold text-[var(--cf-text)]">
           {selection.trim() ? t("notes.ai.titleReplace") : t("notes.ai.titleWrite")}
         </h2>
@@ -436,7 +437,7 @@ export function NoteAiPanel({
               title={t("notes.ai.undoHint")}
               className={buttonClass({ variant: "primary", size: "sm" })}
             >
-              <Sparkles size={11} />
+              <AiGlyph size={11} onFill />
               {t("notes.ai.write")}
             </button>
           </>

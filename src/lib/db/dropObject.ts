@@ -73,9 +73,15 @@ export function dropContainerSql(
   if (language === "redis") return null;
   if (language === "javascript") return `db.runCommand({ "dropDatabase": 1 })`;
 
+  if (!canDropContainer(kind)) return null;
   const schema = node.schema ?? node.name;
   if (kind === "postgres" || kind === "supabase") {
     return `DROP SCHEMA ${quoteIdent(schema, kind)} CASCADE`;
+  }
+  // MySQL's schema is its database, and dropping one takes everything in it in one statement —
+  // the same all-or-nothing Postgres gets from `CASCADE`.
+  if (engineInfo(kind).databaseIsSchema) {
+    return `DROP DATABASE ${quoteIdent(schema, kind)}`;
   }
   return [
     ...contents.views.map((view) => `DROP VIEW ${objectReference(view, kind)}`),
@@ -92,4 +98,17 @@ export function dropContainerSql(
  */
 export function canDropObjects(kind: DbKind): boolean {
   return engineInfo(kind).consoleLanguage !== "redis";
+}
+
+/**
+ * Whether the tree may offer to drop a *container* — a schema, or the database standing in for one.
+ *
+ * Two engines refuse on top of Redis. **Oracle**, because a schema there is a user: the only
+ * statement that removes one is `DROP USER … CASCADE`, which deletes the login along with the
+ * objects, and a row labelled "Drop schema" that also deletes an account is a row that does
+ * something else. **SQLite**, because its schemas are `main` — the file itself — and attached files,
+ * which `DETACH` merely closes; neither is dropping a schema.
+ */
+export function canDropContainer(kind: DbKind): boolean {
+  return canDropObjects(kind) && kind !== "oracle" && kind !== "sqlite";
 }

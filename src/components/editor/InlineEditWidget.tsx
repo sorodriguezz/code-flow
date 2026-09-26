@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Sparkles, X } from "lucide-react";
+import { Loader2, X } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { inlineEditWithAi } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { RunEngineChip } from "../ai/AiRunLog";
@@ -153,7 +154,7 @@ export function InlineEditWidget({
   return (
     <div className="absolute inset-x-3 top-3 z-20 rounded-lg border border-[var(--cf-accent)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
       <div className="flex items-center gap-2 px-2.5 py-1.5">
-        <Sparkles size={13} className="shrink-0 text-[var(--cf-accent)]" />
+        <AiSparkles size={13} className="shrink-0" />
         <input
           autoFocus
           value={instruction}

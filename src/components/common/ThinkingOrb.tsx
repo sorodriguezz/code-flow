@@ -6,7 +6,7 @@ import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
  * The "something is working" mark, shown wherever an engine is actually running — an agent turn,
  * a story generation, a review stage, a wiki write.
  *
- * It has eight looks now (`lib/thinkingDesigns`), chosen once in Settings and followed by every orb
+ * It has twelve looks now (`lib/thinkingDesigns`), chosen once in Settings and followed by every orb
  * in every window. The default is the one it always had, a reactor: two counter-rotating arcs with
  * three particles falling into a beating core. The falling is the part that matters — an agent
  * takes context in and burns it, and a ring turning on its own is what every "loading" in every
@@ -105,6 +105,38 @@ const PARTS: Record<ThinkingDesign, ReactElement> = {
           <span className="cf-orb-base cf-orb-base-b" />
         </span>
       ))}
+    </span>
+  ),
+  // Five, head first: each a carrier that sweeps across and a dot on it that rises and falls at
+  // twice the rate — the orbit's split, for the reason it gives.
+  infinity: (
+    <>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <span key={n} className={`cf-orb-trace cf-orb-trace-${n}`}>
+          <span className="cf-orb-comet" />
+        </span>
+      ))}
+    </>
+  ),
+  cube: (
+    <span className="cf-orb-cube">
+      <span className="cf-orb-face cf-orb-face-top" />
+      <span className="cf-orb-face cf-orb-face-left" />
+      <span className="cf-orb-face cf-orb-face-right" />
+    </span>
+  ),
+  writing: (
+    <span className="cf-orb-page">
+      <span className="cf-orb-line cf-orb-line-1" />
+      <span className="cf-orb-line cf-orb-line-2" />
+      <span className="cf-orb-line cf-orb-line-3" />
+      <span className="cf-orb-caret" />
+    </span>
+  ),
+  wave: (
+    <span className="cf-orb-tide">
+      <span className="cf-orb-wave" />
+      <span className="cf-orb-wave cf-orb-wave-2" />
     </span>
   ),
 };

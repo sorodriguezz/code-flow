@@ -270,7 +270,9 @@ function NavScrollCue({
           type="button"
           onClick={onClick}
           aria-label={label}
-          className="cf-panel-in pointer-events-auto flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
+          // `cf-pinned`: it sits over the list's last row, so a see-through window frosts it like
+          // anything else pinned over content (index.css) — its wrapper is the positioned one.
+          className="cf-pinned cf-panel-in pointer-events-auto flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
         >
           <Icon size={12} />
         </button>
@@ -475,8 +477,8 @@ export function SettingsView() {
 
         <div className="relative flex min-h-0 flex-1">
           {/* No `border-r`: the handle after this nav is the seam, and a border here doubled it.
-              `cf-fold-zone` only while folded — the whole icon rail is the fold button's hover
-              target, same as the projects sidebar's. See `index.css`. */}
+              `cf-fold-zone` in both states — the whole nav is the fold button's hover target, same
+              as the projects sidebar's. See `index.css`. */}
           <nav
             style={{ width: railWidth }}
             // `py-3` and no horizontal padding: the horizontal padding lives on the two children
@@ -488,9 +490,7 @@ export function SettingsView() {
             //
             // Nothing about the scrollbar is decided here — this element is `overflow-hidden` and
             // never scrolls. That is the scroller below, which says why it is painted as it is.
-            className={`flex shrink-0 flex-col overflow-hidden bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))] py-3 ${
-              folded ? "cf-fold-zone" : ""
-            }`}
+            className="cf-fold-zone flex shrink-0 flex-col overflow-hidden bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))] py-3"
           >
             {/* "There is more this way." Folded, the rail has no scrollbar to say it, and on a short
                 screen the list just stopped at the window's edge with sections still under it (user
@@ -629,9 +629,8 @@ export function SettingsView() {
               aria-label={folded ? t("settings.expandNav") : t("settings.collapseNav")}
               aria-expanded={!folded}
               style={{ left: railWidth - 10 }}
-              // Unconditional, and for the reason the sidebar's twin gives in full: the seam half
-              // of `cf-fold-toggle` self-gates on `cf-fold-zone` being in the DOM, so all this adds
-              // when unfolded is the button's own hover colour — which it was missing.
+              // Unconditional, like the sidebar's twin: it is what lights the button under the
+              // pointer and under the whole nav (`cf-fold-zone`), folded or not.
               className="cf-fold-toggle absolute top-6 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors"
             >
               {folded ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}

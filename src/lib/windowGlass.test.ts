@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { clampGlassLevel, DEFAULT_GLASS_LEVEL, glassFills, isGlassPainted, paintGlass } from "./windowGlass";
+import { ALL_THEMES, findTheme } from "./codeThemes";
+import {
+  clampGlassLevel,
+  DEFAULT_GLASS_LEVEL,
+  glassBoost,
+  glassFills,
+  isGlassPainted,
+  MAX_GLASS_BOOST,
+  paintGlass,
+} from "./windowGlass";
 
 /** Just enough of an element for `paintGlass`: an attribute set and a style map. */
 function fakeRoot() {
@@ -69,5 +78,34 @@ describe("paintGlass", () => {
 
   it("answers without a document", () => {
     expect(isGlassPainted()).toBe(false);
+  });
+});
+
+describe("glassBoost", () => {
+  // The slider's numbers were tuned on these two; thickening them would move the default look.
+  it("leaves CodeFlow's own schemes at the slider's numbers", () => {
+    expect(glassBoost(findTheme("codeflow-dark", "dark"))).toBe(0);
+    expect(glassBoost(findTheme("codeflow-light", "light"))).toBe(0);
+  });
+
+  // Dracula's comment grey measured 1.7:1 on the unthickened frame — the section labels vanished.
+  it("thickens a scheme whose muted text sits close to its ground", () => {
+    expect(glassBoost(findTheme("dracula", "dark"))).toBeGreaterThan(0);
+    expect(glassBoost(findTheme("nord", "dark"))).toBeGreaterThan(0);
+  });
+
+  it("is a whole number of points, never past the cap", () => {
+    for (const theme of ALL_THEMES) {
+      const boost = glassBoost(theme);
+      expect(Number.isInteger(boost), theme.id).toBe(true);
+      expect(boost, theme.id).toBeGreaterThanOrEqual(0);
+      expect(boost, theme.id).toBeLessThanOrEqual(MAX_GLASS_BOOST);
+    }
+  });
+
+  it("only ever thickens for the muted grey's sake", () => {
+    const dracula = findTheme("dracula", "dark");
+    const louder = { ...dracula, ui: { ...dracula.ui, textMuted: dracula.ui.text } };
+    expect(glassBoost(louder)).toBeLessThan(glassBoost(dracula));
   });
 });

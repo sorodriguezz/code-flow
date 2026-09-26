@@ -7,41 +7,14 @@ import { Check, ClipboardPaste, Copy, TriangleAlert, X } from "lucide-react";
 import { resizeTerminal, writeTerminal } from "../../lib/tauri/commands";
 import { registerTerminalSink } from "../../state/terminalStore";
 import { useThemeStore } from "../../state/themeStore";
+import { useGlassStore } from "../../state/glassStore";
+import { findTheme } from "../../lib/codeThemes";
+import { terminalTheme } from "../../lib/terminalTheme";
 import { TypedLineBuffer } from "../../lib/remote/typedLines";
 import { currentPlatform, isMac } from "../../lib/platform";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ContextMenu } from "../common/ContextMenu";
-
-/**
- * The selection wash, spelled out rather than left to xterm.
- *
- * xterm does ship a default, and it is the reason this looked *almost* right: a flat white at 30%
- * over `#1e1e27`. Against a terminal whose whole point is coloured text it reads as a smear rather
- * than as a highlight, and on the light theme the same rule washes out to near-nothing. Worse,
- * `selectionInactiveBackground` defaults dimmer still, and this pane loses focus constantly — the
- * dock's own tab strip takes it, so does the editor — which is how "I selected something and see
- * nothing" happens even where the active colour would have shown.
- *
- * Stated as the app's accent so a selection here looks like a selection everywhere else, and given
- * the same value active and inactive: what is selected does not stop being selected because you
- * looked at something else. No `selectionForeground`, deliberately — pinning one would flatten the
- * ANSI colours underneath, and the colours are the information.
- */
-const LIGHT_THEME = {
-  background: "#ffffff",
-  foreground: "#1c1c26",
-  cursor: "#1c1c26",
-  selectionBackground: "#3b82f659",
-  selectionInactiveBackground: "#3b82f659",
-};
-const DARK_THEME = {
-  background: "#1e1e27",
-  foreground: "#eceef5",
-  cursor: "#eceef5",
-  selectionBackground: "#60a5fa66",
-  selectionInactiveBackground: "#60a5fa66",
-};
 
 /**
  * How far back you can scroll in one terminal. Stated rather than inherited: it used to be
@@ -202,7 +175,10 @@ export function TerminalPane({
   autoFocus?: boolean;
 }) {
   const t = useT();
-  const resolved = useThemeStore((s) => s.resolved);
+  // The scheme on screen, so a shell wears the same colours as the editor — and, in a see-through
+  // window, the same glass (`terminalTheme`).
+  const scheme = useThemeStore((s) => findTheme(s.resolved === "dark" ? s.darkThemeId : s.lightThemeId, s.resolved));
+  const glass = useGlassStore((s) => s.enabled);
   const containerRef = useRef<HTMLDivElement>(null);
   const onCommandRef = useRef(onCommand);
   onCommandRef.current = onCommand;
@@ -221,9 +197,9 @@ export function TerminalPane({
   // a visibility change must not tear down a live shell.
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
-  /** Which mode the xterm instance is actually painted in, so a pane can tell whether it slept
-   *  through a theme change. Seeded by the construction effect below. */
-  const themedAs = useRef<"light" | "dark" | null>(null);
+  /** Which scheme (and glass) the xterm instance is actually painted in, so a pane can tell whether it
+   *  slept through a change. Seeded by the construction effect below. */
+  const themedAs = useRef<string | null>(null);
 
   /** Whether the "Copied" badge is showing. */
   const [copied, setCopied] = useState(false);
@@ -317,7 +293,10 @@ export function TerminalPane({
       // already resolves to anyway.
       fontFamily:
         "ui-monospace, Menlo, 'Cascadia Mono', 'Cascadia Code', Consolas, 'DejaVu Sans Mono', monospace",
-      theme: resolved === "dark" ? DARK_THEME : LIGHT_THEME,
+      theme: terminalTheme(scheme, glass),
+      // Read by the WebGL renderer when it builds its glyph atlas: a cleared ground is only honoured
+      // with it on. Kept off outside the glass, where the ground is solid and it would cost for nothing.
+      allowTransparency: glass,
       /**
        * Tells xterm it is talking to a ConPTY, on Windows only.
        *
@@ -343,7 +322,7 @@ export function TerminalPane({
       rightClickSelectsWord: false,
       disableStdin: readOnlyRef.current,
     });
-    themedAs.current = resolved;
+    themedAs.current = `${scheme.id}:${glass}`;
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
@@ -484,7 +463,7 @@ export function TerminalPane({
   }, [sessionId]);
 
   /**
-   * Repaints the terminal in the mode on screen — for the pane on screen, and nobody else.
+   * Repaints the terminal in the scheme on screen — for the pane on screen, and nobody else.
    *
    * Same reasoning as the `cursorBlink` and WebGL effects below, and the same reason it mattered
    * here: no pane is ever unmounted, so a dozen terminals from tabs nobody is looking at were all
@@ -494,17 +473,21 @@ export function TerminalPane({
    * wipe's `flushSync`, so a long-lived session's worth of hidden terminals was paid for as a
    * freeze before the animation could start, to repaint panes at `display: none`.
    *
-   * Keyed on `visible` as well, so a pane that slept through a flip is corrected the moment it is
+   * Keyed on `visible` as well, so a pane that slept through a change is corrected the moment it is
    * shown — before its first frame, since this runs on the same commit that reveals it. `themedAs`
-   * is what makes that safe to defer: it records the mode xterm is actually wearing, so waking is
-   * a no-op for a pane that happens to already be right (two flips back to where it started).
+   * is what makes that safe to defer: it records the scheme and glass xterm is actually wearing, so
+   * waking is a no-op for a pane that happens to already be right (two flips back to where it
+   * started). The glass also switches `allowTransparency`, which the WebGL effect below picks up by
+   * building its renderer again — it runs after this one, on the same change.
    */
   useEffect(() => {
     const term = termRef.current;
-    if (!term || !visible || themedAs.current === resolved) return;
-    term.options.theme = resolved === "dark" ? DARK_THEME : LIGHT_THEME;
-    themedAs.current = resolved;
-  }, [resolved, visible]);
+    const wanted = `${scheme.id}:${glass}`;
+    if (!term || !visible || themedAs.current === wanted) return;
+    term.options.allowTransparency = glass;
+    term.options.theme = terminalTheme(scheme, glass);
+    themedAs.current = wanted;
+  }, [scheme, glass, visible]);
 
   /**
    * The cursor blinks in the pane you are looking at, and only there.
@@ -640,9 +623,10 @@ export function TerminalPane({
    * so a chatty command (a build log, `npm install`) turned into a layout storm that stuttered
    * the whole window, not just this pane. WebGL draws the same glyphs off a texture atlas.
    *
-   * It is visually identical *here* specifically because the themes above are opaque hex with
-   * no alpha and `allowTransparency` is off — WebGL's known divergences are transparency and
-   * custom glyph rendering, and this pane uses neither.
+   * It is visually identical to the DOM renderer outside a see-through window, where the ground is
+   * opaque and `allowTransparency` is off. Inside one the ground is cleared and the option is on —
+   * this addon honours both (its glyph atlas is keyed on the option), which is why the renderer is
+   * built again when the glass switches: the effect is keyed on `glass` as well.
    *
    * **Keyed on `visible`, not on `sessionId`.** The addon used to be built beside the terminal and
    * disposed with it, which is to say never: no pane is ever unmounted, so every terminal the user
@@ -723,7 +707,7 @@ export function TerminalPane({
       if (retry !== undefined) window.clearTimeout(retry);
       webgl?.dispose();
     };
-  }, [visible, sessionId]);
+  }, [visible, sessionId, glass]);
 
   return (
     // The wrapper is exactly the box the container used to be, so nothing about xterm's geometry
@@ -758,7 +742,9 @@ export function TerminalPane({
 
           Moving the padding out here keeps the visual inset identical and leaves `containerRef` a
           pure content box, so what FitAddon measures is what xterm actually gets. */}
-      <div className="h-full w-full p-2">
+      {/* Painted with the terminal's own ground, so the inset reads as part of the shell rather
+          than as a frame of the dock around it — and cleared, like it, in a see-through window. */}
+      <div className="h-full w-full p-2" style={{ background: glass ? undefined : scheme.ui.bg }}>
         <div ref={containerRef} className="h-full w-full overflow-hidden" />
       </div>
 

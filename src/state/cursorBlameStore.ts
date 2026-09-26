@@ -26,8 +26,9 @@ interface CursorBlameState {
    * `null` when no pane owns the slot at all.
    *
    * An entry with an **empty `text`** is a distinct and load-bearing state: "this group owns the slot
-   * and has nothing to say" — blame off, a selection, multiple carets, a binary file, a blame still in
-   * flight. The focused pane claims the slot that way instead of calling `clear`, because `clear` is
+   * and has nothing to say" — a selection, multiple carets, a binary file, a blame still in flight. (Not
+   * the blame setting: that only governs the in-code annotation, and the bar answers either way.) The
+   * focused pane claims the slot that way instead of calling `clear`, because `clear` is
    * guarded and would be a no-op while the *previously* focused pane still held it: the bar would keep
    * showing another pane's answer for as long as the new pane took to blame. Consumers render nothing
    * for an empty string.

@@ -16,7 +16,7 @@ import { resolveTokenRule, tokenRulesFor, type CodeTheme } from "../codeThemes";
  * the one that decided it: in split view the same code is on screen twice, and any other
  * highlighter would colour the right-hand copy differently from the left-hand one — a difference
  * the eye reads as a bug in the note. Tokenising with Monaco and painting with `tokenRulesFor`
- * means the preview is the editor's colours by construction, in whichever of the twenty-one themes
+ * means the preview is the editor's colours by construction, in whichever of the twenty-four themes
  * the user picked. The second is that it costs no new dependency; `codeSnap` already does exactly
  * this to paint a snapshot onto a canvas.
  */

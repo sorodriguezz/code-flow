@@ -893,12 +893,12 @@ impl Drop for IrisSession {
 // Wire format
 // ---------------------------------------------------------------------------
 
-fn text(value: &Value, key: &str) -> Option<String> {
+pub(super) fn text(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string).filter(|s| !s.is_empty())
 }
 
 /// Turns the bridge's answer into the shape the whole workspace reads.
-fn decode_statement(sql: &str, answer: &Value) -> DbStatementResult {
+pub(super) fn decode_statement(sql: &str, answer: &Value) -> DbStatementResult {
     let mut result = DbStatementResult::empty(sql);
 
     result.columns = answer

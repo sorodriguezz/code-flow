@@ -13,7 +13,7 @@ import { onRadioKeys } from "./settingsNav";
  * works large is one to know about before picking it. Tiles and selection ring are the Appearance
  * section's mode tiles, so "picked" reads the same way in both.
  *
- * Eight tiles, four across once there is room and two before — a column count they fill. Choosing is
+ * Twelve tiles, four across once there is room and two before — column counts they fill. Choosing is
  * instant and global: every orb in every window subscribes to the one setting (`thinkingDesignStore`).
  */
 export function ThinkingDesignSettings() {

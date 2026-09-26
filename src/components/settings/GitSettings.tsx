@@ -119,9 +119,10 @@ export function GitSettings() {
             </>
           )}
 
-          {/* Under Git rather than Appearance, and it is not an obvious call: the thing this switches
-              on is a git read — a blame walk — rather than a colour. The `<label>` wrapper is what
-              makes the text clickable, since `Checkbox` is a hidden real input under a styled span. */}
+          {/* Under Git rather than Appearance: it shows git's reading of the file, even though since
+              2026-09-25 it only decides whether the code carries it — the Editor's status line shows
+              the blame either way. The `<label>` wrapper is what makes the text clickable, since
+              `Checkbox` is a hidden real input under a styled span. */}
           {tab === "blame" && (
             <>
               <label className="mb-1 flex items-center gap-2.5 text-[13px] text-[var(--cf-text)]">

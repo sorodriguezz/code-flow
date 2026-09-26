@@ -292,6 +292,16 @@ redis = { version = "1.6", default-features = false, features = [
     "script",
     "streams",
 ] }
+# MySQL and MariaDB (`datasource/mysql.rs`) — one driver for both, since they share the wire
+# protocol. `default-rustls-ring` is rustls on the *ring* provider and pure-Rust compression: the
+# plain `default-rustls` would bring aws-lc-rs, and a second rustls CryptoProvider in the binary
+# breaks reqwest, tonic, mongodb and tiberius at runtime (`cargo tree -i aws-lc-rs` must stay
+# empty). `client_ed25519` is MariaDB's ed25519 authentication plugin, the one auth method it has
+# that MySQL doesn't.
+mysql_async = { version = "0.37", default-features = false, features = [
+    "default-rustls-ring",
+    "client_ed25519",
+] }
 tauri-plugin-single-instance = "2.4.3"
 
 # The quick-ask hotkey. A system-wide accelerator is the only way the ask box can be what it is
@@ -394,11 +404,16 @@ windows-core = "0.61"
 # this app for the same private working set Task Manager shows in its own rows — see
 # `sysload::footprint` for why the resident size sysinfo hands out cannot be reconciled with it. Also
 # already in the tree (tauri, sysinfo and keyring all reach for it), so this names three modules and
-# compiles nothing that was not being compiled.
+# compiles nothing that was not being compiled. The DWM, Controls and WindowsAndMessaging modules are
+# for the see-through window's system backdrop — the frame extension, caption colour and
+# `WM_NCACTIVATE` that `glass::system_frame` sends (bindings only; nothing new to build).
 windows-sys = { version = "0.60", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Dwm",
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
+  "Win32_UI_Controls",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]

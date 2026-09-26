@@ -101,9 +101,9 @@ function fakeContext() {
 }
 
 describe("the notification sounds", () => {
-  it("are ten, each with its own id", () => {
+  it("are twelve, each with its own id", () => {
     const ids = NOTIFICATION_SOUNDS.map((sound) => sound.id);
-    expect(ids).toHaveLength(10);
+    expect(ids).toHaveLength(12);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids[0]).toBe(DEFAULT_NOTIFICATION_SOUND);
   });

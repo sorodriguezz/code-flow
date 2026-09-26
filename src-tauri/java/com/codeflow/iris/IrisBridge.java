@@ -25,7 +25,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * The JDBC half of CodeFlow's InterSystems IRIS driver.
+ * The JDBC half of CodeFlow's InterSystems IRIS and Oracle drivers.
+ *
+ * <p>Named for IRIS, which it was written for; Oracle came second and rides the same process. Its
+ * thin driver is pure Java too, so going through here is what makes Oracle work without an Oracle
+ * client installed. Nothing below is specific to either engine except the driver class the Rust
+ * side names in {@code open}.
  *
  * <p>IRIS has no pure-Rust driver and no wire protocol anyone outside InterSystems implements — its
  * only real client is the Type 4 JDBC driver, which is Java. So the Rust side spawns this program
@@ -126,7 +131,7 @@ public final class IrisBridge {
             default -> {
                 Session session = SESSIONS.get(sessionId);
                 if (session == null) {
-                    replyError(id, "There is no open IRIS session called '" + sessionId + "'.");
+                    replyError(id, "There is no open session called '" + sessionId + "'.");
                     return;
                 }
                 try {
@@ -138,7 +143,7 @@ public final class IrisBridge {
                                 "'" + op + "' is not something this bridge knows how to do.");
                     }));
                 } catch (java.util.concurrent.RejectedExecutionException e) {
-                    replyError(id, "That IRIS session is closing.");
+                    replyError(id, "That session is closing.");
                 }
             }
         }
@@ -236,11 +241,14 @@ public final class IrisBridge {
         }
         // The driver class is named explicitly rather than left to the ServiceLoader: when the jar
         // is missing entirely, "no suitable driver for jdbc:IRIS" is a far worse message than this.
+        // IRIS's is the default, so a request from before Oracle existed still opens.
+        String driverClass = Json.asString(request.get("driver"), "com.intersystems.jdbc.IRISDriver");
+        String driverName = Json.asString(request.get("driverName"), "InterSystems JDBC");
         try {
-            Class.forName("com.intersystems.jdbc.IRISDriver");
+            Class.forName(driverClass);
         } catch (ClassNotFoundException e) {
             throw new IllegalStateException(
-                    "The InterSystems JDBC driver isn't on this bridge's classpath. CodeFlow ships "
+                    "The " + driverName + " driver isn't on this bridge's classpath. CodeFlow ships "
                             + "it alongside the bundled Java runtime — reinstalling the app restores it.");
         }
 

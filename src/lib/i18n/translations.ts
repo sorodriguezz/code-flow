@@ -2238,7 +2238,11 @@ const en = {
   "notifications.soundDigitalHint": "Two short beeps.",
   "notifications.soundAir": "Breath",
   "notifications.soundAirHint": "A breath of air, with no notes in it.",
-  "settings.searchTermsSound": "tone, chime, volume, audio, ring, melody, bell",
+  "notifications.soundLevelUp": "Level up",
+  "notifications.soundLevelUpHint": "An 8-bit arpeggio climbing to a held note, with an echo.",
+  "notifications.soundVictory": "Victory",
+  "notifications.soundVictoryHint": "A console fanfare: three quick hits and the final chord.",
+  "settings.searchTermsSound": "tone, chime, volume, audio, ring, melody, bell, game, gamer, 8-bit",
   "settings.thinkingTitle": "Thinking design",
   "settings.thinkingHint": "The animation that shows a model is working — in the assistant, tasks, reviews and chat. Every window follows it.",
   "settings.searchTermsThinking": "orb, animation, thinking, loading, indicator, spinner, reactor",
@@ -2250,6 +2254,10 @@ const en = {
   "thinking.voice": "Voice",
   "thinking.matrix": "Matrix",
   "thinking.helix": "Helix",
+  "thinking.infinity": "Infinity",
+  "thinking.cube": "Cube",
+  "thinking.writing": "Writing",
+  "thinking.wave": "Wave",
   "vault.settingsHint": "How the keyring locks itself, what this machine remembers, and a look at the passwords already in it.",
   "vault.settingsFooter": "Nothing here leaves this machine. The keyring is encrypted with your master password and only opened in memory while it is unlocked.",
   "vault.healthTitle": "Password health",
@@ -2576,9 +2584,9 @@ const en = {
   "settings.secretScanHint":
     "Scans added lines for API keys, tokens and private keys. If it finds something, it asks for confirmation before committing.",
   "settings.blameDescription": "Line authorship in the editor.",
-  "settings.blameLabel": "Show who last changed the line the caret is on",
+  "settings.blameLabel": "Show in the code who last changed the line the caret is on",
   "settings.blameHint":
-    "A dim note at the end of the current line, and the same in the status bar. Clicking it opens that commit's change to the file side by side. Off by default: it runs a blame over the whole open file.",
+    "A dim note at the end of the current line. Clicking it opens that commit's change to the file side by side. The Editor's status bar always shows it, on or off.",
   "settings.identityPerWorkspace":
     "Identidad por workspace",
   "settings.identityPerWorkspaceHint":
@@ -3812,6 +3820,19 @@ const en = {
   "editor.deleteConfirm": "Move \"{name}\" to the Trash?",
   "editor.copyPath": "Copy Path",
   "editor.copyRelativePath": "Copy Relative Path",
+
+  // The explorer's clipboard: Copy and Cut take the files themselves — Copy Path is the one for text.
+  "editor.cut": "Cut",
+  "editor.cutN": "Cut {n} items",
+  "editor.copy": "Copy",
+  "editor.copyN": "Copy {n} items",
+  "editor.paste": "Paste",
+  "editor.pasteIntoItself": "Can't paste the folder \"{name}\" into itself",
+  // "Generate Tree" writes the folder's structure into a tab that is no file (`lib/scratchTabs`); the
+  // breadcrumb names it as such, and the last line of a tree cut short says where it stopped.
+  "editor.generateTree": "Generate Tree",
+  "editor.treeTruncated": "… truncated at {n} entries",
+  "editor.scratchCrumb": "Temporary",
 
   // Hiding entries from the explorer. The wording carries the one thing that matters about this
   // feature — that it is only about what is drawn — because the alternative reading is "delete".
@@ -5065,6 +5086,20 @@ const en = {
   "npm.quickFixInstall": "Install {name}",
   "shortcuts.formatDocument": "Format document",
   "editor.noFormatter": "Nothing here formats {language} files. TypeScript, JavaScript, JSON, CSS and HTML have one built in.",
+  // Paste JSON as Code (`components/editor/pasteJsonAsCode`): the name VS Code's quicktype extension
+  // uses, so the command palette finds it by the words people already search for.
+  "pasteJson.action": "Paste JSON as Code",
+  "pasteJson.namePrompt": "Name of the top-level type",
+  "pasteJson.insert": "Insert",
+  "pasteJson.badName": "Letters, digits and _ only, not starting with a digit",
+  "pasteJson.clipboardFailed": "Could not read the clipboard",
+  "pasteJson.emptyClipboard": "The clipboard is empty",
+  "pasteJson.notJson": "The clipboard does not hold valid JSON: {reason}",
+  "pasteJson.unsupported": "Paste JSON as Code does not write {language}. Insert TypeScript instead?",
+  "pasteJson.useTypeScript": "Insert TypeScript",
+  "pasteJson.nothing": "That JSON has no structure to write types for",
+  "pasteJson.failed": "Could not generate the code: {error}",
+  "pasteJson.fileGone": "The file left the screen before the code was ready — nothing was pasted",
   "npm.quickFixTypes": "Install {name} — the types this import is missing",
   // The two halves of "there is a newer one". The first needs a hand on the file; the second is
   // already allowed by the range and is shown only because "what is current?" is what was asked.
@@ -6697,6 +6732,7 @@ const en = {
   "db.mode.fields": "Fields",
   "db.mode.url": "URL",
   "db.urlOverrides": "A connection URL overrides host, port, database and user. Switch to Fields to use those instead.",
+  "db.sqliteFileHint": "An existing SQLite database file. It is opened, never created — a mistyped path is reported instead of becoming an empty database.",
   "db.target": "Target",
   "db.optionsN": "{n} option(s)",
   "db.driverOptions": "Driver options",

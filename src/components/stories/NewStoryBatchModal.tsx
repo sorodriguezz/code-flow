@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { BookText, ClipboardList, FileText, FolderGit2, ListChecks, Search, Sparkles } from "lucide-react";
+import { BookText, ClipboardList, FileText, FolderGit2, ListChecks, Search } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { TaskModelTag } from "../ai/ModelTag";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { Note } from "../api/settingsChrome";
@@ -442,7 +443,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
           <span>{t("stories.howManyNote")}</span>
         </p>
         <p className="flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-          <Sparkles size={11} className="mt-[2px] shrink-0" />
+          <AiSparkles size={11} className="mt-[2px] shrink-0" />
           <span>{t("stories.newBatchNote")}</span>
         </p>
       </div>

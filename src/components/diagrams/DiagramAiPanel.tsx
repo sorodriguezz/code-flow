@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { GripHorizontal, Maximize2, Minimize2, Sparkles, X } from "lucide-react";
+import { GripHorizontal, Maximize2, Minimize2, X } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { DiagramPreview } from "./DiagramPreview";
 import { DbmlCanvas } from "../dbml/DbmlCanvas";
@@ -324,7 +325,7 @@ export function DiagramAiPanel({ diagramId, onClose }: { diagramId: string; onCl
         onPointerCancel={onDragEnd}
       >
         <GripHorizontal size={12} className="text-[var(--cf-text-muted)]" />
-        <Sparkles size={12} />
+        <AiSparkles size={12} />
         <span className="flex-1 font-medium">{t("diagrams.ai.title")}</span>
         {/* Not disabled while busy — see the Escape handler for why closing is no longer the same
             thing as abandoning the run. */}

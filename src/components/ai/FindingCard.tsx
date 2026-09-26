@@ -16,10 +16,10 @@ import {
   OctagonAlert,
   TriangleAlert,
   Undo2,
-  Wand2,
   X,
   type LucideIcon,
 } from "lucide-react";
+import { AiWand } from "../common/AiGlyph";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { chipClass, type ChipTone } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
@@ -319,7 +319,7 @@ export function ResolveWithAiButton({
               disabled={resolving}
               className={buttonClass({ variant: "secondary", size: "sm" })}
             >
-              {resolving ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
+              {resolving ? <Loader2 size={13} className="animate-spin" /> : <AiWand size={13} />}
               {queued
                 ? t("assistant.queued")
                 : resolving

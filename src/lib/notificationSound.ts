@@ -1,11 +1,11 @@
 /**
- * The sounds a notification can make — ten of them, picked in Settings › Notifications › Sound.
+ * The sounds a notification can make — twelve of them, picked in Settings › Notifications › Sound.
  *
  * Synthesised rather than played from files. An `.mp3` would be simpler to read, and it would also
  * be a binary in the repository, a bundler rule, a decode step, and a thing nobody can adjust
  * without opening a DAW. Every sound here is a short score of notes played on a handful of
- * instruments made of oscillators; all ten weigh nothing in the bundle, and changing how one sounds
- * is changing a number here.
+ * instruments made of oscillators; all twelve weigh nothing in the bundle, and changing how one
+ * sounds is changing a number here.
  *
  * **The score is also the picture.** Each sound is written down as notes — when, how high, how long
  * — and played from that list, and Settings draws the same list as a small piano roll beside the
@@ -24,11 +24,14 @@
  * out of phase about twice a second, which is what makes the chords sound like they are breathing
  * rather than held.
  *
- * The other nine were written to the same brief — short, soft, and *finished* (each ends lower,
+ * The others were written to the same brief — short, soft, and *finished* (each ends lower,
  * resolved, or decaying, never on a question) — and levelled against it: at the same volume, none
  * is meant to be noticeably louder than the default. Where they differ is character: melodic
- * (Marimba, Arpa, Timbre), struck (Campanilla, Cristal, Cuenco), minimal (Gota, Digital) and one
- * with no pitch at all (Soplo).
+ * (Marimba, Arpa, Timbre), struck (Campanilla, Cristal, Cuenco), minimal (Gota, Digital), one with
+ * no pitch at all (Soplo), and two out of a game console (Nivel, Victoria) — the user asked for
+ * something "más gamer" (2026-09-25). Those two are played on the instruments an 8-bit console
+ * actually had, a square-wave lead and a triangle-wave bass, and they keep the brief the same way
+ * the rest do: each lands on its tonic, which is what a level-up and a fanfare are for.
  */
 
 import type { TranslationKey } from "./i18n/translations";
@@ -43,7 +46,9 @@ export type NotificationSoundId =
   | "doorbell"
   | "drop"
   | "digital"
-  | "air";
+  | "air"
+  | "levelup"
+  | "victory";
 
 export const DEFAULT_NOTIFICATION_SOUND: NotificationSoundId = "cadence";
 
@@ -55,7 +60,20 @@ export const DEFAULT_NOTIFICATION_SOUND: NotificationSoundId = "cadence";
 export const DEFAULT_NOTIFICATION_VOLUME = 70;
 
 /** The instruments a note can be played on. Each is a function below, a few oscillators deep. */
-type Voice = "warm" | "sine" | "bell" | "wood" | "pluck" | "glass" | "bowl" | "vibes" | "blip" | "drop" | "air";
+type Voice =
+  | "warm"
+  | "sine"
+  | "bell"
+  | "wood"
+  | "pluck"
+  | "glass"
+  | "bowl"
+  | "vibes"
+  | "blip"
+  | "drop"
+  | "air"
+  | "chip"
+  | "tri";
 
 /** One note of a score. */
 export interface ScoreNote {
@@ -74,6 +92,9 @@ export interface ScoreNote {
   attack?: number;
   /** For `warm`: a lowpass that opens as the note arrives — from, to, and over how long. */
   sweep?: readonly [from: number, to: number, over: number];
+  /** For `chip`: a pitch wobble on a held note — how fast, how wide, and how long after the strike
+   *  it starts. Delayed, as a console's sound driver does it: the note lands clean, then sings. */
+  vibrato?: readonly [rate: number, cents: number, after: number];
 }
 
 export interface NotificationSoundDef {
@@ -250,6 +271,57 @@ export const NOTIFICATION_SOUNDS: readonly NotificationSoundDef[] = (
       hintKey: "notifications.soundAirHint",
       score: [{ at: 0, hz: 450, to: 3200, voice: "air", peak: 0.22, dur: 0.42 }],
       level: 4,
+    },
+    {
+      // A level-up: G4 C5 E5 G5 swept up on the square channel, landing on C6 and held — the note
+      // lands clean and starts to sing a beat later. Under the landing, C3 on the triangle. The
+      // same five again, 90ms behind and at a third of the level, is the echo 8-bit music fakes
+      // with a second channel because the chip had no reverb; it is written out as notes, so the
+      // piano roll shows it too.
+      id: "levelup",
+      labelKey: "notifications.soundLevelUp",
+      hintKey: "notifications.soundLevelUpHint",
+      score: [
+        ...[0, 0.09].flatMap((delay) => {
+          const echo = delay > 0;
+          const peak = echo ? 0.016 : 0.05;
+          return [
+            ...[392, 523.25, 659.25, 783.99].map(
+              (hz, index): ScoreNote => ({ at: delay + index * 0.055, hz, voice: "chip", peak, dur: 0.1 }),
+            ),
+            {
+              at: delay + 0.22,
+              hz: 1046.5,
+              voice: "chip",
+              peak,
+              dur: echo ? 0.4 : 0.5,
+              vibrato: [6, 22, 0.12],
+            } satisfies ScoreNote,
+          ];
+        }),
+        { at: 0.22, hz: 130.81, voice: "tri", peak: 0.14, dur: 0.45 },
+      ],
+      level: 1,
+    },
+    {
+      // A console fanfare: three quick hits on the dominant, then the tonic held with vibrato —
+      // da-da-da-DAAA. Two square voices a fourth apart (A4 over E4, landing D5 over A4), the bare
+      // fifths a chip's two pulse channels play instead of full chords, and the bass walking A2 to
+      // D3 on the triangle, so the landing is a cadence and not only a higher note.
+      id: "victory",
+      labelKey: "notifications.soundVictory",
+      hintKey: "notifications.soundVictoryHint",
+      score: [
+        ...[0, 0.08, 0.16].flatMap((at): ScoreNote[] => [
+          { at, hz: 440, voice: "chip", peak: 0.045, dur: 0.065 },
+          { at, hz: 329.63, voice: "chip", peak: 0.028, dur: 0.065 },
+        ]),
+        { at: 0.24, hz: 587.33, voice: "chip", peak: 0.05, dur: 0.6, vibrato: [5.5, 20, 0.15] },
+        { at: 0.24, hz: 440, voice: "chip", peak: 0.03, dur: 0.6, vibrato: [5.5, 20, 0.15] },
+        { at: 0, hz: 110, voice: "tri", peak: 0.12, dur: 0.22 },
+        { at: 0.24, hz: 146.83, voice: "tri", peak: 0.15, dur: 0.55 },
+      ],
+      level: 0.9,
     },
   ] satisfies Omit<NotificationSoundDef, "length">[]
 ).map((sound) => ({
@@ -507,6 +579,51 @@ const VOICES: Record<Voice, (ctx: BaseAudioContext, dest: AudioNode, at: number,
     source.start(at);
     source.stop(at + note.dur + 0.02);
   },
+
+  /**
+   * A console's pulse channel: a square wave with only its top rolled off — bright enough to buzz
+   * the way an 8-bit chip does, where `blip`'s lower cut-off makes a beep of the same square.
+   * Struck and then stepped down, as a game's sound driver decays a note, with an optional delayed
+   * vibrato for the notes that are held.
+   */
+  chip: (ctx, dest, at, note) => {
+    const lowpass = ctx.createBiquadFilter();
+    lowpass.type = "lowpass";
+    lowpass.frequency.value = 5200;
+    lowpass.Q.value = 0.6;
+    lowpass.connect(dest);
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(note.hz, at);
+    if (note.vibrato) {
+      const [rate, cents, after] = note.vibrato;
+      const lfo = ctx.createOscillator();
+      const depth = ctx.createGain();
+      lfo.frequency.value = rate;
+      // Swells in over 80ms rather than switching on, so the wobble grows out of the held note.
+      depth.gain.setValueAtTime(0, at);
+      depth.gain.setValueAtTime(0, at + after);
+      depth.gain.linearRampToValueAtTime(cents, at + after + 0.08);
+      lfo.connect(depth);
+      depth.connect(osc.detune);
+      lfo.start(at);
+      lfo.stop(at + note.dur + 0.02);
+    }
+    gain.gain.setValueAtTime(0.0001, at);
+    gain.gain.linearRampToValueAtTime(note.peak, at + 0.003);
+    gain.gain.setValueAtTime(note.peak, at + note.dur * 0.3);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + note.dur);
+    osc.connect(gain);
+    gain.connect(lowpass);
+    osc.start(at);
+    osc.stop(at + note.dur + 0.02);
+  },
+
+  /** The console's triangle channel — the bass under a chiptune: round, and needing no filter. */
+  tri: (ctx, dest, at, note) => {
+    voice(ctx, dest, "triangle", note.hz, at, note.attack ?? 0.004, note.peak, note.dur);
+  },
 };
 
 /**
@@ -514,7 +631,7 @@ const VOICES: Record<Voice, (ctx: BaseAudioContext, dest: AudioNode, at: number,
  * gain back — so a preview can be faded out when the next one starts.
  *
  * Takes a `BaseAudioContext` rather than the live one so the same graph can be rendered offline:
- * that is how the ten were levelled against each other.
+ * that is how the twelve were levelled against each other.
  */
 export function renderNotificationSound(
   ctx: BaseAudioContext,
@@ -612,7 +729,7 @@ export function playNotificationSound(id: string, volume: number): void {
  * is a request to hear the thing, and swallowing that because a notification happened to arrive
  * half a second ago would read as a broken button.
  *
- * One preview at a time. Walking down the list clicking each sound would otherwise stack ten of
+ * One preview at a time. Walking down the list clicking each sound would otherwise stack all of
  * them, the bowl still ringing under the fourth; the one before fades out over 40ms (a hard cut
  * clicks) as the next begins.
  */

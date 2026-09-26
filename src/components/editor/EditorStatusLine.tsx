@@ -19,8 +19,10 @@ import { useT } from "../../state/languageStore";
  * means nothing anywhere else. It describes the pane that has focus (see `editorStatusStore`) and is
  * empty while no pane shows a file in Monaco.
  *
- * The line blame moved here from the app bar for the same reason, and still follows the setting: the
- * pane leaves its text empty while blame is off, and an empty text draws nothing.
+ * The line blame moved here from the app bar for the same reason, and does not follow the setting:
+ * that switch is the in-code annotation's alone (the user, 2026-09-25), so this always says who last
+ * changed the caret's line. An empty text — a selection, several carets, a blame in flight on a newly
+ * opened file — draws nothing.
  */
 export function EditorStatusLine() {
   const t = useT();

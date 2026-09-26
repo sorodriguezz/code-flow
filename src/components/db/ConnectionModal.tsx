@@ -307,6 +307,12 @@ export function ConnectionModal({
    * the engine, and this is the one piece of information that tells them apart.
    */
   const derivedName = useMemo(() => {
+    // A file is named by its file name — `shop.db` — which is what tells two SQLite connections
+    // apart; "localhost" would be the same for all of them.
+    if (engine.file) {
+      const file = config.database.trim().split(/[\\/]/).pop() ?? "";
+      return file || engine.label;
+    }
     if (mode === "url" && config.url.trim()) {
       try {
         const url = new URL(config.url.trim().replace(/^jdbc:/, ""));
@@ -318,7 +324,7 @@ export function ConnectionModal({
     const host = config.host.trim() || "localhost";
     const where = config.database.trim() ? `${host}/${config.database.trim()}` : host;
     return config.user.trim() ? `${config.user.trim()}@${where}` : where;
-  }, [mode, config.url, config.host, config.database, config.user, engine.label]);
+  }, [mode, config.url, config.host, config.database, config.user, engine.label, engine.file]);
 
   /** What a connect will actually address, once defaults are filled in. */
   const target = useMemo(() => {
@@ -328,6 +334,7 @@ export function ConnectionModal({
     const via = config.ssh_enabled
       ? ` ${t("db.viaTunnel", { host: config.ssh_host.trim() || "ssh" })}`
       : "";
+    if (engine.file) return config.database.trim();
     if (mode === "url" && config.url.trim()) return `${redactUrl(config.url.trim())}${via}`;
     const port = config.port || engine.defaultPort;
     const where = `${config.host || "localhost"}:${port}`;
@@ -336,7 +343,7 @@ export function ConnectionModal({
     // pointed at the old REST port (52773) obvious before it is saved rather than after it fails.
     if (config.kind === "iris") return `jdbc:IRIS://${where}${path}${via}`;
     return `${where}${path}${via}`;
-  }, [mode, config, engine.defaultPort, t]);
+  }, [mode, config, engine.defaultPort, engine.file, t]);
 
   /** What `save` would write, which is what "has this changed?" has to be asked about. */
   const pending = useMemo(
@@ -612,7 +619,10 @@ export function ConnectionModal({
                   { id: "schemas", label: t("db.tab.schemas") },
                   { id: "advanced", label: t("db.advanced") },
                 ] as { id: Tab; label: string }[]
-              ).map((entry) => (
+              )
+                // A file on this machine has nothing to tunnel to.
+                .filter((entry) => !(engine.file && entry.id === "ssh"))
+                .map((entry) => (
                 <button
                   key={entry.id}
                   type="button"
@@ -630,7 +640,20 @@ export function ConnectionModal({
             </div>
 
             <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
-              {tab === "general" ? (
+              {tab === "general" && engine.file ? (
+                // A file is its own address: no URL, no host, no credentials — the one question is
+                // which file.
+                <FileRow
+                  label={engine.databaseLabel}
+                  hint={t("db.sqliteFileHint")}
+                  value={config.database}
+                  onChange={(database) => {
+                    patch({ database });
+                    setOutcome(null);
+                  }}
+                  filters={[{ name: "SQLite", extensions: ["db", "sqlite", "sqlite3", "db3"] }]}
+                />
+              ) : tab === "general" ? (
                 <>
                   {/* Fields or URL — alternatives, so only one is on screen. */}
                   <div>
@@ -1101,15 +1124,18 @@ function FileRow({
   hint,
   value,
   onChange,
+  filters,
 }: {
   label: string;
   hint?: string;
   value: string;
   onChange: (value: string) => void;
+  /** What the dialog offers first; "All files" stays reachable in it on every platform. */
+  filters?: { name: string; extensions: string[] }[];
 }) {
   const t = useT();
   const browse = async () => {
-    const picked = await open({ multiple: false, directory: false });
+    const picked = await open({ multiple: false, directory: false, filters });
     if (typeof picked === "string") onChange(picked);
   };
   return (
@@ -1149,6 +1175,13 @@ function startupScriptExample(kind: DbKind): string {
     // on connect here — Redis has no session settings to establish.
     case "redis":
       return "CLIENT SETNAME codeflow";
+    case "mysql":
+    case "mariadb":
+      return "SET SESSION time_zone = '+00:00';";
+    case "sqlite":
+      return "PRAGMA foreign_keys = ON;";
+    case "oracle":
+      return "ALTER SESSION SET CURRENT_SCHEMA = APP";
     default:
       return "SET search_path TO app, public;";
   }
@@ -1670,6 +1703,14 @@ function DriverOptions({
     // keys on — `:` by convention, but a keyspace built on `/` or `.` would otherwise come back as
     // one flat list.
     redis: ["protocol", "namespace_separator", "client_name"],
+    // The MySQL driver takes nothing through here; its settings are the fields and the startup
+    // script. SQLite has no driver options at all.
+    mysql: [],
+    mariadb: [],
+    sqlite: [],
+    // `sid = true` connects by SID instead of service name; the rest are Oracle JDBC properties,
+    // passed to the thin driver as they are.
+    oracle: ["sid", "oracle.net.CONNECT_TIMEOUT", "oracle.jdbc.ReadTimeout"],
   };
   const unused = suggestions[kind].filter(
     (suggestion) => !options.some(([key]) => key === suggestion),

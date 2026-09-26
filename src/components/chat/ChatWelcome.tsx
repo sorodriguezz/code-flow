@@ -1,4 +1,5 @@
-import { AlertCircle, FileDown, GitCommitHorizontal, ScanEye, SquareTerminal, Sparkles, type LucideIcon } from "lucide-react";
+import { AlertCircle, FileDown, GitCommitHorizontal, ScanEye, SquareTerminal, type LucideIcon } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -77,7 +78,7 @@ const STARTERS: Starter[] = [
     draft: "chat.starterGitDraft",
   },
   {
-    icon: Sparkles,
+    icon: AiSparkles,
     label: "chat.starterDiffLabel",
     hint: "chat.starterDiffHint",
     draft: "chat.starterDiffDraft",
@@ -137,7 +138,7 @@ export function ChatWelcome({
           the same kind of moment one step apart — nothing asked yet — and giving each its own
           treatment would make the workspace look like two different products. */}
       <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">
-        <Sparkles size={20} />
+        <AiSparkles size={20} />
       </div>
 
       <div className="space-y-1">

@@ -11,6 +11,7 @@ import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { useTabDragStore, type TabDrag, type TabDropTarget } from "../../state/tabDragStore";
 import { useT } from "../../state/languageStore";
+import { isScratchPath, scratchName } from "../../lib/scratchTabs";
 
 export interface EditorTabItem {
   path: string;
@@ -249,10 +250,16 @@ export function EditorTabs({
       icon: tab.pinned ? PinOff : Pin,
       onClick: () => menu.togglePinned(tab.path),
     },
-    { label: t("editor.copyPath"), icon: ClipboardCopy, onClick: () => menu.copyPath(tab.path) },
-    // Next to Copy Path rather than at the bottom: both answer "where is this file", which is the
-    // question a strip of basenames leaves you with once a few of them are called `index.ts`.
-    { label: t("editor.revealInTree"), icon: ListTree, onClick: () => menu.revealInTree(tab.path) },
+    // Neither for a scratch tab (`lib/scratchTabs`): it lives nowhere, so there is no path to copy
+    // and no row to reveal.
+    ...(isScratchPath(tab.path)
+      ? []
+      : [
+          { label: t("editor.copyPath"), icon: ClipboardCopy, onClick: () => menu.copyPath(tab.path) },
+          // Next to Copy Path rather than at the bottom: both answer "where is this file", which is the
+          // question a strip of basenames leaves you with once a few of them are called `index.ts`.
+          { label: t("editor.revealInTree"), icon: ListTree, onClick: () => menu.revealInTree(tab.path) },
+        ]),
     { label: t("editor.splitRight"), icon: SplitSquareHorizontal, onClick: () => menu.splitRight(tab.path) },
     { label: t("editor.closeAllTabs"), icon: X, separated: true, onClick: menu.closeAll },
   ];
@@ -293,7 +300,7 @@ export function EditorTabs({
                 data-cf-tab={tab.path}
                 role="tab"
                 aria-selected={active}
-                title={tab.path}
+                title={isScratchPath(tab.path) ? scratchName(tab.path) : tab.path}
                 onPointerDown={(e) => beginDrag(e, tab.path)}
                 onPointerEnter={() => useRowHoverStore.getState().enter(hoverKey)}
                 onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}

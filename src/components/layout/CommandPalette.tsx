@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
+  Braces,
   KeyRound,
   Briefcase,
   ClipboardList,
@@ -25,6 +26,7 @@ import {
   Zap,
 } from "lucide-react";
 import { ServicesDockIcon } from "../services/ServicesDockIcon";
+import { canPasteJsonHere, pasteJsonInFocusedEditor } from "../editor/pasteJsonAsCode";
 import { fetchNow, pullNow, pushNow } from "../../lib/gitActions";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useMissingProjectsStore } from "../../state/missingProjectsStore";
@@ -132,6 +134,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const checkoutBranch = useRepoStore((s) => s.checkoutBranch);
   const checkoutRemoteBranch = useRepoStore((s) => s.checkoutRemoteBranch);
   const setActiveView = useUiStore((s) => s.setActiveView);
+  const activeView = useUiStore((s) => s.activeView);
   const openSettings = useUiStore((s) => s.openSettings);
   const openSettingsAt = useUiStore((s) => s.openSettingsAt);
   const openApiWorkspace = useUiStore((s) => s.openApiWorkspace);
@@ -251,6 +254,20 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
         group: "actions",
         onSelect: () => openCloneModal(),
       },
+      // Where VS Code users look for it (⇧⌘P, "paste json"). Listed only with a file open in the
+      // Editor — there is nothing to paste into anywhere else, and every row here has to do
+      // something. Runs from this very click or Enter, which the clipboard read needs.
+      ...(activeView === "editor" && canPasteJsonHere()
+        ? [
+            {
+              key: "action:paste-json",
+              icon: Braces,
+              label: t("pasteJson.action"),
+              group: "actions" as const,
+              onSelect: pasteJsonInFocusedEditor,
+            },
+          ]
+        : []),
     ];
 
     // The API client is app-global, so these work with no project open — but each one has to
@@ -334,6 +351,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     checkoutBranch,
     checkoutRemoteBranch,
     setActiveView,
+    activeView,
     openSettings,
     openSettingsAt,
     openApiWorkspace,

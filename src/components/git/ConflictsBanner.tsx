@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState } from "react";
-import { AlertTriangle, Check, Code2, GitMerge, Sparkles, X } from "lucide-react";
+import { AlertTriangle, Check, Code2, GitMerge, X } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -50,7 +51,7 @@ export function ConflictsBanner() {
               onClick={() => setAiFile(c.path)}
               className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)]"
             >
-              <Sparkles size={12} />
+              <AiSparkles size={12} />
               {t("conflicts.aiResolve")}
             </button>
             <button

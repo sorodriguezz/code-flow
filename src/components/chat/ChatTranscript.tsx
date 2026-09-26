@@ -1,5 +1,6 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, Sparkles } from "lucide-react";
+import { ArrowDown } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { AiRunLog } from "../ai/AiRunLog";
 import {
   ChatMessageBubble,
@@ -200,7 +201,7 @@ export function ChatTranscript({
           {count === 0 && session.loaded && !session.sending && (
             <div className="flex flex-col items-center gap-3 pt-16 text-center">
               <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">
-                <Sparkles size={20} />
+                <AiSparkles size={20} />
               </div>
               <p className="text-[14px] font-semibold">{t("chat.emptyTurnTitle")}</p>
               <p className="max-w-[360px] text-[13px] leading-relaxed text-[var(--cf-text-muted)]">

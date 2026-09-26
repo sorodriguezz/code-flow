@@ -6,7 +6,7 @@ import { useThemeStore } from "../../state/themeStore";
 import { useFileLanguage } from "../../lib/useFileLanguage";
 import { reconstructSides } from "../../lib/diffText";
 // The side effects Monaco needs before the first `<DiffEditor>` mounts — the bundled copy handed to
-// `@monaco-editor/react` (so nothing is fetched from a CDN), the language workers, and the 21 theme
+// `@monaco-editor/react` (so nothing is fetched from a CDN), the language workers, and the 24 theme
 // definitions. `main.tsx` used to import this at startup; it doesn't any more, precisely so that a
 // session which never opens a diff in split mode never pays for Monaco at all. Every module that
 // puts an editor on screen now has to say so itself, and this is that statement for this one.

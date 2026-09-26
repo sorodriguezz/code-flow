@@ -15,11 +15,11 @@ import {
   ListOrdered,
   Minus,
   Quote,
-  Sparkles,
   Strikethrough,
   Table,
   type LucideIcon,
 } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import type { MarkdownTool } from "../../lib/notes/markdownTools";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { ICON_BUTTON, ICON_BUTTON_ACCENT } from "./notesChrome";
@@ -167,7 +167,7 @@ export const NoteToolbar = memo(function NoteToolbar({
         data-tour="notes-ai"
         className={`${ICON_BUTTON_ACCENT} ${aiOpen ? "bg-[var(--cf-accent-soft)]" : ""}`}
       >
-        <Sparkles size={13} />
+        <AiSparkles size={13} />
       </button>
     </div>
   );

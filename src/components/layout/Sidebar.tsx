@@ -2228,11 +2228,11 @@ export function Sidebar() {
         // live half sat off to the right, against the panel it isn't part of. Dropping it leaves one
         // line, centred in the handle's own six pixels, with equal space to each panel.
         //
-        // `cf-fold-zone` only while folded: the whole rail is the fold toggle's hover target, which
-        // is the only way a control that small gets found by someone not already looking for it.
-        // Unfolded it is absent, so brushing a 300px panel on the way somewhere else lights nothing
-        // — there the handle is a live control with its own hover and needs no help. See `index.css`.
-        className={`flex shrink-0 flex-col overflow-hidden ${collapsed ? "cf-fold-zone" : ""}`}
+        // `cf-fold-zone` in both states: the whole panel is the fold toggle's hover target. Folded,
+        // that is the only way a control that small gets found by someone not already looking for
+        // it; unfolded, it is the same answer so the toggle has one manner either way (the user's
+        // call, 2026-09-25). See `index.css`.
+        className="cf-fold-zone flex shrink-0 flex-col overflow-hidden"
       >
         {/* Laid out at the width the panel is *heading for* rather than the width it currently is.
             The outer eases; this doesn't — so the contents are clipped by the fold instead of
@@ -2400,7 +2400,7 @@ export function Sidebar() {
           aria-expanded={!collapsed}
           style={{ left: railWidth - 10, top: collapsed ? 26 : 30, transform: "translateY(-50%)" }}
           // `cf-fold-toggle` in both states: it is what lights the toggle under the pointer, and
-          // while folded (where `cf-fold-zone` is in the DOM) under the whole rail as well.
+          // under the whole panel as well (`cf-fold-zone`, on the `aside` above).
           className="cf-fold-toggle absolute z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors"
         >
           {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}

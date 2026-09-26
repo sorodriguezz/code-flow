@@ -65,7 +65,6 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Smartphone,
-  Sparkles,
   SquarePen,
   SunMoon,
   TerminalSquare,
@@ -77,6 +76,7 @@ import {
   Waypoints,
   Wrench,
 } from "lucide-react";
+import { AiSparkles } from "../components/common/AiGlyph";
 import type { TranslationKey } from "./i18n/translations";
 import type { SettingsSectionId } from "../state/uiStore";
 
@@ -282,7 +282,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         id: "completion",
         labelKey: "localai.title",
         hintKey: "localai.hint",
-        icon: Sparkles,
+        icon: AiSparkles,
         searchKey: "settings.searchTermsCompletion",
       },
       // How the "a model is thinking" mark is drawn. Last of the panes that set something up, before

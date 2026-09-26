@@ -55,7 +55,7 @@ function port(value: string | undefined): number | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Engine names as people write them, mapped to the six this app speaks.
+ * Engine names as people write them, mapped to the engines this app speaks.
  *
  * Wider than the `DbKind` union on purpose: the entry was typed by a human — or imported from
  * 1Password, where the field is free text — and `postgresql` is not a different engine from
@@ -81,6 +81,14 @@ const DB_ALIASES: Record<string, DbKind> = {
   mongo: "mongodb",
   redis: "redis",
   valkey: "redis",
+  mysql: "mysql",
+  mariadb: "mariadb",
+  maria: "mariadb",
+  sqlite: "sqlite",
+  sqlite3: "sqlite",
+  oracle: "oracle",
+  oracledb: "oracle",
+  "oracle database": "oracle",
 };
 
 /** SSL modes as drivers spell them, mapped to the three this app has. */

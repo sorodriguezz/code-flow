@@ -21,8 +21,8 @@
 
    Six of these values are rewritten at runtime by the chosen editor theme (`applyThemeVars` in
    `lib/codeThemes.ts`) and `--cf-accent` by the accent picker. Everything in the "derived" group
-   below is computed *from* those with `color-mix`, which is what lets all 21 schemes get a hover
-   tint, a sunken tone or a strong border without anyone editing 21 palettes — and why none of them
+   below is computed *from* those with `color-mix`, which is what lets all 24 schemes get a hover
+   tint, a sunken tone or a strong border without anyone editing 24 palettes — and why none of them
    may be written as a literal. */
 :root {
   --cf-bg: #ebebf0;
@@ -126,8 +126,8 @@
   --cf-control: var(--cf-surface);
   --cf-accent-fill: var(--cf-accent);
   --cf-danger-fill: var(--cf-danger);
-  /* The brand stroke: the logo's violet → indigo → cyan. Reserved for a model at work (the orb, the
-     run beam) — the mark people already read as "the AI is running". */
+  /* The brand stroke: the logo's violet → indigo → cyan. A model at work (the orb, the run beam) —
+     the mark people already read as "the AI is running" — and, flowing, every AI icon (`AiGlyph`). */
   --cf-ai-a: #8b5cf6;
   --cf-ai-b: #6366f1;
   --cf-ai-c: #06b6d4;
@@ -600,10 +600,14 @@ textarea,
    audience for this. The rail is fifty pixels wide and is where the pointer already goes on its way
    to a project or a settings section, so the answer arrives before the question is asked.
 
-   Unfolded, none of this applies, and deliberately: there the handle is a live control with its
-   own hover behaviour, and a second thing lighting up 300px away every time you brushed the
-   divider on the way somewhere else would be noise reporting on a control you can already see.
-   The classes are simply not applied in that state. */
+   Unfolded, the panel answers the same way. It used not to, on the argument that an open panel's
+   button is a control you can already see, and that something pulsing every time the pointer
+   crossed the panel on its way elsewhere would be noise. The user overruled that (2026-09-25:
+   "cuando pongo el mouse encima de la barra lateral izquierda quiero que el boton de colapsar
+   tambien tenga la misma animacion de cuando esta colapsado"): one control, one manner, whichever
+   way the panel is. What stays folded-only is the seam's share of it — the hairline and its
+   `cf-seam-collapsed` reach. Unfolded, the seam is the `ResizeHandle`, whose glow answers a
+   different gesture, and the button pulsing along with it would be two replies to one approach. */
 .cf-seam-collapsed {
   position: relative;
 }
@@ -626,12 +630,8 @@ textarea,
    button would *drop* the highlight the rail just promised — the control going quiet exactly as you
    arrive at it, which reads as having missed.
 
-   It is also the only one that applies in both states, and the button carries this class in both
-   because of it. The two `cf-fold-zone` selectors describe a folded panel — the rail *is* the
-   button's hover target there — and they need no condition on the markup side to stay that way:
-   nothing has that class while a panel is unfolded, so they simply never match. What is left when
-   unfolded is `:hover` on the button itself, which is the plain "this control answers to the
-   pointer" the fold buttons were missing while open.
+   Unfolded it is two of the three, the panel and the button: the seam there is the `ResizeHandle`
+   and carries no `cf-fold-zone` (see above). The button carries `cf-fold-toggle` in both states.
 
    Two sibling selectors per trigger because the button may or may not be wrapped: `Tooltip` renders
    a `display: contents` span around its child, which changes nothing about layout and everything
@@ -681,6 +681,18 @@ textarea,
     animation: none;
     opacity: 0.65;
   }
+}
+
+/* …except while the pointer is on a dialog the panel opened. The sidebar's dialogs — clone, import,
+   new branch, new PR, connect a provider — are not portalled: each is a `fixed inset-0` scrim
+   rendered inside the panel, so to CSS the pointer anywhere on screen is "on the panel" for as long
+   as one is open, and the button would pulse behind the dim the whole time. `.fixed` is what those scrims
+   share. A rule of its own rather than a `:not(:has(…))` folded into the triggers: a selector the
+   engine does not know drops its whole rule, and here that would cost this exception, not the pulse. */
+.cf-fold-zone:has(.fixed:hover) ~ .cf-fold-toggle::after,
+.cf-fold-zone:has(.fixed:hover) ~ * .cf-fold-toggle::after {
+  animation: none;
+  opacity: 0;
 }
 
 /* A card arriving in a list — same move as cf-fade-in but slow enough to register as one, and
@@ -772,80 +784,101 @@ textarea,
   }
 }
 
-/* The title bar's AI button, beating in the accent while the assistant is closed (the user's ask,
-   2026-09-25: "un latido para que se vea que es importante"). A heartbeat rather than the breath
-   the bell and the battery share, because it says something else: those report a state, this marks
-   the way in. Lub-dub then rest, the first beat the stronger as a heart's is, and one faint glow
-   behind the glyph swelling with each beat.
+/* AI icons (`AiGlyph`): the glyph painted in the logo's own stroke — violet → indigo → cyan — with
+   that stroke flowing through it. First the assistant's door at the foot of the app rail (the user,
+   2026-09-25: "en vez de que haga el latido luminoso quiero que tenga la animacion de gradiante de
+   los colores principales del logo de codeflow"), then every AI icon in the app (2026-09-26: "quiero
+   que todos los iconos de ia como este tenga esa animacion gradiante") — the sparkle on an AI action,
+   the wand that drafts or resolves, the brain of the effort picker.
 
-   The accent and never the AI hues: the ThinkingOrb's colours mean a model is working, and this
-   beats whether anything is working or not. `TitleBar` drops both classes while the panel is open.
+   These are the hues `--cf-ai-*` reserves for a model at work; the user's call overrides that. What
+   still tells the two apart is the motion: the orb says "working" by turning like a reactor, and this
+   is the logo drifting through a glyph — the same whether anything is running or not.
 
-   Transform and opacity only, composited, for the reason `cf-bell-halo` gives: this loops for most
-   of a session. Once every 3s, and the user tuned both numbers: the cycle (it was 1.5s) and the
-   glow's strength (it peaked at 0.6). The two beats keep a heart's own pace — both inside the first
-   half second of the cycle — and the rest of it is the pause, so a longer cycle reads as a slower
-   pulse rather than as a heartbeat played in slow motion. */
-@keyframes cf-ai-beat {
-  0%,
-  18%,
-  100% {
-    transform: scale(1);
-  }
-  6% {
-    transform: scale(1.2);
-  }
-  10% {
-    transform: scale(1.02);
-  }
-  14% {
-    transform: scale(1.12);
-  }
+   How: the glyph is a mask, and what shows through it is a strip of the gradient sliding along
+   underneath, so the flow is a `transform` the compositor runs, like every loop in this file, rather
+   than a gradient repainted each frame. The strip is three glyphs wide and tiles one period of
+   `a b c b a` every two glyphs (the 66.67%), and it travels exactly one period per cycle, so the loop
+   has no seam at any size. At rest — the assistant open, or reduced motion — it sits at the start of
+   a period, which lays the logo's own left-to-right stroke across the glyph. `--cf-ai-phase` starts
+   every glyph's loop as if it had run since the page loaded, so all of them on screen flow in step.
+
+   The masks are lucide's glyphs (v1.25) copied in with lucide's stroke defaults, rather than read
+   from the package: its icon modules are not typed as entry points, and a copy that drifts from
+   upstream only means an older glyph. Both spellings of each property, for WKWebView — see
+   `.cf-fade-edge`. */
+.cf-ai-sparkles {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z'/><path d='M20 2v4'/><path d='M22 4h-4'/><circle cx='4' cy='20' r='2'/></svg>");
+}
+.cf-ai-wand {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72'/><path d='m14 7 3 3'/><path d='M5 6v4'/><path d='M19 14v4'/><path d='M10 2v2'/><path d='M7 8H3'/><path d='M21 16h-4'/><path d='M11 3H9'/></svg>");
+}
+.cf-ai-brain {
+  --cf-ai-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M12 18V5'/><path d='M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4'/><path d='M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5'/><path d='M17.997 5.125a4 4 0 0 1 2.526 5.77'/><path d='M18 18a4 4 0 0 0 2-7.464'/><path d='M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517'/><path d='M6 18a4 4 0 0 1-2-7.464'/><path d='M6.003 5.125a4 4 0 0 0-2.526 5.77'/></svg>");
 }
 
-@keyframes cf-ai-beat-glow {
-  0% {
-    opacity: 0;
-    transform: scale(0.55);
-  }
-  6% {
-    opacity: 0.3;
-    transform: scale(1);
-  }
-  10% {
-    opacity: 0.15;
-    transform: scale(0.92);
-  }
-  14% {
-    opacity: 0.25;
-    transform: scale(1.08);
-  }
-  32%,
-  100% {
-    opacity: 0;
-    transform: scale(1.3);
-  }
+.cf-ai-glyph {
+  position: relative;
+  display: block;
+  flex-shrink: 0;
+  overflow: hidden;
+  -webkit-mask-image: var(--cf-ai-mask);
+  mask-image: var(--cf-ai-mask);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
 }
 
-.cf-ai-beat {
+.cf-ai-glyph::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  /* The glyph plus the one period (two glyphs) the strip travels. */
+  width: 300%;
+  background: linear-gradient(90deg, var(--cf-ai-a), var(--cf-ai-b), var(--cf-ai-c), var(--cf-ai-b), var(--cf-ai-a))
+    0 0 / 66.6667% 100% repeat-x;
+}
+
+/* On a primary button: the same stroke, most of the way to the button's ink — pastel on the light
+   theme's white-on-indigo, deep on the dark theme's dark-on-lilac — or the indigo third of the loop
+   would vanish into the accent fill every cycle. */
+.cf-ai-glyph-on-fill::before {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--cf-ai-a) 30%, var(--cf-on-accent)),
+    color-mix(in oklab, var(--cf-ai-b) 30%, var(--cf-on-accent)),
+    color-mix(in oklab, var(--cf-ai-c) 30%, var(--cf-on-accent)),
+    color-mix(in oklab, var(--cf-ai-b) 30%, var(--cf-on-accent)),
+    color-mix(in oklab, var(--cf-ai-a) 30%, var(--cf-on-accent))
+  );
+}
+
+.cf-ai-glyph-flowing::before {
   will-change: transform;
-  animation: cf-ai-beat 3s ease-in-out infinite;
+  animation: cf-ai-flow 3s linear infinite;
+  animation-delay: var(--cf-ai-phase, 0s);
 }
 
-.cf-ai-beat-glow {
-  will-change: transform, opacity;
-  animation: cf-ai-beat-glow 3s ease-out infinite;
-}
-
-/* Still for reduced motion, but still marked: the glow stays, held faint, so the button keeps
-   reading as the important one without moving. */
-@media (prefers-reduced-motion: reduce) {
-  .cf-ai-beat {
-    animation: none;
+/* Rightward, the way the logo's stroke reads. From one period back to rest, so the frame the loop
+   restarts on is the frame the still states show. */
+@keyframes cf-ai-flow {
+  from {
+    transform: translateX(-66.6667%);
   }
-  .cf-ai-beat-glow {
+  to {
+    transform: translateX(0);
+  }
+}
+
+/* Still for reduced motion, and still the logo: the strip rests where the open state leaves it. */
+@media (prefers-reduced-motion: reduce) {
+  .cf-ai-glyph-flowing::before {
+    will-change: auto;
     animation: none;
-    opacity: 0.15;
   }
 }
 
@@ -1019,7 +1052,7 @@ textarea,
   }
 }
 
-/* The seven other looks of the thinking mark (`lib/thinkingDesigns`), picked in Settings › AI
+/* The eleven other looks of the thinking mark (`lib/thinkingDesigns`), picked in Settings › AI
    assistant › Thinking design. The rules the reactor keeps, they keep: drawn only in the
    assistant's own hues, so none can pass for the plain spinner non-AI work wears; `transform` and
    `opacity` only, so twenty in a task list cost the compositor and not the page; and every
@@ -1452,7 +1485,408 @@ textarea,
   animation-delay: calc(var(--cf-strand-delay) - 0.8s);
 }
 
-/* Still frames for the seven, under reduced motion — each one the moment of its own animation that
+/* Infinito — a comet running a figure-eight: the thought that goes out and comes back round. Five
+   dots, the head first and each after it smaller, dimmer and a step behind, so the tail draws the
+   curve as it goes. Each dot rides two elements, the orbit's split: a carrier swept side to side on
+   a sine, and the dot on it lifted and dropped on a sine at twice the rate — which traces an eight
+   rather than a circle (a 1:2 Lissajous figure), so nothing here can pass for a ring turning. The
+   sines are eased out of quarter-period keyframes with the standard ease-out/ease-in sine curves:
+   no path to measure and no script. A dot's lag is its delay, the same on both of its elements so it
+   stays on the curve. */
+@keyframes cf-infinity-x {
+  0% {
+    transform: translateX(0);
+    animation-timing-function: cubic-bezier(0.61, 1, 0.88, 1);
+  }
+  25% {
+    transform: translateX(var(--cf-inf-ax));
+    animation-timing-function: cubic-bezier(0.12, 0, 0.39, 0);
+  }
+  50% {
+    transform: translateX(0);
+    animation-timing-function: cubic-bezier(0.61, 1, 0.88, 1);
+  }
+  75% {
+    transform: translateX(calc(var(--cf-inf-ax) * -1));
+    animation-timing-function: cubic-bezier(0.12, 0, 0.39, 0);
+  }
+  100% {
+    transform: translateX(0);
+  }
+}
+@keyframes cf-infinity-y {
+  0% {
+    transform: translateY(0);
+    animation-timing-function: cubic-bezier(0.61, 1, 0.88, 1);
+  }
+  25% {
+    transform: translateY(var(--cf-inf-ay));
+    animation-timing-function: cubic-bezier(0.12, 0, 0.39, 0);
+  }
+  50% {
+    transform: translateY(0);
+    animation-timing-function: cubic-bezier(0.61, 1, 0.88, 1);
+  }
+  75% {
+    transform: translateY(calc(var(--cf-inf-ay) * -1));
+    animation-timing-function: cubic-bezier(0.12, 0, 0.39, 0);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+.cf-orb-trace {
+  --cf-inf-ax: calc(var(--cf-orb-size) * 0.34);
+  --cf-inf-ay: calc(var(--cf-orb-size) * 0.2);
+  --cf-inf-period: 2s;
+  position: absolute;
+  inset: 0;
+  animation: cf-infinity-x var(--cf-inf-period) linear var(--cf-inf-delay) infinite;
+}
+.cf-orb-comet {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--cf-comet);
+  height: var(--cf-comet);
+  margin: calc(var(--cf-comet) / -2) 0 0 calc(var(--cf-comet) / -2);
+  border-radius: 50%;
+  background: var(--cf-comet-color);
+  opacity: var(--cf-comet-opacity);
+  animation: cf-infinity-y calc(var(--cf-inf-period) / 2) linear var(--cf-inf-delay) infinite;
+}
+/* Head to tail: cyan into violet, the logo's stroke read backwards along the way it came. 0.12s
+   apart on a 2s lap — closer, and the tail bunched into a caterpillar at the ends of the loops,
+   where the path is slowest. The rest position is where each sits in the still frame: the
+   comet just through the crossing and climbing the right-hand loop. */
+.cf-orb-trace-1 {
+  --cf-inf-delay: -0.48s;
+  --cf-comet: calc(var(--cf-orb-size) * 0.16);
+  --cf-comet-color: var(--cf-ai-c);
+  --cf-comet-opacity: 1;
+  --cf-inf-rest-x: 0.966;
+  --cf-inf-rest-y: 0.5;
+}
+.cf-orb-trace-2 {
+  --cf-inf-delay: -0.36s;
+  --cf-comet: calc(var(--cf-orb-size) * 0.14);
+  --cf-comet-color: var(--cf-ai-c);
+  --cf-comet-opacity: 0.8;
+  --cf-inf-rest-x: 0.803;
+  --cf-inf-rest-y: 0.957;
+}
+.cf-orb-trace-3 {
+  --cf-inf-delay: -0.24s;
+  --cf-comet: calc(var(--cf-orb-size) * 0.12);
+  --cf-comet-color: var(--cf-ai-b);
+  --cf-comet-opacity: 0.62;
+  --cf-inf-rest-x: 0.527;
+  --cf-inf-rest-y: 0.896;
+}
+.cf-orb-trace-4 {
+  --cf-inf-delay: -0.12s;
+  --cf-comet: calc(var(--cf-orb-size) * 0.1);
+  --cf-comet-color: var(--cf-ai-a);
+  --cf-comet-opacity: 0.45;
+  --cf-inf-rest-x: 0.177;
+  --cf-inf-rest-y: 0.349;
+}
+.cf-orb-trace-5 {
+  --cf-inf-delay: 0s;
+  --cf-comet: calc(var(--cf-orb-size) * 0.08);
+  --cf-comet-color: var(--cf-ai-a);
+  --cf-comet-opacity: 0.3;
+  --cf-inf-rest-x: -0.198;
+  --cf-inf-rest-y: -0.388;
+}
+
+/* Cubo — an isometric cube that parts and closes: its three faces slide out along their own axes
+   and meet again, while the light runs round them — top, right, left — so it seems to turn in place.
+   Built by assembling rather than by rotating, which is the point: a turning square is a spinner.
+   The faces are clip-path rhombi inside the hexagon's own box, √3/2 as wide as it is tall, so the
+   cube is regular at every size. Parting and light are two animations on each face — `transform`
+   and `opacity`, different properties, so they run together — and only the light is staggered. */
+@keyframes cf-cube-part {
+  0%,
+  60%,
+  100% {
+    transform: translate(0, 0);
+  }
+  30% {
+    transform: translate(var(--cf-face-dx), var(--cf-face-dy));
+  }
+}
+@keyframes cf-cube-light {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  33% {
+    opacity: 1;
+  }
+}
+.cf-orb-cube {
+  --cf-cube-gap: calc(var(--cf-orb-size) * 0.06);
+  position: absolute;
+  inset: 5% 11.03%;
+}
+.cf-orb-face {
+  position: absolute;
+  inset: 0;
+  animation:
+    cf-cube-part 1.8s ease-in-out infinite,
+    cf-cube-light 1.8s ease-in-out infinite;
+}
+.cf-orb-face-top {
+  --cf-face-dx: 0px;
+  --cf-face-dy: calc(var(--cf-cube-gap) * -1);
+  clip-path: polygon(50% 0%, 100% 25%, 50% 50%, 0% 25%);
+  background: var(--cf-ai-c);
+}
+.cf-orb-face-right {
+  --cf-face-dx: calc(var(--cf-cube-gap) * 0.866);
+  --cf-face-dy: calc(var(--cf-cube-gap) * 0.5);
+  clip-path: polygon(50% 50%, 100% 25%, 100% 75%, 50% 100%);
+  background: var(--cf-ai-b);
+  animation-delay: 0s, -1.2s;
+}
+.cf-orb-face-left {
+  --cf-face-dx: calc(var(--cf-cube-gap) * -0.866);
+  --cf-face-dy: calc(var(--cf-cube-gap) * 0.5);
+  clip-path: polygon(0% 25%, 50% 50%, 50% 100%, 0% 75%);
+  background: var(--cf-ai-a);
+  animation-delay: 0s, -0.6s;
+}
+
+/* Escritura — three lines of text typed a few characters at a time, the caret riding the end of the
+   one being written; a beat of blinking once the paragraph is done, then it clears and starts over.
+   The model writing, which is most of what a model does here. In steps rather than a smooth growth:
+   a line that slides out reads as a progress bar, one that arrives in chunks reads as text. The
+   caret keeps each line's step count over the same stretch of the cycle, so it stays on the end of
+   the line without anything being measured, and it jumps lines while it is between steps. */
+@keyframes cf-write-1 {
+  0% {
+    transform: scaleX(0);
+    opacity: 1;
+    animation-timing-function: steps(5, end);
+  }
+  20% {
+    transform: scaleX(1);
+    opacity: 1;
+    animation-timing-function: linear;
+  }
+  80% {
+    transform: scaleX(1);
+    opacity: 1;
+    animation-timing-function: ease-in;
+  }
+  92%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+}
+@keyframes cf-write-2 {
+  0%,
+  20.5% {
+    transform: scaleX(0);
+    opacity: 1;
+    animation-timing-function: steps(4, end);
+  }
+  38% {
+    transform: scaleX(1);
+    opacity: 1;
+    animation-timing-function: linear;
+  }
+  80% {
+    transform: scaleX(1);
+    opacity: 1;
+    animation-timing-function: ease-in;
+  }
+  92%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+}
+@keyframes cf-write-3 {
+  0%,
+  38.5% {
+    transform: scaleX(0);
+    opacity: 1;
+    animation-timing-function: steps(3, end);
+  }
+  52% {
+    transform: scaleX(1);
+    opacity: 1;
+    animation-timing-function: linear;
+  }
+  80% {
+    transform: scaleX(1);
+    opacity: 1;
+    animation-timing-function: ease-in;
+  }
+  92%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0;
+  }
+}
+@keyframes cf-write-caret {
+  0% {
+    transform: translate(0, 0);
+    animation-timing-function: steps(5, end);
+  }
+  20% {
+    transform: translate(var(--cf-line-1), 0);
+    animation-timing-function: step-end;
+  }
+  20.5% {
+    transform: translate(0, var(--cf-line-gap));
+    animation-timing-function: steps(4, end);
+  }
+  38% {
+    transform: translate(var(--cf-line-2), var(--cf-line-gap));
+    animation-timing-function: step-end;
+  }
+  38.5% {
+    transform: translate(0, calc(var(--cf-line-gap) * 2));
+    animation-timing-function: steps(3, end);
+  }
+  52%,
+  100% {
+    transform: translate(var(--cf-line-3), calc(var(--cf-line-gap) * 2));
+  }
+}
+@keyframes cf-write-blink {
+  0%,
+  52% {
+    opacity: 1;
+    animation-timing-function: step-end;
+  }
+  58% {
+    opacity: 0;
+    animation-timing-function: step-end;
+  }
+  64% {
+    opacity: 1;
+    animation-timing-function: step-end;
+  }
+  70% {
+    opacity: 0;
+    animation-timing-function: step-end;
+  }
+  76% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+    animation-timing-function: ease-in;
+  }
+  92%,
+  100% {
+    opacity: 0;
+  }
+}
+.cf-orb-page {
+  --cf-line-h: calc(var(--cf-orb-size) * 0.13);
+  --cf-line-gap: calc(var(--cf-orb-size) * 0.235);
+  --cf-page-w: calc(var(--cf-orb-size) * 0.78);
+  --cf-line-1: var(--cf-page-w);
+  --cf-line-2: calc(var(--cf-page-w) * 0.84);
+  --cf-line-3: calc(var(--cf-page-w) * 0.55);
+  position: absolute;
+  top: calc(var(--cf-orb-size) * 0.2);
+  left: calc(var(--cf-orb-size) * 0.08);
+  width: var(--cf-page-w);
+  height: calc(var(--cf-line-gap) * 2 + var(--cf-line-h));
+}
+.cf-orb-line {
+  position: absolute;
+  left: 0;
+  height: var(--cf-line-h);
+  border-radius: calc(var(--cf-line-h) / 2);
+  transform-origin: left center;
+}
+.cf-orb-line-1 {
+  top: 0;
+  width: var(--cf-line-1);
+  background: var(--cf-ai-a);
+  animation: cf-write-1 2.6s infinite;
+}
+.cf-orb-line-2 {
+  top: var(--cf-line-gap);
+  width: var(--cf-line-2);
+  background: var(--cf-ai-b);
+  animation: cf-write-2 2.6s infinite;
+}
+.cf-orb-line-3 {
+  top: calc(var(--cf-line-gap) * 2);
+  width: var(--cf-line-3);
+  background: var(--cf-ai-c);
+  animation: cf-write-3 2.6s infinite;
+}
+.cf-orb-caret {
+  --cf-caret-h: calc(var(--cf-orb-size) * 0.24);
+  position: absolute;
+  top: calc((var(--cf-line-h) - var(--cf-caret-h)) / 2);
+  left: 0;
+  width: max(1px, calc(var(--cf-orb-size) * 0.06));
+  height: var(--cf-caret-h);
+  border-radius: 1px;
+  background: var(--cf-accent);
+  animation:
+    cf-write-caret 2.6s infinite,
+    cf-write-blink 2.6s infinite;
+}
+
+/* Onda — two waves running through each other the opposite way, a long slow one and a short quick
+   one, like a signal being listened to. Each is a strip twice the orb's width masked to a line — the
+   curve is an SVG in the mask, tiled once per orb width, drawn half a period past both edges of its
+   tile so the tiles join without a notch — sliding one orb width per cycle: a seamless loop, and the
+   moving part is a `transform`. Its colour is a gradient on the same strip, tiled the same way, so it
+   travels with the wave. The ends fade on a still mask on the layer that holds both, so the waves
+   come out of nothing and go back into it instead of being cut off. */
+@keyframes cf-wave-run {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+.cf-orb-tide {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 24%, #000 76%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 24%, #000 76%, transparent);
+}
+.cf-orb-wave {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 200%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--cf-ai-a), var(--cf-ai-b) 50%, var(--cf-ai-a)) 0 0 / var(--cf-orb-size) 100% repeat-x;
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'><path d='M-20 20 Q-10 38 0 20 T20 20 T40 20 T60 20' fill='none' stroke='black' stroke-width='5.5'/></svg>");
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'><path d='M-20 20 Q-10 38 0 20 T20 20 T40 20 T60 20' fill='none' stroke='black' stroke-width='5.5'/></svg>");
+  -webkit-mask-size: var(--cf-orb-size) 100%;
+  mask-size: var(--cf-orb-size) 100%;
+  -webkit-mask-repeat: repeat-x;
+  mask-repeat: repeat-x;
+  animation: cf-wave-run 1.9s linear infinite;
+}
+.cf-orb-wave-2 {
+  background: linear-gradient(90deg, var(--cf-ai-c), var(--cf-accent) 50%, var(--cf-ai-c)) 0 0 / var(--cf-orb-size) 100% repeat-x;
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'><path d='M-10 20 Q-5 30 0 20 T10 20 T20 20 T30 20 T40 20 T50 20' fill='none' stroke='black' stroke-width='4'/></svg>");
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'><path d='M-10 20 Q-5 30 0 20 T10 20 T20 20 T30 20 T40 20 T50 20' fill='none' stroke='black' stroke-width='4'/></svg>");
+  opacity: 0.85;
+  animation-duration: 1.3s;
+  animation-direction: reverse;
+}
+
+/* Still frames for the eleven, under reduced motion — each one the moment of its own animation that
    best says what it is, never a pile-up of parts at their starting positions. */
 @media (prefers-reduced-motion: reduce) {
   .cf-orb-star,
@@ -1464,7 +1898,13 @@ textarea,
   .cf-orb-heart,
   .cf-orb-bar,
   .cf-orb-cell,
-  .cf-orb-base {
+  .cf-orb-base,
+  .cf-orb-trace,
+  .cf-orb-comet,
+  .cf-orb-face,
+  .cf-orb-line,
+  .cf-orb-caret,
+  .cf-orb-wave {
     animation: none;
   }
   .cf-orb-star {
@@ -1512,6 +1952,24 @@ textarea,
   .cf-orb-base-b {
     transform: translateY(calc(var(--cf-helix-amp) * var(--cf-strand-rest) * -1)) scale(0.7);
     opacity: 0.6;
+  }
+  /* The comet through the crossing and climbing the right-hand loop: the curve, drawn by its tail. */
+  .cf-orb-trace {
+    transform: translateX(calc(var(--cf-inf-ax) * var(--cf-inf-rest-x)));
+  }
+  .cf-orb-comet {
+    transform: translateY(calc(var(--cf-inf-ay) * var(--cf-inf-rest-y)));
+  }
+  /* Closed, and lit from the top: the shading of a cube at rest. */
+  .cf-orb-face-right {
+    opacity: 0.78;
+  }
+  .cf-orb-face-left {
+    opacity: 0.6;
+  }
+  /* The paragraph written, the caret waiting at its end. */
+  .cf-orb-caret {
+    transform: translate(var(--cf-line-3), calc(var(--cf-line-gap) * 2));
   }
 }
 
@@ -2832,7 +3290,7 @@ body.cf-dragging * {
  * shows at a glance which lines are dead.
  *
  * `opacity` rather than a colour, deliberately: the span keeps whatever the theme paints it, so this
- * reads the same in all 21 palettes and needs no per-theme token. */
+ * reads the same in all 24 palettes and needs no per-theme token. */
 .cf-unused {
   opacity: 0.55;
 }
@@ -2938,11 +3396,23 @@ body.cf-dragging * {
    (a secondary button, the selected pill) and the accent and danger fills keep their colour and let
    some of the backdrop through — on the frame as in a sheet.
 
-   **What floats keeps a ground**, because text over text is unreadable: anything `fixed` (a dialog,
-   the palette, a toast), a dialog or menu by role, and a panel pinned over what it covers —
-   `absolute`/`sticky` with the sheet's or a raised tone, the headers content scrolls under. Each
-   gets every solid tone back, for itself and for what is inside it. Portalled popovers never sat in
-   a see-through region at all. */
+   **Each scheme keeps its quiet text readable.** The slider's numbers are what CodeFlow's own two
+   schemes need; a scheme whose muted grey sits close to its ground (Solarized, One Light, Ayu…)
+   would lose it into the backdrop at the same density, so it is painted `--cf-glass-boost` points
+   denser (`glassBoost`, stamped by `applyThemeVars`) — 0 for most.
+
+   **What floats is acrylic** (the user's call, 2026-09-25: "igual pone acrílico los modales"): a
+   dialog, the palette, a menu, a popover, a toast, a tooltip — anything drawn with a floating
+   shadow — paints its own tone over a blur of what it covers, as the window sits over the desktop.
+   Blurred, the text underneath turns to haze instead of text on text, which is what a solid ground
+   was there to prevent. **What is pinned is frosted**: a header content scrolls under and a disc
+   parked on a seam (the fold toggles) take a thinner coat of the same, so they read as the glass
+   around them instead of a black — or white — stripe across it. A pinned column's cells take the
+   coat denser and unblurred: there is one per row, and a blur per row is a layer per row. Anything
+   else that floats (`fixed`, a dialog or menu by role) without that anatomy keeps every solid tone.
+
+   A blur makes its element the containing block of `fixed` descendants, so a floating panel must
+   not hold a `fixed` element of its own: popovers portal to `body` (every one does today). */
 :root[data-glass] {
   /* The solid tones, resolved once, here — the regions below redefine the plain names. */
   --cf-surface-solid: var(--cf-surface);
@@ -2951,9 +3421,42 @@ body.cf-dragging * {
   --cf-sunken-solid: var(--cf-sunken);
   --cf-field-solid: var(--cf-field);
   --cf-accent-soft-solid: var(--cf-accent-soft);
-  --cf-glass-frame-fill: color-mix(in oklab, var(--cf-bg) var(--cf-glass-frame, 47.5%), transparent);
-  --cf-glass-sheet-fill: color-mix(in oklab, var(--cf-surface) var(--cf-glass-sheet, 55%), transparent);
-  --cf-glass-solo-fill: color-mix(in oklab, var(--cf-surface) var(--cf-glass-solo, 76.4%), transparent);
+  --cf-glass-frame-fill: color-mix(
+    in oklab,
+    var(--cf-bg) min(var(--cf-glass-frame, 47.5%) + var(--cf-glass-boost, 0%), 100%),
+    transparent
+  );
+  --cf-glass-sheet-fill: color-mix(
+    in oklab,
+    var(--cf-surface) min(var(--cf-glass-sheet, 55%) + var(--cf-glass-boost, 0%), 100%),
+    transparent
+  );
+  --cf-glass-solo-fill: color-mix(
+    in oklab,
+    var(--cf-surface) min(var(--cf-glass-solo, 76.4%) + var(--cf-glass-boost, 0%), 100%),
+    transparent
+  );
+  /* What floats: the window's whole density (frame and sheet together) and never thinner than 72%
+     — a menu is read at a glance, over whatever is under it — nor thicker than 96%, or it stops
+     being glass. */
+  --cf-glass-float-fill: color-mix(
+    in oklab,
+    var(--cf-surface-raised-solid) min(max(var(--cf-glass-solo, 76.4%), 72%) + var(--cf-glass-boost, 0%), 96%),
+    transparent
+  );
+  /* What is pinned: 0.6 of a sheet's coat, laid over the sheet it is pinned in. */
+  --cf-glass-pin-fill: color-mix(
+    in oklab,
+    var(--cf-surface-solid) calc((var(--cf-glass-sheet, 55%) + var(--cf-glass-boost, 0%)) * 0.6),
+    transparent
+  );
+  --cf-glass-pin-cell-fill: color-mix(
+    in oklab,
+    var(--cf-surface-solid) min(var(--cf-glass-sheet, 55%) + var(--cf-glass-boost, 0%) + 25%, 100%),
+    transparent
+  );
+  --cf-glass-acrylic: blur(28px) saturate(1.6);
+  --cf-glass-frost: blur(16px) saturate(1.4);
 }
 
 :root[data-glass] body {
@@ -2994,11 +3497,9 @@ body.cf-dragging * {
   background: var(--cf-glass-solo-fill);
 }
 
-/* `~=` matches the whole class, so `hover:bg-[…]` and `bg-[…]/70` are not taken for it. */
-:root[data-glass] :is(.cf-frame, .cf-sheet, .cf-glass-solo) :is(.fixed, [role="dialog"], [role="menu"], [aria-modal="true"]),
-:root[data-glass]
-  :is(.cf-frame, .cf-sheet, .cf-glass-solo)
-  :is(.absolute, .sticky):is([class~="bg-[var(--cf-surface)]"], [class~="bg-[var(--cf-surface-raised)]"]) {
+/* Whatever floats without a floating panel's anatomy (below): every solid tone back. Mostly the
+   `fixed` scrims dialogs are centred in, whose panel then sets its own. */
+:root[data-glass] :is(.cf-frame, .cf-sheet, .cf-glass-solo) :is(.fixed, [role="dialog"], [role="menu"], [aria-modal="true"]) {
   --cf-surface: var(--cf-surface-solid);
   --cf-surface-raised: var(--cf-surface-raised-solid);
   --cf-bg: var(--cf-bg-solid);
@@ -3009,6 +3510,78 @@ body.cf-dragging * {
   --cf-accent-soft: var(--cf-accent-soft-solid);
   --cf-accent-fill: var(--cf-accent);
   --cf-danger-fill: var(--cf-danger);
+}
+
+/* Pinned — `absolute`/`sticky` with the sheet's or a raised tone, and not a floating panel: frosted.
+   `~=` matches the whole class, so `hover:bg-[…]` and `bg-[…]/70` are not taken for it. What is
+   inside paints through to the coat, as inside a sheet. `.cf-pinned` marks one whose wrapper is
+   the positioned element (the settings rail's paging discs). */
+:root[data-glass]
+  :is(.absolute, .sticky, .cf-pinned):is([class~="bg-[var(--cf-surface)]"], [class~="bg-[var(--cf-surface-raised)]"]):not(
+    [class~="shadow-[var(--cf-shadow)]"],
+    [class~="shadow-[var(--cf-shadow-modal)]"],
+    .cf-tip,
+    .cf-tour-arrow
+  ) {
+  background: var(--cf-glass-pin-fill);
+  -webkit-backdrop-filter: var(--cf-glass-frost);
+  backdrop-filter: var(--cf-glass-frost);
+  --cf-surface: transparent;
+  --cf-bg: transparent;
+}
+
+/* A pinned column's cells (`sticky` but not to the top or bottom edge — the row numbers): the coat,
+   denser, and no blur, since there is one per row. */
+:root[data-glass]
+  .sticky:not(.top-0, .bottom-0):is([class~="bg-[var(--cf-surface)]"], [class~="bg-[var(--cf-surface-raised)]"]) {
+  background: var(--cf-glass-pin-cell-fill);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* Floating panels — a surface with a floating shadow, or a tooltip: acrylic. What is inside gets a
+   sheet's tones, since the panel is the one layer under it now. Portalled ones too: they sit outside
+   every region, on the plain solid tokens, which is why this names every tone itself. */
+:root[data-glass]
+  :is([class~="shadow-[var(--cf-shadow)]"], [class~="shadow-[var(--cf-shadow-modal)]"], .cf-tip):is(
+    [class~="bg-[var(--cf-surface)]"],
+    [class~="bg-[var(--cf-surface-raised)]"]
+  ) {
+  background: var(--cf-glass-float-fill);
+  -webkit-backdrop-filter: var(--cf-glass-acrylic);
+  backdrop-filter: var(--cf-glass-acrylic);
+  --cf-surface: transparent;
+  --cf-bg: transparent;
+  --cf-surface-raised: color-mix(in oklab, var(--cf-surface-raised-solid) 55%, transparent);
+  --cf-sunken: color-mix(in oklab, var(--cf-sunken-solid) 45%, transparent);
+  --cf-surface-2: var(--cf-sunken);
+  --cf-field: color-mix(in oklab, var(--cf-field-solid) 50%, transparent);
+  --cf-control: color-mix(in oklab, var(--cf-surface-raised-solid) 50%, transparent);
+  --cf-accent-fill: color-mix(in oklab, var(--cf-accent) 80%, transparent);
+  --cf-danger-fill: color-mix(in oklab, var(--cf-danger) 80%, transparent);
+  --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 18%, transparent);
+}
+
+/* The tour card's arrow is a corner of the card: the card's coat, and no blur of its own (TourOverlay
+   clips it to the half outside the card, or the half inside would be coated twice). */
+:root[data-glass] .cf-tour-arrow {
+  background: var(--cf-glass-float-fill);
+}
+
+/* Monaco's sticky-scroll band is pinned too. Its colours are cleared in the `-glass` themes
+   (`monacoSetup`): its gutter and its lines paint the band's colour once each, nested three deep,
+   and a see-through colour would compound. The band paints the coat once, here. */
+:root[data-glass] .monaco-editor .sticky-widget {
+  background: var(--cf-glass-pin-fill);
+  -webkit-backdrop-filter: var(--cf-glass-frost);
+  backdrop-filter: var(--cf-glass-frost);
+}
+
+/* The terminal's ground is cleared too (`terminalTheme`), as the editor's is — but xterm's own sheet
+   paints `.xterm-viewport` black under the canvas, and xterm 6 no longer overrides it inline with the
+   theme's background as older versions did: the cleared terminal came out a black slab. */
+:root[data-glass] .xterm .xterm-viewport {
+  background-color: transparent;
 }
 
 /* A panel appearing: its content fades in rather than the panel growing from zero width — a width

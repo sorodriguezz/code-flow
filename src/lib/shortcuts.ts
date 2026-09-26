@@ -74,6 +74,7 @@ export type ShortcutId =
   | "editor.bookmarkToggle"
   | "editor.splitRight"
   | "editor.codeSnap"
+  | "editor.pasteJsonAsCode"
   | "editor.nextChange"
   | "editor.prevChange"
   | "editor.newFile"
@@ -728,6 +729,23 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "shortcuts.inlineEdit",
     defaultChord: "Mod+I",
     monacoCommand: "cf-inline-edit",
+  },
+  /**
+   * Paste JSON as Code — the clipboard's JSON as types for the file's language (see
+   * `components/editor/pasteJsonAsCode`).
+   *
+   * ⌘⇧V because it is VS Code's: the quicktype extension this copies binds exactly that, and the
+   * people reaching for this feature are the ones with that habit. Free here — nothing in this
+   * registry, nothing in Monaco's table and nothing in the macOS menu claims it. Outside a code editor
+   * the chord is not ours (there is no `run`), so ⌘⇧V still pastes as plain text in a text field
+   * where the platform does that.
+   */
+  {
+    id: "editor.pasteJsonAsCode",
+    group: "editor",
+    labelKey: "pasteJson.action",
+    defaultChord: "Mod+Shift+V",
+    monacoCommand: "cf-paste-json",
   },
   { id: "editor.find", group: "editor", labelKey: "shortcuts.findInFile", defaultChord: "Mod+F", monacoCommand: "actions.find" },
   { id: "editor.goToLine", group: "editor", labelKey: "shortcuts.goToLine", defaultChord: "Mod+G", monacoCommand: "editor.action.gotoLine" },

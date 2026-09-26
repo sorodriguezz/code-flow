@@ -643,7 +643,7 @@ export function ConversationSidebar() {
           of on the folder the user is aiming at — the drop target would never light up. */}
       {dragging && pointer && (
         <div
-          className="pointer-events-none fixed z-50 max-w-[200px] truncate rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface)] px-2 py-1 text-[12px] shadow-lg"
+          className="pointer-events-none fixed z-50 max-w-[200px] truncate rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface)] px-2 py-1 text-[12px] shadow-[var(--cf-shadow)]"
           style={{ left: pointer.x + 12, top: pointer.y + 12 }}
         >
           {dragging.title || t("chat.untitled")}

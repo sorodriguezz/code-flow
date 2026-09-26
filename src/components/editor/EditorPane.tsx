@@ -30,7 +30,9 @@ import { EditorTabs, type EditorTabItem, type TabMenuActions } from "./EditorTab
 import { InlineEditWidget } from "./InlineEditWidget";
 import { ChangePeek, peekHeightOf } from "./ChangePeek";
 import type { CodeSnapTarget } from "./CodeSnapModal";
+import { offerPasteTarget, PASTE_JSON_ACTION, pasteJsonAsCode } from "./pasteJsonAsCode";
 import { modelPathFor } from "../../lib/editorModel";
+import { isScratchPath, scratchName } from "../../lib/scratchTabs";
 import { useFileLanguage } from "../../lib/useFileLanguage";
 import { FileGlyph } from "../common/FileGlyph";
 import { EMPTY_SCHEMA, type DbmlSchema } from "../../lib/dbml/types";
@@ -501,8 +503,12 @@ function Breadcrumb({
    *  be confused. */
   compare: OpenTab["compare"];
 }) {
-  const segments = path.split("/");
-  const name = segments.pop()!;
+  const t = useT();
+  // A scratch tab (`lib/scratchTabs`) has no folders to lead to — its path is `/name` — so where they
+  // would be it says what it is instead: a buffer that is on no disk until it is saved.
+  const scratch = isScratchPath(path);
+  const segments = scratch ? [t("editor.scratchCrumb")] : path.split("/");
+  const name = scratch ? scratchName(path) : segments.pop()!;
   return (
     <div className="flex h-[30px] shrink-0 items-center gap-1 overflow-hidden border-b border-[var(--cf-border)] px-3.5 text-[12px] text-[var(--cf-text-faint)]">
       {segments.map((segment, i) => (
@@ -1482,6 +1488,8 @@ export function EditorPane({
    *  drawn. Overlap is rare behind a 250 ms debounce but a slow first blame plus a keypress is enough. */
   const blamePassRef = useRef(0);
 
+  /** Only a dependency of the re-arm effect below, so flipping the setting draws or takes down the
+   *  annotation at once; the pass reads the setting for itself. */
   const blameEnabled = usePreferencesStore((s) => s.blameAnnotationEnabled);
   /**
    * The commit the blame cache is keyed against.
@@ -1530,29 +1538,33 @@ export function EditorPane({
   }, [groupId]);
 
   /**
-   * Annotates the caret's line — the body of the debounce, and the only thing here that can cost IPC.
+   * Tells the status line who last changed the caret's line, and annotates the line itself when the
+   * setting asks for it — the body of the debounce, and the only thing here that can cost IPC.
    *
-   * The order of the bails is the design. Each one is a case where *no* label is the right answer, and
+   * The order of the bails is the design. Each one is a case where *no* answer is the right one, and
    * each is cheaper than the one below it:
    *
-   * 1. the setting, read imperatively rather than through the subscribed value, for the same reason
-   *    `activePathRef` exists — this runs from a listener wired at mount. "Off" means no blame call at
-   *    all, so this is deliberately the first statement;
-   * 2. **multiple carets** — N carets are N answers, and the annotation is a sentence about "the line
+   * 1. **multiple carets** — N carets are N answers, and the annotation is a sentence about "the line
    *    you are on"; N grey labels turn a file into a wall of them. Same call GitLens makes;
-   * 3. **a non-empty selection** — a drag-select would flicker the label from line to line, and a
+   * 2. **a non-empty selection** — a drag-select would flicker the label from line to line, and a
    *    multi-line selection has no single author. The mirror of the convention `cf-inline-edit`
    *    already uses, where an empty selection is what implies the current line;
-   * 4. **a binary file** — nothing to annotate;
-   * 5. a hunk that does not cover the caret, which is how a blame computed against a different text
+   * 3. **a binary file** — nothing to annotate;
+   * 4. a hunk that does not cover the caret, which is how a blame computed against a different text
    *    than the one on screen presents itself. Saying nothing beats crediting the wrong commit.
+   *
+   * The setting is not one of them. It used to be the first — "off" meant no blame call at all — until
+   * the user split it (2026-09-25: "en la barra de abajo SIEMPRE debe mostrarse, sin tomar en cuenta ese
+   * check. Entonces el check de config es solo para el ultima vez en codigo"). So it is read last, once
+   * the status line has its answer, and it gates the decoration alone. Imperatively rather than through
+   * the subscribed value, for the same reason `activePathRef` exists: this runs from a listener wired
+   * at mount.
    *
    * A cache miss draws **nothing** while the blame is in flight: no spinner, no placeholder. A label
    * that flickers in and is then replaced is worse than one that appears 200 ms later, and this is the
    * end of a line of code rather than a panel with room for a loading state.
    */
   const runBlamePass = useCallback(async () => {
-    if (!usePreferencesStore.getState().blameAnnotationEnabled) return;
     const ed = editorRef.current;
     const mon = monacoRef.current;
     const model = ed?.getModel();
@@ -1644,8 +1656,14 @@ export function EditorPane({
     // No blame to give: a file HEAD has never seen, a repository with no commits, or an empty file.
     // Every line of it reads the same, and that is a more useful thing to say than nothing — it is the
     // case `changedLineRanges` cannot see at all, since an untracked file has no working-diff entry.
-    const label = hunk ? blameLabel(hunk, t) : t("blame.notCommitted");
     const statusText = hunk ? blameStatusText(hunk, t) : t("blame.notCommitted");
+    if (focusedRef.current) useCursorBlameStore.getState().set(groupId, statusText);
+
+    // Everything from here on is the annotation, and the setting's to decide. Off, there is none to take
+    // down: the re-arm effect below cleared it when the setting flipped, and no pass draws one while it
+    // stays off — which also keeps the click handler inert, since `annotatedLineRef` stays `null`.
+    if (!usePreferencesStore.getState().blameAnnotationEnabled) return;
+    const label = hunk ? blameLabel(hunk, t) : t("blame.notCommitted");
     const hover = hunk ? blameHoverMarkdown(hunk, t, language) : label;
     /**
      * Nothing for a click to open — which is *not* the same as "no commit behind this line".
@@ -1697,7 +1715,6 @@ export function EditorPane({
     ]);
     annotatedLineRef.current = line;
     annotatedHunkRef.current = hunk;
-    if (focusedRef.current) useCursorBlameStore.getState().set(groupId, statusText);
   }, [activeTab, project.local_path, headOid, t, language, groupId, clearBlame]);
 
   const runBlameRef = useRef(runBlamePass);
@@ -1707,12 +1724,12 @@ export function EditorPane({
    * Re-arms the trailing timer. Stable — no dependencies — which is what lets the caret listener below
    * be registered once per editor instance instead of re-registered whenever a prop moves.
    *
-   * The setting is read here as well as at the top of the pass, so that with blame off a caret move
-   * costs a single boolean read and nothing else: no timer armed, no timer cleared, no pass queued.
-   * Read imperatively for the same reason the pass does — this runs from a listener wired at mount.
+   * No setting check, and that is a cost taken on knowingly. With the setting off a caret move used to
+   * be one boolean read; now the status line wants the answer either way, so every file the Editor
+   * shows is blamed behind the caret. The debounce is what keeps that affordable — a burst of moves is
+   * one pass, and a clean file's pass is served from `blameStore`'s cache after the first.
    */
   const scheduleBlame = useCallback(() => {
-    if (!usePreferencesStore.getState().blameAnnotationEnabled) return;
     if (blameTimerRef.current !== null) clearTimeout(blameTimerRef.current);
     blameTimerRef.current = setTimeout(() => {
       blameTimerRef.current = null;
@@ -1793,8 +1810,9 @@ export function EditorPane({
 
   /**
    * Arms a pass without waiting for the caret to move — opening a file, switching tabs, flipping the
-   * setting on, taking focus, or HEAD moving under the file all change the answer while the caret sits
-   * still. And it clears first, so a tab switch never shows the previous file's author for a frame.
+   * setting either way, taking focus, or HEAD moving under the file all change the answer while the
+   * caret sits still. And it clears first, so a tab switch never shows the previous file's author for a
+   * frame, and turning the setting off takes the annotation down while the status line keeps answering.
    *
    * `dirty` and `hasWorkingDiff` are in the list because crossing either boundary changes *which* blame
    * is asked for — the committed file or the text on screen, see `buffer` in the pass. Both are
@@ -1811,7 +1829,6 @@ export function EditorPane({
    */
   useEffect(() => {
     clearBlame();
-    if (!blameEnabled) return;
     scheduleBlame();
     return cancelBlame;
   }, [
@@ -1894,6 +1911,9 @@ export function EditorPane({
   useEffect(() => {
     if (focused) registerBookmarkToggle(() => bookmarkToggleRef.current());
   }, [focused, registerBookmarkToggle]);
+  // How the command palette reaches this pane's editor for "Paste JSON as Code" — see
+  // `offerPasteTarget`. Taken back when another pane takes the focus.
+  useEffect(() => (focused ? offerPasteTarget(() => editorRef.current) : undefined), [focused]);
 
   const onFocusRef = useRef(onFocus);
   onFocusRef.current = onFocus;
@@ -2080,6 +2100,16 @@ export function EditorPane({
       contextMenuOrder: 4,
       keybindings: [monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyMod.Shift | monacoInstance.KeyCode.KeyC],
       run: () => captureRef.current(),
+    });
+    // The clipboard's JSON written out as types for this file's language, beside Paste in the menu
+    // since that is what it is. No keybinding here: ⌘⇧V is the registry's (`editor.pasteJsonAsCode`),
+    // and the command palette triggers this same action — see `pasteJsonAsCode`.
+    editorInstance.addAction({
+      id: PASTE_JSON_ACTION,
+      label: tRef.current("pasteJson.action"),
+      contextMenuGroupId: "9_cutcopypaste",
+      contextMenuOrder: 4.5,
+      run: (ed) => pasteJsonAsCode(ed, monacoInstance, activePathRef.current ?? ""),
     });
     // Right-click on the line, next to the other navigation entries — a bookmark is about *where*
     // you are, so `navigation` is the group it belongs in. No keybinding here: that one is in the
@@ -2544,7 +2574,9 @@ export function EditorPane({
                 <Tooltip side="bottom" label={t("editor.save")} trailing={keyCap("editor.save")}>
                   <button
                     onClick={onSave}
-                    disabled={!dirty || saving}
+                    // A scratch tab can always be saved: its save is a Save As, and a clean one — a
+                    // tree fresh out of "Generate Tree" — is the one most worth keeping as a file.
+                    disabled={(!dirty && !isScratchPath(activeTab.path)) || saving}
                     className={buttonClass({ variant: "secondary", size: "sm", className: "ml-1" })}
                   >
                     {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}

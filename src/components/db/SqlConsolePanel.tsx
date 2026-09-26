@@ -18,12 +18,12 @@ import {
   Play,
   Rows3,
   Save,
-  Sparkles,
   Square,
   Table2,
   Waypoints,
   X,
 } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { installSqlCompletions } from "../../lib/db/sqlCompletion";
 import { firstStatement, type ConsoleLanguage } from "../../lib/db/statements";
@@ -506,7 +506,7 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
             {/* The orb reaches the toolbar too, so a console with the panel closed still shows that
                 something is running — and so the button that would close it (and cancel the run)
                 says what it is about to interrupt. */}
-            {tab.ai?.running ? <ThinkingOrb size="sm" /> : <Sparkles size={13} />}
+            {tab.ai?.running ? <ThinkingOrb size="sm" /> : <AiSparkles size={13} />}
           </ToolbarButton>
           <ToolbarButton
             onClick={() => void store.saveConsole(tab.id)}
@@ -801,7 +801,7 @@ function ConsoleAiPanel({
       className="flex shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)] bg-[var(--cf-surface-raised)]"
     >
       <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
-        <Sparkles size={13} className="shrink-0 text-[var(--cf-accent)]" />
+        <AiSparkles size={13} className="shrink-0" />
         <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">
           {t("db.aiTitle")}
         </span>
@@ -831,7 +831,7 @@ function ConsoleAiPanel({
           // composer now, where it is still on screen at the fourth question.
           <div className="flex shrink-0 flex-col items-center gap-2 px-5 text-center">
             <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--cf-accent-soft)]">
-              <Sparkles size={14} className="text-[var(--cf-accent)]" />
+              <AiSparkles size={14} />
             </span>
             <p className="text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
               {t("db.aiPlaceholder")}

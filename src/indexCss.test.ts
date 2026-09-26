@@ -53,3 +53,44 @@ describe("control fills", () => {
     }
   });
 });
+
+describe("see-through window", () => {
+  /** The declarations of the rule that starts at `marker` (a piece of its selector). */
+  function ruleAt(marker: string): string {
+    const at = css.indexOf(marker);
+    expect(at, `no rule containing ${marker}`).toBeGreaterThanOrEqual(0);
+    return css.slice(at, css.indexOf("\n}", at));
+  }
+
+  // WKWebView only honoured the prefixed spelling until recently, and the dev server adds no
+  // prefixes — the same trap as `user-select` above.
+  it("blurs in both spellings wherever it blurs", () => {
+    for (const marker of [
+      ':is([class~="shadow-[var(--cf-shadow)]"], [class~="shadow-[var(--cf-shadow-modal)]"], .cf-tip):is(',
+      ":is(.absolute, .sticky, .cf-pinned):is(",
+      ".monaco-editor .sticky-widget {",
+    ]) {
+      const body = ruleAt(marker);
+      expect(body, marker).toContain("-webkit-backdrop-filter: var(");
+      expect(body, marker).toMatch(/\n\s+backdrop-filter: var\(/);
+    }
+  });
+
+  // A floating panel is the one layer under what it holds: a card inside a dialog that painted the
+  // panel's coat again would come out denser than the dialog around it.
+  it("makes a floating panel the ground of what it holds", () => {
+    const float = ruleAt(':is([class~="shadow-[var(--cf-shadow)]"], [class~="shadow-[var(--cf-shadow-modal)]"], .cf-tip):is(');
+    expect(float).toContain("background: var(--cf-glass-float-fill);");
+    expect(float).toContain("--cf-surface: transparent;");
+    expect(float).toContain("--cf-field: color-mix(");
+  });
+
+  it("thickens every coat by the scheme's boost", () => {
+    const root = rule(":root[data-glass]");
+    for (const fill of ["frame", "sheet", "solo", "float", "pin"]) {
+      const at = root.indexOf(`--cf-glass-${fill}-fill:`);
+      expect(at, fill).toBeGreaterThanOrEqual(0);
+      expect(root.slice(at, root.indexOf(";", at)), fill).toContain("var(--cf-glass-boost, 0%)");
+    }
+  });
+});

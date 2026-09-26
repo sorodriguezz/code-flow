@@ -18,7 +18,19 @@
 
 import type { TranslationKey } from "./i18n/translations";
 
-export type ThinkingDesign = "reactor" | "spark" | "aurora" | "orbit" | "pulse" | "voice" | "matrix" | "helix";
+export type ThinkingDesign =
+  | "reactor"
+  | "spark"
+  | "aurora"
+  | "orbit"
+  | "pulse"
+  | "voice"
+  | "matrix"
+  | "helix"
+  | "infinity"
+  | "cube"
+  | "writing"
+  | "wave";
 
 /** The reactor — the mark the app has always drawn. */
 export const DEFAULT_THINKING_DESIGN: ThinkingDesign = "reactor";
@@ -32,6 +44,10 @@ export const THINKING_DESIGNS: readonly { id: ThinkingDesign; labelKey: Translat
   { id: "voice", labelKey: "thinking.voice" },
   { id: "matrix", labelKey: "thinking.matrix" },
   { id: "helix", labelKey: "thinking.helix" },
+  { id: "infinity", labelKey: "thinking.infinity" },
+  { id: "cube", labelKey: "thinking.cube" },
+  { id: "writing", labelKey: "thinking.writing" },
+  { id: "wave", labelKey: "thinking.wave" },
 ];
 
 export function isThinkingDesign(value: unknown): value is ThinkingDesign {

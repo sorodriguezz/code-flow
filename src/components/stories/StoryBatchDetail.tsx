@@ -15,6 +15,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { OpenQuestionsModal } from "./OpenQuestionsModal";
 import { StoryCard } from "./StoryCard";
 import { SOURCE_KIND } from "./storyStatus";
@@ -361,7 +362,7 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
                 onClick={generate}
                 className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
               >
-                <Sparkles size={13} />
+                <AiSparkles size={13} />
                 {t("stories.generate")}
               </button>
             }

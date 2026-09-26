@@ -33,9 +33,12 @@ pub mod iris;
 pub mod jvm;
 pub mod mongo;
 pub mod mssql;
+pub mod mysql;
+pub mod oracle;
 pub mod postgres;
 pub mod redis;
 pub mod sqlgen;
+pub mod sqlite;
 /// Expanding `mongodb+srv://` by hand when the driver's own resolver can't read the system's
 /// DNS configuration. See the module for why that happens on an ordinary Mac.
 pub mod srv;
@@ -68,6 +71,17 @@ pub enum DbKind {
     /// query and no statement language to generate. See `datasource::redis` for how a keyspace is
     /// presented as a tree without ever enumerating it.
     Redis,
+    /// MySQL and MariaDB share a wire protocol and a driver (`datasource::mysql`). They are two
+    /// kinds rather than one because the user picks by name, the servers differ in what they can
+    /// `EXPLAIN` and whether they have sequences, and "MariaDB" in the connection list is what the
+    /// person running MariaDB expects to read.
+    Mysql,
+    Mariadb,
+    /// A file, not a server: `database` is its path and every network field is ignored.
+    Sqlite,
+    /// Over JDBC, through the same JVM sidecar as IRIS — Oracle's thin driver is pure Java, which is
+    /// what makes this work without an Oracle client installed. See `datasource::oracle`.
+    Oracle,
 }
 
 /// Which SQL to generate — identifier quoting, paging, `EXPLAIN`, and the catalog queries the
@@ -79,6 +93,16 @@ pub enum SqlDialect {
     TSql,
     /// InterSystems SQL: `"quoted"` identifiers, `TOP` instead of `LIMIT`, `INFORMATION_SCHEMA`.
     Iris,
+    /// MySQL and MariaDB: `` `backticked` `` identifiers, `LIMIT … OFFSET`, and string literals in
+    /// which a backslash is an escape character — unless the session's `sql_mode` says
+    /// `NO_BACKSLASH_ESCAPES`, which is why that fact travels with the dialect: it decides how a
+    /// literal has to be written for a quote inside it to stay inside it. See `sqlgen::literal`.
+    MySql { backslash_escapes: bool },
+    /// SQLite: `"quoted"` identifiers, `LIMIT … OFFSET`, standard literals.
+    Sqlite,
+    /// Oracle: `"quoted"` identifiers, `OFFSET … FETCH` (12c and later), PL/SQL blocks ended by a
+    /// line holding only `/`, and no trailing `;` on a plain statement — the server rejects one.
+    Oracle,
 }
 
 impl DbKind {
@@ -91,6 +115,10 @@ impl DbKind {
             DbKind::Iris => 1972,
             DbKind::Mongodb => 27017,
             DbKind::Redis => 6379,
+            DbKind::Mysql | DbKind::Mariadb => 3306,
+            // A file has no port. Zero is never dialled: the SQLite driver reads only `database`.
+            DbKind::Sqlite => 0,
+            DbKind::Oracle => 1521,
         }
     }
 
@@ -108,6 +136,10 @@ impl DbKind {
             DbKind::Iris => "InterSystems IRIS",
             DbKind::Mongodb => "MongoDB",
             DbKind::Redis => "Redis",
+            DbKind::Mysql => "MySQL",
+            DbKind::Mariadb => "MariaDB",
+            DbKind::Sqlite => "SQLite",
+            DbKind::Oracle => "Oracle",
         }
     }
 
@@ -120,7 +152,14 @@ impl DbKind {
     /// `DbEngineInfo.consoleLanguage` in `src/types/database.ts`.
     pub fn console_language(self) -> &'static str {
         match self {
-            DbKind::Postgres | DbKind::Supabase | DbKind::Sqlserver | DbKind::Iris => "sql",
+            DbKind::Postgres
+            | DbKind::Supabase
+            | DbKind::Sqlserver
+            | DbKind::Iris
+            | DbKind::Mysql
+            | DbKind::Mariadb
+            | DbKind::Sqlite
+            | DbKind::Oracle => "sql",
             DbKind::Mongodb => "javascript",
             DbKind::Redis => "redis",
         }
@@ -1110,6 +1149,10 @@ pub enum Session {
     Mongo(mongo::MongoSession),
     Iris(iris::IrisSession),
     Redis(redis::RedisSession),
+    /// MySQL and MariaDB both — one driver, see `datasource::mysql`.
+    Mysql(mysql::MysqlSession),
+    Sqlite(sqlite::SqliteSession),
+    Oracle(oracle::OracleSession),
 }
 
 impl Session {
@@ -1121,7 +1164,9 @@ impl Session {
     /// startup script runs last, so a session is only ever handed out already set up.
     pub async fn open(config: &DbConnectionConfig, database: Option<&str>) -> Result<Self, String> {
         let tunnelled;
-        let config = if config.ssh_enabled {
+        // A SQLite database is a file on this machine; there is nothing at the far end of a tunnel
+        // to reach, so a stale `ssh_enabled` on one is ignored rather than dialled.
+        let config = if config.ssh_enabled && config.kind != DbKind::Sqlite {
             // A URL names the real host and port, and every driver here prefers it over the
             // fields — so a tunnelled connection defined by URL would quietly connect *around* the
             // tunnel, to a host that is usually unreachable and occasionally the wrong one. Silently
@@ -1159,6 +1204,15 @@ impl Session {
             DbKind::Redis => redis::RedisSession::open(config, database)
                 .await
                 .map(Session::Redis),
+            DbKind::Mysql | DbKind::Mariadb => mysql::MysqlSession::open(config, database)
+                .await
+                .map(Session::Mysql),
+            DbKind::Sqlite => sqlite::SqliteSession::open(config, database)
+                .await
+                .map(Session::Sqlite),
+            DbKind::Oracle => oracle::OracleSession::open(config, database)
+                .await
+                .map(Session::Oracle),
         }?;
         session.run_startup_script(config).await?;
         Ok(session)
@@ -1200,6 +1254,8 @@ impl Session {
             // re-point every tab sharing the multiplexed connection), so falling through would
             // make keep-alive silently do nothing at all — the worst of both outcomes to debug.
             Session::Redis(_) => self.execute("PING", &ctx).await.map(|_| ()),
+            // Oracle has no `SELECT` without a `FROM`; `DUAL` is the table that exists for this.
+            Session::Oracle(_) => self.execute("SELECT 1 FROM DUAL", &ctx).await.map(|_| ()),
             _ => self.execute("SELECT 1", &ctx).await.map(|_| ()),
         }
     }
@@ -1211,6 +1267,9 @@ impl Session {
             Session::Mongo(s) => s.info(),
             Session::Iris(s) => s.info(),
             Session::Redis(s) => s.info(),
+            Session::Mysql(s) => s.info(),
+            Session::Sqlite(s) => s.info(),
+            Session::Oracle(s) => s.info(),
         }
     }
 
@@ -1236,6 +1295,11 @@ impl Session {
             // Throwing the session away would discard a healthy multiplexed connection to build an
             // identical one.
             Session::Redis(_) => true,
+            Session::Mysql(s) => s.is_alive(),
+            // A file cannot drop off the network. A connection whose file was deleted underneath it
+            // fails every statement with a message saying so, which is the right thing to show.
+            Session::Sqlite(_) => true,
+            Session::Oracle(s) => s.is_alive(),
         }
     }
 
@@ -1246,6 +1310,9 @@ impl Session {
             Session::Mongo(s) => s.children(node).await,
             Session::Iris(s) => s.children(node).await,
             Session::Redis(s) => s.children(node).await,
+            Session::Mysql(s) => s.children(node).await,
+            Session::Sqlite(s) => s.children(node).await,
+            Session::Oracle(s) => s.children(node).await,
         }
     }
 
@@ -1256,6 +1323,9 @@ impl Session {
             Session::Mongo(s) => s.execute(sql, ctx).await,
             Session::Iris(s) => s.execute(sql, ctx).await,
             Session::Redis(s) => s.execute(sql, ctx).await,
+            Session::Mysql(s) => s.execute(sql, ctx).await,
+            Session::Sqlite(s) => s.execute(sql, ctx).await,
+            Session::Oracle(s) => s.execute(sql, ctx).await,
         }
     }
 
@@ -1269,6 +1339,9 @@ impl Session {
             Session::Mongo(s) => s.table_data(request).await,
             Session::Iris(s) => s.table_data(request).await,
             Session::Redis(s) => s.table_data(request).await,
+            Session::Mysql(s) => s.table_data(request).await,
+            Session::Sqlite(s) => s.table_data(request).await,
+            Session::Oracle(s) => s.table_data(request).await,
         }
     }
 
@@ -1286,6 +1359,9 @@ impl Session {
             // matching on values, which sends the user to a wrong key as often as a right one.
             Session::Redis(_) => Ok(Vec::new()),
             Session::Iris(s) => s.foreign_keys(node).await,
+            Session::Mysql(s) => s.foreign_keys(node).await,
+            Session::Sqlite(s) => s.foreign_keys(node).await,
+            Session::Oracle(s) => s.foreign_keys(node).await,
         }
     }
 
@@ -1306,6 +1382,9 @@ impl Session {
             Session::Mongo(s) => s.schema_objects(node).await,
             Session::Iris(s) => s.schema_objects(node).await,
             Session::Redis(s) => s.schema_objects(node).await,
+            Session::Mysql(s) => s.schema_objects(node).await,
+            Session::Sqlite(s) => s.schema_objects(node).await,
+            Session::Oracle(s) => s.schema_objects(node).await,
         }
     }
 
@@ -1316,6 +1395,9 @@ impl Session {
             Session::Mongo(s) => s.schema_diagram(node).await,
             Session::Iris(s) => s.schema_diagram(node).await,
             Session::Redis(s) => s.schema_diagram(node).await,
+            Session::Mysql(s) => s.schema_diagram(node).await,
+            Session::Sqlite(s) => s.schema_diagram(node).await,
+            Session::Oracle(s) => s.schema_diagram(node).await,
         }?;
         mark_foreign_keys(&mut diagram.tables, &diagram.edges);
         Ok(diagram)
@@ -1336,6 +1418,9 @@ impl Session {
             Session::Mongo(s) => s.row_count(node, filter, options).await,
             Session::Iris(s) => s.row_count(node, filter).await,
             Session::Redis(s) => s.row_count(node, filter).await,
+            Session::Mysql(s) => s.row_count(node, filter).await,
+            Session::Sqlite(s) => s.row_count(node, filter).await,
+            Session::Oracle(s) => s.row_count(node, filter).await,
         }
     }
 
@@ -1350,6 +1435,9 @@ impl Session {
             Session::Mongo(s) => s.apply_edits(node, edits).await,
             Session::Iris(s) => s.apply_edits(node, edits).await,
             Session::Redis(s) => s.apply_edits(node, edits).await,
+            Session::Mysql(s) => s.apply_edits(node, edits).await,
+            Session::Sqlite(s) => s.apply_edits(node, edits).await,
+            Session::Oracle(s) => s.apply_edits(node, edits).await,
         }
     }
 
@@ -1360,6 +1448,9 @@ impl Session {
             Session::Mongo(s) => s.object_ddl(node).await,
             Session::Iris(s) => s.object_ddl(node).await,
             Session::Redis(s) => s.object_ddl(node).await,
+            Session::Mysql(s) => s.object_ddl(node).await,
+            Session::Sqlite(s) => s.object_ddl(node).await,
+            Session::Oracle(s) => s.object_ddl(node).await,
         }
     }
 
@@ -1370,6 +1461,9 @@ impl Session {
             Session::Mongo(s) => s.explain(sql, ctx).await,
             Session::Iris(s) => s.explain(sql, ctx).await,
             Session::Redis(s) => s.explain(sql, ctx).await,
+            Session::Mysql(s) => s.explain(sql, ctx).await,
+            Session::Sqlite(s) => s.explain(sql, ctx).await,
+            Session::Oracle(s) => s.explain(sql, ctx).await,
         }
     }
 
@@ -1384,6 +1478,13 @@ impl Session {
         match self {
             Session::Postgres(s) => s.cancel_running().await,
             Session::Iris(s) => s.cancel_running().await,
+            // `KILL QUERY` from a second connection: the statement stops on the server and its locks
+            // go with it. The session is still thrown away afterwards — see `poisoned_by_cancel`.
+            Session::Mysql(s) => s.cancel_running().await,
+            // `sqlite3_interrupt`, which the statement notices at its next step and stops with
+            // `SQLITE_INTERRUPT`; the connection is fine afterwards.
+            Session::Sqlite(s) => s.cancel_running(),
+            Session::Oracle(s) => s.cancel_running().await,
             // Mongo and Redis fall here, and for Redis it is a decision rather than a gap: there is
             // no per-request cancel, and `CLIENT KILL` from a second connection would kill every
             // other tab's in-flight commands on the shared multiplexer. `DbRegistry::run` dropping
@@ -1402,7 +1503,9 @@ impl Session {
     /// not a caller is still waiting. A plain `redis::aio::Connection` would have exactly the TDS
     /// problem and would have to be listed here — which is why `redis.rs` says never to swap it.
     pub fn poisoned_by_cancel(&self) -> bool {
-        matches!(self, Session::Mssql(_))
+        // MySQL joins it: a query future dropped mid-read leaves the rest of its packets on the
+        // socket, and the next statement would read them as its own answer.
+        matches!(self, Session::Mssql(_) | Session::Mysql(_))
     }
 
     /// Records that this session is unusable, for the callers that know it before the driver does.
@@ -1411,8 +1514,10 @@ impl Session {
     /// handed out keeps working against it, and [`Self::is_alive`] would keep saying yes. This is
     /// what makes an abandoned call visible to whoever still holds the session.
     pub fn poison(&self) {
-        if let Session::Mssql(s) = self {
-            s.poison();
+        match self {
+            Session::Mssql(s) => s.poison(),
+            Session::Mysql(s) => s.poison(),
+            _ => {}
         }
     }
 }
@@ -1932,6 +2037,50 @@ async fn sweep(sessions: &Sessions) {
     }
 }
 
+/// A connection config with every field at its default, for the drivers' own tests.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::{DbAuthMethod, DbConnectionConfig, DbKind, DbSslMode};
+
+    pub fn config(kind: DbKind) -> DbConnectionConfig {
+        DbConnectionConfig {
+            id: "test".into(),
+            kind,
+            host: "localhost".into(),
+            port: 0,
+            database: String::new(),
+            user: String::new(),
+            password: String::new(),
+            auth_method: DbAuthMethod::Password,
+            tenant_id: String::new(),
+            url: String::new(),
+            ssl: DbSslMode::Disable,
+            options: Vec::new(),
+            read_only: false,
+            connect_timeout_ms: 0,
+            show_all_databases: false,
+            visible_schemas: Vec::new(),
+            schemas_filtered: false,
+            schema_filter: String::new(),
+            schema_filter_enabled: true,
+            object_filter: String::new(),
+            object_filter_enabled: true,
+            schema_object_filters: Vec::new(),
+            keep_alive_secs: 0,
+            auto_disconnect_secs: 0,
+            startup_script: String::new(),
+            ssl_ca_file: String::new(),
+            ssl_cert_file: String::new(),
+            ssl_key_file: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            ssh_user: String::new(),
+            ssh_key_file: String::new(),
+        }
+    }
+}
+
 /// The one error string the frontend matches on, to show "cancelled" instead of a red failure.
 pub const CANCELLED: &str = "Query cancelled";
 
@@ -1942,18 +2091,37 @@ pub const CANCELLED: &str = "Query cancelled";
 /// Splits a console buffer into statements on `;`, ignoring the ones inside a string literal, a
 /// quoted identifier, a line comment or a block comment.
 ///
-/// Not a parser — a scanner with five states. It gets `';'` and `-- ;` right, which is what
+/// Not a parser — a scanner with a handful of states. It gets `';'` and `-- ;` right, which is what
 /// actually appears in a console; what it cannot know about is a dialect's own statement
-/// terminator (`GO`, `$$`), so `$$`-quoted bodies are handled explicitly for Postgres and `GO` is
-/// left to the engine that understands it.
+/// terminator, so each dialect's is handled explicitly: `$$`-quoted bodies for Postgres, `DELIMITER`
+/// and backslash escapes for MySQL, PL/SQL blocks ended by a lone `/` for Oracle. `GO` is left to
+/// the engine that understands it, and SQLite doesn't come through here at all — its driver lets
+/// SQLite's own parser find the boundaries, which is the only way a `CREATE TRIGGER … BEGIN … END;`
+/// splits right.
 pub fn split_statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
     let chars: Vec<char> = sql.chars().collect();
+    let mysql = matches!(dialect, Some(SqlDialect::MySql { .. }));
+    let backslash_escapes = matches!(dialect, Some(SqlDialect::MySql { backslash_escapes: true }));
+    let oracle = dialect == Some(SqlDialect::Oracle);
     let mut out = Vec::new();
     let mut current = String::new();
     let mut i = 0;
     // Postgres function bodies are wrapped in a `$tag$ … $tag$` literal that can hold anything,
     // semicolons included. While inside one, nothing else is looked at.
     let mut dollar_tag: Option<String> = None;
+    // MySQL clients change the terminator with `DELIMITER //` so a procedure body's own semicolons
+    // survive. The directive is the client's, never the server's, so it is consumed here.
+    let mut delimiter: Vec<char> = vec![';'];
+    // Oracle: whether the statement being read is a PL/SQL block, decided at its first word. A block
+    // is full of semicolons that belong to it and ends only at a line holding nothing but `/`.
+    let mut plsql: Option<bool> = None;
+
+    let flush = |current: &mut String, out: &mut Vec<String>| {
+        if !current.trim().is_empty() {
+            out.push(current.trim().to_string());
+        }
+        current.clear();
+    };
 
     while i < chars.len() {
         let c = chars[i];
@@ -1970,8 +2138,44 @@ pub fn split_statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
             continue;
         }
 
+        // `DELIMITER xx` on a line of its own, between statements.
+        if mysql && current.trim().is_empty() && at_line_start(&chars, i) {
+            let line: String = chars[i..].iter().take_while(|ch| **ch != '\n').collect();
+            let mut words = line.split_whitespace();
+            if words.next().is_some_and(|word| word.eq_ignore_ascii_case("DELIMITER")) {
+                if let Some(next) = words.next() {
+                    delimiter = next.chars().collect();
+                }
+                i += line.chars().count();
+                current.clear();
+                continue;
+            }
+        }
+
+        // Oracle's run command: a line holding only `/` ends whatever statement is open, block or not.
+        if oracle && c == '/' && at_line_start(&chars, i) {
+            let rest: String = chars[i + 1..].iter().take_while(|ch| **ch != '\n').collect();
+            if rest.trim().is_empty() {
+                i += 1 + rest.chars().count();
+                flush(&mut current, &mut out);
+                plsql = None;
+                continue;
+            }
+        }
+
+        // The first word of an Oracle statement decides whether `;` ends it.
+        if oracle && plsql.is_none() && !c.is_whitespace() && !(c == '-' && chars.get(i + 1) == Some(&'-')) && !(c == '/' && chars.get(i + 1) == Some(&'*')) {
+            plsql = Some(opens_plsql_block(&chars[i..]));
+        }
+
         match c {
             '-' if chars.get(i + 1) == Some(&'-') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    current.push(chars[i]);
+                    i += 1;
+                }
+            }
+            '#' if mysql => {
                 while i < chars.len() && chars[i] != '\n' {
                     current.push(chars[i]);
                     i += 1;
@@ -1991,7 +2195,46 @@ pub fn split_statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
                     i += 2;
                 }
             }
+            // Oracle's alternative quoting, `q'[ … ]'`: the literal ends at the closing bracket
+            // followed by a quote, so a lone `'` inside it is text.
+            'q' | 'Q' if oracle && chars.get(i + 1) == Some(&'\'') && chars.get(i + 2).is_some() => {
+                let open = chars[i + 2];
+                let close = match open {
+                    '[' => ']',
+                    '{' => '}',
+                    '(' => ')',
+                    '<' => '>',
+                    other => other,
+                };
+                current.push(c);
+                current.push('\'');
+                current.push(open);
+                i += 3;
+                while i < chars.len() {
+                    current.push(chars[i]);
+                    if chars[i] == close && chars.get(i + 1) == Some(&'\'') {
+                        current.push('\'');
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
             '\'' | '"' | '`' | '[' => {
+                // `[` quotes an identifier in T-SQL. The three dialects added later have no such
+                // quote, and a stray `[` there — a JSON path outside a string, say — must not
+                // swallow the rest of the buffer looking for a `]`. The older ones keep the
+                // behaviour they always had.
+                if c == '['
+                    && matches!(
+                        dialect,
+                        Some(SqlDialect::MySql { .. } | SqlDialect::Oracle | SqlDialect::Sqlite)
+                    )
+                {
+                    current.push(c);
+                    i += 1;
+                    continue;
+                }
                 let close = match c {
                     '[' => ']',
                     other => other,
@@ -2002,6 +2245,15 @@ pub fn split_statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
                     let ch = chars[i];
                     current.push(ch);
                     i += 1;
+                    // In MySQL's default mode a backslash escapes the next character inside a
+                    // string, so `'it\'s'` is one literal.
+                    if backslash_escapes && ch == '\\' && c != '`' {
+                        if let Some(&next) = chars.get(i) {
+                            current.push(next);
+                            i += 1;
+                        }
+                        continue;
+                    }
                     if ch == close {
                         // Doubling is how every dialect here escapes the closer inside a literal.
                         if chars.get(i) == Some(&close) {
@@ -2030,12 +2282,14 @@ pub fn split_statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
                     i += 1;
                 }
             }
-            ';' => {
+            ';' if oracle && plsql == Some(true) => {
+                current.push(c);
                 i += 1;
-                if !current.trim().is_empty() {
-                    out.push(current.trim().to_string());
-                }
-                current.clear();
+            }
+            _ if chars[i..].starts_with(&delimiter) => {
+                i += delimiter.len();
+                flush(&mut current, &mut out);
+                plsql = None;
             }
             _ => {
                 current.push(c);
@@ -2044,10 +2298,41 @@ pub fn split_statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
         }
     }
 
-    if !current.trim().is_empty() {
-        out.push(current.trim().to_string());
-    }
+    flush(&mut current, &mut out);
     out
+}
+
+/// Whether only whitespace stands between position `i` and the start of its line. Asked lazily —
+/// only of a `/` in Oracle or at a MySQL statement's start — because walking back to the newline
+/// for every character would make a one-line dump quadratic.
+fn at_line_start(chars: &[char], i: usize) -> bool {
+    chars[..i].iter().rev().take_while(|ch| **ch != '\n').all(|ch| ch.is_whitespace())
+}
+
+/// Whether an Oracle statement starting here is a PL/SQL unit: an anonymous block, or a `CREATE`
+/// of something with a PL/SQL body. Those carry their own semicolons and end at a line holding
+/// only `/`, the convention SQL*Plus set and every Oracle tool since has kept.
+fn opens_plsql_block(rest: &[char]) -> bool {
+    let head: String = rest.iter().take(160).collect::<String>().to_ascii_uppercase();
+    let words: Vec<&str> = head
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|word| !word.is_empty())
+        .take(6)
+        .collect();
+    match words.first().copied() {
+        Some("BEGIN") | Some("DECLARE") => true,
+        Some("CREATE") => {
+            let mut rest = &words[1..];
+            if rest.len() >= 2 && rest[0] == "OR" && rest[1] == "REPLACE" {
+                rest = &rest[2..];
+            }
+            if rest.first().is_some_and(|word| *word == "EDITIONABLE" || *word == "NONEDITIONABLE") {
+                rest = &rest[1..];
+            }
+            matches!(rest.first().copied(), Some("PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE" | "LIBRARY"))
+        }
+        _ => false,
+    }
 }
 
 /// Rewrites a driver failure into the sentence the API client's transports already use for the
@@ -2203,6 +2488,38 @@ mod tests {
     fn dollar_quoted_bodies_stay_whole() {
         let sql = "CREATE FUNCTION f() RETURNS int AS $$ BEGIN x; y; RETURN 1; END $$ LANGUAGE plpgsql;";
         assert_eq!(split_statements(sql, Some(SqlDialect::Postgres)).len(), 1);
+    }
+
+    const MYSQL: Option<SqlDialect> = Some(SqlDialect::MySql { backslash_escapes: true });
+
+    /// `\'` does not end a MySQL string, and `#` starts a comment — both would otherwise move the
+    /// split into the middle of a statement.
+    #[test]
+    fn mysql_escapes_and_hash_comments_do_not_split() {
+        let parts = split_statements("SELECT 'it\\'s; fine'; # a; comment\nSELECT 2;", MYSQL);
+        assert_eq!(parts, vec!["SELECT 'it\\'s; fine'", "# a; comment\nSELECT 2"]);
+    }
+
+    /// A procedure body keeps its semicolons behind a `DELIMITER`, and the directive itself — the
+    /// client's, not the server's — is never sent.
+    #[test]
+    fn mysql_delimiter_changes_the_terminator() {
+        let sql = "DELIMITER //\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END//\nDELIMITER ;\nSELECT 3;";
+        let parts = split_statements(sql, MYSQL);
+        assert_eq!(parts, vec!["CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END", "SELECT 3"]);
+    }
+
+    /// A PL/SQL unit runs to its `/` with every semicolon inside it; a plain statement ends at its
+    /// `;`, which is dropped — Oracle rejects one on a statement sent alone.
+    #[test]
+    fn oracle_blocks_end_at_a_slash_and_statements_at_a_semicolon() {
+        let sql = "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;\n/\nSELECT 1 FROM DUAL;\nBEGIN\n  x := 1;\nEND;\n/\n";
+        let parts = split_statements(sql, Some(SqlDialect::Oracle));
+        assert_eq!(parts, vec!["CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;", "SELECT 1 FROM DUAL", "BEGIN\n  x := 1;\nEND;"]);
+        let quoted = split_statements("SELECT q'[it's; ok]' FROM DUAL; SELECT 2 FROM DUAL", Some(SqlDialect::Oracle));
+        assert_eq!(quoted.len(), 2, "{quoted:?}");
+        // A `/` that is division, not a line of its own, is just a character.
+        assert_eq!(split_statements("SELECT 4 / 2 FROM DUAL", Some(SqlDialect::Oracle)).len(), 1);
     }
 
     #[test]

@@ -15,9 +15,9 @@ import {
   Trash2,
   TriangleAlert,
   Undo2,
-  Wand2,
   X,
 } from "lucide-react";
+import { AiWand } from "../common/AiGlyph";
 import { areaClass } from "./areaClass";
 import { chainStatusOf, reasonText } from "./chainStatus";
 import { StoryPlanGate } from "./StoryPlanGate";
@@ -114,7 +114,7 @@ export function ChainDetail({ chainId }: { chainId: string }) {
           the tree and on the run card below, and a third copy up here would only add motion. */}
       <div className={toolbarClass}>
         {chain.kind === "story" ? (
-          <Wand2 size={16} className="shrink-0 text-[var(--cf-accent)]" />
+          <AiWand size={16} className="shrink-0" />
         ) : (
           <Link2 size={16} className="shrink-0 text-[var(--cf-accent)]" />
         )}

@@ -1034,6 +1034,8 @@ pub fn run() {
             commands::fs_cmd::write_file_bytes,
             commands::fs_cmd::move_path,
             commands::fs_cmd::copy_into_repo,
+            commands::fs_cmd::copy_path,
+            commands::fs_cmd::dir_tree,
             commands::fs_cmd::create_dir,
             commands::fs_cmd::create_file,
             commands::fs_cmd::rename_path,

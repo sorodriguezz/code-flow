@@ -10,7 +10,7 @@ import { ErrorBoundary } from "./components/common/ErrorBoundary";
 // *static* dependency of the entry — 3.98 MB of JS and 162 KB of CSS fetched, parsed, evaluated and
 // kept resident on every launch, before the first frame, for a session that may never open an
 // editor at all. Monaco is not inert on evaluation either: it stands up ~90 language contributions
-// and its theme/command/keybinding registries, and `monacoSetup` then defines 21 themes on top.
+// and its theme/command/keybinding registries, and `monacoSetup` then defines 24 themes on top.
 //
 // So the statement moved to the modules that actually put an editor on screen — `EditorPane`,
 // `EditorView`, `SplitFileDiff`, `ConflictResolveModal`, `StreamPanel`, and every panel that

@@ -5,7 +5,8 @@ import Editor, { DiffEditor } from "@monaco-editor/react";
 // puts an editor on screen states its own dependency, which is what keeps the 4 MB editor out of
 // the entry chunk. Idempotent and module-cached, so saying it here costs nothing.
 import "../../lib/monacoSetup";
-import { AlertTriangle, Check, Columns2, Loader2, Sparkles, X } from "lucide-react";
+import { AlertTriangle, Check, Columns2, Loader2, X } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { readFileText, writeFileText, resolveConflictWithAi } from "../../lib/tauri/commands";
 import { useRepoStore } from "../../state/repoStore";
 import { useThemeStore } from "../../state/themeStore";
@@ -80,7 +81,7 @@ export function ConflictResolveModal({ filePath, onClose }: { filePath: string; 
         className="flex h-full max-h-[85vh] w-[900px] max-w-[95vw] flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
       >
         <div className="flex items-center gap-2 border-b border-[var(--cf-border)] p-3">
-          <Sparkles size={15} className="shrink-0 text-[var(--cf-accent)]" />
+          <AiSparkles size={15} className="shrink-0" />
           <span className="text-[13px] font-semibold text-[var(--cf-text)]">{t("conflicts.aiResolveTitle")}</span>
           <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">{filePath}</span>
           {!loading && !error && (

@@ -17,9 +17,9 @@ import {
   TerminalSquare,
   Trash2,
   Users,
-  Wand2,
   X,
 } from "lucide-react";
+import { AiWand } from "../common/AiGlyph";
 import { AGENT_STATUS, STATUS_ORDER } from "./agentStatus";
 import { ContinueWithModal } from "./ContinueWithModal";
 import { TaskTree } from "./TaskTree";
@@ -573,7 +573,7 @@ function NewSplitButton({
           anchor={{ top: at.top, bottom: at.bottom, left: at.left, right: at.right, align: "start" }}
           items={[
             { label: t("agents.newChain"), icon: Link2, onClick: onNewChain },
-            { label: t("agents.newStory"), icon: Wand2, onClick: onNewStory },
+            { label: t("agents.newStory"), icon: AiWand, onClick: onNewStory },
             // A folder is not work for an agent, so it sits under a hairline of its own.
             { label: t("agents.newProject"), icon: Folder, onClick: onNewProject, separated: true },
           ]}

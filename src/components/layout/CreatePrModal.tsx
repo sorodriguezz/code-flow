@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { WorkItemPicker } from "./WorkItemPicker";
 import type { WorkItem } from "../../types/domain";
-import { CloudUpload, GitPullRequest, Loader2, Sparkles, X } from "lucide-react";
+import { CloudUpload, GitPullRequest, Loader2, X } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { listBranches, generatePrDescription, gitPushBranch } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { usePrStore } from "../../state/prStore";
@@ -267,7 +268,7 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
                 title={t("createPr.generate")}
                 className="flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline disabled:opacity-40"
               >
-                {generating ? <Loader2 size={11} className="animate-spin" /> : <Sparkles size={11} />}
+                {generating ? <Loader2 size={11} className="animate-spin" /> : <AiSparkles size={11} />}
                 {generating ? t("createPr.generating") : t("createPr.generate")}
               </button>
             </div>

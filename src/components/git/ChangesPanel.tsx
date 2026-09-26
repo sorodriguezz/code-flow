@@ -17,11 +17,11 @@ import {
   RefreshCw,
   RotateCcw,
   ShieldCheck,
-  Sparkles,
   Trash2,
   Copy,
   History,
 } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import type { LucideIcon } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useBlameStore } from "../../state/blameStore";
@@ -947,7 +947,7 @@ export function ChangesPanel({
               className="absolute right-1 top-1 flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)] disabled:opacity-30"
             >
               {/* The orb, not a spinner: this is a model writing the message. */}
-              {aiBusy ? <ThinkingOrb size="sm" /> : <Sparkles size={13} />}
+              {aiBusy ? <ThinkingOrb size="sm" /> : <AiSparkles size={13} />}
             </button>
           </div>
           {aiError &&

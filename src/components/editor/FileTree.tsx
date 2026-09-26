@@ -5,24 +5,34 @@ import {
   ChevronRight,
   ChevronsDownUp,
   ClipboardCopy,
+  ClipboardPaste,
+  Copy,
   EyeOff,
   FilePlus,
   FolderOpen,
   FolderPlus,
+  FolderTree,
   ListTree,
   PenLine,
   RefreshCw,
+  Scissors,
   Trash2,
 } from "lucide-react";
 import {
+  copyPath,
   createDir,
   createFile,
   deletePath,
+  dirTree,
   listDir,
   movePath,
   renamePath,
   revealInFileManager,
 } from "../../lib/tauri/commands";
+import { distinctParents, planPaste } from "../../lib/explorerClipboard";
+import { renderFileTree, treeFileName } from "../../lib/fileTreeText";
+import { eventToChord, isTypingTarget } from "../../lib/keys";
+import { useExplorerClipboardStore, type ExplorerClipboardMode } from "../../state/explorerClipboardStore";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { Tooltip } from "../common/Tooltip";
 import { iconButtonClass, Kbd } from "../common/Button";
@@ -59,6 +69,14 @@ export function parentDir(path: string): string {
   const i = path.lastIndexOf("/");
   return i < 0 ? "" : path.slice(0, i);
 }
+
+/**
+ * How many entries "Generate Tree" lists before it stops and says so in the text. A tree worth
+ * pasting anywhere is a few dozen lines; this is for the root of a big repository, which would
+ * otherwise become a document nobody can scroll. Folders git ignores are already left closed by the
+ * walk (`fsops::dir_tree`), so it takes a genuinely large source tree to reach it.
+ */
+const TREE_MAX_ENTRIES = 5000;
 
 type DraftKind = "file" | "dir";
 
@@ -250,6 +268,7 @@ const TreeNode = memo(function TreeNode({
   depth,
   selectedPath,
   marked,
+  cutPaths,
   focusedDir,
   focusedFile,
   expanded,
@@ -282,6 +301,14 @@ const TreeNode = memo(function TreeNode({
   /** Place among its siblings, which is all the entry animation needs to stagger. */
   at: number;
   selectedPath: string | null;
+  /**
+   * The rows a Cut has picked up and a Paste has not yet moved, drawn dimmed the way VS Code draws
+   * them — the only sign that ⌘X did anything, since nothing moves until the paste. The rows
+   * themselves only, not what is inside a cut folder: that is VS Code's rule too, and dimming a whole
+   * expanded subtree would read as the folder already being gone. The same frozen empty set as
+   * `marked` when nothing is cut, so the `memo` still holds.
+   */
+  cutPaths: ReadonlySet<string>;
   /**
    * Every row the user has picked out with ⌘/Ctrl or ⇧ — see `marked` in `FileTree`.
    *
@@ -377,6 +404,7 @@ const TreeNode = memo(function TreeNode({
   // See `focusedFile`: the ring stands in for the highlight when the revealed file is not the one
   // open in the editor. Never both — a row that is already selected says so with its background.
   const isRevealed = !entry.is_dir && !isSelected && focusedFile === entry.path;
+  const isCut = cutPaths.has(entry.path);
   const ownStatus = changedPaths.get(entry.path);
   // A directory doesn't have its own git status, but VS Code-style explorers still color
   // it when something inside changed. One Set lookup: this used to spread `changedPaths.keys()`
@@ -419,6 +447,7 @@ const TreeNode = memo(function TreeNode({
   const inherited = {
     selectedPath,
     marked,
+    cutPaths,
     focusedDir,
     focusedFile,
     expanded,
@@ -491,7 +520,7 @@ const TreeNode = memo(function TreeNode({
               : ""
         } ${isSelected || color ? "" : "text-[var(--cf-text)]"} ${
           isDropTarget || isRevealed ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
-        } ${isDragging ? "opacity-40" : ""}`}
+        } ${isDragging ? "opacity-40" : isCut ? "opacity-50" : ""}`}
       >
         {entry.is_dir ? (
           <>
@@ -600,6 +629,7 @@ export function FileTree({
   changedDirs,
   fsNonce = 0,
   onRefresh,
+  onOpenScratch,
 }: {
   repoPath: string;
   /** The project the terminal dock indexes its shells by. Passed in rather than read from the
@@ -649,6 +679,12 @@ export function FileTree({
    * rest of the screen, and that belongs to whoever mounted the tree.
    */
   onRefresh?: () => void;
+  /**
+   * Opens `content` in an editor tab called `name` that is not a file — see `lib/scratchTabs`. What
+   * "Generate Tree" hands its text to: the tree is something to read and copy, and writing it into
+   * the repository to show it would leave a file behind that nobody asked for.
+   */
+  onOpenScratch?: (name: string, content: string) => void;
 }) {
   const t = useT();
   const chord = useShortcutChord();
@@ -738,6 +774,21 @@ export function FileTree({
   const hiddenEntries = useHiddenFilesStore((s) => s.entries);
   const loadHidden = useHiddenFilesStore((s) => s.load);
   const hideEntry = useHiddenFilesStore((s) => s.hide);
+  /** What Copy or Cut left on the explorer's clipboard, and whether it belongs to this repository —
+   *  the only one it can be pasted into. See `explorerClipboardStore`. */
+  const clipboardRepo = useExplorerClipboardStore((s) => s.repoPath);
+  const clipboardMode = useExplorerClipboardStore((s) => s.mode);
+  const clipboardPaths = useExplorerClipboardStore((s) => s.paths);
+  const canPaste = clipboardRepo === repoPath && clipboardPaths.length > 0;
+  /** The rows to draw dimmed. A new set only when the clipboard itself changes, so a Cut costs one
+   *  pass over the rows and everything else leaves their `memo` alone. */
+  const cutPaths = useMemo<ReadonlySet<string>>(
+    () =>
+      clipboardMode === "cut" && clipboardRepo === repoPath && clipboardPaths.length > 0
+        ? new Set(clipboardPaths)
+        : EMPTY_SELECTION,
+    [clipboardMode, clipboardRepo, clipboardPaths, repoPath],
+  );
   /** Subscribed once here rather than twice per row: every row's glyph wants these, and this
    * component re-renders as a whole when they change, so the rows can take them as props. */
   const iconRules = useIconRulesStore((s) => s.rules);
@@ -965,6 +1016,8 @@ export function FileTree({
         // A renamed folder takes every open file under it with it, which is why the editor is told
         // the prefix rather than each path — see `handlePathMoved`.
         onPathMoved?.(from, to);
+        // And a Copy or Cut waiting on it follows the new name rather than failing on the old one.
+        useExplorerClipboardStore.getState().moved(repoPath, from, to);
         setFocus({ path: to, isDir: expanded.has(from) || childrenRef.current.has(from) });
       } catch (e) {
         // Left open on failure, the same as a new-file name that collided: the name is right there
@@ -1064,7 +1117,11 @@ export function FileTree({
     setNestOpen((prev) => new Set([...prev].filter((p) => !orphaned(p))));
     await Promise.all(parents.map((parent) => loadDir(parent).catch(() => {})));
     void useRepoStore.getState().refreshStatus();
-    for (const target of removed) onPathRemoved?.(target);
+    for (const target of removed) {
+      onPathRemoved?.(target);
+      // Nothing left to paste from: the file is in the trash, not where the clipboard remembers it.
+      useExplorerClipboardStore.getState().removed(repoPath, target);
+    }
   }, [repoPath, loadDir, onPathRemoved]);
 
   // The menu is built once per open and its items are closures; reading the actions through refs
@@ -1113,6 +1170,145 @@ export function FileTree({
     setMenu({ x: e.clientX, y: e.clientY, entry });
   }, []);
 
+  /** Gives the keyboard to the tree — see the scroller's `onMouseDown` for why it has to be asked. */
+  const focusTree = useCallback(() => scrollerRef.current?.focus({ preventScroll: true }), []);
+
+  /** `focus`, for a paste: it is started from a menu assembled before the latest click and from a
+   *  key handler, and both have to aim at the row that is focused *now*. */
+  const focusRef = useRef(focus);
+  focusRef.current = focus;
+
+  /**
+   * Copy and Cut: the selected rows go on the explorer's clipboard (`explorerClipboardStore`), and
+   * nothing else happens until a Paste — VS Code's model, in which Cut only marks.
+   *
+   * The selection is the one Delete and Hide act on, so ⌘-clicking four files and pressing ⌘C copies
+   * four files. `distinctParents`, because a folder picked together with something inside it is
+   * copied once, as the folder.
+   */
+  const copySelection = useCallback(
+    (mode: ExplorerClipboardMode) => {
+      const paths = distinctParents(selectedPathsRef.current());
+      if (paths.length === 0) return;
+      useExplorerClipboardStore.getState().set(repoPath, mode, paths);
+    },
+    [repoPath],
+  );
+
+  /**
+   * Whether `path` is a folder, which a paste needs for one thing: the kind of row to focus once
+   * the paste has landed. The listing cache first — the folder a row was copied from has been
+   * listed, that is where it was picked — and the row's own marker when it has not.
+   */
+  const kindOf = useCallback(
+    (path: string): boolean => {
+      const listed = childrenRef.current.get(parentDir(path))?.find((entry) => entry.path === path);
+      return listed ? listed.is_dir : isDirPath(path);
+    },
+    [isDirPath],
+  );
+
+  /**
+   * Paste: what Copy or Cut picked up, into the folder the focused row names — or beside it, when
+   * that row is a file. Where each path lands is `planPaste`'s decision, VS Code's rules included:
+   * pasting onto the very row that was copied is a duplicate, and a folder into itself is refused.
+   *
+   * **Nothing is ever replaced.** A copy onto a taken name lands as `name copy.ext`
+   * (`fsops::copy_path`). A cut is a move, and a move onto a taken name is refused with the
+   * backend's error, the same as a drag — VS Code refuses it too — and the row stays cut, to be
+   * pasted somewhere else.
+   *
+   * Every item is attempted and the failures collected, the way Delete does it, so one refusal
+   * never strands the rest. Afterwards the destinations are opened, what landed is selected, and a
+   * single pasted file is opened in the editor — also VS Code's behaviour.
+   */
+  const paste = useCallback(async () => {
+    const clipboard = useExplorerClipboardStore.getState();
+    if (clipboard.repoPath !== repoPath || clipboard.paths.length === 0) return;
+    const cut = clipboard.mode === "cut";
+    const { steps, refused } = planPaste(clipboard.paths, focusRef.current);
+    for (const source of refused) {
+      pushErrorToast(tRef.current("editor.pasteIntoItself", { name: source.split("/").pop() ?? source }));
+    }
+    if (steps.length === 0) return;
+
+    // Asked before anything moves: after a move the source's row, and its place in the cache, are gone.
+    const kinds = new Map(steps.map((step) => [step.source, kindOf(step.source)]));
+    const landed: { path: string; isDir: boolean }[] = [];
+    const movedAway: string[] = [];
+    const failures: string[] = [];
+    for (const { source, destDir } of steps) {
+      try {
+        if (cut) {
+          const to = await movePath(repoPath, source, destDir);
+          movedAway.push(source);
+          // `to === source` is a cut pasted back where it already was: done, with nothing to re-point.
+          if (to !== source) onPathMoved?.(source, to);
+          landed.push({ path: to, isDir: kinds.get(source) ?? false });
+        } else {
+          landed.push({ path: await copyPath(repoPath, source, destDir), isDir: kinds.get(source) ?? false });
+        }
+      } catch (e) {
+        failures.push(String(e));
+      }
+    }
+    if (failures.length > 0) pushErrorToast(failures[0]);
+
+    // A cut is spent once it has moved. Whatever did not move stays cut, to be pasted elsewhere.
+    if (cut && movedAway.length > 0) {
+      const now = useExplorerClipboardStore.getState();
+      if (now.repoPath === repoPath && now.mode === "cut") {
+        const left = now.paths.filter((path) => !movedAway.includes(path));
+        if (left.length === 0) now.clear();
+        else now.set(repoPath, "cut", left);
+      }
+    }
+
+    if (activeRepoRef.current !== repoPath || landed.length === 0) return;
+    // Every folder that changed: each destination, opened so what landed in it is in view, and for a
+    // move each folder it left.
+    for (const dir of new Set(steps.map((step) => step.destDir))) revealDirRef.current(dir);
+    const vacated = [...new Set(movedAway.map((source) => parentDir(source)))];
+    await Promise.all(vacated.map((dir) => loadDir(dir).catch(() => {})));
+    void useRepoStore.getState().refreshStatus();
+    setMarked(new Set(landed.map((item) => item.path)));
+    anchorRef.current = landed[0].path;
+    setFocus(landed[0]);
+    if (landed.length === 1 && !landed[0].isDir) onOpenFile?.(landed[0].path);
+  }, [repoPath, kindOf, loadDir, onPathMoved, onOpenFile]);
+
+  /**
+   * "Generate Tree": the folder's structure in the text the VS Code extension `file-tree-generator`
+   * prints (`lib/fileTreeText`), opened in a scratch tab (`lib/scratchTabs`) — something to read and
+   * copy, never a file in the project.
+   *
+   * The explorer's hidden entries go with the request, so the tree leaves out what this tree leaves
+   * out — read only when the store holds this repository's list.
+   */
+  const generateTree = useCallback(
+    async (dir: string) => {
+      const hidden = useHiddenFilesStore.getState();
+      const skip = hidden.repoPath === repoPath ? hidden.entries.map((entry) => entry.path) : [];
+      try {
+        const tree = await dirTree(repoPath, dir, skip, TREE_MAX_ENTRIES);
+        const note = tree.truncated ? tRef.current("editor.treeTruncated", { n: TREE_MAX_ENTRIES }) : null;
+        onOpenScratch?.(treeFileName(tree.name), renderFileTree(tree.name, tree.rows, note));
+      } catch (e) {
+        pushErrorToast(String(e));
+      }
+    },
+    [repoPath, onOpenScratch],
+  );
+
+  // Through refs, like `startDraftRef` and `deleteFocusedRef` and for their reason: the menu is
+  // assembled once per open, and its entries must act on the tree as it is when clicked.
+  const copySelectionRef = useRef(copySelection);
+  copySelectionRef.current = copySelection;
+  const pasteRef = useRef(paste);
+  pasteRef.current = paste;
+  const generateTreeRef = useRef(generateTree);
+  generateTreeRef.current = generateTree;
+
   const menuItems = useCallback(
     (entry: FileEntry | null): MenuItem[] => {
       const items: MenuItem[] = [
@@ -1122,6 +1318,42 @@ export function FileTree({
       // How many rows the menu is about. Rename stays singular whatever it says — there is no
       // sensible "rename these four" — so only the actions that can act on a list say so.
       const count = selectedPathsRef.current().length;
+      // Cut, Copy, Paste — VS Code's three, in its order and in a group of their own. Each hands the
+      // keyboard back to the tree first: the menu's press took it, and the ⌘V that follows a Copy
+      // chosen here has to land in the tree, not nowhere.
+      if (entry) {
+        items.push(
+          {
+            label: count > 1 ? t("editor.cutN", { n: String(count) }) : t("editor.cut"),
+            icon: Scissors,
+            separated: true,
+            onClick: () => {
+              focusTree();
+              copySelectionRef.current("cut");
+            },
+          },
+          {
+            label: count > 1 ? t("editor.copyN", { n: String(count) }) : t("editor.copy"),
+            icon: Copy,
+            onClick: () => {
+              focusTree();
+              copySelectionRef.current("copy");
+            },
+          },
+        );
+      }
+      // On the empty space too, where it pastes into the root. Shown and greyed while there is
+      // nothing to paste, as VS Code does, rather than appearing only once something was copied.
+      items.push({
+        label: t("editor.paste"),
+        icon: ClipboardPaste,
+        separated: !entry,
+        disabled: !canPaste,
+        onClick: () => {
+          focusTree();
+          void pasteRef.current();
+        },
+      });
       if (entry) {
         items.push(
           { label: t("editor.rename"), icon: PenLine, separated: true, onClick: () => setRenaming(entry.path) },
@@ -1202,6 +1434,21 @@ export function FileTree({
           },
         );
       }
+      // A folder's, or the root's from the empty space — never a file's, which has no structure to
+      // print. Always the folder under the pointer, whatever else is selected: a tree is of one place.
+      // Only where there is an editor to show it in.
+      if (onOpenScratch && (!entry || entry.is_dir)) {
+        const dir = entry?.path ?? "";
+        items.push({
+          label: t("editor.generateTree"),
+          icon: FolderTree,
+          separated: true,
+          onClick: () => {
+            focusTree();
+            void generateTreeRef.current(dir);
+          },
+        });
+      }
       return items;
     },
     [
@@ -1213,6 +1460,10 @@ export function FileTree({
       isDirPath,
       nestingEnabled,
       toggleNest,
+      focusTree,
+      onOpenScratch,
+      // Paste is greyed while there is nothing on the clipboard for this repository.
+      canPaste,
       // The menu's labels count the selection, so it has to be rebuilt when that count moves.
       marked,
       focus.path,
@@ -1313,6 +1564,7 @@ export function FileTree({
         await Promise.all([loadDir(fromParent), loadDir(destDir)]);
         void useRepoStore.getState().refreshStatus();
         onPathMoved?.(from, to);
+        useExplorerClipboardStore.getState().moved(repoPath, from, to);
       } catch (e) {
         pushErrorToast(String(e));
       }
@@ -1700,6 +1952,31 @@ export function FileTree({
       <div
         ref={scrollerRef}
         data-cf-treeroot=""
+        // Focusable from code only (the rows are the tab stops), so the tree can hold the keyboard.
+        tabIndex={-1}
+        // The tree takes the keyboard on any press inside it. It has to be asked: every row
+        // `preventDefault`s its mousedown so a press cannot start a text selection, and that also
+        // stops the browser moving focus — so without this, the keys after clicking a file go on
+        // arriving wherever they were before, usually the code, where ⌘C copies a line rather than
+        // the file (and F2 renames a symbol rather than the row). VS Code's explorer takes the focus
+        // the same way. The name field inside the tree keeps its own.
+        onMouseDown={(e) => {
+          if (!isTypingTarget(e.target)) e.currentTarget.focus({ preventScroll: true });
+        }}
+        // ⌘C / ⌘X / ⌘V on the selected rows, and Escape to drop a pending cut — handled here, on the
+        // tree, and deliberately not in the shortcut registry: a registry chord fires wherever the
+        // focus is, and these three have to go on meaning copy and paste everywhere else. Only
+        // while the tree has the focus, and never in the name field, where they are that field's.
+        onKeyDown={(e) => {
+          if (isTypingTarget(e.target)) return;
+          const chord = eventToChord(e.nativeEvent);
+          if (chord === "Mod+C") copySelection("copy");
+          else if (chord === "Mod+X") copySelection("cut");
+          else if (chord === "Mod+V") void paste();
+          else if (chord === "Escape" && cutPaths.size > 0) useExplorerClipboardStore.getState().clear();
+          else return;
+          e.preventDefault();
+        }}
         // Clicking empty space below the tree targets the repo root, so a new file created
         // right after lands at the top level instead of inside a previously clicked folder.
         onClick={(e) => {
@@ -1718,7 +1995,7 @@ export function FileTree({
         // Inset from the column's edges, so a row's rounded selection reads as a row rather than
         // as a band the width of the panel. The padding is still this element — a click or a drop
         // there is a click or a drop on the root, like the space below the last row.
-        className={`min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-1 ${
+        className={`min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-1 outline-none ${
           rootIsDropTarget ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
         }`}
       >
@@ -1737,6 +2014,7 @@ export function FileTree({
                 at={index}
                 selectedPath={selectedPath}
                 marked={marked}
+                cutPaths={cutPaths}
                 focusedDir={focus.isDir ? focus.path : null}
                 focusedFile={focus.isDir ? null : focus.path}
                 expanded={expanded}

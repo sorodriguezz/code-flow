@@ -1,4 +1,5 @@
-import { Brain, Check } from "lucide-react";
+import { Check } from "lucide-react";
+import { AiBrain } from "../common/AiGlyph";
 import { useEffect, useRef, useState } from "react";
 import { CHAT_EFFORTS } from "../../lib/tauri/chatCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -99,14 +100,14 @@ export function EffortPicker({
         title={t("chat.effortTitle")}
         className="flex h-[26px] items-center gap-1 rounded-md px-2 text-[12px] text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40"
       >
-        <Brain size={13} />
+        <AiBrain size={13} />
         {/* The word only when a level was actually chosen. An unchosen control that announces
             "Default" next to the model name is noise in the row that matters most. */}
         {value && <span>{current}</span>}
       </button>
 
       {open && (
-        <div className="absolute bottom-[calc(100%+6px)] left-0 z-30 w-[220px] overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] py-1 shadow-lg">
+        <div className="absolute bottom-[calc(100%+6px)] left-0 z-30 w-[220px] overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] py-1 shadow-[var(--cf-shadow)]">
           <p className="px-2.5 pb-1 pt-1 text-[10.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("chat.effortTitle")}
           </p>

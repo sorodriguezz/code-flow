@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { ArrowLeft, FileWarning, GitBranch, Sparkles, Undo2, Workflow } from "lucide-react";
+import { ArrowLeft, FileWarning, GitBranch, Undo2, Workflow } from "lucide-react";
+import { AiSparkles } from "../common/AiGlyph";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ViewSkeleton } from "../common/ViewSkeleton";
@@ -289,7 +290,7 @@ export function DiagramsView() {
                   aria-label={t("diagrams.ai.apply")}
                   onClick={() => setAiOpen(true)}
                 >
-                  <Sparkles size={14} />
+                  <AiSparkles size={14} />
                 </button>
               )}
               <span className="min-w-0 flex-1 truncate text-[12px] font-medium">

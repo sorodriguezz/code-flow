@@ -76,9 +76,9 @@ describe("ThinkingOrb", () => {
 });
 
 describe("the thinking designs", () => {
-  it("are eight, the reactor first and by default", () => {
+  it("are twelve, the reactor first and by default", () => {
     const ids = THINKING_DESIGNS.map((design) => design.id);
-    expect(ids).toHaveLength(8);
+    expect(ids).toHaveLength(12);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids[0]).toBe("reactor");
     expect(DEFAULT_THINKING_DESIGN).toBe("reactor");

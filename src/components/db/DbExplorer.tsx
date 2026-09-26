@@ -71,7 +71,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import type { RowScope } from "../../types/domain";
 import { dbChildren } from "../../lib/tauri/dbCommands";
 import { riseDelay } from "../../lib/rise";
-import { canDropObjects, type SchemaContents } from "../../lib/db/dropObject";
+import { canDropContainer, canDropObjects, type SchemaContents } from "../../lib/db/dropObject";
 import {
   createTemplate,
   objectReference,
@@ -408,7 +408,7 @@ function NodeSubtree({
   const narrowing = useMemo(() => {
     const config = connectionRow ? parseSpec(connectionRow) : null;
     if (!config) return null;
-    if (node.kind === "database") {
+    if (node.kind === "database" && !engineInfo(connectionRow?.kind ?? "postgres").databaseIsSchema) {
       // The pattern only. `schemas_filtered` says the tick-list *counts* as a filter, not that it
       // hides anything — with every schema ticked it hides nothing, and there is no way to tell from
       // here: the tree only knows the schemas that already survived it. Marking the row on that flag
@@ -416,7 +416,7 @@ function NodeSubtree({
       const pattern = config.schema_filter.trim();
       return config.schema_filter_enabled && pattern ? pattern : null;
     }
-    if (node.kind === "schema") {
+    if (node.kind === "schema" || node.kind === "database") {
       if (!schemaIsNarrowed(config, node.name)) return null;
       // The pattern where one covers the whole schema. Where only some of its folders are narrowed
       // there is no single pattern to name, and saying which is the folder rows' own job.
@@ -438,12 +438,15 @@ function NodeSubtree({
   // The level that *is* a schema, which differs by engine: a schema on the four SQL engines, and a
   // database on Mongo, which has no schema level at all. The same rule the diagram uses, hoisted
   // because the overview needs it too.
+  //
+  // MySQL and MariaDB join Mongo on the database side: their database *is* the schema, with the
+  // folders straight under it, so the diagram, the objects and the filter all belong there.
+  const rowEngine = engineInfo(
+    useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind ?? "postgres",
+  );
+  const databaseIsSchema = node.kind === "database" && rowEngine.databaseIsSchema;
   const isSchemaLike =
-    node.kind === "schema" ||
-    (node.kind === "database" &&
-      !engineInfo(
-        useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind ?? "postgres",
-      ).sql);
+    node.kind === "schema" || (node.kind === "database" && (!rowEngine.sql || rowEngine.databaseIsSchema));
 
   const openData = () => {
     if (!isRelation) return;
@@ -617,12 +620,12 @@ function NodeSubtree({
             connectionId,
             node.database ?? undefined,
             node.schema ?? undefined,
-            createTemplate("table", engineKind, node.kind === "schema" ? node.name : null),
+            createTemplate("table", engineKind, node.kind === "schema" || databaseIsSchema ? node.name : null),
           ),
       });
       // Only where a schema is a thing you can create: on Mongo it isn't, and under a schema the
       // answer to "new schema" is its database, not this node.
-      if (node.kind === "database" && engineInfo(engineKind).sql) {
+      if (node.kind === "database" && engineInfo(engineKind).sql && !engineInfo(engineKind).databaseIsSchema) {
         menuItems.push({
           label: t("db.createSchema"),
           icon: FolderPlus,
@@ -652,7 +655,7 @@ function NodeSubtree({
    *
    * The scope is the gesture, so the dialog itself never asks about it.
    */
-  if (node.kind === "database") {
+  if (node.kind === "database" && !databaseIsSchema) {
     menuItems.push({
       label: t("db.filterMenu"),
       icon: Filter,
@@ -662,7 +665,7 @@ function NodeSubtree({
       onClick: () =>
         openModal({ kind: "objectFilter", connectionId, target: { kind: "schemas" } }),
     });
-  } else if (node.kind === "schema") {
+  } else if (node.kind === "schema" || databaseIsSchema) {
     menuItems.push({
       label: t("db.filterMenu"),
       icon: Filter,
@@ -709,11 +712,12 @@ function NodeSubtree({
       separated: true,
       onClick: () => void dropRelation(),
     });
-  } else if (droppable && isSchemaLike) {
+  } else if (droppable && isSchemaLike && engineKindOrNull !== null && canDropContainer(engineKindOrNull)) {
     menuItems.push({
       // Mongo has no schema level, so the container being dropped is the database — and the row
-      // says the word that engine uses rather than one it has no concept of.
-      label: generatesSql ? t("db.dropSchema") : t("db.dropDatabase"),
+      // says the word that engine uses rather than one it has no concept of. MySQL's too: what it
+      // drops is a database.
+      label: generatesSql && !databaseIsSchema ? t("db.dropSchema") : t("db.dropDatabase"),
       icon: Trash2,
       danger: true,
       separated: true,
@@ -977,11 +981,12 @@ function selectStarFor(connectionId: string, node: DbNode): string {
     return `db.${node.name}.find({}).limit(50)`;
   }
   const target = qualifiedName(node);
-  // `TOP` for IRIS and SQL Server, `LIMIT` for Postgres: the console runs this as-is, so it has to
-  // be valid in the dialect it lands in.
+  // `TOP` for IRIS and SQL Server, `FETCH FIRST` for Oracle, `LIMIT` for the rest: the console
+  // runs this as-is, so it has to be valid in the dialect it lands in.
   if (connection?.kind === "sqlserver" || connection?.kind === "iris") {
     return `SELECT TOP 50 * FROM ${target}`;
   }
+  if (connection?.kind === "oracle") return `SELECT * FROM ${target} FETCH FIRST 50 ROWS ONLY`;
   return `SELECT * FROM ${target} LIMIT 50`;
 }
 

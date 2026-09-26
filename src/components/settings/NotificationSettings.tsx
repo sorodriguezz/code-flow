@@ -147,7 +147,7 @@ function ScoreGlyph({ sound, playing }: { sound: NotificationSoundDef; playing: 
   );
 }
 
-/** What it sounds like: whether it sounds at all, how loud, and which of the ten. */
+/** What it sounds like: whether it sounds at all, how loud, and which of the twelve. */
 function SoundPane() {
   const t = useT();
   const enabled = usePreferencesStore((s) => s.notificationSoundEnabled);
@@ -219,8 +219,8 @@ function SoundPane() {
       </div>
 
       <PaneBlock title={t("notifications.toneHeading")}>
-        {/* Two columns once the pane is wide enough for a name and its line side by side — ten sounds
-            make five full rows. */}
+        {/* Two columns once the pane is wide enough for a name and its line side by side — twelve sounds
+            make six full rows. */}
         <div className="@container">
           <div
             role="radiogroup"

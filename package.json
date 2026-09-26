@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "2.0.2",
+  "version": "2.0.3",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -43,6 +43,7 @@
     "marked": "^18.0.7",
     "pdfmake": "^0.3.11",
     "qrcode-generator": "^2.0.4",
+    "quicktype-core": "26.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "yaml": "^2.9.0",

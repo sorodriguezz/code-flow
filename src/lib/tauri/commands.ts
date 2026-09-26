@@ -1702,6 +1702,37 @@ export interface ImportOutcome {
 export const copyIntoRepo = (repoPath: string, destDir: string, sources: string[]) =>
   invoke<ImportOutcome>("copy_into_repo", { repoPath, destDir, sources });
 
+/** Copies a file or folder that is already in the project — the *file*, not its path text — into
+ * `destDir` (repo-relative; `""` is the root): the explorer's Copy then Paste. A name already taken
+ * there gets VS Code's ` copy` suffix (`a copy.ts`, `a copy 2.ts`) rather than being overwritten.
+ * Returns the new repo-relative path. */
+export const copyPath = (repoPath: string, fromRel: string, destDir: string) =>
+  invoke<string>("copy_path", { repoPath, fromRel, destDir });
+
+/** One line of a generated tree. See `fsops::dir_tree`. */
+export interface TreeRow {
+  /** Folders between this entry and the one the tree was generated on: 0 for its own contents. */
+  depth: number;
+  name: string;
+  is_dir: boolean;
+  /** The last of its siblings — drawn with `┗` rather than `┣`. */
+  last: boolean;
+}
+
+/** A folder's structure as the rows the explorer's "Generate Tree" prints. */
+export interface DirTree {
+  /** The folder's own name, or the repository's for the root. */
+  name: string;
+  rows: TreeRow[];
+  /** The walk stopped at `maxEntries`, so the rows end before the folder does. */
+  truncated: boolean;
+}
+
+/** Walks `relDir` (`""` for the root) the way the explorer lists it, leaving out `hidden` (the
+ * explorer's hidden entries) and not walking into folders git ignores. */
+export const dirTree = (repoPath: string, relDir: string, hidden: string[], maxEntries: number) =>
+  invoke<DirTree>("dir_tree", { repoPath, relDir, hidden, maxEntries });
+
 /** Creates a folder, and any missing parents — so `a/b/c` typed into one box works in one go. */
 export const createDir = (repoPath: string, relPath: string) =>
   invoke<void>("create_dir", { repoPath, relPath });

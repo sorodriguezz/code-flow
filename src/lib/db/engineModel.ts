@@ -145,6 +145,16 @@ export const ENGINE_RECORD_MODELS: Record<DbKind, EngineRecordModel> = {
     // follows one is never the right control here.
     references: false,
   },
+  mysql: RELATIONAL,
+  // MySQL's sibling: the same catalog and the same notion of a row.
+  mariadb: RELATIONAL,
+  sqlite: {
+    ...RELATIONAL,
+    // Every ordinary SQLite table has a `rowid` whether or not it declares a key, and a console
+    // `SELECT rowid, *` is how one row is found again — worth marking without a catalog behind it.
+    conventionalIdentity: ["rowid"],
+  },
+  oracle: RELATIONAL,
   redis: {
     // A Redis grid holds the *entries* of one value — a hash's fields, a list's items — or the keys
     // under a namespace. Neither is a row and neither is a document, so it gets its own vocabulary

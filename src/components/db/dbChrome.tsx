@@ -1,8 +1,11 @@
 import {
   Braces,
+  CircleDot,
   Columns3,
   Database,
+  Feather,
   FileCode2,
+  Fish,
   Folder,
   Hash,
   KeyRound,
@@ -13,6 +16,7 @@ import {
   Server,
   Table2,
   View,
+  Waves,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -121,6 +125,10 @@ const ENGINE_COLORS: Record<DbKind, string> = {
   iris: "#8b5cf6",
   mongodb: "#22c55e",
   redis: "#dc382d",
+  mysql: "#00758f",
+  mariadb: "#c0765a",
+  sqlite: "#0ea5e9",
+  oracle: "#c74634",
 };
 
 export function engineColor(kind: DbKind): string {
@@ -148,6 +156,14 @@ const ENGINE_ICONS: Record<DbKind, LucideIcon> = {
   // A key, because that is plainly what Redis is — and every shape closer to "fast store"
   // (`Database`, `Zap`, `Server`, `Layers`, `Leaf`) is already taken by one of the five above.
   redis: KeySquare,
+  // MySQL's mark is a dolphin and MariaDB's a sea lion; lucide has neither, and a fish and the sea
+  // are the nearest two shapes that still tell the siblings apart.
+  mysql: Fish,
+  mariadb: Waves,
+  // SQLite's own logo is a feather.
+  sqlite: Feather,
+  // Oracle's is the red "O".
+  oracle: CircleDot,
 };
 
 export function engineIcon(kind: DbKind): LucideIcon {

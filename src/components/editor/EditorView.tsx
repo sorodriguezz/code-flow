@@ -6,6 +6,7 @@ import * as monaco from "monaco-editor";
 import "../../lib/monacoSetup";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   Bookmark,
   Bug,
@@ -46,7 +47,8 @@ import {
   togglePinInGroups,
   type EditorGroup,
 } from "../../lib/editorGroups";
-import { copyIntoRepo, readFileText, writeFileText } from "../../lib/tauri/commands";
+import { copyIntoRepo, readFileText, writeFileBytes, writeFileText } from "../../lib/tauri/commands";
+import { freeScratchPath, isScratchPath, scratchName, scratchPath } from "../../lib/scratchTabs";
 import { readDrafts, writeDrafts } from "../../lib/editorDrafts";
 import { onRepoFsChanged } from "../../lib/tauri/events";
 import { isDbmlPath, openDbmlInDiagrams } from "../../lib/dbmlBridge";
@@ -284,7 +286,10 @@ export function EditorView() {
   const dirtyBuffers = useMemo(
     () =>
       tabs
-        .filter((tab) => !tab.loading && tab.content !== tab.originalContent)
+        // Not a scratch tab (`lib/scratchTabs`): it is no file of the project, so it is nothing the
+        // project search describes, and nothing the drafts journal below could restore — a draft is
+        // offered back only against the file it belongs to.
+        .filter((tab) => !tab.loading && tab.content !== tab.originalContent && !isScratchPath(tab.path))
         .map((tab) => ({ path: tab.path, content: tab.content })),
     [tabs],
   );
@@ -356,6 +361,9 @@ export function EditorView() {
       const pin = opts?.pin ?? false;
       const targetId = opts?.groupId ?? activeGroupIdRef.current;
       const alreadyOpen = tabsRef.current.some((tab) => tab.path === path);
+      // A scratch buffer that has been closed is gone — there is no file to read it back from, so
+      // a bookmark or a stale link aimed at one opens nothing rather than an error tab.
+      if (isScratchPath(path) && !alreadyOpen) return;
 
       const outcome = openInGroups(groupsRef.current, targetId, path, pin, (p) =>
         Boolean(tabsRef.current.find((tab) => tab.path === p)?.preview),
@@ -384,6 +392,42 @@ export function EditorView() {
     },
     [project, patchTab],
   );
+
+  /**
+   * Opens `content` in a tab that is no file of the project — see `lib/scratchTabs`. Where the
+   * explorer's "Generate Tree" puts its text.
+   *
+   * Pinned, never a preview: it is something the user asked to read, and a preview tab is recycled by
+   * the next single click in the tree — which would take the only copy of the text with it. Asked for
+   * the same name again, it refreshes that tab if the user has not typed in it, and opens a numbered
+   * one beside it if they have.
+   */
+  const openScratch = useCallback((name: string, content: string) => {
+    const targetId = activeGroupIdRef.current;
+    const reusable = tabsRef.current.some(
+      (tab) => tab.path === scratchPath(name) && tab.content === tab.originalContent,
+    );
+    const path = reusable
+      ? scratchPath(name)
+      : freeScratchPath(name, (candidate) => tabsRef.current.some((tab) => tab.path === candidate));
+    const outcome = openInGroups(groupsRef.current, targetId, path, true, () => false);
+    setGroups(outcome.groups);
+    setActiveGroupId(targetId);
+    const fresh: OpenTab = {
+      path,
+      content,
+      originalContent: content,
+      loading: false,
+      viewMode: "code",
+      preview: false,
+      compare: null,
+    };
+    setTabs((prev) =>
+      prev.some((tab) => tab.path === path)
+        ? prev.map((tab) => (tab.path === path ? fresh : tab))
+        : [...prev, fresh],
+    );
+  }, []);
 
   const closeTab = useCallback(async (groupId: string, path: string) => {
     const tab = tabsRef.current.find((item) => item.path === path);
@@ -555,10 +599,37 @@ export function EditorView() {
     setTabs((prev) => prev.filter((tab) => outcome.groups.some((g) => g.paths.includes(tab.path))));
   }, []);
 
+  /**
+   * Save, on a scratch tab, is Save As: there is no file behind it to write back to, so the user picks
+   * one — offered in the project's folder, which is where a tree of the project usually ends up. The
+   * tab stays a buffer, now clean; what was written is an ordinary file wherever it landed, and the
+   * explorer shows it when that is inside the project.
+   */
+  const saveScratchAs = useCallback(async (repoPath: string, path: string, text: string) => {
+    try {
+      const target = await saveDialog({ defaultPath: `${repoPath}/${scratchName(path)}` });
+      if (!target) return;
+      await writeFileBytes(target, new TextEncoder().encode(text));
+      // Against the text that was written, not the tab's latest: typing done while the dialog was up
+      // is still unsaved, and the dot has to go on saying so.
+      setTabs((prev) => prev.map((item) => (item.path === path ? { ...item, originalContent: text } : item)));
+      void useRepoStore.getState().refreshStatus();
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  }, []);
+
   const save = useCallback(
     async (path: string) => {
       const tab = tabsRef.current.find((item) => item.path === path);
-      if (!project || !tab || tab.content === tab.originalContent) return;
+      if (!project || !tab) return;
+      // Before the "nothing changed" check, not after it: a tree fresh out of "Generate Tree" is clean,
+      // and saving it as a file is exactly what someone pressing ⌘S on it wants.
+      if (isScratchPath(path)) {
+        await saveScratchAs(project.local_path, path, tab.content);
+        return;
+      }
+      if (tab.content === tab.originalContent) return;
       const text = tab.content;
       setSaving(true);
       try {
@@ -578,7 +649,7 @@ export function EditorView() {
         setSaving(false);
       }
     },
-    [project],
+    [project, saveScratchAs],
   );
 
   /**
@@ -680,7 +751,8 @@ export function EditorView() {
   const syncOpenTabs = useCallback(() => {
     if (!project) return;
     for (const tab of tabsRef.current) {
-      if (tab.loading || tab.content !== tab.originalContent) continue;
+      // A scratch tab has no file on disk to fall behind — see `lib/scratchTabs`.
+      if (tab.loading || tab.content !== tab.originalContent || isScratchPath(tab.path)) continue;
       void readFileText(project.local_path, tab.path)
         .then((text) => {
           // The overwhelmingly common case: the watcher fired for *some* file in the repo and
@@ -1332,6 +1404,7 @@ export function EditorView() {
               changedDirs={changedDirs}
               fsNonce={fsNonce}
               onRefresh={forceReload}
+              onOpenScratch={openScratch}
             />
           )}
         </div>

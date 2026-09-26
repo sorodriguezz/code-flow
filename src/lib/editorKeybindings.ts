@@ -78,6 +78,12 @@ export function installEditorShortcuts(monaco: Monaco, overrides: BindingOverrid
       .getEditors()
       .find((candidate: MonacoEditor.ICodeEditor) => candidate.getDomNode()?.contains(target));
     if (!editor) return;
+    // Our own actions (`cf-…`) exist only on the editors that registered them — the Editor's panes —
+    // while this listens in every editor in the app, from the moment the Editor first shows a file.
+    // In an editor that lacks the action, triggering it does nothing, and swallowing the key on top
+    // left ⌘S dead in the SQL console (its own ⌘S command never saw the key) and would do the same to
+    // ⌘⇧V in every other editor. Not ours there, so the key goes on to that editor.
+    if (commandId.startsWith("cf-") && !editor.getAction(commandId)) return;
     // Swallowed before Monaco's own table is consulted — otherwise a chord the user moved onto a
     // key Monaco already uses would run both.
     event.preventDefault();

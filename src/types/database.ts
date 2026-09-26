@@ -15,7 +15,17 @@
 import type { RowScope } from "./domain";
 
 /** Which engine a connection speaks. `supabase` is Postgres with different connection defaults. */
-export type DbKind = "postgres" | "supabase" | "sqlserver" | "iris" | "mongodb" | "redis";
+export type DbKind =
+  | "postgres"
+  | "supabase"
+  | "sqlserver"
+  | "iris"
+  | "mongodb"
+  | "redis"
+  | "mysql"
+  | "mariadb"
+  | "sqlite"
+  | "oracle";
 
 export type DbSslMode = "disable" | "require" | "verify_full";
 
@@ -662,6 +672,17 @@ export interface DbEngineInfo {
   defaultSsl: DbSslMode;
   /** Pre-filled user, when the engine has a conventional one. */
   defaultUser: string;
+  /**
+   * The database *is* the schema — MySQL and MariaDB, which have one namespace level. The tree
+   * then goes database → Tables/Views directly, and a database node does what a schema node does
+   * elsewhere: its diagram, its objects, its filter. Mirrors the Rust driver's tree shape.
+   */
+  databaseIsSchema: boolean;
+  /**
+   * A file, not a server: SQLite. The connection is a path, and every network field — host, port,
+   * user, password, TLS, SSH — means nothing for it.
+   */
+  file: boolean;
 }
 
 export const DB_ENGINES: DbEngineInfo[] = [
@@ -676,6 +697,8 @@ export const DB_ENGINES: DbEngineInfo[] = [
     urlPlaceholder: "postgres://user:password@host:5432/database",
     defaultSsl: "disable",
     defaultUser: "postgres",
+    databaseIsSchema: false,
+    file: false,
   },
   {
     kind: "supabase",
@@ -690,6 +713,8 @@ export const DB_ENGINES: DbEngineInfo[] = [
     // Everything reaches Supabase over the internet, so verification is the only sane default.
     defaultSsl: "verify_full",
     defaultUser: "postgres",
+    databaseIsSchema: false,
+    file: false,
   },
   {
     kind: "sqlserver",
@@ -702,6 +727,8 @@ export const DB_ENGINES: DbEngineInfo[] = [
     urlPlaceholder: "Server=host,1433;Database=db;User Id=sa;Password=…;Encrypt=true",
     defaultSsl: "require",
     defaultUser: "sa",
+    databaseIsSchema: false,
+    file: false,
   },
   {
     kind: "iris",
@@ -716,6 +743,8 @@ export const DB_ENGINES: DbEngineInfo[] = [
     urlPlaceholder: "jdbc:IRIS://host:1972/USER",
     defaultSsl: "disable",
     defaultUser: "_SYSTEM",
+    databaseIsSchema: false,
+    file: false,
   },
   {
     kind: "mongodb",
@@ -728,6 +757,8 @@ export const DB_ENGINES: DbEngineInfo[] = [
     urlPlaceholder: "mongodb+srv://user:password@cluster.mongodb.net/database",
     defaultSsl: "disable",
     defaultUser: "",
+    databaseIsSchema: false,
+    file: false,
   },
   {
     kind: "redis",
@@ -744,6 +775,67 @@ export const DB_ENGINES: DbEngineInfo[] = [
     defaultSsl: "disable",
     // The ACL user every Redis has out of the box.
     defaultUser: "default",
+    databaseIsSchema: false,
+    file: false,
+  },
+  {
+    kind: "mysql",
+    label: "MySQL",
+    defaultPort: 3306,
+    sql: true,
+    consoleLanguage: "sql",
+    documents: false,
+    databaseLabel: "Database",
+    urlPlaceholder: "mysql://user:password@host:3306/database",
+    defaultSsl: "disable",
+    defaultUser: "root",
+    databaseIsSchema: true,
+    file: false,
+  },
+  {
+    kind: "mariadb",
+    label: "MariaDB",
+    defaultPort: 3306,
+    sql: true,
+    consoleLanguage: "sql",
+    documents: false,
+    databaseLabel: "Database",
+    urlPlaceholder: "mariadb://user:password@host:3306/database",
+    defaultSsl: "disable",
+    defaultUser: "root",
+    databaseIsSchema: true,
+    file: false,
+  },
+  {
+    kind: "sqlite",
+    label: "SQLite",
+    // No port: a file is opened, not dialled.
+    defaultPort: 0,
+    sql: true,
+    consoleLanguage: "sql",
+    documents: false,
+    databaseLabel: "File",
+    urlPlaceholder: "sqlite:///path/to/database.db",
+    defaultSsl: "disable",
+    defaultUser: "",
+    databaseIsSchema: false,
+    file: true,
+  },
+  {
+    kind: "oracle",
+    label: "Oracle",
+    defaultPort: 1521,
+    sql: true,
+    consoleLanguage: "sql",
+    documents: false,
+    // Oracle connects to a *service*, which the thin driver names in its URL; a SID can be used
+    // instead with the `sid = true` option.
+    databaseLabel: "Service name",
+    urlPlaceholder: "host:1521/FREEPDB1",
+    defaultSsl: "disable",
+    defaultUser: "",
+    databaseIsSchema: false,
+    file: false,
   },
 ];
 
@@ -761,6 +853,8 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     // IRIS names its namespaces and Redis numbers its databases; everything else takes the
     // server's own default when the field is left empty.
     database: kind === "iris" ? "USER" : kind === "redis" ? "0" : "",
+    // A file has no host; an empty one keeps a SQLite connection from reading as "on localhost".
+    ...(engine.file ? { host: "" } : {}),
     user: engine.defaultUser,
     password: "",
     auth_method: "password",

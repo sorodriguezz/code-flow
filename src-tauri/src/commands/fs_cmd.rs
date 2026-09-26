@@ -42,6 +42,32 @@ pub fn copy_into_repo(
     fsops::copy_into(&repo_path, &dest_dir, &sources)
 }
 
+/// Copies a file or folder of the project into `dest_dir` (repo-relative, `""` for the root) — the
+/// explorer's Copy then Paste. A taken name gets VS Code's ` copy` suffix instead of being
+/// overwritten. Returns the new repo-relative path.
+///
+/// `(async)` for the reason [`list_repo_files`] is: copying a folder costs whatever is in it, and a
+/// plain command runs on the UI thread. Two pastes at once cannot collide — see
+/// `fsops::reserve_copy_target`.
+#[tauri::command(async)]
+pub fn copy_path(repo_path: String, from_rel: String, dest_dir: String) -> Result<String, String> {
+    fsops::copy_path(&repo_path, &from_rel, &dest_dir)
+}
+
+/// The rows of the explorer's "Generate Tree" for `rel_dir` — see [`fsops::dir_tree`]. `hidden` is
+/// the explorer's hidden-entries list, so the tree leaves out what the explorer does.
+///
+/// `(async)` because it walks a whole folder, the same as [`list_repo_files`].
+#[tauri::command(async)]
+pub fn dir_tree(
+    repo_path: String,
+    rel_dir: String,
+    hidden: Vec<String>,
+    max_entries: usize,
+) -> Result<fsops::DirTree, String> {
+    fsops::dir_tree(&repo_path, &rel_dir, &hidden, max_entries)
+}
+
 #[tauri::command]
 pub fn create_dir(repo_path: String, rel_path: String) -> Result<(), String> {
     fsops::create_dir(&repo_path, &rel_path)

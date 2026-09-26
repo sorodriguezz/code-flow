@@ -1,5 +1,6 @@
 import { useId, useState } from "react";
-import { CheckCheck, ChevronDown, ChevronRight, Loader2, MapPin, MessageCircle, Wand2 } from "lucide-react";
+import { CheckCheck, ChevronDown, ChevronRight, Loader2, MapPin, MessageCircle } from "lucide-react";
+import { AiWand } from "../common/AiGlyph";
 import type { PrCommentThread, ThreadCloseOutcome } from "../../types/domain";
 import { Skeleton } from "../common/Skeleton";
 import { buttonClass } from "../common/Button";
@@ -386,7 +387,7 @@ function ThreadCloseComposer({
             title={t("pr.threadDraftHint")}
             className={buttonClass({ variant: "secondary", size: "sm" })}
           >
-            {drafting ? <Loader2 size={13} className="animate-spin" /> : <Wand2 size={13} />}
+            {drafting ? <Loader2 size={13} className="animate-spin" /> : <AiWand size={13} />}
             {t(drafting ? "pr.threadDrafting" : "pr.threadDraftWithAi")}
           </button>
         )}

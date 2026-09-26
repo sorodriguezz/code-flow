@@ -102,15 +102,14 @@ interface PreferencesState {
    */
   pipelinePollSeconds: number;
   /**
-   * Whether the editor annotates the caret's line with who last changed it. Defaults to **off**, for
-   * the same kind of reason the sound above does but a stronger one: nothing is at risk if this is
-   * absent, and turning it on puts a git revwalk behind the caret in every file you open. An editor
-   * that quietly starts doing extra work per keystroke is a thing to opt into, not out of — and "off"
-   * here means no blame call at all, not a hidden annotation, so the cost of leaving it alone is one
-   * boolean read per caret move.
+   * Whether the editor annotates the caret's line, in the code, with who last changed it. Only that:
+   * the Editor's status line says the same thing whatever this is (the user, 2026-09-25: "el check de
+   * config es solo para el ultima vez en codigo"), so the blame runs either way and this no longer
+   * decides anything about cost.
    *
-   * (VS Code ships GitLens' line blame on. VS Code also never had to answer for a 200 ms libgit2
-   * revwalk on a large-history repository, which is the number we do not yet have a bound on.)
+   * Still **off** by default. It used to be off because "off" meant no blame call at all, and a git
+   * revwalk behind the caret was the thing to opt into. Now it is off because the status line already
+   * answers the question, and a label trailing whatever line you land on is the louder of the two.
    */
   blameAnnotationEnabled: boolean;
   /**

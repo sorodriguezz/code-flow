@@ -8,9 +8,9 @@ import {
   Link2,
   Loader2,
   Search,
-  Sparkles,
   X,
 } from "lucide-react";
+import { AiGlyph } from "../common/AiGlyph";
 import { resolvePrLink } from "../../lib/tauri/commands";
 import { VIEW_ON_KEYS } from "../../lib/providerLabels";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -261,7 +261,7 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
               onClick={() => void openPr(resolution, true)}
               className={buttonClass({ variant: "primary" })}
             >
-              <Sparkles size={13} />
+              <AiGlyph size={13} onFill />
               {t("prLink.review")}
             </button>
           </>
@@ -284,7 +284,7 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
               disabled={!activeWorkspaceId}
               className={buttonClass({ variant: "primary" })}
             >
-              <Sparkles size={13} />
+              <AiGlyph size={13} onFill />
               {t("prLink.quickReview")}
             </button>
           </>

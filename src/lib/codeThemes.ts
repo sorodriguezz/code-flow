@@ -14,6 +14,7 @@
  */
 
 import { RAINBOW_COLUMNS } from "./csvDialect";
+import { glassBoost } from "./windowGlass";
 
 export interface CodeThemeUi {
   bg: string;
@@ -44,6 +45,13 @@ export interface CodeTheme {
   mode: "light" | "dark";
   ui: CodeThemeUi;
   tokens: CodeThemeTokens;
+  /**
+   * The terminal's sixteen colours, in xterm's order — black, red, green, yellow, blue, magenta,
+   * cyan, white, then the bright eight: the `terminal.ansi*` values of the scheme's published VS Code
+   * theme. Absent where that theme names none, and then the terminal draws what VS Code does with
+   * it — VS Code's own defaults (`terminalTheme`).
+   */
+  ansi?: readonly string[];
 }
 
 export const DARK_THEMES: CodeTheme[] = [
@@ -74,6 +82,12 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#f87171",
       attribute: "#fbbf24",
     },
+    // Terminal: CodeFlow's own — the app's danger, success, warning, blue, violet and teal, and their
+    // 300s for the bright eight.
+    ansi: [
+      "#252733", "#f87171", "#4ade80", "#fbbf24", "#60a5fa", "#c084fc", "#2dd4bf", "#a1a4b5",
+      "#6b7280", "#fca5a5", "#86efac", "#fcd34d", "#93c5fd", "#d8b4fe", "#5eead4", "#e8e9f1",
+    ],
   },
   {
     id: "dracula",
@@ -100,6 +114,11 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#ff79c6",
       attribute: "#50fa7b",
     },
+    // Terminal: as published in Dracula Theme.
+    ansi: [
+      "#21222c", "#ff5555", "#50fa7b", "#f1fa8c", "#bd93f9", "#ff79c6", "#8be9fd", "#f8f8f2",
+      "#6272a4", "#ff6e6e", "#69ff94", "#ffffa5", "#d6acff", "#ff92df", "#a4ffff", "#ffffff",
+    ],
   },
   {
     id: "monokai",
@@ -126,6 +145,11 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#f92672",
       attribute: "#a6e22e",
     },
+    // Terminal: as published in VS Code's built-in Monokai.
+    ansi: [
+      "#333333", "#c4265e", "#86b42b", "#b3b42b", "#6a7ec8", "#8c6bc8", "#56adbc", "#e3e3dd",
+      "#666666", "#f92672", "#a6e22e", "#e2e22e", "#819aff", "#ae81ff", "#66d9ef", "#f8f8f2",
+    ],
   },
   {
     id: "one-dark",
@@ -152,6 +176,11 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#e06c75",
       attribute: "#d19a66",
     },
+    // Terminal: as published in One Dark Pro.
+    ansi: [
+      "#3f4451", "#e05561", "#8cc265", "#d18f52", "#4aa5f0", "#c162de", "#42b3c2", "#d7dae0",
+      "#4f5666", "#ff616e", "#a5e075", "#f0a45d", "#4dc4ff", "#de73ff", "#4cd1e0", "#e6e6e6",
+    ],
   },
   {
     id: "darcula",
@@ -178,6 +207,8 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#e8bf6a",
       attribute: "#bababa",
     },
+    // No `ansi`: the published VS Code port names no terminal colours, so the terminal takes VS Code's
+    // defaults, as VS Code does.
   },
   {
     id: "nord",
@@ -204,6 +235,11 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#81a1c1",
       attribute: "#8fbcbb",
     },
+    // Terminal: as published in Nord.
+    ansi: [
+      "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+      "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
+    ],
   },
   {
     id: "tokyo-night",
@@ -230,6 +266,11 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#f7768e",
       attribute: "#bb9af7",
     },
+    // Terminal: as published in Tokyo Night.
+    ansi: [
+      "#363b54", "#f7768e", "#73daca", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#787c99",
+      "#363b54", "#f7768e", "#73daca", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#acb0d0",
+    ],
   },
   {
     id: "gruvbox-dark",
@@ -256,6 +297,11 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#8ec07c",
       attribute: "#fabd2f",
     },
+    // Terminal: as published in Gruvbox Dark Medium.
+    ansi: [
+      "#3c3836", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+      "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+    ],
   },
   {
     id: "github-dark",
@@ -282,6 +328,11 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#7ee787",
       attribute: "#79c0ff",
     },
+    // Terminal: as published in GitHub Dark Default.
+    ansi: [
+      "#484f58", "#ff7b72", "#3fb950", "#d29922", "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4",
+      "#6e7681", "#ffa198", "#56d364", "#e3b341", "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff",
+    ],
   },
   {
     id: "night-owl",
@@ -308,6 +359,11 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#caece6",
       attribute: "#c5e478",
     },
+    // Terminal: as published in Night Owl.
+    ansi: [
+      "#011627", "#ef5350", "#22da6e", "#c5e478", "#82aaff", "#c792ea", "#21c7a8", "#ffffff",
+      "#575656", "#ef5350", "#22da6e", "#ffeb95", "#82aaff", "#c792ea", "#7fdbca", "#ffffff",
+    ],
   },
   {
     id: "catppuccin-mocha",
@@ -334,6 +390,47 @@ export const DARK_THEMES: CodeTheme[] = [
       tag: "#f38ba8",
       attribute: "#f9e2af",
     },
+    // Terminal: as published in Catppuccin Mocha.
+    ansi: [
+      "#45475a", "#f38ba8", "#a6e3a1", "#f9e2af", "#89b4fa", "#f5c2e7", "#94e2d5", "#a6adc8",
+      "#585b70", "#f37799", "#89d88b", "#ebd391", "#74a8fc", "#f2aede", "#6bd7ca", "#bac2de",
+    ],
+  },
+  {
+    id: "solarized-dark",
+    name: "Solarized Dark",
+    mode: "dark",
+    // Solarized Light's sixteen colours with the base tones swapped for their dark twins — that
+    // symmetry is the scheme — so the accents below are the light entry's, role for role, and only
+    // the comment tone moves (base01 here, base1 there).
+    ui: {
+      bg: "#002b36",
+      surface: "#00212b",
+      surfaceRaised: "#073642",
+      border: "#004052",
+      text: "#93a1a1",
+      // base0, the scheme's body text, not the base01 its comments use: base01 sits at 2.8:1 on this
+      // background — the light entry's reason for base00, mirrored.
+      textMuted: "#839496",
+    },
+    tokens: {
+      comment: "#586e75",
+      keyword: "#859900",
+      string: "#2aa198",
+      number: "#d33682",
+      fn: "#268bd2",
+      type: "#b58900",
+      variable: "#268bd2",
+      constant: "#cb4b16",
+      operator: "#859900",
+      tag: "#268bd2",
+      attribute: "#b58900",
+    },
+    // Terminal: as published in VS Code's built-in Solarized Dark.
+    ansi: [
+      "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+      "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+    ],
   },
 ];
 
@@ -364,6 +461,12 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#be123c",
       attribute: "#b45309",
     },
+    // Terminal: CodeFlow's own — the app's danger, success, warning, blue, violet and teal, and a step
+    // lighter for the bright eight.
+    ansi: [
+      "#15161d", "#dc2626", "#15803d", "#b45309", "#2563eb", "#9333ea", "#0f766e", "#545767",
+      "#6b7280", "#ef4444", "#16a34a", "#d97706", "#3b82f6", "#a855f7", "#0d9488", "#9ca3af",
+    ],
   },
   {
     id: "github-light",
@@ -390,6 +493,11 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#116329",
       attribute: "#0550ae",
     },
+    // Terminal: as published in GitHub Light Default.
+    ansi: [
+      "#24292f", "#cf222e", "#116329", "#4d2d00", "#0969da", "#8250df", "#1b7c83", "#6e7781",
+      "#57606a", "#a40e26", "#1a7f37", "#633c01", "#218bff", "#a475f9", "#3192aa", "#8c959f",
+    ],
   },
   {
     id: "one-light",
@@ -416,6 +524,8 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#e45649",
       attribute: "#986801",
     },
+    // No `ansi`: Atom One Light names no terminal colours, so the terminal takes VS Code's
+    // defaults, as VS Code does.
   },
   {
     id: "solarized-light",
@@ -445,6 +555,11 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#268bd2",
       attribute: "#b58900",
     },
+    // Terminal: as published in VS Code's built-in Solarized Light.
+    ansi: [
+      "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+      "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+    ],
   },
   {
     id: "gruvbox-light",
@@ -471,6 +586,11 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#427b58",
       attribute: "#b57614",
     },
+    // Terminal: as published in Gruvbox Light Medium.
+    ansi: [
+      "#ebdbb2", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#7c6f64",
+      "#928374", "#9d0006", "#79740e", "#b57614", "#076678", "#8f3f71", "#427b58", "#3c3836",
+    ],
   },
   {
     id: "catppuccin-latte",
@@ -497,6 +617,11 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#d20f39",
       attribute: "#df8e1d",
     },
+    // Terminal: as published in Catppuccin Latte.
+    ansi: [
+      "#5c5f77", "#d20f39", "#40a02b", "#df8e1d", "#1e66f5", "#ea76cb", "#179299", "#acb0be",
+      "#6c6f85", "#de293e", "#49af3d", "#eea02d", "#456eff", "#fe85d8", "#2d9fa8", "#bcc0cc",
+    ],
   },
   {
     id: "quiet-light",
@@ -523,6 +648,8 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#91b3e0",
       attribute: "#8f9d6a",
     },
+    // No `ansi`: VS Code's built-in Quiet Light names no terminal colours, so the terminal takes VS Code's
+    // defaults, as VS Code does.
   },
   {
     id: "xcode-light",
@@ -549,6 +676,8 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#ad3da4",
       attribute: "#805ea7",
     },
+    // No `ansi`: no Xcode port names a full set of terminal colours, so the terminal takes VS Code's
+    // defaults, as VS Code does.
   },
   {
     id: "tokyo-night-light",
@@ -575,6 +704,11 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#8c4351",
       attribute: "#5a4a78",
     },
+    // Terminal: as published in Tokyo Night Light.
+    ansi: [
+      "#343b58", "#8c4351", "#33635c", "#8f5e15", "#2959aa", "#7b43ba", "#006c86", "#707280",
+      "#343b58", "#8c4351", "#33635c", "#8f5e15", "#2959aa", "#7b43ba", "#006c86", "#707280",
+    ],
   },
   {
     id: "ayu-light",
@@ -601,6 +735,83 @@ export const LIGHT_THEMES: CodeTheme[] = [
       tag: "#55b4d4",
       attribute: "#f2ae49",
     },
+    // Terminal: as published in Ayu Light.
+    ansi: [
+      "#000000", "#f06b6c", "#6cbf43", "#e7a100", "#21a1e2", "#a176cb", "#4abc96", "#c7c7c7",
+      "#686868", "#f07171", "#86b300", "#eba400", "#22a4e6", "#a37acc", "#4cbf99", "#d1d1d1",
+    ],
+  },
+  {
+    id: "night-owl-light",
+    name: "Night Owl Light",
+    mode: "light",
+    ui: {
+      bg: "#fbfbfb",
+      surface: "#f0f0f0",
+      surfaceRaised: "#f6f6f6",
+      border: "#d9d9d9",
+      text: "#403f53",
+      // Not the scheme's line-number grey (#90a7b2): that is 2.4:1 on this background — fine in a
+      // gutter, too faint for every muted label in the app. This slate is Night Owl's too (a
+      // signature's commas) and reads at 4.1:1.
+      textMuted: "#5f7e97",
+    },
+    tokens: {
+      comment: "#989fb1",
+      keyword: "#994cc3",
+      // The quoted-string colour, which is nearly every string in a file; the scheme gives only bare
+      // `string` scopes (template literals) its function blue.
+      string: "#c96765",
+      number: "#aa0982",
+      fn: "#4876d6",
+      type: "#111111",
+      variable: "#403f53",
+      constant: "#aa0982",
+      operator: "#994cc3",
+      tag: "#994cc3",
+      attribute: "#4876d6",
+    },
+    // Terminal: as published in Night Owl Light.
+    ansi: [
+      "#403f53", "#de3d3b", "#08916a", "#e0af02", "#288ed7", "#d6438a", "#2aa298", "#93a1a1",
+      "#403f53", "#de3d3b", "#08916a", "#daaa01", "#288ed7", "#d6438a", "#2aa298", "#93a1a1",
+    ],
+  },
+  {
+    id: "rose-pine-dawn",
+    name: "Rosé Pine Dawn",
+    mode: "light",
+    // Rosé Pine's own layering: `base` for the frame, and the lighter `surface` for the panels, menus
+    // and widgets that sit on it.
+    ui: {
+      bg: "#faf4ed",
+      surface: "#fffaf3",
+      surfaceRaised: "#fffaf3",
+      // Highlight Med, the scheme's selection tone, as its published solid colour. Rosé Pine's own
+      // theme files paint it as a translucent overlay (`#6e6a8614`), which can't go here:
+      // `monacoSetup` appends an alpha of its own to this value.
+      border: "#dfdad9",
+      text: "#575279",
+      textMuted: "#797593",
+    },
+    tokens: {
+      comment: "#9893a5",
+      keyword: "#286983",
+      string: "#ea9d34",
+      number: "#d7827e",
+      fn: "#d7827e",
+      type: "#56949f",
+      variable: "#575279",
+      constant: "#d7827e",
+      operator: "#286983",
+      tag: "#56949f",
+      attribute: "#907aa9",
+    },
+    // Terminal: as published in Rosé Pine Dawn.
+    ansi: [
+      "#f2e9e1", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+      "#797593", "#b4637a", "#286983", "#ea9d34", "#56949f", "#907aa9", "#d7827e", "#575279",
+    ],
   },
 ];
 
@@ -642,7 +853,7 @@ export interface TokenRule {
  * picked, and every colour is one the theme's author already made readable on its background. The
  * first column is the plain text colour, as it is there.
  *
- * Six of the shipped schemes have only six distinct token colours, and two more have seven. The gap
+ * Nine of the shipped schemes have only six distinct token colours, and five more have seven. The gap
  * is filled with the comment colour in the fourth slot (Rainbow CSV's own fourth column is its
  * comment scope) and, after that, even mixes of two neighbouring palette colours — colours the theme
  * does not name but is made of, so they sit in it and stay readable on its background.
@@ -711,7 +922,7 @@ export function tokenRulesFor(theme: CodeTheme): TokenRule[] {
     // ObjectScript class those are opposite things, and the doc blocks are long enough that telling
     // them apart pays. `ui.textMuted` rather than a new palette role: it is brighter than `comment` in
     // every dark scheme and darker in every light one, so a doc block reads as *more* present than
-    // dead code in both directions — without editing 21 palettes.
+    // dead code in both directions — without editing 24 palettes.
     { token: "comment.doc", foreground: theme.ui.textMuted, fontStyle: "italic" },
     { token: "keyword", foreground: theme.tokens.keyword },
     { token: "keyword.json", foreground: theme.tokens.constant },
@@ -769,4 +980,6 @@ export function applyThemeVars(theme: CodeTheme) {
   root.setProperty("--cf-text-muted", theme.ui.textMuted);
   // 15%, the same mix `index.css` declares — the two used to disagree (14% there, 18% here).
   root.setProperty("--cf-accent-soft", "color-mix(in oklab, var(--cf-accent) 15%, var(--cf-surface))");
+  // How much thicker this scheme's see-through glass is painted; read only while it is on.
+  root.setProperty("--cf-glass-boost", `${glassBoost(theme)}%`);
 }
