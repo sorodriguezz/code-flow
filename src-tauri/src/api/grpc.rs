@@ -265,6 +265,10 @@ async fn build_channel(
     }
 
     if use_tls {
+        // The client certificate goes on in both branches — mutual TLS is about who *we* are, which
+        // turning server verification off says nothing about. Decoded by `tls`, so a PKCS#12 bundle
+        // or an encrypted key works here exactly as it does over HTTP.
+        let identity = super::tls::identity_for(options)?;
         ep = if options.verify_ssl {
             let mut tls = ClientTlsConfig::new().with_native_roots();
             if !options.ca_cert_path.trim().is_empty() {
@@ -273,11 +277,18 @@ async fn build_channel(
                 })?;
                 tls = tls.ca_certificate(Certificate::from_pem(pem));
             }
+            if let Some(identity) = &identity {
+                tls = tls.identity(identity.tonic());
+            }
             ep.tls_config(tls).map_err(|e| e.to_string())?
         } else {
             // tonic rejects a custom verifier combined with configured roots, so this branch has
             // to start from a bare config rather than reusing the one above.
-            ep.tls_config_with_verifier(ClientTlsConfig::new(), Arc::new(AcceptAnyServerCert))
+            let mut tls = ClientTlsConfig::new();
+            if let Some(identity) = &identity {
+                tls = tls.identity(identity.tonic());
+            }
+            ep.tls_config_with_verifier(tls, Arc::new(AcceptAnyServerCert))
                 .map_err(|e| e.to_string())?
         };
     }

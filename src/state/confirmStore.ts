@@ -28,19 +28,38 @@ export interface ConfirmFlow {
   note?: string;
 }
 
+/**
+ * One way forward in a question that has more than two answers — see [`chooseAction`]. The first
+ * choice listed is the default (Enter picks it), so it should be the one that loses nothing.
+ */
+export interface ConfirmChoice {
+  id: string;
+  label: string;
+  /** `danger` for an answer that throws work away; `primary` for the default. */
+  variant?: "primary" | "secondary" | "danger";
+}
+
 interface ConfirmRequest {
   message: string;
   danger: boolean;
   /** Overrides the generic "Confirm" button label when naming the action is clearer. */
   confirmLabel?: string;
   flow?: ConfirmFlow;
-  resolve: (value: boolean) => void;
+  /** Listed under the message — the files a quit would lose, say. Kept short by the caller. */
+  items?: string[];
+  /** More than one way forward: drawn instead of the single confirm button. */
+  choices?: ConfirmChoice[];
+  /** Settles the question: a choice's id, `true` for the single confirm button, `null` for cancel. */
+  settle: (answer: string | true | null) => void;
 }
 
 interface ConfirmState {
   request: ConfirmRequest | null;
-  ask: (request: Omit<ConfirmRequest, "resolve">) => Promise<boolean>;
+  ask: (request: Omit<ConfirmRequest, "settle" | "choices">) => Promise<boolean>;
+  /** The many-answer form: resolves to the chosen id, or `null` when the question was cancelled. */
+  choose: (request: Omit<ConfirmRequest, "settle"> & { choices: ConfirmChoice[] }) => Promise<string | null>;
   respond: (value: boolean) => void;
+  pick: (id: string) => void;
 }
 
 export const useConfirmStore = create<ConfirmState>((set, get) => ({
@@ -50,12 +69,23 @@ export const useConfirmStore = create<ConfirmState>((set, get) => ({
     new Promise<boolean>((resolve) => {
       // Asking again while a dialog is already up would drop the first promise on the floor and
       // hang whatever was awaiting it, so the pending one is answered "no" before being replaced.
-      get().request?.resolve(false);
-      set({ request: { ...request, resolve } });
+      get().request?.settle(null);
+      set({ request: { ...request, settle: (answer) => resolve(answer === true) } });
+    }),
+
+  choose: (request) =>
+    new Promise<string | null>((resolve) => {
+      get().request?.settle(null);
+      set({ request: { ...request, settle: (answer) => resolve(typeof answer === "string" ? answer : null) } });
     }),
 
   respond: (value) => {
-    get().request?.resolve(value);
+    get().request?.settle(value ? true : null);
+    set({ request: null });
+  },
+
+  pick: (id) => {
+    get().request?.settle(id);
     set({ request: null });
   },
 }));
@@ -65,6 +95,24 @@ export const useConfirmStore = create<ConfirmState>((set, get) => ({
  * through this rather than rolling its own confirm UI. */
 export const confirmAction = (message: string, danger = true, confirmLabel?: string) =>
   useConfirmStore.getState().ask({ message, danger, confirmLabel });
+
+/**
+ * The same modal with more than two answers — "compare / reload / overwrite", "save all / discard".
+ * Resolves to the chosen id, or `null` for Cancel, Escape or a click outside. Cancel is always
+ * there and always means "none of these": callers treat `null` as leaving things as they are.
+ */
+export const chooseAction = (args: {
+  message: string;
+  choices: ConfirmChoice[];
+  items?: string[];
+  danger?: boolean;
+}) =>
+  useConfirmStore.getState().choose({
+    message: args.message,
+    danger: args.danger ?? false,
+    items: args.items,
+    choices: args.choices,
+  });
 
 /** Same modal plus the animated `source → target` diagram — for the branch and stash operations
  * where which way round the change flows is the thing worth being sure about. */

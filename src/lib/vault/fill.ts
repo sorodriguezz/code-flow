@@ -340,6 +340,11 @@ export interface AuthFill {
  * `oauth2` is deliberately absent. Its client id and secret are half a flow whose other half is a
  * token URL, a grant and a scope; filling two boxes of six looks like a completed form and is not
  * one. `jwt` is absent for the same reason — its secret is signing material, paired with claims.
+ *
+ * The value filled is the keyring's own, verbatim: the form sends it, so it has to be the real
+ * thing. Where it lands when the form is saved is the OS credential store, not the `api_*` row —
+ * every command that writes a collection, folder or request seals its credential slots on the way
+ * down (see `db::api_secrets`), so a fill no longer copies a keyring password into SQLite.
  */
 export function authFillFrom(auth: AuthConfig, secret: VaultSecret): AuthFill {
   let filled = 0;

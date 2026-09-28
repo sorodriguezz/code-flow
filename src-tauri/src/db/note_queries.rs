@@ -18,8 +18,15 @@
 //!
 //! What is *not* here: any notion of markdown. A note's body is text to this layer — it is stored,
 //! searched as a string, and measured. Rendering, outlines and formatting are the frontend's.
+//!
+//! **A deleted note goes to the trash first.** `deleted_at` is empty on a live note and a
+//! timestamp on a trashed one, and every read a view makes — the tree, the search, the back-links,
+//! a body — asks for live notes only. A trashed note keeps its history (`doc_versions`), because
+//! restoring the note without it would restore half of it; the history goes when the note does, on
+//! a purge, an emptied trash or the thirty-day sweep ([`purge_expired_trash`]).
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use uuid::Uuid;
 
 use super::models::{
@@ -44,6 +51,11 @@ const EXCERPT_CHARS: usize = 220;
 /// Characters of body either side of a search match. Enough for the phrase around it to be
 /// recognisable without the hit list turning into a second reading surface.
 const SNIPPET_PAD: usize = 60;
+
+/// How long a trashed note is kept before a launch deletes it for good. Long enough to notice a
+/// deletion made by mistake a few weeks back; short enough that "deleted" still means something —
+/// a trashed note is in every backup until it goes.
+pub const TRASH_DAYS: i64 = 30;
 
 fn map_book(row: &rusqlite::Row) -> rusqlite::Result<NoteBookRow> {
     Ok(NoteBookRow {
@@ -288,7 +300,8 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// One workspace's notes, books and templates in a single round trip — and no note bodies.
 pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<NotesWorkspaceTree> {
     let mut statement = conn.prepare(&format!(
-        "SELECT {NOTE_META_COLUMNS} FROM notes WHERE workspace_id = ?1 OR scope = 'global' \
+        "SELECT {NOTE_META_COLUMNS} FROM notes \
+         WHERE (workspace_id = ?1 OR scope = 'global') AND deleted_at = '' \
          ORDER BY pinned DESC, updated_at DESC"
     ))?;
     let notes = statement
@@ -314,10 +327,10 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Note
     Ok(NotesWorkspaceTree { notes, books, templates })
 }
 
-/// One note, body included.
+/// One note, body included. A trashed note is not one — it is read by nothing but the trash.
 pub fn get_note(conn: &Connection, id: &str) -> rusqlite::Result<Option<NoteRow>> {
     conn.query_row(
-        &format!("SELECT {NOTE_COLUMNS} FROM notes WHERE id = ?1"),
+        &format!("SELECT {NOTE_COLUMNS} FROM notes WHERE id = ?1 AND deleted_at = ''"),
         params![id],
         map_note,
     )
@@ -424,7 +437,7 @@ pub fn save_note(
     let (excerpt, word_count) = derive(content);
     let changed = conn.execute(
         "UPDATE notes SET title = ?2, content = ?3, excerpt = ?4, tags = ?5, word_count = ?6, \
-         updated_at = ?7 WHERE id = ?1",
+         updated_at = ?7 WHERE id = ?1 AND deleted_at = ''",
         params![id, title, content, excerpt, tags, word_count, now()],
     )?;
     if changed == 0 {
@@ -456,7 +469,7 @@ pub fn move_note(
     let changed = conn.execute(
         "UPDATE notes SET book_id = ?2, sort_order = ?3, \
          scope = COALESCE((SELECT scope FROM note_books WHERE id = ?2), 'workspace') \
-         WHERE id = ?1",
+         WHERE id = ?1 AND deleted_at = ''",
         params![id, book_id, sort_order],
     )?;
     if changed == 0 {
@@ -495,9 +508,214 @@ pub fn set_note_pinned(conn: &Connection, id: &str, pinned: bool) -> rusqlite::R
     Ok(())
 }
 
-pub fn delete_note(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
-    Ok(())
+/// Deletes a note for good, **history included** — the row and every `doc_versions` row it left.
+///
+/// One transaction, because the pair is one fact: a note gone with its versions still there is the
+/// text the user deleted, surviving in the database and in every backup made afterwards. Reached
+/// only through the trash ([`purge_note`], [`empty_trash`], [`purge_expired_trash`]).
+fn delete_note_for_good(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let removed = tx.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
+    tx.execute(
+        "DELETE FROM doc_versions WHERE kind = 'note' AND doc_id = ?1",
+        params![id],
+    )?;
+    tx.commit()?;
+    Ok(removed > 0)
+}
+
+// ---------------------------------------------------------------------------
+// Trash
+// ---------------------------------------------------------------------------
+
+/// A trashed note as the trash lists it — metadata, never the body, like the tree.
+#[derive(Debug, Clone, Serialize)]
+pub struct NoteTrashRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub book_id: Option<String>,
+    /// The book it was in, when that book still exists; empty when the book was deleted too — which
+    /// is how most notes arrive here in bulk.
+    pub book_name: String,
+    pub title: String,
+    pub excerpt: String,
+    pub word_count: i64,
+    pub scope: String,
+    pub deleted_at: String,
+}
+
+/// Moves a note to the trash. `false` when there was no live note by that id.
+///
+/// Its versions stay: restoring a note without its history would restore half of it.
+pub fn trash_note(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE notes SET deleted_at = ?2 WHERE id = ?1 AND deleted_at = ''",
+        params![id, now()],
+    )?;
+    Ok(changed > 0)
+}
+
+/// The trash one workspace sees: its own trashed notes and the global ones, newest first — the same
+/// `workspace_id = ?1 OR scope = 'global'` every read in this file makes (see `codeflow-row-scope`).
+pub fn list_trash(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<NoteTrashRow>> {
+    let mut statement = conn.prepare(
+        "SELECT n.id, n.workspace_id, n.book_id, COALESCE(b.name, ''), n.title, n.excerpt, \
+                n.word_count, n.scope, n.deleted_at \
+         FROM notes n LEFT JOIN note_books b ON b.id = n.book_id \
+         WHERE (n.workspace_id = ?1 OR n.scope = 'global') AND n.deleted_at <> '' \
+         ORDER BY n.deleted_at DESC",
+    )?;
+    let rows = statement
+        .query_map(params![workspace_id], |row| {
+            Ok(NoteTrashRow {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                book_id: row.get(2)?,
+                book_name: row.get(3)?,
+                title: row.get(4)?,
+                excerpt: row.get(5)?,
+                word_count: row.get(6)?,
+                scope: row.get(7)?,
+                deleted_at: row.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Takes a note out of the trash, back into its book — or, when the book went with it, into the
+/// first book of its workspace, or into a new one named `fallback_book_name` when there is none.
+///
+/// Every note has a book (see [`create_note`]), and a note restored into none would be restored
+/// into nowhere. The name comes from the caller because it is a translated string. Appended at the
+/// end of the destination, and `scope` re-inherited from it, the two things [`move_note`] does.
+/// `None` when there is no trashed note by that id.
+pub fn restore_note(
+    conn: &Connection,
+    id: &str,
+    fallback_book_name: &str,
+) -> rusqlite::Result<Option<NoteMeta>> {
+    let tx = conn.unchecked_transaction()?;
+    let Some((workspace_id, book_id)) = tx
+        .query_row(
+            "SELECT workspace_id, book_id FROM notes WHERE id = ?1 AND deleted_at <> ''",
+            params![id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let still_there = match &book_id {
+        Some(book) => tx
+            .query_row("SELECT 1 FROM note_books WHERE id = ?1", params![book], |_| Ok(()))
+            .optional()?
+            .is_some(),
+        None => false,
+    };
+    let destination = match (still_there, book_id) {
+        (true, Some(book)) => book,
+        _ => {
+            let first: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM note_books WHERE workspace_id = ?1 AND parent_id IS NULL \
+                     ORDER BY sort_order, name LIMIT 1",
+                    params![&workspace_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match first {
+                Some(book) => book,
+                None => create_book(&tx, &workspace_id, None, fallback_book_name, "")?.id,
+            }
+        }
+    };
+    let sort_order: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM notes \
+         WHERE book_id = ?1 AND deleted_at = ''",
+        params![&destination],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "UPDATE notes SET deleted_at = '', book_id = ?2, sort_order = ?3, \
+         scope = COALESCE((SELECT scope FROM note_books WHERE id = ?2), 'workspace') \
+         WHERE id = ?1",
+        params![id, &destination, sort_order],
+    )?;
+    tx.commit()?;
+    meta_of(conn, id)
+}
+
+/// Deletes one trashed note for good, history included. Only a trashed one: a mis-wired call with
+/// a live note's id deletes nothing.
+pub fn purge_note(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    let trashed = conn
+        .query_row(
+            "SELECT 1 FROM notes WHERE id = ?1 AND deleted_at <> ''",
+            params![id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !trashed {
+        return Ok(false);
+    }
+    delete_note_for_good(conn, id)
+}
+
+/// Empties the trash one workspace sees (its own and the global notes), for good. Returns how many
+/// notes went.
+pub fn empty_trash(conn: &Connection, workspace_id: &str) -> rusqlite::Result<usize> {
+    let ids: Vec<String> = conn
+        .prepare(
+            "SELECT id FROM notes \
+             WHERE (workspace_id = ?1 OR scope = 'global') AND deleted_at <> ''",
+        )?
+        .query_map(params![workspace_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut removed = 0;
+    for id in ids {
+        if delete_note_for_good(conn, &id)? {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+/// The launch-time sweep: every note trashed more than [`TRASH_DAYS`] before `now` goes for good,
+/// and so does every note version whose note no longer exists at all.
+///
+/// The second half is for rows nobody can reach any more — the history of notes deleted before the
+/// trash existed (a notebook's delete took its notes and left their versions behind), and of notes a
+/// deleted workspace took with it. That history is the text the user deleted, surviving in the
+/// database and in every backup, with no screen left that could show or remove it.
+///
+/// `now` is a parameter so the test does not wait a month. A `deleted_at` that does not parse is
+/// kept rather than guessed at.
+pub fn purge_expired_trash(
+    conn: &Connection,
+    now: chrono::DateTime<chrono::Utc>,
+) -> rusqlite::Result<usize> {
+    let cutoff = now - chrono::Duration::days(TRASH_DAYS);
+    let trashed: Vec<(String, String)> = conn
+        .prepare("SELECT id, deleted_at FROM notes WHERE deleted_at <> ''")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut removed = 0;
+    for (id, deleted_at) in trashed {
+        let expired = chrono::DateTime::parse_from_rfc3339(&deleted_at)
+            .map(|at| at.with_timezone(&chrono::Utc) < cutoff)
+            .unwrap_or(false);
+        if expired && delete_note_for_good(conn, &id)? {
+            removed += 1;
+        }
+    }
+    conn.execute(
+        "DELETE FROM doc_versions WHERE kind = 'note' \
+         AND doc_id NOT IN (SELECT id FROM notes)",
+        [],
+    )?;
+    Ok(removed)
 }
 
 /// Copies a note into the same book, under a caller-supplied name.
@@ -768,17 +986,19 @@ pub fn reorder_books(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> 
     tx.commit()
 }
 
-/// Deletes a book, its subbooks, **and every note in any of them**.
+/// Deletes a book and its subbooks, and moves **every note in any of them to the trash**.
 ///
 /// This used to leave the notes behind at the root, which was the recoverable outcome while "no
-/// book" was a place a note could be. It no longer is (see [`create_note`]), so there is nowhere to
-/// leave them: a surviving note would be a row no view can reach. Deleting a book is therefore a
-/// destructive act, and the confirmation the UI puts in front of it says how many notes are about
-/// to go — see `notes.deleteBookWithNotes`.
+/// book" was a place a note could be. It no longer is (see [`create_note`]), so a surviving live
+/// note would be a row no view can reach. It then deleted them outright — and left their versions
+/// behind, so the text the user deleted survived in the database and in every backup with nothing
+/// able to show or remove it. Now they go to the trash with their history, like a note deleted on
+/// its own: a book deleted by mistake is recovered note by note, and emptying the trash (or the
+/// thirty-day sweep) takes the history with them. [`restore_note`] files a note whose book is gone.
 ///
-/// The notes go first and in the same transaction as the books. The other order would rely on the
-/// table's `ON DELETE SET NULL` not firing in between, which is exactly the state — notes with no
-/// book — this function exists to avoid producing.
+/// The notes are trashed first and in the same transaction as the books; the book's delete then
+/// leaves them with no `book_id` (the table's `ON DELETE SET NULL`), which is fine for a trashed row
+/// and is exactly what `restore_note` looks for.
 pub fn delete_book(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     tx.execute(
@@ -787,8 +1007,9 @@ pub fn delete_book(conn: &Connection, id: &str) -> rusqlite::Result<()> {
              UNION ALL \
              SELECT book.id FROM note_books book JOIN subtree ON book.parent_id = subtree.id \
          ) \
-         DELETE FROM notes WHERE book_id IN (SELECT id FROM subtree)",
-        params![id],
+         UPDATE notes SET deleted_at = ?2 \
+         WHERE book_id IN (SELECT id FROM subtree) AND deleted_at = ''",
+        params![id, now()],
     )?;
     // The subbooks go with it through `note_books.parent_id`'s own `ON DELETE CASCADE`.
     tx.execute("DELETE FROM note_books WHERE id = ?1", params![id])?;
@@ -903,7 +1124,8 @@ pub fn search_notes(
     }
 
     let mut statement = conn.prepare(
-        "SELECT id, content FROM notes WHERE workspace_id = ?1 OR scope = 'global' \
+        "SELECT id, content FROM notes \
+         WHERE (workspace_id = ?1 OR scope = 'global') AND deleted_at = '' \
          ORDER BY pinned DESC, updated_at DESC",
     )?;
     let mut rows = statement.query(params![workspace_id])?;
@@ -953,7 +1175,8 @@ pub fn backlinks(
     }
 
     let mut statement = conn.prepare(
-        "SELECT id, content FROM notes WHERE (workspace_id = ?1 OR scope = 'global') AND id != ?2 \
+        "SELECT id, content FROM notes \
+         WHERE (workspace_id = ?1 OR scope = 'global') AND id != ?2 AND deleted_at = '' \
          ORDER BY pinned DESC, updated_at DESC",
     )?;
     let mut rows = statement.query(params![workspace_id, exclude_id])?;
@@ -981,6 +1204,150 @@ pub fn backlinks(
         }
     }
     Ok(hits)
+}
+
+/// How many live notes other than `exclude_id` link to `title` — the number the rename question
+/// states before anything is rewritten. Uncapped, unlike [`backlinks`]: "rewrite 100 notes" when it
+/// is 340 would be a promise about the wrong amount of work.
+pub fn count_linking_notes(
+    conn: &Connection,
+    workspace_id: &str,
+    title: &str,
+    exclude_id: &str,
+) -> rusqlite::Result<usize> {
+    let wanted = fold_for_match(title);
+    if wanted.is_empty() {
+        return Ok(0);
+    }
+    let mut statement = conn.prepare(
+        "SELECT content FROM notes \
+         WHERE (workspace_id = ?1 OR scope = 'global') AND id != ?2 AND deleted_at = ''",
+    )?;
+    let mut rows = statement.query(params![workspace_id, exclude_id])?;
+    let mut count = 0;
+    while let Some(row) = rows.next()? {
+        let content: String = row.get(0)?;
+        if find_wiki_link(&content, &wanted).is_some() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Points every `[[old]]` — and `[[old|label]]`, label kept — in the workspace's other live notes at
+/// `new_title`, and answers with the notes it changed.
+///
+/// A rename used to break every link to the note silently: links resolve by title, so the day
+/// "Retro" became "Retro 12 May" every `[[Retro]]` in the workspace pointed at nothing and nothing
+/// said so. This is the other half of the rename, run only when the user said yes to the count
+/// [`count_linking_notes`] gave them.
+///
+/// **One transaction for all of it**, because the rewrite is one fact: half the notes pointing at
+/// the new title and half at the old is a state nobody asked for and nothing could explain. Each
+/// note's previous text is recorded as a version on the way past (throttled like any save), so a
+/// rewrite the user regrets is one restore away, note by note. The derived columns are rewritten with
+/// the body, per the rule at the top of this file.
+pub fn rewrite_links(
+    conn: &Connection,
+    workspace_id: &str,
+    old_title: &str,
+    new_title: &str,
+    exclude_id: &str,
+) -> rusqlite::Result<Vec<NoteMeta>> {
+    let wanted = fold_for_match(old_title);
+    let target = new_title.trim();
+    // A title a link cannot carry: `]]` would close it early, `|` would start its label.
+    if wanted.is_empty() || target.is_empty() || target.contains("]]") || target.contains('|') || target.contains('\n') {
+        return Ok(Vec::new());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let candidates: Vec<(String, String, String)> = tx
+        .prepare(
+            "SELECT id, title, content FROM notes \
+             WHERE (workspace_id = ?1 OR scope = 'global') AND id != ?2 AND deleted_at = ''",
+        )?
+        .query_map(params![workspace_id, exclude_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let timestamp = now();
+    let mut changed = Vec::new();
+    for (id, title, content) in candidates {
+        let Some(rewritten) = replace_wiki_links(&content, &wanted, target) else {
+            continue;
+        };
+        super::version_queries::record_version(&tx, "note", &id, &title, &content, &timestamp)?;
+        let (excerpt, word_count) = derive(&rewritten);
+        tx.execute(
+            "UPDATE notes SET content = ?2, excerpt = ?3, word_count = ?4, updated_at = ?5 \
+             WHERE id = ?1",
+            params![&id, &rewritten, excerpt, word_count, &timestamp],
+        )?;
+        changed.push(id);
+    }
+    tx.commit()?;
+    let mut metas = Vec::with_capacity(changed.len());
+    for id in changed {
+        if let Some(meta) = meta_of(conn, &id)? {
+            metas.push(meta);
+        }
+    }
+    Ok(metas)
+}
+
+/// `content` with every `[[…]]` whose target folds to `wanted` pointed at `new_title`, or `None`
+/// when it holds none. The same bounded scan [`find_wiki_link`] makes, so what is rewritten is
+/// exactly what [`backlinks`] would have listed.
+fn replace_wiki_links(content: &str, wanted: &str, new_title: &str) -> Option<String> {
+    let chars: Vec<char> = content.chars().collect();
+    let mut out = String::with_capacity(content.len());
+    let mut index = 0;
+    let mut replaced = false;
+    while index < chars.len() {
+        if index + 1 >= chars.len() || chars[index] != '[' || chars[index + 1] != '[' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let mut cursor = index + 2;
+        let mut close = None;
+        while cursor + 1 < chars.len() && cursor < index + 2 + 200 {
+            if chars[cursor] == '[' && chars[cursor + 1] == '[' {
+                break;
+            }
+            if chars[cursor] == ']' && chars[cursor + 1] == ']' {
+                close = Some(cursor);
+                break;
+            }
+            cursor += 1;
+        }
+        let Some(close) = close else {
+            out.push_str("[[");
+            index += 2;
+            continue;
+        };
+        let inner: String = chars[index + 2..close].iter().collect();
+        let (link_target, label) = match inner.split_once('|') {
+            Some((head, tail)) => (head, Some(tail)),
+            None => (inner.as_str(), None),
+        };
+        if fold_for_match(link_target) == wanted {
+            out.push_str("[[");
+            out.push_str(new_title);
+            if let Some(label) = label {
+                out.push('|');
+                out.push_str(label);
+            }
+            out.push_str("]]");
+            replaced = true;
+        } else {
+            out.push_str("[[");
+            out.push_str(&inner);
+            out.push_str("]]");
+        }
+        index = close + 2;
+    }
+    replaced.then_some(out)
 }
 
 /// Case- and accent-insensitive folding, plus whitespace collapsed — the same comparison
@@ -1425,6 +1792,199 @@ mod tests {
             tree.notes.iter().all(|n| n.book_id.is_some()),
             "no note is ever left without a book",
         );
+    }
+
+    fn versions_of(conn: &Connection, id: &str) -> usize {
+        super::super::version_queries::list_versions(conn, "note", id).unwrap().len()
+    }
+
+    fn remember_version(conn: &Connection, id: &str, text: &str) {
+        super::super::version_queries::record_version(conn, "note", id, "t", text, &now()).unwrap();
+    }
+
+    /// The bug behind item one of the audit: a book's delete took its notes and left their history,
+    /// so the deleted text stayed in the database and in every backup with no screen able to show
+    /// or remove it. Now the notes go to the trash *with* their history, and emptying the trash
+    /// takes both.
+    #[test]
+    fn deleting_a_book_trashes_its_notes_and_emptying_the_trash_takes_their_history() {
+        let conn = workspace();
+        let parent = create_book(&conn, "w1", None, "Padre", "").unwrap();
+        let child = create_book(&conn, "w1", Some(&parent.id), "Hijo", "").unwrap();
+        let top = create_note(&conn, "w1", &parent.id, "Arriba", "uno", "[]").unwrap();
+        let deep = create_note(&conn, "w1", &child.id, "Abajo", "dos", "[]").unwrap();
+        remember_version(&conn, &top.id, "uno antes");
+        remember_version(&conn, &deep.id, "dos antes");
+
+        delete_book(&conn, &parent.id).unwrap();
+
+        assert!(load_tree(&conn, "w1").unwrap().notes.is_empty(), "gone from the shelf");
+        let trash = list_trash(&conn, "w1").unwrap();
+        assert_eq!(trash.len(), 2, "both are in the trash, the sub-book's too");
+        assert!(trash.iter().all(|row| row.book_name.is_empty()), "their books are gone");
+        assert_eq!(versions_of(&conn, &top.id), 1, "the history waits with the note");
+
+        assert_eq!(empty_trash(&conn, "w1").unwrap(), 2);
+        assert_eq!(versions_of(&conn, &top.id), 0, "and goes with it");
+        assert_eq!(versions_of(&conn, &deep.id), 0);
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn a_trashed_note_is_invisible_to_every_read_but_the_trash() {
+        let conn = workspace();
+        let note = create_note(&conn, "w1", "b1", "Retro", "alfa beta", "[]").unwrap();
+        let other = create_note(&conn, "w1", "b1", "Otra", "ver [[Retro]]", "[]").unwrap();
+        assert!(trash_note(&conn, &note.id).unwrap());
+        assert!(!trash_note(&conn, &note.id).unwrap(), "trashing twice changes nothing");
+
+        assert!(get_note(&conn, &note.id).unwrap().is_none());
+        assert!(search_notes(&conn, "w1", "alfa", 10).unwrap().is_empty());
+        assert!(save_note(&conn, &note.id, "x", "y", "[]").unwrap().is_none(), "no autosave into the trash");
+        assert!(move_note(&conn, &note.id, "b1").unwrap().is_none());
+        assert_eq!(list_trash(&conn, "w1").unwrap()[0].id, note.id);
+        // A trashed note's own links no longer count as links.
+        trash_note(&conn, &other.id).unwrap();
+        assert!(backlinks(&conn, "w1", "Retro", "", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restoring_puts_a_note_back_where_it_was_or_somewhere_it_can_be_reached() {
+        let conn = workspace();
+        let note = create_note(&conn, "w1", "b1", "Vuelve", "x", "[]").unwrap();
+        trash_note(&conn, &note.id).unwrap();
+        let back = restore_note(&conn, &note.id, "Recuperadas").unwrap().unwrap();
+        assert_eq!(back.book_id.as_deref(), Some("b1"), "its own book, which still exists");
+        assert_eq!(load_tree(&conn, "w1").unwrap().notes.len(), 1);
+        assert!(restore_note(&conn, &note.id, "Recuperadas").unwrap().is_none(), "not in the trash any more");
+
+        // Its book gone and none left in the workspace: a book is made for it.
+        let lonely = create_book(&conn, "w1", None, "Solo", "").unwrap();
+        let inside = create_note(&conn, "w1", &lonely.id, "Dentro", "y", "[]").unwrap();
+        conn.execute("DELETE FROM notes WHERE id = ?1", params![note.id]).unwrap();
+        delete_book(&conn, &lonely.id).unwrap();
+        conn.execute("DELETE FROM note_books", []).unwrap();
+        let rescued = restore_note(&conn, &inside.id, "Recuperadas").unwrap().unwrap();
+        let tree = load_tree(&conn, "w1").unwrap();
+        assert_eq!(tree.books.len(), 1);
+        assert_eq!(tree.books[0].name, "Recuperadas");
+        assert_eq!(rescued.book_id.as_deref(), Some(tree.books[0].id.as_str()));
+    }
+
+    #[test]
+    fn purge_refuses_a_live_note_and_takes_a_trashed_one_with_its_history() {
+        let conn = workspace();
+        let note = create_note(&conn, "w1", "b1", "Una", "x", "[]").unwrap();
+        remember_version(&conn, &note.id, "antes");
+        assert!(!purge_note(&conn, &note.id).unwrap(), "a live note is not purged");
+        assert!(get_note(&conn, &note.id).unwrap().is_some());
+
+        trash_note(&conn, &note.id).unwrap();
+        assert!(purge_note(&conn, &note.id).unwrap());
+        assert_eq!(versions_of(&conn, &note.id), 0);
+        assert!(list_trash(&conn, "w1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_launch_sweep_takes_expired_trash_and_orphaned_history_only() {
+        let conn = workspace();
+        let old = create_note(&conn, "w1", "b1", "Vieja", "x", "[]").unwrap();
+        let recent = create_note(&conn, "w1", "b1", "Reciente", "y", "[]").unwrap();
+        let live = create_note(&conn, "w1", "b1", "Viva", "z", "[]").unwrap();
+        remember_version(&conn, &old.id, "a");
+        remember_version(&conn, &live.id, "b");
+        // History a pre-trash delete left behind: a version with no note.
+        remember_version(&conn, "gone-note", "c");
+        let at = chrono::DateTime::parse_from_rfc3339("2026-09-01T00:00:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        conn.execute(
+            "UPDATE notes SET deleted_at = ?2 WHERE id = ?1",
+            params![old.id, (at - chrono::Duration::days(31)).to_rfc3339()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE notes SET deleted_at = ?2 WHERE id = ?1",
+            params![recent.id, (at - chrono::Duration::days(29)).to_rfc3339()],
+        )
+        .unwrap();
+
+        assert_eq!(purge_expired_trash(&conn, at).unwrap(), 1);
+
+        let trash: Vec<String> = list_trash(&conn, "w1").unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(trash, vec![recent.id.clone()], "a month to the day is still kept");
+        assert_eq!(versions_of(&conn, &old.id), 0);
+        assert_eq!(versions_of(&conn, "gone-note"), 0, "orphaned history is swept");
+        assert_eq!(versions_of(&conn, &live.id), 1, "a live note's history is not");
+    }
+
+    /// The row-scope rule the rest of this file follows: a global book's trashed notes are in every
+    /// workspace's trash, and a workspace-scoped one only in its own.
+    #[test]
+    fn the_trash_follows_the_scope_of_what_is_in_it() {
+        let conn = workspace();
+        with_second_workspace(&conn);
+        let shared = create_book(&conn, "w1", None, "Compartido", "").unwrap();
+        set_book_scope(&conn, &shared.id, true).unwrap();
+        let everywhere = create_note(&conn, "w1", &shared.id, "Global", "x", "[]").unwrap();
+        let here = create_note(&conn, "w1", "b1", "Local", "y", "[]").unwrap();
+        trash_note(&conn, &everywhere.id).unwrap();
+        trash_note(&conn, &here.id).unwrap();
+
+        let other: Vec<String> = list_trash(&conn, "w2").unwrap().into_iter().map(|r| r.id).collect();
+        assert_eq!(other, vec![everywhere.id.clone()]);
+        assert_eq!(empty_trash(&conn, "w2").unwrap(), 1, "w2 empties what it can see");
+        assert_eq!(list_trash(&conn, "w1").unwrap().len(), 1, "w1's own is untouched");
+    }
+
+    /// Links resolve by title, so a rename used to break every `[[link]]` to the note in silence.
+    #[test]
+    fn renaming_rewrites_the_links_that_pointed_at_the_old_title() {
+        let conn = workspace();
+        let renamed = create_note(&conn, "w1", "b1", "Retro Mayo", "yo", "[]").unwrap();
+        let linking = create_note(
+            &conn,
+            "w1",
+            "b1",
+            "Diario",
+            "Ver [[retro mayo]] y [[ Retro Mayo |la retro]], no [[Retro]].",
+            "[]",
+        )
+        .unwrap();
+        let unrelated = create_note(&conn, "w1", "b1", "Nada", "[[Otra cosa]]", "[]").unwrap();
+
+        assert_eq!(count_linking_notes(&conn, "w1", "Retro Mayo", &renamed.id).unwrap(), 1);
+        let changed = rewrite_links(&conn, "w1", "Retro Mayo", "Retro 12 Mayo", &renamed.id).unwrap();
+        assert_eq!(changed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec![linking.id.as_str()]);
+
+        let body = get_note(&conn, &linking.id).unwrap().unwrap().content;
+        assert_eq!(body, "Ver [[Retro 12 Mayo]] y [[Retro 12 Mayo|la retro]], no [[Retro]].");
+        assert_eq!(get_note(&conn, &unrelated.id).unwrap().unwrap().content, "[[Otra cosa]]");
+        assert_eq!(versions_of(&conn, &linking.id), 1, "what it said before is one restore away");
+        assert_eq!(count_linking_notes(&conn, "w1", "Retro Mayo", &renamed.id).unwrap(), 0);
+        assert_eq!(count_linking_notes(&conn, "w1", "Retro 12 Mayo", &renamed.id).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_title_a_link_cannot_carry_rewrites_nothing() {
+        let conn = workspace();
+        let renamed = create_note(&conn, "w1", "b1", "A", "", "[]").unwrap();
+        create_note(&conn, "w1", "b1", "B", "[[A]]", "[]").unwrap();
+        for bad in ["", "  ", "x]]y", "x|y"] {
+            assert!(rewrite_links(&conn, "w1", "A", bad, &renamed.id).unwrap().is_empty(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn replacing_links_survives_unclosed_and_repeated_brackets() {
+        let wanted = fold_for_match("A");
+        assert_eq!(replace_wiki_links("[[A]] [[b]] [[a]]", &wanted, "Z").unwrap(), "[[Z]] [[b]] [[Z]]");
+        assert_eq!(replace_wiki_links("[[ open [[A]]", &wanted, "Z").unwrap(), "[[ open [[Z]]");
+        assert!(replace_wiki_links("[[A", &wanted, "Z").is_none());
+        assert!(replace_wiki_links("sin enlaces", &wanted, "Z").is_none());
     }
 
     /// The upgrade path. A note written when "no book" was an ordinary place has to be brought

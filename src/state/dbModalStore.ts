@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { DbColumn, DbFilterTarget, DbForeignKey, DbKind } from "../types/database";
+import type { DbColumn, DbFilterTarget, DbForeignKey, DbKind, DbNodeRef } from "../types/database";
 
 /**
  * Which of the database workspace's modals is on screen.
@@ -71,7 +71,9 @@ export type DbModal =
       onSave: (text: string) => void;
     }
   /** The statements a pending batch of edits would run, before it runs them. */
-  | { kind: "preview"; title: string; statements: string[]; onConfirm: () => void };
+  | { kind: "preview"; title: string; statements: string[]; onConfirm: () => void }
+  /** A CSV file into the table a data tab shows; the tab reloads when rows were kept. */
+  | { kind: "importCsv"; connectionId: string; node: DbNodeRef; tabId: string };
 
 interface DbModalState {
   modal: DbModal | null;

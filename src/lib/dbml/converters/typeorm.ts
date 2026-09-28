@@ -5,12 +5,20 @@ import {
   camel,
   codeName,
   codegenRefs,
+  defaultOf,
+  findingLines,
   incoming,
+  isComposite,
+  isKeyColumn,
   isOptional,
+  jsLiteral,
   lengthOf,
   NOTHING_TO_CONVERT,
   outgoing,
   pascal,
+  quotedLiteral,
+  relationStem,
+  type CodegenRef,
 } from "./shared";
 
 /** DBML type → the string TypeORM's `@Column` takes. */
@@ -32,6 +40,20 @@ const TS_TYPE: Record<string, string> = {
   date: "Date", datetime: "Date", timestamp: "Date", time: "string",
   json: "Record<string, unknown>", jsonb: "Record<string, unknown>", uuid: "string",
 };
+
+/** The property a relation is reached through: `author_id` → `author`. */
+function property(ref: CodegenRef): string {
+  return camel(relationStem(ref).replace(/_(id|fk|key)$/i, "")) || camel(ref.pkTable.name);
+}
+
+/** `@JoinColumn`'s argument — one object, or the array TypeORM takes for a composite key. */
+function joinColumns(ref: CodegenRef): string {
+  if (!isComposite(ref)) return `{ name: '${ref.fkFields[0]}' }`;
+  const pairs = ref.fkFields.map(
+    (name, at) => `{ name: '${name}', referencedColumnName: '${ref.pkFields[at]}' }`,
+  );
+  return `[${pairs.join(", ")}]`;
+}
 
 /**
  * TypeORM entities.
@@ -55,8 +77,12 @@ export function toTypeOrm(schema: DbmlSchema): string {
 
       const options: string[] = [];
       if (field.unique && !field.pk) options.push("unique: true");
-      if (isOptional(field)) options.push("nullable: true");
-      if (field.default !== null) options.push(`default: ${field.default}`);
+      if (isOptional(field, table)) options.push("nullable: true");
+      const value = defaultOf(field);
+      // An expression is raw SQL, which TypeORM takes as a function returning it — a bare string
+      // would be stored as the literal text "now()".
+      if (value?.kind === "expression") options.push(`default: () => ${quotedLiteral(value.sql)}`);
+      else if (value) options.push(`default: ${jsLiteral(value)}`);
       const length = lengthOf(field.type);
       if (length) options.push(`length: ${length}`);
       if (field.note) options.push(`comment: ${JSON.stringify(field.note)}`);
@@ -64,25 +90,25 @@ export function toTypeOrm(schema: DbmlSchema): string {
 
       if (field.pk && field.increment) lines.push("  @PrimaryGeneratedColumn()");
       else if (field.pk && base === "uuid") lines.push("  @PrimaryGeneratedColumn('uuid')");
-      else if (field.pk) lines.push("  @PrimaryColumn()");
+      // Every column of a composite key is a `@PrimaryColumn` — that is how TypeORM spells one.
+      else if (isKeyColumn(table, field)) lines.push("  @PrimaryColumn()");
       else lines.push(`  @Column('${column}'${suffix})`);
 
-      lines.push(`  ${field.name}!: ${ts}${isOptional(field) ? " | null" : ""};`, "");
+      lines.push(`  ${field.name}!: ${ts}${isOptional(field, table) ? " | null" : ""};`, "");
     }
 
     for (const ref of outgoing(refs, table)) {
       if (ref.kind === "many-to-many") continue;
       const target = pascal(codeName(ref.pkTable));
-      const property = camel(ref.fkField.replace(/_(id|fk|key)$/i, "")) || camel(ref.pkTable.name);
       const decorator = ref.kind === "one-to-one" ? "OneToOne" : "ManyToOne";
       lines.push(`  @${decorator}(() => ${target}, { nullable: true })`);
-      lines.push(`  @JoinColumn({ name: '${ref.fkField}' })`);
-      lines.push(`  ${property}!: ${target};`, "");
+      lines.push(`  @JoinColumn(${joinColumns(ref)})`);
+      lines.push(`  ${property(ref)}!: ${target};`, "");
     }
     for (const ref of incoming(refs, table)) {
       if (ref.kind === "many-to-many") continue;
       const source = pascal(codeName(ref.fkTable));
-      const back = camel(ref.fkField.replace(/_(id|fk|key)$/i, "")) || camel(table.name);
+      const back = property(ref);
       if (ref.kind === "one-to-one") {
         lines.push(`  @OneToOne(() => ${source}, (row) => row.${back})`);
         lines.push(`  ${camel(ref.fkTable.name)}!: ${source};`, "");
@@ -100,6 +126,7 @@ export function toTypeOrm(schema: DbmlSchema): string {
   return [
     banner("TypeORM entities"),
     "",
+    ...findingLines(schema),
     "import {",
     "  Column,",
     "  Entity,",

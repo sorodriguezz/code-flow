@@ -12,7 +12,9 @@
 //!
 //! - **The cookie jar travels.** `api_cookies` holds live sessions, so restoring moves a signed-in
 //!   session onto the other computer. Between two machines belonging to the same person that is the
-//!   point; it is also why the file is encrypted whole rather than field by field.
+//!   point; it is also why the file is encrypted whole rather than field by field. The values are
+//!   copied as stored — sealed (`db::api_cookie_seal`) — and open on the other machine because the
+//!   key that seals them travels with the credentials.
 //! - **Live state arrives mid-flight.** A chain that was running when the backup was written
 //!   restores saying so. [`super::restore`] runs `recover_after_restart` afterwards for exactly
 //!   this: the same reconciliation the app does after a crash, which is what a restored session
@@ -104,6 +106,9 @@ pub const TABLES: &[&str] = &[
     "api_sync_base",
     "api_sync_conflicts",
     "api_tombstones",
+    // Which scripts may run unasked. Travels with the collections it vouches for — restored without
+    // it, every script the user wrote would stop at the trust gate once on the new machine.
+    "api_script_trust",
     "api_cookies",
     "api_history",
     // The database workspace.
@@ -242,6 +247,7 @@ pub const GROUPS: &[Group] = &[
             "api_sync_base",
             "api_sync_conflicts",
             "api_tombstones",
+            "api_script_trust",
         ],
     },
     Group { key: "databases", tables: &["db_groups", "db_connections", "db_consoles"] },

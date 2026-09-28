@@ -26,18 +26,24 @@
 //! crate's operations borrow the client mutably, so the `Mutex` is what the borrow checker was
 //! going to insist on anyway. It also keeps the share handles: a session that browsed three shares
 //! holds three trees, because re-connecting one per listing is a round trip per click.
+//!
+//! **And one that can die quietly**, like every held connection here: the client's own
+//! disconnected flag is checked before a held one is used, and a lost connection, a timeout or an
+//! expired session drops it — see [`super::pool`].
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
-use smb2::{SmbClient, Tree};
+use smb2::{ErrorKind, SmbClient, Tree};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use super::files::{
-    join, plan_upload, progress, sort_entries, Planned, RemoteFile, RemoteListing, CHUNK,
-    PROGRESS_INTERVAL,
+    cancelled, discard_partial_local, join, new_parents, plan_upload, progress, sort_entries, Planned,
+    RemoteFile, RemoteListing, CHUNK, PROGRESS_INTERVAL, TRANSFER_CANCELLED,
 };
+use super::pool::{local, step, Outcome, Pool, Retry};
 use super::RemoteHostSpec;
 
 /// One host's connection, and the shares it has opened through it.
@@ -48,24 +54,44 @@ struct Session {
     trees: HashMap<String, Tree>,
 }
 
-type Sessions = Mutex<HashMap<String, Arc<Mutex<Session>>>>;
+type Held = Mutex<Session>;
 
-fn sessions() -> &'static Sessions {
-    static SESSIONS: std::sync::OnceLock<Sessions> = std::sync::OnceLock::new();
-    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+fn pool() -> &'static Pool<Held> {
+    static POOL: std::sync::OnceLock<Pool<Held>> = std::sync::OnceLock::new();
+    POOL.get_or_init(Pool::default)
 }
 
-/// The session for this host, opening one if there isn't a live one.
-async fn session(host_id: &str, spec: &RemoteHostSpec) -> Result<Arc<Mutex<Session>>, String> {
-    if let Some(existing) = sessions().lock().await.get(host_id).cloned() {
-        return Ok(existing);
-    }
-    let opened = Arc::new(Mutex::new(Session {
-        client: connect(host_id, spec).await?,
-        trees: HashMap::new(),
-    }));
-    sessions().lock().await.insert(host_id.to_string(), opened.clone());
-    Ok(opened)
+/// Runs `op` on this host's connection, opening one if there isn't a live one. See [`super::pool`]
+/// — the cheap check here is the client's own record of having been disconnected.
+async fn with_session<T, F, FF>(host_id: &str, spec: &RemoteHostSpec, retry: Retry, op: F) -> Result<T, String>
+where
+    F: Fn(Arc<Held>) -> FF,
+    FF: Future<Output = Outcome<T>>,
+{
+    pool()
+        .run(
+            host_id,
+            || async move {
+                let client = connect(host_id, spec).await?;
+                Ok(Mutex::new(Session { client, trees: HashMap::new() }))
+            },
+            |session| async move { !session.lock().await.client.is_disconnected() },
+            retry,
+            op,
+        )
+        .await
+}
+
+/// Whether an SMB error means the connection is gone: the socket dropped, the server stopped
+/// answering, or the session it signed in with has expired. Access denied, not found or a full disk
+/// are the server answering.
+fn lost(error: &smb2::Error) -> bool {
+    matches!(error.kind(), ErrorKind::ConnectionLost | ErrorKind::TimedOut | ErrorKind::SessionExpired)
+}
+
+/// One SMB call, sorted into the three ways it can end.
+fn attempt<T>(operation: &str, result: Result<T, smb2::Error>) -> Outcome<T> {
+    Outcome::of(result, lost, |error| explain(operation, error))
 }
 
 async fn connect(host_id: &str, spec: &RemoteHostSpec) -> Result<SmbClient, String> {
@@ -92,23 +118,23 @@ fn credentials(host_id: &str, spec: &RemoteHostSpec) -> (String, String) {
     (spec.user.trim().to_string(), password)
 }
 
-/// Closes a host's file session. Idempotent — what disconnecting and deleting both call.
+/// Closes a host's file session. Idempotent — what disconnecting, deleting and editing all call.
 ///
 /// `TREE_DISCONNECT` and `LOGOFF` are not sent, for [`super::ftp::close`]'s reason: they need the
 /// lock and a round trip on a socket that may already be dead, and dropping the client closes the
 /// connection either way.
 pub async fn close(host_id: &str) {
-    sessions().lock().await.remove(host_id);
+    pool().close(host_id).await;
 }
 
 /// Every host currently holding a connection, for [`super::hold`] to report.
 pub async fn open_hosts() -> Vec<String> {
-    sessions().lock().await.keys().cloned().collect()
+    pool().hosts().await
 }
 
 /// Drops every host's connection — the exit path's.
 pub async fn close_all() {
-    sessions().lock().await.clear();
+    pool().close_all().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,40 +147,38 @@ pub async fn list(
     spec: &RemoteHostSpec,
     path: &str,
 ) -> Result<RemoteListing, String> {
-    let session = session(host_id, spec).await?;
-    let mut guard = session.lock().await;
+    with_session(host_id, spec, Retry::Once, |session| async move {
+        let mut guard = session.lock().await;
+        let Some((share, inner)) = split_share(path) else {
+            return shares(&mut guard.client).await;
+        };
 
-    let Some((share, inner)) = split_share(path) else {
-        return shares(&mut guard.client).await;
-    };
+        let Session { client, trees } = &mut *guard;
+        let tree = step!(tree(client, trees, share).await);
+        let found = step!(attempt(&format!("list {path}"), client.list_directory(tree, inner).await));
 
-    let Session { client, trees } = &mut *guard;
-    let tree = tree(client, trees, share).await?;
-    let found = client
-        .list_directory(tree, inner)
-        .await
-        .map_err(|e| explain(&format!("list {path}"), e))?;
+        let base = join("", share);
+        let mut entries = found
+            .into_iter()
+            // `.` and `..` are the server's, not the user's: the browser has its own way up, and a
+            // row that walks into itself is a row that can only confuse.
+            .filter(|entry| entry.name != "." && entry.name != "..")
+            .map(|entry| RemoteFile {
+                path: join(&join(&base, inner), &entry.name),
+                is_dir: entry.is_directory,
+                size: entry.size,
+                modified: seconds(entry.modified),
+                // SMB carries DOS attributes, not a POSIX mode. Left empty rather than translated
+                // into an `rwxr-xr-x` that would be invented — see `RemoteFile::permissions`.
+                name: entry.name,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        sort_entries(&mut entries);
 
-    let base = join("", share);
-    let mut entries = found
-        .into_iter()
-        // `.` and `..` are the server's, not the user's: the browser has its own way up, and a row
-        // that walks into itself is a row that can only confuse.
-        .filter(|entry| entry.name != "." && entry.name != "..")
-        .map(|entry| RemoteFile {
-            path: join(&join(&base, inner), &entry.name),
-            is_dir: entry.is_directory,
-            size: entry.size,
-            modified: seconds(entry.modified),
-            // SMB carries DOS attributes, not a POSIX mode. Left empty rather than translated into
-            // an `rwxr-xr-x` that would be invented — see `RemoteFile::permissions`.
-            name: entry.name,
-            ..Default::default()
-        })
-        .collect::<Vec<_>>();
-    sort_entries(&mut entries);
-
-    Ok(RemoteListing { path: join(&base, inner), entries, ..Default::default() })
+        Outcome::Done(RemoteListing { path: join(&base, inner), entries, ..Default::default() })
+    })
+    .await
 }
 
 /// The server's shares, as the root directory.
@@ -162,8 +186,8 @@ pub async fn list(
 /// Administrative shares are left out: `IPC$` is not a filesystem at all, and `C$`/`ADMIN$` are
 /// whole-disk back doors that need an admin session and answer with an error for everyone else. A
 /// row nobody can open is worse than no row.
-async fn shares(client: &mut SmbClient) -> Result<RemoteListing, String> {
-    let found = client.list_shares().await.map_err(|e| explain("list the server's shares", e))?;
+async fn shares(client: &mut SmbClient) -> Outcome<RemoteListing> {
+    let found = step!(attempt("list the server's shares", client.list_shares().await));
     let mut entries = found
         .into_iter()
         .filter(|share| {
@@ -181,7 +205,7 @@ async fn shares(client: &mut SmbClient) -> Result<RemoteListing, String> {
         })
         .collect::<Vec<_>>();
     sort_entries(&mut entries);
-    Ok(RemoteListing { path: "/".into(), entries, ..Default::default() })
+    Outcome::Done(RemoteListing { path: "/".into(), entries, ..Default::default() })
 }
 
 /// One file or one whole directory, from the far side to here.
@@ -193,52 +217,72 @@ pub async fn download(
     remote_path: &str,
     local_path: &str,
 ) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut guard = session.lock().await;
-    let Session { client, trees } = &mut *guard;
-
     let (share, inner) = split_share(remote_path)
         .ok_or_else(|| "Pick a share to download from — the root is the list of them.".to_string())?;
-    let files = plan_download(client, trees, share, inner, local_path).await?;
-    let total: u64 = files.iter().map(|file| file.size).sum();
-    let mut done = 0u64;
+    let files = with_session(host_id, spec, Retry::Once, |session| async move {
+        let mut guard = session.lock().await;
+        let Session { client, trees } = &mut *guard;
+        plan_download(client, trees, share, inner, local_path).await
+    })
+    .await?;
+    let files = &files;
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut guard = session.lock().await;
+        let Session { client, trees } = &mut *guard;
+        // Opened here as well as by the plan: when the session under the plan died, this is a new
+        // one with no shares open yet.
+        step!(tree(client, trees, share).await);
+        let total: u64 = files.iter().map(|file| file.size).sum();
+        let mut done = 0u64;
 
-    for (index, file) in files.iter().enumerate() {
-        if let Some(parent) = std::path::Path::new(&file.local).parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("Couldn't create {}: {e}", parent.display()))?;
-        }
-        let mut target = tokio::fs::File::create(&file.local)
-            .await
-            .map_err(|e| format!("Couldn't write {}: {e}", file.local))?;
-
-        // The crate's own chunking rather than a `pump` over an `AsyncRead`: a download here is a
-        // sliding window of overlapping READs (that is the crate's whole point), and an
-        // `AsyncRead` facade would serialize it back into one request at a time.
-        let tree = trees.get(share).ok_or_else(|| format!("{share} is not open"))?;
-        let mut stream = client
-            .download(tree, &file.remote)
-            .await
-            .map_err(|e| explain(&format!("open {}", file.remote), e))?;
-        let mut last = std::time::Instant::now();
-        while let Some(chunk) = stream.next_chunk().await {
-            let bytes = chunk.map_err(|e| explain(&format!("read {}", file.remote), e))?;
-            target
-                .write_all(&bytes)
-                .await
-                .map_err(|e| format!("Couldn't write {}: {e}", file.local))?;
-            done += bytes.len() as u64;
-            if last.elapsed() >= PROGRESS_INTERVAL {
-                last = std::time::Instant::now();
-                progress(app, id, &file.name, done, total, index as u64, files.len() as u64);
+        for (index, file) in files.iter().enumerate() {
+            if let Some(parent) = std::path::Path::new(&file.local).parent() {
+                step!(local(
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| format!("Couldn't create {}: {e}", parent.display()))
+                ));
             }
+            let mut target = step!(local(
+                tokio::fs::File::create(&file.local)
+                    .await
+                    .map_err(|e| format!("Couldn't write {}: {e}", file.local))
+            ));
+
+            // The crate's own chunking rather than a `pump` over an `AsyncRead`: a download here is
+            // a sliding window of overlapping READs (that is the crate's whole point), and an
+            // `AsyncRead` facade would serialize it back into one request at a time.
+            let tree = step!(local(trees.get(share).ok_or_else(|| format!("{share} is not open"))));
+            let mut stream =
+                step!(attempt(&format!("open {}", file.remote), client.download(tree, &file.remote).await));
+            let mut last = std::time::Instant::now();
+            while let Some(chunk) = stream.next_chunk().await {
+                if cancelled(id) {
+                    drop(stream);
+                    drop(target);
+                    discard_partial_local(&file.local, TRANSFER_CANCELLED).await;
+                    // Reads were still in flight when it stopped, and whether the client settles
+                    // them cleanly is not something to find out on the next listing — the
+                    // connection goes, and the next operation opens a fresh one.
+                    return Outcome::Lost(TRANSFER_CANCELLED.to_string());
+                }
+                let bytes = step!(attempt(&format!("read {}", file.remote), chunk));
+                step!(local(
+                    target.write_all(&bytes).await.map_err(|e| format!("Couldn't write {}: {e}", file.local))
+                ));
+                done += bytes.len() as u64;
+                if last.elapsed() >= PROGRESS_INTERVAL {
+                    last = std::time::Instant::now();
+                    progress(app, id, &file.name, done, total, index as u64, files.len() as u64);
+                }
+            }
+            // Flushed before the next file, so a transfer that dies half way leaves what it claimed.
+            step!(local(target.flush().await.map_err(|e| format!("Couldn't write {}: {e}", file.local))));
+            progress(app, id, &file.name, done, total, index as u64 + 1, files.len() as u64);
         }
-        // Flushed before the next file, so a transfer that dies half way leaves what it claimed.
-        target.flush().await.map_err(|e| format!("Couldn't write {}: {e}", file.local))?;
-        progress(app, id, &file.name, done, total, index as u64 + 1, files.len() as u64);
-    }
-    Ok(())
+        Outcome::Done(())
+    })
+    .await
 }
 
 /// One file or one whole directory, from here to the far side.
@@ -250,78 +294,81 @@ pub async fn upload(
     local_path: &str,
     remote_path: &str,
 ) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut guard = session.lock().await;
-    let Session { client, trees } = &mut *guard;
-
     let (share, inner) = split_share(remote_path)
         .ok_or_else(|| "Pick a share to upload into — the root is the list of them.".to_string())?;
-    let tree = tree(client, trees, share).await?;
     let files = plan_upload(local_path, inner)?;
-    let total: u64 = files.iter().map(|file| file.size).sum();
-    let mut done = 0u64;
+    let files = &files;
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut guard = session.lock().await;
+        let Session { client, trees } = &mut *guard;
+        let tree = step!(tree(client, trees, share).await);
+        let total: u64 = files.iter().map(|file| file.size).sum();
+        let mut done = 0u64;
+        let mut made = std::collections::HashSet::new();
 
-    for (index, file) in files.iter().enumerate() {
-        // Created before the file that goes in it, and an existing directory is not an error — an
-        // interrupted transfer resumed by re-running it must not fail on its own leftovers.
-        if let Some((parent, _)) = file.remote.rsplit_once('/') {
-            if !parent.is_empty() {
-                let _ = client.create_directory(tree, parent).await;
+        for (index, file) in files.iter().enumerate() {
+            // Every missing directory between the transfer's root and this file, outermost first;
+            // an existing one is not an error — an interrupted transfer resumed by re-running it
+            // must not fail on its own leftovers.
+            for dir in new_parents(inner, &file.remote, &mut made) {
+                let _ = client.create_directory(tree, &dir).await;
             }
-        }
-        let mut source = tokio::fs::File::open(&file.local)
-            .await
-            .map_err(|e| format!("Couldn't read {}: {e}", file.local))?;
+            let mut source = step!(local(
+                tokio::fs::File::open(&file.local)
+                    .await
+                    .map_err(|e| format!("Couldn't read {}: {e}", file.local))
+            ));
 
-        // `create_file_writer` and not `upload`, which takes the file as one `&[u8]`: that would
-        // read a 40 GB disk image into memory to send it.
-        let mut writer = client
-            .create_file_writer(tree, &file.remote)
-            .await
-            .map_err(|e| explain(&format!("create {}", file.remote), e))?;
-        let mut buffer = vec![0u8; CHUNK];
-        let mut last = std::time::Instant::now();
-        loop {
-            let read = source
-                .read(&mut buffer)
-                .await
-                .map_err(|e| format!("Couldn't read {}: {e}", file.local))?;
-            if read == 0 {
-                break;
+            // `create_file_writer` and not `upload`, which takes the file as one `&[u8]`: that would
+            // read a 40 GB disk image into memory to send it.
+            let mut writer =
+                step!(attempt(&format!("create {}", file.remote), client.create_file_writer(tree, &file.remote).await));
+            let mut buffer = vec![0u8; CHUNK];
+            let mut last = std::time::Instant::now();
+            loop {
+                if cancelled(id) {
+                    // Closed, then removed: a file cut short under the real name is
+                    // indistinguishable from a finished one to whoever opens it next.
+                    let closed = writer.finish().await;
+                    if closed.is_ok() {
+                        let _ = client.delete_file(tree, &file.remote).await;
+                        return Outcome::Failed(TRANSFER_CANCELLED.to_string());
+                    }
+                    return Outcome::Lost(TRANSFER_CANCELLED.to_string());
+                }
+                let read = step!(local(
+                    source.read(&mut buffer).await.map_err(|e| format!("Couldn't read {}: {e}", file.local))
+                ));
+                if read == 0 {
+                    break;
+                }
+                step!(attempt(&format!("write {}", file.remote), writer.write_chunk(&buffer[..read]).await));
+                done += read as u64;
+                if last.elapsed() >= PROGRESS_INTERVAL {
+                    last = std::time::Instant::now();
+                    progress(app, id, &file.name, done, total, index as u64, files.len() as u64);
+                }
             }
-            writer
-                .write_chunk(&buffer[..read])
-                .await
-                .map_err(|e| explain(&format!("write {}", file.remote), e))?;
-            done += read as u64;
-            if last.elapsed() >= PROGRESS_INTERVAL {
-                last = std::time::Instant::now();
-                progress(app, id, &file.name, done, total, index as u64, files.len() as u64);
-            }
+            // Mandatory, not tidiness: this is what flushes and closes the handle, and a writer
+            // dropped without it leaves a truncated file that looks finished.
+            step!(attempt(&format!("finish {}", file.remote), writer.finish().await));
+            progress(app, id, &file.name, done, total, index as u64 + 1, files.len() as u64);
         }
-        // Mandatory, not tidiness: this is what flushes and closes the handle, and a writer dropped
-        // without it leaves a truncated file that looks finished.
-        writer
-            .finish()
-            .await
-            .map_err(|e| explain(&format!("finish {}", file.remote), e))?;
-        progress(app, id, &file.name, done, total, index as u64 + 1, files.len() as u64);
-    }
-    Ok(())
+        Outcome::Done(())
+    })
+    .await
 }
 
 pub async fn make_dir(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut guard = session.lock().await;
-    let Session { client, trees } = &mut *guard;
-
     let (share, inner) = split_share(path)
         .ok_or_else(|| "A folder goes inside a share — the root is the list of them.".to_string())?;
-    let tree = tree(client, trees, share).await?;
-    client
-        .create_directory(tree, inner)
-        .await
-        .map_err(|e| explain(&format!("create {path}"), e))
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut guard = session.lock().await;
+        let Session { client, trees } = &mut *guard;
+        let tree = step!(tree(client, trees, share).await);
+        attempt(&format!("create {path}"), client.create_directory(tree, inner).await)
+    })
+    .await
 }
 
 /// Deletes a file or an empty directory. Not recursive, for the reason [`super::files::remove`]
@@ -332,22 +379,23 @@ pub async fn remove(
     path: &str,
     is_dir: bool,
 ) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut guard = session.lock().await;
-    let Session { client, trees } = &mut *guard;
-
     let Some((share, inner)) = split_share(path) else {
         // A share is the server's configuration, not a directory entry. Saying so is the point:
         // `DELETE` on the root would otherwise fail with something about a path.
         return Err("A share can't be deleted from here — it's set up on the server.".into());
     };
-    let tree = tree(client, trees, share).await?;
-    if is_dir {
-        client.delete_directory(tree, inner).await
-    } else {
-        client.delete_file(tree, inner).await
-    }
-    .map_err(|e| explain(&format!("remove {path}"), e))
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut guard = session.lock().await;
+        let Session { client, trees } = &mut *guard;
+        let tree = step!(tree(client, trees, share).await);
+        let removed = if is_dir {
+            client.delete_directory(tree, inner).await
+        } else {
+            client.delete_file(tree, inner).await
+        };
+        attempt(&format!("remove {path}"), removed)
+    })
+    .await
 }
 
 pub async fn rename(
@@ -356,12 +404,7 @@ pub async fn rename(
     from: &str,
     to: &str,
 ) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut guard = session.lock().await;
-    let Session { client, trees } = &mut *guard;
-
-    let (Some((share, source)), Some((target_share, target))) =
-        (split_share(from), split_share(to))
+    let (Some((share, source)), Some((target_share, target))) = (split_share(from), split_share(to))
     else {
         return Err("A share can't be renamed from here — it's set up on the server.".into());
     };
@@ -372,11 +415,13 @@ pub async fn rename(
             "Moving between shares isn't a rename — copy it into {target_share} instead."
         ));
     }
-    let tree = tree(client, trees, share).await?;
-    client
-        .rename(tree, source, target)
-        .await
-        .map_err(|e| explain(&format!("rename {from}"), e))
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut guard = session.lock().await;
+        let Session { client, trees } = &mut *guard;
+        let tree = step!(tree(client, trees, share).await);
+        attempt(&format!("rename {from}"), client.rename(tree, source, target).await)
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -405,15 +450,12 @@ async fn tree<'a>(
     client: &mut SmbClient,
     trees: &'a mut HashMap<String, Tree>,
     share: &str,
-) -> Result<&'a mut Tree, String> {
+) -> Outcome<&'a mut Tree> {
     if !trees.contains_key(share) {
-        let opened = client
-            .connect_share(share)
-            .await
-            .map_err(|e| explain(&format!("open the share {share}"), e))?;
+        let opened = step!(attempt(&format!("open the share {share}"), client.connect_share(share).await));
         trees.insert(share.to_string(), opened);
     }
-    trees.get_mut(share).ok_or_else(|| format!("{share} is not open"))
+    local(trees.get_mut(share).ok_or_else(|| format!("{share} is not open")))
 }
 
 /// Every file under `remote`, paired with where it lands locally. A plain file is one entry.
@@ -422,34 +464,28 @@ async fn plan_download(
     trees: &mut HashMap<String, Tree>,
     share: &str,
     remote: &str,
-    local: &str,
-) -> Result<Vec<Planned>, String> {
+    local_path: &str,
+) -> Outcome<Vec<Planned>> {
     // `handle`, not `tree`: a binding of that name would shadow the function of that name, and the
     // second call below — inside the loop — would then be calling a `&mut Tree`.
-    let handle = tree(client, trees, share).await?;
-    let info = client
-        .stat(handle, remote)
-        .await
-        .map_err(|e| explain(&format!("read {remote}"), e))?;
+    let handle = step!(tree(client, trees, share).await);
+    let info = step!(attempt(&format!("read {remote}"), client.stat(handle, remote).await));
     let name = remote.rsplit('/').next().unwrap_or(remote).to_string();
 
     if !info.is_directory {
-        return Ok(vec![Planned {
+        return Outcome::Done(vec![Planned {
             remote: remote.to_string(),
-            local: local.to_string(),
+            local: local_path.to_string(),
             name,
             size: info.size,
         }]);
     }
 
     let mut planned = Vec::new();
-    let mut queue = vec![(remote.to_string(), std::path::PathBuf::from(local))];
+    let mut queue = vec![(remote.to_string(), std::path::PathBuf::from(local_path))];
     while let Some((dir, into)) = queue.pop() {
-        let handle = tree(client, trees, share).await?;
-        let entries = client
-            .list_directory(handle, &dir)
-            .await
-            .map_err(|e| explain(&format!("list {dir}"), e))?;
+        let handle = step!(tree(client, trees, share).await);
+        let entries = step!(attempt(&format!("list {dir}"), client.list_directory(handle, &dir).await));
         for entry in entries {
             if entry.name == "." || entry.name == ".." {
                 continue;
@@ -468,7 +504,7 @@ async fn plan_download(
             }
         }
     }
-    Ok(planned)
+    Outcome::Done(planned)
 }
 
 /// Unix epoch seconds from an SMB `FILETIME`, or 0 when the server left it unset.
@@ -490,6 +526,16 @@ fn explain(operation: &str, error: smb2::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lost connection or an expired session is a session to drop; the server refusing is not.
+    #[test]
+    fn only_a_connection_that_is_gone_is_dropped() {
+        assert!(lost(&smb2::Error::Disconnected));
+        assert!(lost(&smb2::Error::Timeout));
+        assert!(lost(&smb2::Error::SessionExpired));
+        assert!(!lost(&smb2::Error::Auth { message: "logon failure".into() }));
+        assert!(!lost(&smb2::Error::invalid_data("bad name")));
+    }
 
     #[test]
     fn the_root_belongs_to_no_share() {

@@ -41,7 +41,15 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   dbml: "dbml",
   yaml: "yaml",
   yml: "yaml",
+  // Registered by `monacoToml` — Monaco ships no TOML, so until that existed this pointed at an id
+  // nothing had registered and `Cargo.toml` opened as plain text.
   toml: "toml",
+  // Single-file components are markup around a script and a style block, which is what Monaco's
+  // HTML grammar tokenizes — `lang="ts"` / `lang="scss"` included, see `monacoSfc`. They used to
+  // open as plain text.
+  vue: "html",
+  svelte: "html",
+  astro: "html",
   sh: "shell",
   bash: "shell",
   ps1: "powershell",
@@ -61,6 +69,8 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   markdown: "markdown",
   mdx: "mdx",
   jsonc: "json",
+  // A notebook's file, when it is shown as the JSON it is (the notebook view's "JSON" toggle).
+  ipynb: "json",
   kt: "kotlin",
   kts: "kotlin",
   swift: "swift",

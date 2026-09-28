@@ -151,9 +151,10 @@ fn adopt(imported: &str) {
 /// The cache file: one line, the resolved `PATH`, next to the database.
 ///
 /// A plain file rather than a row in the settings table, and deliberately. This whole module runs
-/// before `db::init()` — it must, because everything downstream resolves programs against the `PATH`
-/// it leaves behind — so reading the cache from the settings table would mean either opening the
-/// database first or reordering `run()` around it. Neither is worth it for one string: a file costs
+/// from `run()`, before the database is opened in `setup` (`boot_guard::open`) — it must, because
+/// everything downstream resolves programs against the `PATH` it leaves behind — so reading the cache
+/// from the settings table would mean either opening the database first or reordering startup
+/// around it. Neither is worth it for one string: a file costs
 /// no connection, needs no schema and cannot deadlock against one.
 ///
 /// It lives under `paths::cache_dir()` — cache and not state, because losing it costs exactly one

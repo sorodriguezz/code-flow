@@ -3,8 +3,12 @@ import type { PrAction, PostFindingItem } from "./tauri/commands";
 import { isCancellation } from "../state/aiRunStore";
 import type {
   JobHistoryEntry,
+  MergeChoice,
+  MergeOptions,
+  PrChecks,
   PrDecision,
   PrCommentThread,
+  PublishOutcome,
   PullRequestSummary,
   ThreadCloseOutcome,
   WorkspaceActivityEntry,
@@ -114,13 +118,19 @@ export async function actOnPr(
   return api.actOnPullRequest(target.projectId, prId, action);
 }
 
-/** Re-reads the PR itself, so a header settles onto the host's answer rather than a guess. */
+/** Re-reads the PR itself, so a header settles onto the host's answer rather than a guess. Read
+ * directly by number: the project's list is one page of open pull requests, and the one on screen
+ * may be closed, merged or simply older than that page. */
 export async function refreshPr(target: PrTarget, prId: number): Promise<PullRequestSummary | null> {
   if (target.kind === "link") return api.prLinkPullRequest(target.url);
-  const prs = await api.listPullRequests(target.projectId);
-  return prs.find((pr) => pr.id === prId) ?? null;
+  return api.getPullRequest(target.projectId, prId);
 }
 
+/**
+ * Publishes the chosen findings and says, item by item, what happened — a partial publish resolves
+ * with the failures in it rather than rejecting, because what did land is on the pull request (and,
+ * for a project, in the run's memory) either way.
+ */
 export function postFindings(
   target: PrTarget,
   prId: number,
@@ -128,18 +138,44 @@ export function postFindings(
   items: PostFindingItem[],
   postSummary: boolean,
   summary: string | null,
-): Promise<void> {
+): Promise<PublishOutcome> {
   if (target.kind !== "project") return api.postPrLinkReviewComment(target.url, items, postSummary, summary);
-  return api
-    .postPrReviewComment(target.projectId, prId, runId, items, postSummary, summary)
+  const projectId = target.projectId;
+  const notify = () => api.notifyStateChange("reviews", projectId);
+  return api.publishPrReview(projectId, prId, runId, items, postSummary, summary).then(
     // Publishing rewrites the run's saved findings — each one gains the host thread it was posted
     // under — so a phone holding that review is now showing findings it would offer to publish
     // again. Only the project-backed half emits: a link review saves no run, so there is nothing
     // for another client to be stale about.
-    .then((result) => {
-      api.notifyStateChange("reviews", target.projectId);
-      return result;
-    });
+    (outcome) => {
+      notify();
+      return outcome;
+    },
+    (e: unknown) => {
+      notify();
+      throw e;
+    },
+  );
+}
+
+/** How the PR can be merged from here — asked when the merge step opens. */
+export function mergeOptions(target: PrTarget, prId: number): Promise<MergeOptions> {
+  return target.kind === "project" ? api.prMergeOptions(target.projectId, prId) : api.prLinkMergeOptions(target.url);
+}
+
+/** Merges the PR on its host; like a decision, it comes back with the Activity row it was filed as. */
+export async function merge(
+  target: PrTarget,
+  prId: number,
+  choice: MergeChoice,
+): Promise<{ pr: PullRequestSummary; merged: boolean; warning: string | null; activity: JobHistoryEntry | WorkspaceActivityEntry }> {
+  if (target.kind === "link") return api.mergePrLink(target.url, target.workspaceId, choice);
+  return api.mergePullRequest(target.projectId, prId, choice);
+}
+
+/** The checks on the PR's head commit. */
+export function checks(target: PrTarget, prId: number): Promise<PrChecks> {
+  return target.kind === "project" ? api.prChecks(target.projectId, prId) : api.prLinkChecks(target.url);
 }
 
 /**

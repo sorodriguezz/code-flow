@@ -353,6 +353,37 @@ pub fn create_branch(path: &str, name: &str, start_point: Option<String>) -> Res
     Ok(())
 }
 
+/// How many commits deleting a local branch would leave unreachable: the ones on it that are
+/// neither on HEAD nor on the branch's own upstream.
+///
+/// That is `git branch -d`'s test for "not fully merged". The app always deletes with the force of
+/// `-D` once the user confirms, so this is what the confirmation has to say out loud instead — "3
+/// commits will be lost" is a different question from "delete this branch?", and the old dialog
+/// asked the second one about both. Zero for a branch whose tip cannot be read, which has nothing
+/// countable to lose.
+pub fn unmerged_commit_count(path: &str, name: &str) -> Result<usize, String> {
+    let repo = open(path)?;
+    let branch = repo
+        .find_branch(name, BranchType::Local)
+        .map_err(|e| e.message().to_string())?;
+    let Some(tip) = branch.get().target() else { return Ok(0) };
+
+    let mut walk = repo.revwalk().map_err(|e| e.message().to_string())?;
+    walk.push(tip).map_err(|e| e.message().to_string())?;
+    if let Some(head) = repo.head().ok().and_then(|h| h.target()) {
+        walk.hide(head).map_err(|e| e.message().to_string())?;
+    }
+    if let Some(upstream) = branch.upstream().ok().and_then(|u| u.get().target()) {
+        walk.hide(upstream).map_err(|e| e.message().to_string())?;
+    }
+    let mut count = 0;
+    for oid in walk {
+        oid.map_err(|e| e.message().to_string())?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 pub fn delete_branch(path: &str, name: &str, is_remote: bool) -> Result<(), String> {
     let repo = open(path)?;
     let kind = if is_remote { BranchType::Remote } else { BranchType::Local };
@@ -739,6 +770,43 @@ mod tests {
         // that is checked out, so only that one goes through `git pull`.
         assert!(is_head_branch(path, &base).unwrap());
         assert!(!is_head_branch(path, "feature").unwrap());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The count behind the delete confirmation: commits only this branch has. Merged into HEAD, or
+    /// pushed to its upstream, they are not lost — and they stop being counted.
+    #[test]
+    fn unmerged_commits_are_the_ones_neither_head_nor_the_upstream_has() {
+        let _pinned = lock_rules::pin_for_test(&[]);
+        let (dir, _base) = fixture();
+        let path = dir.to_str().unwrap();
+
+        // `feature` has one commit HEAD lacks.
+        assert_eq!(unmerged_commit_count(path, "feature").unwrap(), 1);
+        // A branch at HEAD's own commit has nothing to lose.
+        create_branch(path, "same", None).unwrap();
+        assert_eq!(unmerged_commit_count(path, "same").unwrap(), 0);
+
+        // Once its upstream holds the commit, deleting the local branch loses nothing either.
+        {
+            let repo = git2::Repository::open(path).unwrap();
+            repo.remote("origin", "https://example.invalid/repo.git").unwrap();
+            let tip = repo.find_branch("feature", BranchType::Local).unwrap().get().target().unwrap();
+            repo.reference("refs/remotes/origin/feature", tip, false, "test").unwrap();
+            repo.find_branch("feature", BranchType::Local)
+                .unwrap()
+                .set_upstream(Some("origin/feature"))
+                .unwrap();
+        }
+        assert_eq!(unmerged_commit_count(path, "feature").unwrap(), 0);
+
+        // And merged into HEAD, likewise — checked on a branch with no upstream of its own.
+        create_branch(path, "gone", Some("feature".into())).unwrap();
+        assert_eq!(unmerged_commit_count(path, "gone").unwrap(), 1);
+        checkout_local_branch(path, "same").unwrap();
+        super::super::merge::merge_branch(path, "feature").unwrap();
+        assert_eq!(unmerged_commit_count(path, "gone").unwrap(), 0);
 
         fs::remove_dir_all(&dir).ok();
     }

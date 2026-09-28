@@ -30,6 +30,7 @@ interface Table {
 
 interface Reference {
   fromTable: string;
+  /** One column, or `(a, b)` for a composite key — already in DBML's spelling. */
   fromColumn: string;
   toTable: string;
   toColumn: string;
@@ -37,6 +38,29 @@ interface Reference {
 
 function unquote(value: string): string {
   return value.replace(/^["'`[]|["'`\]]$/g, "").trim();
+}
+
+/** A column list — `a`, or `(a, b)` for a composite key — as DBML writes one end of a `Ref:`. */
+function refColumns(raw: string): string {
+  const columns = raw.split(",").map(unquote).filter(Boolean);
+  return columns.length === 1 ? columns[0] : `(${columns.join(", ")})`;
+}
+
+/**
+ * A SQL default as DBML writes it.
+ *
+ * DBML has literals — a quoted string, a number, `true`/`false`/`null` — and everything else is an
+ * expression, which it only accepts between backticks. Copied through as SQL, `DEFAULT now()` became
+ * `default: now()`, which the parser rejects, and the whole import with it. A string is re-escaped
+ * too: SQL doubles a quote (`'it''s'`), DBML backslashes it.
+ */
+function dbmlDefault(sql: string): string {
+  const value = sql.trim();
+  if (/^'.*'$/s.test(value)) return `'${value.slice(1, -1).replace(/''/g, "'").replace(/'/g, "\\'")}'`;
+  if (/^[-+]?(\d+\.?\d*|\.\d+)$/.test(value)) return value;
+  if (/^(true|false|null)$/i.test(value)) return value.toLowerCase();
+  if (/^`.*`$/.test(value)) return value;
+  return `\`${value.replace(/^"(.*)"$/, "$1")}\``;
 }
 
 /**
@@ -217,9 +241,9 @@ export function sqlToDbml(sql: string): string {
         if (key) {
           refs.push({
             fromTable: name,
-            fromColumn: unquote(key[1]),
+            fromColumn: refColumns(key[1]),
             toTable: key[2],
-            toColumn: unquote(key[3]),
+            toColumn: refColumns(key[3]),
           });
         }
         continue;
@@ -268,9 +292,9 @@ export function sqlToDbml(sql: string): string {
   while ((match = alterKey.exec(clean)) !== null) {
     refs.push({
       fromTable: match[1],
-      fromColumn: unquote(match[2]),
+      fromColumn: refColumns(match[2]),
       toTable: match[3],
-      toColumn: unquote(match[4]),
+      toColumn: refColumns(match[4]),
     });
   }
 
@@ -285,7 +309,7 @@ export function sqlToDbml(sql: string): string {
       if (column.increment) settings.push("increment");
       if (column.notNull && !column.pk) settings.push("not null");
       if (column.unique) settings.push("unique");
-      if (column.default !== null) settings.push(`default: ${column.default}`);
+      if (column.default !== null) settings.push(`default: ${dbmlDefault(column.default)}`);
       lines.push(`  ${column.name} ${column.type}${settings.length > 0 ? ` [${settings.join(", ")}]` : ""}`);
     }
     if (table.uniqueGroups.length > 0) {

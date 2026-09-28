@@ -2,14 +2,17 @@ import { useEffect, useState } from "react";
 import {
   Cloud,
   FolderOpen,
+  KeyRound,
   Monitor,
   MonitorSmartphone,
+  RotateCw,
   ScrollText,
   Terminal,
   Waypoints,
   X,
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
+import { HostKeyDialog } from "../common/HostKeyDialog";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { HostExplorer } from "./HostExplorer";
 import { HostDetailsPanel } from "./HostDetailsPanel";
@@ -23,7 +26,7 @@ import { ScreenPanel } from "./ScreenPanel";
 import { HostGallery } from "./HostGallery";
 import { ConnectBar } from "./ConnectBar";
 import { CARD } from "./remoteChrome";
-import { iconButtonClass } from "../common/Button";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { docStripClass, docTabClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import {
@@ -55,12 +58,14 @@ import { useT } from "../../state/languageStore";
  */
 export function RemoteView() {
   const tabs = useRemoteStore((s) => s.tabs);
+  const background = useRemoteStore((s) => s.background);
   const activeTabId = useRemoteStore((s) => s.activeTabId);
   const workspaceId = useRemoteStore((s) => s.workspaceId);
   const pollForwards = useRemoteStore((s) => s.pollForwards);
   const markExited = useRemoteStore((s) => s.markExited);
   const recordCommand = useRemoteStore((s) => s.recordCommand);
   const closeTab = useRemoteStore((s) => s.closeTab);
+  const reconnect = useRemoteStore((s) => s.reconnect);
   const activeView = useUiStore((s) => s.activeView);
   const t = useT();
 
@@ -125,26 +130,46 @@ export function RemoteView() {
             {tabs.length > 0 && <RemoteTabStrip />}
 
             <div className="relative min-h-0 flex-1">
-              {tabs.length === 0 ? (
-                <HostGallery />
-              ) : (
-                <>
-                  {/* Sessions: always mounted, hidden with CSS. See the note at the top. */}
-                  {tabs.map((tab) =>
-                    tab.kind === "session" ? (
-                      <div
-                        key={tab.id}
-                        className={`absolute inset-0 ${tab.id === activeTabId ? "" : "hidden"}`}
+              {tabs.length === 0 && <HostGallery />}
+              {/* Sessions: always mounted, hidden with CSS. See the note at the top — and the
+                  shells kept for other workspaces are sessions too, mounted here beside the
+                  rest, or switching workspace would throw away their scrollback and everything
+                  they print while nobody looks. The key carries the session id, so a Reconnect
+                  is a fresh terminal rather than the new shell drawn over the old one's text. */}
+              {[...tabs, ...background].map((tab) =>
+                tab.kind === "session" ? (
+                  <div
+                    key={`${tab.id}:${tab.sessionId}`}
+                    className={`absolute inset-0 ${tab.id === activeTabId ? "" : "hidden"}`}
+                  >
+                    <TerminalPane
+                      sessionId={tab.sessionId}
+                      visible={tab.id === activeTabId}
+                      onCommand={(line) => recordCommand(tab.sessionId, line)}
+                      onClose={() => void closeTab(tab.id)}
+                    />
+                    {/* Where the eye already is when a session ends — the tab strip only says
+                        it, in strikethrough. */}
+                    {tab.exited && tab.id === activeTabId && (
+                      <button
+                        type="button"
+                        onClick={() => void reconnect(tab.id)}
+                        className={buttonClass({
+                          variant: "primary",
+                          className: "absolute bottom-3 right-4 shadow-[var(--cf-shadow-modal)]",
+                        })}
                       >
-                        <TerminalPane
-                          sessionId={tab.sessionId}
-                          visible={tab.id === activeTabId}
-                          onCommand={(line) => recordCommand(tab.sessionId, line)}
-                          onClose={() => void closeTab(tab.id)}
-                        />
-                      </div>
-                    ) : null,
-                  )}
+                        <RotateCw size={13} />
+                        {t("remote.reconnect")}
+                      </button>
+                    )}
+                  </div>
+                ) : null,
+              )}
+              {/* Outside the gallery's condition, unlike everything below: a workspace with no tabs
+                  of its own still has other workspaces' shells mounted here, hidden. */}
+              {tabs.length > 0 && (
+                <>
                   {/* The other two are stateless views over the store, so they render on demand. */}
                   {activeTab?.kind === "forwards" && (
                     <div className="absolute inset-0">
@@ -216,6 +241,11 @@ export function RemoteView() {
       </div>
 
       {importing && <ImportSshConfigModal onClose={() => setImporting(false)} />}
+      {/* "Trust this host?", for the file browser, a forward or a screen's tunnel meeting a host
+          `known_hosts` has never seen. Only while this view is on screen: the database view mounts
+          one too, and two kept-mounted copies would both answer the same store — the hidden one
+          taking the focus trap's top layer from the one being looked at. */}
+      {activeView === "remote" && <HostKeyDialog />}
     </>
   );
 }
@@ -246,6 +276,7 @@ function RemoteTabStrip() {
   const activeTabId = useRemoteStore((s) => s.activeTabId);
   const setActiveTab = useRemoteStore((s) => s.setActiveTab);
   const closeTab = useRemoteStore((s) => s.closeTab);
+  const typePassword = useRemoteStore((s) => s.typePassword);
   const hosts = useRemoteStore((s) => s.hosts);
   const t = useT();
 
@@ -256,6 +287,9 @@ function RemoteTabStrip() {
         const host = hosts.find((entry) => entry.id === tab.hostId);
         const active = tab.id === activeTabId;
         const exited = tab.kind === "session" && tab.exited;
+        // Only a live shell on a host that signs in with a password has one to type — the one field
+        // a saved password can come from.
+        const typable = tab.kind === "session" && !tab.exited && !!host && parseHostSpec(host).auth === "password";
         return (
           <div
             key={tab.id}
@@ -293,6 +327,26 @@ function RemoteTabStrip() {
               <span className="shrink-0 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
                 {t("remote.tabForwardsShort")}
               </span>
+            )}
+            {typable && (
+              <Tooltip label={t("remote.typePassword")} description={t("remote.typePasswordHint")}>
+                <button
+                  type="button"
+                  aria-label={t("remote.typePassword")}
+                  // Keeps the terminal's focus: the keys go to the pty, and the caret should still be
+                  // there for the next thing typed.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void typePassword(tab.id);
+                  }}
+                  className={`${iconButtonClass({ size: "xs" })} ${
+                    active ? "" : "opacity-0 focus:opacity-100 group-hover/doctab:opacity-100"
+                  }`}
+                >
+                  <KeyRound size={12} />
+                </button>
+              </Tooltip>
             )}
             <Tooltip label={t("common.close")}>
               <button
@@ -341,6 +395,9 @@ function RemoteStatusBar() {
   const sessions = useRemoteStore(
     (s) => s.tabs.filter((tab) => tab.kind === "session" && !tab.exited).length,
   );
+  // Shells still running in workspaces not on screen — said here so a running command is never
+  // entirely out of sight. See `background`.
+  const elsewhere = useRemoteStore((s) => s.background.filter((tab) => !tab.exited).length);
   const openAllForwards = useRemoteStore((s) => s.openAllForwards);
   const latency = useRemoteStore((s) => s.latency);
   const selected = useRemoteStore((s) =>
@@ -352,7 +409,7 @@ function RemoteStatusBar() {
   });
   const t = useT();
 
-  if (sessions === 0 && forwards.length === 0 && latency === null) return null;
+  if (sessions === 0 && elsewhere === 0 && forwards.length === 0 && latency === null) return null;
 
   // Spaced rather than dotted apart: each fact is a word and a number, and the gaps are enough to
   // keep them separate. The forwards sit at the far edge, because they are the one part you click.
@@ -363,6 +420,13 @@ function RemoteStatusBar() {
           <span aria-hidden className="h-[7px] w-[7px] rounded-full bg-[var(--cf-success)]" />
           {sessions === 1 ? t("remote.statusSessionsOne") : t("remote.statusSessions", { n: String(sessions) })}
         </span>
+      )}
+      {elsewhere > 0 && (
+        <Tooltip label={t("remote.statusElsewhereHint")}>
+          <span className="shrink-0 text-[var(--cf-text-faint)]">
+            {elsewhere === 1 ? t("remote.statusElsewhereOne") : t("remote.statusElsewhere", { n: String(elsewhere) })}
+          </span>
+        </Tooltip>
       )}
       {latency !== null && selected && (
         <Tooltip label={t("remote.latencyHint", { name: selected.name })}>

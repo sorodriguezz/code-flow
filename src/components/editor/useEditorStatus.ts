@@ -35,7 +35,15 @@ export function useEditorStatus(
     focused,
     path,
     fileKey,
-  }: { groupId: string; focused: boolean; path: string | null; fileKey: string | null },
+    encoding,
+  }: {
+    groupId: string;
+    focused: boolean;
+    path: string | null;
+    fileKey: string | null;
+    /** How the file was decoded — `UTF-8` for anything the editor can save. */
+    encoding: string;
+  },
 ): void {
   const actions = useMemo<EditorStatusActions | null>(() => {
     if (!editor || !monaco) return null;
@@ -49,7 +57,9 @@ export function useEditorStatus(
       // so the save writes it.
       setEol: (eol) => {
         const model = editor.getModel();
-        if (!model) return;
+        // `pushEOL` goes straight to the model, past Monaco's read-only flag — and a file shown
+        // read-only is one the editor will not save, so converting it would only make the screen lie.
+        if (!model || editor.getOption(monaco.editor.EditorOption.readOnly)) return;
         model.pushEOL(eol === "CRLF" ? monaco.editor.EndOfLineSequence.CRLF : monaco.editor.EndOfLineSequence.LF);
         editor.focus();
       },
@@ -103,6 +113,7 @@ export function useEditorStatus(
           tabSize: options.tabSize,
           insertSpaces: options.insertSpaces,
           eol: model.getEOL() === "\r\n" ? "CRLF" : "LF",
+          encoding,
           languageId,
           languageName: languageNameOf(monaco, languageId),
         },
@@ -122,5 +133,5 @@ export function useEditorStatus(
       for (const subscription of subscriptions) subscription.dispose();
       useEditorStatusStore.getState().clear(groupId);
     };
-  }, [editor, monaco, actions, focused, groupId, path, fileKey]);
+  }, [editor, monaco, actions, focused, groupId, path, fileKey, encoding]);
 }

@@ -27,8 +27,9 @@ If you are contributing on behalf of an employer, make sure you are allowed to.
 
 ## Reporting a bug or suggesting an idea
 
-Open an [issue](../../issues). For a bug, include your OS, the app version
-(**Settings › About**) and the steps to reproduce it. For a security problem,
+Open an [issue](../../issues). For a bug, include your OS, the app version and
+the steps to reproduce it — **Settings › About and diagnostics › Copy
+diagnostics** gathers the first two for you. For a security problem,
 please open a private security advisory instead of a public issue.
 
 ## Sending a pull request
@@ -59,19 +60,31 @@ Answer the password prompt once more after that and it should be the last one.
 A different name works if you export `CODEFLOW_SIGN_IDENTITY`. Skip all of this
 and everything still builds and runs — you just keep typing your password.
 
-Before you push, run what CI runs on every pull request:
+Before you open a pull request, run what CI runs on every one — plus the Rust
+suite, which CI does not run:
 
 ```bash
-node scripts/check-translations.mjs && pnpm exec tsc --noEmit
+node scripts/check-translations.mjs && node scripts/check-control-bytes.mjs
+pnpm exec tsc --noEmit
+pnpm test                 # the vitest suite
+pnpm notices:check        # THIRD-PARTY-NOTICES.md still matches the dependencies
+cd src-tauri && cargo test --lib   # from src-tauri/, where the signing runner applies
 ```
 
-Both must pass. The first one is the trap that catches most newcomers: **every
-English string needs its Spanish twin**. The app ships in both languages and a
-missing translation fails the build.
+All of it must pass. The translation check is the trap that catches most
+newcomers: **every English string needs its Spanish twin**. The app ships in
+both languages and a missing translation fails the build.
 
-If you touched Rust, run `cargo test` in `src-tauri/` too. Two tests in
-`debugger::live_tests` already fail on a clean tree — that is the known
-baseline, not something you broke.
+`cargo test --lib` has a baseline of **zero failures**, so anything red is
+yours to look at. Some tests use the macOS Keychain, and after a rebuild macOS
+may ask for access; with the `CodeFlow Dev` certificate above, allowing it once
+is enough.
+
+Added, removed or upgraded a dependency? Then `pnpm notices:check` fails until
+you run `pnpm notices` and commit the regenerated `THIRD-PARTY-NOTICES.md`. It
+works offline, from the lockfiles. A licence it has never seen gets a warning
+and copyleft stops it — say so in the pull request rather than working around
+it.
 
 A good pull request:
 
@@ -116,7 +129,8 @@ Si contribuyes por cuenta de tu empleador, asegúrate de que puedes hacerlo.
 ## Reportar un bug o proponer una idea
 
 Abre un [issue](../../issues). Para un bug, incluye tu sistema operativo, la
-versión de la app (**Ajustes › Acerca de**) y los pasos para reproducirlo. Si
+versión de la app y los pasos para reproducirlo — **Ajustes › Acerca de y
+diagnóstico › Copiar diagnóstico** reúne los dos primeros por ti. Si
 es un problema de seguridad, abre un aviso de seguridad privado en lugar de un
 issue público.
 
@@ -148,19 +162,31 @@ Responde al aviso de contraseña una vez más y debería ser la última. Si
 prefieres otro nombre, exporta `CODEFLOW_SIGN_IDENTITY`. Si te saltas todo esto
 igual compila y funciona — solo seguirás escribiendo la contraseña.
 
-Antes de subir, corre lo mismo que corre CI en cada pull request:
+Antes de abrir un pull request, corre lo mismo que corre CI en cada uno — y
+además la suite de Rust, que CI no corre:
 
 ```bash
-node scripts/check-translations.mjs && pnpm exec tsc --noEmit
+node scripts/check-translations.mjs && node scripts/check-control-bytes.mjs
+pnpm exec tsc --noEmit
+pnpm test                 # la suite de vitest
+pnpm notices:check        # THIRD-PARTY-NOTICES.md sigue al día con las dependencias
+cd src-tauri && cargo test --lib   # desde src-tauri/, donde aplica el runner que firma
 ```
 
-Los dos tienen que pasar. El primero es la trampa que pilla a casi todo el
-mundo: **cada texto en inglés necesita su gemelo en español**. La app se
-publica en los dos idiomas y una traducción que falta rompe el build.
+Todo tiene que pasar. La comprobación de traducciones es la trampa que pilla a
+casi todo el mundo: **cada texto en inglés necesita su gemelo en español**. La
+app se publica en los dos idiomas y una traducción que falta rompe el build.
 
-Si tocaste Rust, corre también `cargo test` en `src-tauri/`. Dos tests de
-`debugger::live_tests` ya fallan en un árbol limpio: esa es la línea base
-conocida, no algo que hayas roto tú.
+`cargo test --lib` tiene una línea base de **cero fallos**, así que cualquier
+rojo te toca revisarlo. Algunos tests usan el llavero de macOS, y después de
+recompilar macOS puede pedirte acceso; con el certificado `CodeFlow Dev` de
+arriba, basta con permitirlo una vez.
+
+¿Agregaste, quitaste o actualizaste una dependencia? Entonces `pnpm notices:check`
+falla hasta que corras `pnpm notices` y hagas commit del
+`THIRD-PARTY-NOTICES.md` regenerado. Funciona sin conexión, desde los lockfiles.
+Una licencia que nunca ha visto genera un aviso, y una licencia copyleft lo
+detiene — dilo en el pull request en vez de esquivarlo.
 
 Un buen pull request:
 

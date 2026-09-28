@@ -302,7 +302,20 @@ export interface DbStatementResult {
 export interface DbExecuteResult {
   results: DbStatementResult[];
   duration_ms: number;
+  /** The transaction state a console's session was left in. Absent on anything but `db_execute`. */
+  transaction?: DbTransactionState;
 }
+
+/**
+ * Which of a connection's sessions a call runs on. A console has its own — the only one a user can
+ * leave a transaction open on — and everything the app does on the user's behalf runs on the other.
+ * Mirrors `DbLane` in `datasource/mod.rs`.
+ */
+export type DbLane = "work" | "console";
+
+/** Whether a console's session is inside a transaction; `aborted` is Postgres' "commands ignored
+ *  until end of transaction block". */
+export type DbTransactionState = "none" | "open" | "aborted";
 
 /**
  * How one statement of the console's last run went, as the AI assistant is told about it.

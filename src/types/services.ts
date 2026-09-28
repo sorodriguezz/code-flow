@@ -48,6 +48,9 @@ export interface ServiceRow {
   updated_at: string;
   /** JSON array of the ports the last run was seen listening on. Written by the supervisor. */
   detected_ports: string;
+  /** JSON array of env files loaded at every start, relative to the folder, in order. The row's own
+   *  `env` wins over them. */
+  env_files: string;
 }
 
 export interface ServiceGroup {
@@ -134,6 +137,8 @@ export interface ServiceCandidate {
    */
   pinnedPorts: number[];
   score: number;
+  /** `.env` when the folder has one — offered, and removable in the form. */
+  envFiles: string[];
 }
 
 export interface ProjectCandidates {
@@ -171,6 +176,10 @@ export const serviceDetectedPorts = (service: ServiceRow): number[] =>
   parseJson<number[]>(service.detected_ports ?? "[]", []);
 export const serviceEnv = (service: ServiceRow): Record<string, string> =>
   parseJson<Record<string, string>>(service.env, {});
+export const serviceEnvFiles = (service: ServiceRow): string[] => {
+  const files = parseJson<unknown>(service.env_files ?? "[]", []);
+  return Array.isArray(files) ? files.filter((file): file is string => typeof file === "string") : [];
+};
 
 /** Whether a command is a `docker compose up`, which decides the service's kind — the supervisor
  *  reads the command itself. */

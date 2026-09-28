@@ -10,6 +10,7 @@ import { ThinkingOrb } from "../common/ThinkingOrb";
 import { confirmAction } from "../../state/confirmStore";
 import { useStoriesStore } from "../../state/storiesStore";
 import { riseDelay } from "../../lib/rise";
+import { boardLabelKey } from "../../lib/boardLabel";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import type { StoryBatch } from "../../types/domain";
@@ -69,7 +70,9 @@ export function StoryBatchList({ width, onNewBatch }: { width: number; onNewBatc
       danger: true,
       separated: true,
       onClick: () => {
-        void confirmAction(t("stories.deleteBatchConfirm", { name: batch.title })).then((ok) => {
+        void confirmAction(
+          t("stories.deleteBatchConfirm", { name: batch.title, board: t(boardLabelKey(batch.board_provider)) }),
+        ).then((ok) => {
           if (ok) void useStoriesStore.getState().remove(batch.id);
         });
       },

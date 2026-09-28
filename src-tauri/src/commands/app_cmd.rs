@@ -10,12 +10,12 @@ use crate::tray::QuittingFlag;
 ///
 /// The last thing before exiting is the backup, when the user asked for one on quit: the session
 /// that just ended is precisely the one a scheduled backup is most likely not to have caught.
+///
+/// Asked about unsaved work first, like the tray's Quit and ⌘Q — see `quit_guard`, which does the
+/// backup and marks the quit once it is really going ahead.
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
-    use tauri::Manager;
-    crate::backup::auto::flush_on_exit(&app);
-    app.state::<QuittingFlag>().mark_quitting();
-    app.exit(0);
+    crate::quit_guard::request_quit(&app);
 }
 
 /// The in-app equivalent of the Windows installer's "delete my data" uninstall prompt — the
@@ -26,6 +26,8 @@ pub fn quit_app(app: AppHandle) {
 pub fn reset_app_data(app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
     std::fs::write(paths::reset_marker_path(), "").map_err(|e| e.to_string())?;
+    // Never held by the unsaved-work question: the user has just asked for everything to go.
+    app.state::<crate::quit_guard::QuitGuard>().approve();
     app.state::<QuittingFlag>().mark_quitting();
     app.exit(0);
     Ok(())

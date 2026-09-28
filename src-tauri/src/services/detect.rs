@@ -47,6 +47,78 @@ pub struct Candidate {
     pub pinned_ports: Vec<u16>,
     /// How likely this is to be *the* thing to run here. Higher first.
     pub score: u32,
+    /// Env files to load, relative to `cwd`: `.env` when the folder has one — offered, not
+    /// imposed; the form shows it and it can be taken off.
+    pub env_files: Vec<String>,
+}
+
+/// What detection has to know about the machine a command will run on, because the right spelling
+/// differs: Windows runs a service through `cmd /C`, where `./mvnw` is "'.' is not recognized", and
+/// macOS has no `python` at all. A value rather than `cfg!` so the tests can ask about either.
+pub struct Host {
+    pub windows: bool,
+    /// The Python to run when a project has no environment of its own — see [`system_python`].
+    pub system_python: &'static str,
+}
+
+impl Host {
+    pub fn current() -> Self {
+        let windows = cfg!(windows);
+        Host { windows, system_python: system_python(windows, on_path) }
+    }
+}
+
+/// The folders a Python project keeps its virtual environment in, in the order they are tried.
+const VENV_DIRS: [&str; 3] = [".venv", "venv", "env"];
+
+/// The interpreter of the virtual environment in `dir`, relative to it — `.venv/bin/python`, or
+/// `.venv\Scripts\python.exe` on Windows — when there is one. That is where a project's dependencies
+/// are installed, so running anything else runs it without them.
+pub fn venv_python(dir: &Path, windows: bool) -> Option<String> {
+    let (folder, file, separator) = if windows { ("Scripts", "python.exe", "\\") } else { ("bin", "python", "/") };
+    VENV_DIRS.iter().find_map(|venv| {
+        dir.join(venv)
+            .join(folder)
+            .join(file)
+            .is_file()
+            .then(|| format!("{venv}{separator}{folder}{separator}{file}"))
+    })
+}
+
+/// The Python to run when a project has no environment of its own.
+///
+/// `python3` first: it is the name every current macOS and Linux installs, and macOS has no `python`
+/// at all — which is where the bare `python` this used to propose failed. On Windows the order is
+/// `python`, then the `py` launcher: the python.org installer puts those on `PATH`, while `python3`
+/// there is usually the Store's placeholder, which opens the Store instead of running anything.
+pub fn system_python(windows: bool, on_path: impl Fn(&str) -> bool) -> &'static str {
+    let order: &[&'static str] = if windows { &["python", "py"] } else { &["python3", "python"] };
+    order.iter().copied().find(|name| on_path(name)).unwrap_or(order[0])
+}
+
+/// Whether `program` resolves on this process's `PATH` — which on a GUI launch is the login shell's
+/// (see `shell_env::import_login_path`). With `.exe` on Windows.
+pub fn on_path(program: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else { return false };
+    std::env::split_paths(&path)
+        .any(|dir| dir.join(program).is_file() || (cfg!(windows) && dir.join(format!("{program}.exe")).is_file()))
+}
+
+/// The Maven or Gradle wrapper a folder carries, spelled for the shell that will run it — or the
+/// globally installed tool when there is no wrapper. On Windows the wrapper is the `.cmd`/`.bat`
+/// beside the shell script (the same spelling the project initializer writes), run by name: `cmd`
+/// looks in the working folder first.
+fn build_tool(dir: &Path, host: &Host, unix: &'static str, windows: &'static str, global: &'static str) -> &'static str {
+    if host.windows {
+        if dir.join(windows).is_file() { windows } else { global }
+    } else if dir.join(unix).is_file() {
+        match unix {
+            "mvnw" => "./mvnw",
+            _ => "./gradlew",
+        }
+    } else {
+        global
+    }
 }
 
 /// Folders that never hold a project of their own: build output, installed dependencies, caches,
@@ -67,6 +139,11 @@ const MAX_DIRS: usize = 60;
 /// Every candidate in `root`, best first. Never fails: a folder that cannot be read has nothing to
 /// suggest.
 pub fn detect(root: &Path) -> Vec<Candidate> {
+    detect_on(root, &Host::current())
+}
+
+/// [`detect`], for a given machine.
+pub fn detect_on(root: &Path, host: &Host) -> Vec<Candidate> {
     let mut out = Vec::new();
     let folder_name = root
         .file_name()
@@ -98,10 +175,10 @@ pub fn detect(root: &Path) -> Vec<Candidate> {
         found.extend(dockerfile_candidates(dir, &name));
         found.extend(procfile_candidates(dir));
         found.extend(make_candidates(dir, &name));
-        found.extend(other_candidates(dir, &name));
+        found.extend(other_candidates(dir, &name, host));
         found.extend(dotnet_candidates(dir));
         if !covered.contains(dir) {
-            let (jvm, modules) = jvm_candidates(dir, &name);
+            let (jvm, modules) = jvm_candidates(dir, &name, host);
             found.extend(jvm);
             covered.extend(modules);
         }
@@ -123,6 +200,11 @@ pub fn detect(root: &Path) -> Vec<Candidate> {
     let mut seen = HashSet::new();
     out.retain(|c| seen.insert((c.cwd.clone(), c.command.clone())));
     out.sort_by(|a, b| b.score.cmp(&a.score).then(a.cwd.cmp(&b.cwd)).then(a.name.cmp(&b.name)));
+    for candidate in &mut out {
+        if root.join(&candidate.cwd).join(".env").is_file() {
+            candidate.env_files = vec![".env".to_string()];
+        }
+    }
     out
 }
 
@@ -591,6 +673,7 @@ fn dockerfile_candidates(dir: &Path, name: &str) -> Vec<Candidate> {
         // Below any way of running the code directly: a Dockerfile is as often the production
         // recipe as it is the way anyone works on the thing.
         score: 35,
+        ..Default::default()
     }]
 }
 
@@ -849,7 +932,7 @@ fn gradle_includes(settings: &str) -> Vec<String> {
 /// by module — `./mvnw -pl api spring-boot:run`, `./gradlew :api:bootRun` — because that is the
 /// form that resolves the sibling modules an app depends on; running inside the module folder
 /// would look for them in a local repository they were never installed to.
-fn jvm_candidates(dir: &Path, name: &str) -> (Vec<Candidate>, Vec<PathBuf>) {
+fn jvm_candidates(dir: &Path, name: &str, host: &Host) -> (Vec<Candidate>, Vec<PathBuf>) {
     let mut out = Vec::new();
     let mut covered = Vec::new();
     let candidate = |name: String, command: String, source: String, app: &JvmApp, app_dir: &Path| Candidate {
@@ -866,7 +949,7 @@ fn jvm_candidates(dir: &Path, name: &str) -> (Vec<Candidate>, Vec<PathBuf>) {
     };
 
     if let Ok(pom) = std::fs::read_to_string(dir.join("pom.xml")) {
-        let mvn = if dir.join("mvnw").is_file() { "./mvnw" } else { "mvn" };
+        let mvn = build_tool(dir, host, "mvnw", "mvnw.cmd", "mvn");
         let modules = maven_modules(&pom);
         if modules.is_empty() {
             if let Some(app) = maven_app(&pom, false) {
@@ -910,7 +993,7 @@ fn jvm_candidates(dir: &Path, name: &str) -> (Vec<Candidate>, Vec<PathBuf>) {
         .into_iter()
         .find_map(|f| std::fs::read_to_string(dir.join(f)).ok());
     if build_file(dir).is_some() || settings.is_some() {
-        let gradle = if dir.join("gradlew").is_file() { "./gradlew" } else { "gradle" };
+        let gradle = build_tool(dir, host, "gradlew", "gradlew.bat", "gradle");
         if let Some(file) = build_file(dir) {
             let text = std::fs::read_to_string(dir.join(file)).unwrap_or_default();
             if let Some(app) = gradle_app(&text) {
@@ -1069,7 +1152,7 @@ fn launch_ports(dir: &Path) -> Vec<u16> {
 
 /// Everything that is not Node, Compose, Docker, a task runner, .NET or the JVM: one well-known
 /// command per ecosystem.
-fn other_candidates(root: &Path, folder_name: &str) -> Vec<Candidate> {
+fn other_candidates(root: &Path, folder_name: &str, host: &Host) -> Vec<Candidate> {
     let mut out = Vec::new();
     let has = |file: &str| root.join(file).exists();
     let contains = |file: &str, needle: &str| {
@@ -1089,22 +1172,26 @@ fn other_candidates(root: &Path, folder_name: &str) -> Vec<Candidate> {
         });
     };
 
-    // Python. `uv` and Poetry run the project's own interpreter; bare `python` would not.
-    let python = if has("uv.lock") {
-        "uv run python"
+    // Python. `uv` and Poetry run the project's own interpreter. Without either, the project's
+    // virtual environment is used when it has one — its dependencies are installed there — and the
+    // system's Python when it does not (see `system_python`: `python3`, not the `python` macOS
+    // lacks).
+    let (python, uvicorn) = if has("uv.lock") {
+        ("uv run python".to_string(), "uv run uvicorn".to_string())
     } else if has("poetry.lock") {
-        "poetry run python"
+        ("poetry run python".to_string(), "poetry run uvicorn".to_string())
     } else {
-        "python"
+        let python = venv_python(root, host.windows).unwrap_or_else(|| host.system_python.to_string());
+        // `-m`, so it is this interpreter's uvicorn rather than whichever is first on `PATH`.
+        let uvicorn = format!("{python} -m uvicorn");
+        (python, uvicorn)
     };
     if has("manage.py") {
         push(format!("{python} manage.py runserver"), "manage.py", "Django", vec![8000], 85);
     }
     for (file, module) in [("main.py", "main"), ("app/main.py", "app.main"), ("src/main.py", "src.main")] {
         if contains(file, "FastAPI(") {
-            // `uv run uvicorn`, `poetry run uvicorn` or plain `uvicorn`, matching the interpreter.
-            let runner = python.replace("python", "uvicorn");
-            push(format!("{runner} {module}:app --reload"), file, "FastAPI", vec![8000], 85);
+            push(format!("{uvicorn} {module}:app --reload"), file, "FastAPI", vec![8000], 85);
             break;
         }
     }
@@ -1466,6 +1553,92 @@ mod tests {
         let rails = scratch(&[("bin/rails", ""), ("bin/dev", ""), ("config.ru", "")]);
         let commands: Vec<String> = detect(rails.path()).into_iter().map(|c| c.command).collect();
         assert_eq!(commands, vec!["bin/dev", "bin/rails server"], "not rackup: Rails owns config.ru");
+    }
+
+    fn windows() -> Host {
+        Host { windows: true, system_python: "python" }
+    }
+
+    fn unix() -> Host {
+        Host { windows: false, system_python: "python3" }
+    }
+
+    /// Windows runs a service through `cmd /C`, where `./mvnw` is "'.' is not recognized as an
+    /// internal or external command". The wrapper there is the `.cmd`/`.bat` beside the script.
+    #[test]
+    fn windows_runs_the_wrappers_it_can_run() {
+        let maven = scratch(&[("pom.xml", "<artifactId>spring-boot-starter-web</artifactId>"), ("mvnw", ""), ("mvnw.cmd", "")]);
+        assert_eq!(detect_on(maven.path(), &windows())[0].command, "mvnw.cmd spring-boot:run");
+        assert_eq!(detect_on(maven.path(), &unix())[0].command, "./mvnw spring-boot:run");
+
+        // Only the shell script: on Windows that is no wrapper at all, so the installed tool runs.
+        let unix_only = scratch(&[("pom.xml", "<artifactId>spring-boot-starter-web</artifactId>"), ("mvnw", "")]);
+        assert_eq!(detect_on(unix_only.path(), &windows())[0].command, "mvn spring-boot:run");
+
+        let gradle = scratch(&[
+            ("settings.gradle.kts", "include(\"api\")\n"),
+            ("gradlew", ""),
+            ("gradlew.bat", ""),
+            ("api/build.gradle.kts", "plugins {\n  id(\"org.springframework.boot\")\n}\n"),
+        ]);
+        find(&detect_on(gradle.path(), &windows()), "", "gradlew.bat :api:bootRun");
+        find(&detect_on(gradle.path(), &unix()), "", "./gradlew :api:bootRun");
+
+        let multi = scratch(&[
+            ("pom.xml", "<project><packaging>pom</packaging><modules>\n<module>api</module>\n</modules></project>"),
+            ("mvnw.cmd", ""),
+            ("api/pom.xml", "<project><build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>"),
+        ]);
+        find(&detect_on(multi.path(), &windows()), "", "mvnw.cmd -pl api spring-boot:run");
+    }
+
+    /// Without uv or Poetry, a Python project runs under its own virtual environment when it has
+    /// one — where its dependencies are — and under `python3` otherwise: macOS has no `python`.
+    #[test]
+    fn python_runs_under_the_projects_venv_or_python3() {
+        let bare = scratch(&[("manage.py", ""), ("app.py", "app = Flask(__name__)")]);
+        let found = detect_on(bare.path(), &unix());
+        find(&found, "", "python3 manage.py runserver");
+        find(&found, "", "python3 -m flask run");
+        find(&detect_on(bare.path(), &windows()), "", "python manage.py runserver");
+
+        let venv = scratch(&[("manage.py", ""), (".venv/bin/python", ""), (".venv/Scripts/python.exe", "")]);
+        find(&detect_on(venv.path(), &unix()), "", ".venv/bin/python manage.py runserver");
+        find(&detect_on(venv.path(), &windows()), "", ".venv\\Scripts\\python.exe manage.py runserver");
+
+        // An older layout's folder name works too, and FastAPI runs the environment's uvicorn.
+        let fastapi = scratch(&[("main.py", "app = FastAPI()"), ("venv/bin/python", "")]);
+        find(&detect_on(fastapi.path(), &unix()), "", "venv/bin/python -m uvicorn main:app --reload");
+
+        // uv and Poetry keep running their own.
+        let poetry = scratch(&[("manage.py", ""), ("poetry.lock", ""), (".venv/bin/python", "")]);
+        find(&detect_on(poetry.path(), &unix()), "", "poetry run python manage.py runserver");
+        let uv = scratch(&[("main.py", "app = FastAPI()"), ("uv.lock", "")]);
+        find(&detect_on(uv.path(), &unix()), "", "uv run uvicorn main:app --reload");
+    }
+
+    #[test]
+    fn the_fallback_python_is_the_platforms_own_name() {
+        assert_eq!(system_python(false, |name| name == "python3" || name == "python"), "python3");
+        assert_eq!(system_python(false, |name| name == "python"), "python");
+        assert_eq!(system_python(false, |_| false), "python3");
+        // Windows: never the Store's `python3` placeholder.
+        assert_eq!(system_python(true, |_| true), "python");
+        assert_eq!(system_python(true, |name| name == "py" || name == "python3"), "py");
+        assert_eq!(system_python(true, |_| false), "python");
+    }
+
+    /// A folder with a `.env` offers it to the service — for that folder only.
+    #[test]
+    fn a_dot_env_beside_a_service_is_offered() {
+        let dir = scratch(&[
+            ("api/package.json", r#"{"scripts":{"dev":"node server.js"}}"#),
+            ("api/.env", "PORT=4001\n"),
+            ("web/package.json", r#"{"scripts":{"dev":"vite"}}"#),
+        ]);
+        let found = detect(dir.path());
+        assert_eq!(find(&found, "api", "npm run dev").env_files, vec![".env".to_string()]);
+        assert!(find(&found, "web", "npm run dev").env_files.is_empty());
     }
 
     #[test]

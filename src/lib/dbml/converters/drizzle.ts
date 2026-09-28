@@ -4,6 +4,13 @@ import {
   baseType,
   camel,
   codegenRefs,
+  compositeKey,
+  defaultOf,
+  findingLines,
+  isComposite,
+  isNowExpression,
+  isUuidExpression,
+  jsLiteral,
   lengthOf,
   NOTHING_TO_CONVERT,
   precisionOf,
@@ -59,6 +66,8 @@ export function toDrizzle(schema: DbmlSchema): string {
   if (schema.tables.length === 0) return NOTHING_TO_CONVERT;
 
   const imports = new Set<string>(["pgTable"]);
+  /** `sql` comes from `drizzle-orm` itself rather than from `pg-core`, and only when a default needs it. */
+  let usesSql = false;
   const blocks: string[] = [];
   const refs = codegenRefs(schema);
   const enumsByName = new Map(schema.enums.map((entry) => [entry.name.toLowerCase(), entry]));
@@ -71,11 +80,13 @@ export function toDrizzle(schema: DbmlSchema): string {
   if (schema.enums.length > 0) blocks.push("");
 
   for (const table of schema.tables) {
-    const keys = new Map(
-      refs
-        .filter((ref) => ref.fkTable.id === table.id && ref.kind !== "many-to-many")
-        .map((ref) => [ref.fkField, ref]),
-    );
+    const own = refs.filter((ref) => ref.fkTable.id === table.id && ref.kind !== "many-to-many");
+    // A single-column key is a `.references()` on its column; a composite one cannot be — it is a
+    // `foreignKey()` over both columns in the table's extra config, below.
+    const keys = new Map(own.filter((ref) => !isComposite(ref)).map((ref) => [ref.fkFields[0], ref]));
+    const composite = own.filter(isComposite);
+    // A key over several columns is a `primaryKey()` in the extra config for the same reason.
+    const primary = compositeKey(table);
 
     const lines = [`export const ${camel(table.name)} = pgTable('${table.name}', {`];
     for (const field of table.fields) {
@@ -90,24 +101,58 @@ export function toDrizzle(schema: DbmlSchema): string {
       }
 
       const chain: string[] = [];
-      if (field.pk) chain.push(".primaryKey()");
-      if (field.notNull && !field.pk) chain.push(".notNull()");
+      if (field.pk && !primary) chain.push(".primaryKey()");
+      if (field.notNull && !(field.pk && !primary)) chain.push(".notNull()");
       if (field.unique && !field.pk) chain.push(".unique()");
-      if (field.default !== null && !field.increment) {
-        const value = field.default;
-        if (/^`?(now\(\)|current_timestamp)`?$/i.test(value)) chain.push(".defaultNow()");
-        else if (/^`?(gen_random_uuid|uuid_generate_v4)\(\)`?$/i.test(value)) chain.push(".defaultRandom()");
-        else chain.push(`.default(${value.replace(/^`|`$/g, "")})`);
+      const value = field.increment ? null : defaultOf(field);
+      if (value?.kind === "expression") {
+        if (isNowExpression(value.sql)) chain.push(".defaultNow()");
+        else if (isUuidExpression(value.sql)) chain.push(".defaultRandom()");
+        else {
+          // Raw SQL goes through the `sql` tag; without it the expression is either a syntax error
+          // in the generated file or, quoted, a string default.
+          usesSql = true;
+          chain.push(`.default(sql\`${value.sql.replace(/[`\\]/g, "\\$&")}\`)`);
+        }
+      } else if (value?.kind === "number" && call.startsWith("numeric(")) {
+        // `numeric` reads and writes strings in Drizzle, so its default is one too.
+        chain.push(`.default('${value.text}')`);
+      } else if (value) {
+        chain.push(`.default(${jsLiteral(value)})`);
       }
       const ref = keys.get(field.name);
-      if (ref) chain.push(`.references(() => ${camel(ref.pkTable.name)}.${camel(ref.pkField)})`);
+      if (ref) chain.push(`.references(() => ${camel(ref.pkTable.name)}.${camel(ref.pkFields[0])})`);
 
       lines.push(`  ${camel(field.name)}: ${call}${chain.join("")},`);
     }
-    lines.push("});");
+    if (composite.length > 0 || primary) {
+      lines.push("}, (table) => [");
+      if (primary) {
+        imports.add("primaryKey");
+        lines.push(`  primaryKey({ columns: [${primary.map((name) => `table.${camel(name)}`).join(", ")}] }),`);
+      }
+      if (composite.length > 0) imports.add("foreignKey");
+      for (const ref of composite) {
+        const parent = camel(ref.pkTable.name);
+        lines.push("  foreignKey({");
+        lines.push(`    columns: [${ref.fkFields.map((name) => `table.${camel(name)}`).join(", ")}],`);
+        lines.push(`    foreignColumns: [${ref.pkFields.map((name) => `${parent}.${camel(name)}`).join(", ")}],`);
+        lines.push("  }),");
+      }
+      lines.push("]);");
+    } else {
+      lines.push("});");
+    }
     blocks.push(lines.join("\n"), "");
   }
 
-  const importLine = `import { ${[...imports].sort().join(", ")} } from 'drizzle-orm/pg-core';`;
-  return [banner("Drizzle ORM schema"), "", importLine, "", ...blocks].join("\n").trimEnd() + "\n";
+  const importLines = [
+    ...(usesSql ? ["import { sql } from 'drizzle-orm';"] : []),
+    `import { ${[...imports].sort().join(", ")} } from 'drizzle-orm/pg-core';`,
+  ];
+  return (
+    [banner("Drizzle ORM schema"), "", ...findingLines(schema), ...importLines, "", ...blocks]
+      .join("\n")
+      .trimEnd() + "\n"
+  );
 }

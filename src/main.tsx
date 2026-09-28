@@ -1,7 +1,8 @@
-import React from "react";
+import React, { useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+import { bootReady } from "./lib/tauri/commands";
 // `./lib/monacoSetup` is deliberately NOT imported here, and that absence is the point.
 //
 // It used to be, "before any editor mounts" — which is true of every module that renders one, and
@@ -33,6 +34,9 @@ import { startContextMenuGuard } from "./lib/contextMenuGuard";
 // Keeps the title bar draggable underneath a modal's backdrop, which covers it and would otherwise
 // leave the window stuck in place for as long as a dialog is open.
 import { startOverlayDragRegion } from "./lib/overlayDragRegion";
+// Uncaught errors and unhandled rejections into `codeflow.log` — until this they reached the
+// console and nowhere a user could send. See `lib/diagnostics.ts`.
+import { installErrorReporting } from "./lib/diagnostics";
 // The app's two faces, from the bundle rather than a CDN: Instrument Sans for the interface and
 // JetBrains Mono for code, hashes and paths. `@font-face` only — each subset (~30–40 KB) is read the
 // first time a glyph in its range is drawn, and never from the network. See `--font-sans` in
@@ -47,6 +51,23 @@ startScrollFeedback();
 startExternalLinks();
 startContextMenuGuard();
 startOverlayDragRegion();
+installErrorReporting();
+
+/**
+ * Tells the backend the shell rendered — the boot watchdog's all-clear (`boot_guard::arm_watchdog`).
+ * Without it, 30 s after launch the backend offers an update from a native dialog, because a
+ * frontend that never comes up never runs its own update check.
+ *
+ * A sibling of `App` inside the same boundary, and that placement is the point: a shell that throws
+ * on its first render takes this down with it, so the fatal fallback — an error and a reload button,
+ * no app — does not count as having started.
+ */
+function BootReady() {
+  useEffect(() => {
+    void bootReady().catch(() => {});
+  }, []);
+  return null;
+}
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
@@ -58,6 +79,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
         and leaves a blank window that can only be quit. */}
     <ErrorBoundary fatal>
       <App />
+      <BootReady />
     </ErrorBoundary>
   </React.StrictMode>,
 );

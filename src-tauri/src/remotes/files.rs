@@ -221,6 +221,7 @@ pub async fn download(
     remote_path: &str,
     local_path: &str,
 ) -> Result<(), String> {
+    let _running = Running::begin(id);
     match transport(spec)? {
         Transport::Sftp => super::sftp::download(app, id, host_id, spec, remote_path, local_path).await,
         Transport::Ftp => super::ftp::download(app, id, host_id, spec, remote_path, local_path).await,
@@ -239,12 +240,139 @@ pub async fn upload(
     local_path: &str,
     remote_path: &str,
 ) -> Result<(), String> {
+    let _running = Running::begin(id);
     match transport(spec)? {
         Transport::Sftp => super::sftp::upload(app, id, host_id, spec, local_path, remote_path).await,
         Transport::Ftp => super::ftp::upload(app, id, host_id, spec, local_path, remote_path).await,
         Transport::Smb => super::smb::upload(app, id, host_id, spec, local_path, remote_path).await,
         Transport::S3 => super::cloud::s3::upload(app, id, host_id, spec, local_path, remote_path).await,
         Transport::Azure => super::cloud::account::upload(app, id, host_id, spec, local_path, remote_path).await,
+    }
+}
+
+/// Which of `paths` already exist — on the far side, or here when `local` is set.
+///
+/// **What the overwrite question is asked from.** Every transport's write truncates whatever is at
+/// the destination, so the browser asks before sending anything that would land on an existing
+/// name, and this is where it learns which names those are. Asked of the *service*, not of the
+/// listing on screen: a pane can be minutes stale, and an object store's listing is paged, so a name
+/// that is not in the first two hundred rows is still a name.
+///
+/// A filesystem directory arrives whole, so each parent is listed once. An object store is asked per
+/// name, with the name as the listing prefix — the one query it answers in a single page whatever
+/// the container holds, and exact because a key sorts before every longer key it prefixes.
+pub async fn exist(
+    host_id: &str,
+    spec: &RemoteHostSpec,
+    paths: &[String],
+    local: bool,
+) -> Result<Vec<bool>, String> {
+    if local {
+        // `symlink_metadata`, so a dangling link counts as taken: writing through it would create
+        // whatever it points at, which is not what "this name is free" promised.
+        return Ok(paths.iter().map(|path| std::fs::symlink_metadata(path).is_ok()).collect());
+    }
+    let whole_directories = matches!(transport(spec)?, Transport::Sftp | Transport::Ftp | Transport::Smb);
+    let mut listed: std::collections::HashMap<String, Vec<String>> = Default::default();
+    let mut found = Vec::with_capacity(paths.len());
+    for path in paths {
+        let (parent, name) = split_remote(path);
+        let key = if whole_directories { parent.clone() } else { path.clone() };
+        if !listed.contains_key(&key) {
+            let page = ListPage {
+                prefix: if whole_directories { String::new() } else { name.clone() },
+                marker: String::new(),
+            };
+            let names = list(host_id, spec, &parent, &page)
+                .await?
+                .entries
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            listed.insert(key.clone(), names);
+        }
+        // Exact and case-sensitive, unlike the listing's prefix filter: `Report.pdf` beside
+        // `report.pdf` is two files on every transport but SMB, and SMB answers that itself.
+        found.push(listed[&key].iter().any(|existing| *existing == name));
+    }
+    Ok(found)
+}
+
+/// `/srv/app/a.txt` → (`/srv/app`, `a.txt`); a top-level name's parent is `/`.
+fn split_remote(path: &str) -> (String, String) {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rsplit_once('/') {
+        Some(("", name)) => ("/".to_string(), name.to_string()),
+        Some((parent, name)) => (parent.to_string(), name.to_string()),
+        None => (String::new(), trimmed.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cancelling a transfer
+// ---------------------------------------------------------------------------
+
+/// What a transfer that was asked to stop returns. The user asked for it, so it is not an error to
+/// report — the frontend matches this text to say nothing. Keep it identical to
+/// `TRANSFER_CANCELLED` in `src/lib/remote/transfers.ts`.
+pub const TRANSFER_CANCELLED: &str = "Transfer cancelled.";
+
+/// Transfer ids somebody has asked to stop.
+///
+/// A flag checked between chunks rather than a task to abort: every transport has something to put
+/// right when it stops — an FTP data connection whose reply must still be read, a half-written file
+/// on either side, an S3 multipart upload that bills until it is aborted — and a future dropped
+/// mid-`await` does none of that.
+fn cancels() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static CANCELS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    CANCELS.get_or_init(Default::default)
+}
+
+/// Asks a running transfer to stop at its next chunk. A no-op for an id that is not running.
+pub fn cancel(id: &str) {
+    if let Ok(mut set) = cancels().lock() {
+        set.insert(id.to_string());
+    }
+}
+
+/// Whether `id` has been asked to stop. Cheap enough to ask per chunk: one uncontended lock and a
+/// hash of a short string, against a 64 KiB copy.
+pub(super) fn cancelled(id: &str) -> bool {
+    cancels().lock().map(|set| set.contains(id)).unwrap_or(false)
+}
+
+/// The span of one transfer, for the cancel flag. A cancel that lands after the transfer ended
+/// would otherwise sit in the set for the rest of the process.
+struct Running(String);
+
+impl Running {
+    fn begin(id: &str) -> Self {
+        // Cleared on the way in as well: a flag left by a cancel that raced the end of the last
+        // transfer with this id must not stop this one before its first byte.
+        if let Ok(mut set) = cancels().lock() {
+            set.remove(id);
+        }
+        Self(id.to_string())
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Ok(mut set) = cancels().lock() {
+            set.remove(&self.0);
+        }
+    }
+}
+
+/// Removes the local file a cancelled download was writing.
+///
+/// Only on a cancel: that is a request to have nothing, and a half-file under the real name is the
+/// worst kind of something. A download that *failed* keeps what arrived, next to an error that says
+/// it is incomplete.
+pub(super) async fn discard_partial_local(local: &str, error: &str) {
+    if error == TRANSFER_CANCELLED {
+        let _ = tokio::fs::remove_file(local).await;
     }
 }
 
@@ -389,9 +517,40 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    stream(app, id, source, target, name, done, total, file_index, files).await?;
+    // A final event on every file, so the bar reaches the end rather than stopping wherever the
+    // last tick happened to land.
+    progress(app, id, name, *done, total, file_index + 1, files);
+    Ok(())
+}
+
+/// [`pump`] without the closing "this file is done" tick — for a copy that is one *piece* of a
+/// file: a part of an S3 multipart upload, a block of a staged Azure one. Counting each piece as a
+/// finished file would have a single upload's bar read `7/1`.
+///
+/// Stops at the next chunk once the transfer is [`cancel`]led, returning [`TRANSFER_CANCELLED`].
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn stream<R, W>(
+    app: &tauri::AppHandle,
+    id: &str,
+    source: &mut R,
+    target: &mut W,
+    name: &str,
+    done: &mut u64,
+    total: u64,
+    file_index: u64,
+    files: u64,
+) -> Result<(), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let mut buffer = vec![0u8; CHUNK];
     let mut last = std::time::Instant::now();
     loop {
+        if cancelled(id) {
+            return Err(TRANSFER_CANCELLED.to_string());
+        }
         let read = source.read(&mut buffer).await.map_err(|e| format!("Couldn't read {name}: {e}"))?;
         if read == 0 {
             break;
@@ -406,9 +565,6 @@ where
             progress(app, id, name, *done, total, file_index, files);
         }
     }
-    // A final event on every file, so the bar reaches the end rather than stopping wherever the
-    // last tick happened to land.
-    progress(app, id, name, *done, total, file_index + 1, files);
     Ok(())
 }
 
@@ -477,6 +633,44 @@ pub(super) fn plan_upload(local_path: &str, remote_path: &str) -> Result<Vec<Pla
         }
     }
     Ok(planned)
+}
+
+/// The remote directories an upload has to create before `file` can be written, outermost first,
+/// and only those not already in `made`.
+///
+/// Everything from the transfer's `root` down to the file's own parent. Creating only the parent,
+/// as the transports used to, fails for a folder whose sole content is another folder: its first
+/// file is two levels down, and `mkdir` of `root/inner` refuses while `root` does not exist yet. A
+/// single-file upload (`file == root`) creates nothing — it lands in the directory on screen.
+pub(super) fn new_parents(
+    root: &str,
+    file: &str,
+    made: &mut std::collections::HashSet<String>,
+) -> Vec<String> {
+    let root = root.trim_end_matches('/');
+    if file == root {
+        return Vec::new();
+    }
+    let Some(inside) = file.strip_prefix(root).and_then(|rest| rest.strip_prefix('/')) else {
+        // Not under the root, which no planner produces — fall back to the parent alone.
+        return match file.rsplit_once('/') {
+            Some((parent, _)) if !parent.is_empty() && made.insert(parent.to_string()) => vec![parent.to_string()],
+            _ => Vec::new(),
+        };
+    };
+    let mut dirs = Vec::new();
+    let mut current = root.to_string();
+    if !current.is_empty() && made.insert(current.clone()) {
+        dirs.push(current.clone());
+    }
+    let segments: Vec<&str> = inside.split('/').collect();
+    for segment in &segments[..segments.len().saturating_sub(1)] {
+        current = if current.is_empty() { segment.to_string() } else { format!("{current}/{segment}") };
+        if made.insert(current.clone()) {
+            dirs.push(current.clone());
+        }
+    }
+    dirs
 }
 
 /// Sorts a listing the way every file browser does: directories first, then by name.
@@ -650,6 +844,82 @@ mod tests {
         assert_eq!(remotes, ["/srv/app/nested/deep.txt", "/srv/app/top.txt"]);
         assert_eq!(planned.iter().map(|p| p.size).sum::<u64>(), 9);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_upload_creates_every_missing_folder_down_to_the_file_once() {
+        let mut made = std::collections::HashSet::new();
+        // A folder whose only content is another folder: its first file is two levels down.
+        assert_eq!(
+            new_parents("/srv/app", "/srv/app/nested/deep.txt", &mut made),
+            ["/srv/app", "/srv/app/nested"]
+        );
+        assert_eq!(new_parents("/srv/app", "/srv/app/nested/other.txt", &mut made), Vec::<String>::new());
+        assert_eq!(new_parents("/srv/app/", "/srv/app/top.txt", &mut made), Vec::<String>::new());
+        // A single file lands in the directory on screen, which exists.
+        assert!(new_parents("/srv/one.txt", "/srv/one.txt", &mut made).is_empty());
+        // SMB hands share-relative paths with no leading slash.
+        let mut made = std::collections::HashSet::new();
+        assert_eq!(new_parents("reports/q3", "reports/q3/a/b.pdf", &mut made), ["reports/q3", "reports/q3/a"]);
+    }
+
+    #[test]
+    fn a_remote_path_splits_into_its_directory_and_name() {
+        assert_eq!(split_remote("/srv/app/a.txt"), ("/srv/app".to_string(), "a.txt".to_string()));
+        assert_eq!(split_remote("/top"), ("/".to_string(), "top".to_string()));
+        assert_eq!(split_remote("/blob/photos/"), ("/blob".to_string(), "photos".to_string()));
+    }
+
+    /// The flag outlives neither the transfer nor a cancel that arrived after it ended — and a flag
+    /// left over from an earlier transfer with the same id must not stop a new one at its first byte.
+    #[test]
+    fn a_cancel_flag_lives_exactly_as_long_as_its_transfer() {
+        let id = format!("t-{}", uuid::Uuid::new_v4());
+        cancel(&id);
+        {
+            let _running = Running::begin(&id);
+            assert!(!cancelled(&id), "a stale flag is cleared when the transfer starts");
+            cancel(&id);
+            assert!(cancelled(&id));
+        }
+        assert!(!cancelled(&id), "and cleared again when it ends");
+    }
+
+    #[tokio::test]
+    async fn only_a_cancelled_download_discards_its_partial_file() {
+        let dir = std::env::temp_dir().join(format!("cf-partial-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("half.bin");
+        std::fs::write(&partial, b"half").unwrap();
+        let path = partial.to_string_lossy().to_string();
+
+        discard_partial_local(&path, "Couldn't read half.bin: connection reset").await;
+        assert!(partial.exists(), "a failure keeps what arrived");
+        discard_partial_local(&path, TRANSFER_CANCELLED).await;
+        assert!(!partial.exists(), "a cancel leaves nothing");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The overwrite question for a download is asked of this machine, and a dangling link counts
+    /// as taken — writing through it would create whatever it points at.
+    #[tokio::test]
+    async fn existence_on_this_side_is_read_from_the_filesystem() {
+        let dir = std::env::temp_dir().join(format!("cf-exist-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("here.txt"), b"x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("nowhere"), dir.join("dangling")).unwrap();
+
+        let paths: Vec<String> = ["here.txt", "absent.txt", "dangling"]
+            .iter()
+            .map(|name| dir.join(name).to_string_lossy().to_string())
+            .collect();
+        let spec = RemoteHostSpec::default();
+        let found = exist("unused", &spec, &paths, true).await.unwrap();
+        assert_eq!(&found[..2], [true, false]);
+        #[cfg(unix)]
+        assert!(found[2]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

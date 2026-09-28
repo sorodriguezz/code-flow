@@ -38,6 +38,10 @@ export interface Project {
   gitlab_host: string | null;
   sort_order: number;
   created_at: string;
+  /** Bitbucket Cloud's workspace and repository slug. No host: there is only bitbucket.org. Set
+   * by linking, never at creation — which is why `NewProject` has neither. */
+  bitbucket_workspace: string | null;
+  bitbucket_repo: string | null;
 }
 
 export interface NewProject {
@@ -75,6 +79,36 @@ export interface GithubConnection {
 export interface GitlabConnection {
   host: string;
   username: string;
+}
+
+/** How a Bitbucket connection authenticates: an Atlassian API token (with the e-mail of its account),
+ * or a workspace, project or repository access token. The same shape `bitbucket::BitbucketAuth`
+ * takes over IPC — it goes to the keychain whole and never comes back. */
+export type BitbucketCredential =
+  | { kind: "api_token"; email: string; token: string }
+  | { kind: "access_token"; token: string };
+
+/** A saved Bitbucket connection — one per workspace. Persisted as the `bitbucket_connections`
+ * app-setting (JSON); the credential itself lives in the OS keychain, keyed by the workspace. */
+export interface BitbucketConnection {
+  workspace: string;
+  kind: BitbucketCredential["kind"];
+  /** The API token's account e-mail — shown, not a secret. `null` for an access token. */
+  email: string | null;
+  /** Who the credential acts as, when Bitbucket said. Empty for most access tokens. */
+  user: string;
+}
+
+/** What testing a Bitbucket credential found (`bitbucket::CredentialCheck`). */
+export interface BitbucketCheck {
+  user: string;
+  credential_type: string | null;
+  granted: string[];
+  /** Scopes a feature needs that the credential is known to lack, in its own vocabulary. */
+  missing: string[];
+  /** Needed scopes nothing could confirm without writing. */
+  unverified: string[];
+  probed_repo: string | null;
 }
 
 /** A saved Azure DevOps connection — one per organization. Persisted as the `ado_connections`
@@ -215,6 +249,25 @@ export interface MergeOutcome {
 export interface ConflictFile {
   path: string;
 }
+
+/** An operation git can leave half done, waiting for the user — see `git/merge.rs`. */
+export type OperationKind = "merge" | "revert" | "cherry_pick" | "rebase";
+
+/** What the conflicts banner draws from, in one read. */
+export interface OperationState {
+  kind: OperationKind | null;
+  /** Continue/abort go through `git <op> --continue/--abort`: a rebase, or a multi-commit revert or
+   * cherry-pick started from a terminal. */
+  sequenced: boolean;
+  /** Unresolved paths, read from the index whatever the state — a conflicted `stash pop` leaves
+   * some behind with no operation at all. */
+  conflicts: string[];
+  /** The message git prepared for the operation's commit, comment lines removed. */
+  message: string | null;
+}
+
+/** How a pull reconciles a branch that diverged from its upstream. */
+export type PullMode = "merge" | "rebase" | "ff_only";
 
 export interface DiffLine {
   origin: string;
@@ -373,6 +426,12 @@ export interface SavedFinding {
    * good (see `apply_post_outcome`).
    */
   comentario_md?: string;
+  /** The iteration whose publish last wrote to this finding's thread. A finding published in the
+   * run on screen is not offered again: a second publish would post "sigue presente" on the thread it
+   * opened seconds earlier. Absent on runs saved before it was tracked. */
+  publicado_en_iter?: number | null;
+  /** Its thread is a plain PR comment (no location, or the host refused the line). */
+  hilo_general?: boolean;
 }
 
 /** A standing "this is a known false positive" rule for one repository (mirrors the Rust
@@ -538,6 +597,9 @@ export interface AgentChain {
   /** Step runs started, ever — the budget a looping plan spends. `step_count` stopped being the
    * bound once a step could send the plan backwards. */
   dispatches: number;
+  /** When a chain paused on its engine (quota, sign-in, missing CLI) resumes by itself — seconds
+   * since the epoch, `0` when it waits for the user. Only the user arms it; any move clears it. */
+  resume_at: number;
   created_at: string;
   updated_at: string;
   kind: ChainKind;
@@ -889,7 +951,7 @@ export interface AdoRepo {
   name: string;
 }
 
-export type VcsProvider = "azure" | "github" | "gitlab";
+export type VcsProvider = "azure" | "github" | "gitlab" | "bitbucket";
 
 /** AI-drafted PR title + body, returned by `generate_pr_description` to prefill the create form. */
 export interface PrDescriptionDraft {
@@ -933,6 +995,106 @@ export interface PrActionOutcome {
 export interface PrLinkActionOutcome {
   pr: PullRequestSummary;
   activity: WorkspaceActivityEntry;
+}
+
+/** Which pull requests a list asks for: still waiting (open + draft), finished (merged + closed),
+ * or everything. Open is the default. */
+export type PrListScope = "open" | "closed" | "all";
+
+/** One page of a pull-request list (`list_pull_requests_page`). */
+export interface PrPage {
+  items: PullRequestSummary[];
+  page: number;
+  has_more: boolean;
+}
+
+/** One check on a pull request's head commit, the same shape from every host (`ado::PrCheck`). */
+export interface PrCheck {
+  kind: "check" | "status" | "pipeline" | "job" | "policy";
+  name: string;
+  /** The Pipelines tab's vocabulary: queued · running · success · warning · failed · cancelled · skipped. */
+  state: string;
+  raw_state: string;
+  description: string | null;
+  url: string | null;
+  /** The run's id in the Pipelines tab, when this check is one. */
+  pipeline_run_id: string | null;
+  /** Whether the host requires it to pass; `null` where the host doesn't say. */
+  required: boolean | null;
+}
+
+export interface PrChecks {
+  head_sha: string | null;
+  checks: PrCheck[];
+}
+
+/** A merge method: a merge commit, a squash, a rebase, Azure's semi-linear merge, a fast-forward
+ * (fixed by a GitLab project, chosen per merge on Bitbucket), or Bitbucket's squash that only lands
+ * when the branch fast-forwards. */
+export type MergeMethod = "merge" | "squash" | "rebase" | "rebase_merge" | "ff" | "squash_ff";
+
+/** What merging a pull request may look like on its host (`ado::MergeOptions`). */
+export interface MergeOptions {
+  methods: MergeMethod[];
+  /** False when the repository's own settings couldn't be read and the host's whole menu is offered. */
+  methods_known: boolean;
+  default_method: MergeMethod | null;
+  /** GitLab's squash policy; `null` elsewhere. */
+  squash: "never" | "always" | "default_on" | "default_off" | null;
+  can_delete_source_branch: boolean;
+  delete_source_branch_default: boolean;
+  /** Azure DevOps only. */
+  transition_work_items: boolean | null;
+  readiness:
+    | "clean"
+    | "conflicts"
+    | "behind"
+    | "blocked"
+    | "approvals"
+    | "checks_pending"
+    | "checks_failing"
+    | "draft"
+    | "closed"
+    | "unknown";
+  readiness_detail: string | null;
+}
+
+/** How the user asked for a pull request to be merged. */
+export interface MergeChoice {
+  method: MergeMethod;
+  deleteSourceBranch: boolean;
+  squash?: boolean | null;
+  transitionWorkItems?: boolean | null;
+}
+
+export interface PrMergeOutcome {
+  pr: PullRequestSummary;
+  /** False on Azure DevOps while an accepted completion is still merging. */
+  merged: boolean;
+  /** What half-worked — a source branch that couldn't be deleted. The merge stands. */
+  warning: string | null;
+  activity: JobHistoryEntry;
+}
+
+export interface PrLinkMergeOutcome {
+  pr: PullRequestSummary;
+  merged: boolean;
+  warning: string | null;
+  activity: WorkspaceActivityEntry;
+}
+
+/** What happened to one finding of a publish. */
+export interface PublishedItem {
+  id: string | null;
+  status: "opened" | "fallback" | "replied" | "resolved" | "skipped" | "failed";
+  error: string | null;
+}
+
+/** What a publish actually did, item by item — a partial publish is not a failed one. */
+export interface PublishOutcome {
+  items: PublishedItem[];
+  summary_posted: boolean | null;
+  summary_error: string | null;
 }
 
 /** What a pasted pull-request link turned out to be. `Ready` is the happy path: the PR was read
@@ -1776,6 +1938,33 @@ export interface RemoteStatus {
    * execution on this machine. Turning the server on must not silently mean this too.
    */
   allow_terminal: boolean;
+  /** Whether the server is set to speak HTTPS — on unless turned off. What the next start does. */
+  tls: boolean;
+  /**
+   * The SHA-256 of the certificate the running server presents, as upper-case hex pairs joined by
+   * colons — the spelling a phone's browser prints in its certificate warning. `null` while the
+   * server is off or on over plain HTTP.
+   */
+  fingerprint: string | null;
+}
+
+/**
+ * One entry of the desktop's notification centre, as the main window publishes it for paired
+ * phones (`remotectl_publish_notifications`) and a phone reads it back (`list_notifications`).
+ *
+ * Already rendered, in the desktop's language: the phone has its own small string table and none
+ * of the desktop's keys.
+ */
+export interface RemoteNotice {
+  id: string;
+  /** The menu it came from, as the desktop labels it. */
+  source: string;
+  title: string;
+  detail: string | null;
+  status: "success" | "error" | "info";
+  /** Milliseconds since the epoch. */
+  finishedAt: number;
+  workspaceId: string | null;
 }
 
 /**
@@ -1868,6 +2057,13 @@ export interface PipelineRun {
    * See `parseWorkflowNeeds` and `parseAzureStages` in `pipelineGraph.ts`.
    */
   definition_path: string | null;
+  /**
+   * Held at a gate — nearly always waiting on a person (an environment's reviewers, a blocking
+   * manual job, an Azure approval). A flag rather than a status: GitHub files it under `queued`,
+   * GitLab under `skipped`, Azure under `running`. The list only knows it where the host puts it in
+   * the list response (GitHub, GitLab); an Azure row learns it when the run is opened.
+   */
+  gated: boolean;
 }
 
 /** One unit inside a run — and the unit that has a log. There is no step level; see `ci/mod.rs`. */
@@ -1939,6 +2135,107 @@ export interface PipelineRunDetail {
   jobs: PipelineJob[];
   /** Empty for GitHub and GitLab — see {@link PipelineStage}. */
   stages: PipelineStage[];
+  /** What the run is waiting on a person for right now. Empty when it isn't waiting. */
+  gates: PipelineGate[];
+}
+
+/** `approval`: somebody says yes or no. `manual`: a GitLab job waiting for play. `check`: the host
+ *  is evaluating something by itself (a wait timer, business hours) — nothing to answer here. */
+export type PipelineGateKind = "approval" | "manual" | "check";
+
+/** One thing a run is waiting on — see `ci::PipelineGate`. */
+export interface PipelineGate {
+  provider: VcsProvider;
+  run_id: string;
+  /** What the host is answered with: a GitHub environment id, a GitLab deployment id (approval)
+   *  or job id (manual), an Azure approval id. */
+  id: string;
+  kind: PipelineGateKind;
+  /** The environment, job or stage that is waiting. */
+  name: string;
+  /** The stage it holds (Azure) — matches `PipelineJob.stage_id`. */
+  stage_id: string | null;
+  /** The jobs it holds, for the graph to mark. GitHub can't say which waiting job belongs to which
+   *  environment, so there every waiting job is listed under every pending environment. */
+  job_ids: string[];
+  /** Whether this token may answer it; `null` when the host doesn't say (all but GitHub). */
+  can_act: boolean | null;
+  reviewers: string[];
+  instructions: string | null;
+  since: string | null;
+  web_url: string;
+}
+
+/** A file a run published. `id` is what the download command takes back: GitHub's artifact id,
+ *  GitLab's job id, Azure's artifact id. */
+export interface PipelineArtifact {
+  provider: VcsProvider;
+  run_id: string;
+  id: string;
+  name: string;
+  size_bytes: number | null;
+  expires_at: string | null;
+  expired: boolean;
+  job_name: string | null;
+  /** What the save dialog proposes — filesystem-safe, ending in `.zip`. */
+  file_name: string;
+}
+
+/** One queue-time variable a definition declares (Azure's overridable variables). */
+export interface DeclaredVariable {
+  name: string;
+  value: string;
+  secret: boolean;
+}
+
+/** A pipeline that can be started by hand. */
+export interface PipelineDefinition {
+  provider: VcsProvider;
+  id: string;
+  name: string;
+  /** The repo-relative file that declares it and its inputs, when there is one. */
+  path: string | null;
+  variables: DeclaredVariable[];
+  web_url: string;
+}
+
+export interface PipelineLaunchContext {
+  provider: VcsProvider;
+  definitions: PipelineDefinition[];
+  default_branch: string | null;
+  /** For a GitHub input of `type: environment`. */
+  environments: string[];
+}
+
+/** One key/value typed for a run or a manual job. `masked` hides it on screen (and, on Azure, sends
+ *  it as a secret). */
+export interface PipelineVariable {
+  key: string;
+  value: string;
+  masked: boolean;
+}
+
+export interface StartPipelineRequest {
+  definition_id: string;
+  ref: string;
+  /** GitHub `inputs`, GitLab `inputs`, Azure `templateParameters` — typed JSON (a structured Azure
+   *  parameter arrives as the object itself); each host converts on the Rust side. */
+  inputs: Record<string, unknown>;
+  variables: PipelineVariable[];
+}
+
+export interface StartedPipeline {
+  /** `null` when the host doesn't say which run it started (an older GitHub Enterprise Server). */
+  run_id: string | null;
+  web_url: string | null;
+}
+
+/** How far an artifact download has got, on `ci:artifact`. `total` is `null` when the host
+ *  doesn't say how big it is. */
+export interface ArtifactDownloadEvent {
+  id: string;
+  done: number;
+  total: number | null;
 }
 
 export interface JobLog {

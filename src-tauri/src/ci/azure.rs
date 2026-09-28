@@ -14,17 +14,20 @@
 //! normalisation, the path encoder, the `{count, value: […]}` envelope) is imported from
 //! [`crate::ado`] rather than re-derived here: both halves talk to the same server, and a second
 //! copy of `normalize_org` is a second thing to keep in step. The transport, on the other hand, is
-//! this module's own ([`super::http`]) — `ado::get_json` has no timeout and no plain-text path,
-//! and this screen both polls and downloads logs.
+//! this module's own ([`super::http`]) — `ado::get_json` is built for a review (90 s a request, no
+//! plain-text path), and this screen polls, downloads logs and streams artifacts.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 use super::http;
 use super::{
-    status, JobLog, PipelineJob, PipelineRun, PipelineRunDetail, PipelineStage, MAX_LOG_BYTES,
-    PROVIDER_AZURE,
+    artifact_file_name, gate_kind, input_as_text, split_ref, status, DeclaredVariable, JobLog,
+    PipelineArtifact, PipelineDefinition, PipelineGate, PipelineJob, PipelineLaunchContext,
+    PipelineRun, PipelineRunDetail, PipelineStage, PipelineVariable, RefKind, StartedPipeline,
+    MAX_LOG_BYTES, PROVIDER_AZURE,
 };
 use crate::ado::{
     auth_header, encode_segment, normalize_org, ListResponse, API_VERSION, BAD_CREDENTIALS,
@@ -468,6 +471,9 @@ fn map_build(org_enc: &str, project_enc: &str, build: RawBuild) -> PipelineRun {
         // for which, so the board was left inferring the shape from the stage clocks — which reads
         // two stages that ran in parallel as a chain whenever one of them was skipped.
         definition_path: None,
+        // A build says `inProgress` whether it is running or sitting at an approval; only the
+        // timeline tells them apart, and the list doesn't fetch it. `build_detail` fills this in.
+        gated: false,
     }
 }
 
@@ -523,7 +529,30 @@ pub async fn build_detail(
     // stage list has to include the stages that *do* have jobs, and `map_timeline` only ever looks
     // at a `Stage` record when it turns out to have none.
     let stages = map_stages(&run.id, &timeline.records);
-    Ok(PipelineRunDetail { run, jobs, stages })
+
+    // The same records again, for what is waiting on a person. The approvals themselves are then
+    // asked for by id — once, and only when there are any — for the two things the timeline
+    // doesn't carry: who may approve, and what the pipeline's author asked them to check. That
+    // second read is best-effort: without it the gate still has an id to answer with.
+    let mut gates = map_gates(&run.id, &org_enc, &project_enc, &timeline.records);
+    let approval_ids: Vec<&str> = gates
+        .iter()
+        .filter(|gate| gate.kind == gate_kind::APPROVAL)
+        .map(|gate| gate.id.as_str())
+        .collect();
+    if !approval_ids.is_empty() {
+        let url = format!(
+            "https://dev.azure.com/{org_enc}/{project_enc}/_apis/pipelines/approvals\
+             ?approvalIds={}&$expand=steps&api-version={API_VERSION}",
+            approval_ids.iter().map(|id| encode_segment(id)).collect::<Vec<_>>().join(",")
+        );
+        let request = http::client().get(&url).header("Authorization", auth_header(pat));
+        if let Ok(found) = http::get_json::<ListResponse<RawApproval>>(request, http::Provider::Azure).await {
+            gates = apply_approval_details(gates, found.value);
+        }
+    }
+    run.gated = !gates.is_empty();
+    Ok(PipelineRunDetail { run, jobs, stages, gates })
 }
 
 /// The repo-relative pipeline file a definition points at, or `None` if there isn't one.
@@ -549,7 +578,11 @@ async fn definition_yaml_path(
 /// The mapping half of [`definition_yaml_path`], as a pure function so it is testable without a
 /// network.
 fn yaml_path(detail: &RawDefinitionDetail) -> Option<String> {
-    let process = detail.process.as_ref()?;
+    process_yaml_path(detail.process.as_ref()?)
+}
+
+/// The repo-relative YAML file of a process, or `None` for a classic one.
+fn process_yaml_path(process: &RawProcess) -> Option<String> {
     // A classic definition has no file to read; pointing the parser at one would be a read that
     // could only ever fail.
     if process.kind != 2 {
@@ -1593,4 +1626,880 @@ pub async fn cancel(org: &str, project: &str, build_id: &str, pat: &str) -> Resu
         .header("Authorization", auth_header(pat))
         .json(&serde_json::json!({ "status": "cancelling" }));
     http::send_write(request, http::Provider::Azure).await
+}
+
+// ---------------------------------------------------------------------------
+// Approvals and checks
+// ---------------------------------------------------------------------------
+
+/// What a stage is waiting on, read out of the timeline the detail already fetched.
+///
+/// Azure writes a stage's checks into the timeline as a `Checkpoint` record under the stage, with
+/// one child per check: `Checkpoint.Approval` for an approval, `Checkpoint.TaskCheck` and friends
+/// for the checks the server evaluates by itself (business hours, an invoked function, a query).
+/// Two facts make this the right place to look, and neither is in the Approvals API's own
+/// reference:
+///
+/// * **the approval record's `id` is the approval's id** — the value `PATCH …/approvals` takes as
+///   `approvalId` — so no second lookup is needed to answer one;
+/// * a check that is still waiting is `inProgress`, and one that has been answered is `completed`,
+///   so the pending ones are told apart without asking anything else.
+///
+/// Walking up to the stage is what lets the board mark the card that is held — the record's parent
+/// is the `Checkpoint`, whose parent is the stage.
+fn map_gates(run_id: &str, org_enc: &str, project_enc: &str, records: &[RawRecord]) -> Vec<PipelineGate> {
+    let by_id: HashMap<&str, usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| !record.id.is_empty())
+        .map(|(index, record)| (record.id.as_str(), index))
+        .collect();
+    let web_url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_build/results?buildId={}&view=results",
+        encode_segment(run_id)
+    );
+
+    let mut gates: Vec<(i64, PipelineGate)> = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        let is_approval = record.kind.eq_ignore_ascii_case("Checkpoint.Approval")
+            || record.name.eq_ignore_ascii_case("Checkpoint.Approval");
+        // `get` rather than slicing: a byte offset into a string the server wrote is not promised to
+        // land on a character boundary.
+        let is_check = !is_approval
+            && record.kind.len() > "Checkpoint.".len()
+            && record
+                .kind
+                .get(.."Checkpoint.".len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Checkpoint."));
+        if !is_approval && !is_check {
+            continue;
+        }
+        // Waiting means `inProgress`. Anything else has an answer already, or has not been reached.
+        if !record.state.trim().eq_ignore_ascii_case("inProgress") || record.id.is_empty() {
+            continue;
+        }
+        let (stage_name, stage_id, stage_order) = resolve_stage(records, &by_id, index);
+        // A check's own name ("Business hours") says more than its stage's; an approval's record
+        // is only ever called "Checkpoint.Approval", which says nothing a reader wants.
+        let own_name = non_empty(&record.name).filter(|name| !name.starts_with("Checkpoint"));
+        let name = (if is_approval { stage_name.clone() } else { own_name.or_else(|| stage_name.clone()) })
+            .unwrap_or_else(|| "Stage".to_string());
+        gates.push((
+            stage_order,
+            PipelineGate {
+                provider: PROVIDER_AZURE.to_string(),
+                run_id: run_id.to_string(),
+                id: record.id.clone(),
+                kind: if is_approval { gate_kind::APPROVAL } else { gate_kind::CHECK }.to_string(),
+                name,
+                stage_id,
+                job_ids: Vec::new(),
+                can_act: if is_approval { None } else { Some(false) },
+                reviewers: Vec::new(),
+                instructions: None,
+                since: record.start_time.clone(),
+                web_url: web_url.clone(),
+            },
+        ));
+    }
+    // In the order of the stages they hold, which is the order the board reads in.
+    gates.sort_by_key(|(order, _)| *order);
+    gates.into_iter().map(|(_, gate)| gate).collect()
+}
+
+#[derive(Deserialize)]
+struct RawApproval {
+    #[serde(default)]
+    id: String,
+    /// `pending` while waiting; `uninitiated` for an approver whose turn in an ordered chain has
+    /// not come yet. Anything else has been answered.
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    instructions: Option<String>,
+    #[serde(default)]
+    steps: Vec<RawApprovalStep>,
+}
+
+#[derive(Deserialize)]
+struct RawApprovalStep {
+    #[serde(rename = "assignedApprover", default)]
+    assigned_approver: Option<RawIdentity>,
+    #[serde(default)]
+    status: String,
+}
+
+fn still_waiting(status: &str) -> bool {
+    let status = status.trim();
+    status.eq_ignore_ascii_case("pending") || status.eq_ignore_ascii_case("uninitiated")
+}
+
+/// Fills the approval gates in with who may answer and what they were asked to check — and drops
+/// any the Approvals API says has already been answered, which is the timeline lagging a second
+/// behind a decision made in the browser.
+fn apply_approval_details(gates: Vec<PipelineGate>, approvals: Vec<RawApproval>) -> Vec<PipelineGate> {
+    gates
+        .into_iter()
+        .filter_map(|mut gate| {
+            if gate.kind != gate_kind::APPROVAL {
+                return Some(gate);
+            }
+            let Some(approval) =
+                approvals.iter().find(|approval| approval.id.eq_ignore_ascii_case(&gate.id))
+            else {
+                return Some(gate);
+            };
+            if !still_waiting(&approval.status) {
+                return None;
+            }
+            gate.instructions = approval.instructions.as_deref().and_then(non_empty);
+            let mut reviewers: Vec<String> = Vec::new();
+            for step in approval.steps.iter().filter(|step| still_waiting(&step.status)) {
+                if let Some(name) =
+                    step.assigned_approver.as_ref().and_then(|who| non_empty(&who.display_name))
+                {
+                    if !reviewers.contains(&name) {
+                        reviewers.push(name);
+                    }
+                }
+            }
+            gate.reviewers = reviewers;
+            Some(gate)
+        })
+        .collect()
+}
+
+/// The body `PATCH …/approvals` takes: a list, of one.
+fn approval_body(approval_id: &str, approve: bool, comment: &str) -> Value {
+    json!([{
+        "approvalId": approval_id.trim(),
+        "status": if approve { "approved" } else { "rejected" },
+        "comment": comment.trim(),
+    }])
+}
+
+/// Approves or rejects a stage's approval.
+pub async fn review_approval(
+    org: &str,
+    project: &str,
+    approval_id: &str,
+    approve: bool,
+    comment: &str,
+    pat: &str,
+) -> Result<(), String> {
+    require_pat(pat)?;
+    // A GUID, always — it is the timeline record's id. Checked rather than trusted, because it goes
+    // into a request body that approves a production deployment.
+    if !looks_like_guid(approval_id.trim()) {
+        return Err(format!("“{approval_id}” isn't an Azure DevOps approval id"));
+    }
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/pipelines/approvals?api-version={API_VERSION}"
+    );
+    let request = http::client()
+        .patch(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&approval_body(approval_id, approve, comment));
+    http::send_write(request, http::Provider::Azure).await
+}
+
+// ---------------------------------------------------------------------------
+// Starting a pipeline by hand
+// ---------------------------------------------------------------------------
+
+/// A definition as the list returns it with `includeAllProperties=true` — the full object, which is
+/// the only form that carries the process (YAML or classic), the repository and the variables.
+#[derive(Deserialize)]
+struct RawFullDefinition {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    name: String,
+    /// `enabled`, `paused` or `disabled`. A disabled definition refuses to be queued.
+    #[serde(rename = "queueStatus", default)]
+    queue_status: Option<String>,
+    #[serde(default)]
+    process: Option<RawProcess>,
+    #[serde(default)]
+    repository: Option<RawDefinitionRepository>,
+    #[serde(default)]
+    variables: Option<HashMap<String, RawDefinitionVariable>>,
+    #[serde(rename = "_links", default)]
+    links: Option<RawLinks>,
+}
+
+#[derive(Deserialize)]
+struct RawDefinitionRepository {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "defaultBranch", default)]
+    default_branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawDefinitionVariable {
+    #[serde(default)]
+    value: Option<String>,
+    /// "Let users override this value when running this pipeline". Only these may be set at queue
+    /// time; any other name is refused by the server with a 400.
+    #[serde(rename = "allowOverride", default)]
+    allow_override: bool,
+    #[serde(rename = "isSecret", default)]
+    is_secret: bool,
+}
+
+/// The definitions that build this repository, as the dialog lists them.
+///
+/// Filtered to the repository the same two ways [`list_builds`] is — by GUID on the server when the
+/// link holds one, by id *or* name here when it holds a name — for the reason
+/// [`looks_like_guid`] spells out. A disabled definition is dropped: Azure refuses to queue it.
+fn map_definitions(
+    org_enc: &str,
+    project_enc: &str,
+    repo_id: &str,
+    raw: Vec<RawFullDefinition>,
+) -> (Vec<PipelineDefinition>, Option<String>) {
+    let repo_id = repo_id.trim();
+    let mut default_branch: Option<String> = None;
+    let mut definitions: Vec<PipelineDefinition> = raw
+        .into_iter()
+        .filter(|definition| definition.id > 0)
+        .filter(|definition| {
+            !definition
+                .queue_status
+                .as_deref()
+                .is_some_and(|status| status.eq_ignore_ascii_case("disabled"))
+        })
+        .filter(|definition| {
+            repo_id.is_empty()
+                || definition.repository.as_ref().is_some_and(|repo| {
+                    repo.id.eq_ignore_ascii_case(repo_id) || repo.name.eq_ignore_ascii_case(repo_id)
+                })
+        })
+        .map(|definition| {
+            if default_branch.is_none() {
+                default_branch = definition
+                    .repository
+                    .as_ref()
+                    .and_then(|repo| repo.default_branch.as_deref())
+                    .and_then(non_empty)
+                    .map(|branch| strip_branch_prefix(&branch));
+            }
+            let mut variables: Vec<DeclaredVariable> = definition
+                .variables
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, variable)| variable.allow_override)
+                .map(|(name, variable)| DeclaredVariable {
+                    // The server never hands a secret's value back; an empty default is honest.
+                    value: if variable.is_secret { String::new() } else { variable.value.unwrap_or_default() },
+                    secret: variable.is_secret,
+                    name,
+                })
+                .collect();
+            variables.sort_by_key(|variable| variable.name.to_lowercase());
+            let id = definition.id;
+            PipelineDefinition {
+                provider: PROVIDER_AZURE.to_string(),
+                id: id.to_string(),
+                name: non_empty(&definition.name).unwrap_or_else(|| format!("Pipeline {id}")),
+                path: definition.process.as_ref().and_then(process_yaml_path),
+                variables,
+                web_url: definition
+                    .links
+                    .as_ref()
+                    .and_then(|links| links.web.as_ref())
+                    .and_then(|web| web.href.as_deref())
+                    .and_then(non_empty)
+                    .unwrap_or_else(|| {
+                        format!("https://dev.azure.com/{org_enc}/{project_enc}/_build?definitionId={id}")
+                    }),
+            }
+        })
+        .collect();
+    definitions.sort_by_key(|definition| definition.name.to_lowercase());
+    (definitions, default_branch)
+}
+
+/// What the "Run pipeline" dialog opens with: this repository's pipeline definitions.
+pub async fn launch_context(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pat: &str,
+) -> Result<PipelineLaunchContext, String> {
+    require_pat(pat)?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let repo_id = repo_id.trim();
+
+    let mut url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/definitions\
+         ?api-version={API_VERSION}&includeAllProperties=true&$top={CLIENT_FILTER_TOP}\
+         &queryOrder=definitionNameAscending"
+    );
+    if looks_like_guid(repo_id) {
+        url.push_str(&format!("&repositoryId={}&repositoryType=TfsGit", encode_segment(repo_id)));
+    }
+    let request = http::client().get(&url).header("Authorization", auth_header(pat));
+    let parsed: ListResponse<RawFullDefinition> = http::get_json(request, http::Provider::Azure).await?;
+    let (definitions, default_branch) = map_definitions(&org_enc, &project_enc, repo_id, parsed.value);
+    Ok(PipelineLaunchContext {
+        provider: PROVIDER_AZURE.to_string(),
+        definitions,
+        default_branch,
+        // Azure environments are resources a stage targets, not values a person types into a form.
+        environments: Vec::new(),
+    })
+}
+
+#[derive(Deserialize)]
+struct RawGitItem {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// A file as the repository has it at `reference`, through the Git Items API.
+///
+/// The Git API, unlike the Build API, takes a repository name as readily as its GUID — see
+/// [`looks_like_guid`] — so the link's `repo_id` works here in either form.
+pub async fn definition_file(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    path: &str,
+    reference: Option<&str>,
+    pat: &str,
+) -> Result<Option<String>, String> {
+    require_pat(pat)?;
+    let repo_id = repo_id.trim();
+    if repo_id.is_empty() {
+        return Ok(None);
+    }
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let item = format!("/{}", path.trim().trim_start_matches('/'));
+    let mut url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{}/items\
+         ?path={}&includeContent=true&$format=json&api-version={API_VERSION}",
+        encode_segment(repo_id),
+        encode_segment(&item)
+    );
+    if let Some(reference) = reference.map(str::trim).filter(|value| !value.is_empty()) {
+        let (kind, name) = split_ref(reference);
+        let kind = if kind == RefKind::Tag { "tag" } else { "branch" };
+        url.push_str(&format!(
+            "&versionDescriptor.version={}&versionDescriptor.versionType={kind}",
+            encode_segment(&name)
+        ));
+    }
+    let request = http::client().get(&url).header("Authorization", auth_header(pat));
+    // The file arrives JSON-escaped inside an envelope, so the envelope gets twice the cap.
+    let Some(text) =
+        http::get_text(request, http::Provider::Azure, http::MAX_DEFINITION_BYTES * 2).await?
+    else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str::<RawGitItem>(&text).ok().and_then(|item| item.content))
+}
+
+/// A ref the way Azure takes it: always full. `main` → `refs/heads/main`, a tag stays a tag.
+fn full_ref(reference: &str) -> String {
+    match split_ref(reference) {
+        (RefKind::Tag, name) => format!("refs/tags/{name}"),
+        (RefKind::Branch, name) if name.starts_with("refs/") => name,
+        (RefKind::Branch, name) => format!("refs/heads/{name}"),
+    }
+}
+
+/// The body of `POST pipelines/{id}/runs`: the ref of the repository being built (`self`), the
+/// template parameters as text, and the variables with their secret flag.
+fn run_body(
+    reference: &str,
+    template_parameters: &BTreeMap<String, Value>,
+    variables: &[PipelineVariable],
+) -> Value {
+    let mut body = json!({ "resources": { "repositories": { "self": { "refName": full_ref(reference) } } } });
+    if !template_parameters.is_empty() {
+        body["templateParameters"] = Value::Object(
+            template_parameters
+                .iter()
+                .map(|(name, value)| (name.clone(), Value::String(input_as_text(value))))
+                .collect(),
+        );
+    }
+    if !variables.is_empty() {
+        body["variables"] = Value::Object(
+            variables
+                .iter()
+                .map(|variable| {
+                    (
+                        variable.key.trim().to_string(),
+                        json!({ "value": variable.value, "isSecret": variable.masked }),
+                    )
+                })
+                .collect(),
+        );
+    }
+    body
+}
+
+/// The body of `POST build/builds` for a classic definition, which the Pipelines API doesn't run.
+///
+/// Queue-time variables travel as `parameters`: a JSON object *serialised into a string*, which is
+/// how the Build API has always taken them. A classic definition has no template parameters.
+fn queue_body(definition_id: i64, reference: &str, variables: &[PipelineVariable]) -> Value {
+    let mut body = json!({ "definition": { "id": definition_id }, "sourceBranch": full_ref(reference) });
+    if !variables.is_empty() {
+        let values: serde_json::Map<String, Value> = variables
+            .iter()
+            .map(|variable| (variable.key.trim().to_string(), Value::String(variable.value.clone())))
+            .collect();
+        body["parameters"] = Value::String(Value::Object(values).to_string());
+    }
+    body
+}
+
+/// What either API answers with, as far as this needs: the new run (a run *is* a build, one id
+/// space) and its page.
+#[derive(Deserialize)]
+struct RawRunReceipt {
+    id: i64,
+    #[serde(rename = "_links", default)]
+    links: Option<RawLinks>,
+}
+
+/// Runs a pipeline definition on a ref.
+///
+/// Which API depends on what kind of pipeline it is, and that is read from the server rather than
+/// taken from the dialog: a YAML pipeline goes through `pipelines/{id}/runs`, the only one that
+/// takes template parameters; a classic one through the Build API's queue, the only one that runs
+/// it. One extra read to be sure beats a run started through the wrong door.
+pub async fn run_pipeline(
+    org: &str,
+    project: &str,
+    definition_id: &str,
+    reference: &str,
+    template_parameters: &BTreeMap<String, Value>,
+    variables: &[PipelineVariable],
+    pat: &str,
+) -> Result<StartedPipeline, String> {
+    require_pat(pat)?;
+    let id: i64 = definition_id
+        .trim()
+        .parse()
+        .map_err(|_| format!("“{definition_id}” isn't an Azure DevOps pipeline id"))?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+
+    let definition_url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/definitions/{id}?api-version={API_VERSION}"
+    );
+    let request = http::client().get(&definition_url).header("Authorization", auth_header(pat));
+    let detail: RawDefinitionDetail = http::get_json(request, http::Provider::Azure).await?;
+    let yaml = detail.process.as_ref().is_some_and(|process| process.kind == 2);
+
+    let (url, body) = if yaml {
+        (
+            format!(
+                "https://dev.azure.com/{org_enc}/{project_enc}/_apis/pipelines/{id}/runs?api-version={API_VERSION}"
+            ),
+            run_body(reference, template_parameters, variables),
+        )
+    } else {
+        (
+            format!("https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds?api-version={API_VERSION}"),
+            queue_body(id, reference, variables),
+        )
+    };
+    let request = http::client().post(&url).header("Authorization", auth_header(pat)).json(&body);
+    let receipt = http::send_write_for::<RawRunReceipt>(request, http::Provider::Azure).await?;
+    Ok(match receipt {
+        Some(receipt) => StartedPipeline {
+            run_id: Some(receipt.id.to_string()),
+            web_url: receipt
+                .links
+                .as_ref()
+                .and_then(|links| links.web.as_ref())
+                .and_then(|web| web.href.as_deref())
+                .and_then(non_empty),
+        },
+        None => StartedPipeline::default(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Artifacts
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawBuildArtifact {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    resource: Option<RawArtifactResource>,
+}
+
+#[derive(Deserialize)]
+struct RawArtifactResource {
+    #[serde(rename = "downloadUrl", default)]
+    download_url: Option<String>,
+    /// Type-specific. A pipeline artifact carries `artifactsize` — as a *string* of digits, or on
+    /// some servers a number — and a file-container one usually carries nothing about its size.
+    #[serde(default)]
+    properties: Option<HashMap<String, Value>>,
+}
+
+/// `artifactsize`, whichever way the server spelled it.
+fn artifact_size(resource: Option<&RawArtifactResource>) -> Option<u64> {
+    let value = resource?.properties.as_ref()?.get("artifactsize")?;
+    match value {
+        Value::String(text) => text.trim().parse().ok(),
+        Value::Number(number) => number.as_u64(),
+        _ => None,
+    }
+}
+
+fn map_artifacts(run_id: &str, raw: Vec<RawBuildArtifact>) -> Vec<PipelineArtifact> {
+    raw.into_iter()
+        .filter(|artifact| artifact.id > 0)
+        .map(|artifact| PipelineArtifact {
+            provider: PROVIDER_AZURE.to_string(),
+            run_id: run_id.to_string(),
+            id: artifact.id.to_string(),
+            size_bytes: artifact_size(artifact.resource.as_ref()),
+            file_name: artifact_file_name(&artifact.name),
+            name: artifact.name,
+            // A build artifact lives as long as the build is retained; there is no date to show.
+            expires_at: None,
+            expired: false,
+            job_name: None,
+        })
+        .collect()
+}
+
+async fn build_artifacts(
+    org_enc: &str,
+    project_enc: &str,
+    build_id: &str,
+    pat: &str,
+) -> Result<Vec<RawBuildArtifact>, String> {
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds/{}/artifacts?api-version={API_VERSION}",
+        encode_segment(build_id.trim())
+    );
+    let request = http::client().get(&url).header("Authorization", auth_header(pat));
+    let parsed: ListResponse<RawBuildArtifact> = http::get_json(request, http::Provider::Azure).await?;
+    Ok(parsed.value)
+}
+
+/// A build's artifacts.
+pub async fn list_artifacts(
+    org: &str,
+    project: &str,
+    build_id: &str,
+    pat: &str,
+) -> Result<Vec<PipelineArtifact>, String> {
+    require_pat(pat)?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let raw = build_artifacts(&org_enc, &project_enc, build_id, pat).await?;
+    Ok(map_artifacts(build_id, raw))
+}
+
+/// Whether a URL is one Azure DevOps itself serves, and so one the PAT may be sent to.
+///
+/// `downloadUrl` comes out of a response, and the request built from it carries the user's PAT in
+/// its `Authorization` header — so it is checked before anything is sent. The hosts are the ones
+/// the service answers on: `dev.azure.com` (and its subdomains, like `vsblob.dev.azure.com`) and
+/// `*.visualstudio.com`, which is where pipeline artifacts live (`artprod….artifacts…`).
+fn is_azure_devops_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else { return false };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else { return false };
+    host == "dev.azure.com" || host.ends_with(".dev.azure.com") || host.ends_with(".visualstudio.com")
+}
+
+/// The request that downloads one build artifact as a zip, and the size the listing gave for it.
+///
+/// Re-reads the listing rather than taking a URL from the frontend: the id is all the dialog hands
+/// back, and the URL the PAT is sent to comes from Azure and is checked (see
+/// [`is_azure_devops_url`]).
+pub async fn artifact_download(
+    org: &str,
+    project: &str,
+    build_id: &str,
+    artifact_id: &str,
+    pat: &str,
+) -> Result<(reqwest::RequestBuilder, Option<u64>), String> {
+    require_pat(pat)?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let raw = build_artifacts(&org_enc, &project_enc, build_id, pat).await?;
+    let artifact = raw
+        .into_iter()
+        .find(|artifact| artifact.id.to_string() == artifact_id.trim())
+        .ok_or_else(|| "Azure DevOps no longer lists that artifact for this build".to_string())?;
+    let size = artifact_size(artifact.resource.as_ref());
+    let url = artifact
+        .resource
+        .and_then(|resource| resource.download_url)
+        .filter(|url| !url.trim().is_empty())
+        .ok_or_else(|| "Azure DevOps offers no download for that artifact".to_string())?;
+    if !is_azure_devops_url(&url) {
+        return Err(format!(
+            "Refusing to send your Azure DevOps token to {url}: it isn't an Azure DevOps address"
+        ));
+    }
+    let request = http::download_client().get(&url).header("Authorization", auth_header(pat));
+    Ok((request, size))
+}
+
+#[cfg(test)]
+mod launch_tests {
+    //! Fixtures follow the shapes Azure DevOps' REST reference (api-version 7.1) documents, trimmed
+    //! to the fields read here, with placeholder organizations and projects.
+    use super::*;
+
+    fn timeline(json: &str) -> Vec<RawRecord> {
+        serde_json::from_str::<RawTimeline>(json).expect("fixture de timeline inválida").records
+    }
+
+    /// Stage → Checkpoint → Checkpoint.Approval, which is how Azure writes an approval into a
+    /// build's timeline — and the record id is the approval id.
+    #[test]
+    fn a_pending_approval_is_read_out_of_the_timeline_with_its_stage() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"stage-build","parentId":null,"type":"Stage","name":"Build","order":1,
+               "state":"completed","result":"succeeded"},
+              {"id":"stage-prod","parentId":null,"type":"Stage","name":"Deploy prod","order":2,
+               "state":"inProgress","startTime":"2026-09-11T10:02:00Z"},
+              {"id":"checkpoint-prod","parentId":"stage-prod","type":"Checkpoint","name":"Checkpoint",
+               "order":1,"state":"inProgress"},
+              {"id":"aab27959-a5be-4ee3-97ca-f19b3602cd2f","parentId":"checkpoint-prod",
+               "type":"Checkpoint.Approval","name":"Checkpoint.Approval","order":1,
+               "state":"inProgress","startTime":"2026-09-11T10:02:01Z"},
+              {"id":"check-hours","parentId":"checkpoint-prod","type":"Checkpoint.TaskCheck",
+               "name":"Business hours","order":2,"state":"inProgress"},
+              {"id":"06239b11-a904-43a1-be6a-0d44026bd121","parentId":"checkpoint-prod",
+               "type":"Checkpoint.Approval","name":"Checkpoint.Approval","order":3,
+               "state":"completed","result":"succeeded"}
+            ]}"#,
+        );
+        let gates = map_gates("42", "example-org", "Example%20Project", &records);
+        assert_eq!(gates.len(), 2, "the answered approval is not a gate");
+
+        let approval = &gates[0];
+        assert_eq!(approval.kind, gate_kind::APPROVAL);
+        assert_eq!(approval.id, "aab27959-a5be-4ee3-97ca-f19b3602cd2f");
+        // Named after the stage it holds, and pointing at it by id for the board.
+        assert_eq!(approval.name, "Deploy prod");
+        assert_eq!(approval.stage_id.as_deref(), Some("stage-prod"));
+        assert_eq!(approval.since.as_deref(), Some("2026-09-11T10:02:01Z"));
+        assert_eq!(approval.can_act, None);
+        assert_eq!(
+            approval.web_url,
+            "https://dev.azure.com/example-org/Example%20Project/_build/results?buildId=42&view=results"
+        );
+
+        // A check the server runs by itself: named after itself, and nothing to press.
+        assert_eq!(gates[1].kind, gate_kind::CHECK);
+        assert_eq!(gates[1].name, "Business hours");
+        assert_eq!(gates[1].can_act, Some(false));
+    }
+
+    #[test]
+    fn approval_details_add_the_approvers_and_drop_what_was_already_answered() {
+        let records = timeline(
+            r#"{"records":[
+              {"id":"stage-prod","parentId":null,"type":"Stage","name":"Deploy","order":1,"state":"inProgress"},
+              {"id":"cp","parentId":"stage-prod","type":"Checkpoint","order":1,"state":"inProgress"},
+              {"id":"aab27959-a5be-4ee3-97ca-f19b3602cd2f","parentId":"cp","type":"Checkpoint.Approval",
+               "order":1,"state":"inProgress"},
+              {"id":"ee14f612-6838-43c0-b445-db238ef14153","parentId":"cp","type":"Checkpoint.Approval",
+               "order":2,"state":"inProgress"}
+            ]}"#,
+        );
+        let gates = map_gates("42", "o", "p", &records);
+        let found: ListResponse<RawApproval> = serde_json::from_str(
+            r#"{"count":2,"value":[
+              {"id":"aab27959-a5be-4ee3-97ca-f19b3602cd2f","status":"pending",
+               "instructions":"Check the release notes first.",
+               "steps":[
+                 {"assignedApprover":{"displayName":"Release Managers","id":"3b3db741-9d03-4e32-a7c0-6c3dfc2013c1",
+                   "uniqueName":"uniqueName","descriptor":"Descriptor"},"status":"pending","order":1,"history":[]},
+                 {"assignedApprover":{"displayName":"Already Voted"},"status":"approved"}
+               ],
+               "createdOn":"2026-09-11T08:14:49.58Z","executionOrder":"anyOrder","minRequiredApprovers":1,
+               "blockedApprovers":[]},
+              {"id":"EE14F612-6838-43C0-B445-DB238EF14153","status":"approved","steps":[]}
+            ]}"#,
+        )
+        .expect("approvals");
+
+        let gates = apply_approval_details(gates, found.value);
+        // The second was answered in the browser a moment ago; the timeline just hadn't caught up.
+        assert_eq!(gates.len(), 1);
+        assert_eq!(gates[0].instructions.as_deref(), Some("Check the release notes first."));
+        // Only who still has to act.
+        assert_eq!(gates[0].reviewers, vec!["Release Managers".to_string()]);
+    }
+
+    #[test]
+    fn an_approval_is_answered_with_its_id_a_verdict_and_the_comment() {
+        assert_eq!(
+            approval_body(" aab27959-a5be-4ee3-97ca-f19b3602cd2f ", true, " Approving "),
+            json!([{"approvalId":"aab27959-a5be-4ee3-97ca-f19b3602cd2f","status":"approved","comment":"Approving"}])
+        );
+        assert_eq!(approval_body("x", false, "no")[0]["status"], json!("rejected"));
+    }
+
+    #[test]
+    fn a_repositorys_definitions_are_listed_with_their_overridable_variables() {
+        let parsed: ListResponse<RawFullDefinition> = serde_json::from_str(
+            r#"{"count":4,"value":[
+              {"id":12,"name":"web-ci","path":"\\","queueStatus":"enabled",
+               "process":{"type":2,"yamlFilename":"/pipelines/web.yml"},
+               "repository":{"id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301","name":"example-repo","type":"TfsGit",
+                 "defaultBranch":"refs/heads/main"},
+               "variables":{
+                 "deployTarget":{"value":"staging","allowOverride":true},
+                 "apiKey":{"value":null,"isSecret":true,"allowOverride":true},
+                 "fixed":{"value":"x"}
+               },
+               "_links":{"web":{"href":"https://dev.azure.com/example-org/Example/_build/definition?definitionId=12"}}},
+              {"id":13,"name":"Classic release","queueStatus":"enabled","process":{"type":1},
+               "repository":{"id":"other-guid","name":"EXAMPLE-REPO","type":"TfsGit"}},
+              {"id":14,"name":"disabled","queueStatus":"disabled","process":{"type":2,"yamlFilename":"x.yml"},
+               "repository":{"id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301","name":"example-repo"}},
+              {"id":15,"name":"another repo","process":{"type":2,"yamlFilename":"y.yml"},
+               "repository":{"id":"aaaaaaaa-4f89-11d3-9a0c-0305e82c3301","name":"elsewhere"}}
+            ]}"#,
+        )
+        .expect("definitions");
+
+        let (definitions, default_branch) =
+            map_definitions("example-org", "Example", "example-repo", parsed.value);
+        let named: Vec<(&str, Option<&str>)> =
+            definitions.iter().map(|d| (d.name.as_str(), d.path.as_deref())).collect();
+        // Sorted, matched by name case-insensitively, disabled and foreign ones dropped; a classic
+        // definition has no file.
+        assert_eq!(named, vec![("Classic release", None), ("web-ci", Some("pipelines/web.yml"))]);
+        assert_eq!(default_branch.as_deref(), Some("main"));
+
+        let web = &definitions[1];
+        assert_eq!(web.id, "12");
+        assert_eq!(web.web_url, "https://dev.azure.com/example-org/Example/_build/definition?definitionId=12");
+        // Only what the definition lets a person override, and never a secret's value.
+        let variables: Vec<(&str, &str, bool)> =
+            web.variables.iter().map(|v| (v.name.as_str(), v.value.as_str(), v.secret)).collect();
+        assert_eq!(variables, vec![("apiKey", "", true), ("deployTarget", "staging", false)]);
+    }
+
+    #[test]
+    fn a_yaml_run_names_the_ref_the_parameters_as_text_and_the_secret_variables() {
+        let mut parameters = BTreeMap::new();
+        parameters.insert("image".to_string(), json!("ubuntu-latest"));
+        parameters.insert("runTests".to_string(), json!(false));
+        let variables = vec![PipelineVariable { key: "apiKey".to_string(), value: "s3cret".to_string(), masked: true }];
+
+        assert_eq!(
+            run_body("release/2.0", &parameters, &variables),
+            json!({
+              "resources":{"repositories":{"self":{"refName":"refs/heads/release/2.0"}}},
+              "templateParameters":{"image":"ubuntu-latest","runTests":"false"},
+              "variables":{"apiKey":{"value":"s3cret","isSecret":true}}
+            })
+        );
+        // Nothing to send, nothing sent; and a tag keeps being a tag.
+        assert_eq!(
+            run_body("refs/tags/v1.0", &BTreeMap::new(), &[]),
+            json!({"resources":{"repositories":{"self":{"refName":"refs/tags/v1.0"}}}})
+        );
+    }
+
+    #[test]
+    fn a_classic_queue_sends_variables_as_a_json_string() {
+        let variables = vec![PipelineVariable { key: "target".to_string(), value: "eu".to_string(), masked: false }];
+        let body = queue_body(13, "main", &variables);
+        assert_eq!(body["definition"]["id"], json!(13));
+        assert_eq!(body["sourceBranch"], json!("refs/heads/main"));
+        let parameters: Value =
+            serde_json::from_str(body["parameters"].as_str().expect("a string")).expect("json inside");
+        assert_eq!(parameters, json!({"target":"eu"}));
+        assert!(queue_body(13, "main", &[]).get("parameters").is_none());
+    }
+
+    #[test]
+    fn a_run_receipt_names_the_new_build() {
+        let receipt: RawRunReceipt = serde_json::from_str(
+            r#"{"_links":{"self":{"href":"https://dev.azure.com/example-org/p/_apis/pipelines/12/runs/345"},
+                "web":{"href":"https://dev.azure.com/example-org/p/_build/results?buildId=345"}},
+                "pipeline":{"url":"x","id":12,"revision":3,"name":"web-ci","folder":"\\"},
+                "state":"inProgress","createdDate":"2026-09-11T10:00:00Z","url":"x","id":345,"name":"20260911.1"}"#,
+        )
+        .expect("receipt");
+        assert_eq!(receipt.id, 345);
+        assert_eq!(
+            receipt.links.and_then(|l| l.web).and_then(|w| w.href).as_deref(),
+            Some("https://dev.azure.com/example-org/p/_build/results?buildId=345")
+        );
+    }
+
+    #[test]
+    fn artifacts_read_their_size_whichever_way_it_was_spelled() {
+        // `r##` because the container's `data` is `#/…`, and `"#` would end an `r#` string.
+        let parsed: ListResponse<RawBuildArtifact> = serde_json::from_str(
+            r##"{"count":3,"value":[
+              {"id":7,"name":"drop","source":"3a1b5e6c-0000-0000-0000-000000000000",
+               "resource":{"type":"Container","data":"#/1234567/drop",
+                 "properties":{"localpath":"/home/vsts/work/1/a"},
+                 "url":"https://dev.azure.com/example-org/p/_apis/build/builds/42/artifacts?artifactName=drop",
+                 "downloadUrl":"https://dev.azure.com/example-org/p/_apis/build/builds/42/artifacts?artifactName=drop&$format=zip"}},
+              {"id":8,"name":"web app","resource":{"type":"PipelineArtifact","properties":{"artifactsize":"2048"},
+                 "downloadUrl":"https://artprodcus3.artifacts.visualstudio.com/x/y/_apis/artifact/z/content?format=zip"}},
+              {"id":9,"name":"numeric","resource":{"properties":{"artifactsize":4096}}}
+            ]}"##,
+        )
+        .expect("artifacts");
+        let artifacts = map_artifacts("42", parsed.value);
+        assert_eq!(artifacts.len(), 3);
+        assert_eq!(artifacts[0].size_bytes, None, "a container artifact says nothing about its size");
+        assert_eq!(artifacts[1].size_bytes, Some(2048));
+        assert_eq!(artifacts[1].file_name, "web app.zip");
+        assert_eq!(artifacts[2].size_bytes, Some(4096));
+        assert!(artifacts.iter().all(|a| a.expires_at.is_none() && !a.expired));
+    }
+
+    /// The PAT goes in the header of whatever `downloadUrl` names, so only Azure DevOps' own hosts
+    /// are accepted.
+    #[test]
+    fn a_download_url_must_be_an_azure_devops_address() {
+        assert!(is_azure_devops_url("https://dev.azure.com/example-org/p/_apis/build/builds/42/artifacts"));
+        assert!(is_azure_devops_url("https://vsblob.dev.azure.com/example-org/x"));
+        assert!(is_azure_devops_url("https://artprodcus3.artifacts.visualstudio.com/x/content?format=zip"));
+        assert!(is_azure_devops_url("https://example-org.visualstudio.com/p/_apis/x"));
+        assert!(!is_azure_devops_url("http://dev.azure.com/example-org/p"), "never over plain http");
+        assert!(!is_azure_devops_url("https://example.test/dev.azure.com/x"));
+        assert!(!is_azure_devops_url("https://dev.azure.com.example.test/x"));
+        assert!(!is_azure_devops_url("https://notvisualstudio.com/x"));
+        assert!(!is_azure_devops_url("not a url"));
+    }
+
+    #[test]
+    fn a_ref_reaches_azure_in_full() {
+        assert_eq!(full_ref("main"), "refs/heads/main");
+        assert_eq!(full_ref("refs/heads/main"), "refs/heads/main");
+        assert_eq!(full_ref("refs/tags/v2"), "refs/tags/v2");
+        assert_eq!(full_ref("refs/pull/7/merge"), "refs/pull/7/merge");
+    }
 }

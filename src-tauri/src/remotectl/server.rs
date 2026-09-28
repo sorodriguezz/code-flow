@@ -11,6 +11,9 @@
 //!
 //! Everything else is the mobile bundle, served as static files.
 //!
+//! Over HTTPS unless its switch is off — the listener is `tls.rs`'s, and the routes cannot tell the
+//! difference. See [`start`].
+//!
 //! `/api/hello` and `/api/pair` are unauthenticated because they have to be — a device that has
 //! never paired has nothing to present. What keeps that from being a hole is that neither one can
 //! *read* anything: `hello` answers a fixed shape with no install detail in it, and `pair` is
@@ -26,6 +29,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
@@ -59,7 +63,21 @@ struct Ctx {
 /// be on and is not.
 pub async fn start(app: &AppHandle, port: u16) -> Result<u16, String> {
     let state = app.state::<RemoteCtl>();
-    // Whatever was bound before goes away first. Without this, flipping the toggle twice would
+
+    // The certificate first — before the running server is touched — so a state root that cannot be
+    // written is an error on the switch the user just pressed, with whatever was serving left as it
+    // was, rather than a server that claims to be up and refuses every handshake. Loaded per start
+    // rather than kept: a start is when a certificate close to its expiry gets renewed
+    // (`tls::load_or_create`).
+    let tls = if super::read_config(&app.state::<Db>()).tls {
+        let identity = super::tls::load_or_create(&crate::paths::remote_tls_dir())
+            .map_err(|e| format!("no se pudo preparar el certificado HTTPS: {e}"))?;
+        Some((identity.server_config()?, identity.fingerprint))
+    } else {
+        None
+    };
+
+    // Whatever was bound before goes away next. Without this, flipping the toggle twice would
     // leak a listener holding the old port, and the rebind below would fail against ourselves.
     state.stop();
 
@@ -67,7 +85,7 @@ pub async fn start(app: &AppHandle, port: u16) -> Result<u16, String> {
     // one line that makes the difference, and it only ever runs because the user turned the
     // setting on — see `remotectl::autostart`.
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = bind(addr)
         .await
         .map_err(|e| format!("no se pudo abrir el puerto {port}: {e}"))?;
 
@@ -94,22 +112,60 @@ pub async fn start(app: &AppHandle, port: u16) -> Result<u16, String> {
     // upgrades takes a clone; stopping or rebinding cancels it, and the server that replaces this
     // one gets a fresh token that the old one's cancellation cannot touch.
     let cancel = tokio_util::sync::CancellationToken::new();
-    state.set_running(port, tx, cancel);
 
+    match tls {
+        Some((config, fingerprint)) => {
+            let listener = super::tls::TlsListener::new(listener, config).map_err(|e| e.to_string())?;
+            state.set_running(port, tx, cancel, Some(fingerprint));
+            serve(listener, router, rx);
+        }
+        None => {
+            state.set_running(port, tx, cancel, None);
+            serve(listener, router, rx);
+        }
+    }
+
+    Ok(port)
+}
+
+/// Runs the server until `stop` fires.
+fn serve<L>(listener: L, router: Router, stop: oneshot::Receiver<()>)
+where
+    L: axum::serve::Listener,
+    L::Addr: std::fmt::Debug,
+{
     tauri::async_runtime::spawn(async move {
         let served = axum::serve(listener, router)
             // Resolves when the sender is dropped — which is what `RemoteCtl::stop` does, and what
             // `set_running` does to a previous server. Either path ends this task.
             .with_graceful_shutdown(async move {
-                let _ = rx.await;
+                let _ = stop.await;
             })
             .await;
         if let Err(e) = served {
             eprintln!("[remotectl] el servidor terminó con error: {e}");
         }
     });
+}
 
-    Ok(port)
+/// Binds the port, waiting a moment for the listener this one replaces to let go of it.
+///
+/// `stop()` only *asks* the old server to go: its accept loop lets go of the socket a task or two
+/// later. A rebind to the same port — turning HTTPS on or off, which moves nothing but the protocol —
+/// would otherwise race that teardown and lose to it with "address in use", against ourselves. Two
+/// seconds is far past any teardown and short enough that a port genuinely taken by something else
+/// still reports as such while the user is looking at the switch.
+async fn bind(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    let mut attempts = 0;
+    loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempts < 40 => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            bound => return bound,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +358,12 @@ struct Hello {
     /// happens constantly in development and once per app update in the field, and neither bumps a
     /// version. `null` when the bundle is missing, which the client treats as "nothing to compare".
     bundle: Option<String>,
+    /// Whether this answer came over HTTPS.
+    tls: bool,
+    /// The SHA-256 of the certificate this server presents, for the phone's pairing screen to show
+    /// beside the desktop's. Public by nature — every client is handed the certificate itself during
+    /// the handshake — and `null` over plain HTTP.
+    fingerprint: Option<String>,
 }
 
 /// Deliberately carries no hostname, no workspace names and no device count. It exists to answer
@@ -313,10 +375,13 @@ struct Hello {
 /// themselves.
 async fn hello(State(ctx): State<Ctx>) -> impl IntoResponse {
     let state = ctx.app.state::<RemoteCtl>();
+    let fingerprint = state.tls_fingerprint();
     Json(Hello {
         app: "codeflow",
         pairing: state.pairing.is_open(),
         bundle: bundle_id(),
+        tls: fingerprint.is_some(),
+        fingerprint,
     })
 }
 
@@ -358,11 +423,76 @@ struct RpcRequest {
     args: Value,
 }
 
+/// The header a mutating call's idempotency key arrives in.
+const IDEMPOTENCY_KEY: &str = "idempotency-key";
+
+/// The key a request carries, when it is one worth trusting as a map key: short, and made of the
+/// characters a UUID is made of. Anything else is treated as no key at all — the call runs, once,
+/// exactly as it did before keys existed — rather than refused over an optional header.
+fn idempotency_key(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(IDEMPOTENCY_KEY)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|key| {
+            !key.is_empty()
+                && key.len() <= 128
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+}
+
+/// One command from a paired device.
+///
+/// # A keyed call runs on its own task, and is remembered
+///
+/// A call with an idempotency key (every mutating one the client sends — see `transport.ts`) is run
+/// on a task of its own and its answer is kept for [`dispatch::REPLAY_WINDOW`]. Both halves matter.
+/// Kept, so that a retry of a request whose *answer* was lost gets that answer instead of a second
+/// commit. On its own task, because hyper drops a request's future when the phone's connection goes:
+/// inline, a push cut off by a wifi handover stopped wherever it was, reported nothing to the
+/// desktop, and left the retry to start it again from nothing.
+///
+/// A call without a key — a read, or a client older than keys — runs inline as it always has.
 async fn rpc(State(ctx): State<Ctx>, headers: HeaderMap, Json(body): Json<RpcRequest>) -> Response {
     let Some((device_id, device_name)) = device_from_bearer(&ctx, bearer(&headers)) else {
         return refused();
     };
+    let Some(key) = idempotency_key(&headers) else {
+        return reply(execute(ctx, device_id, device_name, body).await);
+    };
 
+    let request = dispatch::request_fingerprint(&body.cmd, &body.args);
+    let claim = ctx.app.state::<RemoteCtl>().replays.claim(&device_id, key, &request, Instant::now());
+    let answer = match claim {
+        dispatch::Claim::Mismatch => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "ok": false, "error": "idempotency_key_reused" })),
+            )
+                .into_response()
+        }
+        dispatch::Claim::Replay(answer) => answer,
+        dispatch::Claim::Fresh(sender) => {
+            let answer = sender.subscribe();
+            let job = execute(ctx.clone(), device_id, device_name, body);
+            tauri::async_runtime::spawn(async move {
+                let _ = sender.send(Some(job.await));
+            });
+            answer
+        }
+    };
+    reply(dispatch::answer_of(answer).await)
+}
+
+fn reply(answer: dispatch::Answer) -> Response {
+    let status = StatusCode::from_u16(answer.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (status, Json(answer.body)).into_response()
+}
+
+/// Runs one command and announces what it did — everything [`rpc`] does after the bearer check.
+///
+/// Owns its arguments so a keyed call can run on a task that outlives the request.
+async fn execute(ctx: Ctx, device_id: String, device_name: String, body: RpcRequest) -> dispatch::Answer {
     // Read straight off the request rather than threaded back out of the dispatcher: the argument
     // is right here, every command that has a project takes it under this one name, and the
     // alternative is a third return value on twenty arms that do not care.
@@ -406,7 +536,7 @@ async fn rpc(State(ctx): State<Ctx>, headers: HeaderMap, Json(body): Json<RpcReq
         // though something changed — nor announce that it happened.
         Ok((value, inv)) => {
             announce(inv, false);
-            Json(json!({ "ok": true, "value": value })).into_response()
+            dispatch::Answer::new(200, json!({ "ok": true, "value": value }))
         }
         // **403, and emphatically not the 401 `refused()` gives.**
         //
@@ -420,16 +550,12 @@ async fn rpc(State(ctx): State<Ctx>, headers: HeaderMap, Json(body): Json<RpcReq
         //
         // The allowlist is compiled into the client this same server ships anyway. There is no map
         // here that a holder of a device token does not already have.
-        Err(dispatch::DispatchError::NotAllowed) => (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "ok": false, "error": "not_allowed" })),
-        )
-            .into_response(),
-        Err(dispatch::DispatchError::BadArgs(msg)) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "error": msg })),
-        )
-            .into_response(),
+        Err(dispatch::DispatchError::NotAllowed) => {
+            dispatch::Answer::new(403, json!({ "ok": false, "error": "not_allowed" }))
+        }
+        Err(dispatch::DispatchError::BadArgs(msg)) => {
+            dispatch::Answer::new(400, json!({ "ok": false, "error": msg }))
+        }
         // The only error text that travels: this is the same message the desktop would put in a
         // toast for the same action, so it is already something the user is meant to read.
         Err(dispatch::DispatchError::Failed { message, invalidate }) => {
@@ -441,7 +567,7 @@ async fn rpc(State(ctx): State<Ctx>, headers: HeaderMap, Json(body): Json<RpcReq
             if !wrote_nothing(&message) {
                 announce(invalidate, true);
             }
-            Json(json!({ "ok": false, "error": message })).into_response()
+            dispatch::Answer::new(200, json!({ "ok": false, "error": message }))
         }
     }
 }
@@ -471,14 +597,14 @@ struct EventsQuery {
 ///
 /// A browser's `WebSocket` constructor cannot set an `Authorization` header — the only channel it
 /// offers is the subprotocol list, and threading a bearer through that means the server echoing
-/// back a value derived from the secret. The query string is the ordinary alternative, and here it
-/// costs nothing extra: the whole conversation is already plaintext HTTP on a local network, so a
-/// token in the URL is exposed to precisely the same observer as a token in a header. The usual
-/// objection — that URLs end up in proxy and server logs — does not apply to a server that keeps
-/// none.
+/// back a value derived from the secret. The query string is the ordinary alternative, and it costs
+/// nothing extra here: under TLS the path and query are encrypted exactly like a header (only the
+/// address and port are visible on the wire), and with TLS switched off a header would be as
+/// readable as the URL. The usual objection — that URLs end up in proxy and server logs — does not
+/// apply to a server that keeps none.
 ///
-/// It is worth revisiting the day this grows TLS or a cloud relay, where the URL genuinely does
-/// travel further than the body.
+/// Worth revisiting the day this grows a cloud relay, where the URL genuinely does travel further
+/// than the body.
 async fn events(
     State(ctx): State<Ctx>,
     Query(query): Query<EventsQuery>,
@@ -717,6 +843,20 @@ async fn pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key is a map key held for ten minutes: only a short, UUID-shaped one is taken as such. The
+    /// rest are treated as no key — the call runs once, as before keys existed — not refused.
+    #[test]
+    fn only_a_plausible_idempotency_key_is_trusted() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(idempotency_key(&headers), None);
+        headers.insert(IDEMPOTENCY_KEY, HeaderValue::from_static("0b6f3c9e-1d2a-4c55-9a3e-7f0c2b1d4e5a"));
+        assert_eq!(idempotency_key(&headers), Some("0b6f3c9e-1d2a-4c55-9a3e-7f0c2b1d4e5a"));
+        headers.insert(IDEMPOTENCY_KEY, HeaderValue::from_static("has spaces"));
+        assert_eq!(idempotency_key(&headers), None);
+        headers.insert(IDEMPOTENCY_KEY, HeaderValue::from_str(&"a".repeat(200)).unwrap());
+        assert_eq!(idempotency_key(&headers), None);
+    }
 
     /// The two failures that leave nothing behind, and the many that do.
     ///

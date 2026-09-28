@@ -27,6 +27,8 @@ import { EngineGlyph } from "./dbChrome";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { UNGROUPED, parseSpec, redactUrl, urlHasPassword, useDbStore } from "../../state/dbStore";
 import { dbHasPassword, dbSchemaCatalog } from "../../lib/tauri/dbCommands";
+import { isUnknownHostKeyError } from "../../lib/hostKey";
+import { useHostKeyStore } from "../../state/hostKeyStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useToastStore } from "../../state/toastStore";
 import { VaultPicker } from "../vault/VaultPicker";
@@ -190,7 +192,7 @@ export function ConnectionModal({
   const [passwordTouched, setPasswordTouched] = useState(false);
   /** Whether the URL on screen already carries a password, which is what makes the separate box
    *  redundant rather than optional — see the box's own comment below. */
-  const passwordInUrl = mode === "url" && urlHasPassword(config.url);
+  const passwordInUrl = mode === "url" && urlHasPassword(config.url, config.kind);
   const [testing, setTesting] = useState(false);
   const [outcome, setOutcome] = useState<
     { ok: true; info: DbServerInfo } | { ok: false; error: string } | null
@@ -199,6 +201,8 @@ export function ConnectionModal({
   /** Whether the keyring picker is up. Also passed to the dialog as `busy`, which is what stops
    *  Escape from closing this form out from under it. */
   const [picking, setPicking] = useState(false);
+  /** The SSH host-key dialog, opened over this one by a failed test — `busy` for the same reason. */
+  const hostKeyOpen = useHostKeyStore((s) => s.target !== null);
 
   const engine = engineInfo(config.kind);
   const row = connections.find((c) => c.id === selected) ?? null;
@@ -404,6 +408,16 @@ export function ConnectionModal({
       setOutcome({ ok: true, info });
     } catch (e) {
       setOutcome({ ok: false, error: String(e) });
+      // The first connection through a tunnel to a new bastion: ask about its key here, and test
+      // again once it is trusted.
+      if (config.ssh_enabled && config.ssh_host.trim() && isUnknownHostKeyError(e)) {
+        useHostKeyStore
+          .getState()
+          .open(
+            { host: config.ssh_host.trim(), port: config.ssh_port, user: config.ssh_user.trim() },
+            () => void test(),
+          );
+      }
     } finally {
       setTesting(false);
     }
@@ -438,6 +452,12 @@ export function ConnectionModal({
     setSelected(id);
     setDraftEngine(null);
     setName(name.trim() || derivedName);
+    // What was saved can differ from what was typed: a password in the URL was lifted into the
+    // keychain on the way (see `saveConnection`). Showing the stored version is what keeps the form
+    // from reading as unsaved the moment it was saved.
+    const stored = useDbStore.getState().connections.find((c) => c.id === id);
+    const storedSpec = stored ? parseSpec(stored) : null;
+    if (storedSpec) setConfig(storedSpec);
     // The typed password is in the keychain now, so the box goes back to showing that.
     setPassword("");
     setPasswordTouched(false);
@@ -496,7 +516,7 @@ export function ConnectionModal({
       tourAnchor="db-data-sources"
       width="max-w-4xl"
       height="h-[78vh]"
-      busy={saving || picking}
+      busy={saving || picking || hostKeyOpen}
       // A dozen fields and a password, none of it drafted anywhere: a click on the backdrop must not
       // be what throws it away. Close, Cancel and Escape stay.
       dismissOnBackdrop={false}
@@ -731,10 +751,13 @@ export function ConnectionModal({
                                 : t("db.user")
                             }
                           >
+                            {/* Under the Azure CLI, SQL Server takes the account from the token
+                                alone; Postgres still logs in as a named role, which defaults to
+                                the token's account when the box is left empty. */}
                             <input
                               value={config.user}
                               onChange={(e) => patch({ user: e.target.value })}
-                              disabled={config.auth_method === "entra_cli"}
+                              disabled={config.auth_method === "entra_cli" && config.kind !== "postgres"}
                               placeholder={
                                 config.auth_method === "entra_cli" ? t("db.userFromAzureCli") : ""
                               }
@@ -748,12 +771,20 @@ export function ConnectionModal({
                     )}
                   </div>
 
-                  {/* Only SQL Server: it is the one engine here that takes a Microsoft Entra ID
-                      token, and an Azure SQL server set to Entra-only refuses SQL logins outright —
-                      so for those users this control is the difference between the engine working
-                      and being unreachable. */}
-                  {config.kind === "sqlserver" && (
-                    <Row label={t("db.authMethod")} hint={authHint(config.auth_method, t)}>
+                  {/* SQL Server and PostgreSQL: the two engines here that take a Microsoft Entra
+                      ID token — Azure SQL over TDS, Azure Database for PostgreSQL as the password.
+                      An Azure server set to Entra-only refuses other logins outright, so for those
+                      users this control is the difference between the engine working and being
+                      unreachable. */}
+                  {(config.kind === "sqlserver" || config.kind === "postgres") && (
+                    <Row
+                      label={t("db.authMethod")}
+                      hint={
+                        config.kind === "postgres" && config.auth_method === "entra_service_principal"
+                          ? t("db.authEntraPgAppHint")
+                          : authHint(config.auth_method, t)
+                      }
+                    >
                       <Select
                         value={config.auth_method}
                         onChange={(auth_method) => {
@@ -792,11 +823,10 @@ export function ConnectionModal({
 
                   {/* Two ways this box is absent, and they are different absences.
                       The CLI path stores nothing — the whole point is that the credential stays
-                      with `az`. And a URL that already carries `user:pass@` has answered the
-                      question: every engine here prefers the URL's own credential, so the box would
-                      be a field you fill for nothing. What is left — a URL with a user and no
-                      password — is exactly when it matters, because then it is the only path to the
-                      keychain. */}
+                      with `az`. And a URL that already carries a password has answered the
+                      question: saving moves that password into the keychain slot this box writes,
+                      so the box would be a field you fill for nothing. What is left — a URL with a
+                      user and no password — is exactly when it matters. */}
                   {passwordInUrl && (
                     <p className="text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
                       {t("db.passwordFromUrl")}
@@ -1689,7 +1719,8 @@ function DriverOptions({
 }) {
   const t = useT();
   const suggestions: Record<DbKind, string[]> = {
-    postgres: ["application_name"],
+    // `entra_role`: the role an Entra ID application logs in as — see `entra_role` in postgres.rs.
+    postgres: ["application_name", "entra_role"],
     supabase: ["application_name"],
     sqlserver: ["instance_name", "application_name"],
     // Properties of the InterSystems JDBC driver, spelled the way it names them (they are matched

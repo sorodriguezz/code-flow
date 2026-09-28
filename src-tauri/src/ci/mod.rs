@@ -5,7 +5,7 @@
 //! same word in the same codebase is a bug waiting to be read into existence.
 //!
 //! The shape is the one `crate::ado`'s [`PullRequestSummary`] established for pull requests: the
-//! wire types are declared **once**, here, with a `provider` field, and each of the three clients
+//! wire types are declared **once**, here, with a `provider` field, and each of the four clients
 //! produces exactly them. The frontend never branches on the host, and neither does anything
 //! between here and it.
 //!
@@ -17,21 +17,33 @@
 //! | GitHub | workflow run | `/runs/{id}/jobs` | per job, behind a 302 | **none** — see [`PipelineRun::definition_path`] |
 //! | GitLab | pipeline | `/pipelines/{id}/jobs` | per job (`trace`), text/plain | `job.stage`, first-class |
 //! | Azure | build | `timeline` records | per *record*, not per job | the record's `Stage` parent |
+//! | Bitbucket | pipeline | `/pipelines/{uuid}/steps` | per step, behind a 307 once finished | **none** — overlapping time |
+//!
+//! And for the three things a person can *do* besides re-running and cancelling:
+//!
+//! | | start by hand | waiting on a person | artifacts |
+//! |---|---|---|---|
+//! | GitHub | `workflow_dispatch`, inputs declared in the workflow file | `pending_deployments` of the run | per run, a zip behind a 302 |
+//! | GitLab | `POST /pipeline` on a ref, with variables | `manual` jobs; `blocked` deployments | per job: its one archive |
+//! | Azure | `pipelines/{id}/runs`, template parameters from the YAML | `Checkpoint.*` records in the timeline | per build, `downloadUrl` |
+//! | Bitbucket | `POST /pipelines` on a ref, a custom pipeline with variables | a paused pipeline's manual step — no API to start it | **none** in the API |
 //!
 //! [`PullRequestSummary`]: crate::ado::PullRequestSummary
 
 pub mod azure;
+pub mod bitbucket;
 pub mod github;
 pub mod gitlab;
 pub mod http;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-/// The provider ids as they travel to the frontend. Same three strings the PR types use, so a
+/// The provider ids as they travel to the frontend. Same four strings the PR types use, so a
 /// component that already knows how to label "github" doesn't learn a second vocabulary.
 pub const PROVIDER_GITHUB: &str = "github";
 pub const PROVIDER_GITLAB: &str = "gitlab";
 pub const PROVIDER_AZURE: &str = "azure";
+pub const PROVIDER_BITBUCKET: &str = "bitbucket";
 
 /// The seven buckets every provider's taxonomy is collapsed into before it crosses to TypeScript.
 ///
@@ -64,7 +76,7 @@ pub fn is_live(bucket: &str) -> bool {
 /// One execution of a pipeline: a GitHub workflow run, a GitLab pipeline, an Azure build.
 #[derive(Debug, Clone, Serialize)]
 pub struct PipelineRun {
-    /// "github" | "gitlab" | "azure".
+    /// "github" | "gitlab" | "azure" | "bitbucket".
     pub provider: String,
     /// The host's own id, as a string. Deliberately not an `i64`: the three providers don't share
     /// an id space, the value is only ever echoed back to the host or used as a map key, and a
@@ -112,6 +124,21 @@ pub struct PipelineRun {
     /// builds a repository other than the one holding it — the graph falls back to grouping by
     /// overlapping time, and says so on the badge rather than pretending it was declared.
     pub definition_path: Option<String>,
+    /// Whether the run is held at a gate — nearly always waiting on a person: an environment's
+    /// reviewers, a blocking manual job, an Azure approval; occasionally on a check the host runs by
+    /// itself (a wait timer, business hours). See [`PipelineGate`].
+    ///
+    /// A flag rather than an eighth [`status`] bucket, because it is not a state the run is *in* so
+    /// much as the reason it isn't moving — and the three hosts file it under three different
+    /// states: GitHub says `waiting` (bucketed `QUEUED`), GitLab `manual` (bucketed `SKIPPED`),
+    /// Azure plain `inProgress`. The bucket keeps meaning what it meant, including whether the poll
+    /// treats the run as live; this adds the one thing the list has to show on top of it.
+    ///
+    /// The list only knows it where the host puts it in the list response. GitHub and GitLab do;
+    /// an Azure build says `inProgress` and nothing about its approvals, so an Azure row learns it
+    /// when the run is opened and the timeline is read — the same accepted difference between list
+    /// and detail that `github::refine_run_status` documents for warnings.
+    pub gated: bool,
 }
 
 /// One unit inside a run. The unit that has a log — which is why there is no `step` level: GitLab
@@ -197,6 +224,230 @@ pub struct PipelineRunDetail {
     /// The stages the provider declared, when it says anything about them beyond their names.
     /// Empty for GitHub and GitLab — see [`PipelineStage`].
     pub stages: Vec<PipelineStage>,
+    /// What the run is waiting on a person for, right now. Empty for a run that isn't waiting.
+    pub gates: Vec<PipelineGate>,
+}
+
+/// What a [`PipelineGate`] is waiting for. The three words the UI branches on — never the host.
+pub mod gate_kind {
+    /// Somebody has to say yes or no: a GitHub environment's reviewers, a GitLab protected
+    /// environment's approvers, an Azure approval check.
+    pub const APPROVAL: &str = "approval";
+    /// A job that only runs when somebody starts it — GitLab's `when: manual`.
+    pub const MANUAL: &str = "manual";
+    /// A check the host evaluates by itself — Azure's business hours, an invoked function, a
+    /// monitor query. Nothing to answer from here; it is shown so a stage that isn't moving says why.
+    pub const CHECK: &str = "check";
+}
+
+/// One thing a run is waiting on a person for.
+///
+/// All three hosts have the idea and none of them agree on its shape, so this is the common
+/// denominator the UI can put a button on: what is waiting, who may answer, and the id the host
+/// wants back. How each host finds its own is in its client — GitHub asks a dedicated endpoint,
+/// GitLab reads its manual jobs and blocked deployments, Azure reads `Checkpoint.*` records out of
+/// the timeline it already fetched.
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineGate {
+    pub provider: String,
+    pub run_id: String,
+    /// What the host is answered with: a GitHub environment id, a GitLab deployment id (approval)
+    /// or job id (manual), an Azure approval id — which *is* the id of the timeline's
+    /// `Checkpoint.Approval` record.
+    pub id: String,
+    /// One of [`gate_kind`].
+    pub kind: String,
+    /// What is waiting, in the host's words: the environment, the job, the stage.
+    pub name: String,
+    /// The stage it holds, when the host has stage objects (Azure). The same id the jobs carry in
+    /// [`PipelineJob::stage_id`], which is what lets the stage board mark the right card.
+    pub stage_id: Option<String>,
+    /// The jobs it holds, for the graph to mark. Exactly as precise as the host allows: GitHub
+    /// never says which waiting job belongs to which environment, so there every waiting job is
+    /// listed under every pending environment.
+    pub job_ids: Vec<String>,
+    /// Whether *this* token may answer it. `None` when the host doesn't say — every host but
+    /// GitHub — and then a refusal comes back from the host, in its own words, when it is tried.
+    pub can_act: Option<bool>,
+    /// Who may answer it, as the host names them.
+    pub reviewers: Vec<String>,
+    /// What the pipeline's author asked approvers to check first (Azure's `instructions`).
+    pub instructions: Option<String>,
+    /// When it started waiting.
+    pub since: Option<String>,
+    /// Where to answer it in the browser instead.
+    pub web_url: String,
+}
+
+/// A file a run published: a GitHub workflow artifact, a GitLab job's archive, an Azure build
+/// artifact.
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineArtifact {
+    pub provider: String,
+    pub run_id: String,
+    /// What the download command is handed back. GitHub's artifact id, GitLab's **job** id (a job
+    /// has one archive, and the job is what the download endpoint is addressed by), Azure's
+    /// artifact id.
+    pub id: String,
+    pub name: String,
+    /// `None` where the host doesn't publish one — an Azure file-container artifact.
+    pub size_bytes: Option<u64>,
+    /// When the host will delete it. `None` for Azure, whose artifacts live as long as the build.
+    pub expires_at: Option<String>,
+    /// Past its retention. Listed so the user can see it existed; there is nothing to download.
+    pub expired: bool,
+    /// The job that produced it, when the host says.
+    pub job_name: Option<String>,
+    /// What the save dialog proposes: safe on every filesystem, and ending in `.zip` — the archive
+    /// is saved exactly as the host delivers it, never unpacked.
+    pub file_name: String,
+}
+
+/// A pipeline that can be started by hand: a workflow with `workflow_dispatch`, the project's
+/// `.gitlab-ci.yml`, an Azure pipeline definition.
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineDefinition {
+    pub provider: String,
+    /// What [`StartPipelineRequest::definition_id`] carries back: the GitHub workflow id, the Azure
+    /// definition id. GitLab has one pipeline per project, so there it is the config path.
+    pub id: String,
+    pub name: String,
+    /// Repo-relative path of the file that declares it — and its inputs. `None` for a classic Azure
+    /// definition (stored on the server, not in the repository) and for a GitLab config that lives
+    /// in another project or behind a URL.
+    pub path: Option<String>,
+    /// The variables the host lets a person set at queue time, with their defaults — Azure's
+    /// "let users override this value" variables. Empty for the other two: GitLab's prefilled
+    /// variables are read out of the file, and GitHub has no queue-time variables at all.
+    pub variables: Vec<DeclaredVariable>,
+    pub web_url: String,
+}
+
+/// One queue-time variable a definition declares.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeclaredVariable {
+    pub name: String,
+    /// Its default. Empty for a secret: the host never hands those back.
+    pub value: String,
+    pub secret: bool,
+}
+
+/// Everything the "Run pipeline" dialog needs before the user has picked anything.
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineLaunchContext {
+    pub provider: String,
+    pub definitions: Vec<PipelineDefinition>,
+    /// The branch the host treats as the repository's default, which is where a GitHub workflow
+    /// has to exist to be dispatchable at all.
+    pub default_branch: Option<String>,
+    /// The repository's deployment environments, for a GitHub input of `type: environment`. Empty
+    /// when the host has none, has no such concept, or wouldn't say.
+    pub environments: Vec<String>,
+}
+
+/// A run to start, as the dialog sends it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StartPipelineRequest {
+    /// [`PipelineDefinition::id`].
+    pub definition_id: String,
+    /// The branch or tag to run on, bare (`main`, `v1.2.0`) or full (`refs/heads/main`). Each client
+    /// reshapes it into what its host takes.
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    /// GitHub `inputs`, GitLab `inputs`, Azure `templateParameters`.
+    ///
+    /// JSON values rather than strings, because the three hosts disagree on types: GitHub and
+    /// Azure take every value as text (a `type: boolean` input receives `"true"`), while GitLab's
+    /// typed `spec:inputs` expect a real boolean or number. The form sends what it has, and each
+    /// client converts on its own side of the dispatch.
+    #[serde(default)]
+    pub inputs: std::collections::BTreeMap<String, serde_json::Value>,
+    /// GitLab pipeline variables, Azure run variables. GitHub has none.
+    #[serde(default)]
+    pub variables: Vec<PipelineVariable>,
+}
+
+/// One key/value the user typed for a run or a manual job.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PipelineVariable {
+    pub key: String,
+    #[serde(default)]
+    pub value: String,
+    /// Hidden on screen and in the confirmation — and, where the host has the notion (Azure's
+    /// `isSecret`), sent as a secret. GitLab has no queue-time masking at all.
+    #[serde(default)]
+    pub masked: bool,
+}
+
+/// What starting a run produced.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct StartedPipeline {
+    /// The new run, when the host says which it is. GitLab and Azure always do; GitHub does on
+    /// github.com (a `200` carrying `workflow_run_id`) and not on an older Enterprise Server, which
+    /// answers `204` with no body — there the frontend finds the run on the next page of the list.
+    pub run_id: Option<String>,
+    pub web_url: Option<String>,
+}
+
+/// A file name the save dialog can propose for an artifact, on any of the three desktop
+/// filesystems.
+///
+/// Artifact names are free text on every host — `coverage report (linux)`, `dist/web`, `a:b` — and
+/// the save dialog is handed this verbatim. A `/` would be read as a folder the dialog then fails
+/// to find, and `:` or `?` is a name Windows refuses outright. Everything outside what all three
+/// accept is replaced rather than dropped, so two artifacts differing only in punctuation still
+/// propose different names.
+pub fn artifact_file_name(name: &str) -> String {
+    let mut out: String = name
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    // Windows also refuses a name that ends in a dot or a space, and a leading dot hides the file
+    // everywhere else.
+    out = out.trim_matches(|c: char| c == '.' || c == ' ').to_string();
+    if out.is_empty() {
+        out = "artifact".to_string();
+    }
+    if !out.to_ascii_lowercase().ends_with(".zip") {
+        out.push_str(".zip");
+    }
+    out
+}
+
+/// Splits a ref into what kind it is and its short name: `refs/tags/v1` → `(Tag, "v1")`,
+/// `refs/heads/main` and `main` → `(Branch, "main")`.
+///
+/// A bare name is taken as a branch. That is the only guess in here, and it is the one every host
+/// makes too: GitLab and GitHub resolve a bare name against branches before tags.
+pub fn split_ref(reference: &str) -> (RefKind, String) {
+    let trimmed = reference.trim();
+    if let Some(tag) = trimmed.strip_prefix("refs/tags/") {
+        return (RefKind::Tag, tag.to_string());
+    }
+    let bare = trimmed.strip_prefix("refs/heads/").unwrap_or(trimmed);
+    (RefKind::Branch, bare.to_string())
+}
+
+/// See [`split_ref`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefKind {
+    Branch,
+    Tag,
+}
+
+/// A form value as the text a host that takes text wants: `true` rather than `"true"` never
+/// reaches GitHub or Azure, whose inputs are strings however the file typed them.
+pub fn input_as_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 /// A job's log, already capped.
@@ -534,4 +785,64 @@ mod tests {
         assert!(twice.ends_with('\n'));
     }
 
+    /// The save dialog is handed this verbatim, so it has to be a name every filesystem takes —
+    /// and still read as the artifact it came from.
+    #[test]
+    fn an_artifact_name_becomes_a_file_name_any_desktop_accepts() {
+        assert_eq!(artifact_file_name("dist"), "dist.zip");
+        // A slash would be read as a folder, a colon is refused by Windows.
+        assert_eq!(artifact_file_name("dist/web"), "dist_web.zip");
+        assert_eq!(artifact_file_name("report: linux?"), "report_ linux_.zip");
+        // Already a zip: not doubled, whatever the case.
+        assert_eq!(artifact_file_name("bundle.ZIP"), "bundle.ZIP");
+        // Leading dots hide a file; trailing dots and spaces are refused by Windows.
+        assert_eq!(artifact_file_name(" .hidden. "), "hidden.zip");
+        // Nothing usable left still proposes something.
+        assert_eq!(artifact_file_name("..."), "artifact.zip");
+        assert_eq!(artifact_file_name(""), "artifact.zip");
+        // Control characters are replaced, never passed through.
+        assert_eq!(artifact_file_name("a\tb"), "a_b.zip");
+    }
+
+    #[test]
+    fn a_ref_is_split_into_its_kind_and_its_short_name() {
+        assert_eq!(split_ref("main"), (RefKind::Branch, "main".to_string()));
+        assert_eq!(split_ref("refs/heads/release/2.0"), (RefKind::Branch, "release/2.0".to_string()));
+        assert_eq!(split_ref(" refs/tags/v1.2.0 "), (RefKind::Tag, "v1.2.0".to_string()));
+        // Anything else under `refs/` is not second-guessed.
+        assert_eq!(split_ref("refs/pull/7/merge"), (RefKind::Branch, "refs/pull/7/merge".to_string()));
+    }
+
+    /// GitHub and Azure take every input as text; `true` must arrive as `"true"`, not as `True`
+    /// or as a JSON boolean the dispatch then rejects.
+    #[test]
+    fn form_values_become_the_text_a_text_only_host_wants() {
+        use serde_json::json;
+        assert_eq!(input_as_text(&json!("staging")), "staging");
+        assert_eq!(input_as_text(&json!(true)), "true");
+        assert_eq!(input_as_text(&json!(false)), "false");
+        assert_eq!(input_as_text(&json!(3)), "3");
+        assert_eq!(input_as_text(&json!(2.5)), "2.5");
+        assert_eq!(input_as_text(&json!(null)), "");
+    }
+
+    /// The request the dialog sends, decoded the way the command decodes it: `ref` renamed,
+    /// everything but the definition and the ref optional.
+    #[test]
+    fn a_start_request_decodes_from_what_the_dialog_sends() {
+        let full: StartPipelineRequest = serde_json::from_str(
+            r#"{"definition_id":"42","ref":"main","inputs":{"dry_run":true,"target":"staging"},
+                "variables":[{"key":"TOKEN","value":"x","masked":true},{"key":"PLAIN","value":"y"}]}"#,
+        )
+        .expect("full request");
+        assert_eq!(full.ref_name, "main");
+        assert_eq!(full.inputs.get("dry_run"), Some(&serde_json::json!(true)));
+        assert!(full.variables[0].masked);
+        assert!(!full.variables[1].masked);
+
+        let bare: StartPipelineRequest =
+            serde_json::from_str(r#"{"definition_id":".gitlab-ci.yml","ref":"v1.0"}"#).expect("bare");
+        assert!(bare.inputs.is_empty());
+        assert!(bare.variables.is_empty());
+    }
 }

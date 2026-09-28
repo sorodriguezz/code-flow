@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  Archive,
   ArrowDownToLine,
   ArrowUpFromLine,
   Check,
@@ -384,6 +385,7 @@ export function RepoScreen() {
   const projectId = useMobileStore((s) => s.projectId);
   const commits = useMobileStore((s) => s.commits);
   const unpushed = useMobileStore((s) => s.unpushed);
+  const stashes = useMobileStore((s) => s.stashes.length);
   const run = useMobileStore((s) => s.run);
   const refreshRepo = useMobileStore((s) => s.refreshRepo);
   const push = useNav((s) => s.push);
@@ -486,6 +488,23 @@ export function RepoScreen() {
             </div>
           </Card>
         </Section>
+
+        {/* Only when there is something in it: an empty stash is not a place worth a row. */}
+        {stashes > 0 && (
+          <Section>
+            <Card>
+              <Row
+                leading={<Archive size={16} className="text-[var(--cf-text-muted)]" aria-hidden />}
+                title={t("stash.title")}
+                trailing={<Badge tone="neutral">{stashes}</Badge>}
+                onClick={() => {
+                  navigated();
+                  push({ k: "stash", repoPath });
+                }}
+              />
+            </Card>
+          </Section>
+        )}
 
         {repoState === "loading" && status === null ? (
           <Section title={t("repo.changes")}>

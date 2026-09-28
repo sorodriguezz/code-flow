@@ -1,10 +1,19 @@
 import { create } from "zustand";
+import { listen } from "@tauri-apps/api/event";
 import * as api from "../lib/tauri/commands";
 import { notify } from "./notificationStore";
 import { usePreferencesStore } from "./preferencesStore";
 import { useUiStore } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
-import type { JobLog, PipelineJob, PipelineRun, PipelineRunDetail } from "../types/domain";
+import type {
+  ArtifactDownloadEvent,
+  JobLog,
+  PipelineArtifact,
+  PipelineJob,
+  PipelineRun,
+  PipelineRunDetail,
+  StartPipelineRequest,
+} from "../types/domain";
 import type { DeclaredStages } from "../lib/pipelineGraph";
 
 /**
@@ -37,8 +46,33 @@ function jobKey(projectId: string, job: Pick<PipelineJob, "provider" | "run_id" 
   return `${projectId}:${job.provider}:${job.run_id}:${job.id}`;
 }
 
+/** The same, for an artifact of a run — what a download is filed under. */
+export function artifactKey(
+  projectId: string,
+  run: Pick<PipelineRun, "provider" | "id">,
+  artifactId: string,
+): string {
+  return `${runKey(projectId, run)}:${artifactId}`;
+}
+
 /** How the run's structure was worked out, so the panel can say. See `pipelineGraph.ts`. */
 export type GraphMode = "graph" | "waterfall";
+
+/** One artifact download, from the moment it is asked for until it lands, fails or is stopped. */
+export interface ArtifactDownload {
+  /** The id the backend's `ci:artifact` progress events carry. */
+  transferId: string;
+  done: number;
+  /** `null` when the host doesn't say how big it is — the bar is then indeterminate. */
+  total: number | null;
+  state: "running" | "done" | "failed" | "cancelled";
+  error?: string;
+  /** Where the user chose to save it. */
+  path: string;
+  /** The user pressed stop. The backend's error for it is "download cancelled"; this is what lets
+   *  the row say "stopped" rather than print that as a failure. */
+  stopping?: boolean;
+}
 
 interface Selection {
   projectId: string;
@@ -102,8 +136,44 @@ interface CiState {
    *  than one job and each is its own question. */
   analysisByJob: Record<string, { aiRunId: string; startedAt: number; text?: string; error?: string }>;
 
+  /** A run's artifacts, keyed by [`runKey`]. Fetched when the list is opened, never polled. */
+  artifactsByRun: Record<string, PipelineArtifact[]>;
+  artifactsBusy: Record<string, boolean>;
+  artifactsError: Record<string, string>;
+  /** Downloads, keyed by [`artifactKey`]. Kept after they end, so reopening the list shows how
+   *  the last one went. */
+  downloads: Record<string, ArtifactDownload>;
+
   load: (projectId: string, options?: { quiet?: boolean }) => Promise<void>;
-  selectRun: (projectId: string, run: Pick<PipelineRun, "id" | "provider">) => Promise<void>;
+  /**
+   * Opens a run. `refresh` re-reads its detail even when the cached copy says it has finished —
+   * which is what a gate that was just answered, or a run that was just re-run under the same id,
+   * needs: the cache is exactly what the action has made stale.
+   */
+  selectRun: (
+    projectId: string,
+    run: Pick<PipelineRun, "id" | "provider"> & Partial<Pick<PipelineRun, "status">>,
+    options?: { refresh?: boolean },
+  ) => Promise<void>;
+  /**
+   * Starts a run by hand and opens it. Resolves to the new run's id — or to `null` when the host
+   * started it without saying which it was, in which case it is looked for on the list in the
+   * background and opened when it shows up. Throws what the host refused with.
+   */
+  startRun: (
+    projectId: string,
+    provider: PipelineRun["provider"],
+    request: StartPipelineRequest,
+    definitionPath: string | null,
+  ) => Promise<string | null>;
+  loadArtifacts: (projectId: string, run: Pick<PipelineRun, "id" | "provider">) => Promise<void>;
+  downloadArtifact: (
+    projectId: string,
+    run: Pick<PipelineRun, "id" | "provider">,
+    artifact: PipelineArtifact,
+    destination: string,
+  ) => Promise<void>;
+  cancelDownload: (key: string) => void;
   selectJob: (jobId: string) => Promise<void>;
   /** Opens a run by its [`runKey`] — the shape a notification carries. */
   openByKey: (key: string) => Promise<void>;
@@ -142,6 +212,10 @@ const LIVE_MS = 5_000;
 /** Every 30 s when nothing is. A new push is the only thing that can change the list, and it
  *  arrives from outside the app. */
 const IDLE_MS = 30_000;
+/** The live cadence's floor for a Bitbucket repository. Bitbucket allows about a thousand API
+ *  requests an hour — a fifth of GitHub's — and a live run costs three a poll (the list, the run,
+ *  its steps), so five seconds would spend the hour's allowance in under half of it. */
+const BITBUCKET_LIVE_MS = 15_000;
 /** The interval actually runs at the fast rate and counts; a second timer that has to be rebuilt
  *  on every `visibilitychange` is what `api/sync.ts` explains it avoided doing. */
 const TICK_MS = LIVE_MS;
@@ -181,8 +255,89 @@ const polling = new Set<string>();
  */
 const lastSeenStatus = new Map<string, PipelineRun["status"]>();
 
-function isLive(run: PipelineRun): boolean {
+function isLive(run: Pick<PipelineRun, "status">): boolean {
   return run.status === "running" || run.status === "queued";
+}
+
+/**
+ * How far the host's clock and ours may disagree when a started run is looked for by its creation
+ * time. Generous: the cost of too wide a window is matching a run that someone else dispatched on
+ * the same workflow and ref in the same minute, and the known-ids filter already rules out anything
+ * that was on the list before the click.
+ */
+const CLOCK_SKEW_MS = 60_000;
+/** How long to wait between looks for a started run that the host didn't name, and how many looks. */
+export const DISPATCH_POLL_MS = 2_000;
+export const DISPATCH_ATTEMPTS = 6;
+
+/** `refs/heads/main` and `main` are the same branch to a run list, which only ever says `main`. */
+function shortRef(reference: string): string {
+  const trimmed = reference.trim();
+  if (trimmed.startsWith("refs/heads/")) return trimmed.slice("refs/heads/".length);
+  if (trimmed.startsWith("refs/tags/")) return trimmed.slice("refs/tags/".length);
+  return trimmed;
+}
+
+/**
+ * The run a `workflow_dispatch` just started, found the way a person would find it: new since the
+ * click, triggered by `workflow_dispatch`, on that ref, from that workflow file — the newest if
+ * several qualify.
+ *
+ * Only needed where the host doesn't say. github.com answers a dispatch with the run's id; an older
+ * GitHub Enterprise Server answers `204` and nothing else, and until the run appears on a list page
+ * nothing links the click to it.
+ */
+export function findDispatchedRun(
+  runs: PipelineRun[],
+  known: ReadonlySet<string>,
+  want: { ref: string; path: string | null; since: number },
+): PipelineRun | undefined {
+  const branch = shortRef(want.ref);
+  // A run's `path` can carry the ref it was read at — GitHub's own reference shows
+  // `.github/workflows/build.yml@main` — while the workflow list never does. The file is the match.
+  const fileOf = (path: string | null) => (path ?? "").split("@")[0];
+  const candidates = runs.filter((run) => {
+    if (known.has(run.id) || run.event !== "workflow_dispatch" || run.branch !== branch) return false;
+    if (want.path && fileOf(run.definition_path) !== fileOf(want.path)) return false;
+    const created = Date.parse(run.created_at);
+    return Number.isNaN(created) || created >= want.since - CLOCK_SKEW_MS;
+  });
+  return candidates.sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))[0];
+}
+
+/** `setTimeout` as a promise, for the dispatch look-ups — kept apart so tests can run it on fake
+ *  timers. */
+function pause(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * The one `ci:artifact` listener, subscribed the first time a download starts and kept for the life
+ * of the window: downloads outlive the dialog that started them, and their progress has to land
+ * whether or not anything is looking.
+ */
+let progressListener: Promise<unknown> | null = null;
+
+function listenForProgress(): void {
+  if (progressListener) return;
+  progressListener = listen<ArtifactDownloadEvent>("ci:artifact", (event) => {
+    const { id, done, total } = event.payload;
+    useCiStore.setState((s) => {
+      const entry = Object.entries(s.downloads).find(([, download]) => download.transferId === id);
+      if (!entry) return {};
+      const [key, download] = entry;
+      // A progress event that arrives after the command returned must not reopen a finished row.
+      if (download.state !== "running") return {};
+      return { downloads: { ...s.downloads, [key]: { ...download, done, total: total ?? download.total } } };
+    });
+  }).catch(() => {
+    // No event bridge (a test, a preview): the download still resolves; only the bar stays still.
+    progressListener = null;
+  });
+}
+
+function newTransferId(): string {
+  return `ci-artifact-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 /**
@@ -264,6 +419,10 @@ export const useCiStore = create<CiState>((set, get) => ({
   statusFilter: null,
   graphMode: "graph",
   analysisByJob: {},
+  artifactsByRun: {},
+  artifactsBusy: {},
+  artifactsError: {},
+  downloads: {},
 
   /**
    * Reloads a project's runs.
@@ -331,7 +490,7 @@ export const useCiStore = create<CiState>((set, get) => ({
     }
   },
 
-  selectRun: async (projectId, run) => {
+  selectRun: async (projectId, run, options = {}) => {
     const key = runKey(projectId, run);
     const previous = get().selection;
     const cached = get().detailByRun[key];
@@ -355,7 +514,13 @@ export const useCiStore = create<CiState>((set, get) => ({
     if (cached) {
       void get().selectJob(keepJobId ?? pickInterestingJob(cached.jobs)?.id ?? "");
       // Still refetched underneath: a run that was running when it was last opened has moved on.
-      if (!isLive(cached.run)) return;
+      //
+      // And refetched when the *list* says it is moving while the cached copy says it is done —
+      // which is a finished run that was re-run under its own id (GitHub's re-run keeps the id).
+      // Trusting the cache there kept the old jobs on screen through the whole second attempt,
+      // because every poll asked the same question of the same stale copy.
+      const revived = run.status !== undefined && isLive({ status: run.status }) && !isLive(cached.run);
+      if (!isLive(cached.run) && !revived && !options.refresh) return;
     }
 
     set((s) => ({ detailBusy: { ...s.detailBusy, [key]: true } }));
@@ -478,6 +643,103 @@ export const useCiStore = create<CiState>((set, get) => ({
       return { analysisByJob: { ...s.analysisByJob, [key]: { ...previous, ...patch } } };
     }),
 
+  startRun: async (projectId, provider, request, definitionPath) => {
+    // Everything already on the list is, by definition, not the run about to start. Taken before
+    // the request, because a fast host can have the new run on the list by the time it answers.
+    const known = new Set((get().runsByProject[projectId] ?? []).map((run) => run.id));
+    const since = Date.now();
+    const started = await api.startPipeline(projectId, request);
+
+    // The user asking is a good reason to stop waiting out a backoff, the same as a refresh.
+    failures.delete(projectId);
+    nextAttempt.delete(projectId);
+
+    if (started.run_id) {
+      await get().load(projectId, { quiet: true });
+      await get().selectRun(projectId, { id: started.run_id, provider });
+      return started.run_id;
+    }
+
+    // The host started it without saying which run it is. Looked for in the background, so the
+    // dialog can close on "started" instead of holding the user for the dozen seconds a runner
+    // queue can take to put the run on a page. Asked by the ref rather than through the store's
+    // filtered list: the branch filter on screen may be another branch entirely, and the new run
+    // would never appear in it.
+    const before = get().selection;
+    void (async () => {
+      for (let attempt = 0; attempt < DISPATCH_ATTEMPTS; attempt += 1) {
+        await pause(DISPATCH_POLL_MS);
+        const runs = await api.listPipelineRuns(projectId, shortRef(request.ref), 20).catch(() => []);
+        const found = findDispatchedRun(runs, known, { ref: request.ref, path: definitionPath, since });
+        if (!found) continue;
+        await get().load(projectId, { quiet: true });
+        // Only if the user is still where they were: a run found ten seconds later must not pull
+        // the pane away from whatever they have opened since.
+        const now = get().selection;
+        const untouched =
+          now?.projectId === before?.projectId && now?.runId === before?.runId && now?.provider === before?.provider;
+        if (untouched) await get().selectRun(projectId, found);
+        return;
+      }
+      await get().load(projectId, { quiet: true });
+    })();
+    return null;
+  },
+
+  loadArtifacts: async (projectId, run) => {
+    const key = runKey(projectId, run);
+    if (get().artifactsBusy[key]) return;
+    set((s) => ({ artifactsBusy: { ...s.artifactsBusy, [key]: true } }));
+    try {
+      const artifacts = await api.listPipelineArtifacts(projectId, run.id);
+      set((s) => ({
+        artifactsByRun: { ...s.artifactsByRun, [key]: artifacts },
+        artifactsError: { ...s.artifactsError, [key]: "" },
+      }));
+    } catch (e) {
+      set((s) => ({ artifactsError: { ...s.artifactsError, [key]: String(e) } }));
+    } finally {
+      set((s) => ({ artifactsBusy: { ...s.artifactsBusy, [key]: false } }));
+    }
+  },
+
+  downloadArtifact: async (projectId, run, artifact, destination) => {
+    const key = artifactKey(projectId, run, artifact.id);
+    // One download per artifact at a time: a second click on a running row would race the first to
+    // the same `.part` file.
+    if (get().downloads[key]?.state === "running") return;
+    const transferId = newTransferId();
+    listenForProgress();
+    set((s) => ({
+      downloads: {
+        ...s.downloads,
+        [key]: { transferId, done: 0, total: artifact.size_bytes, state: "running", path: destination },
+      },
+    }));
+    const patch = (next: Partial<ArtifactDownload>) =>
+      set((s) => {
+        const current = s.downloads[key];
+        // Replaced by a newer download of the same artifact: this one's ending is not news.
+        if (!current || current.transferId !== transferId) return {};
+        return { downloads: { ...s.downloads, [key]: { ...current, ...next } } };
+      });
+    try {
+      const written = await api.downloadPipelineArtifact(projectId, run.id, artifact.id, destination, transferId);
+      patch({ state: "done", done: written, total: written });
+    } catch (e) {
+      const stopping = get().downloads[key]?.stopping === true;
+      patch(stopping ? { state: "cancelled" } : { state: "failed", error: String(e) });
+      if (!stopping) throw e;
+    }
+  },
+
+  cancelDownload: (key) => {
+    const download = get().downloads[key];
+    if (!download || download.state !== "running") return;
+    set((s) => ({ downloads: { ...s.downloads, [key]: { ...download, stopping: true } } }));
+    void api.cancelPipelineArtifactDownload(download.transferId).catch(() => {});
+  },
+
   watch: () => {
     watchers += 1;
     const tick = () => {
@@ -517,7 +779,8 @@ export const useCiStore = create<CiState>((set, get) => ({
        */
       if (!onTab && !anyLive) return;
       sinceLastPoll += TICK_MS;
-      if (sinceLastPoll < (anyLive ? LIVE_MS : IDLE_MS)) return;
+      const liveMs = runs.some((r) => r.provider === "bitbucket") ? Math.max(LIVE_MS, BITBUCKET_LIVE_MS) : LIVE_MS;
+      if (sinceLastPoll < (anyLive ? liveMs : IDLE_MS)) return;
       // A round that hasn't landed yet must not be joined by another. Azure's job logs are fetched
       // one timeline record at a time, so a single tick there can outlast the five seconds until
       // the next — and without this the requests stack against a host that rate-limits. Returning

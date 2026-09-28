@@ -19,17 +19,20 @@ import {
   listGatedChains,
   listChainTemplates,
   listWorkspaceChainSteps,
+  listScheduledResumes,
   notifyStateChange,
   resumeChain,
   rerunChainFrom,
   retryChainStep,
   setChainGroup,
   setChainPinned,
+  setChainResumeAt,
   setChainStepInput,
   setChainStepSkipped,
   skipChainStep,
   upsertChainTemplate,
 } from "../lib/tauri/commands";
+import { isEnginePause } from "../lib/chainPause";
 import { onTurnSettled } from "./agentEvents";
 import { useAgentsStore } from "./agentsStore";
 import { newRunId, useAiRunStore } from "./aiRunStore";
@@ -57,6 +60,17 @@ const GATE_MOVED = "chain.gateMoved";
 const HARVEST_POLL_MS = 5_000;
 /** After this long with no turn on disk, a recovered step is given up on and its run stopped. */
 const STEP_TIMEOUT_MS = 45 * 60_000;
+/** The first wait before a failed turn is sent again; it doubles per attempt already spent. A
+ * provider having a bad minute (`529 Overloaded`) is the case this is for, and re-sending into it
+ * the instant it answers is how three attempts used to be spent in as many seconds. */
+const RETRY_BACKOFF_MS = 15_000;
+const RETRY_BACKOFF_MAX_MS = 120_000;
+/** How long a chain whose repository was busy waits before asking again, when nothing else frees
+ * it sooner. An agent turn settling in that repository wakes it at once (see `onTurnSettled`); this
+ * is for the lease holders that announce nothing — a panel chat, a commit message, a wiki run. */
+const BUSY_RECHECK_MS = 30_000;
+/** `setTimeout`'s ceiling (2^31-1 ms, about 24.8 days). A longer wait is re-armed when it fires. */
+const MAX_TIMER_MS = 2_147_483_647;
 
 /**
  * The chain scheduler.
@@ -182,7 +196,14 @@ interface ChainState {
   retry: (chainId: string) => Promise<void>;
   /** "Do that again, but…" — back to one step, carrying the user's own words, and moving. */
   rerunFrom: (chainId: string, stepIndex: number, note: string) => Promise<void>;
-  resume: (chainId: string) => Promise<void>;
+  /** `unattended` is an automatic resume firing: the user asked for it in advance, which is the same
+   * exemption from the tray guard a phone's tap gets — see `pump`. */
+  resume: (chainId: string, opts?: { unattended?: boolean }) => Promise<void>;
+  /**
+   * Arms (an instant in ms) or disarms (`null`) the automatic resume of a chain paused on its
+   * engine. Consent to one pause: the backend drops it on any transition and on a restart.
+   */
+  setAutoResume: (chainId: string, at: number | null) => Promise<void>;
   abort: (chainId: string) => Promise<void>;
   remove: (chainId: string) => Promise<void>;
   /** Stops anything live and aborts every chain of a repository that is about to be deleted. */
@@ -281,6 +302,45 @@ function stopHarvestingForChain(chainId: string): void {
 /** Which cross-workspace gate read is the current one. See `refreshGates`. */
 let gatesSeq = 0;
 
+/**
+ * Chains sitting out a wait before their next claim, by chain id.
+ *
+ * Two waits, told apart by `busy`. A failed turn is re-sent after a backoff rather than the instant
+ * it failed; a turn refused because somebody else holds the repository is re-asked after
+ * `BUSY_RECHECK_MS`, or as soon as an agent turn in that repository settles. Before these, both
+ * went straight back to `pump`: a busy repository bounced the step three times in a row and failed
+ * the plan while the user typed in another task, and an overloaded provider got its three attempts
+ * in the same second.
+ *
+ * Held here rather than on disk because a wait is a scheduling detail of this window's driver, not
+ * state anybody else reads: the row stays `queued`, which is the truth, and a reload that forgets
+ * the wait costs one early claim, not a wrong answer.
+ */
+const held = new Map<string, { until: number; busy: boolean; timer: ReturnType<typeof setTimeout> }>();
+
+/** Automatic-resume timers, by chain id. See `armResumes`. */
+const resumeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function release(chainId: string): void {
+  const entry = held.get(chainId);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  held.delete(chainId);
+}
+
+function forgetTimers(chainId: string): void {
+  release(chainId);
+  const timer = resumeTimers.get(chainId);
+  if (timer !== undefined) clearTimeout(timer);
+  resumeTimers.delete(chainId);
+}
+
+/** How long to wait before re-sending a turn that failed on its `attempts`th try. */
+export function retryDelay(attempts: number): number {
+  const spent = Math.max(1, Math.floor(attempts));
+  return Math.min(RETRY_BACKOFF_MS * 2 ** (spent - 1), RETRY_BACKOFF_MAX_MS);
+}
+
 export const useChainStore = create<ChainState>((set, get) => ({
   workspaceId: null,
   chains: [],
@@ -324,6 +384,8 @@ export const useChainStore = create<ChainState>((set, get) => ({
     // just as true for a switch to none as for a switch to another one — and this is the call that
     // populates it at boot.
     void get().refreshGates();
+    // Same reasoning for the automatic resumes: armed in whichever workspace, fired from this one.
+    void armResumes(get);
     if (!id) return;
     const [chains, templates, briefs] = await Promise.all([
       listAgentChains(id).catch(() => [] as AgentChain[]),
@@ -503,6 +565,11 @@ export const useChainStore = create<ChainState>((set, get) => ({
     // authorised it is long over — and an approval that lands while this chain is already mid-advance
     // returns at the very next line, which would otherwise throw the authorisation away with it.
     if (opts?.remote) drivenRemotely.add(chainId);
+    // A chain sitting out a wait is claimed by its own timer when the wait is over. Every other
+    // door into here — a turn settling in the repository, the window coming back, a workspace
+    // load — would otherwise walk straight past the backoff it is observing.
+    const wait = held.get(chainId);
+    if (wait && wait.until > Date.now()) return;
     if (inFlight.has(chainId)) return;
     // The tray guard, with the one exemption it always needed. `background` exists so a hidden
     // window does not start engines nobody asked for — and a phone tap *is* somebody asking, from a
@@ -590,6 +657,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
   },
 
   approve: async (chainId, input, stepId) => {
+    release(chainId);
     // The one command here that can be refused on a precondition, so the one that has to say so.
     // Every caller invokes this as a bare `void`, and a rejection would be an unhandled one — which
     // is the worst possible shape for "your click did nothing": no message, no reload, and a pane
@@ -610,6 +678,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
   },
 
   skip: async (chainId) => {
+    release(chainId);
     const chain = await skipChainStep(chainId);
     if (chain) applyChain(chain, set);
     await get().refresh(chainId);
@@ -617,6 +686,8 @@ export const useChainStore = create<ChainState>((set, get) => ({
   },
 
   retry: async (chainId) => {
+    // A person asking now does not wait out a backoff the plan set itself.
+    release(chainId);
     const chain = await retryChainStep(chainId);
     if (chain) applyChain(chain, set);
     await get().refresh(chainId);
@@ -630,16 +701,28 @@ export const useChainStore = create<ChainState>((set, get) => ({
     if (chain?.status === "queued") void get().pump(chainId);
   },
 
-  resume: async (chainId) => {
+  resume: async (chainId, opts) => {
+    forgetTimers(chainId);
     const chain = await resumeChain(chainId);
     if (chain) applyChain(chain, set);
-    void get().pump(chainId);
+    void get().pump(chainId, { remote: opts?.unattended });
+  },
+
+  setAutoResume: async (chainId, at) => {
+    const seconds = at === null ? 0 : Math.max(1, Math.floor(at / 1000));
+    const chain = await setChainResumeAt(chainId, seconds).catch((e: unknown) => {
+      pushErrorToast(String(e));
+      return null;
+    });
+    if (chain) applyChain(chain, set);
+    await armResumes(get);
   },
 
   abort: async (chainId) => {
     // Every timer this chain owns, before anything else: an aborted step has no result to harvest,
     // and a poller left behind here is one that never stops (see `stopHarvestingForChain`).
     stopHarvestingForChain(chainId);
+    forgetTimers(chainId);
     // "Stop" is the one answer that cannot be followed by another step, so whoever was driving this
     // remotely is no longer driving anything.
     drivenRemotely.delete(chainId);
@@ -654,6 +737,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
 
   remove: async (chainId) => {
     await get().abort(chainId);
+    forgetTimers(chainId);
     // The step tasks go with the chain now — the backend deletes them in the same transaction, and
     // hands back which ones so the task list can forget them here rather than keep drawing rows for
     // work whose plan is gone.
@@ -896,8 +980,8 @@ async function settleStep(
   } else if (outcome.kind === "cancelled") {
     chain = await completeChainStep(stepId, "cancelled", "", "chain.stopped").catch(() => null);
   } else if (outcome.busy) {
-    // Never a failure: the turn did not run. Back in the queue, and the sweep re-arms it when
-    // whoever holds the repository finishes.
+    // Never a failure: the turn did not run. Back in the queue, costing the step nothing, and held
+    // until whoever has the repository lets go of it (see `held` and `onTurnSettled`).
     chain = await completeChainStep(stepId, "requeue", "", "chain.repoBusy").catch(() => null);
   } else {
     chain = await completeChainStep(stepId, "error", "", outcome.message).catch(() => null);
@@ -912,11 +996,20 @@ async function settleStep(
   // "agent task finished" through `agentsStore`, but a ten-step chain is the longest-running thing
   // in the app and "they are all done" is the only one of those eleven notifications the user was
   // actually waiting for. `aborted` is the user's own stop, so it stays silent like every other
-  // cancelled run; `gated` and `paused` are still in flight and say nothing yet.
-  if (chain?.status === "done" || chain?.status === "failed") {
+  // cancelled run; `gated` and an ordinary `paused` are still in flight and say nothing yet.
+  //
+  // The exception is a plan the engine could not run (quota, sign-in, missing CLI): it parks and
+  // waits for the user, mid-plan, with the user usually elsewhere — the one pause nobody is watching
+  // arrive. Said once, like the end of the plan.
+  const enginePause = chain?.status === "paused" && isEnginePause(chain.last_reason);
+  if (chain && (chain.status === "done" || chain.status === "failed" || enginePause)) {
     notify({
       source: "agents",
-      titleKey: chain.status === "done" ? "notifications.chainDone" : "notifications.chainFailed",
+      titleKey: enginePause
+        ? "notifications.chainPaused"
+        : chain.status === "done"
+          ? "notifications.chainDone"
+          : "notifications.chainFailed",
       // A chain carries no workspace column of its own — every one of its queries reaches the
       // workspace through the first repository of its set — so this is where the stamp comes from,
       // the same route `pump` uses for the run itself. It answers `null` for a workspace this
@@ -925,7 +1018,7 @@ async function settleStep(
       // on the right plan once the workspace it belongs to has been resolved from the repository.
       workspaceId: useWorkspaceStore.getState().workspaceOfProject(chain.project_id),
       target: { view: "agents", projectId: chain.project_id, select: { kind: "chain", id: chain.id } },
-      status: chain.status === "done" ? "success" : "error",
+      status: chain.status === "done" ? "success" : enginePause ? "info" : "error",
       detail: chain.title,
     });
   }
@@ -938,8 +1031,69 @@ async function settleStep(
   // `remote` carries whatever the last person to ask said, so a plan approved from a phone keeps
   // going with the window in the tray for the whole of its remaining steps rather than for one. It
   // is cleared here the moment the chain stops on something a person has to answer.
-  if (chain?.status === "queued") void get().pump(chainId, { remote: drivenRemotely.has(chainId) });
-  else drivenRemotely.delete(chainId);
+  //
+  // A turn that failed or bounced is not re-sent on the spot: it waits (see `held`), and its own
+  // timer claims it when the wait is over.
+  if (chain?.status === "queued" && outcome.kind === "error") {
+    const attempts = get().stepsByChain[chainId]?.find((step) => step.id === stepId)?.attempts ?? 1;
+    hold(chainId, outcome.busy ? BUSY_RECHECK_MS : retryDelay(attempts), outcome.busy, get);
+  } else if (chain?.status === "queued") {
+    void get().pump(chainId, { remote: drivenRemotely.has(chainId) });
+  } else {
+    drivenRemotely.delete(chainId);
+  }
+}
+
+/** Parks a queued chain for `ms` and claims it when the wait is over — see `held`. The remote mark
+ * is left as it was, so a plan a phone is driving keeps going after the wait as it did before it. */
+function hold(chainId: string, ms: number, busy: boolean, get: () => ChainState): void {
+  release(chainId);
+  const timer = setTimeout(() => {
+    held.delete(chainId);
+    void get().pump(chainId, { remote: drivenRemotely.has(chainId) });
+  }, ms);
+  held.set(chainId, { until: Date.now() + ms, busy, timer });
+}
+
+/**
+ * (Re)arms one timer per automatic resume the user has asked for, across every workspace.
+ *
+ * Read whole from the backend each time — the rows are the consent, and the backend drops one on
+ * any move of its chain — so a timer here is only ever a reminder to go and look. When it fires,
+ * the row is read again and only a chain still armed and due is resumed: a plan resumed by hand and
+ * paused again for another reason must not be moved by a timer set for the first pause.
+ *
+ * Main window only, like everything else that dispatches.
+ */
+async function armResumes(get: () => ChainState): Promise<void> {
+  if (!isMainWindow()) return;
+  const scheduled = await listScheduledResumes().catch(() => null);
+  if (!scheduled) return;
+  const due = new Map(scheduled.map((entry) => [entry.chain_id, entry.resume_at * 1000]));
+  for (const [chainId, timer] of resumeTimers) {
+    if (due.has(chainId)) continue;
+    clearTimeout(timer);
+    resumeTimers.delete(chainId);
+  }
+  for (const [chainId, at] of due) {
+    const existing = resumeTimers.get(chainId);
+    if (existing !== undefined) clearTimeout(existing);
+    const wait = Math.min(Math.max(0, at - Date.now()), MAX_TIMER_MS);
+    resumeTimers.set(
+      chainId,
+      setTimeout(() => {
+        resumeTimers.delete(chainId);
+        void (async () => {
+          // A wait longer than a timer can hold is re-armed rather than taken early.
+          if (Date.now() < at - 1_000) return armResumes(get);
+          const still = await listScheduledResumes().catch(() => []);
+          const entry = still.find((candidate) => candidate.chain_id === chainId);
+          if (!entry || entry.resume_at * 1000 > Date.now() + 1_000) return;
+          await get().resume(chainId, { unattended: true });
+        })();
+      }, wait),
+    );
+  }
 }
 
 /**
@@ -1050,7 +1204,12 @@ if (isMainWindow()) {
         chain.project_id === projectId ||
         briefs === undefined ||
         briefs.some((brief) => brief.project_id === projectId && brief.status === "pending");
-      if (waiting) void store.pump(chain.id);
+      if (!waiting) continue;
+      // A chain waiting for this repository to free up is exactly what this turn settling is news
+      // for, so its wait ends now. A backoff after a failure is not: the provider has not got any
+      // better because somebody else's turn finished.
+      if (held.get(chain.id)?.busy) release(chain.id);
+      void store.pump(chain.id);
     }
   });
 

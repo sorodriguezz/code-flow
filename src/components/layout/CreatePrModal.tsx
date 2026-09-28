@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useDialog } from "../../lib/useFocusTrap";
 import { WorkItemPicker } from "./WorkItemPicker";
 import type { WorkItem } from "../../types/domain";
 import { CloudUpload, GitPullRequest, Loader2, X } from "lucide-react";
@@ -9,6 +10,7 @@ import { usePrStore } from "../../state/prStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
+import { describeGitError } from "../../lib/gitErrors";
 import { Select } from "../common/Select";
 import type { BranchInfo, Project, PullRequestSummary } from "../../types/domain";
 import { buttonClass } from "../common/Button";
@@ -121,7 +123,7 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
       await gitPushBranch(project.local_path, source);
       await reloadBranches();
     } catch (e) {
-      pushErrorToast(String(e));
+      pushErrorToast(describeGitError(e, t));
     } finally {
       setPublishing(false);
     }
@@ -185,23 +187,35 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
     }
   };
 
+  // A dialog's keyboard contract: Tab stays inside, and Escape closes it while it is the top
+  // layer. It had neither — Tab walked into the app behind the backdrop. Not while busy, and not
+  // once a title or a description has been written: this form's text is what the backdrop click is
+  // already kept from throwing away (see below), and an Escape pressed out of habit in a field
+  // would do exactly that. The X and Cancel stay the way out of a form with something in it.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const written = title.trim() !== "" || description.trim() !== "";
+  useDialog(panelRef, true, busy || written ? null : onClose);
+
   return (
     // No dismiss on the backdrop. This form holds typing the user cannot get back — a description
     // an AI run spent a minute drafting, most of all — and a click that lands beside a Select's
     // popover is indistinguishable from one aimed at it. The X and Cancel are the way out.
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
         className="max-h-full w-[520px] max-w-[92vw] overflow-auto rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
+          <h3 id={titleId} className="flex items-center gap-1.5 text-[15px] font-semibold">
             <GitPullRequest size={14} />
             {t("createPr.title")}
           </h3>
           {!busy && (
-            <button onClick={onClose} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
+            <button onClick={onClose} aria-label={t("common.close")} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
               <X size={15} />
             </button>
           )}

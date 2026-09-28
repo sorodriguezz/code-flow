@@ -84,6 +84,10 @@ export type Route =
   | { k: "chain"; workspaceId: string; chainId: string; title: string }
   | { k: "review"; projectId: string; runId: string; prId: number; iter: number }
   | { k: "job"; projectId: string; id: string; label: string }
+  /** One pipeline run and its jobs. The title is the run's name, for the first frame's app bar. */
+  | { k: "pipeline"; projectId: string; runId: string; title: string }
+  | { k: "stash"; repoPath: string }
+  | { k: "notifications" }
   | { k: "settings" }
   /** The workspace/project picker. Presented as a sheet rather than a push — see `isSheet`. */
   | { k: "scope" };

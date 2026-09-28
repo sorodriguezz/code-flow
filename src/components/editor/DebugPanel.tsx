@@ -1,58 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  ChevronDown,
-  ChevronRight,
-  CornerDownRight,
-  CornerRightUp,
-  Play,
-  Redo2,
-  Square,
-  Trash2,
-} from "lucide-react";
+import { CornerDownRight, CornerRightUp, Play, Redo2, Square, Trash2 } from "lucide-react";
 import { Select } from "../common/Select";
 import { Tooltip } from "../common/Tooltip";
 import { iconButtonClass } from "../common/Button";
 import { explorerHeadClass, explorerTitleClass, fieldClass, rowClass } from "../common/recipes";
 import { useDebugStore } from "../../state/debugStore";
 import { DEBUG_ADAPTERS, adapterById, adapterForFile } from "../../lib/debugAdapters";
-import type { DebugVariable } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
+import { BreakpointsSection, SectionHead, VariableRow, WatchSection } from "./DebugSections";
 
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
-}
-
-/** One variable row. Objects expand one level at a time, on click — a deep graph fetched eagerly
- * is slow to produce and almost entirely unread. */
-function VariableRow({ variable, depth }: { variable: DebugVariable; depth: number }) {
-  const expanded = useDebugStore((s) => (variable.object_id ? s.expanded[variable.object_id] : undefined));
-  const expand = useDebugStore((s) => s.expand);
-  const expandable = Boolean(variable.object_id);
-
-  return (
-    <>
-      <button
-        onClick={() => variable.object_id && void expand(variable.object_id)}
-        style={{ paddingLeft: depth * 12 + 6 }}
-        className="flex h-6 w-full items-center gap-1.5 rounded-md pr-2 text-left hover:bg-[var(--cf-hover)]"
-      >
-        {expandable ? (
-          expanded ? (
-            <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
-          ) : (
-            <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
-          )
-        ) : (
-          <span className="w-3 shrink-0" />
-        )}
-        <span className="shrink-0 font-mono text-[12px] text-[var(--cf-text)]">{variable.name}</span>
-        <span className="truncate font-mono text-[12px] text-[var(--cf-text-muted)]">{variable.value}</span>
-      </button>
-      {expanded?.map((child) => (
-        <VariableRow key={`${variable.object_id}-${child.name}`} variable={child} depth={depth + 1} />
-      ))}
-    </>
-  );
 }
 
 /** Run and Debug: launch a program, stop where you asked, and look around.
@@ -76,10 +34,12 @@ export function DebugPanel({
   const status = useDebugStore((s) => s.status);
   const frames = useDebugStore((s) => s.frames);
   const selectedFrame = useDebugStore((s) => s.selectedFrame);
-  const variables = useDebugStore((s) => s.variables);
+  const scopes = useDebugStore((s) => s.scopes);
+  const pauseReason = useDebugStore((s) => s.pauseReason);
+  const pauseDescription = useDebugStore((s) => s.pauseDescription);
+  const sessionDebugger = useDebugStore((s) => s.sessionDebugger);
   const consoleLines = useDebugStore((s) => s.console);
   const error = useDebugStore((s) => s.error);
-  const breakpoints = useDebugStore((s) => s.breakpoints);
   const [program, setProgram] = useState("");
   const [adapterId, setAdapterId] = useState("node");
   /** Overrides the preset's binary — for an adapter that isn't on PATH, or a custom one. */
@@ -111,7 +71,9 @@ export function DebugPanel({
   const running = status !== "idle";
   const paused = status === "paused";
   const store = useDebugStore.getState();
-  const breakpointCount = Object.values(breakpoints).reduce((sum, lines) => sum + lines.length, 0);
+  /** Whose exception filters the breakpoints list offers: the running session's debugger, else the
+   *  one picked to start with. */
+  const debuggerId = running && sessionDebugger ? sessionDebugger : adapterId;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -238,24 +200,24 @@ export function DebugPanel({
           </div>
         )}
 
-        {!running && (
-          <p className="mt-2 text-[11px] text-[var(--cf-text-faint)]">
-            {breakpointCount > 0 ? t("debug.breakpointCount", { n: breakpointCount }) : t("debug.noBreakpoints")}
-          </p>
-        )}
-        {error && <p className="mt-2 text-[11px] text-[var(--cf-danger)]">{error}</p>}
+        {error && <p className="mt-2 whitespace-pre-wrap text-[11px] text-[var(--cf-danger)]">{error}</p>}
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto px-2 pb-2">
         {paused && (
           <>
-            <p className="flex items-center px-1.5 pb-1.5 pt-3 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
-              {t("debug.callStack")}
-            </p>
+            {(pauseReason === "exception" || pauseReason === "promiseRejection") && (
+              <p className="px-1.5 pt-2 text-[11px] text-[var(--cf-danger)]" title={pauseDescription ?? undefined}>
+                {t("debug.pausedOnException")}
+                {pauseDescription ? ` · ${pauseDescription}` : ""}
+              </p>
+            )}
+            <SectionHead title={t("debug.callStack")} />
             {frames.map((frame, index) => (
               <button
                 key={frame.id}
                 onClick={() => {
+                  // Any frame, not only the top one: its own scopes, its own watches.
                   void store.selectFrame(index);
                   if (frame.file.includes("/") || frame.file.includes("\\")) onOpenFrame(frame.file, frame.line);
                 }}
@@ -268,18 +230,16 @@ export function DebugPanel({
               </button>
             ))}
 
-            <p className="flex items-center px-1.5 pb-1.5 pt-3 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
-              {t("debug.variables")}
-            </p>
-            {variables.length === 0 ? (
+            <SectionHead title={t("debug.variables")} />
+            {scopes.length === 0 ? (
               <p className="px-1.5 py-1 text-[11px] text-[var(--cf-text-faint)]">{t("debug.noVariables")}</p>
             ) : (
-              variables.map((variable) => (
-                <VariableRow key={variable.name} variable={variable} depth={0} />
-              ))
+              scopes.map((scope) => <VariableRow key={`${scope.name}-${scope.object_id}`} variable={scope} depth={0} />)
             )}
           </>
         )}
+        <WatchSection paused={paused} />
+        <BreakpointsSection repoPath={repoPath} debuggerId={debuggerId} onOpen={onOpenFrame} />
       </div>
 
       {/* The console: a log well, sunk a step below the panel it sits in. */}

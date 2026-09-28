@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "@xterm/xterm/css/xterm.css";
 import { Check, ClipboardPaste, Copy, TriangleAlert, X } from "lucide-react";
 import { resizeTerminal, writeTerminal } from "../../lib/tauri/commands";
@@ -15,6 +18,7 @@ import { currentPlatform, isMac } from "../../lib/platform";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ContextMenu } from "../common/ContextMenu";
+import { TerminalSearch } from "./TerminalSearch";
 
 /**
  * How far back you can scroll in one terminal. Stated rather than inherited: it used to be
@@ -68,11 +72,22 @@ const COPIED_BADGE_MS = 1200;
  * all paste on, so it is the one a Windows user presses; unhandled, xterm sent it to the shell as
  * `^V`, which read as "paste does nothing" (reported from the CLI sign-in dialog, where the code has
  * to be pasted). Linux keeps `Ctrl+V` for the shell, as its terminals do.
+ *
+ * **Find is here too** — ⌘F on macOS, `Ctrl+F` elsewhere, VS Code's chords for its terminal — because
+ * xterm takes one custom key handler per terminal, and a second one would replace this one.
  */
-function clipboardKeys(term: Terminal, actions: { copy: () => boolean; paste: () => void }) {
+function clipboardKeys(term: Terminal, actions: { copy: () => boolean; paste: () => void; find: () => void }) {
   const windows = currentPlatform() === "windows";
   term.attachCustomKeyEventHandler((event) => {
     if (event.type !== "keydown" || event.altKey) return true;
+    const findChord = isMac()
+      ? event.metaKey && !event.ctrlKey && !event.shiftKey
+      : event.ctrlKey && !event.metaKey && !event.shiftKey;
+    if (findChord && event.key.toLowerCase() === "f") {
+      actions.find();
+      event.preventDefault();
+      return false;
+    }
     if (windows && event.ctrlKey && !event.shiftKey && !event.metaKey && event.key.toLowerCase() === "v") {
       actions.paste();
       event.preventDefault();
@@ -217,6 +232,20 @@ export function TerminalPane({
    */
   const [renderer, setRenderer] = useState<"webgl" | "dom" | null>(null);
   const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The scrollback search, built with the terminal. */
+  const searchRef = useRef<SearchAddon | null>(null);
+  /** Whether the find box is open; `findFocus` is bumped by every ⌘F, to take the focus back to it. */
+  const [findOpen, setFindOpen] = useState(false);
+  const [findFocus, setFindFocus] = useState(0);
+  const dark = useThemeStore((s) => s.resolved === "dark");
+  const openFind = useCallback(() => {
+    setFindOpen(true);
+    setFindFocus((n) => n + 1);
+  }, []);
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    termRef.current?.focus();
+  }, []);
 
   /**
    * Flashes the badge.
@@ -321,15 +350,31 @@ export function TerminalPane({
       // and the menu acts on what is on screen.
       rightClickSelectsWord: false,
       disableStdin: readOnlyRef.current,
+      // Search highlights every match through xterm's decoration API, which it still files under
+      // "proposed" and refuses without this.
+      allowProposedApi: true,
     });
     themedAs.current = `${scheme.id}:${glass}`;
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+    const searchAddon = new SearchAddon({ highlightLimit: 2000 });
+    term.loadAddon(searchAddon);
+    searchRef.current = searchAddon;
+    // A URL a command printed is a link: ⌘/Ctrl-click opens it in the browser. Only http(s) — the
+    // addon's own pattern matches nothing else, and the check says so again where it matters, at
+    // the moment something is about to be opened.
+    term.loadAddon(
+      new WebLinksAddon((event, uri) => {
+        if (!/^https?:\/\//i.test(uri)) return;
+        event.preventDefault();
+        void openUrl(uri).catch((e: unknown) => pushErrorToast(String(e)));
+      }),
+    );
     term.open(containerRef.current);
     termRef.current = term;
     fitRef.current = fitAddon;
     if (autoFocusRef.current) term.focus();
-    clipboardKeys(term, { copy: copySelection, paste: pasteClipboard });
+    clipboardKeys(term, { copy: copySelection, paste: pasteClipboard, find: openFind });
 
     // Before `onData` is wired and before the output listener is attached, so the replay can never
     // interleave with what the live shell is saying — the whole of the past, then the present.
@@ -458,6 +503,7 @@ export function TerminalPane({
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      searchRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -748,9 +794,14 @@ export function TerminalPane({
         <div ref={containerRef} className="h-full w-full overflow-hidden" />
       </div>
 
+      {findOpen && searchRef.current && (
+        <TerminalSearch addon={searchRef.current} dark={dark} focusToken={findFocus} onClose={closeFind} />
+      )}
+
       {/* Only when the GPU renderer could not be had. Top-right rather than bottom-right, which the
-          copy badge owns, and it stays put: this is a condition, not an event. */}
-      {renderer === "dom" && (
+          copy badge owns, and it stays put: this is a condition, not an event — except under the
+          find box, which takes the same corner while it is open. */}
+      {renderer === "dom" && !findOpen && (
         <div
           title={t("terminal.softwareRendererHint")}
           className="pointer-events-none absolute right-3 top-3 z-10 flex items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-1.5 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] opacity-70"

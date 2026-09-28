@@ -100,6 +100,24 @@ export function sessionsForLanguage(language: string): Session[] {
   return [...sessions.values()].filter((session) => session.server.languages.includes(language));
 }
 
+/**
+ * The languages some running server declared `capability` for, sorted — what the rename and
+ * formatting providers are registered against.
+ *
+ * Those two are the providers Monaco does not merge: it picks *one* (the first formatter, the first
+ * rename answer) and uses it. Registered for every claimed language, the LSP formatter outranked
+ * Monaco's own TypeScript and CSS formatters in any repository with Tailwind in it — Tailwind claims
+ * both languages and formats neither — and ⇧⌥F did nothing at all.
+ */
+export function languagesServedWith(capability: string): string[] {
+  const languages = new Set<string>();
+  for (const session of sessions.values()) {
+    if (!session.capabilities?.[capability]) continue;
+    for (const language of session.server.languages) languages.add(language);
+  }
+  return [...languages].sort();
+}
+
 /** Whether any server is holding this file and can be asked about it — the guard every provider
  *  opens with, and what `goToDefinition` checks before falling back to its own ranked guess. */
 export function lspKnows(relPath: string): boolean {
@@ -324,8 +342,18 @@ export function syncClose(relPath: string): void {
  * and the interesting answer may come from either. A server that rejects or times out contributes
  * nothing rather than failing the call — one slow server must not take the completion list with it.
  */
-export async function askAll<T>(language: string, method: string, params: unknown): Promise<T[]> {
-  const targets = sessionsForLanguage(language);
+export async function askAll<T>(
+  language: string,
+  method: string,
+  params: unknown,
+  /** Only the servers that declared this capability in their `initialize` answer — `renameProvider`,
+   *  `referencesProvider`. A server that never offered the method answers it with an error at best
+   *  and a hang at worst, and there is no reason to find out which. */
+  capability?: string,
+): Promise<T[]> {
+  const targets = sessionsForLanguage(language).filter(
+    (session) => !capability || Boolean(session.capabilities?.[capability]),
+  );
   // Annotated rather than inferred: `Promise.all` widens through `Awaited<T>`, which for an
   // unconstrained `T` is not the same type as `T` and makes the filter's predicate unprovable.
   const answers: (T | null)[] = await Promise.all(

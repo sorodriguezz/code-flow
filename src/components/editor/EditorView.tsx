@@ -29,8 +29,17 @@ import { AnchorsPanel } from "./AnchorsPanel";
 import { BookmarksPanel } from "./BookmarksPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
-import { clearFullDiffCache, EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
+import {
+  clearFullDiffCache,
+  EditorPane,
+  type DiskAction,
+  type OpenTab,
+  type RevealRequest,
+  type ViewMode,
+} from "./EditorPane";
 import { EditorStatusLine } from "./EditorStatusLine";
+import { EditorBottomPanel } from "./EditorBottomPanel";
+import { formatModel } from "./formatDocument";
 import { ChangesPanel } from "../git/ChangesPanel";
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
 import { setDefinitionContext } from "../../lib/goToDefinition";
@@ -47,9 +56,40 @@ import {
   togglePinInGroups,
   type EditorGroup,
 } from "../../lib/editorGroups";
-import { copyIntoRepo, readFileText, writeFileBytes, writeFileText } from "../../lib/tauri/commands";
+import {
+  copyIntoRepo,
+  readEditorFile,
+  statEditorFile,
+  writeEditorFile,
+  writeFileBytes,
+  type DiskVersion,
+} from "../../lib/tauri/commands";
 import { freeScratchPath, isScratchPath, scratchName, scratchPath } from "../../lib/scratchTabs";
-import { readDrafts, writeDrafts } from "../../lib/editorDrafts";
+import { clearDrafts, readDrafts, writeDrafts } from "../../lib/editorDrafts";
+import {
+  describePath,
+  failedLoad,
+  isChangedOnDisk,
+  isWritable,
+  loadedFrom,
+  sameLoadedState,
+  sweepStep,
+  type LoadedFile,
+} from "../../lib/editorFiles";
+import { notifyUnsavedChanged, registerUnsavedProvider, type UnsavedItem } from "../../lib/unsavedWork";
+import { applyTextEdits, registerWorkspaceEditHost } from "../../lib/workspaceEdit";
+import { formatWithPrettier, prettierCanFormat } from "../../lib/formatting";
+import { useProblemsStore } from "../../state/problemsStore";
+import { useEditorPanelStore } from "../../state/editorPanelStore";
+import { useEditorFormatStore } from "../../state/editorFormatStore";
+import { isNotebookPath, registerNotebookHost } from "../../lib/notebook/host";
+import { notebookActions } from "../../state/notebookStore";
+import {
+  editorAfterSwitch,
+  isDirtyBuffer as isDirtyTab,
+  parkedAfterSwitch,
+  type ParkedEditor as ParkedEditorOf,
+} from "../../lib/parkedEditors";
 import { onRepoFsChanged } from "../../lib/tauri/events";
 import { isDbmlPath, openDbmlInDiagrams } from "../../lib/dbmlBridge";
 import { findTheme } from "../../lib/codeThemes";
@@ -63,7 +103,7 @@ import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useEditorCommandStore } from "../../state/editorCommandStore";
 import type { TabDrag, TabDropTarget } from "../../state/tabDragStore";
 import { useTreeDragStore } from "../../state/treeDragStore";
-import { confirmAction } from "../../state/confirmStore";
+import { chooseAction, confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -74,7 +114,7 @@ import { explorerClass, inspectorClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import type { ShortcutId } from "../../lib/shortcuts";
-import type { FileDiffInfo } from "../../types/domain";
+import type { FileDiffInfo, Project } from "../../types/domain";
 
 /**
  * How long after the last keystroke the unsaved buffers are journalled.
@@ -91,6 +131,10 @@ const TREE_MAX = 480;
  * path and three action buttons, and the commit box under them has to fit a message. */
 const CHANGES_MIN = 240;
 const CHANGES_MAX = 560;
+/** The Problems / results panel under the groups: a few rows at least, and never more than the
+ *  code it sits under could spare. */
+const PANEL_MIN = 96;
+const PANEL_MAX = 640;
 /** The shut dock: one 28px button with a little air — the same width as the activity rail on the
  * other side of the code, so the two edges of the editor read as a pair. */
 const RAIL_W = 40;
@@ -128,6 +172,64 @@ const GROUP_MIN = 320;
  * split is a worse way of showing nothing.
  */
 const ROW_MIN = 140;
+
+/** A tab for a file whose text is still on its way. */
+function loadingTab(path: string, preview: boolean): OpenTab {
+  return {
+    path,
+    content: "",
+    originalContent: "",
+    loading: true,
+    viewMode: "code",
+    preview,
+    compare: null,
+    version: null,
+    notice: null,
+    readOnly: null,
+    diskChanged: false,
+    diskText: null,
+  };
+}
+
+/**
+ * A read laid over a tab: the buffer becomes what is on disk and every mark of a difference goes. A
+ * diff that was comparing the buffer against the disk falls back to the code — there is nothing
+ * left between the two to show.
+ */
+function withLoaded(tab: OpenTab, loaded: LoadedFile): OpenTab {
+  return {
+    ...tab,
+    content: loaded.content,
+    originalContent: loaded.content,
+    version: loaded.version,
+    notice: loaded.notice,
+    readOnly: loaded.readOnly,
+    loading: false,
+    diskChanged: false,
+    diskText: null,
+    viewMode: tab.diskText !== null && tab.viewMode === "diff" ? "code" : tab.viewMode,
+  };
+}
+
+/**
+ * A project's editor, set aside when the window moved to another project with unsaved tabs in it —
+ * see `lib/parkedEditors` for the rules.
+ *
+ * Switching projects used to empty the editor outright — dirty buffers included, without a word, and
+ * with the draft journal's pending write cancelled by the same switch. The switch cannot be refused
+ * from here: it arrives from the sidebar, the palette, a shortcut, a PR link, a workspace change, all
+ * through the workspace store. So nothing is thrown away when it happens. The tabs are parked, exactly
+ * as they were, the journal is written at once, and the user is asked right after: save them all,
+ * discard them, or cancel — which takes the window back to where the work is, and the parked editor
+ * comes back with it, groups, splits and undo history intact.
+ */
+type ParkedEditor = ParkedEditorOf<OpenTab, Project>;
+
+/**
+ * How a save went. `conflict`: the file changed on disk since it was read, and nothing was written.
+ * `skipped`: not a writable buffer — a notice, read-only text, a tab still loading.
+ */
+type SaveOutcome = "saved" | "clean" | "conflict" | "failed" | "skipped";
 
 export function EditorView() {
   const t = useT();
@@ -184,6 +286,8 @@ export function EditorView() {
   const clearPendingEditorPath = useUiStore((s) => s.clearPendingEditorPath);
   const treeWidth = useLayoutStore((s) => s.sizes.editorTreeWidth);
   const changesWidth = useLayoutStore((s) => s.sizes.editorChangesWidth);
+  const panelHeight = useLayoutStore((s) => s.sizes.editorPanelHeight);
+  const panelOpen = useEditorPanelStore((s) => s.open);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   /** Files with something uncommitted, counted the way the Changes tab counts them — one per
@@ -203,6 +307,13 @@ export function EditorView() {
   const [groups, setGroups] = useState<EditorGroup[]>(() => [newGroup()]);
   const [activeGroupId, setActiveGroupId] = useState<string>(() => groups[0].id);
   const [saving, setSaving] = useState(false);
+  /** Editors set aside in projects this window has left with unsaved tabs — see `ParkedEditor`.
+   *  Keyed by the project's local path, the key the draft journal files them under too. */
+  const [parked, setParked] = useState<Record<string, ParkedEditor>>({});
+  /** A project just left with unsaved tabs, waiting for the question the switch owes the user. */
+  const [leaving, setLeaving] = useState<{ repoPath: string; to: string | null } | null>(null);
+  /** Bumped when a parked editor comes back — see the effect that re-reads its unfinished tabs. */
+  const [restoredParked, setRestoredParked] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<
     "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons"
@@ -258,6 +369,18 @@ export function EditorView() {
   // re-registered every time the open project changes.
   const projectRef = useRef(project);
   projectRef.current = project;
+  const parkedRef = useRef(parked);
+  parkedRef.current = parked;
+  /**
+   * The save in flight per path. A second ⌘S before the first has answered carried the version the
+   * first one was about to replace, and the backend — rightly — refused it as a file changed on disk:
+   * by our own hand. Saves of one file now queue behind each other, and the disk sweep leaves a file
+   * alone while one is running.
+   */
+  const savesInFlight = useRef(new Map<string, Promise<SaveOutcome>>());
+  /** Set once the user chose to quit without saving: the journal is cleared then, and nothing may
+   *  write it again in the moment before the process ends. */
+  const discardedRef = useRef(false);
   /** Numbers this view's own requests to the explorer, which share a channel with the keybinding
    * store's — see the guard in `FileTree`. */
   const dropNonce = useRef(0);
@@ -317,6 +440,7 @@ export function EditorView() {
     if (!project) return;
     const repoPath = project.local_path;
     const id = window.setTimeout(() => {
+      if (discardedRef.current) return;
       void writeDrafts(
         repoPath,
         dirtyBuffers.map((buffer) => ({ path: buffer.path, content: buffer.content, at: Date.now() })),
@@ -355,6 +479,37 @@ export function EditorView() {
     setTabs((prev) => prev.map((tab) => (tab.path === path ? { ...tab, ...patch } : tab)));
   }, []);
 
+  /** A keystroke in a pane. Refused for a tab that is not a writable buffer — read-only text is
+   *  read-only in Monaco too, so this is the backstop, not the gate. */
+  const changeTab = useCallback((path: string, value: string) => {
+    setTabs((prev) =>
+      prev.map((tab) => (tab.path === path && isWritable(tab) ? { ...tab, content: value, preview: false } : tab)),
+    );
+  }, []);
+
+  /**
+   * Reads a file into its tab — what opening one does, and what a parked editor coming back does for
+   * a tab it left in the middle of a read.
+   *
+   * What came back decides what the tab is: text to edit, or a notice — an error, a binary file, an
+   * image, a file too large — with no buffer in it. An unreadable file used to open as an editable tab
+   * *holding the error message*, one keystroke and a ⌘S away from writing that message over the file
+   * it could not read.
+   */
+  const readInto = useCallback(async (path: string) => {
+    const current = projectRef.current;
+    if (!current) return;
+    let loaded: LoadedFile;
+    try {
+      loaded = loadedFrom(await readEditorFile(current.local_path, path));
+    } catch (e) {
+      loaded = failedLoad(e);
+    }
+    // Another project's tab of the same name is not this file.
+    if (projectRef.current?.local_path !== current.local_path) return;
+    setTabs((prev) => prev.map((tab) => (tab.path === path ? withLoaded(tab, loaded) : tab)));
+  }, []);
+
   const openFile = useCallback(
     async (path: string, opts?: { pin?: boolean; groupId?: string }) => {
       if (!project) return;
@@ -375,22 +530,12 @@ export function EditorView() {
         // An evicted preview only leaves the registry if no other group was showing it too.
         const kept = outcome.evictedFully ? prev.filter((tab) => tab.path !== outcome.evicted) : prev;
         if (alreadyOpen) return pin ? kept.map((tab) => (tab.path === path ? { ...tab, preview: false } : tab)) : kept;
-        return [
-          ...kept,
-          { path, content: "", originalContent: "", loading: true, viewMode: "code", preview: !pin, compare: null },
-        ];
+        return [...kept, loadingTab(path, !pin)];
       });
       if (alreadyOpen) return;
-
-      try {
-        const text = await readFileText(project.local_path, path);
-        patchTab(path, { content: text, originalContent: text, loading: false });
-      } catch (e) {
-        const message = tRef.current("editor.failedToOpen", { error: String(e) });
-        patchTab(path, { content: message, originalContent: message, loading: false });
-      }
+      await readInto(path);
     },
-    [project, patchTab],
+    [project, readInto],
   );
 
   /**
@@ -413,15 +558,7 @@ export function EditorView() {
     const outcome = openInGroups(groupsRef.current, targetId, path, true, () => false);
     setGroups(outcome.groups);
     setActiveGroupId(targetId);
-    const fresh: OpenTab = {
-      path,
-      content,
-      originalContent: content,
-      loading: false,
-      viewMode: "code",
-      preview: false,
-      compare: null,
-    };
+    const fresh: OpenTab = { ...loadingTab(path, false), content, originalContent: content, loading: false };
     setTabs((prev) =>
       prev.some((tab) => tab.path === path)
         ? prev.map((tab) => (tab.path === path ? fresh : tab))
@@ -438,6 +575,16 @@ export function EditorView() {
     if (viewCount <= 1 && tab.content !== tab.originalContent) {
       const ok = await confirmAction(
         tRef.current("editor.closeDirtyConfirm", { name: path.split("/").pop() ?? path }),
+        true,
+      );
+      if (!ok) return;
+    }
+    // Closing a notebook stops its kernel (see the effect over `notebookPaths`), and one that is
+    // still running something is asked about first.
+    const repoPath = projectRef.current?.local_path;
+    if (viewCount <= 1 && repoPath && isNotebookPath(path) && notebookActions.isBusy(repoPath, path)) {
+      const ok = await confirmAction(
+        tRef.current("notebook.closeBusyConfirm", { name: path.split("/").pop() ?? path }),
         true,
       );
       if (!ok) return;
@@ -556,10 +703,14 @@ export function EditorView() {
       if (cancelled || drafts.length === 0) return;
       const restored: string[] = [];
       for (const draft of drafts) {
-        // What the file holds now — which may have moved on, or may already be this exact text.
-        const onDisk = await readFileText(repoPath, draft.path).catch(() => null);
+        // Already open: a parked editor came back with this very buffer in it (see `ParkedEditor`),
+        // and re-applying the journal over it would at best change nothing and announce it anyway.
+        if (tabsRef.current.some((tab) => tab.path === draft.path)) continue;
+        // What the file holds now — which may have moved on, or may already be this exact text. A
+        // file that is no longer text is not one a text draft can be laid over.
+        const onDisk = await readEditorFile(repoPath, draft.path).catch(() => null);
         if (cancelled) return;
-        if (onDisk === null || onDisk === draft.content) continue;
+        if (onDisk?.kind !== "text" || onDisk.text === draft.content) continue;
         await openFile(draft.path, { pin: true });
         if (cancelled) return;
         // `originalContent` stays whatever the file holds, so the tab is dirty against disk and the
@@ -619,38 +770,304 @@ export function EditorView() {
     }
   }, []);
 
-  const save = useCallback(
-    async (path: string) => {
+  /**
+   * `setTabs`, with `tabsRef` brought up to date at once instead of at the next render — for writes
+   * whose follow-up can run before React renders. A save queued behind another reads the version the
+   * first one just wrote; the render's copy would still hold the old one, and the disk would refuse
+   * the second save as a change nobody else made.
+   */
+  const commitTabs = useCallback((update: (prev: OpenTab[]) => OpenTab[]) => {
+    tabsRef.current = update(tabsRef.current);
+    setTabs(update);
+  }, []);
+
+  /** The question for a file that changed under its buffer. A ref because `save` asks it and the
+   *  question's answers call `save` back — see `resolveDiskConflict`, assigned below. */
+  const diskQuestionRef = useRef<(path: string) => void>(() => {});
+
+  const saveNow = useCallback(
+    async (path: string, force: boolean, interactive: boolean): Promise<SaveOutcome> => {
+      // A save that waited behind another can run after the window moved to another project, where
+      // `tabsRef` holds that project's tabs — and a tab of the same name there is not this file.
+      if (!project || projectRef.current?.local_path !== project.local_path) return "skipped";
       const tab = tabsRef.current.find((item) => item.path === path);
-      if (!project || !tab) return;
+      if (!tab) return "skipped";
       // Before the "nothing changed" check, not after it: a tree fresh out of "Generate Tree" is clean,
-      // and saving it as a file is exactly what someone pressing ⌘S on it wants.
+      // and saving it as a file is exactly what someone pressing ⌘S on it wants. It needs a person to
+      // pick where, so a save nobody is watching (the quit's "save all") cannot do it.
       if (isScratchPath(path)) {
+        if (!interactive) return "failed";
         await saveScratchAs(project.local_path, path, tab.content);
-        return;
+        return "saved";
       }
-      if (tab.content === tab.originalContent) return;
+      // A notice or read-only text has nothing of the user's to write — and writing a decoded Latin-1
+      // file back as UTF-8 would change every accent in it.
+      if (tab.loading || !isWritable(tab)) return "skipped";
+      if (tab.content === tab.originalContent) return "clean";
       const text = tab.content;
       setSaving(true);
       try {
-        await writeFileText(project.local_path, path, text);
+        // Checked against the version the buffer started from, so a file an agent, a pull or a
+        // replace rewrote meanwhile is not silently overwritten. `force` is the user's "overwrite".
+        const version = await writeEditorFile(project.local_path, path, text, force ? null : tab.version);
         // The language servers are told too. `client_capabilities` asks for `didSave` and this is
         // the only place that can send it — without it `checkOnSave`, which the rust-analyzer entry
         // declares twice, never fires: the user gets one round of real cargo errors on workspace
         // load and never another, however often they save. gopls and Ruff lose their on-save pass
         // the same way.
         syncSave(path, text);
-        setTabs((prev) => prev.map((item) => (item.path === path ? { ...item, originalContent: text } : item)));
+        commitTabs((prev) =>
+          prev.map((item) =>
+            item.path === path
+              ? {
+                  ...item,
+                  originalContent: text,
+                  version,
+                  diskChanged: false,
+                  diskText: null,
+                  viewMode: item.diskText !== null && item.viewMode === "diff" ? "code" : item.viewMode,
+                }
+              : item,
+          ),
+        );
         // The Changes tab (and any conflict-resolution flow) reads git status from
         // repoStore, which has no way to know a file changed on disk outside of a git
         // command — refresh it explicitly so a save here shows up immediately there.
         void useRepoStore.getState().refreshStatus();
+        return "saved";
+      } catch (e) {
+        if (isChangedOnDisk(e)) {
+          commitTabs((prev) => prev.map((item) => (item.path === path ? { ...item, diskChanged: true } : item)));
+          if (interactive) diskQuestionRef.current(path);
+          return "conflict";
+        }
+        // Said out loud, and the buffer stays dirty: a save that failed quietly — a full disk, a
+        // permission, a folder deleted under the file — looked exactly like one that worked.
+        if (interactive) {
+          pushErrorToast(tRef.current("editor.saveFailed", { name: describePath(path).name, error: String(e) }));
+        }
+        return "failed";
       } finally {
         setSaving(false);
       }
     },
-    [project, saveScratchAs],
+    [project, saveScratchAs, commitTabs],
   );
+
+  /**
+   * "Formatear al guardar": the buffer formatted — the repository's Prettier, else the language's
+   * formatter (`formatDocument`) — right before the checked save below writes it. Only a dirty,
+   * writable file of the project: formatting a clean file on ⌘S would turn a save that writes
+   * nothing into one that rewrites the file.
+   */
+  const formatBeforeSave = useCallback(
+    async (path: string) => {
+      if (!useEditorFormatStore.getState().formatOnSave) return;
+      const current = projectRef.current;
+      const tab = tabsRef.current.find((item) => item.path === path);
+      if (!current || !tab || tab.loading || !isWritable(tab) || !isDirtyTab(tab)) return;
+      // A scratch buffer is no file to be formatted as, and a notebook is written in Jupyter's own
+      // layout (see `lib/notebook`), which a JSON formatter would rewrite on every save.
+      if (isScratchPath(path) || isNotebookPath(path)) return;
+      try {
+        const model = monaco.editor.getModel(monaco.Uri.parse(modelPathFor(current, path)));
+        let text: string | null = null;
+        if (model) {
+          await formatModel(model, current.local_path, path);
+          if (!model.isDisposed()) text = model.getValue();
+        } else if (prettierCanFormat(path)) {
+          // A tab that has never been on screen has no model, and a bare text is Prettier's alone.
+          const outcome = await formatWithPrettier(current.local_path, path, tab.content);
+          if (outcome.kind === "formatted") text = outcome.text;
+        }
+        if (text === null || projectRef.current?.local_path !== current.local_path) return;
+        const formatted = text;
+        // Into the tab now rather than at the next render: the save that follows reads `tabsRef`.
+        // Without a model, only over the text that was formatted — typing since then wins.
+        commitTabs((prev) =>
+          prev.map((item) =>
+            item.path === path && isWritable(item) && (model !== null || item.content === tab.content)
+              ? { ...item, content: formatted }
+              : item,
+          ),
+        );
+      } catch {
+        // A formatter that failed has said so (`formatDocument`); the save goes ahead as typed.
+      }
+    },
+    [commitTabs],
+  );
+
+  /** Saves one file — after any save of it already running, see `savesInFlight`. `interactive:
+   *  false` is a save nobody is watching (the quit's "save all"): it reports, it never asks.
+   *  `format` defaults to `interactive`: the quit's save writes what is there, and an overwrite of a
+   *  file that changed on disk writes exactly the buffer the user chose to keep. */
+  const save = useCallback(
+    async (
+      path: string,
+      opts: { force?: boolean; interactive?: boolean; format?: boolean } = {},
+    ): Promise<SaveOutcome> => {
+      const before = savesInFlight.current.get(path);
+      const interactive = opts.interactive ?? true;
+      const run = (async () => {
+        if (before) await before.catch(() => "failed");
+        if (!opts.force && (opts.format ?? interactive)) await formatBeforeSave(path);
+        return saveNow(path, opts.force ?? false, interactive);
+      })();
+      savesInFlight.current.set(path, run);
+      try {
+        return await run;
+      } finally {
+        if (savesInFlight.current.get(path) === run) savesInFlight.current.delete(path);
+      }
+    },
+    [saveNow, formatBeforeSave],
+  );
+
+  /**
+   * Reads a tab's file again and makes the tab whatever came back: a notice's Retry, "open anyway"
+   * (`allowLarge`), "reload from disk" — which is the buffer thrown away, on purpose — and the disk
+   * sweep's refresh of a clean tab (`onlyIfClean`, which never touches unsaved edits).
+   */
+  const reloadTab = useCallback(
+    async (path: string, opts: { allowLarge?: boolean; onlyIfClean?: boolean } = {}) => {
+      const current = projectRef.current;
+      const tab = tabsRef.current.find((item) => item.path === path);
+      if (!current || !tab || isScratchPath(path)) return;
+      // A notice has nothing on screen worth keeping while the read runs; text stays where it is
+      // until the new text lands.
+      if (tab.notice && !opts.onlyIfClean) patchTab(path, { loading: true });
+      let loaded: LoadedFile;
+      try {
+        loaded = loadedFrom(
+          await readEditorFile(current.local_path, path, opts.allowLarge ?? tab.readOnly?.kind === "large"),
+        );
+      } catch (e) {
+        if (tab.notice) {
+          loaded = failedLoad(e);
+        } else {
+          // Text stays as it is — a file deleted since is a reason to keep the buffer, not to lose it.
+          if (!opts.onlyIfClean) pushErrorToast(String(e));
+          return;
+        }
+      }
+      // The window moved to another project while this was read, whose tab of the same name is not
+      // this file.
+      if (projectRef.current?.local_path !== current.local_path) return;
+      const latest = tabsRef.current.find((item) => item.path === path);
+      if (!latest) return;
+      if (opts.onlyIfClean && (isDirtyTab(latest) || sameLoadedState(latest, loaded))) return;
+      commitTabs((prev) =>
+        prev.map((item) =>
+          item.path === path && !(opts.onlyIfClean && isDirtyTab(item)) ? withLoaded(item, loaded) : item,
+        ),
+      );
+    },
+    [patchTab, commitTabs],
+  );
+
+  /** "Compare": the file as it is on disk now, beside the buffer, in the diff view. */
+  const compareWithDisk = useCallback(
+    async (path: string) => {
+      const current = projectRef.current;
+      if (!current) return;
+      let text: string | null;
+      try {
+        const file = await readEditorFile(current.local_path, path);
+        text = file.kind === "text" || file.kind === "legacy" ? file.text : null;
+      } catch (e) {
+        // Deleted since it was read: the disk side is nothing, which is exactly what to show.
+        const now = await statEditorFile(current.local_path, path, null).catch(() => undefined);
+        if (now !== null) {
+          pushErrorToast(String(e));
+          return;
+        }
+        text = "";
+      }
+      if (text === null) {
+        pushErrorToast(tRef.current("editor.diskCompareUnavailable"));
+        return;
+      }
+      if (projectRef.current?.local_path !== current.local_path) return;
+      patchTab(path, { diskText: text, viewMode: "diff", compare: null, diskChanged: true });
+    },
+    [patchTab],
+  );
+
+  const diskAction = useCallback(
+    (path: string, action: DiskAction) => {
+      if (action === "overwrite") void save(path, { force: true });
+      else if (action === "reload") void reloadTab(path);
+      else void compareWithDisk(path);
+    },
+    [save, reloadTab, compareWithDisk],
+  );
+
+  /**
+   * What a save the disk refused asks: compare the two, take the disk's copy (the buffer goes), or
+   * write the buffer over it. Cancel leaves both as they are — the tab keeps its "changed on disk"
+   * strip, with the same three answers on it for later.
+   */
+  const resolveDiskConflict = useCallback(
+    async (path: string) => {
+      const askedIn = projectRef.current?.local_path;
+      const answer = await chooseAction({
+        message: tRef.current("editor.diskConflict", { name: describePath(path).name }),
+        danger: true,
+        choices: [
+          { id: "compare", label: tRef.current("editor.diskCompare"), variant: "primary" },
+          { id: "reload", label: tRef.current("editor.diskReload") },
+          { id: "overwrite", label: tRef.current("editor.diskOverwrite"), variant: "danger" },
+        ],
+      });
+      // Answered after the window moved to another project: the tab is parked with its strip, and
+      // the answer can wait for it — acting now would act on the other project's file of this name.
+      if (projectRef.current?.local_path !== askedIn) return;
+      if (answer === "compare" || answer === "reload" || answer === "overwrite") diskAction(path, answer);
+    },
+    [diskAction],
+  );
+  diskQuestionRef.current = (path) => void resolveDiskConflict(path);
+
+  /**
+   * "Guardar todo": every unsaved tab of this project — notebooks included, whose tab text *is* the
+   * notebook — through the same checked save ⌘S uses, formatting and all.
+   *
+   * Nothing is asked per file on the way, so one conflict does not stop the rest: a file that
+   * changed on disk is left unsaved with its strip on (Comparar / Recargar / Sobrescribir), and the
+   * files that ended up that way are listed together once everything else is written. Scratch
+   * buffers are left out — their save is a Save As, a dialog per tab — and so is read-only text,
+   * which has nothing of the user's to write.
+   */
+  const saveAll = useCallback(async () => {
+    const current = projectRef.current;
+    if (!current) return;
+    const dirty = tabsRef.current.filter((tab) => isDirtyTab(tab) && isWritable(tab) && !isScratchPath(tab.path));
+    if (dirty.length === 0) return;
+    const conflicts: string[] = [];
+    const failed: string[] = [];
+    for (const tab of dirty) {
+      const outcome = await save(tab.path, { interactive: false, format: true });
+      if (outcome === "conflict") conflicts.push(tab.path);
+      else if (outcome === "failed") failed.push(tab.path);
+    }
+    if (projectRef.current?.local_path !== current.local_path) return;
+    if (failed.length > 0) pushErrorToast(tRef.current("editor.saveAllFailed", { names: failed.join(", ") }));
+    if (conflicts.length === 0) return;
+    const answer = await chooseAction({
+      message: tRef.current("editor.saveAllConflicts", { n: conflicts.length }),
+      items: conflicts,
+      danger: true,
+      choices: [
+        { id: "review", label: tRef.current("editor.saveAllReview"), variant: "primary" },
+        { id: "overwrite", label: tRef.current("editor.saveAllOverwrite"), variant: "danger" },
+      ],
+    });
+    if (projectRef.current?.local_path !== current.local_path) return;
+    // Review: the first of them, whose strip holds the three answers — the others keep theirs.
+    if (answer === "review") void openFile(conflicts[0], { pin: true });
+    else if (answer === "overwrite") for (const path of conflicts) await save(path, { force: true, interactive: false });
+  }, [save, openFile]);
 
   /**
    * Hands a `.dbml` file to the Diagrams app as a diagram that stays in step with it.
@@ -671,7 +1088,9 @@ export function EditorView() {
         useWorkspaceStore.getState().workspaceOfProject(current.id) ??
         useWorkspaceStore.getState().activeWorkspaceId;
       if (!workspaceId) return;
-      await save(path);
+      // Not over a save that did not happen: the diagram would open on the older text on disk.
+      const saved = await save(path);
+      if (saved === "conflict" || saved === "failed") return;
       await openDbmlInDiagrams({ workspaceId, projectId: current.id, relPath: path });
     },
     [save],
@@ -707,13 +1126,27 @@ export function EditorView() {
   // Otherwise switching projects leaves the previous repo's files open — everything else
   // (branch, file tree, status) points at the new repo. Done during render rather than in
   // an effect so the editor never paints one repo's tabs against another's tree.
-  const [lastProjectPath, setLastProjectPath] = useState<string | null>(project?.local_path ?? null);
-  if ((project?.local_path ?? null) !== lastProjectPath) {
-    setLastProjectPath(project?.local_path ?? null);
-    setTabs([]);
-    const fresh = newGroup();
-    setGroups([fresh]);
-    setActiveGroupId(fresh.id);
+  //
+  // A project left with unsaved tabs is parked rather than emptied, and asked about right after (the
+  // `leaving` effect below) — see `ParkedEditor` for why it cannot be asked before. A project coming
+  // back gets its parked editor back, exactly as it was left.
+  const [lastProject, setLastProject] = useState<Project | null>(project);
+  const projectPath = project?.local_path ?? null;
+  if (projectPath !== (lastProject?.local_path ?? null)) {
+    const left = lastProject;
+    const current = { tabs, groups, activeGroupId };
+    const { editor, restored } = editorAfterSwitch(parked, projectPath, () => newGroup());
+    setLastProject(project);
+    setParked((prev) => parkedAfterSwitch(prev, current, left, projectPath));
+    setTabs(editor.tabs);
+    setGroups(editor.groups);
+    setActiveGroupId(editor.activeGroupId);
+    if (restored) setRestoredParked((n) => n + 1);
+    if (left && tabs.some(isDirtyTab)) setLeaving({ repoPath: left.local_path, to: projectPath });
+  } else if (project && project !== lastProject) {
+    // The same repository under a fresher row (a rename, a link written by the backend): kept, so a
+    // project parked later is named as it is called now.
+    setLastProject(project);
   }
 
   // The diff cache is per repository by key, so once the project has changed nothing in it can be
@@ -727,15 +1160,290 @@ export function EditorView() {
   // files are open rather than on `tabs` itself, so this isn't swept on every keystroke.
   // Newline is the one character a path can't contain.
   const openPathsKey = tabs.map((tab) => tab.path).join("\n");
+  const parkedKey = Object.entries(parked)
+    .map(([repoPath, entry]) => `${repoPath}\n${entry.tabs.map((tab) => tab.path).join("\n")}`)
+    .join("\n\n");
   useEffect(() => {
     if (!project) return;
     // Both sides go through `Uri.parse().toString()` so the comparison is against Monaco's
     // own normalization of the path rather than the raw string we handed it.
     const open = new Set(tabsRef.current.map((tab) => monaco.Uri.parse(modelPathFor(project, tab.path)).toString()));
+    // A parked editor keeps its models: they are its undo history, and it comes back with it.
+    for (const entry of Object.values(parkedRef.current)) {
+      for (const tab of entry.tabs) open.add(monaco.Uri.parse(modelPathFor(entry.project, tab.path)).toString());
+    }
     for (const model of monaco.editor.getModels()) {
       if (model.uri.scheme === MODEL_SCHEME && !open.has(model.uri.toString())) model.dispose();
     }
-  }, [openPathsKey, project]);
+  }, [openPathsKey, parkedKey, project]);
+
+  /** Forgets a parked editor — its tabs saved, or thrown away. */
+  const dropParked = useCallback((repoPath: string) => {
+    setParked((prev) => {
+      if (!(repoPath in prev)) return prev;
+      const next = { ...prev };
+      delete next[repoPath];
+      return next;
+    });
+  }, []);
+
+  /**
+   * Saves a parked editor's unsaved tabs where they are, without going back to the project — each
+   * checked against the version it was read at, like any save. Resolves to what could not be saved: a
+   * file that changed on disk meanwhile (marked, for when the project is opened again), a scratch
+   * buffer (which only a Save As can place), a write that failed. Those stay parked.
+   */
+  const saveParked = useCallback(async (repoPath: string): Promise<string[]> => {
+    const entry = parkedRef.current[repoPath];
+    if (!entry) return [];
+    const failed: string[] = [];
+    const saved = new Map<string, { text: string; version: DiskVersion }>();
+    const changed = new Set<string>();
+    for (const tab of entry.tabs.filter(isDirtyTab)) {
+      if (isScratchPath(tab.path) || !isWritable(tab)) {
+        failed.push(isScratchPath(tab.path) ? scratchName(tab.path) : tab.path);
+        continue;
+      }
+      try {
+        const version = await writeEditorFile(repoPath, tab.path, tab.content, tab.version);
+        saved.set(tab.path, { text: tab.content, version });
+      } catch (e) {
+        if (isChangedOnDisk(e)) changed.add(tab.path);
+        failed.push(tab.path);
+      }
+    }
+    setParked((prev) => {
+      const current = prev[repoPath];
+      if (!current) return prev;
+      const tabs = current.tabs.map((tab) => {
+        const done = saved.get(tab.path);
+        if (done && tab.content === done.text) {
+          return { ...tab, originalContent: done.text, version: done.version, diskChanged: false };
+        }
+        return changed.has(tab.path) ? { ...tab, diskChanged: true } : tab;
+      });
+      const next = { ...prev };
+      if (tabs.some(isDirtyTab)) next[repoPath] = { ...current, tabs };
+      else delete next[repoPath];
+      return next;
+    });
+    // The journal row says what is still unsaved there — which is only what just failed.
+    if (!discardedRef.current) {
+      void writeDrafts(
+        repoPath,
+        entry.tabs
+          .filter((tab) => isDirtyTab(tab) && !saved.has(tab.path) && !isScratchPath(tab.path))
+          .map((tab) => ({ path: tab.path, content: tab.content, at: Date.now() })),
+      );
+    }
+    return failed;
+  }, []);
+
+  /**
+   * The question a project switch owes the user when it left unsaved tabs behind: save them all
+   * where they are, discard them, or cancel — which goes back to the project, where the parked
+   * editor is waiting. Cancel only goes back while the window is still on the project it switched
+   * to: if the user has moved on again since, the tabs simply stay parked (nothing is lost, and the
+   * quit question still knows about them).
+   */
+  const askAboutParked = useCallback(
+    async (repoPath: string, switchedTo: string | null) => {
+      const entry = parkedRef.current[repoPath];
+      if (!entry) return;
+      const dirty = entry.tabs.filter(isDirtyTab);
+      // Journalled now: the switch cancelled the debounced write that would have covered these.
+      if (!discardedRef.current) {
+        void writeDrafts(
+          repoPath,
+          dirty
+            .filter((tab) => !isScratchPath(tab.path))
+            .map((tab) => ({ path: tab.path, content: tab.content, at: Date.now() })),
+        );
+      }
+      const answer = await chooseAction({
+        message: tRef.current("editor.leaveDirty", { n: dirty.length, project: entry.project.name }),
+        items: dirty.map((tab) => (isScratchPath(tab.path) ? scratchName(tab.path) : tab.path)),
+        danger: true,
+        choices: [
+          { id: "save", label: tRef.current("editor.saveAll"), variant: "primary" },
+          { id: "discard", label: tRef.current("editor.discardAll"), variant: "danger" },
+        ],
+      });
+      if (answer === "save") {
+        const failed = await saveParked(repoPath);
+        if (failed.length > 0) {
+          pushErrorToast(tRef.current("editor.saveAllFailed", { names: failed.join(", ") }));
+        }
+      } else if (answer === "discard") {
+        dropParked(repoPath);
+        void clearDrafts(repoPath);
+      } else if (switchedTo === null || projectRef.current?.local_path === switchedTo) {
+        // `null` is a workspace switch: it passes through "no project" before the workspace's own last
+        // project is picked for it, and that pick is part of the same move, not the user moving on.
+        const workspaces = useWorkspaceStore.getState();
+        const workspaceId = workspaces.workspaceOfProject(entry.project.id);
+        // A project removed since has nowhere to go back to; its tabs stay parked.
+        if (workspaceId) void workspaces.focusProject(workspaceId, entry.project.id);
+      }
+    },
+    [saveParked, dropParked],
+  );
+
+  useEffect(() => {
+    if (!leaving) return;
+    setLeaving(null);
+    void askAboutParked(leaving.repoPath, leaving.to);
+  }, [leaving, askAboutParked]);
+
+  // A parked editor can come back holding a tab that was still being read when the window left: that
+  // read finished while another project was showing and was dropped (see `readInto`). Read it again,
+  // or the tab would wait on it forever.
+  useEffect(() => {
+    if (restoredParked === 0) return;
+    for (const tab of tabsRef.current) if (tab.loading) void readInto(tab.path);
+  }, [restoredParked, readInto]);
+
+  /**
+   * What a quit asks about — see `lib/unsavedWork.ts`: every dirty tab, this project's and every
+   * parked one's. Registered once and read through refs, so the answer is the editor as it is when
+   * the question comes.
+   *
+   * `saveAll` saves without asking anything (it runs inside the quit's own question): a file that
+   * changed on disk is reported as not saved, and the app stays open with the buffer intact.
+   */
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  const saveParkedRef = useRef(saveParked);
+  saveParkedRef.current = saveParked;
+  useEffect(
+    () =>
+      registerUnsavedProvider({
+        id: "editor",
+        unsaved: () => {
+          const items: UnsavedItem[] = [];
+          const add = (tab: OpenTab, projectName: string) => {
+            if (!isDirtyTab(tab)) return;
+            items.push({ label: isScratchPath(tab.path) ? scratchName(tab.path) : tab.path, detail: projectName });
+          };
+          const here = projectRef.current;
+          if (here) for (const tab of tabsRef.current) add(tab, here.name);
+          for (const entry of Object.values(parkedRef.current)) {
+            for (const tab of entry.tabs) add(tab, entry.project.name);
+          }
+          return items;
+        },
+        saveAll: async () => {
+          const failed: string[] = [];
+          for (const tab of tabsRef.current.filter(isDirtyTab)) {
+            const outcome = await saveRef.current(tab.path, { interactive: false });
+            if (outcome !== "saved" && outcome !== "clean") {
+              failed.push(isScratchPath(tab.path) ? scratchName(tab.path) : tab.path);
+            }
+          }
+          for (const repoPath of Object.keys(parkedRef.current)) {
+            failed.push(...(await saveParkedRef.current(repoPath)));
+          }
+          return failed;
+        },
+        discard: async () => {
+          discardedRef.current = true;
+          const repos = new Set(Object.keys(parkedRef.current));
+          if (projectRef.current) repos.add(projectRef.current.local_path);
+          await Promise.all([...repos].map((repoPath) => clearDrafts(repoPath)));
+        },
+      }),
+    [],
+  );
+  // Which files are dirty, as one string: what changes when a file becomes dirty or clean — not on
+  // every keystroke — which is when a satellite's report to the main window has to go out.
+  const unsavedKey = [
+    ...tabs.filter(isDirtyTab).map((tab) => tab.path),
+    ...Object.entries(parked).flatMap(([repoPath, entry]) =>
+      entry.tabs.filter(isDirtyTab).map((tab) => `${repoPath}:${tab.path}`),
+    ),
+  ].join("\n");
+  useEffect(() => notifyUnsavedChanged(), [unsavedKey]);
+
+  // The notebooks' way into their tabs — see `lib/notebook/host`. Through `commitTabs`, so a read
+  // right after a write already sees it: a kernel's output and a keystroke can land in one tick.
+  useEffect(() => {
+    if (!project) return;
+    return registerNotebookHost(project.local_path, {
+      read: (path) => {
+        const tab = tabsRef.current.find((item) => item.path === path);
+        return tab && !tab.loading && isWritable(tab) ? tab.content : null;
+      },
+      write: (path, text) =>
+        commitTabs((prev) =>
+          prev.map((tab) => (tab.path === path && isWritable(tab) ? { ...tab, content: text, preview: false } : tab)),
+        ),
+    });
+  }, [project, commitTabs]);
+
+  /**
+   * How a rename reaches the tabs — see `lib/workspaceEdit`. A file with a model is edited through
+   * it, so the change is one Ctrl+Z away and every server hears about it through the document sync;
+   * a tab that was never on screen has no model and takes the edit as text. Either way the tab goes
+   * dirty, and nothing is written: the rename sits in the buffer like anything typed there.
+   *
+   * A dirty tab with no model is refused. The server planned the edit against a copy of the file it
+   * was given, and it is only ever given models — so for that tab it read the disk, and the buffer
+   * says something else.
+   */
+  useEffect(() => {
+    if (!project) return;
+    return registerWorkspaceEditHost(project.local_path, {
+      isOpen: (path) => tabsRef.current.some((tab) => tab.path === path),
+      applyToOpen: (path, edits) => {
+        const tab = tabsRef.current.find((item) => item.path === path);
+        if (!tab) throw new Error(tRef.current("editor.renameNotOpen"));
+        if (tab.loading || !isWritable(tab)) throw new Error(tRef.current("editor.renameReadOnly"));
+        const model = monaco.editor.getModel(monaco.Uri.parse(modelPathFor(project, path)));
+        let text: string;
+        if (model) {
+          model.pushStackElement();
+          model.pushEditOperations(
+            [],
+            edits.map((edit) => ({ range: edit.range, text: edit.text })),
+            () => null,
+          );
+          model.pushStackElement();
+          text = model.getValue();
+        } else {
+          if (isDirtyTab(tab)) throw new Error(tRef.current("editor.renameUnseenBuffer"));
+          text = applyTextEdits(tab.content, edits);
+        }
+        const next = text;
+        commitTabs((prev) =>
+          prev.map((item) => (item.path === path && isWritable(item) ? { ...item, content: next, preview: false } : item)),
+        );
+        return next;
+      },
+    });
+  }, [project, commitTabs]);
+
+  // Problems and the project check are about one project; a window that moved on has none of the
+  // previous one's, and every server they came from was stopped with it.
+  useEffect(() => {
+    useProblemsStore.getState().clear();
+    useEditorPanelStore.getState().setProjectCheck({ canCheckProject: false, checkingProject: false });
+  }, [project?.local_path]);
+
+  // "Formatear al guardar" is read when the editor first needs it rather than at boot.
+  useEffect(() => {
+    void useEditorFormatStore.getState().init();
+  }, []);
+
+  // A notebook whose last tab closed has its kernel stopped. Keyed on the notebooks' paths alone, so
+  // typing never runs it; a project the window left keeps its notebooks (they are parked).
+  const notebookPaths = tabs
+    .filter((tab) => isNotebookPath(tab.path))
+    .map((tab) => tab.path)
+    .join("\n");
+  useEffect(() => {
+    if (!project) return;
+    notebookActions.syncOpenNotebooks(project.local_path, notebookPaths ? notebookPaths.split("\n") : []);
+  }, [project, notebookPaths]);
 
   // Bookmarks are stored per project, so opening one is what decides which set is in force. The
   // store no-ops when the path hasn't changed, which is what makes this safe to run on a render
@@ -746,33 +1454,54 @@ export function EditorView() {
 
   // Reload open files from disk when they change externally — a terminal `git` command, an
   // edit in another editor, a branch checkout — instead of silently showing stale content
-  // until the user happens to reopen them. Tabs with unsaved local edits are skipped so this
-  // never clobbers work in progress; the user's own edit wins until they save or discard it.
+  // until the user happens to reopen them. Tabs with unsaved local edits are never reloaded, so
+  // this never clobbers work in progress; the user's own edit wins until they save or discard it.
+  //
+  // Nor are they ignored any more. An agent, a pull or a project-wide replace rewriting a file under
+  // a dirty tab used to leave no trace until ⌘S put the old buffer back over their work. Such a tab is
+  // now marked (`diskChanged`), and the save itself is checked against the disk (see `saveNow`).
+  //
+  // Each tab is asked about with the version it holds, so a file whose timestamp and size have not
+  // moved costs one `stat` and no read — this runs for every open tab on every watcher event.
   const syncOpenTabs = useCallback(() => {
     if (!project) return;
+    const repoPath = project.local_path;
     for (const tab of tabsRef.current) {
-      // A scratch tab has no file on disk to fall behind — see `lib/scratchTabs`.
-      if (tab.loading || tab.content !== tab.originalContent || isScratchPath(tab.path)) continue;
-      void readFileText(project.local_path, tab.path)
-        .then((text) => {
-          // The overwhelmingly common case: the watcher fired for *some* file in the repo and
-          // this one came back byte for byte identical. Writing state anyway rebuilt the `tabs`
-          // array and every tab object in it, which re-rendered this view, every `EditorPane`
-          // (each holding a live Monaco instance) and the whole file tree — for no change.
-          if (text === tab.content) return;
-          setTabs((prev) =>
-            prev.map((item) =>
-              // Re-check dirtiness against the latest state: the read is async and the
-              // user may have started typing in this tab while it was in flight.
-              item.path === tab.path && item.content === item.originalContent
-                ? { ...item, content: text, originalContent: text }
-                : item,
-            ),
-          );
+      // A scratch tab has no file on disk to fall behind — see `lib/scratchTabs`. A file being saved
+      // is about to move under its own tab, which is not news.
+      if (tab.loading || isScratchPath(tab.path) || savesInFlight.current.has(tab.path)) continue;
+      void statEditorFile(repoPath, tab.path, tab.version)
+        .then((now) => {
+          if (projectRef.current?.local_path !== repoPath || savesInFlight.current.has(tab.path)) return;
+          const latest = tabsRef.current.find((item) => item.path === tab.path);
+          if (!latest || latest.loading) return;
+          // See `sweepStep`. `none` is the overwhelmingly common answer — the watcher fired for
+          // *some* file in the repo and this one is byte for byte what the tab holds — and it must
+          // not write state: rebuilding the `tabs` array re-renders this view, every `EditorPane`
+          // (each holding a live Monaco instance) and the whole file tree, for no change.
+          const step = sweepStep(latest, isDirtyTab(latest), now);
+          if (step.kind === "mark") {
+            commitTabs((prev) =>
+              prev.map((item) =>
+                // Against the latest state: a save may have landed while this was in flight.
+                item.path === tab.path && isDirtyTab(item) && item.version === latest.version
+                  ? { ...item, diskChanged: step.diskChanged, version: step.version }
+                  : item,
+              ),
+            );
+          } else if (step.kind === "stamp") {
+            commitTabs((prev) =>
+              prev.map((item) =>
+                item.path === tab.path && item.version === latest.version ? { ...item, version: step.version } : item,
+              ),
+            );
+          } else if (step.kind === "reload") {
+            void reloadTab(tab.path, { onlyIfClean: true });
+          }
         })
         .catch(() => {});
     }
-  }, [project]);
+  }, [project, commitTabs, reloadTab]);
 
   /** Set when the watcher fired for this repo while the Editor was off screen, so the sweep can be
    * deferred to the moment it comes back rather than run behind another view. */
@@ -972,6 +1701,9 @@ export function EditorView() {
         if (current) void save(current);
         break;
       }
+      case "saveAll":
+        void saveAll();
+        break;
       case "closeTab":
       case "nextTab":
       case "prevTab":
@@ -1223,15 +1955,18 @@ export function EditorView() {
       onPin={(path) => patchTab(path, { preview: false })}
       onDropTab={dropTab}
       // Typing in a preview tab promotes it to a permanent one, exactly like VS Code.
-      onChange={(path, value) => patchTab(path, { content: value, preview: false })}
+      onChange={changeTab}
       // Leaving diff view forgets which commit was being compared. One rule in one place: without it,
       // a tab that once showed a commit's change would keep showing *that* commit every time the diff
       // toggle was pressed again, for the rest of the tab's life — and the toggle's promise is "the
-      // change this file has", not "the last thing you clicked on in it".
+      // change this file has", not "the last thing you clicked on in it". A comparison with the disk
+      // is forgotten the same way.
       onViewMode={(path, mode: ViewMode) =>
-        patchTab(path, mode === "diff" ? { viewMode: mode } : { viewMode: mode, compare: null })
+        patchTab(path, mode === "diff" ? { viewMode: mode } : { viewMode: mode, compare: null, diskText: null })
       }
       onSave={() => group.activePath && void save(group.activePath)}
+      onReload={(path, opts) => void reloadTab(path, opts)}
+      onDiskAction={diskAction}
       // Only for a schema. Not a disabled button on every other file — there is nothing to explain
       // about a bridge that does not apply, and a permanently greyed-out icon in a five-icon
       // toolbar is worse than an absent one.
@@ -1260,6 +1995,7 @@ export function EditorView() {
         copyPath,
         revealInTree,
         splitRight: (path) => splitGroup(group.id, path),
+        saveAll: () => void saveAll(),
       }}
     />
   );
@@ -1421,69 +2157,90 @@ export function EditorView() {
             the row fills exactly and a drag only ever moves one boundary. `GROUP_MIN` is a real
             floor — past the point where the panes stop fitting, the row scrolls rather than
             squeezing controls out of reach. */}
-        <div ref={groupsRowRef} className="flex min-w-0 flex-1 overflow-x-auto">
-          {/* A row of columns, each a stack of panes — the two axes a tab can be dropped against.
-              A column with one group in it is exactly the old layout, which is what every split
-              made before this existed still looks like. */}
-          {columns.map((column, i) => {
-            const lastColumn = i === columns.length - 1;
-            const heights = groupHeights[column.id] ?? [];
-            return (
-              <Fragment key={column.id}>
-                {i > 0 && (
-                  <ResizeHandle
-                    axis="x"
-                    value={groupWidths[i - 1] ?? GROUP_MIN}
-                    min={GROUP_MIN}
-                    max={GROUP_MAX}
-                    onChange={(w) => setGroupWidths((prev) => prev.map((v, k) => (k === i - 1 ? w : v)))}
-                    onCommit={() => {}}
-                  />
-                )}
-                <div
-                  style={
-                    lastColumn
-                      ? { minWidth: GROUP_MIN }
-                      : { width: groupWidths[i] ?? GROUP_MIN, minWidth: GROUP_MIN }
-                  }
-                  className={`flex min-w-0 flex-col ${lastColumn ? "flex-1" : "shrink-0"}`}
-                >
-                  {column.groups.map((group, j) => {
-                    const lastRow = j === column.groups.length - 1;
-                    return (
-                      <Fragment key={group.id}>
-                        {j > 0 && (
-                          <ResizeHandle
-                            axis="y"
-                            value={heights[j - 1] ?? ROW_MIN}
-                            min={ROW_MIN}
-                            max={GROUP_MAX}
-                            onChange={(h) =>
-                              setGroupHeights((prev) => ({
-                                ...prev,
-                                [column.id]: (prev[column.id] ?? []).map((v, k) => (k === j - 1 ? h : v)),
-                              }))
+        {/* The groups over the Problems / results panel, which spans the groups and nothing else:
+            what it lists is about the code, and the tree beside it keeps its full height. */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div ref={groupsRowRef} className="flex min-h-0 min-w-0 flex-1 overflow-x-auto">
+            {/* A row of columns, each a stack of panes — the two axes a tab can be dropped against.
+                A column with one group in it is exactly the old layout, which is what every split
+                made before this existed still looks like. */}
+            {columns.map((column, i) => {
+              const lastColumn = i === columns.length - 1;
+              const heights = groupHeights[column.id] ?? [];
+              return (
+                <Fragment key={column.id}>
+                  {i > 0 && (
+                    <ResizeHandle
+                      axis="x"
+                      value={groupWidths[i - 1] ?? GROUP_MIN}
+                      min={GROUP_MIN}
+                      max={GROUP_MAX}
+                      onChange={(w) => setGroupWidths((prev) => prev.map((v, k) => (k === i - 1 ? w : v)))}
+                      onCommit={() => {}}
+                    />
+                  )}
+                  <div
+                    style={
+                      lastColumn
+                        ? { minWidth: GROUP_MIN }
+                        : { width: groupWidths[i] ?? GROUP_MIN, minWidth: GROUP_MIN }
+                    }
+                    className={`flex min-w-0 flex-col ${lastColumn ? "flex-1" : "shrink-0"}`}
+                  >
+                    {column.groups.map((group, j) => {
+                      const lastRow = j === column.groups.length - 1;
+                      return (
+                        <Fragment key={group.id}>
+                          {j > 0 && (
+                            <ResizeHandle
+                              axis="y"
+                              value={heights[j - 1] ?? ROW_MIN}
+                              min={ROW_MIN}
+                              max={GROUP_MAX}
+                              onChange={(h) =>
+                                setGroupHeights((prev) => ({
+                                  ...prev,
+                                  [column.id]: (prev[column.id] ?? []).map((v, k) => (k === j - 1 ? h : v)),
+                                }))
+                              }
+                              onCommit={() => {}}
+                            />
+                          )}
+                          <div
+                            style={
+                              lastRow
+                                ? { minHeight: ROW_MIN }
+                                : { height: heights[j] ?? ROW_MIN, minHeight: ROW_MIN }
                             }
-                            onCommit={() => {}}
-                          />
-                        )}
-                        <div
-                          style={
-                            lastRow
-                              ? { minHeight: ROW_MIN }
-                              : { height: heights[j] ?? ROW_MIN, minHeight: ROW_MIN }
-                          }
-                          className={`flex min-h-0 ${lastRow ? "flex-1" : "shrink-0"}`}
-                        >
-                          {renderGroup(group)}
-                        </div>
-                      </Fragment>
-                    );
-                  })}
-                </div>
-              </Fragment>
-            );
-          })}
+                            className={`flex min-h-0 ${lastRow ? "flex-1" : "shrink-0"}`}
+                          >
+                            {renderGroup(group)}
+                          </div>
+                        </Fragment>
+                      );
+                    })}
+                  </div>
+                </Fragment>
+              );
+            })}
+          </div>
+          {panelOpen && (
+            <>
+              <ResizeHandle
+                axis="y"
+                value={panelHeight}
+                min={PANEL_MIN}
+                max={PANEL_MAX}
+                // Anchored to the bottom, so dragging up — toward the code — has to grow it.
+                invert
+                onChange={(h) => setSize("editorPanelHeight", h)}
+                onCommit={(h) => commitSize("editorPanelHeight", h)}
+              />
+              <div style={{ height: panelHeight }} className="flex min-h-0 shrink-0 flex-col">
+                <EditorBottomPanel onOpen={openHit} />
+              </div>
+            </>
+          )}
         </div>
         {/* The Changes dock: the same panel the Changes screen is, on the other side of the code.
             Its rows open files here instead of into a diff pane of their own — see `ChangesPanel`

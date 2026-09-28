@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
+import { Suspense, lazy, memo, useEffect, useState, type ReactElement } from "react";
 import { FolderGit2, GitBranchPlus, Loader2, Trash2, Unlink } from "lucide-react";
 import { useT } from "./state/languageStore";
 import { TitleBar } from "./components/layout/TitleBar";
@@ -7,6 +7,8 @@ import { AppRail } from "./components/layout/AppRail";
 import { StatusBar } from "./components/layout/StatusBar";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
 import { listenToAppMenu } from "./lib/menuBridge";
+import { installQuitGuard } from "./lib/quitGuard";
+import { installCloseNotice } from "./lib/closeNotice";
 import { AddDependencyModal } from "./components/editor/AddDependencyModal";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
@@ -72,7 +74,7 @@ import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { backgroundFetch } from "./lib/backgroundFetch";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
-import { DESKTOP_ORIGIN, onAppForeground, onRepoFsChanged, onStateInvalidate } from "./lib/tauri/events";
+import { isOwnOrigin, onAppForeground, onRepoFsChanged, onStateInvalidate } from "./lib/tauri/events";
 import { buttonClass } from "./components/common/Button";
 
 /**
@@ -210,6 +212,13 @@ const REMOTE_ACTION_KEYS = new Set<string>([
   "remote.action.chat",
   "remote.action.terminalOpened",
   "remote.action.terminalClosed",
+  "remote.action.stashApplied",
+  "remote.action.stashPopped",
+  "remote.action.pipelineRerun",
+  "remote.action.pipelineCancelled",
+  "remote.action.servicesStarted",
+  "remote.action.servicesStopped",
+  "remote.action.servicesRestarted",
 ]);
 
 function isRemoteActionKey(key: string): key is TranslationKey {
@@ -483,6 +492,21 @@ function MainContent() {
     </>
   );
 }
+
+/**
+ * The shell's parts that take no props, memoised.
+ *
+ * `App` subscribes to a dozen UI flags — the palette, the AI panel, the dock, every modal's open flag
+ * — and each flip re-rendered everything under it: the 2,400-line sidebar and every mounted view,
+ * for a palette opening on top of them. None of these take props, and each reads what it shows
+ * through its own store subscriptions (checked: no `getState()` read on a render path), so skipping
+ * them when only `App` changed cannot leave one stale.
+ */
+const ShellTitleBar = memo(TitleBar);
+const ShellSidebar = memo(Sidebar);
+const ShellMainContent = memo(MainContent);
+const ShellAppRail = memo(AppRail);
+const ShellStatusBar = memo(StatusBar);
 
 export default function App() {
   const initTheme = useThemeStore((s) => s.init);
@@ -801,6 +825,14 @@ export default function App() {
     };
   }, [project?.local_path]);
 
+  // A quit the user asked for (tray, ⌘Q, Settings) waits on this window to ask about unsaved work —
+  // this window's and every satellite's. See `lib/quitGuard.ts` and `quit_guard.rs`.
+  useEffect(() => installQuitGuard(), []);
+
+  // The first close of this window says where the app is going — the tray — before it goes, and
+  // offers to quit instead. See `lib/closeNotice.ts` and `tray::close_action`.
+  useEffect(() => installCloseNotice(), []);
+
   useEffect(() => {
     // Everything the working tree changing implies, still refreshed — an external change can just
     // as easily be a branch switch, a stash or a merge, all of which used to go stale until
@@ -889,7 +921,9 @@ export default function App() {
       // settling into it — a chain list re-read mid-`applyChain`, a chat history reloaded while the
       // optimistic bubble is up. The comment on `origin` claimed this filter existed long before it
       // did; adding the desktop as an emitter is what made its absence matter.
-      if (e.origin === DESKTOP_ORIGIN) return;
+      // Per window since satellites stamp their own origin (`WINDOW_ORIGIN`): a change made in a
+      // detached window is somebody else's here, and used to be dropped as this window's echo.
+      if (isOwnOrigin(e.origin)) return;
 
       switch (e.domain) {
         case "repo":
@@ -1035,7 +1069,8 @@ export default function App() {
       const remaining = useFetchTimerStore.getState().remainingSeconds;
       if (remaining === null) return;
       if (remaining <= 1) {
-        void useRepoStore.getState().fetch();
+        // `auto`: a failure is reported once, not on every tick while offline — see `autoFetchFailing`.
+        void useRepoStore.getState().fetch({ auto: true });
         useFetchTimerStore.getState().setRemaining(autoFetchSeconds);
       } else {
         useFetchTimerStore.getState().setRemaining(remaining - 1);
@@ -1103,7 +1138,7 @@ export default function App() {
 
   return (
     <div className="cf-frame flex h-screen flex-col overflow-hidden">
-      <TitleBar />
+      <ShellTitleBar />
       {/* `overflow-hidden` is load-bearing, not tidiness.
           This row is `min-h-0` so the column inside it can shrink, but nothing was clipping that
           column's *content*. With the terminal dock dragged tall, `min-h-[120px]` on the view above
@@ -1111,7 +1146,7 @@ export default function App() {
           row's bottom edge — straight under the status bar, which is a later sibling and therefore
           paints on top. The symptom was the shell's last line disappearing behind the bar. */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <Sidebar />
+        <ShellSidebar />
         {/* The work column: the view is a sheet, and the dock under it is a second one, 6px apart —
             the frame shows between them. See the note atop `index.css`.
 
@@ -1127,7 +1162,7 @@ export default function App() {
               dock shrinks instead. Still far below the content's own height, so the item shrinks
               freely — which is all `min-h-0` was ever here for. */}
           <div data-tour="main-content" className="cf-sheet cf-ambient-bg min-h-[120px] flex-1">
-            <MainContent />
+            <ShellMainContent />
           </div>
           {/* The dock appears and goes; it no longer grows from zero height. Animating a height
               re-laid the whole column out on every frame — the view above it included — which is
@@ -1145,7 +1180,7 @@ export default function App() {
             of the window, so opening or closing the AI panel slides past the rail rather than
             moving it, and the terminal dock — which lives *inside* the column above — rises
             without pushing it around either. */}
-        <AppRail />
+        <ShellAppRail />
         {/* Mounted when open, with an opacity fade of its own (`cf-panel-in`) and no width tween —
             the same reasoning as the dock's. */}
         {aiPanelOpen && <AiPanel key="ai-panel" />}
@@ -1157,7 +1192,7 @@ export default function App() {
           the bar that gave way — which is the other half of the last line ending up underneath it. */}
       <div className="relative shrink-0">
         <UpdateAlert />
-        <StatusBar />
+        <ShellStatusBar />
       </div>
       {/* Mounted at the top rather than inside the editor: the request comes from a CodeLens, which
           reaches React through a Monaco command id rather than through the component tree, and the

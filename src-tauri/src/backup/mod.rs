@@ -442,10 +442,40 @@ pub fn restore(
 
     let mut report = report(summary, &header);
 
+    // The cookie jar's key, as it was before the credentials land — only when the file carries one,
+    // so a backup without credentials costs no credential-store read. See `reseal_cookie_jar`.
+    let jar_key_before = snapshot
+        .secrets
+        .iter()
+        .any(|entry| entry.key == crate::secrets::api_cookie_key())
+        .then(|| crate::db::api_cookie_seal::existing_key(&crate::db::api_secrets::os_store()).ok().flatten())
+        .flatten();
+
     let (written, failed) = vault::restore(&snapshot.secrets);
     report.secrets = written;
     report.failed_secrets = failed;
+    reseal_cookie_jar(conn, jar_key_before);
     Ok(report)
+}
+
+/// Moves the cookies this machine already had onto the key the backup brought, when it brought a
+/// different one.
+///
+/// The jar is stored sealed (`db::api_cookie_seal`) and the backup carries its key with the other
+/// credentials, so the rows that came from the file open under the new key. The rows that were here
+/// before — every one of them in a merge, and all of them when the file left the jar out — were
+/// sealed under the key that has just been overwritten, and would never open again. Best-effort
+/// like the reconciliations above: the restore itself has already succeeded.
+fn reseal_cookie_jar(conn: &Connection, before: Option<crate::db::api_cookie_seal::JarKey>) {
+    let Some(before) = before else { return };
+    let store = crate::db::api_secrets::os_store();
+    let Ok(Some(after)) = crate::db::api_cookie_seal::existing_key(&store) else { return };
+    if after.same_as(&before) {
+        return;
+    }
+    if let Err(error) = crate::db::api_cookie_seal::reseal(conn, &before, &after) {
+        eprintln!("restore: moving the cookie jar to the restored key failed: {error}");
+    }
 }
 
 /// What a file says about itself before anyone types a password.

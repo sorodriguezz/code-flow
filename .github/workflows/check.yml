@@ -14,7 +14,13 @@
 # actually produces — a type error that would otherwise surface twenty minutes into the release job
 # on a Windows runner, and an English string added without its Spanish twin. A byte scan rides
 # along for a rarer one that hides itself: a control byte typed into source, where a single NUL
-# makes git show the whole file as binary.
+# makes git show the whole file as binary. The vitest suite runs next: the frontend's stores and
+# pure logic, in seconds, still with no Rust toolchain.
+#
+# Last, the third-party notices: `THIRD-PARTY-NOTICES.md` regenerated in memory and compared byte
+# for byte with the committed copy, so a dependency cannot land without its licence row. It is the
+# one step that calls cargo, and only `cargo metadata` — it reads `Cargo.lock` and downloads crate
+# manifests but compiles nothing, so the cargo already on the Ubuntu image is all it needs.
 #
 # What is NOT here, and why: `cargo test`.
 #
@@ -27,12 +33,11 @@
 #   * On `macos-latest` or `windows-latest` it is a 10-25 minute debug build per pull request — the
 #     release workflow's own comments record 11 minutes warm and 26 cold — and macOS runner minutes
 #     bill at ten times the Linux rate.
-#   * Two tests in `debugger::live_tests` fail on a clean tree, so the gate would have to be written
-#     around a known-failing baseline before it could gate anything.
 #
-# `cargo test` is run by hand before a release. If that ever stops being true, the place to add it
-# is a step inside the existing release job, where the toolchain and `rust-cache` are already warm —
-# not a second job that pays for both from cold.
+# `cargo test --lib` is run by hand — before a release, and before a pull request (CONTRIBUTING.md
+# asks for it, against a baseline of zero failures). If that ever stops being enough, the place to
+# add it is a step inside the existing release job, where the toolchain and `rust-cache` are already
+# warm — not a second job that pays for both from cold.
 
 name: check
 
@@ -69,3 +74,13 @@ jobs:
       - run: node scripts/check-control-bytes.mjs
 
       - run: pnpm exec tsc --noEmit
+
+      # The frontend suite. It needs neither the Rust toolchain nor a webview and finishes in
+      # seconds, which is exactly why leaving it out was a mistake: for a long stretch nothing ran
+      # these tests anywhere but a developer's machine, so a green check said nothing about them.
+      - run: pnpm exec vitest run
+
+      # The notices file against the tree it describes. Works from the lockfiles and the installed
+      # `node_modules`; cargo fetches the crate manifests on a cold runner, which is why this is not
+      # `--offline` here. A failure means "run `pnpm notices` and commit the file".
+      - run: node scripts/build-third-party-notices.mjs --check

@@ -58,9 +58,54 @@ const QUOTA_SIGNALS: [&str; 11] = [
 
 /// Whether a CLI's message reads like a quota/billing refusal rather than a genuine error —
 /// shared by every engine's output interpreter.
+///
+/// **Only ever asked of text the run already failed with** (and, through [`refusal_reply`], of a
+/// reply that generated nothing at all). That is what lets it include [`limit_refusal`], whose
+/// openings are ordinary English in any other position.
 pub(crate) fn quota_signal(text: &str) -> bool {
+    worded_as_quota(text) || limit_refusal(text)
+}
+
+/// The older, narrower half of [`quota_signal`]: phrases that name a limit or a balance outright.
+fn worded_as_quota(text: &str) -> bool {
     let lower = text.to_lowercase();
     QUOTA_SIGNALS.iter().any(|s| lower.contains(s)) || waits_on_a_clock(&lower)
+}
+
+/// How Claude Code opens the sentence that says the plan is used up.
+///
+/// None of [`QUOTA_SIGNALS`] reads these, so a real session limit reached the user as a raw red
+/// error with the CLI's text instead of as the quota notice. Taken from the binary (2.1.266 carries
+/// the list) and from real refusals in the user's own transcripts — synthetic messages billed at
+/// zero tokens, `is_error: true` under `-p`:
+///
+/// - "You've hit your session limit · resets 12am (America/Santiago)"
+/// - "You've hit your weekly limit · resets Mon 9am"
+/// - "API Error: 400 You're out of extra usage. Add more at claude.ai/settings/usage…"
+/// - "You've reached your …", "You're out of usage credits", "Your org is out of usage · …"
+const LIMIT_OPENINGS: [&str; 4] = ["you've hit your", "you've reached your", "you're out of", "your org is out of"];
+
+/// What has to follow an opening, in the same sentence, for it to be a refusal. An opening alone is
+/// everyday English — "you've hit your stride", "you're out of luck" — and a model is free to write
+/// it.
+const LIMIT_NOUNS: [&str; 3] = ["limit", "usage", "credits"];
+
+/// Whether `text` contains one of Claude Code's own "you are out of plan" sentences. See
+/// [`LIMIT_OPENINGS`] for the wordings, and [`quota_signal`] for why it is only asked on the failed
+/// path.
+pub(crate) fn limit_refusal(text: &str) -> bool {
+    // The CLI writes a straight apostrophe; a curly one is what the same sentence becomes the moment
+    // anything typographic has touched it.
+    let lower = text.to_lowercase().replace('\u{2019}', "'");
+    LIMIT_OPENINGS.iter().any(|opening| {
+        lower.match_indices(opening).any(|(at, _)| {
+            let sentence = lower[at + opening.len()..]
+                .split(['.', '\u{b7}', '\n', '!', '?', '|'])
+                .next()
+                .unwrap_or_default();
+            LIMIT_NOUNS.iter().any(|noun| sentence.contains(noun))
+        })
+    })
 }
 
 /// "Try again in 3 hours" is a window that reopens on a clock. "Try again in a moment" is a server
@@ -98,11 +143,203 @@ const MAX_REFUSAL_CHARS: usize = 400;
 /// and idempotency to order creation" — a clean, finished answer, 547 tokens of Haiku — was shown
 /// as "you've hit your usage limit" (2026-09-26). The words are the fallback for a run that reports
 /// no counts at all, which opencode's never does.
+///
+/// **And which words depends on which of those two it is.** A run that reported *zero* generated
+/// tokens is the provider speaking, not the model, so the failed path's whole vocabulary applies —
+/// Claude Code's own "You've hit your session limit" included. A run that reported *no counts at
+/// all* could be either, so it gets only the narrow phrases: [`limit_refusal`]'s openings are
+/// everyday English, and a two-line opencode answer beginning "You've hit your limit on …" is an
+/// answer.
 pub(crate) fn refusal_reply(text: &str, output_tokens: Option<i64>) -> bool {
-    if output_tokens.is_some_and(|generated| generated > 0) {
+    if text.chars().count() > MAX_REFUSAL_CHARS {
         return false;
     }
-    text.chars().count() <= MAX_REFUSAL_CHARS && quota_signal(text)
+    match output_tokens {
+        Some(generated) if generated > 0 => false,
+        Some(_) => quota_signal(text),
+        None => worded_as_quota(text),
+    }
+}
+
+/// What kind of failure a run ended in — the shape a caller decides on, rather than an error string
+/// it would have to pattern-match itself.
+///
+/// The agent chains are the reason this exists: a plan that runs out of quota halfway should park
+/// and wait for the window to reopen, one whose CLI is signed out should ask for a sign-in, and
+/// neither should be retried into the same wall or reported as the model failing. Serialized in
+/// `snake_case` — `"quota"`, `"auth_required"`, `"cli_missing"`, `"overloaded"`, `"other"`. The
+/// frontend asks this same classifier through `claude_cmd::ai_classify_failure`
+/// (`aiClassifyFailure` in `lib/tauri/commands.ts`) rather than keeping a copy of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiFailureKind {
+    /// The plan or the balance is used up: a window that reopens on a clock, or credit to top up.
+    /// Carries the marker [`QUOTA_MARKER`] when an engine recognised it.
+    Quota,
+    /// Nobody is signed in to the CLI, or its session expired.
+    AuthRequired,
+    /// The CLI could not be started at all — not installed, or not where the setting says.
+    CliMissing,
+    /// The provider is having a bad moment (`529 Overloaded`, a `500`): asking again later is the
+    /// whole remedy, and it says nothing about the account.
+    Overloaded,
+    /// Everything else — including a run the user stopped (`ai_runs::CANCELLED_MARKER`) and a
+    /// repository that was busy (`ai_locks::BUSY_MARKER`), which callers already tell apart by
+    /// their own markers.
+    Other,
+}
+
+/// One failed run, classified. See [`classify_failure`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AiFailure {
+    pub kind: AiFailureKind,
+    /// The provider's own words, with this app's marker taken off and nothing else changed — so
+    /// "resets 12am (America/Santiago)" is never lost to a paraphrase. The trailing `|<epoch>` of
+    /// the older Claude wording is the one thing removed; it is in `resets_at` instead.
+    pub message: String,
+    /// When the window reopens, as the provider phrased it — "12am (America/Santiago)", "Mon
+    /// 9am", "in 3 hours". `None` when it did not say. Only ever set for [`AiFailureKind::Quota`].
+    pub resets: Option<String>,
+    /// The same instant as seconds since the epoch, when the provider stated one exactly (the older
+    /// "Claude AI usage limit reached|1751234567"). Absent more often than not.
+    pub resets_at: Option<i64>,
+}
+
+/// The longest error that is still read for a setup or availability problem — the same "a line or
+/// two" rule as `MAX_SETUP_CHARS` in `claudeError.ts`. Anything longer is a real failure that merely
+/// mentions one of the phrases below (a stack trace, a log tail), and a confident wrong kind would
+/// be worse than `Other`.
+const MAX_CLASSIFIED_CHARS: usize = 600;
+
+/// Sign-in trouble, in the CLIs' own words (mirrors `SIGNED_OUT` in `claudeError.ts`).
+const AUTH_SIGNALS: [&str; 14] = [
+    "not signed in",
+    "not logged in",
+    "please run /login",
+    "run /login",
+    "please log in",
+    "login required",
+    "authentication required",
+    "authentication failed",
+    "authentication_failed",
+    "failed to authenticate",
+    "invalid api key",
+    "unauthorized",
+    "session expired",
+    "token expired",
+];
+
+/// A CLI that could not be started. `failed to launch` is [`spawn_once`]'s own wording; the rest are
+/// the operating systems'.
+const MISSING_SIGNALS: [&str; 5] = [
+    "failed to launch",
+    "command not found",
+    "no such file or directory",
+    "is not recognized as an internal or external command",
+    "cannot find the file specified",
+];
+
+/// A provider that fell over rather than refused. Deliberately phrases, never a bare status number:
+/// "503" is also a line number.
+const OVERLOADED_SIGNALS: [&str; 9] = [
+    "overloaded",
+    "internal server error",
+    "server_error",
+    "service unavailable",
+    "temporarily unavailable",
+    "try again in a moment",
+    "bad gateway",
+    "gateway timeout",
+    "api error: 5",
+];
+
+/// Classifies the error a run failed with.
+///
+/// **Only for errors.** A caller hands this the `Err` of an AI operation — never a reply — which is
+/// the rule [`refusal_reply`] learned the hard way: the model is free to write about rate limits,
+/// sign-ins and outages, and a classifier that reads answers will eventually eat one. The engines
+/// have already applied the token-evidence rule by the time an error exists.
+pub fn classify_failure(error: &str) -> AiFailure {
+    // Not failures of the engine at all: the user stopped it, or it never started because its
+    // repository was busy. Their callers match on these markers already; they are `Other` here so
+    // that no wording inside them — a repository called `rate-limit-api` — can pass for a limit.
+    if error.starts_with(crate::ai_runs::CANCELLED_MARKER) || error.starts_with(crate::ai_locks::BUSY_MARKER) {
+        return AiFailure { kind: AiFailureKind::Other, message: error.to_string(), resets: None, resets_at: None };
+    }
+    let marked = error.contains(QUOTA_MARKER);
+    let message = match error.find(QUOTA_MARKER) {
+        Some(at) => &error[at + QUOTA_MARKER.len()..],
+        None => error,
+    }
+    .trim();
+
+    // The older Claude wording ends in the reset instant: "Claude AI usage limit reached|1751234567".
+    let (message, resets_at) = match message.rsplit_once('|') {
+        Some((before, epoch)) if epoch.len() >= 9 && epoch.chars().all(|c| c.is_ascii_digit()) => {
+            (before.trim_end(), epoch.parse::<i64>().ok())
+        }
+        _ => (message, None),
+    };
+
+    let lower = message.to_lowercase();
+    let short = message.chars().count() <= MAX_CLASSIFIED_CHARS;
+    let says = |signals: &[&str]| short && signals.iter().any(|signal| lower.contains(signal));
+    // The marker is an engine's verdict and is trusted at any length. Unmarked text — an error
+    // stored before a wording was known, or one no engine produced — is read for a limit only when
+    // it is a line or two: a long log that mentions `src/billing/` has said nothing about money.
+    let kind = if marked || (short && quota_signal(message)) {
+        AiFailureKind::Quota
+    } else if says(&MISSING_SIGNALS) {
+        AiFailureKind::CliMissing
+    } else if says(&AUTH_SIGNALS) {
+        AiFailureKind::AuthRequired
+    } else if says(&OVERLOADED_SIGNALS) {
+        AiFailureKind::Overloaded
+    } else {
+        AiFailureKind::Other
+    };
+
+    let quota = kind == AiFailureKind::Quota;
+    AiFailure {
+        kind,
+        resets: if quota { reset_phrase(message) } else { None },
+        resets_at: if quota { resets_at } else { None },
+        message: message.to_string(),
+    }
+}
+
+/// "When does it reopen", in the provider's own words: what follows "resets" (up to the end of that
+/// clause), or else a "try again in <number> …" the CLI offered.
+fn reset_phrase(message: &str) -> Option<String> {
+    let lower = message.to_lowercase();
+    if let Some(at) = lower.find("reset") {
+        // Byte offsets of `lower` only hold for `message` while lowercasing kept every length, which
+        // is true of everything these CLIs print; if it did not, the phrase is dropped rather than
+        // cut in the wrong place.
+        if lower.len() == message.len() {
+            let tail = &message[at..];
+            let tail = tail.trim_start_matches(|c: char| c.is_alphabetic()); // "resets" / "reset"
+            let tail = tail.trim_start();
+            let tail = tail
+                .strip_prefix("at ")
+                .or_else(|| tail.strip_prefix("on "))
+                .or_else(|| tail.strip_prefix(':'))
+                .unwrap_or(tail);
+            let clause = tail.split(['\u{b7}', '\n', '|']).next().unwrap_or_default();
+            let clause = clause.split(". ").next().unwrap_or_default().trim().trim_end_matches('.').trim();
+            if !clause.is_empty() {
+                return Some(clause.to_string());
+            }
+        }
+    }
+    const PHRASE: &str = "try again in";
+    let at = lower.find(PHRASE)?;
+    let rest = lower[at + PHRASE.len()..].trim_start();
+    if !rest.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let clause = rest.split(['.', ',', '\n', '\u{b7}']).next().unwrap_or_default().trim();
+    Some(format!("in {clause}"))
 }
 
 /// Removes terminal escape sequences from a CLI's output. The engines run headless but still
@@ -626,6 +863,23 @@ pub struct AiInvocation<'a> {
     /// Claude asking for them also switches the CLI into a mode that prints several times as much
     /// output for the same answer.
     pub stream_deltas: Option<DeltaSink>,
+    /// The caller has promised this run writes nothing: apply the engine's strongest real read-only
+    /// mode, not just the absence of [`auto_approve_edits`](Self::auto_approve_edits).
+    ///
+    /// The difference matters because "not auto-approved" means "not told to accept edits", and on
+    /// most of these CLIs that stops nothing — a headless run cannot ask, so whatever the user's own
+    /// settings pre-approve simply runs. This asks each engine for a limit its CLI enforces: Claude
+    /// restricts the tools that *exist* (`--tools`, no MCP servers), Codex keeps its `read-only`
+    /// sandbox, grok keeps its tool allow-list and denies MCP calls, agy drops the permission bypass
+    /// it otherwise needs to read its own brief. Where no such limit exists
+    /// ([`AiEngine::enforces_read_only`] is false) the UI says so instead of promising it.
+    ///
+    /// Set by the repo-less chat with file generation off, by compaction, and by a story's analysis
+    /// phase; never by a flow that is meant to change files.
+    pub read_only: bool,
+    /// The files the engine wrote to hand over its prompt, deleted once the run is over. Engines
+    /// write through this rather than to the temp directory — see [`crate::ai_prompt_files`].
+    pub prompt_files: crate::ai_prompt_files::PromptFiles,
 }
 
 /// The feature labels recorded against a run's usage.
@@ -717,6 +971,8 @@ pub mod task {
     /// of the two is actually spending the budget — a pipeline analysis reads the repository with
     /// tools, so it is by some distance the more expensive of the pair.
     pub const PIPELINE_ANALYZE: &str = "pipeline-analyze";
+    /// A notebook cell generated, explained, fixed or documented — see [`super::notebook_assist`].
+    pub const NOTEBOOK: &str = "notebook";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -737,6 +993,8 @@ impl<'a> AiInvocation<'a> {
             effort: None,
             task: task::OTHER,
             stream_deltas: None,
+            read_only: false,
+            prompt_files: crate::ai_prompt_files::PromptFiles::default(),
         }
     }
 }
@@ -917,6 +1175,42 @@ pub trait AiEngine: Send + Sync {
     /// which `commands::chat_cmd`'s module doc is careful to say out loud.
     fn read_only_tools(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Whether [`AiInvocation::read_only`] is a limit this engine's CLI **enforces**, rather than an
+    /// instruction its model is asked to follow.
+    ///
+    /// True only where a real mechanism was verified against the installed CLI's own `--help` and
+    /// docs: Claude Code's `--tools` (tools outside the set do not exist for the run), Codex's
+    /// `read-only` sandbox, grok's `--tools` allow-list. False for agy — its permission system can be
+    /// pre-approved from the user's own settings and its plan mode is a prompt, not a gate — for
+    /// opencode, which has no such flag, and for Cline, whose plan mode can switch itself to act
+    /// mode. The UI reads this (`ai_read_only_engines`) to say plainly where "text only" is a
+    /// request rather than a guarantee.
+    fn enforces_read_only(&self) -> bool {
+        false
+    }
+
+    /// What a run that did **not** end in an answer still reported spending.
+    ///
+    /// A failed turn is billed like any other — twelve tool calls and then an error cost twelve tool
+    /// calls — and a turn stopped halfway spent everything up to the stop. The meter used to skip
+    /// both, because the only usage it read was the successful [`AiRun::usage`]. Most CLIs state
+    /// their spend on the failure path as well (Claude's `result` event, Cline's `run_result`, …),
+    /// so each engine reads its own output for it here. `None` — the default — is "this CLI said
+    /// nothing", which records nothing rather than a zero.
+    fn reported_usage(&self, _stdout: &str, _stderr: &str) -> Option<AiUsage> {
+        None
+    }
+
+    /// Whether this CLI prints nothing at all until the turn is over.
+    ///
+    /// The watchdog ([`crate::ai_runs::gone_quiet`]) judges a run hung by its silence, which is only
+    /// fair to a CLI that prints as it works. One that is silent by design until it answers — grok's
+    /// single JSON object — is given three times as long, since silence is its normal state and a
+    /// long agentic turn would otherwise be killed for working.
+    fn quiet_while_working(&self) -> bool {
+        false
     }
 
     /// This engine's own flags for the attached files, if it has any.
@@ -1245,6 +1539,15 @@ impl AiEngine for AccountEngine {
     }
     fn read_only_tools(&self) -> Vec<String> {
         self.with(|e| e.read_only_tools())
+    }
+    fn enforces_read_only(&self) -> bool {
+        self.with(|e| e.enforces_read_only())
+    }
+    fn reported_usage(&self, stdout: &str, stderr: &str) -> Option<AiUsage> {
+        self.with(|e| e.reported_usage(stdout, stderr))
+    }
+    fn quiet_while_working(&self) -> bool {
+        self.with(|e| e.quiet_while_working())
     }
     fn attachment_args(&self, attachments: &[AiAttachment]) -> Vec<String> {
         self.with(|e| e.attachment_args(attachments))
@@ -1602,6 +1905,7 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
     stream: &'static str,
     ctx: Option<RunCtx>,
     deltas: Option<DeltaPump>,
+    activity: ai_runs::Activity,
 ) -> Vec<u8> {
     let mut collected = Collected::default();
     let Some(mut pipe) = pipe else { return collected.finish() };
@@ -1616,6 +1920,9 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
+        // Any byte on either stream is a sign of life — a progress bar with no newline counts as
+        // much as an event line. See the watchdog in `spawn_once`.
+        activity.touch();
         collected.push(&buf[..read]);
         let Some(ctx) = &ctx else { continue };
 
@@ -1757,9 +2064,19 @@ async fn spawn_once(
     ctx: &Option<RunCtx>,
     cancel: &mut Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<AiRun, String> {
+    // Nothing new starts once the app has begun to quit: `ai_runs::stop_all` has already swept the
+    // live processes, and one launched after it would be the one nothing ever stops. A run that was
+    // on its way here — reading settings, building a diff — ends as the cancellation it is.
+    if ai_runs::stopping() {
+        return Err(ai_runs::CANCELLED_MARKER.to_string());
+    }
     let dirs = search_dirs();
     let program = resolve_binary(binary, &dirs);
     let mut cmd = engine.build_command(&program, inv);
+    // Whatever the engine just wrote to hand over its prompt — a brief, a system prompt file — is
+    // deleted when this attempt is over, by every route out of this function, spawn failure
+    // included. Held until then because the CLI reads it after it starts. See `ai_prompt_files`.
+    let _prompt_files = inv.prompt_files.take();
     // Appended here rather than inside each `build_command`, for the same reason the process group
     // and the console flag are: it is the one place every engine's command passes through, and a
     // seventh engine then gets the level by implementing one pure mapping instead of remembering to
@@ -1798,6 +2115,10 @@ async fn spawn_once(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to launch '{binary}': {e}"))?;
+    // On the quit path's list from its first instant to its last. Quitting holds no `Child` of ours
+    // and runs no destructor, so this list is the only way it can find this process — and the
+    // process group it leads — to stop it. See `ai_runs::stop_all`.
+    let _live = child.id().map(|pid| ai_runs::register_process(pid, ctx.as_ref().map(|c| c.run_id.as_str())));
 
     // Feed stdin from a separate task, concurrently with waiting for the output, for two reasons:
     // (1) an engine that *ignores* stdin (opencode delivers its payload via `--file` instead)
@@ -1828,17 +2149,60 @@ async fn spawn_once(
         .as_ref()
         .filter(|_| engine.streams_partial())
         .map(|sink| DeltaPump { engine: engine.id(), sink: sink.clone() });
-    let stdout_task = tokio::spawn(pump(child.stdout.take(), "stdout", ctx.clone(), deltas));
-    let stderr_task = tokio::spawn(pump(child.stderr.take(), "stderr", ctx.clone(), None));
+    let activity = ai_runs::Activity::new();
+    let stdout_task = tokio::spawn(pump(child.stdout.take(), "stdout", ctx.clone(), deltas, activity.clone()));
+    let stderr_task = tokio::spawn(pump(child.stderr.take(), "stderr", ctx.clone(), None, activity.clone()));
 
-    let status = tokio::select! {
-        status = child.wait() => status.map_err(|e| e.to_string())?,
-        _ = ai_runs::cancelled(cancel) => {
+    // The watchdog's limit, read per run so a change in Settings applies to the next one. A CLI that
+    // is silent by design until it answers gets three times as long — see
+    // [`AiEngine::quiet_while_working`].
+    let idle_limit = ai_runs::idle_limit()
+        .map(|limit| if engine.quiet_while_working() { limit * 3 } else { limit });
+
+    // Three ways out, where there used to be two. The third is the watchdog: a CLI that hangs gives
+    // neither an exit nor a Stop, and it held its repository's lease for as long as the app ran.
+    enum Stopped {
+        Cancelled,
+        WentQuiet(std::time::Duration),
+    }
+    let ended = tokio::select! {
+        status = child.wait() => Ok(status.map_err(|e| e.to_string())?),
+        _ = ai_runs::cancelled(cancel) => Err(Stopped::Cancelled),
+        limit = ai_runs::gone_quiet(&activity, idle_limit) => Err(Stopped::WentQuiet(limit)),
+    };
+    let status = match ended {
+        Ok(status) => status,
+        Err(stopped) => {
             ai_runs::kill_tree(&mut child).await;
             // The pumps end on their own once the pipes close with the process; awaiting them
-            // keeps the tasks from outliving the run and emitting into a finished one.
-            let _ = tokio::join!(stdout_task, stderr_task, writer);
-            return Err(ai_runs::CANCELLED_MARKER.to_string());
+            // keeps the tasks from outliving the run and emitting into a finished one. Bounded,
+            // though: a descendant that left the process group — a daemonised dev server — can hold
+            // a pipe open indefinitely, and a stop that then never returned would keep the very
+            // lease the watchdog exists to release.
+            let pumps = [stdout_task.abort_handle(), stderr_task.abort_handle(), writer.abort_handle()];
+            let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(stdout_task, stderr_task, writer)
+            })
+            .await;
+            let (stdout, stderr) = match drained {
+                Ok((stdout, stderr, _)) => (stdout.unwrap_or_default(), stderr.unwrap_or_default()),
+                Err(_) => {
+                    pumps.iter().for_each(tokio::task::AbortHandle::abort);
+                    (Vec::new(), Vec::new())
+                }
+            };
+            // Stopped halfway is not free: what it spent up to the stop is still spent, whenever the
+            // CLI had already said so.
+            record_failed_usage(
+                engine,
+                inv,
+                &strip_ansi(&String::from_utf8_lossy(&stdout)),
+                &strip_ansi(&String::from_utf8_lossy(&stderr)),
+            );
+            return Err(match stopped {
+                Stopped::Cancelled => ai_runs::CANCELLED_MARKER.to_string(),
+                Stopped::WentQuiet(limit) => ai_runs::idle_error(engine.label(), limit),
+            });
         }
     };
 
@@ -1858,6 +2222,14 @@ async fn spawn_once(
     drop(stdout);
     let stderr_text = strip_ansi(&String::from_utf8_lossy(&stderr));
     drop(stderr);
+    // A process the quit path signalled exits on that signal, and read as it stands it would be a
+    // crash — "claude exited with an error (signal: 15)" filed as a chat's answer or a chain step's
+    // error. It is a cancellation, and it is filed as one; only a run that finished cleanly in the
+    // same instant keeps its answer. See `ai_runs::stop_all`.
+    if ai_runs::stopping() && !status.success() {
+        record_failed_usage(engine, inv, &stdout_text, &stderr_text);
+        return Err(ai_runs::CANCELLED_MARKER.to_string());
+    }
     let outcome = without_reasoning(engine.interpret(
         status.success(),
         &status.to_string(),
@@ -1865,18 +2237,37 @@ async fn spawn_once(
         &stderr_text,
     ));
     // Filed here because this is the one place every subprocess engine passes through, so nothing
-    // that spends tokens can forget to say so. Only successful runs: a refused or crashed one has
-    // no account of itself, and recording a zero for it would make the meter read as though the
-    // work had been free rather than as though it had not happened.
-    record_usage(engine, inv, &outcome, Some(&program));
+    // that spends tokens can forget to say so — an answer through its own report, a failure
+    // through what the CLI said it spent before failing.
+    match &outcome {
+        Ok(_) => record_usage(engine, inv, &outcome, Some(&program)),
+        Err(_) => record_failed_usage(engine, inv, &stdout_text, &stderr_text),
+    }
     outcome
+}
+
+/// Files what a run that ended without an answer spent — failed, stopped, or stopped by the
+/// watchdog — **when its CLI said**, and nothing otherwise.
+///
+/// The meter used to count answers only, which made a turn that failed after twelve tool calls
+/// look free. A refusal still records nothing, because it reported nothing: Claude Code's are
+/// billed at zero, and [`crate::ai_usage::record`] drops an empty report rather than filing a zero
+/// that would read as work done for free.
+fn record_failed_usage(engine: &dyn AiEngine, inv: &AiInvocation<'_>, stdout: &str, stderr: &str) {
+    let Some(usage) = failed_run_usage(engine, stdout, stderr) else { return };
+    let account_id = engine.account().and_then(|a| a.account_id.clone());
+    crate::ai_usage::record(engine.id(), inv.model, inv.task, account_id.as_deref(), &usage);
+}
+
+/// The pure half of [`record_failed_usage`]: what a failed run's own output says it spent.
+fn failed_run_usage(engine: &dyn AiEngine, stdout: &str, stderr: &str) -> Option<AiUsage> {
+    engine.reported_usage(stdout, stderr).filter(|usage| !usage.is_empty())
 }
 
 /// Files what a finished run spent, whichever transport produced it.
 ///
-/// Only successful runs: a refused or crashed one has no account of itself, and recording a zero
-/// for it would make the meter read as though the work had been free rather than as though it had
-/// not happened.
+/// The answered half; a run that failed or was stopped goes through [`record_failed_usage`], which
+/// counts it when — and only when — the CLI reported what it had spent.
 ///
 /// `probe_binary` is the resolved executable, and is `None` for the HTTP engines — they have no
 /// second command to ask, and would have nothing to run it with if they did.
@@ -2676,6 +3067,33 @@ pub async fn inline_edit(
     inv.task = task::INLINE;
     let run = run(engine, binary, inv).await?;
     Ok(strip_code_fence(&run.text))
+}
+
+/// The notebook's AI actions on one cell — see `jupyter::assist`, which builds `payload` and
+/// cleans the answer. Read-only and with no working directory: the engine sees the cells it is
+/// handed and nothing else, and whatever it proposes goes back to the notebook as text, where the
+/// user accepts or discards it.
+pub async fn notebook_assist(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    template: &str,
+    action: crate::jupyter::assist::AssistAction,
+    payload: &str,
+) -> Result<String, String> {
+    let ask = if action.answers_with_code() {
+        "Responde solo con el código de la celda."
+    } else {
+        "Responde con la explicación en Markdown."
+    };
+    let mut inv = AiInvocation::new(ask, payload);
+    inv.system_prompt =
+        Some(if template.trim().is_empty() { crate::jupyter::assist::DEFAULT_PROMPT } else { template });
+    inv.model = model;
+    inv.read_only = true;
+    inv.task = task::NOTEBOOK;
+    let run = run(engine, binary, inv).await?;
+    Ok(crate::jupyter::assist::clean_answer(action, &run.text))
 }
 
 // ---------------------------------------------------------------------------
@@ -5014,6 +5432,9 @@ pub struct ChatTurn<'a> {
     pub effort: Option<&'a str>,
     /// Files attached to this turn, already copied under the app's own root.
     pub attachments: &'a [AiAttachment],
+    /// The turn must write nothing — see [`AiInvocation::read_only`]. Never set together with
+    /// `auto_approve_edits`; if both are, read-only wins.
+    pub read_only: bool,
 }
 
 /// Runs one [`ChatTurn`].
@@ -5059,7 +5480,8 @@ pub async fn chat_turn(
     inv.allowed_tools = turn.allowed_tools;
     inv.cwd = Some(turn.cwd);
     inv.resume_session_id = turn.session_id;
-    inv.auto_approve_edits = turn.auto_approve_edits;
+    inv.auto_approve_edits = turn.auto_approve_edits && !turn.read_only;
+    inv.read_only = turn.read_only;
     inv.stream_deltas = turn.stream_deltas;
     inv.effort = turn.effort;
     inv.attachments = turn.attachments;
@@ -5075,6 +5497,12 @@ pub async fn chat_turn(
 /// headless run can never be asked for permission — running commands still needs the shell tool
 /// enabled in Settings). `stream_deltas` is the caller's: the desk's panel asks for the reply as it
 /// is written; the paired phone, which is never sent deltas, does not.
+///
+/// `read_only` is the one exception, and it is not the panel's: a story's analysis step runs
+/// through this same path (a chain step *is* a task turn), and its whole promise is that nothing is
+/// written before the user approves the plan. Then edits are not auto-approved, `allowed_tools` is
+/// replaced by the engine's read-only set, and the engine applies whatever read-only mode its CLI
+/// really enforces — see [`AiInvocation::read_only`].
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_with_repo(
     engine: &dyn AiEngine,
@@ -5086,7 +5514,9 @@ pub async fn chat_with_repo(
     allowed_tools: &[String],
     cwd: &str,
     stream_deltas: Option<DeltaSink>,
+    read_only: bool,
 ) -> Result<AiRun, String> {
+    let read_only_tools = if read_only { engine.read_only_tools() } else { Vec::new() };
     chat_turn(
         engine,
         binary,
@@ -5095,15 +5525,16 @@ pub async fn chat_with_repo(
             contexts,
             message,
             session_id,
-            allowed_tools,
+            allowed_tools: if read_only { &read_only_tools } else { allowed_tools },
             cwd,
             system_prompt: None,
-            auto_approve_edits: true,
+            auto_approve_edits: !read_only,
             stream_deltas,
             // The AI panel's repo chat has no per-conversation control, so it leaves every CLI on
             // its own configured default rather than inventing a level for it.
             effort: None,
             attachments: &[],
+            read_only,
         },
     )
     .await
@@ -5157,6 +5588,112 @@ mod tests {
         let grep = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Grep","input":{"pattern":"stream_event"}}]}}"#;
         assert!(grep.contains(STREAM_EVENT_TAG), "the cheap gate lets this through…");
         assert!(!is_stream_event_line(grep), "…and the parse is what stops it");
+    }
+
+    /// Claude Code's own openings, and the ordinary English that shares them.
+    #[test]
+    fn claude_codes_limit_sentences_are_recognised_and_ordinary_english_is_not() {
+        for refusal in [
+            "You've hit your session limit · resets 12am (America/Santiago)",
+            "You've hit your weekly limit · resets Mon 9am",
+            "You\u{2019}ve reached your usage limit",
+            "API Error: 400 You're out of extra usage. Add more at claude.ai/settings/usage",
+            "You're out of usage credits",
+            "Your org is out of usage · contact your admin",
+        ] {
+            assert!(limit_refusal(refusal), "missed: {refusal}");
+            assert!(quota_signal(refusal), "the failed path must see it: {refusal}");
+        }
+        for prose in [
+            "You've hit your stride with this refactor.",
+            "You're out of luck: the file is gone.",
+            "You've reached your destination. The limit of the loop is 10.",
+        ] {
+            assert!(!limit_refusal(prose), "misread: {prose}");
+        }
+    }
+
+    /// Where the new wordings may be heard: the failed path and a reply that generated nothing —
+    /// never a reply with no counts at all, and never one the model wrote. The rate-limiting commit
+    /// message is the regression this rule was made for, and it still passes.
+    #[test]
+    fn the_new_wordings_follow_the_token_evidence_rule() {
+        let session = "You've hit your session limit · resets 12am (America/Santiago)";
+        assert!(refusal_reply(session, Some(0)), "zero tokens is the provider speaking");
+        assert!(!refusal_reply(session, None), "no counts at all: only the narrow phrases decide");
+        assert!(!refusal_reply(session, Some(12)), "a generated reply is an answer");
+        assert!(!refusal_reply("feat: add rate limiting and idempotency to order creation", Some(547)));
+        // The narrow phrases keep working where they always did.
+        assert!(refusal_reply("Claude AI usage limit reached|1751234567", Some(0)));
+        assert!(refusal_reply("Insufficient balance. Manage your billing here.", None));
+    }
+
+    /// The structured answer the chains decide on: kind, the provider's words, and the reset.
+    #[test]
+    fn a_failure_is_classified_with_its_own_words_and_its_reset() {
+        let session = classify_failure("QUOTA_EXCEEDED::You've hit your session limit · resets 12am (America/Santiago)");
+        assert_eq!(session.kind, AiFailureKind::Quota);
+        assert_eq!(session.message, "You've hit your session limit · resets 12am (America/Santiago)");
+        assert_eq!(session.resets.as_deref(), Some("12am (America/Santiago)"));
+        assert_eq!(session.resets_at, None);
+
+        let old = classify_failure("QUOTA_EXCEEDED::Claude AI usage limit reached|1751234567");
+        assert_eq!(old.kind, AiFailureKind::Quota);
+        assert_eq!(old.message, "Claude AI usage limit reached", "the epoch is data, not words");
+        assert_eq!(old.resets_at, Some(1_751_234_567));
+
+        let clock = classify_failure("QUOTA_EXCEEDED::quota exceeded, try again in 2 hours.");
+        assert_eq!(clock.resets.as_deref(), Some("in 2 hours"));
+
+        let at = classify_failure("QUOTA_EXCEEDED::Claude usage limit reached, resets at 5pm.");
+        assert_eq!(at.resets.as_deref(), Some("5pm"));
+
+        // Recognised even without the marker — an error stored before the wording was known.
+        assert_eq!(classify_failure("You're out of extra usage").kind, AiFailureKind::Quota);
+    }
+
+    #[test]
+    fn sign_in_missing_cli_and_outages_each_have_their_kind() {
+        let kind = |error: &str| classify_failure(error).kind;
+        assert_eq!(kind("Failed to authenticate: OAuth session expired and could not be refreshed"), AiFailureKind::AuthRequired);
+        assert_eq!(
+            kind("grok exited with an error (exit status: 1): Error: Not signed in. Run `grok login`"),
+            AiFailureKind::AuthRequired
+        );
+        assert_eq!(kind("APIError: Unauthorized: AuthenticateToken authentication failed"), AiFailureKind::AuthRequired);
+        assert_eq!(kind("failed to launch 'agy': No such file or directory (os error 2)"), AiFailureKind::CliMissing);
+        assert_eq!(kind("API Error: 529 Overloaded"), AiFailureKind::Overloaded);
+        assert_eq!(kind("API Error: 500 {\"type\":\"error\",\"error\":{\"type\":\"api_error\"}}"), AiFailureKind::Overloaded);
+        assert_eq!(kind("claude exited with an error (exit status: 1): Unknown model 'nope'"), AiFailureKind::Other);
+        // Not failures of the engine: their callers match their own markers.
+        assert_eq!(kind("RUN_CANCELLED::"), AiFailureKind::Other);
+        assert_eq!(kind("REPO_BUSY::rate limit service"), AiFailureKind::Other);
+        // A reset is only ever read off a quota.
+        assert_eq!(classify_failure("Connection reset by peer").resets, None);
+    }
+
+    /// A long log that merely mentions a sign-in — or a billing module — is not that problem. The
+    /// marker, being an engine's verdict, is trusted however long the message is.
+    #[test]
+    fn a_long_failure_is_not_guessed_at() {
+        let long = format!("{} not signed in", "x".repeat(700));
+        assert_eq!(classify_failure(&long).kind, AiFailureKind::Other);
+        let log = format!("error[E0425]: cannot find value in src/billing/mod.rs\n{}", "x".repeat(700));
+        assert_eq!(classify_failure(&log).kind, AiFailureKind::Other);
+        let marked = format!("QUOTA_EXCEEDED::{}", log);
+        assert_eq!(classify_failure(&marked).kind, AiFailureKind::Quota);
+    }
+
+    /// The meter's rule for a run that ended without an answer: count what the CLI reported, and
+    /// nothing when it reported nothing — a zero would read as work done for free.
+    #[test]
+    fn a_failed_run_counts_what_it_reported_and_nothing_else() {
+        let failed = r#"{"type":"result","is_error":true,"result":"boom","usage":{"input_tokens":50,"output_tokens":7}}"#;
+        let usage = failed_run_usage(&crate::claude::ClaudeEngine, failed, "").expect("reported");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (50, 7));
+        let refused = r#"{"type":"result","is_error":true,"result":"You've hit your session limit","usage":{"input_tokens":0,"output_tokens":0}}"#;
+        assert!(failed_run_usage(&crate::claude::ClaudeEngine, refused, "").is_none());
+        assert!(failed_run_usage(&crate::opencode::OpenCodeEngine, failed, "").is_none(), "opencode reports nothing on the run");
     }
 
     /// Everything a pump can hand this: a half-written line from a killed CLI, a plain banner, the

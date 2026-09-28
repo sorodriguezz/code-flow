@@ -5,6 +5,7 @@
 
 pub mod compose;
 pub mod detect;
+pub mod envfile;
 pub mod log;
 pub mod ports;
 pub mod supervisor;

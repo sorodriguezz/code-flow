@@ -69,6 +69,17 @@ interface WindowState {
  *  for — API client, database, frontend, backend — with nothing left over. */
 export const DEFAULT_SATELLITE_LIMIT = 4;
 
+/**
+ * The windows the limit is about: every satellite but the hotkey ask box.
+ *
+ * The ask box is hidden, not closed, between uses — once summoned it is "open" for the rest of the
+ * session — so counting it made a limit of four mean three, and the "open right now" line in
+ * Settings counted a window nobody could see. `windows.rs` leaves it out of its own backstop too.
+ */
+export function countedSatellites(satellites: readonly SatelliteInfo[]): number {
+  return satellites.filter((s) => s.kind !== "quick").length;
+}
+
 let nextReturnId = 0;
 
 /**
@@ -138,7 +149,7 @@ export const useWindowStore = create<WindowState>((set, get) => ({
     const { satellites, limit } = get();
     const already = satellites.some((s) => s.kind === kind && s.ref_id === refId);
     // Focusing what is already open is never refused, however full the desk is — it opens nothing.
-    if (!already && satellites.length >= limit) {
+    if (!already && countedSatellites(satellites) >= limit) {
       pushErrorToast(translate("windows.limitReached", { limit: String(limit) }));
       return false;
     }

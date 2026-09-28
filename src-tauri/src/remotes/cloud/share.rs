@@ -82,8 +82,14 @@ pub async fn download(
         let mut target = tokio::fs::File::create(&file.local)
             .await
             .map_err(|e| format!("Couldn't write {}: {e}", file.local))?;
-        pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
-            .await?;
+        if let Err(error) =
+            pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
+                .await
+        {
+            drop(target);
+            super::super::files::discard_partial_local(&file.local, &error).await;
+            return Err(error);
+        }
         use tokio::io::AsyncWriteExt as _;
         target.flush().await.map_err(|e| format!("Couldn't finish {}: {e}", file.local))?;
     }
@@ -137,6 +143,12 @@ pub async fn upload(
             .map_err(|e| format!("Couldn't read {}: {e}", file.local))?;
         let mut offset = 0u64;
         while offset < file.size {
+            if super::super::files::cancelled(id) {
+                // Created at its final size before a byte was written, so what is there now reads as
+                // the whole file with zeros where the rest should be — it goes.
+                let _ = azure::send(spec, &credential, "DELETE", &url, &[], None).await;
+                return Err(super::super::files::TRANSFER_CANCELLED.to_string());
+            }
             let take = MAX_RANGE.min(file.size - offset) as usize;
             let mut chunk = vec![0u8; take];
             handle

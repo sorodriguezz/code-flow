@@ -75,6 +75,7 @@ import { htmlToText } from "../../lib/workItemHtml";
 import { renderInlineMarkdown, renderMarkdown } from "../../lib/markdown";
 import { riseDelay } from "../../lib/rise";
 import { openExternalUrl } from "../../lib/tauri/commands";
+import { boardLabelKey } from "../../lib/boardLabel";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import type {
   BoardWorkItem,
@@ -143,6 +144,14 @@ function copy(text: string, done: string) {
 }
 
 const store = useWorkItemReviewStore.getState;
+
+/** The loaded item's board by name — "Azure Boards", "Jira", "monday.com" — for the sentences that
+ * say where something is written. They all used to say "Azure DevOps", whatever the board. */
+function useBoardName(): string {
+  const t = useT();
+  const provider = useWorkItemReviewStore((s) => s.provider);
+  return t(boardLabelKey(provider));
+}
 
 /** The tinted square every section heading wears — one shape, so the eye learns it once. */
 function IconChip({ icon: Icon, tone = "accent" }: { icon: typeof ScanSearch; tone?: "accent" | "danger" }) {
@@ -757,6 +766,7 @@ function StoryBlock({ label, text, empty }: { label: string; text: string; empty
  */
 function ChildTaskRow({ child, at }: { child: BoardWorkItemChild; at: number }) {
   const t = useT();
+  const board = useBoardName();
   const isBugChild = kindOf(child.work_item_type) === "bug";
   const content = htmlToText(child.description_html);
 
@@ -779,8 +789,8 @@ function ChildTaskRow({ child, at }: { child: BoardWorkItemChild; at: number }) 
         <button
           type="button"
           onClick={() => void openExternalUrl(child.url).catch((e: unknown) => pushErrorToast(String(e)))}
-          title={t("huReview.openChildHint")}
-          aria-label={t("huReview.openChildHint")}
+          title={t("huReview.openChildHint", { board })}
+          aria-label={t("huReview.openChildHint", { board })}
           className={`shrink-0 ${ICON_ACTION} hover:text-[var(--cf-accent)]`}
         >
           <ExternalLink size={12} />
@@ -2240,6 +2250,7 @@ const DRAFT_CRIT_WIDTH = "w-full shrink-0 lg:w-[var(--cf-hu-draft-crit-w)]";
 
 function DraftTab() {
   const t = useT();
+  const board = useBoardName();
   const item = useWorkItemReviewStore((s) => s.item);
   const draft = useWorkItemReviewStore((s) => s.draft);
   const open = useWorkItemReviewStore((s) => s.status === "open");
@@ -2278,7 +2289,7 @@ function DraftTab() {
         part="description"
         count={draft.description === null ? 0 : 1}
         width={DRAFT_DESC_WIDTH}
-        confirm={t("huReview.confirmDescription")}
+        confirm={t("huReview.confirmDescription", { board })}
       >
         <div className="h-full min-h-0">
           <MarkdownEditor
@@ -2301,7 +2312,7 @@ function DraftTab() {
         count={criteria.length}
         width={DRAFT_CRIT_WIDTH}
         note={t("huReview.binNoteCriteria")}
-        confirm={t("huReview.confirmCriteria").replace("{n}", String(criteria.filter((c) => c.trim()).length))}
+        confirm={t("huReview.confirmCriteria", { n: criteria.filter((c) => c.trim()).length, board })}
       >
         <div className="space-y-1.5">
           {criteria.map((criterion, at) => (
@@ -2335,7 +2346,7 @@ function DraftTab() {
         part="tasks"
         count={tasks.length}
         note={t("huReview.binNoteTasks")}
-        confirm={t("huReview.confirmTasks").replace("{n}", String(tasks.length))}
+        confirm={t("huReview.confirmTasks", { n: tasks.length, board })}
       >
         <div className="space-y-1.5">
           {tasks.map((task, at) => (
@@ -2726,6 +2737,7 @@ function ContextToggle() {
  */
 export function WorkItemReviewView() {
   const t = useT();
+  const board = useBoardName();
   const openSettings = useUiStore((s) => s.openSettings);
   const input = useWorkItemReviewStore((s) => s.input);
   const org = useWorkItemReviewStore((s) => s.org);
@@ -2778,7 +2790,7 @@ export function WorkItemReviewView() {
   };
 
   const publishEverything = () => {
-    void confirmAction(t("huReview.publishAllConfirm")).then((ok) => {
+    void confirmAction(t("huReview.publishAllConfirm", { board })).then((ok) => {
       if (ok) void store().publishAll();
     });
   };
@@ -2877,7 +2889,7 @@ export function WorkItemReviewView() {
       {openedFrom && (
         <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-[var(--cf-accent-soft)] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-accent)]">
           <History size={11} className="mt-[2px] shrink-0" />
-          <span className="min-w-0 break-words" title={t("huReview.snapshotHint")}>
+          <span className="min-w-0 break-words" title={t("huReview.snapshotHint", { board })}>
             {t("huReview.snapshot").replace("{at}", new Date(openedFrom.at).toLocaleString())}
           </span>
         </p>
@@ -2978,7 +2990,7 @@ export function WorkItemReviewView() {
                 type="button"
                 onClick={() => void openExternalUrl(item.url).catch((e: unknown) => pushErrorToast(String(e)))}
                 title={t("huReview.openInAzureHint")}
-                aria-label={t("huReview.openInAzure")}
+                aria-label={t("huReview.openInAzure", { board })}
                 className="flex h-[30px] w-[30px] items-center justify-center rounded-md border border-[var(--cf-border)] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
               >
                 <ExternalLink size={13} />

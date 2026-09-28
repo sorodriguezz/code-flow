@@ -205,6 +205,7 @@ const PR_ACTION_LABEL_KEY: Record<string, keyof typeof translations.en> = {
   approve: "activity.prApproved",
   request_changes: "activity.prChangesRequested",
   close: "activity.prClosed",
+  merge: "activity.prMerged",
 };
 
 /** A persisted Activity row, from either table — they carry the same fields apart from what they

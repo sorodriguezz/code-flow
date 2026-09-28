@@ -12,7 +12,7 @@ import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
-import { formatAgentLogLine } from "../lib/agentLog";
+import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { isQueuedCancellation, whenRepoFree } from "../lib/repoQueue";
 import { onAiChatDelta } from "../lib/tauri/events";
 import type { ActivityLogEntry } from "../types/domain";
@@ -38,8 +38,11 @@ export interface ChatMessage {
   model?: string;
   engineVersion?: string;
   /** What the engine printed while producing this answer — kept with the message so the trace
-   * outlives the run, and reloaded from disk when a past conversation is reopened. */
+   * outlives the run. A reopened turn carries `traceId` instead, until its disclosure is opened. */
   trace?: AiRunLine[];
+  /** The stored row whose trace this turn has but was read without: fetched on demand through
+   * `lib/turnTrace.ts` when the disclosure is opened, rather than with the transcript. */
+  traceId?: string;
   /** This turn failed; `content` is the raw engine error (still carrying the quota marker, so the
    * bubble can re-derive the billing link when a past conversation is reopened). */
   isError?: boolean;
@@ -145,30 +148,9 @@ function liveTitle(message: string): string {
   return oneLine.length > LIVE_TITLE_MAX ? `${oneLine.slice(0, LIVE_TITLE_MAX)}…` : oneLine;
 }
 
-/** Rehydrates a stored trace into the shape the log component renders, applying the same
- * formatting the live view uses so a reopened turn reads identically to a fresh one.
- *
- * Exported for `agentsStore`, which replays the same `activity_log` rows: an agent task is a
- * conversation with a role attached, and a reopened one has to read the same as a reopened chat. */
-export function parseTrace(raw: string | null): AiRunLine[] | undefined {
-  if (!raw) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return undefined;
-    const lines: AiRunLine[] = [];
-    for (const item of parsed) {
-      if (typeof item !== "object" || item === null) continue;
-      const { stream, line } = item as { stream?: unknown; line?: unknown };
-      if (typeof line !== "string") continue;
-      const text = formatAgentLogLine(line);
-      if (text === null) continue;
-      lines.push({ stream: stream === "stderr" ? "stderr" : "stdout", text });
-    }
-    return lines.length > 0 ? lines : undefined;
-  } catch {
-    return undefined;
-  }
-}
+/** Rehydrates a stored trace — see `lib/turnTrace.ts`, where it lives now that every transcript
+ * fetches traces one turn at a time. Re-exported for the callers that always imported it from here. */
+export { parseTrace };
 
 /**
  * The live half of `turnsToMessages`: the reply said it ran as another account than the turn before
@@ -221,6 +203,7 @@ export function turnsToMessages(entries: ActivityLogEntry[]): ChatMessage[] {
         engineVersion: e.engine_version ?? undefined,
         isError: e.is_error,
         trace: parseTrace(e.trace),
+        traceId: traceIdOf(e.trace, e.id),
       },
     ];
   });

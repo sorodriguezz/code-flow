@@ -27,7 +27,7 @@ import { useT } from "../../state/languageStore";
  *
  * # Why unavailable rows are greyed out instead of removed
  *
- * Two of these rows are PNG-only and one is SVG/PDF-only, so a dialog that rendered only what
+ * Two of these rows are PNG/PDF-only and one is SVG-only, so a dialog that rendered only what
  * applied would change height and content between formats. Two consequences, both bad: the buttons
  * move under the pointer, and — worse — a user who exported a PNG with a grid and then chose SVG
  * would find the grid row simply gone and conclude they had imagined it. Disabled, with the reason
@@ -77,8 +77,8 @@ export function ExportImageModal({
     supportsOption(format, option)
       ? undefined
       : option === "appearance"
-        ? t("diagrams.exportOptions.onlyVector")
-        : t("diagrams.exportOptions.onlyPng");
+        ? t("diagrams.exportOptions.onlySvg")
+        : t("diagrams.exportOptions.onlyRaster");
 
   const off = (option: ExportOptionKey) => !supportsOption(format, option);
 

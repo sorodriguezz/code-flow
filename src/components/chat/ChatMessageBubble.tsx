@@ -8,6 +8,7 @@ import { useT } from "../../state/languageStore";
 import type { AiRunLine } from "../../state/aiRunStore";
 import { AiErrorBanner } from "../ai/AiErrorBanner";
 import { AiRunLog } from "../ai/AiRunLog";
+import { LazyTrace } from "./LazyTrace";
 import { CostChip, formatResponseTime, parseStamp, useCopy, useLocale } from "./chatChrome";
 import { highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
 import { bodyForBlock, fileNameForBlock } from "../../lib/codeFileName";
@@ -43,6 +44,9 @@ export interface ChatBubbleMessage {
   engineVersion?: string;
   /** What the engine printed while producing this answer. */
   trace?: AiRunLine[];
+  /** A reopened turn whose trace was not read with the transcript: its disclosure fetches it by this
+   *  id when opened. Ignored when `trace` is already here. */
+  traceId?: string;
   /** This turn failed; `content` is the raw engine error, still carrying the quota marker so the
    *  banner can re-derive the billing link when a past conversation is reopened. */
   isError?: boolean;
@@ -140,17 +144,24 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   // including the failed and the stopped ones, where "what was it doing when it died?" is the
   // whole question.
   const trace = message.trace;
-  const traceLog = trace && trace.length > 0 && (
-    <div className={`${reading ? "pt-1.5" : "mr-auto max-w-[95%] pt-1"}`}>
-      <AiRunLog
-        lines={trace}
-        running={false}
-        label={t("ai.traceSteps", { n: trace.length })}
-        expanded={traceOpen}
-        onToggle={() => setTraceOpen((v) => !v)}
-      />
-    </div>
-  );
+  const traceWrap = reading ? "pt-1.5" : "mr-auto max-w-[95%] pt-1";
+  const traceLog =
+    trace && trace.length > 0 ? (
+      <div className={traceWrap}>
+        <AiRunLog
+          lines={trace}
+          running={false}
+          label={t("ai.traceSteps", { n: trace.length })}
+          expanded={traceOpen}
+          onToggle={() => setTraceOpen((v) => !v)}
+        />
+      </div>
+    ) : message.traceId ? (
+      // Reopened: the trace stayed on disk, and is read the first time somebody opens it.
+      <div className={traceWrap}>
+        <LazyTrace traceId={message.traceId} />
+      </div>
+    ) : null;
 
   const streaming = streamText !== undefined;
   const body = streaming ? streamText : message.content;

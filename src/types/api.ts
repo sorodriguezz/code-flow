@@ -340,6 +340,12 @@ export interface RequestSettings {
   keepAuthOnRedirect: boolean | null;
   /** Encode the URL before sending (off = send exactly what was typed). */
   encodeUrl: boolean | null;
+  /**
+   * Show the body as it arrives, timed by idleness rather than a total deadline. `null` is off —
+   * there is no app-wide setting to inherit — and `text/event-stream` streams regardless. Absent
+   * from requests saved before it existed, so read it with `?? null`.
+   */
+  streamResponse?: boolean | null;
 }
 
 export function defaultRequestSettings(): RequestSettings {
@@ -351,6 +357,7 @@ export function defaultRequestSettings(): RequestSettings {
     sendCookies: null,
     keepAuthOnRedirect: null,
     encodeUrl: null,
+    streamResponse: null,
   };
 }
 
@@ -642,12 +649,17 @@ export interface NetworkOptions {
   proxy_url: string;
   /** PEM/PKCS#12 client certificate for mTLS, matched by host in the caller. */
   client_cert_path: string;
+  /** The private key when it is a PEM file of its own; `""` when the certificate file holds it. */
+  client_key_path: string;
+  /** Opens an encrypted PEM key or a PKCS#12 container; `""` for neither. */
   client_cert_password: string;
   /** Extra CA bundle (PEM). */
   ca_cert_path: string;
   /** Cookies to send, already matched to the URL by the caller. */
   cookies: [string, string][];
   max_response_bytes: number;
+  /** Emit the body as it arrives (`api:http-stream`); event streams always do. */
+  stream: boolean;
 }
 
 export interface HttpResponse {
@@ -670,6 +682,31 @@ export interface HttpResponse {
   set_cookies: ParsedCookie[];
   /** The request as it actually went on the wire, for the console. */
   sent: SentRequestSummary;
+  /**
+   * Why the body stopped before its end — "Stopped.", an idle stream closed, a timeout, a dropped
+   * connection. Absent or `null` when it was read to its end. What arrived is kept either way.
+   */
+  interrupted?: string | null;
+}
+
+/** One server-sent event, as it arrived. */
+export interface StreamedEvent {
+  /** Unix milliseconds. */
+  at: number;
+  event: string;
+  data: string;
+  lastEventId: string;
+}
+
+/** What a streamed response delivered while it was arriving. */
+export interface ResponseStream {
+  /** Still arriving. */
+  live: boolean;
+  /** `text/event-stream`: the events list applies. */
+  sse: boolean;
+  events: StreamedEvent[];
+  /** Events let go from the front of the list to keep it bounded. */
+  droppedEvents: number;
 }
 
 export interface ResponseTimings {
@@ -708,6 +745,8 @@ export interface ApiResponse extends HttpResponse {
   visualizer: { template: string; data: unknown } | null;
   /** Set when the request failed before a response arrived. */
   error: string | null;
+  /** Present for a response that was streamed as it arrived. */
+  stream?: ResponseStream;
 }
 
 export interface TestResult {
@@ -884,7 +923,7 @@ export type ApiPanelId =
   | "docs";
 
 /** The response panel's sub-tab strip. Here for the same reason as [`ApiPanelId`]. */
-export type ApiResponseTab = "body" | "headers" | "cookies" | "tests" | "console" | "timeline";
+export type ApiResponseTab = "body" | "events" | "headers" | "cookies" | "tests" | "console" | "timeline";
 
 export interface GrpcResponse {
   /** JSON of the response message; for server-streaming, a JSON array of messages. */
@@ -951,6 +990,11 @@ export interface SupabaseProject {
   ready: boolean;
   /** When that check last passed, so the panel can say how fresh "connected" is. */
   checkedAt: string;
+  /**
+   * The last check found an older copy of `supabase_schema.sql` than this build expects. Optional
+   * because every row saved before the check could tell is simply "not known to be outdated".
+   */
+  schemaOutdated?: boolean;
 }
 
 /*
@@ -1066,7 +1110,7 @@ export interface RunnerReport {
 // Import / export
 // ---------------------------------------------------------------------------
 
-export type ImportFormat = "postman" | "openapi" | "curl" | "har" | "insomnia" | "codeflow";
+export type ImportFormat = "postman" | "openapi" | "curl" | "har" | "insomnia" | "bruno" | "codeflow";
 
 export interface ImportResult {
   format: ImportFormat;

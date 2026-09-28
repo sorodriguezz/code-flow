@@ -75,12 +75,13 @@ pub struct OracleSession {
 }
 
 impl OracleSession {
-    pub async fn open(config: &DbConnectionConfig, database: Option<&str>) -> Result<Self, String> {
+    /// `tag`: see `Session::open_tagged`.
+    pub async fn open(config: &DbConnectionConfig, database: Option<&str>, tag: &str) -> Result<Self, String> {
         let mut config = config.clone();
         config.resolve_password();
         let bridge = jvm::bridge().await?;
         let service = database.filter(|d| !d.is_empty()).map(str::to_string).unwrap_or_else(|| config.database.clone());
-        let session_id = format!("{}#oracle#{service}", config.id);
+        let session_id = format!("{}#oracle#{service}{tag}", config.id);
 
         let mut request = Map::new();
         request.insert("url".into(), Value::from(jdbc_url(&config)?));
@@ -89,6 +90,11 @@ impl OracleSession {
         request.insert("user".into(), Value::from(config.user.clone()));
         // Over a pipe to a child process, never on its command line — argv is world-readable.
         request.insert("password".into(), Value::from(config.password.clone()));
+        // Advisory only, and knowingly so: the thin driver's `setReadOnly` stores a flag and sends
+        // nothing (checked in ojdbc11's `PhysicalConnection`), and Oracle has no session-wide
+        // read-only switch — `SET TRANSACTION READ ONLY` lasts one transaction, freezes its snapshot
+        // and is ended by any DDL's implicit commit. So on Oracle the read-only guard in `execute`
+        // is the enforcement, which is why it refuses PL/SQL blocks and `CALL` outright.
         request.insert("readOnly".into(), Value::from(config.read_only));
         request.insert("timeoutMs".into(), Value::from(config.connect_timeout().as_millis() as u64));
         request.insert("properties".into(), Value::Object(driver_properties(&config)));
@@ -153,6 +159,14 @@ impl OracleSession {
         self.bridge.is_alive()
     }
 
+    /// Turns the JDBC connection's autocommit off or back on — how a transaction spanning several
+    /// statements is held open over the bridge (see `IrisBridge.autocommit`).
+    pub async fn set_autocommit(&self, enabled: bool) -> Result<(), String> {
+        let mut request = Map::new();
+        request.insert("enabled".into(), Value::from(enabled));
+        self.bridge.call("autocommit", &self.session_id, request).await.map(|_| ())
+    }
+
     pub async fn cancel_running(&self) {
         let _ = self.bridge.call("cancel", &self.session_id, Map::new()).await;
     }
@@ -204,7 +218,7 @@ impl OracleSession {
         }
         let mut results = Vec::new();
         for statement in split_statements(sql, Some(DIALECT)) {
-            if let Err(refused) = read_only_guard(&statement, self.read_only) {
+            if let Err(refused) = read_only_guard(&statement, self.read_only, DIALECT) {
                 results.push(DbStatementResult::failed(&statement, refused));
                 break;
             }
@@ -675,18 +689,11 @@ impl OracleSession {
             .iter()
             .map(|edit| sqlgen::edit_statement(node, DIALECT, edit))
             .collect::<Result<Vec<String>, String>>()?;
-        let mut request = Map::new();
-        request.insert("statements".into(), Value::from(statements.clone()));
-        request.insert("transactional".into(), Value::from(true));
+        // Each UPDATE and DELETE must affect exactly one row, or the bridge rolls the batch back —
+        // see `edit_expects_one_row`.
+        let request = jvm::edit_batch_request(&statements, edits);
         let answer = self.bridge.call("batch", &self.session_id, request).await?;
-        let applied = answer.get("applied").and_then(Value::as_u64).unwrap_or(0) as u32;
-        let error = answer.get("error").and_then(Value::as_str).map(|message| {
-            match answer.get("failedStatement").and_then(Value::as_str) {
-                Some(statement) if !statement.is_empty() => format!("{message}\n\n{statement}"),
-                _ => message.to_string(),
-            }
-        });
-        Ok(DbEditResult { applied, statements, error })
+        Ok(jvm::edit_batch_result(&answer, statements))
     }
 
     /// The server's own definition from `DBMS_METADATA`, or — for an account that may not read
@@ -932,7 +939,7 @@ mod tests {
         config.user = parts[2].into();
         config.password = parts[3].into();
         config.database = parts[4].into();
-        let session = OracleSession::open(&config, None).await.expect("connect");
+        let session = OracleSession::open(&config, None, "").await.expect("connect");
         let schema = session.schema.lock().await.clone();
         let ctx = DbExecContext { database: None, schema: None, max_rows: 100 };
 

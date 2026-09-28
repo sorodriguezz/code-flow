@@ -82,6 +82,7 @@ export type ShortcutId =
   | "editor.renamePath"
   | "editor.deletePath"
   | "editor.save"
+  | "editor.saveAll"
   | "editor.closeTab"
   | "editor.nextTab"
   | "editor.prevTab"
@@ -90,6 +91,7 @@ export type ShortcutId =
   | "editor.goToLine"
   | "editor.toggleComment"
   | "editor.formatDocument"
+  | "editor.findReferences"
   | "editor.selectNextOccurrence"
   | "editor.moveLineUp"
   | "editor.moveLineDown"
@@ -195,13 +197,49 @@ function cycleView(delta: number): void {
   goTo(VIEW_ORDER[(index + delta + VIEW_ORDER.length) % VIEW_ORDER.length]);
 }
 
-/** Replays a history entry — shared with the title bar's back/forward chevrons so both routes
- * apply an entry the same way. */
+/**
+ * Replays a history entry — shared with the title bar's back/forward chevrons so both routes
+ * apply an entry the same way.
+ *
+ * **Only entries this workspace can show.** The history spans every workspace the window has been
+ * in, and replaying a project from another one used to leave the window on "no project open" with
+ * that project's id saved as where it opens next. Crossing back into the other workspace was the
+ * alternative, and the more surprising one: switching workspace is a deliberate move, and ⌥← quietly
+ * undoing it — sidebar, rail and all — is not what "back" means to someone who just made it. So the
+ * entries that cannot be shown here are walked over (see `historyStep`), and the keys go on meaning
+ * "where I was in this workspace". An entry with no project — a workspace app — is always fine.
+ */
 export function goHistory(direction: "back" | "forward"): void {
-  const entry = useNavigationStore.getState()[direction]();
+  const entry = useNavigationStore
+    .getState()
+    [direction]((candidate) => !candidate.projectId || openableProjectId(candidate.projectId));
   if (!entry) return;
   useUiStore.getState().setActiveView(entry.view);
   if (entry.projectId) useWorkspaceStore.getState().setActiveProject(entry.projectId);
+}
+
+/**
+ * Whether this window can open `project` right now: in the active workspace, on disk, still a
+ * repository, and not moved out into a window of its own. The sidebar refuses the same ones — see
+ * `missingProjectsStore` — and a keystroke that landed on one would point the git engine where the
+ * row itself will not.
+ */
+function openable(project: { id: string; local_path: string }): boolean {
+  const { missing, notARepo } = useMissingProjectsStore.getState();
+  const { satellites } = useWindowStore.getState();
+  return (
+    !missing.has(project.local_path) &&
+    !notARepo.has(project.local_path) &&
+    !satellites.some((s) => s.kind === "repo" && s.ref_id === project.id)
+  );
+}
+
+function openableProjectId(projectId: string): boolean {
+  const { activeWorkspaceId, projectsByWorkspace } = useWorkspaceStore.getState();
+  const project = activeWorkspaceId
+    ? projectsByWorkspace[activeWorkspaceId]?.find((p) => p.id === projectId)
+    : undefined;
+  return !!project && openable(project);
 }
 
 /**
@@ -247,20 +285,10 @@ function cycleProject(delta: number): void {
   const { activeWorkspaceId, projectsByWorkspace, activeProjectId, setActiveProject } =
     useWorkspaceStore.getState();
   const all = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
-  // A repository that cannot be opened is not a stop on the way round — whether its folder is gone
-  // or its folder has stopped being a repository. The sidebar already refuses to open either — see
-  // `missingProjectsStore` — and a shortcut that landed on one would put the git engine somewhere
-  // the row itself will not send it.
-  const { missing, notARepo } = useMissingProjectsStore.getState();
-  // And nor is one this window has moved out into a window of its own — cycling onto it would
-  // select a repository whose views are not in this window at all.
-  const { satellites } = useWindowStore.getState();
-  const projects = all.filter(
-    (p) =>
-      !missing.has(p.local_path) &&
-      !notARepo.has(p.local_path) &&
-      !satellites.some((s) => s.kind === "repo" && s.ref_id === p.id),
-  );
+  // A repository that cannot be opened is not a stop on the way round — whether its folder is gone,
+  // its folder has stopped being a repository, or this window has moved it out into a window of its
+  // own (cycling onto that would select a repository whose views are not here at all).
+  const projects = all.filter(openable);
   if (projects.length === 0) return;
   const index = projects.findIndex((p) => p.id === activeProjectId);
   const next = index < 0 ? 0 : (index + delta + projects.length) % projects.length;
@@ -679,19 +707,49 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     monacoCommand: "cf-save",
   },
   /**
+   * Every unsaved tab of the project, through the same checked save — `saveAll` in `EditorView`.
+   *
+   * ⌘⌥S because it is VS Code's on macOS (and Ctrl+Alt+S where Mod is Ctrl), and free here: nothing
+   * in this registry, Monaco's table or the macOS menu claims it. A plain `run`, not a Monaco action:
+   * it is about every tab, so it has to work with the caret anywhere — which the Mod chord does.
+   */
+  {
+    id: "editor.saveAll",
+    group: "editor",
+    labelKey: "editor.saveAll",
+    defaultChord: "Mod+Alt+S",
+    run: () => useEditorCommandStore.getState().send("saveAll"),
+  },
+  /**
    * Format the document.
    *
    * Monaco ships this on ⇧⌥F and it was reachable — but only in the languages something can format,
    * and when nothing can it does nothing at all, silently, which reads as a broken key rather than
    * as a missing formatter. Routed through an action of ours so the key is rebindable like every
-   * other, and so the silence can be answered (see `cf-format` in `EditorPane`).
+   * other, and so the silence can be answered (see `cf-format` in `EditorPane`), and so the
+   * repository's own Prettier goes first.
+   *
+   * `Alt+Shift+F`, in `eventToChord`'s order. It was written `Shift+Alt+F`, which no keypress ever
+   * produces — so the chord never reached `cf-format` at all, and ⇧⌥F fell through to Monaco's own
+   * binding of the same key, bypassing everything this action adds.
    */
   {
     id: "editor.formatDocument",
     group: "editor",
     labelKey: "shortcuts.formatDocument",
-    defaultChord: "Shift+Alt+F",
+    defaultChord: "Alt+Shift+F",
     monacoCommand: "cf-format",
+  },
+  /**
+   * Every reference to the symbol under the caret, across the project, listed in the panel under
+   * the editor — see `findReferences`. ⇧⌥F12 is VS Code's; Monaco's own ⇧F12 still opens its peek.
+   */
+  {
+    id: "editor.findReferences",
+    group: "editor",
+    labelKey: "editor.findReferences",
+    defaultChord: "Alt+Shift+F12",
+    monacoCommand: "cf-find-references",
   },
   {
     id: "editor.closeTab",

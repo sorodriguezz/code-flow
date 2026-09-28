@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { relPathFromModelUri } from "./editorModel";
+import type { TsRenameGroup } from "./workspaceEdit";
 
 /**
  * The thin half of the TypeScript language service: the protocol, and nothing about editors.
@@ -25,9 +28,97 @@ export const tsStop = () => invoke<void>("ts_stop");
 export const tsRequest = <T>(command: string, args: unknown) =>
   invoke<T>("ts_request", { command, arguments: args });
 
-/** `open`, `change`, `close` — the ones tsserver never replies to. */
+/** `open`, `change`, `close` — the ones tsserver never replies to — and `geterr`/`geterrForProject`,
+ *  which reply only with events. Resolves with the message's `seq`, the number the closing
+ *  `requestCompleted` event names. */
 export const tsNotify = (command: string, args: unknown) =>
-  invoke<void>("ts_notify", { command, arguments: args });
+  invoke<number>("ts_notify", { command, arguments: args });
+
+/**
+ * One event tsserver raised on its own — only the diagnostics ones are forwarded (`tsserver.rs`).
+ * `root` is the repository the server was started for: every window hears every event, and a
+ * window editing another repository must not take these for its own.
+ */
+export interface TsEvent {
+  root: string;
+  event: "syntaxDiag" | "semanticDiag" | "suggestionDiag" | "requestCompleted";
+  body: unknown;
+}
+
+export const onTsEvent = (handler: (event: TsEvent) => void) =>
+  listen<TsEvent>("tsserver:event", (e) => handler(e.payload));
+
+/**
+ * The project the running server answers for, and whether it is up — published by `useTypeScript`.
+ *
+ * Module state rather than the hook's own for the reason `tsOpenFiles` is: the other reader is not
+ * a component. Monaco's isolated TypeScript worker is registered at startup (`tsWorkerFallback`)
+ * and has to know, per model, whether the compiler is the one answering — so that exactly one of
+ * the two ever does.
+ */
+let served: { repoPath: string; projectId: string } | null = null;
+/** The repository the server that is up was started for — not a boolean, because the window can
+ *  move to another project while the previous one's server is still the one running. */
+let runningRoot: string | null = null;
+
+export function setTsServed(project: { repoPath: string; projectId: string } | null): void {
+  served = project;
+}
+
+export function tsServedProject(): { repoPath: string; projectId: string } | null {
+  return served;
+}
+
+/** `root` when a server came up for that repository, `null` when none is running. */
+export function setTsRunning(root: string | null): void {
+  runningRoot = root;
+}
+
+/** The repository the running server belongs to, or `null`. */
+export function tsRunningRoot(): string | null {
+  return runningRoot;
+}
+
+/** Whether a server is up *for the project the editor is showing* — the only one it can answer
+ *  about. */
+export function tsIsRunning(): boolean {
+  return runningRoot !== null && served !== null && served.repoPath === runningRoot;
+}
+
+/**
+ * The absolute path tsserver holds for a model, or `null` when it is not one of the served
+ * project's script files or the server has not been handed it yet.
+ *
+ * Through `relPathFromModelUri`, because models here are addressed as `cf-editor:/<projectId>/<relPath>`
+ * and not by their path on disk — reading `uri.path` directly once pasted the project id into the
+ * middle of every path and matched nothing (see `useTypeScript`).
+ */
+export function tsFileOf(uri: { scheme: string; path: string }): string | null {
+  const file = tsCandidateFile(uri);
+  return file !== null && tsOpenFiles.has(file) ? file : null;
+}
+
+/** Whether the compiler — and not Monaco's isolated worker — answers for this model right now. */
+export function tsServes(uri: { scheme: string; path: string }): boolean {
+  return tsIsRunning() && tsFileOf(uri) !== null;
+}
+
+/** The absolute path a model of the served project *would* have in tsserver, open or not — what the
+ *  document sync opens it under. */
+export function tsCandidateFile(uri: { scheme: string; path: string }): string | null {
+  if (!served) return null;
+  const relative = relPathFromModelUri(uri, served.projectId);
+  if (!relative || !scriptKind(relative)) return null;
+  return tsAbsolute(served.repoPath, relative);
+}
+
+/** tsserver's absolute path as a repo-relative one of the served project, or `null` outside it. */
+export function tsRelPath(file: string): string | null {
+  if (!served) return null;
+  const root = served.repoPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalized = file.replace(/\\/g, "/");
+  return normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : null;
+}
 
 /**
  * The files handed to the running server, as absolute paths.
@@ -166,6 +257,85 @@ export interface TsDiagnostic {
 
 export const partsToText = (parts?: TsSymbolDisplayPart[]) =>
   (parts ?? []).map((part) => part.text).join("");
+
+/** What a `syntaxDiag`/`semanticDiag`/`suggestionDiag` event carries: one file's whole list of
+ *  that kind, which replaces whatever the previous one said about it. */
+export interface TsDiagnosticEventBody {
+  file: string;
+  diagnostics: TsDiagnostic[];
+}
+
+/**
+ * `rename`'s answer. `info` says whether the symbol can be renamed at all — a keyword, a symbol
+ * from a `.d.ts` in `node_modules`, a string literal all say no, with the compiler's own sentence
+ * why — and `locs` is every occurrence, grouped by file, across the whole project.
+ */
+export interface TsRenameResponse {
+  info: {
+    canRename: boolean;
+    localizedErrorMessage?: string;
+    displayName?: string;
+    triggerSpan?: TsTextSpan;
+  };
+  locs: TsRenameGroup[];
+}
+
+/** One occurrence `references` found. `lineText` is the line it is on — what makes a results
+ *  list readable without opening each file. */
+export interface TsReferenceEntry {
+  file: string;
+  start: { line: number; offset: number };
+  end: { line: number; offset: number };
+  lineText?: string;
+  isDefinition?: boolean;
+  isWriteAccess?: boolean;
+}
+
+export interface TsReferencesResponse {
+  refs: TsReferenceEntry[];
+  symbolName: string;
+}
+
+export interface TsSignatureHelpParameter {
+  name: string;
+  documentation?: TsSymbolDisplayPart[];
+  displayParts: TsSymbolDisplayPart[];
+}
+
+export interface TsSignatureHelpItem {
+  prefixDisplayParts: TsSymbolDisplayPart[];
+  suffixDisplayParts: TsSymbolDisplayPart[];
+  separatorDisplayParts: TsSymbolDisplayPart[];
+  parameters: TsSignatureHelpParameter[];
+  documentation?: TsSymbolDisplayPart[];
+}
+
+export interface TsSignatureHelpItems {
+  items: TsSignatureHelpItem[];
+  selectedItemIndex: number;
+  argumentIndex: number;
+}
+
+/**
+ * A signature as Monaco draws it: the label written out, and each parameter as the `[start, end)`
+ * slice of that label it occupies — which is what lets Monaco bold the one being typed even when
+ * two parameters share a name with something else in the signature.
+ */
+export function signatureLabel(item: TsSignatureHelpItem): {
+  label: string;
+  parameters: { label: [number, number]; documentation: string }[];
+} {
+  let label = partsToText(item.prefixDisplayParts);
+  const separator = partsToText(item.separatorDisplayParts);
+  const parameters = item.parameters.map((parameter, index) => {
+    if (index > 0) label += separator;
+    const start = label.length;
+    label += partsToText(parameter.displayParts);
+    return { label: [start, label.length] as [number, number], documentation: partsToText(parameter.documentation) };
+  });
+  label += partsToText(item.suffixDisplayParts);
+  return { label, parameters };
+}
 
 /**
  * The script kind tsserver should parse a file as.

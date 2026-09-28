@@ -97,9 +97,8 @@ pub async fn all() -> Vec<HostHold> {
 ///
 /// One honest limit, stated rather than papered over: [`super::sftp::close`] de-registers a session,
 /// it does not kill it. A transfer already running holds its own handle on the session for the length
-/// of the copy, so that `ssh` child outlives this call — bounded by the transfer, but unreachable
-/// from any command while it lasts. Cancelling a transfer is a different feature with its own UI
-/// question.
+/// of the copy, so that `ssh` child outlives this call — bounded by the transfer. That transfer has
+/// its own way out: `remote_cancel_transfer` stops it at its next chunk.
 pub async fn release(host_id: &str) {
     // Forwards first, and synchronously: this is the step that gives a listening port back, and
     // dropping the entry is what kills the `ssh`. The screen's tunnel is in this registry too.
@@ -121,6 +120,8 @@ pub async fn release_all() {
     super::forward::close_all();
     super::screen::close_all();
     super::files::close_all().await;
+    // Last: the `ssh` processes that could have been reading from it are gone above.
+    super::askpass::cleanup();
 }
 
 #[cfg(test)]

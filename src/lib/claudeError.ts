@@ -1,3 +1,5 @@
+import type { TranslationKey } from "./i18n/translations";
+
 const QUOTA_MARKER = "QUOTA_EXCEEDED::";
 
 /** Why the provider refused. `usage` is a rate/usage limit that lifts on its own; `billing` is an
@@ -5,11 +7,13 @@ const QUOTA_MARKER = "QUOTA_EXCEEDED::";
  * rather than both shown as "you hit your limit". */
 export type QuotaKind = "usage" | "billing";
 
-/** Must stay in step with the billing half of `QUOTA_SIGNALS` in `ai.rs`: that list decides
- *  whether a refusal is recognised at all, this one decides which of the two remedies is offered.
- *  A phrase in one and not the other is the worst outcome available here — the refusal is caught
- *  and then the user is told to wait for a window that does not exist, because a prepaid balance
- *  does not refill on a clock. */
+/** Must stay in step with the billing half of `QUOTA_SIGNALS` in `ai.rs`, and with the Claude Code
+ *  wordings of `LIMIT_OPENINGS` beside it: those lists decide whether a refusal is recognised at
+ *  all, this one decides which of the two remedies is offered. A phrase in one and not the other is
+ *  the worst outcome available here — the refusal is caught and then the user is told to wait for a
+ *  window that does not exist, because a prepaid balance does not refill on a clock. The last three
+ *  are Claude Code's: extra usage and usage credits are bought, and an organisation's allowance is
+ *  topped up by its admin — none of them reopens by itself, unlike "You've hit your session limit". */
 const BILLING_SIGNALS = [
   "insufficient balance",
   "insufficient credit",
@@ -17,6 +21,9 @@ const BILLING_SIGNALS = [
   "out of credit",
   "payment required",
   "billing",
+  "out of extra usage",
+  "out of usage credits",
+  "org is out of usage",
 ];
 
 /**
@@ -54,9 +61,15 @@ export interface ClaudeErrorInfo {
   isQuotaExceeded: boolean;
   /** Only set when `isQuotaExceeded`. */
   kind: QuotaKind | null;
+  /** For a quota refusal, the provider's own words — "You've hit your session limit · resets 12am
+   *  (America/Santiago)" — which the notice shows as they are, so the one fact the user needs is
+   *  never replaced by a paraphrase. */
   message: string;
   /** Best-effort "resets in N hours/minutes" extracted from the CLI's own message. */
   resetHint: string | null;
+  /** The reset instant in epoch seconds, when the provider stated one exactly (the older Claude
+   *  wording ends in `|<epoch>`, which is taken off `message`). */
+  resetsAt: number | null;
   /** An http(s) link the provider pointed at (e.g. its billing page), when it included one. */
   actionUrl: string | null;
   /** Set when the failure is a configuration problem with a known remedy. Never set at the same
@@ -171,7 +184,11 @@ function parseSetupProblem(message: string): SetupProblem | null {
 
 export function parseClaudeError(raw: string): ClaudeErrorInfo {
   if (raw.includes(QUOTA_MARKER)) {
-    const message = raw.slice(raw.indexOf(QUOTA_MARKER) + QUOTA_MARKER.length).trim();
+    const quoted = raw.slice(raw.indexOf(QUOTA_MARKER) + QUOTA_MARKER.length).trim();
+    // "Claude AI usage limit reached|1751234567": the number is the reset instant, not words — the
+    // same split `ai::classify_failure` makes.
+    const stamped = quoted.match(/^(.*?)\s*\|(\d{9,})\s*$/s);
+    const message = stamped ? stamped[1] : quoted;
     const lower = message.toLowerCase();
     const kind: QuotaKind = BILLING_SIGNALS.some((s) => lower.includes(s)) ? "billing" : "usage";
     const match = message.match(/(\d+)\s*(hours?|hrs?|minutes?|mins?)/i);
@@ -182,6 +199,7 @@ export function parseClaudeError(raw: string): ClaudeErrorInfo {
       kind,
       message,
       resetHint: kind === "usage" && match ? `${match[1]} ${match[2].toLowerCase()}` : null,
+      resetsAt: stamped ? Number(stamped[2]) : null,
       actionUrl: url,
       // Deliberately null: an account that is out of quota is an account that is set up. Offering
       // "sign in" to someone who is signed in and merely rate-limited sends them to re-authenticate
@@ -194,7 +212,45 @@ export function parseClaudeError(raw: string): ClaudeErrorInfo {
     kind: null,
     message: raw,
     resetHint: null,
+    resetsAt: null,
     actionUrl: null,
     setup: parseSetupProblem(raw),
   };
+}
+
+/**
+ * What a usage-limit notice adds about *when*, beyond the provider's own words — or `null` when
+ * those words already say it.
+ *
+ * Both quota notices (`AiErrorBanner` and the Changes panel's) print the provider's message as it
+ * is, and this is the line under it. It used to be the only line: a parsed "N hours", or "try again
+ * later" when there was none — so a real "You've hit your session limit · resets 12am
+ * (America/Santiago)" lost the one fact in it and gained a vaguer one. Now "later" is only offered
+ * when the message names no time at all, and never contradicts one that does.
+ */
+export function quotaRetryNote(
+  error: ClaudeErrorInfo,
+): { key: TranslationKey; params?: Record<string, string> } | null {
+  if (!error.isQuotaExceeded || error.kind !== "usage") return null;
+  if (error.resetHint) return { key: "changes.quotaRetry", params: { hint: error.resetHint } };
+  if (error.resetsAt) {
+    const time = new Date(error.resetsAt * 1000).toLocaleString([], {
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    return { key: "changes.quotaResetsAt", params: { time } };
+  }
+  if (/\breset|\btry again\b/i.test(error.message)) return null;
+  return { key: "changes.quotaRetryLater" };
+}
+
+/** [`quotaRetryNote`], already translated — for a notice that has `t` and nothing else to do with
+ *  the key. `null` when there is nothing to add to the provider's words. */
+export function quotaRetryText(
+  error: ClaudeErrorInfo,
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string,
+): string | null {
+  const note = quotaRetryNote(error);
+  return note ? t(note.key, note.params) : null;
 }

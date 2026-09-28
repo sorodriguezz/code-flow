@@ -19,6 +19,7 @@
  */
 
 import {
+  AlignLeft,
   AppWindow,
   Bell,
   Blocks,
@@ -40,6 +41,7 @@ import {
   GraduationCap,
   HardDrive,
   History,
+  Info,
   Keyboard,
   KeyRound,
   Languages,
@@ -130,6 +132,9 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "windows", labelKey: "windows.limitLabel", hintKey: "windows.limitHint", icon: AppWindow, searchKey: "settings.searchTermsWindows" },
       { id: "tours", labelKey: "tour.settingsTitle", hintKey: "tour.settingsHint", icon: GraduationCap, searchKey: "settings.searchTermsTours" },
       { id: "data", labelKey: "settings.tabAppData", icon: HardDrive, searchKey: "settings.searchTermsAppData" },
+      // The version, the log folder and the way to report a problem — which were only ever in the
+      // macOS Help menu, so Windows and Linux had none of them.
+      { id: "about", labelKey: "settings.tabAbout", icon: Info, searchKey: "settings.searchTermsAbout" },
     ],
   },
   {
@@ -203,6 +208,14 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
         hintKey: "csv.settingsHint",
         icon: Rainbow,
         searchKey: "settings.searchTermsCsv",
+      },
+      // Formatting: the repository's Prettier, and whether a save formats first.
+      {
+        id: "format",
+        labelKey: "editor.formatting",
+        hintKey: "editor.formattingHint",
+        icon: AlignLeft,
+        searchKey: "settings.searchTermsFormatting",
       },
     ],
   },

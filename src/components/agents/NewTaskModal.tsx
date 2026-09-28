@@ -118,6 +118,10 @@ export function NewTaskModal({
       for (const projectId of projectIds) {
         created.push(await store.create({ projectId, agent, goal, agentProjectId }));
       }
+      // A refusal here is the one-agent-per-repository guard, and `send` says so itself, naming the
+      // repository. The dialog still closes on it: the task exists, `create` selected it, and it
+      // opens with its goal on screen and a Run button — the retry is one click away once the
+      // repository is free, instead of a task that silently never started.
       for (const task of created) store.send(task.id, goal);
       // `create` selects whatever it just made, so the pane would otherwise open on the repository
       // ticked last. The first one is the one the user started from.

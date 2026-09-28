@@ -6,6 +6,7 @@ import type {
   NoteRow,
   NoteSearchHit,
   NoteTemplateRow,
+  NoteTrashRow,
   NotesWorkspaceTree,
 } from "../../types/notes";
 
@@ -69,7 +70,44 @@ export const notesReorderNotes = (ids: string[]) =>
 export const notesSetPinned = (id: string, pinned: boolean) =>
   invoke<void>("notes_set_pinned", { id, pinned });
 
+/** Moves a note to the trash, history and all. See the trash calls below. */
 export const notesDeleteNote = (id: string) => invoke<void>("notes_delete_note", { id });
+
+// ---------- trash ----------
+
+/** The trash this workspace sees: its own trashed notes and the global ones, newest first. */
+export const notesListTrash = (workspaceId: string) =>
+  invoke<NoteTrashRow[]>("notes_list_trash", { workspaceId });
+
+/** Takes a note out of the trash. `fallbackBookName` names the book made for it when its own is
+ *  gone and the workspace has none. `null` when it was no longer in the trash. */
+export const notesRestoreNote = (id: string, fallbackBookName: string) =>
+  invoke<NoteMetaRow | null>("notes_restore_note", { id, fallbackBookName });
+
+/** Deletes one trashed note for good, history included. `false` if it was not in the trash. */
+export const notesPurgeNote = (id: string) => invoke<boolean>("notes_purge_note", { id });
+
+/** Empties the trash this workspace sees, for good. Answers with how many notes went. */
+export const notesEmptyTrash = (workspaceId: string) =>
+  invoke<number>("notes_empty_trash", { workspaceId });
+
+// ---------- renaming ----------
+
+/** Reads a Markdown file picked in a dialog, for "Import Markdown". Capped at 5 MB, UTF-8 only. */
+export const notesReadImport = (path: string) => invoke<string>("notes_read_import", { path });
+
+/** How many other notes link to `title` with a `[[link]]`. */
+export const notesCountLinks = (workspaceId: string, title: string, excludeId: string) =>
+  invoke<number>("notes_count_links", { workspaceId, title, excludeId });
+
+/** Points every `[[oldTitle]]` in the workspace's other notes at `newTitle`, in one transaction.
+ *  Answers with the notes it rewrote. */
+export const notesRewriteLinks = (
+  workspaceId: string,
+  oldTitle: string,
+  newTitle: string,
+  excludeId: string,
+) => invoke<NoteMetaRow[]>("notes_rewrite_links", { workspaceId, oldTitle, newTitle, excludeId });
 
 /** `title` is passed in because "Copy of …" is translated and Rust has no language. */
 export const notesDuplicateNote = (id: string, title: string) =>

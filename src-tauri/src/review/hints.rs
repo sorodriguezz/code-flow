@@ -150,6 +150,8 @@ mod tests {
             motivo_descarte: motivo.map(str::to_string),
             delta: None,
             comentario_md: String::new(),
+            publicado_en_iter: None,
+            hilo_general: false,
         }
     }
 

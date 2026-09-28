@@ -51,6 +51,7 @@ use crate::db::{queries, service_queries, Db};
 use crate::terminal::{self, Origin, PtyHooks, TerminalRegistry};
 
 use super::compose::{self, ComposeTarget};
+use super::envfile;
 use super::log::{strip_ansi, LogBuffer};
 use super::ports::{self, ProcId, ProcessTable};
 
@@ -676,9 +677,13 @@ impl Supervisor {
             let marker = start_marker(&run.def.command, !run.log.text().is_empty());
             run.log.push(&marker);
 
-            let launched = launch(app, &run.def, self.hooks(app, id, spawn_id, env_of(&run.def)));
+            let launched = env_of(&run.def).and_then(|env| launch(app, &run.def, self.hooks(app, id, spawn_id, env)));
             match launched {
-                Ok(Launched { session, pid, cwd, env }) => {
+                Ok(Launched { session, pid, cwd, env, notes }) => {
+                    // Still under the lock, so these land before the first byte the process prints.
+                    for note in notes {
+                        run.log.push(&format!("\x1b[33m{note}\x1b[0m\r\n"));
+                    }
                     run.session_id = Some(session);
                     run.pid = pid;
                     run.cwd = cwd;
@@ -1287,13 +1292,19 @@ struct Launched {
     pid: Option<u32>,
     cwd: Option<PathBuf>,
     env: Vec<(String, String)>,
+    /// Lines for the console about the start itself — an env file that was not there.
+    notes: Vec<String>,
 }
 
-fn launch<R: Runtime>(app: &AppHandle<R>, def: &Service, hooks: PtyHooks) -> Result<Launched, String> {
+fn launch<R: Runtime>(app: &AppHandle<R>, def: &Service, mut hooks: PtyHooks) -> Result<Launched, String> {
     if def.command.trim().is_empty() {
         return Err("this service has no command to run".into());
     }
     let cwd = resolve_cwd(app, def)?;
+    // The env files under the service's own variables: those were written for this service in
+    // particular, a file is shared with everything else run in the folder. See `envfile`.
+    let loaded = envfile::load(&envfile::files_of(&def.env_files), cwd.as_deref());
+    hooks.env = envfile::merge(loaded.vars, std::mem::take(&mut hooks.env));
     let env = hooks.env.clone();
     let (program, args) = shell_invocation(&def.command);
     let registry = app.state::<TerminalRegistry>();
@@ -1315,7 +1326,7 @@ fn launch<R: Runtime>(app: &AppHandle<R>, def: &Service, hooks: PtyHooks) -> Res
         hooks,
     )?;
     let pid = terminal::pid_of(&registry, &session);
-    Ok(Launched { session, pid, cwd, env })
+    Ok(Launched { session, pid, cwd, env, notes: loaded.notes })
 }
 
 /// Where a service runs.
@@ -1360,7 +1371,7 @@ fn resolve_cwd<R: Runtime>(app: &AppHandle<R>, service: &Service) -> Result<Opti
 pub fn shell_invocation(command: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
-        ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])
+        ("cmd".to_string(), vec!["/C".to_string(), for_cmd(command)])
     }
     #[cfg(not(windows))]
     {
@@ -1368,21 +1379,57 @@ pub fn shell_invocation(command: &str) -> (String, Vec<String>) {
     }
 }
 
-/// A service's environment variables. Only plain values: an entry shaped `{"vault": id}` names a
-/// secret in the keyring, and is left out rather than passed as the text of its reference.
-fn env_of(service: &Service) -> Vec<(String, String)> {
+/// A command written for a Unix shell, made runnable by `cmd`.
+///
+/// Only the one spelling that can never work there: a leading `./mvnw` or `./gradlew`, which `cmd`
+/// reads as a program called `.` ("'.' is not recognized…"). Detection used to write exactly that
+/// on every platform, so services saved before it learned Windows' spelling are repaired here
+/// rather than left failing; the wrapper `cmd` runs is the `.cmd`/`.bat` beside the script.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn for_cmd(command: &str) -> String {
+    let trimmed = command.trim_start();
+    for (unix, windows) in [("./mvnw", "mvnw.cmd"), ("./gradlew", "gradlew.bat")] {
+        if let Some(rest) = trimmed.strip_prefix(unix) {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return format!("{windows}{rest}");
+            }
+        }
+    }
+    command.to_string()
+}
+
+/// A service's environment variables — or why it cannot be started with them.
+///
+/// Plain values pass through. An entry shaped `{"vault": id}` names a secret in the keyring, and is
+/// **refused, by name**: nothing can hand a service a keyring secret — the keyring is locked more
+/// often than not when a group starts, and a reference does not even say which of the entry's
+/// fields it means. It used to be left out silently, so the service started without the token it
+/// was configured with and failed later, somewhere else, for a reason nothing on screen showed.
+fn env_of(service: &Service) -> Result<Vec<(String, String)>, String> {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&service.env) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    map.into_iter()
-        .filter(|(key, _)| !key.trim().is_empty())
-        .filter_map(|(key, value)| match value {
-            serde_json::Value::String(s) => Some((key, s)),
-            serde_json::Value::Number(n) => Some((key, n.to_string())),
-            serde_json::Value::Bool(b) => Some((key, b.to_string())),
-            _ => None,
-        })
-        .collect()
+    let mut env = Vec::new();
+    let mut refused = Vec::new();
+    for (key, value) in map {
+        if key.trim().is_empty() {
+            continue;
+        }
+        match value {
+            serde_json::Value::String(s) => env.push((key, s)),
+            serde_json::Value::Number(n) => env.push((key, n.to_string())),
+            serde_json::Value::Bool(b) => env.push((key, b.to_string())),
+            serde_json::Value::Null => {}
+            _ => refused.push(key),
+        }
+    }
+    if !refused.is_empty() {
+        return Err(format!(
+            "{} refers to a keyring entry, which a service cannot be given — set a value, or load it from an env file",
+            refused.join(", ")
+        ));
+    }
+    Ok(env)
 }
 
 pub fn deps_of(service: &Service) -> Vec<String> {
@@ -1606,6 +1653,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             detected_ports: "[]".into(),
+            env_files: "[]".into(),
         }
     }
 
@@ -1753,10 +1801,10 @@ mod tests {
     }
 
     #[test]
-    fn env_takes_plain_values_and_skips_vault_references() {
+    fn env_takes_plain_values() {
         let mut s = service("x", &[]);
-        s.env = r#"{"PORT":"4001","DEBUG":true,"WORKERS":2,"TOKEN":{"vault":"abc"},"":"x"}"#.into();
-        let mut env = env_of(&s);
+        s.env = r#"{"PORT":"4001","DEBUG":true,"WORKERS":2,"UNSET":null,"":"x"}"#.into();
+        let mut env = env_of(&s).unwrap();
         env.sort();
         assert_eq!(
             env,
@@ -1766,6 +1814,53 @@ mod tests {
                 ("WORKERS".to_string(), "2".to_string()),
             ]
         );
+    }
+
+    /// A keyring reference is refused by name rather than dropped: a service started without the
+    /// token it was configured with fails later, somewhere else, for a reason nobody can see.
+    #[test]
+    fn a_vault_reference_is_refused_by_name_not_dropped() {
+        let mut s = service("x", &[]);
+        s.env = r#"{"PORT":"4001","TOKEN":{"vault":"abc"},"KEY":{"vault":"def"}}"#.into();
+        let error = env_of(&s).unwrap_err();
+        assert!(error.contains("TOKEN") && error.contains("KEY"), "{error}");
+        assert!(!error.contains("PORT"), "{error}");
+    }
+
+    /// Commands saved before detection spelled the wrappers for Windows are repaired for `cmd`, and
+    /// nothing else is touched.
+    #[test]
+    fn unix_wrapper_spellings_are_repaired_for_cmd() {
+        assert_eq!(for_cmd("./mvnw spring-boot:run"), "mvnw.cmd spring-boot:run");
+        assert_eq!(for_cmd("./mvnw -pl api spring-boot:run"), "mvnw.cmd -pl api spring-boot:run");
+        assert_eq!(for_cmd("./gradlew :api:bootRun"), "gradlew.bat :api:bootRun");
+        assert_eq!(for_cmd("./gradlew"), "gradlew.bat");
+        assert_eq!(for_cmd("./mvnwrapper run"), "./mvnwrapper run");
+        assert_eq!(for_cmd("mvn spring-boot:run"), "mvn spring-boot:run");
+        assert_eq!(for_cmd("pnpm dev && ./mvnw x"), "pnpm dev && ./mvnw x");
+    }
+
+    /// The env files come in under the service's own variables, and a missing one is a line in the
+    /// console — end to end through `launch`'s own merge.
+    #[test]
+    fn env_files_are_layered_under_the_services_own_variables() {
+        let dir = std::env::temp_dir().join(format!("cf-sup-env-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "PORT=3000\nDATABASE_URL=postgres://localhost/app\n").unwrap();
+        let mut s = service("x", &[]);
+        s.env = r#"{"PORT":"4001"}"#.into();
+        s.env_files = r#"[".env", ".env.local"]"#.into();
+        let loaded = envfile::load(&envfile::files_of(&s.env_files), Some(&dir));
+        let env = envfile::merge(loaded.vars, env_of(&s).unwrap());
+        assert_eq!(
+            env,
+            vec![
+                ("PORT".to_string(), "4001".to_string()),
+                ("DATABASE_URL".to_string(), "postgres://localhost/app".to_string()),
+            ]
+        );
+        assert_eq!(loaded.notes.len(), 1, "the missing .env.local is said");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The supervisor against real processes in real ptys: the behaviour the user sees, end to end,

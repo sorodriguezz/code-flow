@@ -79,6 +79,18 @@ pub fn scaffold_write_files(root: String, files: Vec<run::FileSpec>) -> Result<(
     run::write_files(&root, &files)
 }
 
+/// Claims `root` for a run that is about to create it — see [`run::claim`].
+#[tauri::command(async)]
+pub fn scaffold_claim(root: String) -> Result<(), String> {
+    run::claim(&PathBuf::from(root))
+}
+
+/// Deletes what a failed run left at `root`, for "delete and retry" — see [`run::discard`].
+#[tauri::command(async)]
+pub fn scaffold_discard(root: String) -> Result<(), String> {
+    run::discard(&PathBuf::from(root))
+}
+
 /// Starts `script` in a pty from `cwd`; answers with the terminal session id. `(async)` because it
 /// may have to ask the login shell for a `PATH` first, which takes a second.
 #[tauri::command(async)]

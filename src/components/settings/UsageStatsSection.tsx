@@ -448,6 +448,7 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   chat: "usage.task.chat",
   inline: "usage.task.inline",
   "note-write": "usage.task.noteWrite",
+  notebook: "usage.task.notebook",
   commit: "usage.task.commit",
   analyze: "usage.task.analyze",
   "review-pr": "usage.task.reviewPr",

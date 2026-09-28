@@ -20,6 +20,12 @@ export interface DebugAdapter {
   launch: Record<string, unknown>;
   /** What to install when the adapter isn't found — shown verbatim in the error. */
   install: string;
+  /**
+   * `python`: the command above is only what the field shows. Left as it is, the interpreter is
+   * picked for the project when the session starts — its own `.venv` first, then `python3`, then
+   * `python` (see `debug_python`) — for the adapter and for the program alike.
+   */
+  resolve?: "python";
 }
 
 export const DEBUG_ADAPTERS: DebugAdapter[] = [
@@ -36,16 +42,18 @@ export const DEBUG_ADAPTERS: DebugAdapter[] = [
     id: "python",
     label: "Python",
     extensions: ["py"],
-    command: "python",
+    // `python3`, never `python`: macOS has no `python` at all. What actually runs is picked per
+    // project at launch — see `resolve`.
+    command: "python3",
     args: ["-m", "debugpy.adapter"],
     launch: {
       type: "python",
       request: "launch",
       console: "internalConsole",
       justMyCode: true,
-      python: ["python"],
     },
-    install: "pip install debugpy",
+    install: "python3 -m pip install debugpy",
+    resolve: "python",
   },
   {
     id: "coreclr",

@@ -229,10 +229,10 @@ export function BookmarksPanel({
   const breakpointPlaces = useMemo(() => {
     const root = normalizePath(`${repoPath}/`);
     const places: { path: string; line: number; key: string }[] = [];
-    for (const [absolute, lines] of Object.entries(breakpoints)) {
+    for (const [absolute, list] of Object.entries(breakpoints)) {
       if (!absolute.startsWith(root)) continue;
       const relative = absolute.slice(root.length);
-      for (const line of lines) {
+      for (const { line } of list) {
         places.push({ path: relative, line, key: `${absolute}:${line}` });
       }
     }

@@ -21,6 +21,8 @@ const KIND_LABELS: Record<string, TranslationKey> = {
   chat: "checkpoints.kindChat",
   "fix-finding": "checkpoints.kindFix",
   "replace-all": "checkpoints.kindReplace",
+  // A project-wide rename that wrote to files nobody had open (`create_editor_checkpoint`).
+  "rename-symbol": "checkpoints.kindRename",
 };
 
 /** The undo list: every snapshot taken before something was allowed to rewrite the working tree

@@ -61,13 +61,20 @@ const MESSAGE_COLUMNS: &str = "id, conversation_id, turn, role, content, provide
                                engine_version, response_time_ms, is_error, is_cancelled, trace, \
                                outputs, created_at";
 
-/// The same list with a literal `NULL` where `trace` was — but **`outputs` is still read**. It is a
-/// short array of filenames, not a megabyte of log, and it is what the chips under an answer are
-/// drawn from: dropping it here would mean a reopened conversation showed no files until something
-/// asked for traces.
+/// The same list without the trace itself — but **`outputs` is still read**. It is a short array of
+/// filenames, not a megabyte of log, and it is what the chips under an answer are drawn from:
+/// dropping it here would mean a reopened conversation showed no files until something asked for
+/// traces.
+///
+/// The trace column still says *whether* there is one: `''` for "there is, fetch it by this
+/// message's id" (`queries::get_turn_trace`), `NULL` for "there is none". That is what lets the
+/// transcript keep its "N steps" disclosure on a reopened turn and load the trace only when it is
+/// opened.
 const MESSAGE_COLUMNS_NO_TRACE: &str = "id, conversation_id, turn, role, content, provider, \
                                         model, engine_version, response_time_ms, is_error, \
-                                        is_cancelled, NULL, outputs, created_at";
+                                        is_cancelled, \
+                                        CASE WHEN trace IS NULL OR trace = '' OR trace = '[]' THEN NULL ELSE '' END, \
+                                        outputs, created_at";
 
 /// How many characters a generated title may be. Roughly what fits on one line of the sidebar at
 /// its default width; past that the row elides and the extra characters are storage nobody reads.
@@ -915,7 +922,7 @@ mod tests {
     #[test]
     fn folders_sort_pinned_first_and_archived_last() {
         let conn = seeded();
-        let plain = create_group(&conn, "plain", "").unwrap();
+        create_group(&conn, "plain", "").unwrap();
         let pinned = create_group(&conn, "pinned", "").unwrap();
         let shelved = create_group(&conn, "shelved", "").unwrap();
         // Created in that order, so `sort_order` alone would list them plain, pinned, shelved.
@@ -1134,7 +1141,11 @@ mod tests {
 
         let light = list_messages(&conn, &chat.id, false).unwrap();
         assert_eq!(light.len(), 1);
-        assert!(light[0].trace.is_none(), "the trace must not cross the wire unasked");
+        assert_eq!(
+            light[0].trace.as_deref(),
+            Some(""),
+            "the trace must not cross the wire unasked — only the fact that there is one"
+        );
 
         let heavy = list_messages(&conn, &chat.id, true).unwrap();
         assert_eq!(heavy[0].trace.as_deref(), Some(trace), "and must be there when it is");

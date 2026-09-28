@@ -40,6 +40,8 @@ import type {
   JobHistoryEntry,
   JobLog,
   MergeOutcome,
+  OperationState,
+  PullMode,
   NewProject,
   PrActionOutcome,
   PrCommentThread,
@@ -98,6 +100,7 @@ import type {
   DocResult,
   DocScope,
   RemoteDevice,
+  RemoteNotice,
   RemoteTerminal,
   RemoteStatus,
 } from "../../types/domain";
@@ -106,6 +109,18 @@ import type { FindingLocation } from "../parseAnalysis";
 // ---------- app lifecycle ----------
 
 export const quitApp = () => invoke<void>("quit_app");
+
+/** The main window saying it answers `app:quit-requested` (or, unloading, that it no longer
+ *  does). See `quit_guard.rs` and `lib/quitGuard.ts`. */
+export const quitGuardArm = (armed: boolean) => invoke<void>("quit_guard_arm", { armed });
+/** "Heard the question" — sent before anything else, so a busy window is not taken for a frozen one. */
+export const quitGuardAck = () => invoke<void>("quit_guard_ack");
+/** The user chose to stay. */
+export const quitGuardCancel = () => invoke<void>("quit_guard_cancel");
+/** Ends the app for real: nothing was unsaved, or the user saved it or chose to lose it. */
+export const quitAppConfirmed = () => invoke<void>("quit_app_confirmed");
+/** The shell rendered: the boot watchdog's all-clear. Idempotent. See `boot_guard.rs`. */
+export const bootReady = () => invoke<void>("boot_ready");
 
 export const resetAppData = () => invoke<void>("reset_app_data");
 
@@ -418,6 +433,10 @@ export const createBranch = (repoPath: string, name: string, startPoint?: string
 export const deleteBranch = (repoPath: string, name: string, isRemote: boolean) =>
   invoke<void>("delete_branch", { repoPath, name, isRemote });
 
+/** Commits on a local branch that neither HEAD nor its upstream has — what deleting it would lose. */
+export const branchUnmergedCount = (repoPath: string, name: string) =>
+  invoke<number>("branch_unmerged_count", { repoPath, name });
+
 export const setBranchLocked = (repoPath: string, name: string, locked: boolean) =>
   invoke<void>("set_branch_locked", { repoPath, name, locked });
 
@@ -523,12 +542,24 @@ export const listRemotes = (repoPath: string) => invoke<RemoteInfo[]>("list_remo
 export const setRemoteUrl = (repoPath: string, name: string, url: string) =>
   invoke<void>("set_remote_url", { repoPath, name, url });
 
+export const addRemote = (repoPath: string, name: string, url: string) =>
+  invoke<void>("add_remote", { repoPath, name, url });
+
+/** `git remote remove`: the remote, its remote-tracking branches and every upstream pointing at it.
+ * Local branches stay. */
+export const removeRemote = (repoPath: string, name: string) =>
+  invoke<void>("remove_remote", { repoPath, name });
+
 // ---------- git: identity ----------
 
 export const getGitIdentity = () => invoke<GitIdentity>("get_git_identity");
 
 export const setGitIdentity = (name: string, email: string) =>
   invoke<void>("set_git_identity", { name, email });
+
+/** A name and email for one repository only, in its own `.git/config`. */
+export const setRepoGitIdentity = (repoPath: string, name: string, email: string) =>
+  invoke<void>("set_repo_git_identity", { repoPath, name, email });
 
 // ---------- git: merge / conflicts ----------
 
@@ -554,6 +585,18 @@ export const completeMerge = (repoPath: string, message: string) =>
 
 export const abortMerge = (repoPath: string) => invoke<void>("abort_merge", { repoPath });
 
+/** Which operation is half done, its unresolved paths (whatever the state) and its prepared message. */
+export const getOperationState = (repoPath: string) =>
+  invoke<OperationState>("get_operation_state", { repoPath });
+
+/** Finishes the operation in progress: commits a merge, revert or cherry-pick with `message` (or the
+ * prepared one), or runs `git <op> --continue` for a rebase or a sequence. */
+export const continueOperation = (repoPath: string, message?: string) =>
+  invoke<void>("continue_operation", { repoPath, message: message ?? null });
+
+/** Undoes the operation in progress, touching only the paths it wrote — or `git <op> --abort`. */
+export const abortOperation = (repoPath: string) => invoke<void>("abort_operation", { repoPath });
+
 // ---------- terminal ----------
 
 export const listShellProfiles = () => invoke<ShellProfile[]>("list_shell_profiles");
@@ -576,6 +619,9 @@ export const resizeTerminal = (id: string, cols: number, rows: number) =>
   invoke<void>("resize_terminal", { id, cols, rows });
 
 export const closeTerminal = (id: string) => invoke<void>("close_terminal", { id });
+/** What a terminal is running in its foreground other than its shell — `null` at the prompt. Closing
+ *  its tab ends it, so the tab asks first. */
+export const terminalForeground = (id: string) => invoke<string | null>("terminal_foreground", { id });
 
 // ---------- terminal: the agent console's bench ----------
 
@@ -639,6 +685,11 @@ export const gitFetch = (repoPath: string, remoteName?: string) =>
 
 export const gitPull = (repoPath: string) => invoke<void>("git_pull", { repoPath });
 
+/** A pull with the reconciliation spelled out — the answer to a `PULL_DIVERGED` refusal. `remember`
+ * writes the choice to the repository's git config first. */
+export const gitPullWith = (repoPath: string, mode: PullMode, remember: boolean) =>
+  invoke<void>("git_pull_with", { repoPath, mode, remember });
+
 /** One branch's remote-tracking ref, and nothing else — no working tree touched. */
 export const gitFetchBranch = (repoPath: string, branch: string) =>
   invoke<void>("git_fetch_branch", { repoPath, branch });
@@ -655,6 +706,10 @@ export const gitPush = (repoPath: string, setUpstream: boolean) =>
  * HEAD, which is the wrong shape wherever the branch is picked from a list rather than stood on. */
 export const gitPushBranch = (repoPath: string, branch: string) =>
   invoke<void>("git_push_branch", { repoPath, branch });
+
+/** `push --force-with-lease --force-if-includes` — offered only after a push came back rejected. */
+export const gitPushForceWithLease = (repoPath: string) =>
+  invoke<void>("git_push_force_with_lease", { repoPath });
 
 // ---------- settings ----------
 
@@ -947,6 +1002,16 @@ export const resumeChain = (chainId: string) => invoke<AgentChain | null>("resum
 
 export const abortChain = (chainId: string) => invoke<AgentChain | null>("abort_chain", { chainId });
 
+/** Arms a paused chain's automatic resume at `resumeAt` (seconds since the epoch), or disarms it
+ * with `0`. Only a chain paused on its engine takes one, and any move clears it — see
+ * `queries::set_chain_resume_at`. */
+export const setChainResumeAt = (chainId: string, resumeAt: number) =>
+  invoke<AgentChain | null>("set_chain_resume_at", { chainId, resumeAt });
+
+/** Every armed automatic resume, in every workspace — what the scheduler re-arms its timers from. */
+export const listScheduledResumes = () =>
+  invoke<{ chain_id: string; resume_at: number }[]>("list_scheduled_resumes");
+
 /** Deletes the plan, the tasks its steps produced, and its memory folder. Returns the ids of those
  * tasks so the caller can drop the same rows out of its own list — they are gone from the database
  * by the time this resolves, and a list still holding them would be showing work that no longer
@@ -1233,6 +1298,27 @@ export const deleteGitlabToken = (host: string) => invoke<void>("delete_gitlab_t
 export const gitlabAuthenticatedUser = (host: string) =>
   invoke<string>("gitlab_authenticated_user", { host });
 
+/** Checks a Bitbucket credential against a workspace **before** it is saved: who it acts as, and
+ * which scopes it is missing. Rejects when it doesn't authenticate at all — nothing is stored. */
+export const bitbucketVerifyCredential = (
+  workspace: string,
+  credential: import("../../types/domain").BitbucketCredential,
+) => invoke<import("../../types/domain").BitbucketCheck>("bitbucket_verify_credential", { workspace, credential });
+
+/** The same check for a workspace whose credential is already saved. */
+export const bitbucketCheckWorkspace = (workspace: string) =>
+  invoke<import("../../types/domain").BitbucketCheck>("bitbucket_check_workspace", { workspace });
+
+/** Bitbucket credentials are keyed per workspace. Write and delete only: every Bitbucket call is
+ * made from Rust, so nothing needs the token back in the webview. */
+export const setBitbucketCredential = (
+  workspace: string,
+  credential: import("../../types/domain").BitbucketCredential,
+) => invoke<void>("set_bitbucket_credential", { workspace, credential });
+
+export const deleteBitbucketCredential = (workspace: string) =>
+  invoke<void>("delete_bitbucket_credential", { workspace });
+
 /** Validates the token saved for `host`, returning the login it authenticates as. */
 export const githubAuthenticatedUser = (host: string) =>
   invoke<string>("github_authenticated_user", { host });
@@ -1244,6 +1330,25 @@ export const generateCommitMessage = (diff: string, runId?: string, workspaceId?
 
 /** Stops a run by the id it was started with. Resolves `false` when it had already finished. */
 export const cancelAiRun = (runId: string) => invoke<boolean>("cancel_ai_run", { runId });
+
+/** The providers whose read-only mode their CLI enforces (`AiEngine::enforces_read_only`). Where a
+ *  provider is missing, "text only" is a request, and the UI says so. Fixed per build. */
+export const aiReadOnlyEngines = () => invoke<string[]>("ai_read_only_engines");
+
+/** Mirrors `ai::AiFailure` — one failed run, classified. See `aiClassifyFailure`. */
+export interface AiFailure {
+  kind: "quota" | "auth_required" | "cli_missing" | "overloaded" | "other";
+  /** The provider's own words, marker stripped — "…· resets 12am (America/Santiago)" survives. */
+  message: string;
+  /** When the window reopens, as the provider phrased it ("12am (America/Santiago)", "in 3 hours"). */
+  resets: string | null;
+  /** The same instant in epoch seconds, when the provider stated one exactly. */
+  resets_at: number | null;
+}
+
+/** Classifies the error an AI run failed with, with the backend's one classifier
+ *  (`ai::classify_failure`). Only ever pass it an error, never a reply. */
+export const aiClassifyFailure = (error: string) => invoke<AiFailure>("ai_classify_failure", { error });
 
 export interface AiCheckpoint {
   id: string;
@@ -1394,6 +1499,10 @@ export const linkProjectGithub = (id: string, githubOwner: string, githubRepo: s
 export const linkProjectGitlab = (id: string, gitlabProject: string, gitlabHost: string) =>
   invoke<void>("link_project_gitlab", { id, gitlabProject, gitlabHost });
 
+/** Links a project to a Bitbucket Cloud repository by workspace and repository slug. */
+export const linkProjectBitbucket = (id: string, workspace: string, repo: string) =>
+  invoke<void>("link_project_bitbucket", { id, workspace, repo });
+
 /** Clears whichever VCS link (Azure DevOps, GitHub or GitLab) the project currently has. */
 export const unlinkProject = (id: string) => invoke<void>("unlink_project", { id });
 
@@ -1403,6 +1512,15 @@ export const openRepoInBrowser = (projectId: string) =>
 
 export const listPullRequests = (projectId: string) =>
   invoke<PullRequestSummary[]>("list_pull_requests", { projectId });
+
+/** One page of the repository's pull requests: `scope` open (the default) · closed · all, `page`
+ * 1-based. The list used to be one page of every state, where an older open PR fell off the end. */
+export const listPullRequestsPage = (projectId: string, scope: import("../../types/domain").PrListScope, page: number) =>
+  invoke<import("../../types/domain").PrPage>("list_pull_requests_page", { projectId, scope, page });
+
+/** One pull request, read directly from its host — however old, whatever its state. */
+export const getPullRequest = (projectId: string, prId: number) =>
+  invoke<PullRequestSummary>("get_pull_request", { projectId, prId });
 
 // ---------------------------------------------------------------------------
 // CI/CD pipelines
@@ -1474,6 +1592,58 @@ export const analyzePipelineFailure = (
   logRef: string | null,
   aiRunId: string,
 ) => invoke<string>("analyze_pipeline_failure", { projectId, runId, jobId, logRef, aiRunId });
+
+/** What the "Run pipeline" dialog opens with: the startable pipelines, the default branch, and
+ *  GitHub's environments. Whether a workflow declares `workflow_dispatch` is read from its file. */
+export const pipelineLaunchContext = (projectId: string) =>
+  invoke<import("../../types/domain").PipelineLaunchContext>("pipeline_launch_context", { projectId });
+
+/** A pipeline file as the host has it at `refName` — the fallback for a working copy without it.
+ *  `null` when the host has no such file there. */
+export const pipelineDefinitionFile = (projectId: string, path: string, refName: string | null) =>
+  invoke<string | null>("pipeline_definition_file", { projectId, path, refName });
+
+/** Starts a run by hand. `run_id` comes back when the host says which run it started. */
+export const startPipeline = (projectId: string, request: import("../../types/domain").StartPipelineRequest) =>
+  invoke<import("../../types/domain").StartedPipeline>("start_pipeline", { projectId, request });
+
+/** Approves or rejects a gate of kind `approval`. The comment is required. */
+export const reviewPipelineGate = (
+  projectId: string,
+  runId: string,
+  gateId: string,
+  approve: boolean,
+  comment: string,
+) => invoke<void>("review_pipeline_gate", { projectId, runId, gateId, approve, comment });
+
+/** Starts a GitLab manual job, with job variables. */
+export const playPipelineJob = (
+  projectId: string,
+  jobId: string,
+  variables: import("../../types/domain").PipelineVariable[],
+) => invoke<void>("play_pipeline_job", { projectId, jobId, variables });
+
+/** A run's artifacts — asked for when the list is opened, never polled. */
+export const listPipelineArtifacts = (projectId: string, runId: string) =>
+  invoke<import("../../types/domain").PipelineArtifact[]>("list_pipeline_artifacts", { projectId, runId });
+
+/**
+ * Downloads one artifact to `destination` (from the save dialog), as the zip the host delivers.
+ * Progress arrives on `ci:artifact` carrying `transferId`, minted by the caller before the invoke.
+ * Resolves to the bytes written.
+ */
+export const downloadPipelineArtifact = (
+  projectId: string,
+  runId: string,
+  artifactId: string,
+  destination: string,
+  transferId: string,
+) =>
+  invoke<number>("download_pipeline_artifact", { projectId, runId, artifactId, destination, transferId });
+
+/** Stops a download at its next chunk; the partial file is removed. */
+export const cancelPipelineArtifactDownload = (transferId: string) =>
+  invoke<void>("cancel_pipeline_artifact_download", { transferId });
 
 /** Resolves a pasted pull-request or merge-request URL — GitHub (including Enterprise), GitLab
  * (including self-managed) or Azure DevOps — into the PR plus the local repository it belongs to,
@@ -1583,8 +1753,10 @@ export const reviewPrFromLink = (url: string, jobId: string, level: string, work
     agentPrompt: null,
   });
 
-/** One human-selected finding to post — identity (`file` + `category`) reuses its stored thread. */
+/** One human-selected finding to post. `id` (its `F-NNN`) is what matches it to its stored finding
+ * and thread; `file` + `category` are the fallback the backend uses when an item carries no id. */
 export interface PostFindingItem {
+  id: string;
   file: string | null;
   category: string;
   content: string;
@@ -1592,15 +1764,24 @@ export interface PostFindingItem {
 }
 
 /** Posts the selected findings to the PR, reconciling threads (new / reply / resolve) against the
- * saved run (`runId`), plus an optional summary comment. */
-export const postPrReviewComment = (
+ * saved run (`runId`), plus an optional summary comment. Every item is attempted; the outcome says
+ * item by item what landed, so a partial publish is never reported as nothing posted. */
+export const publishPrReview = (
   projectId: string,
   prId: number,
   runId: string,
   items: PostFindingItem[],
   postSummary: boolean,
   summary: string | null,
-) => invoke<void>("post_pr_review_comment", { projectId, prId, runId, items, postSummary, summary });
+) =>
+  invoke<import("../../types/domain").PublishOutcome>("publish_pr_review", {
+    projectId,
+    prId,
+    runId,
+    items,
+    postSummary,
+    summary,
+  });
 
 /** Posts the findings of a link-only review, addressed by URL. There's no saved run to reconcile
  * against, so each finding opens a fresh thread rather than continuing an earlier one. */
@@ -1609,7 +1790,13 @@ export const postPrLinkReviewComment = (
   items: PostFindingItem[],
   postSummary: boolean,
   summary: string | null,
-) => invoke<void>("post_pr_link_review_comment", { url, items, postSummary, summary });
+) =>
+  invoke<import("../../types/domain").PublishOutcome>("post_pr_link_review_comment", {
+    url,
+    items,
+    postSummary,
+    summary,
+  });
 
 export type PrAction = "approve" | "request_changes" | "close";
 
@@ -1677,6 +1864,39 @@ export const quickDiffBase = (repoPath: string, filePath: string, staged: boolea
 
 export const writeFileText = (repoPath: string, relPath: string, content: string) =>
   invoke<void>("write_file_text", { repoPath, relPath, content });
+
+/** A file's bytes as the editor last read or wrote them — what a save checks the disk against.
+ *  `hash` (SHA-256, hex) decides; it is empty for a file too large to be read. See
+ *  `fsops::DiskVersion`. */
+export interface DiskVersion {
+  mtime_ms: number;
+  size: number;
+  hash: string;
+}
+
+/** A file as the editor opens it — only `text` is an editable buffer. See `fsops::EditorFile`. */
+export type EditorFile =
+  | { kind: "text"; text: string; version: DiskVersion }
+  /** Another encoding, decoded to be read — never written back. */
+  | { kind: "legacy"; text: string; encoding: string; version: DiskVersion }
+  | { kind: "image"; mime: string; base64: string; version: DiskVersion }
+  | { kind: "binary"; size: number; version: DiskVersion }
+  /** Nothing read. `can_force`: "open anyway" is on offer. */
+  | { kind: "tooLarge"; size: number; can_force: boolean; version: DiskVersion };
+
+/** The editor's read. `allowLarge` is a tab's "open anyway", which raises the read cap. */
+export const readEditorFile = (repoPath: string, relPath: string, allowLarge = false) =>
+  invoke<EditorFile>("read_editor_file", { repoPath, relPath, allowLarge });
+
+/** The disk version of an open tab's file now, or `null` when nothing is there. `known` comes
+ *  straight back, unread, while the file's timestamp and size still match it. */
+export const statEditorFile = (repoPath: string, relPath: string, known: DiskVersion | null) =>
+  invoke<DiskVersion | null>("stat_editor_file", { repoPath, relPath, known });
+
+/** The editor's save: refuses (see `isChangedOnDisk` in `lib/editorFiles`) when the file is no
+ *  longer the one `expected` describes; `expected: null` overwrites. Returns the version written. */
+export const writeEditorFile = (repoPath: string, relPath: string, content: string, expected: DiskVersion | null) =>
+  invoke<DiskVersion>("write_editor_file", { repoPath, relPath, content, expected });
 
 /** Writes an exported binary to an absolute path — the one the user picked in a native save
  * dialog, which is what authorises writing outside the repo. */
@@ -1789,6 +2009,8 @@ export interface ReplaceOutcome {
   files: number;
   /** Snapshot taken before anything was written — restorable from the restore-points list. */
   checkpoint_id: string | null;
+  /** Files that matched but were left alone because they are not UTF-8 (repo-relative). */
+  skipped_not_utf8: string[];
 }
 
 export const searchRepo = (repoPath: string, query: string, options: SearchOptions, maxResults = 500) =>
@@ -1829,8 +2051,20 @@ export const inlineEditWithAi = (
 export const listChatConversations = (projectId: string, search?: string) =>
   invoke<ChatConversationSummary[]>("list_chat_conversations", { projectId, search: search ?? null });
 
-export const getChatConversation = (projectId: string, sessionId: string) =>
-  invoke<ActivityLogEntry[]>("get_chat_conversation", { projectId, sessionId });
+/**
+ * One conversation's turns, **without their traces** unless `withTrace` says otherwise.
+ *
+ * A trace reaches ~600 KB a turn, so the eager read moved up to ~18 MB per reopened conversation.
+ * Read light, a turn that has a trace comes back with `trace: ""` — present, not sent — and `null`
+ * when it has none; the bubble's disclosure fetches the one it is asked for through `getTurnTrace`
+ * (see `lib/turnTrace.ts`).
+ */
+export const getChatConversation = (projectId: string, sessionId: string, withTrace = false) =>
+  invoke<ActivityLogEntry[]>("get_chat_conversation", { projectId, sessionId, withTrace });
+
+/** One turn's stored trace, by row id — an `activity_log` turn (repo chat, agent tasks) or a chat
+ * workspace message alike. `null` when it has none. */
+export const getTurnTrace = (id: string) => invoke<string | null>("get_turn_trace", { id });
 
 export const deleteChatConversation = (projectId: string, sessionId: string) =>
   invoke<void>("delete_chat_conversation", { projectId, sessionId });
@@ -1901,36 +2135,89 @@ export interface DebugVariable {
   object_id: string | null;
 }
 
+/** One breakpoint as a backend takes it: a line, optionally only when `condition` holds, or a
+ * logpoint that prints `logMessage` (`{expression}` interpolated) instead of stopping. */
+export interface BreakpointSpec {
+  line: number;
+  condition?: string;
+  logMessage?: string;
+}
+
+/** A kind of exception a session can stop on — Node's two, or whatever an adapter offers. */
+export interface ExceptionFilter {
+  filter: string;
+  label: string;
+  /** On unless the user said otherwise. */
+  default: boolean;
+}
+
+/** A session running without the panel having started it — the webview reloaded. */
+export interface DebugSessionInfo {
+  backend: "node" | "adapter";
+  paused: { reason: string; frames: StackFrame[]; description: string | null } | null;
+  exceptionFilters: ExceptionFilter[];
+}
+
 /** Launches `program` under Node with the inspector attached. `breakpoints` maps absolute file
- * paths to 1-based lines and is applied before the first statement runs. */
+ * paths to their breakpoints and is applied, with the exception filters, before the first
+ * statement runs. */
 export const debugStart = (
   cwd: string,
   program: string,
   args: string[],
-  breakpoints: Record<string, number[]>,
+  breakpoints: Record<string, BreakpointSpec[]>,
+  exceptionFilters: string[],
   nodeBinary?: string,
-) => invoke<void>("debug_start", { cwd, program, args, breakpoints, nodeBinary: nodeBinary ?? null });
+) =>
+  invoke<void>("debug_start", {
+    cwd,
+    program,
+    args,
+    breakpoints,
+    exceptionFilters,
+    nodeBinary: nodeBinary ?? null,
+  });
 
 /** Starts a session through a DAP adapter — every language other than Node. `launchConfig` is
- * that adapter's own launch object. */
+ * that adapter's own launch object. `exceptionFilters` is `null` when the user never chose for
+ * this adapter, which takes its defaults. Resolves with the filters the adapter offers. */
 export const debugStartAdapter = (
   cwd: string,
   command: string,
   args: string[],
   launchConfig: Record<string, unknown>,
-  breakpoints: Record<string, number[]>,
-) => invoke<void>("debug_start_adapter", { cwd, command, args, launchConfig, breakpoints });
+  breakpoints: Record<string, BreakpointSpec[]>,
+  exceptionFilters: string[] | null,
+) =>
+  invoke<ExceptionFilter[]>("debug_start_adapter", {
+    cwd,
+    command,
+    args,
+    launchConfig,
+    breakpoints,
+    exceptionFilters,
+  });
 
 export const debugStop = () => invoke<void>("debug_stop");
 export const debugContinue = () => invoke<void>("debug_continue");
 export const debugPause = () => invoke<void>("debug_pause");
 export const debugStep = (kind: "over" | "into" | "out") => invoke<void>("debug_step", { kind });
-export const debugSetBreakpoints = (breakpoints: Record<string, number[]>) =>
+export const debugSetBreakpoints = (breakpoints: Record<string, BreakpointSpec[]>) =>
   invoke<void>("debug_set_breakpoints", { breakpoints });
+export const debugSetExceptionFilters = (filters: string[]) =>
+  invoke<void>("debug_set_exception_filters", { filters });
 export const debugProperties = (objectId: string) =>
   invoke<DebugVariable[]>("debug_properties", { objectId });
-export const debugEvaluate = (frameId: string, expression: string) =>
-  invoke<DebugVariable>("debug_evaluate", { frameId, expression });
+/** Every scope of a paused frame — any frame, not only the top one — as expandable rows. */
+export const debugScopes = (frameId: string) => invoke<DebugVariable[]>("debug_scopes", { frameId });
+/** `context`: `repl` for the console, `watch` for the watch list (never stops or prints). */
+export const debugEvaluate = (frameId: string, expression: string, context?: "repl" | "watch") =>
+  invoke<DebugVariable>("debug_evaluate", { frameId, expression, context: context ?? null });
+export const debugIsRunning = () => invoke<boolean>("debug_is_running");
+export const debugSession = () => invoke<DebugSessionInfo | null>("debug_session");
+/** Which Python runs debugpy and which runs the program: the project's venv when it has one. */
+export const debugPython = (cwd: string) =>
+  invoke<{ adapter: string; interpreter: string }>("debug_python", { cwd });
 
 // ---------------------------------------------------------------------------
 // Language servers
@@ -1995,6 +2282,32 @@ export const prLinkDecision = (url: string) => invoke<PrDecision>("pr_link_decis
 export const actOnPrLink = (url: string, workspaceId: string, action: PrAction, body?: string) =>
   invoke<PrLinkActionOutcome>("act_on_pr_link", { url, workspaceId, action, body });
 
+/** How a pull request can be merged from here — methods, switches, and what the host says about
+ * merging it now. Asked when the merge step opens, never before. */
+export const prMergeOptions = (projectId: string, prId: number) =>
+  invoke<import("../../types/domain").MergeOptions>("pr_merge_options", { projectId, prId });
+
+/** Merges (on Azure DevOps: completes) the pull request. A refusal the user can act on comes back
+ * prefixed with {@link MERGE_BLOCKED_MARKER} — see `parseMergeRefusal`. */
+export const mergePullRequest = (projectId: string, prId: number, choice: import("../../types/domain").MergeChoice) =>
+  invoke<import("../../types/domain").PrMergeOutcome>("merge_pull_request", { projectId, prId, choice });
+
+export const prLinkMergeOptions = (url: string) =>
+  invoke<import("../../types/domain").MergeOptions>("pr_link_merge_options", { url });
+
+export const mergePrLink = (url: string, workspaceId: string, choice: import("../../types/domain").MergeChoice) =>
+  invoke<import("../../types/domain").PrLinkMergeOutcome>("merge_pr_link", { url, workspaceId, choice });
+
+/** The checks on a pull request's head commit, from whichever host it lives on. */
+export const prChecks = (projectId: string, prId: number) =>
+  invoke<import("../../types/domain").PrChecks>("pr_checks", { projectId, prId });
+
+export const prLinkChecks = (url: string) => invoke<import("../../types/domain").PrChecks>("pr_link_checks", { url });
+
+/** Prefix of a merge the host refused for a reason the user can act on (`ado::MERGE_BLOCKED_MARKER`):
+ * `MERGE_BLOCKED::{kind}::{the host's words}`. */
+export const MERGE_BLOCKED_MARKER = "MERGE_BLOCKED::";
+
 // ---------- user stories: reading the source ----------
 
 /** The wikis of one Azure DevOps project — a project wiki, plus any code wikis published from a
@@ -2026,8 +2339,6 @@ export const jiraListProjects = (site: string) =>
 
 export const setJiraToken = (site: string, token: string) =>
   invoke<void>("set_jira_token", { site, token });
-
-export const getJiraToken = (site: string) => invoke<string | null>("get_jira_token", { site });
 
 export const deleteJiraToken = (site: string) => invoke<void>("delete_jira_token", { site });
 
@@ -2218,6 +2529,22 @@ export const writeStoryFeatureFile = (batchId: string, fileName: string, content
 export const publishStories = (batchId: string, storyIds: string[]) =>
   invoke<StoryPublishOutcome>("publish_stories", { batchId, storyIds });
 
+/** One field "update on the board" would change on a published story's item. `content` is the
+ * narrative, description and criteria together, too long to quote — its `before`/`after` are empty. */
+export interface BoardFieldChange {
+  field: "title" | "content" | "estimate";
+  before: string;
+  after: string;
+}
+
+/** What updating a published story's item would change, against the item as the board holds it
+ * now. Empty when the board already says the same. */
+export const previewStoryBoardUpdate = (storyId: string) =>
+  invoke<BoardFieldChange[]>("preview_story_board_update", { storyId });
+
+/** Writes a published story's current draft over its item — Azure Boards, Jira or monday. */
+export const updateStoryOnBoard = (storyId: string) => invoke<void>("update_story_on_board", { storyId });
+
 // ---------- reviewing a work item that is already on the board ----------
 
 /** Resolves whatever was pasted — an Azure link or id, a Jira link or `PROJ-123` — into the host,
@@ -2365,8 +2692,23 @@ export const setDocPageTarget = (input: {
 
 export const deleteDocPage = (id: string) => invoke<void>("delete_doc_page", { id });
 
-/** Publishes a stored document to its configured wiki and records that it landed. */
-export const publishDocPage = (id: string) => invoke<AdoWikiPageRef>("publish_doc_page", { id });
+/** Prefix of the error a wiki publish fails with when the page is not the version the document was
+ * read from. A wire constant — it must match `boards::azure::WIKI_CONFLICT_MARKER`. */
+export const WIKI_CONFLICT_MARKER = "WIKI_CONFLICT::";
+
+/** Publishes a stored document to its configured wiki and records that it landed.
+ *
+ * Only over the version the document was read from (or last published); a page changed since
+ * fails with `WIKI_CONFLICT_MARKER`. `overwrite` is the user's explicit answer to that. */
+export const publishDocPage = (id: string, overwrite = false) =>
+  invoke<AdoWikiPageRef>("publish_doc_page", { id, overwrite });
+
+/** Replaces a document's body with the page as the wiki holds it now — the "reload" answer to a
+ * publish conflict. */
+export const reloadDocPageFromWiki = (id: string) => invoke<DocPage>("reload_doc_page_from_wiki", { id });
+
+/** One document, re-read by id. `null` once it has been deleted. */
+export const getDocPage = (id: string) => invoke<DocPage | null>("get_doc_page", { id });
 
 /**
  * Generates a document's content by reading the code.
@@ -2474,6 +2816,15 @@ export const remotectlRevokeAll = () => invoke<RemoteDevice[]>("remotectl_revoke
 export const remotectlSetAllowTerminal = (allowed: boolean) =>
   invoke<RemoteStatus>("remotectl_set_allow_terminal", { allowed });
 
+/** Turns HTTPS on or off, restarting a running server on the same port. Paired devices keep their
+ *  tokens; what changes for them is the address's scheme. */
+export const remotectlSetTls = (enabled: boolean) => invoke<RemoteStatus>("remotectl_set_tls", { enabled });
+
+/** Hands the notification centre, rendered, to the server for paired phones to read. Main window
+ *  only — the backend ignores anybody else. Fire-and-forget, like `notifyStateChange`. */
+export const remotectlPublishNotifications = (items: RemoteNotice[]) =>
+  void invoke<void>("remotectl_publish_notifications", { items }).catch(() => undefined);
+
 /** Removes one already-revoked device from the list for good. Cannot touch a live device — the
  *  backend's SQL is what guarantees that, so cutting off and forgetting stay two separate acts. */
 export const remotectlForgetDevice = (id: string) =>
@@ -2500,7 +2851,7 @@ export const remotectlForgetAllRevoked = () =>
  * say whether the transcript on screen is the one that moved.
  */
 export const notifyStateChange = (
-  domain: "repo" | "chains" | "tasks" | "reviews" | "chat",
+  domain: "repo" | "chains" | "tasks" | "reviews" | "chat" | "workspaces",
   projectId?: string | null,
   conversationId?: string | null,
 ) =>

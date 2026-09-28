@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { AzureDevOpsSettings } from "./AzureDevOpsSettings";
+import { BitbucketSettings } from "./BitbucketSettings";
 import { GitHubSettings } from "./GitHubSettings";
 import { GitLabSettings } from "./GitLabSettings";
 import { JiraSettings } from "./JiraSettings";
@@ -22,6 +23,7 @@ const HINT_KEYS: Record<HostingProvider, TranslationKey> = {
   azure: "settings.azureHint",
   github: "settings.githubHint",
   gitlab: "settings.gitlabHint",
+  bitbucket: "settings.bitbucketHint",
   jira: "settings.jiraHint",
   monday: "settings.mondayHint",
 };
@@ -125,6 +127,7 @@ export function GitHostingSettings() {
 
             {provider === "github" && <GitHubSettings />}
             {provider === "gitlab" && <GitLabSettings />}
+            {provider === "bitbucket" && <BitbucketSettings />}
             {provider === "azure" && <AzureDevOpsSettings />}
             {provider === "jira" && <JiraSettings />}
             {provider === "monday" && <MondaySettings />}

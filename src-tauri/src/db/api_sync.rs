@@ -32,6 +32,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::api_backup::{self, ApiBackup, BackupWorkspace, ImportOptions, ImportSummary};
 use super::api_queries;
+use super::api_secrets;
+use super::api_trust;
 use super::models::{ApiCollection, ApiFolder, ApiRequestRow};
 use super::queries::now;
 use crate::supabase::SharedItem;
@@ -46,6 +48,11 @@ pub struct SyncResult {
     pub conflicts: i64,
     /// The newest server `synced_at` seen, so the next pull can ask for changes after it.
     pub cursor: String,
+    /// `(kind, id)` of every record this round wrote, so the caller can seal a credential that
+    /// arrived in the clear (an older peer's MQTT password) — which needs the credential store, and
+    /// so cannot happen in here.
+    #[serde(skip)]
+    pub touched: Vec<(String, String)>,
 }
 
 /// One frozen record, with both sides attached so the UI can show the choice without a round trip.
@@ -84,45 +91,46 @@ pub enum Resolution {
 // Redaction
 // ---------------------------------------------------------------------------
 
-/// The fields of an `AuthConfig` that hold a credential, per scheme. The same list the plaintext
-/// backup uses (`src/lib/api/backup.ts`); the two must not drift, or one path protects a secret the
-/// other publishes.
-const AUTH_SECRET_FIELDS: &[(&str, &[&str])] = &[
-    ("basic", &["password"]),
-    ("digest", &["password"]),
-    ("bearer", &["token"]),
-    ("apikey", &["value"]),
-    ("jwt", &["secret"]),
-    ("awsv4", &["secretKey", "sessionToken"]),
-    ("oauth2", &["clientSecret", "password", "accessToken", "refreshToken"]),
-];
+/// Blanks a credential slot unless it only points at variables.
+///
+/// A `{{token}}` reference is how a team shares a request *without* sharing the token — the value
+/// lives in each member's own environment — so it has to travel. Blanking it too, as this used to,
+/// broke exactly that pattern: every teammate's request came back with an empty field where the
+/// reference had been. A literal, and a sealed slot's marker, are credentials and never leave.
+fn blank_unless_reference(slot: &mut serde_json::Value) {
+    if slot.as_str().is_some_and(|text| !api_secrets::is_reference(text)) {
+        *slot = serde_json::Value::String(String::new());
+    }
+}
 
 /// Blanks the credential fields of a JSON `AuthConfig` string, leaving its shape intact.
-fn redact_auth(raw: &str) -> String {
+pub(crate) fn redact_auth(raw: &str) -> String {
     if raw.trim().is_empty() {
         return raw.to_string();
     }
     let Ok(mut auth) = serde_json::from_str::<serde_json::Value>(raw) else {
         return raw.to_string();
     };
-    redact_auth_value(&mut auth);
+    api_secrets::auth_secret_slots(&mut auth, &mut |_, slot| blank_unless_reference(slot));
+    forget_token_expiry(&mut auth);
     auth.to_string()
 }
 
-fn redact_auth_value(auth: &mut serde_json::Value) {
-    for (scheme, fields) in AUTH_SECRET_FIELDS {
-        let Some(block) = auth.get_mut(scheme) else { continue };
-        for field in *fields {
-            if let Some(slot) = block.get_mut(field) {
-                *slot = serde_json::Value::String(String::new());
-            }
-        }
+/// When this machine's OAuth 2 token expires is as local as the token itself: a teammate's copy would
+/// describe a token nobody else holds, and send the next refresh at the wrong moment. Without this,
+/// every automatic refresh rewrote a shared field, stamped the row and pushed it.
+fn forget_token_expiry(auth: &mut serde_json::Value) {
+    if let Some(slot) = auth.get_mut("oauth2").and_then(|oauth2| oauth2.get_mut("expiresAt")) {
+        *slot = serde_json::Value::from(0);
     }
 }
 
-/// Blanks both values of every variable flagged secret, keeping the key so the shape survives and
-/// each member can fill in their own.
-fn redact_variables(raw: &str) -> String {
+/// Shares only what Postman shares: the **initial** value of every variable, blanked too when the
+/// variable is marked secret. The **current** value never travels — it is this machine's session
+/// state, the slot a script writes a freshly minted token into, and publishing it is how a
+/// `pm.collectionVariables.set('token', …)` in a login script used to hand that token to every
+/// member of the collection on the next push.
+pub(crate) fn redact_variables(raw: &str) -> String {
     let Ok(mut variables) = serde_json::from_str::<serde_json::Value>(raw) else {
         return raw.to_string();
     };
@@ -130,25 +138,117 @@ fn redact_variables(raw: &str) -> String {
         return raw.to_string();
     };
     for variable in list.iter_mut() {
-        if variable.get("secret").and_then(|s| s.as_bool()) != Some(true) {
-            continue;
+        if let Some(slot) = variable.get_mut("currentValue") {
+            *slot = serde_json::Value::String(String::new());
         }
-        for field in ["initialValue", "currentValue"] {
-            if let Some(slot) = variable.get_mut(field) {
-                *slot = serde_json::Value::String(String::new());
+        if variable.get("secret").and_then(|s| s.as_bool()) == Some(true) {
+            if let Some(slot) = variable.get_mut("initialValue") {
+                blank_unless_reference(slot);
             }
         }
     }
     variables.to_string()
 }
 
-/// A request's `spec` carries its own auth block inside the JSON blob.
-fn redact_spec(raw: &str) -> String {
+/// Whether two versions of a column say the same thing once a push has redacted them — compared as
+/// JSON, so key order and whitespace are not an edit. What `api_queries` asks before stamping a
+/// write: a change a push would not carry (a credential, a current value) is not one to announce.
+pub(crate) fn same_when_shared(before: &str, after: &str, redact: fn(&str) -> String) -> bool {
+    let (before, after) = (redact(before), redact(after));
+    match (
+        serde_json::from_str::<serde_json::Value>(&before),
+        serde_json::from_str::<serde_json::Value>(&after),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => before == after,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Initial and current values
+// ---------------------------------------------------------------------------
+
+/// Set once [`migrate_variable_split`] has run over this database.
+const VARIABLE_SPLIT_FLAG: &str = "api_variables_split";
+
+/// Empties every current value that merely repeats its initial value — "current empty" already
+/// means "use the initial", so nothing resolves differently. Returns the new list, or `None` when
+/// nothing changed.
+///
+/// It matters because only the initial value travels now. A current value is a local override, and
+/// a stale copy of the initial is the worst kind: when a teammate changes the shared value, the copy
+/// keeps winning on every machine that has one — which, for variables that came in through an
+/// import (importers fill both fields), is every machine. A current value that differs from its
+/// initial, or that is the only value (a script's token, a quick edit), is a real local override and
+/// is left alone; promoting it to the initial would publish exactly what a script captured.
+pub fn split_current_values(raw: &str) -> Option<String> {
+    let mut variables = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let mut changed = false;
+    for variable in variables.as_array_mut()? {
+        let initial = variable.get("initialValue").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let Some(slot) = variable.get_mut("currentValue") else { continue };
+        if slot.as_str().is_some_and(|current| !current.is_empty() && current == initial) {
+            *slot = serde_json::Value::String(String::new());
+            changed = true;
+        }
+    }
+    changed.then(|| variables.to_string())
+}
+
+/// [`split_current_values`] over the given rows of `api_collections` or `api_environments`, without
+/// touching `updated_at` — a current value is not something a push carries. Used after an import.
+pub fn split_variables_of(conn: &Connection, table: &str, ids: &[String]) -> rusqlite::Result<usize> {
+    let table = match table {
+        "api_collections" => "api_collections",
+        "api_environments" => "api_environments",
+        _ => return Ok(0),
+    };
+    let mut changed = 0;
+    for id in ids {
+        let raw: Option<String> = conn
+            .query_row(&format!("SELECT variables FROM {table} WHERE id = ?1"), params![id], |row| row.get(0))
+            .optional()?;
+        if let Some(next) = raw.as_deref().and_then(split_current_values) {
+            changed += conn.execute(
+                &format!("UPDATE {table} SET variables = ?2 WHERE id = ?1"),
+                params![id, next],
+            )?;
+        }
+    }
+    Ok(changed)
+}
+
+/// The same over every collection and environment, once per database: the upgrade to "only the
+/// initial value is shared". Flagged in `app_settings` only once there is something to have looked
+/// at, so a database with no API data yet stays exactly as empty as it was.
+pub fn migrate_variable_split(conn: &Connection) -> rusqlite::Result<()> {
+    if super::queries::get_setting(conn, VARIABLE_SPLIT_FLAG)?.as_deref() == Some("1") {
+        return Ok(());
+    }
+    let mut seen = 0usize;
+    for table in ["api_collections", "api_environments"] {
+        let ids: Vec<String> = {
+            let mut stmt = conn.prepare(&format!("SELECT id FROM {table}"))?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        seen += ids.len();
+        split_variables_of(conn, table, &ids)?;
+    }
+    if seen > 0 {
+        super::queries::set_setting(conn, VARIABLE_SPLIT_FLAG, "1")?;
+    }
+    Ok(())
+}
+
+/// A request's `spec` carries its own auth block inside the JSON blob, and an MQTT password.
+pub(crate) fn redact_spec(raw: &str) -> String {
     let Ok(mut spec) = serde_json::from_str::<serde_json::Value>(raw) else {
         return raw.to_string();
     };
+    api_secrets::spec_secret_slots(&mut spec, &mut |_, slot| blank_unless_reference(slot));
     if let Some(auth) = spec.get_mut("auth") {
-        redact_auth_value(auth);
+        forget_token_expiry(auth);
     }
     spec.to_string()
 }
@@ -215,6 +315,8 @@ pub fn local_items(conn: &Connection, collection_id: &str) -> rusqlite::Result<V
     let frozen = frozen_keys(conn, collection_id)?;
     let bases = base_map(conn, collection_id)?;
     let mut items = Vec::new();
+    // Every record that exists here right now, sent or not — see the tombstone loop below.
+    let mut live: HashSet<(String, String)> = HashSet::new();
 
     let consider = |kind: &str, id: &str, updated_at: &str| -> bool {
         let key = (kind.to_string(), id.to_string());
@@ -228,6 +330,9 @@ pub fn local_items(conn: &Connection, collection_id: &str) -> rusqlite::Result<V
     };
 
     if let Some((collection, folders, requests)) = api_queries::load_collection(conn, collection_id)? {
+        live.insert(("collection".to_string(), collection.id.clone()));
+        live.extend(folders.iter().map(|f| ("folder".to_string(), f.id.clone())));
+        live.extend(requests.iter().map(|r| ("request".to_string(), r.id.clone())));
         if consider("collection", &collection.id, &collection.updated_at) {
             let updated_at = collection.updated_at.clone();
             let id = collection.id.clone();
@@ -260,6 +365,12 @@ pub fn local_items(conn: &Connection, collection_id: &str) -> rusqlite::Result<V
     // delivered, so it is a delta already.
     for (kind, id, deleted_at) in api_queries::list_tombstones(conn, collection_id)? {
         if frozen.contains(&(kind.clone(), id.clone())) {
+            continue;
+        }
+        // Moved out and back in before the removal travelled: the record is here, and a tombstone
+        // beside it in the same push would both contradict it and hand PostgREST one id twice in a
+        // single upsert, which it refuses outright.
+        if live.contains(&(kind.clone(), id.clone())) {
             continue;
         }
         items.push(SharedItem {
@@ -453,6 +564,20 @@ fn comparable(kind: &str, payload: &serde_json::Value) -> serde_json::Value {
     if let Some(object) = value.as_object_mut() {
         object.remove("updated_at");
         object.remove("created_at");
+        // Redacted again, whichever side this is: a peer on an older build still sends current
+        // values and token expiries, which are nobody's business but its own, and a difference in
+        // them is not an edit to freeze a record over.
+        for (field, redact) in [
+            ("auth", redact_auth as fn(&str) -> String),
+            ("variables", redact_variables),
+            ("spec", redact_spec),
+        ] {
+            if let Some(slot) = object.get_mut(field) {
+                if let Some(raw) = slot.as_str() {
+                    *slot = serde_json::Value::String(redact(raw));
+                }
+            }
+        }
         if kind == "collection" {
             object.remove("workspace_id");
             object.remove("sort_order");
@@ -499,6 +624,7 @@ pub fn apply_items(
 ) -> rusqlite::Result<SyncResult> {
     let bases = base_map(conn, collection_id)?;
     let locals = local_records(conn, collection_id)?;
+    let raw = raw_records(conn, collection_id)?;
     let existing_collection = api_queries::load_collection(conn, collection_id)?.map(|(c, _, _)| c);
 
     let mut cursor = String::new();
@@ -554,7 +680,7 @@ pub fn apply_items(
                 graves.push((item.kind.clone(), item.id.clone()));
                 agreed.push((item.kind.clone(), item.id.clone(), String::new()));
             } else {
-                push_live(&mut live, &item, workspace_id, existing_collection.as_ref());
+                push_live(&mut live, &item, workspace_id, existing_collection.as_ref(), raw.get(&key));
                 agreed.push((item.kind.clone(), item.id.clone(), item.updated_at.clone()));
             }
             continue;
@@ -594,6 +720,15 @@ pub fn apply_items(
     live.folders.retain(|f| f.collection_id == collection_id);
     live.requests.retain(|r| r.collection_id == collection_id);
 
+    let touched: Vec<(String, String)> = live
+        .collections
+        .iter()
+        .map(|c| ("collection".to_string(), c.id.clone()))
+        .chain(live.folders.iter().map(|f| ("folder".to_string(), f.id.clone())))
+        .chain(live.requests.iter().map(|r| ("request".to_string(), r.id.clone())))
+        .collect();
+    let scripts = incoming_scripts(&live);
+
     let applied = if live.collections.is_empty() && live.folders.is_empty() && live.requests.is_empty() {
         ImportSummary::default()
     } else {
@@ -611,6 +746,10 @@ pub fn apply_items(
 
     let mut deleted = 0;
     let tx = conn.transaction()?;
+    // Somebody else's code, so it runs only after the trust gate has shown it. Recorded as
+    // untrusted with where it came from, which the gate's dialog says out loud; a text already
+    // trusted here stays trusted — identical text is identical code (see `api_trust`).
+    api_trust::record_scripts(&tx, scripts.iter().map(String::as_str), false, api_trust::ORIGIN_SHARED)?;
     for (kind, id) in graves {
         let Some(table) = table_for(&kind) else { continue };
         // Scoped to the collection so a tombstone from one share can never reach a row of another.
@@ -654,7 +793,208 @@ pub fn apply_items(
     }
     tx.commit()?;
 
-    Ok(SyncResult { applied, deleted, conflicts: frozen, cursor })
+    Ok(SyncResult { applied, deleted, conflicts: frozen, cursor, touched })
+}
+
+/// Every runnable script in a batch about to be applied.
+fn incoming_scripts(live: &BackupWorkspace) -> Vec<String> {
+    let mut scripts = Vec::new();
+    for c in &live.collections {
+        scripts.extend([c.pre_script.clone(), c.post_script.clone()]);
+    }
+    for f in &live.folders {
+        scripts.extend([f.pre_script.clone(), f.post_script.clone()]);
+    }
+    for r in &live.requests {
+        scripts.extend(api_trust::request_scripts(&r.spec));
+    }
+    scripts.retain(|code| api_trust::is_runnable(code));
+    scripts
+}
+
+/// The local side of every record, **unredacted** — credentials, sealed markers and current values
+/// included — for [`merge_local`] to carry into what a peer sends.
+fn raw_records(
+    conn: &Connection,
+    collection_id: &str,
+) -> rusqlite::Result<HashMap<(String, String), serde_json::Value>> {
+    let mut map = HashMap::new();
+    let Some((collection, folders, requests)) = api_queries::load_collection(conn, collection_id)?
+    else {
+        return Ok(map);
+    };
+    let value = |row: serde_json::Result<serde_json::Value>| row.unwrap_or(serde_json::Value::Null);
+    map.insert(("collection".to_string(), collection.id.clone()), value(serde_json::to_value(&collection)));
+    for folder in folders {
+        map.insert(("folder".to_string(), folder.id.clone()), value(serde_json::to_value(&folder)));
+    }
+    for request in requests {
+        map.insert(("request".to_string(), request.id.clone()), value(serde_json::to_value(&request)));
+    }
+    Ok(map)
+}
+
+// ---------------------------------------------------------------------------
+// Merging an incoming record with the local one
+// ---------------------------------------------------------------------------
+
+/// Carries this machine's own values into an incoming record before it lands.
+///
+/// A push never carries a credential or a current value, so every incoming record arrives with
+/// those slots blank — and applying it verbatim, as this used to, replaced the whole auth block and
+/// the whole variable list: a teammate renaming a request wiped the token everyone else had typed
+/// into it, and a pull reset every variable a script had set. So:
+///
+/// - a credential slot that arrives blank keeps the local value — a literal, a sealed marker or a
+///   `{{reference}}`, whichever is here;
+/// - every variable keeps its local current value, matched by id and then by key;
+///
+/// and anything the peer actually sent — a changed initial value, a reference where a literal was —
+/// wins exactly as before.
+fn merge_local(kind: &str, payload: &mut serde_json::Value, local: &serde_json::Value) {
+    match kind {
+        "collection" => {
+            merge_field(payload, local, "auth", merge_auth);
+            merge_field(payload, local, "variables", merge_variables);
+        }
+        "folder" => merge_field(payload, local, "auth", merge_auth),
+        "request" => merge_field(payload, local, "spec", merge_spec),
+        _ => {}
+    }
+}
+
+fn merge_field(
+    payload: &mut serde_json::Value,
+    local: &serde_json::Value,
+    field: &str,
+    merge: fn(&str, &str) -> String,
+) {
+    let Some(mine) = local.get(field).and_then(|v| v.as_str()) else { return };
+    let Some(slot) = payload.get_mut(field) else { return };
+    let Some(theirs) = slot.as_str() else { return };
+    let merged = merge(theirs, mine);
+    *slot = serde_json::Value::String(merged);
+}
+
+/// Fills the blank credential slots of `theirs` from the same slots of `mine`.
+fn fill_blank_slots(
+    theirs: &str,
+    mine: &str,
+    walk: fn(&mut serde_json::Value, &mut dyn FnMut(&str, &mut serde_json::Value)),
+    oauth2: fn(&mut serde_json::Value) -> Option<&mut serde_json::Value>,
+) -> String {
+    // "" is how an unconfigured auth column is stored: they turned auth off, and that is theirs to do.
+    if theirs.trim().is_empty() {
+        return theirs.to_string();
+    }
+    let Ok(mut incoming) = serde_json::from_str::<serde_json::Value>(theirs) else {
+        return theirs.to_string();
+    };
+    // Nothing here (a record this machine has never had) is an empty local side: no credential to
+    // keep, and no token whose expiry could be anyone's but the sender's.
+    let mut local = serde_json::from_str::<serde_json::Value>(mine).unwrap_or(serde_json::Value::Null);
+    let mut kept: HashMap<String, serde_json::Value> = HashMap::new();
+    walk(&mut local, &mut |path, slot| {
+        if slot.as_str().is_some_and(|text| !text.is_empty()) {
+            kept.insert(path.to_string(), slot.clone());
+        }
+    });
+    let mut changed = false;
+    walk(&mut incoming, &mut |path, slot| {
+        if slot.as_str() == Some("") {
+            if let Some(value) = kept.get(path) {
+                *slot = value.clone();
+                changed = true;
+            }
+        }
+    });
+    // The expiry of the token kept above belongs with it — see `forget_token_expiry`.
+    let local_expiry = oauth2(&mut local)
+        .and_then(|block| block.get("expiresAt").cloned())
+        .unwrap_or_else(|| serde_json::Value::from(0));
+    if let Some(block) = oauth2(&mut incoming) {
+        let expiry = local_expiry;
+        if let Some(slot) = block.get_mut("expiresAt") {
+            if *slot != expiry {
+                *slot = expiry;
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        incoming.to_string()
+    } else {
+        theirs.to_string()
+    }
+}
+
+fn merge_auth(theirs: &str, mine: &str) -> String {
+    fill_blank_slots(
+        theirs,
+        mine,
+        |value, visit| api_secrets::auth_secret_slots(value, visit),
+        |auth| auth.get_mut("oauth2"),
+    )
+}
+
+fn merge_spec(theirs: &str, mine: &str) -> String {
+    fill_blank_slots(
+        theirs,
+        mine,
+        |value, visit| api_secrets::spec_secret_slots(value, visit),
+        |spec| spec.get_mut("auth").and_then(|auth| auth.get_mut("oauth2")),
+    )
+}
+
+/// Their list — which variables exist, in which order, with which initial values — with this
+/// machine's current values, and its own credential wherever theirs arrived blank.
+fn merge_variables(theirs: &str, mine: &str) -> String {
+    let Ok(mut incoming) = serde_json::from_str::<serde_json::Value>(theirs) else {
+        return theirs.to_string();
+    };
+    let local: Vec<serde_json::Value> = serde_json::from_str::<serde_json::Value>(mine)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let Some(list) = incoming.as_array_mut() else { return theirs.to_string() };
+    let text = |value: &serde_json::Value, field: &str| -> String {
+        value.get(field).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    };
+    let mut changed = false;
+    for variable in list.iter_mut() {
+        let id = text(variable, "id");
+        let key = text(variable, "key");
+        let found = local
+            .iter()
+            .find(|candidate| !id.is_empty() && text(candidate, "id") == id)
+            .or_else(|| local.iter().find(|candidate| text(candidate, "key") == key));
+        // Always this machine's current value, empty included. A current build never sends one,
+        // but a peer on an older build still pushes its own — a script's token among them — and
+        // that must not land here as ours.
+        let current = found.map(|local| text(local, "currentValue")).unwrap_or_default();
+        if let Some(slot) = variable.get_mut("currentValue") {
+            if slot.as_str() != Some(current.as_str()) {
+                *slot = serde_json::Value::String(current);
+                changed = true;
+            }
+        }
+        let Some(found) = found else { continue };
+        let secret = variable.get("secret").and_then(|v| v.as_bool()) == Some(true);
+        let initial = text(found, "initialValue");
+        if secret && !initial.is_empty() {
+            if let Some(slot) = variable.get_mut("initialValue") {
+                if slot.as_str() == Some("") {
+                    *slot = serde_json::Value::String(initial);
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        incoming.to_string()
+    } else {
+        theirs.to_string()
+    }
 }
 
 fn push_live(
@@ -662,6 +1002,7 @@ fn push_live(
     item: &SharedItem,
     workspace_id: &str,
     existing: Option<&ApiCollection>,
+    local: Option<&serde_json::Value>,
 ) {
     // **The column is the authority for the timestamp; the payload is the authority for the
     // content.** They are two spellings of the same instant — the payload's is whatever the writing
@@ -679,22 +1020,29 @@ fn push_live(
         value
     };
 
+    let mut payload = item.payload.clone();
+    // A record this machine has never had still goes through the merge, against an empty local
+    // side: a peer on an older build sends its current values and token expiry, and those describe
+    // its machine, not this one.
+    let nothing = serde_json::json!({ "auth": "", "variables": "[]", "spec": "{}" });
+    merge_local(&item.kind, &mut payload, local.unwrap_or(&nothing));
+
     // A payload this build can't read is skipped rather than fatal: a newer client may be sharing a
     // record with a field this one doesn't know, and dropping one request is a much better outcome
     // than refusing the whole sync.
     match item.kind.as_str() {
         "collection" => {
-            if let Ok(row) = serde_json::from_value::<ApiCollection>(stamp(item.payload.clone())) {
+            if let Ok(row) = serde_json::from_value::<ApiCollection>(stamp(payload)) {
                 live.collections.push(localise_collection(row, workspace_id, existing));
             }
         }
         "folder" => {
-            if let Ok(row) = serde_json::from_value(stamp(item.payload.clone())) {
+            if let Ok(row) = serde_json::from_value(stamp(payload)) {
                 live.folders.push(row);
             }
         }
         "request" => {
-            if let Ok(row) = serde_json::from_value(stamp(item.payload.clone())) {
+            if let Ok(row) = serde_json::from_value(stamp(payload)) {
                 live.requests.push(row);
             }
         }
@@ -866,7 +1214,11 @@ pub fn resolve(
                     synced_at: String::new(),
                     deleted: false,
                 };
-                push_live(&mut live, &incoming, &workspace_id, existing.as_ref());
+                // "Theirs" is their version of the record, not their copy of your credentials:
+                // the same merge a pull applies, so taking their rename does not cost the token.
+                let local = raw_records(conn, collection_id)?.remove(&(kind.to_string(), id.to_string()));
+                push_live(&mut live, &incoming, &workspace_id, existing.as_ref(), local.as_ref());
+                let scripts = incoming_scripts(&live);
                 // The upsert only writes when the incoming row is strictly newer, and a local edit
                 // made *after* theirs would otherwise survive a "take theirs". Stamping the row
                 // back to their timestamp first is what makes the choice actually take effect.
@@ -876,6 +1228,7 @@ pub fn resolve(
                     &ApiBackup { workspaces: vec![live] },
                     ImportOptions { replace: false, match_by_name: false },
                 )?;
+                api_trust::record_scripts(conn, scripts.iter().map(String::as_str), false, api_trust::ORIGIN_SHARED)?;
             }
         }
         Resolution::Mine => {
@@ -1525,5 +1878,349 @@ mod tests {
         let collection: ApiCollection =
             serde_json::from_value(payload).expect("an older peer's collection must still parse");
         assert_eq!(collection.scope, "workspace");
+    }
+
+    // -----------------------------------------------------------------------
+    // Credentials, current values, moves, deletes
+    // -----------------------------------------------------------------------
+
+    const HOST_SPEC: &str = r#"{"auth":{"type":"bearer","bearer":{"token":"host-token-1111"},"basic":{"username":"u","password":"{{password}}"}},"mqtt":{"password":"host-mqtt-2222"}}"#;
+    const HOST_AUTH: &str = r#"{"type":"apikey","apikey":{"key":"X-API-Key","value":"host-key-3333","addTo":"header"}}"#;
+    const HOST_VARIABLES: &str = r#"[
+        {"id":"v1","key":"baseUrl","initialValue":"https://api.example.com","currentValue":"http://localhost:8080","secret":false,"enabled":true},
+        {"id":"v2","key":"token","initialValue":"","currentValue":"script-token-4444","secret":false,"enabled":true},
+        {"id":"v3","key":"apiKey","initialValue":"host-secret-5555","currentValue":"","secret":true,"enabled":true}
+    ]"#;
+
+    /// A host whose collection carries credentials, and a guest that has pulled it once.
+    fn host_and_guest() -> (Connection, Connection) {
+        let host = seeded();
+        host.execute(
+            "UPDATE api_collections SET auth = ?1, variables = ?2 WHERE id = 'c1'",
+            params![HOST_AUTH, HOST_VARIABLES],
+        )
+        .unwrap();
+        host.execute("UPDATE api_requests SET spec = ?1 WHERE id = 'r1'", params![HOST_SPEC]).unwrap();
+        let items = local_items(&host, "c1").unwrap();
+        record_base(&host, "c1", &items).unwrap();
+
+        let mut guest = Connection::open_in_memory().unwrap();
+        super::super::migrations::run(&guest).unwrap();
+        guest
+            .execute_batch(
+                r#"
+                INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                    VALUES ('w2', 'Mine', '', '', 0, '2026-01-01T00:00:00+00:00');
+                INSERT INTO api_shared_collections (collection_id, workspace_id, remote_name, role, created_at)
+                    VALUES ('c1', 'w2', 'My API', 'member', '2026-01-01T00:00:00+00:00');
+                "#,
+            )
+            .unwrap();
+        apply_items(&mut guest, "c1", "w2", items).unwrap();
+        (host, guest)
+    }
+
+    /// The guest types their own credentials in — a write that changes nothing a push carries, so it
+    /// is not stamped (see `api_queries::update_request`).
+    fn guest_fills_in_their_own(guest: &Connection) {
+        let edit = |raw: &str, change: &dyn Fn(&mut serde_json::Value)| -> String {
+            let mut value: serde_json::Value = serde_json::from_str(raw).unwrap();
+            change(&mut value);
+            value.to_string()
+        };
+        let mut request = api_queries::load_collection(guest, "c1").unwrap().unwrap().2.remove(0);
+        request.spec = edit(&request.spec, &|spec| spec["auth"]["bearer"]["token"] = "guest-token-6666".into());
+        api_queries::update_request(guest, &request).unwrap();
+        let mut collection = api_queries::load_collection(guest, "c1").unwrap().unwrap().0;
+        collection.auth = edit(&collection.auth, &|auth| auth["apikey"]["value"] = "guest-key-7777".into());
+        collection.variables =
+            edit(&collection.variables, &|list| list[0]["currentValue"] = "http://guest.local".into());
+        api_queries::update_collection(guest, &collection).unwrap();
+    }
+
+    #[test]
+    fn nothing_but_initial_values_and_references_is_pushed() {
+        let host = seeded();
+        host.execute(
+            "UPDATE api_collections SET auth = ?1, variables = ?2 WHERE id = 'c1'",
+            params![HOST_AUTH, HOST_VARIABLES],
+        )
+        .unwrap();
+        host.execute("UPDATE api_requests SET spec = ?1 WHERE id = 'r1'", params![HOST_SPEC]).unwrap();
+
+        let wire = serde_json::to_string(&local_items(&host, "c1").unwrap()).unwrap();
+
+        for secret in ["host-token-1111", "host-mqtt-2222", "host-key-3333", "host-secret-5555"] {
+            assert!(!wire.contains(secret), "{secret} must not be pushed");
+        }
+        // Current values are this machine's own — a script's token above all.
+        assert!(!wire.contains("script-token-4444"));
+        assert!(!wire.contains("localhost:8080"));
+        // What is shared still is: the initial value, the variable itself, and a reference.
+        assert!(wire.contains("https://api.example.com"));
+        assert!(wire.contains(r#"\"key\":\"token\""#) || wire.contains("\\\"token\\\""));
+        assert!(wire.contains("{{password}}"), "a reference is not a credential and must travel");
+    }
+
+    /// A sealed slot's marker is a credential too — it names this machine's keychain entry.
+    #[test]
+    fn a_sealed_marker_is_never_pushed() {
+        let host = seeded();
+        host.execute(
+            "UPDATE api_requests SET spec = ?1 WHERE id = 'r1'",
+            params![r#"{"auth":{"type":"bearer","bearer":{"token":"cf-keychain:auth.bearer.token"}}}"#],
+        )
+        .unwrap();
+        let wire = serde_json::to_string(&local_items(&host, "c1").unwrap()).unwrap();
+        assert!(!wire.contains("cf-keychain"));
+    }
+
+    /// The bug: a teammate's rename arrived with every credential slot blank (a push never carries
+    /// one) and the pull wrote it over the whole auth block and variable list.
+    #[test]
+    fn a_teammates_edit_keeps_my_credentials_and_current_values() {
+        let (host, mut guest) = host_and_guest();
+        guest_fills_in_their_own(&guest);
+
+        host.execute_batch(
+            "UPDATE api_requests SET name = 'Login (renamed)', updated_at = '2027-01-01T00:00:00+00:00' WHERE id = 'r1';
+             UPDATE api_collections SET name = 'My API (renamed)', updated_at = '2027-01-01T00:00:00+00:00' WHERE id = 'c1';",
+        )
+        .unwrap();
+        let result = apply_items(&mut guest, "c1", "w2", local_items(&host, "c1").unwrap()).unwrap();
+
+        assert_eq!(result.conflicts, 0, "a credential typed here is not an edit that competes");
+        assert_eq!(text(&guest, "SELECT name FROM api_requests WHERE id = 'r1'"), "Login (renamed)");
+        assert_eq!(text(&guest, "SELECT name FROM api_collections WHERE id = 'c1'"), "My API (renamed)");
+        let spec = text(&guest, "SELECT spec FROM api_requests WHERE id = 'r1'");
+        assert!(spec.contains("guest-token-6666"), "the guest's token survived: {spec}");
+        assert!(spec.contains("{{password}}"));
+        let auth = text(&guest, "SELECT auth FROM api_collections WHERE id = 'c1'");
+        assert!(auth.contains("guest-key-7777"), "the guest's API key survived: {auth}");
+        let variables = text(&guest, "SELECT variables FROM api_collections WHERE id = 'c1'");
+        assert!(variables.contains("http://guest.local"), "the guest's current value survived: {variables}");
+    }
+
+    /// Only the initial value is shared, so a teammate changing it reaches everyone — and a current
+    /// value set here still wins here, as it does in Postman.
+    #[test]
+    fn a_changed_initial_value_arrives_under_the_local_current_value() {
+        let (host, mut guest) = host_and_guest();
+        guest_fills_in_their_own(&guest);
+
+        let variables = HOST_VARIABLES.replace("https://api.example.com", "https://v2.api.example.com");
+        host.execute(
+            "UPDATE api_collections SET variables = ?1, updated_at = '2027-01-01T00:00:00+00:00' WHERE id = 'c1'",
+            params![variables],
+        )
+        .unwrap();
+        apply_items(&mut guest, "c1", "w2", local_items(&host, "c1").unwrap()).unwrap();
+
+        let stored: serde_json::Value =
+            serde_json::from_str(&text(&guest, "SELECT variables FROM api_collections WHERE id = 'c1'")).unwrap();
+        assert_eq!(stored[0]["initialValue"], "https://v2.api.example.com");
+        assert_eq!(stored[0]["currentValue"], "http://guest.local");
+        // The host's script-set current value never reached the guest.
+        assert_eq!(stored[1]["currentValue"], "");
+    }
+
+    /// "Take theirs" is their version of the record, not their copy of my credentials.
+    #[test]
+    fn taking_theirs_in_a_conflict_keeps_my_credentials() {
+        let (host, mut guest) = host_and_guest();
+        guest_fills_in_their_own(&guest);
+        guest
+            .execute(
+                "UPDATE api_requests SET name = 'Login (mine)', updated_at = '2027-06-01T00:00:00+00:00' WHERE id = 'r1'",
+                [],
+            )
+            .unwrap();
+        host.execute(
+            "UPDATE api_requests SET name = 'Login (theirs)', updated_at = '2027-01-01T00:00:00+00:00' WHERE id = 'r1'",
+            [],
+        )
+        .unwrap();
+        let result = apply_items(&mut guest, "c1", "w2", local_items(&host, "c1").unwrap()).unwrap();
+        assert_eq!(result.conflicts, 1);
+
+        resolve(&mut guest, "c1", "request", "r1", Resolution::Theirs).unwrap();
+
+        assert_eq!(text(&guest, "SELECT name FROM api_requests WHERE id = 'r1'"), "Login (theirs)");
+        assert!(text(&guest, "SELECT spec FROM api_requests WHERE id = 'r1'").contains("guest-token-6666"));
+    }
+
+    /// A move used to leave `updated_at` alone, so the delta push never carried it and every other
+    /// member kept the old parent and the old order for good.
+    #[test]
+    fn a_move_travels_to_the_other_members() {
+        let (host, mut guest) = host_and_guest();
+        let folder = api_queries::create_folder(&host, "c1", None, "Orders").unwrap();
+        let first = local_items(&host, "c1").unwrap();
+        record_base(&host, "c1", &first).unwrap();
+        apply_items(&mut guest, "c1", "w2", first).unwrap();
+
+        let moved = api_queries::move_node(&host, "request", "r1", "c1", Some(&folder.id), 0).unwrap();
+        assert_eq!(moved.requests, vec!["r1".to_string()]);
+
+        let delta = local_items(&host, "c1").unwrap();
+        assert!(delta.iter().any(|item| item.id == "r1"), "the moved request is in the next push");
+        let result = apply_items(&mut guest, "c1", "w2", delta).unwrap();
+
+        assert_eq!(result.conflicts, 0);
+        assert_eq!(text(&guest, "SELECT folder_id FROM api_requests WHERE id = 'r1'"), folder.id);
+    }
+
+    /// Out of one collection and into another is, for the first, a removal — and a removal travels
+    /// as a tombstone, or that collection's members keep the request for ever.
+    #[test]
+    fn a_move_into_another_collection_tombstones_it_in_the_first() {
+        let host = seeded();
+        record_base(&host, "c1", &local_items(&host, "c1").unwrap()).unwrap();
+        host.execute_batch(
+            "INSERT INTO api_collections (id, workspace_id, name, created_at, updated_at)
+                 VALUES ('c2', 'w1', 'Other', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+
+        api_queries::move_node(&host, "request", "r1", "c2", None, 0).unwrap();
+
+        let outbound = local_items(&host, "c1").unwrap();
+        assert!(outbound.iter().any(|item| item.id == "r1" && item.deleted));
+        // And moved back before that travelled, it is live there again with no tombstone beside it.
+        api_queries::move_node(&host, "request", "r1", "c1", None, 0).unwrap();
+        let outbound = local_items(&host, "c1").unwrap();
+        assert!(outbound.iter().any(|item| item.id == "r1" && !item.deleted));
+        assert!(!outbound.iter().any(|item| item.id == "r1" && item.deleted));
+    }
+
+    /// The fix for the P0: a guest's delete is theirs alone. No tombstone may be written, or the next
+    /// push deletes the collection on every machine, the host's included.
+    #[test]
+    fn a_guests_delete_never_travels() {
+        let (_host, guest) = host_and_guest();
+
+        api_queries::delete_collection_locally(&guest, "c1").unwrap();
+
+        assert_eq!(scalar(&guest, "SELECT COUNT(*) FROM api_collections WHERE id = 'c1'"), 0);
+        assert_eq!(scalar(&guest, "SELECT COUNT(*) FROM api_tombstones WHERE collection_id = 'c1'"), 0);
+        assert_eq!(scalar(&guest, "SELECT COUNT(*) FROM api_shared_collections WHERE collection_id = 'c1'"), 0);
+        assert!(local_items(&guest, "c1").unwrap().is_empty(), "nothing left to push");
+    }
+
+    /// Changing only a credential or a current value is not an edit a push carries, so it must not
+    /// be stamped: a stamp would send a record with nothing new in it, and freeze it as a conflict
+    /// the moment a teammate edited it too.
+    #[test]
+    fn a_change_a_push_would_not_carry_is_not_stamped() {
+        let (host, _guest) = host_and_guest();
+        let before = text(&host, "SELECT updated_at FROM api_requests WHERE id = 'r1'");
+        let mut request = api_queries::load_collection(&host, "c1").unwrap().unwrap().2.remove(0);
+        request.spec = request.spec.replace("host-token-1111", "rotated-token");
+        let stamp = api_queries::update_request(&host, &request).unwrap();
+        assert_eq!(stamp, before);
+        assert!(text(&host, "SELECT spec FROM api_requests WHERE id = 'r1'").contains("rotated-token"));
+
+        let mut collection = api_queries::load_collection(&host, "c1").unwrap().unwrap().0;
+        let collection_before = collection.updated_at.clone();
+        collection.variables = collection.variables.replace("script-token-4444", "next-script-token");
+        collection.pinned = true;
+        api_queries::update_collection(&host, &collection).unwrap();
+        assert_eq!(text(&host, "SELECT updated_at FROM api_collections WHERE id = 'c1'"), collection_before);
+        assert!(local_items(&host, "c1").unwrap().is_empty());
+
+        // A rename is an edit, and is stamped.
+        collection.name = "Renamed".into();
+        api_queries::update_collection(&host, &collection).unwrap();
+        assert_ne!(text(&host, "SELECT updated_at FROM api_collections WHERE id = 'c1'"), collection_before);
+    }
+
+    /// An OAuth 2 refresh writes a new access token *and* its expiry. Both are this machine's: the
+    /// refresh must not stamp the row (it would push and conflict on every refresh), and a pull must
+    /// not replace the expiry of the token it keeps with a teammate's.
+    #[test]
+    fn a_token_refresh_stays_on_this_machine() {
+        let host = seeded();
+        let spec = |token: &str, expires: i64| {
+            serde_json::json!({"auth": {"type": "oauth2", "oauth2": {"accessToken": token, "expiresAt": expires}}}).to_string()
+        };
+        host.execute("UPDATE api_requests SET spec = ?1 WHERE id = 'r1'", params![spec("first", 100)]).unwrap();
+        record_base(&host, "c1", &local_items(&host, "c1").unwrap()).unwrap();
+
+        let mut request = api_queries::load_collection(&host, "c1").unwrap().unwrap().2.remove(0);
+        let before = request.updated_at.clone();
+        request.spec = spec("refreshed", 200);
+        assert_eq!(api_queries::update_request(&host, &request).unwrap(), before, "a refresh is not an edit");
+        assert!(local_items(&host, "c1").unwrap().is_empty());
+
+        // A teammate renames it; their payload says nothing about our token or when it expires.
+        let mut items = local_items(&seeded(), "c1").unwrap();
+        for item in &mut items {
+            if item.kind == "request" {
+                item.payload["name"] = "Renamed".into();
+                item.payload["spec"] = spec("", 0).into();
+                item.updated_at = "2027-01-01T00:00:00+00:00".into();
+            }
+        }
+        let mut host = host;
+        apply_items(&mut host, "c1", "w1", items).unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_str(&text(&host, "SELECT spec FROM api_requests WHERE id = 'r1'")).unwrap();
+        assert_eq!(stored["auth"]["oauth2"]["accessToken"], "refreshed");
+        assert_eq!(stored["auth"]["oauth2"]["expiresAt"], 200);
+    }
+
+    /// A pulled script is somebody else's code: recorded as untrusted, labelled as shared, and never
+    /// trusted by the sync — whatever the peer's app thought of it.
+    #[test]
+    fn pulled_scripts_are_recorded_untrusted() {
+        let host = seeded();
+        host.execute(
+            "UPDATE api_requests SET spec = ?1 WHERE id = 'r1'",
+            params![r#"{"preScript":"pm.environment.set('x', 1)","postScript":""}"#],
+        )
+        .unwrap();
+        let (mut guest, items) = {
+            let items = local_items(&host, "c1").unwrap();
+            let guest = Connection::open_in_memory().unwrap();
+            super::super::migrations::run(&guest).unwrap();
+            guest
+                .execute_batch(
+                    "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                         VALUES ('w2', 'Mine', '', '', 0, '2026-01-01T00:00:00+00:00');
+                     INSERT INTO api_shared_collections (collection_id, workspace_id, remote_name, role, created_at)
+                         VALUES ('c1', 'w2', 'My API', 'member', '2026-01-01T00:00:00+00:00');",
+                )
+                .unwrap();
+            (guest, items)
+        };
+        apply_items(&mut guest, "c1", "w2", items).unwrap();
+
+        let found = api_trust::lookup(&guest, &[api_trust::script_hash("pm.environment.set('x', 1)")]).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(!found[0].trusted);
+        assert_eq!(found[0].origin, api_trust::ORIGIN_SHARED);
+    }
+
+    /// The upgrade to "only the initial value is shared": a current value that merely repeats its
+    /// initial is emptied (it would shadow a teammate's change to the initial), and a real local
+    /// override — or a value that only ever lived in the current column — is left alone.
+    #[test]
+    fn a_current_value_repeating_the_initial_is_emptied_once() {
+        let raw = r#"[{"key":"a","initialValue":"x","currentValue":"x"},
+                      {"key":"b","initialValue":"x","currentValue":"y"},
+                      {"key":"c","initialValue":"","currentValue":"z"}]"#;
+        let split: serde_json::Value = serde_json::from_str(&split_current_values(raw).unwrap()).unwrap();
+        assert_eq!(split[0]["currentValue"], "");
+        assert_eq!(split[1]["currentValue"], "y");
+        assert_eq!(split[2]["currentValue"], "z");
+        assert!(split_current_values(&split.to_string()).is_none(), "nothing left to do the second time");
+
+        let conn = seeded();
+        conn.execute("UPDATE api_collections SET variables = ?1 WHERE id = 'c1'", params![raw]).unwrap();
+        conn.execute("DELETE FROM app_settings WHERE key = 'api_variables_split'", []).unwrap();
+        let before = text(&conn, "SELECT updated_at FROM api_collections WHERE id = 'c1'");
+        migrate_variable_split(&conn).unwrap();
+        assert!(text(&conn, "SELECT variables FROM api_collections WHERE id = 'c1'").contains(r#""currentValue":"""#));
+        assert_eq!(text(&conn, "SELECT updated_at FROM api_collections WHERE id = 'c1'"), before);
     }
 }

@@ -26,6 +26,7 @@
  * reported for "Postgres would have done this differently".
  */
 
+import { orientReference } from "./orient";
 import type { DbmlEndpoint, DbmlField, DbmlRef, DbmlSchema, DbmlTable } from "./types";
 
 /** What a named CHECK meant, so an engine error can be turned back into a sentence about a cell. */
@@ -268,31 +269,24 @@ function constraintName(kind: string, table: string, column: string): string {
  * which is worse than a missing one, and one that no error message would ever explain.
  *
  * The **relation** is what is reliable: the `*` end holds the key. For `1-1`, where it says
- * nothing, the tiebreak is that a foreign key must point at something unique — so the end whose
- * column is a primary key is the parent. If that is still a tie, `to` is taken as the parent, which
- * is the reading of the explicit `Ref:` form somebody wrote deliberately.
+ * nothing, the evidence is the schema's own — the end that is the primary key is the parent, and
+ * failing that the end declared `unique` but not `pk` is the child. That rule is `orientReference`,
+ * shared with every code generator so the sandbox and the generated DDL cannot disagree about a
+ * foreign key.
+ *
+ * Where the schema says nothing either way — a shared primary key, two unique ends — the generators
+ * drop the edge with a finding, but the sandbox has to build *something* to hold rows against, so
+ * `to` is taken as the parent: the reading of the explicit `Ref:` form somebody wrote deliberately.
  */
 export function orientRef(
   schema: DbmlSchema,
   ref: DbmlRef,
 ): { child: DbmlEndpoint; parent: DbmlEndpoint } | null {
+  const oriented = orientReference(schema, ref);
   // Many-to-many needs a junction table; neither end holds a key.
-  if (ref.from.relation === "*" && ref.to.relation === "*") return null;
-  if (ref.from.relation === "*") return { child: ref.from, parent: ref.to };
-  if (ref.to.relation === "*") return { child: ref.to, parent: ref.from };
-
-  const keyed = (endpoint: DbmlEndpoint): boolean => {
-    const table = schema.tables.find((entry) => entry.id === endpoint.table);
-    if (!table) return false;
-    const pkIndex = table.indexes.find((index) => index.pk && index.columns.length > 0);
-    const keys = pkIndex ? pkIndex.columns : table.fields.filter((field) => field.pk).map((f) => f.name);
-    return endpoint.fields.every((field) => keys.includes(field));
-  };
-  const fromKeyed = keyed(ref.from);
-  const toKeyed = keyed(ref.to);
-  if (fromKeyed && !toKeyed) return { child: ref.to, parent: ref.from };
-  if (toKeyed && !fromKeyed) return { child: ref.from, parent: ref.to };
-  return { child: ref.from, parent: ref.to };
+  if (oriented.kind === "many-to-many") return null;
+  if (oriented.kind === "ambiguous") return { child: ref.from, parent: ref.to };
+  return { child: oriented.child, parent: oriented.parent };
 }
 
 /** Every reference whose foreign key sits on `tableId`. The question four call sites ask. */

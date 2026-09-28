@@ -24,6 +24,7 @@ use tokio::sync::oneshot;
 use url::Url;
 
 use crate::sigv4::{hex_sha256, sigv4_headers};
+use crate::api::stream::{is_event_stream, now_ms, HttpStreamEvent, SseParser, StreamSink, Utf8Stream};
 use crate::api::{
     BackendAuth, FormPart, HttpResponse, HttpSendRequest, NetworkOptions, ParsedCookie,
     ResponseTimings, SentRequestSummary,
@@ -44,15 +45,20 @@ const ADVERTISED_ENCODINGS: &str = "gzip, br, deflate";
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Sends `req`. With `cancel`, the send can be stopped — and what had already arrived is returned
+/// rather than thrown away. With `sink`, a server-sent event stream (or any body, when the request
+/// asks to stream) is emitted piece by piece as it arrives; see `api::stream`.
 pub async fn send(
     req: HttpSendRequest,
     cancel: Option<oneshot::Receiver<()>>,
+    sink: Option<StreamSink>,
 ) -> Result<HttpResponse, String> {
+    let progress = Mutex::new(Progress::default());
     let Some(mut cancel) = cancel else {
-        return send_inner(req).await;
+        return send_inner(req, &progress, sink).await;
     };
 
-    let fut = send_inner(req);
+    let fut = send_inner(req, &progress, sink);
     tokio::pin!(fut);
     let cancelled = tokio::select! {
         result = &mut fut => return result,
@@ -60,7 +66,9 @@ pub async fn send(
     };
 
     if cancelled {
-        Err("Request cancelled".to_string())
+        // A stream the user stopped, or a download given up on, still has a head and a body worth
+        // reading; only a send stopped before any answer came back is an error.
+        finish(&progress, Some("Stopped.".to_string())).ok_or_else(|| "Request cancelled".to_string())
     } else {
         // The sender was dropped without firing. Nothing can cancel us any more, so finishing is
         // strictly better than reporting a cancellation nobody asked for.
@@ -68,7 +76,69 @@ pub async fn send(
     }
 }
 
-async fn send_inner(req: HttpSendRequest) -> Result<HttpResponse, String> {
+/// What is known about the response so far, kept outside the send's own future so a cancel can
+/// still report it. Never locked across an await.
+#[derive(Default)]
+struct Progress {
+    head: Option<ResponseHead>,
+    body: Vec<u8>,
+    truncated: bool,
+}
+
+struct ResponseHead {
+    status: reqwest::StatusCode,
+    http_version: String,
+    headers: Vec<(String, String)>,
+    set_cookies: Vec<ParsedCookie>,
+    sent: SentRequestSummary,
+    redirects: Vec<String>,
+    first_byte_ms: i64,
+    started: Instant,
+    body_started: Instant,
+}
+
+/// The response as far as it got. `None` when no head ever arrived.
+fn finish(progress: &Mutex<Progress>, interrupted: Option<String>) -> Option<HttpResponse> {
+    let mut progress = progress.lock().ok()?;
+    let head = progress.head.take()?;
+    let body = std::mem::take(&mut progress.body);
+    let size_bytes = body.len() as u64;
+    let (body_text, body_base64) = decode_body(body, response_content_type(&head.headers).as_deref());
+    let total_ms = head.started.elapsed().as_millis() as i64;
+    Some(HttpResponse {
+        status: head.status.as_u16(),
+        status_text: head.status.canonical_reason().unwrap_or("").to_string(),
+        http_version: head.http_version,
+        headers: head.headers,
+        body_text,
+        body_base64,
+        size_bytes,
+        truncated: progress.truncated,
+        interrupted,
+        duration_ms: total_ms,
+        timings: ResponseTimings {
+            // reqwest hands back a `Response`, not a connection trace: the DNS lookup, the TCP
+            // handshake and the TLS handshake all happen inside `execute` with no hook to time
+            // them separately. -1 is the contract's "unavailable", and inventing a split of
+            // `first_byte_ms` would be worse than admitting that.
+            dns_ms: -1,
+            connect_ms: -1,
+            tls_ms: -1,
+            first_byte_ms: head.first_byte_ms,
+            download_ms: head.body_started.elapsed().as_millis() as i64,
+            total_ms,
+        },
+        redirects: head.redirects,
+        set_cookies: head.set_cookies,
+        sent: head.sent,
+    })
+}
+
+async fn send_inner(
+    req: HttpSendRequest,
+    progress: &Mutex<Progress>,
+    sink: Option<StreamSink>,
+) -> Result<HttpResponse, String> {
     let total_started = Instant::now();
 
     let method = Method::from_bytes(req.method.trim().as_bytes())
@@ -85,8 +155,93 @@ async fn send_inner(req: HttpSendRequest) -> Result<HttpResponse, String> {
 
     let hops: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let client = build_client(&req.options, &hops)?;
+    let limit = (req.options.timeout_ms > 0).then(|| Duration::from_millis(req.options.timeout_ms));
 
-    let mut attempt = run_exchange(&client, &req, &method, &start_url, &[], &hops).await?;
+    // The head is due within the request's timeout whatever the body turns out to be; only a
+    // stream's body is timed differently, below.
+    let exchange = exchange_with_auth(&client, &req, &method, &start_url, &hops);
+    let attempt = match limit {
+        Some(limit) => tokio::time::timeout(limit, exchange).await.map_err(|_| {
+            format!("{method} {start_url} timed out after {} ms with no response", limit.as_millis())
+        })??,
+        None => exchange.await?,
+    };
+
+    let Exchange {
+        response,
+        sent,
+        first_byte_ms,
+    } = attempt;
+
+    let status = response.status();
+    let http_version = format!("{:?}", response.version());
+    let final_url = response.url().clone();
+    let headers = header_pairs(response.headers());
+    let set_cookies = parse_set_cookies(response.headers(), &final_url);
+
+    let mut redirects = hops.lock().map(|h| h.clone()).unwrap_or_default();
+    // The contract is "every hop, final URL last" — reqwest's own follower records the *targets*
+    // it moved to, which already ends at the final URL, but a manual hop can leave it one short.
+    if !redirects.is_empty() && redirects.last().map(String::as_str) != Some(final_url.as_str()) {
+        redirects.push(final_url.to_string());
+    }
+
+    let sse = response_content_type(&headers).is_some_and(|content_type| is_event_stream(&content_type));
+    // Streamed only when somebody is watching: an untracked send (a script's `pm.sendRequest`, the
+    // runner, a token call) keeps its total deadline, so an endless stream can never hang it.
+    let stream_to = sink.filter(|_| sse || req.options.stream);
+    if let Some(sink) = &stream_to {
+        sink(HttpStreamEvent::Open {
+            status: status.as_u16(),
+            status_text: status.canonical_reason().unwrap_or("").to_string(),
+            http_version: http_version.clone(),
+            headers: headers.clone(),
+            sse,
+            at: now_ms(),
+        });
+    }
+
+    if let Ok(mut progress) = progress.lock() {
+        progress.head = Some(ResponseHead {
+            status,
+            http_version,
+            headers,
+            set_cookies,
+            sent,
+            redirects,
+            first_byte_ms,
+            started: total_started,
+            body_started: Instant::now(),
+        });
+    }
+
+    let cap = req.options.max_response_bytes;
+    let interrupted = match (&stream_to, limit) {
+        // A stream is bounded by idleness (the client's read timeout), never by a total deadline:
+        // one that is still talking after half an hour is working, not late.
+        (Some(sink), _) => read_stream(response, cap, progress, sink, sse, &final_url, limit).await.err(),
+        (None, Some(limit)) => {
+            let remaining = limit.saturating_sub(total_started.elapsed());
+            match tokio::time::timeout(remaining, read_body(response, cap, progress, &final_url)).await {
+                Ok(result) => result.err(),
+                Err(_) => Some(format!("Timed out after {} ms.", limit.as_millis())),
+            }
+        }
+        (None, None) => read_body(response, cap, progress, &final_url).await.err(),
+    };
+
+    finish(progress, interrupted).ok_or_else(|| "The response was lost while it was being read".to_string())
+}
+
+/// One exchange, plus the second one Digest needs.
+async fn exchange_with_auth(
+    client: &reqwest::Client,
+    req: &HttpSendRequest,
+    method: &Method,
+    start_url: &Url,
+    hops: &Arc<Mutex<Vec<String>>>,
+) -> Result<Exchange, String> {
+    let mut attempt = run_exchange(client, req, method, start_url, &[], hops).await?;
 
     // Digest is a challenge/response scheme: the first send exists only to collect the nonce, and
     // the body has to go out again with the second one (there is no 100-continue dance here).
@@ -101,74 +256,19 @@ async fn send_inner(req: HttpSendRequest) -> Result<HttpResponse, String> {
             // Re-challenge against wherever the first attempt actually landed: the nonce and the
             // signed request-target belong to that URL, not to the one originally typed.
             let target = attempt.response.url().clone();
-            let header =
-                digest_authorization(username, password, method.as_str(), &target, &challenge)?;
+            let header = digest_authorization(username, password, method.as_str(), &target, &challenge)?;
             attempt = run_exchange(
-                &client,
-                &req,
-                &method,
+                client,
+                req,
+                method,
                 &target,
                 &[("authorization".to_string(), header)],
-                &hops,
+                hops,
             )
             .await?;
         }
     }
-
-    let Exchange {
-        response,
-        sent,
-        first_byte_ms,
-    } = attempt;
-
-    let status = response.status();
-    let http_version = format!("{:?}", response.version());
-    let final_url = response.url().clone();
-    let headers = header_pairs(response.headers());
-    let set_cookies = parse_set_cookies(response.headers(), &final_url);
-
-    let download_started = Instant::now();
-    let (body, truncated) = read_body(response, req.options.max_response_bytes, &final_url).await?;
-    let download_ms = download_started.elapsed().as_millis() as i64;
-    let size_bytes = body.len() as u64;
-
-    let (body_text, body_base64) = decode_body(body, response_content_type(&headers).as_deref());
-
-    let mut redirects = hops.lock().map(|h| h.clone()).unwrap_or_default();
-    // The contract is "every hop, final URL last" — reqwest's own follower records the *targets*
-    // it moved to, which already ends at the final URL, but a manual hop can leave it one short.
-    if !redirects.is_empty() && redirects.last().map(String::as_str) != Some(final_url.as_str()) {
-        redirects.push(final_url.to_string());
-    }
-
-    let total_ms = total_started.elapsed().as_millis() as i64;
-
-    Ok(HttpResponse {
-        status: status.as_u16(),
-        status_text: status.canonical_reason().unwrap_or("").to_string(),
-        http_version,
-        headers,
-        body_text,
-        body_base64,
-        size_bytes,
-        truncated,
-        duration_ms: total_ms,
-        timings: ResponseTimings {
-            // reqwest hands back a `Response`, not a connection trace: the DNS lookup, the TCP
-            // handshake and the TLS handshake all happen inside `execute` with no hook to time
-            // them separately. -1 is the contract's "unavailable", and inventing a split of
-            // `first_byte_ms` would be worse than admitting that.
-            dns_ms: -1,
-            connect_ms: -1,
-            tls_ms: -1,
-            first_byte_ms,
-            download_ms,
-            total_ms,
-        },
-        redirects,
-        set_cookies,
-        sent,
-    })
+    Ok(attempt)
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +284,12 @@ fn build_client(
         .redirect(redirect_policy(options, hops));
 
     if options.timeout_ms > 0 {
-        builder = builder.timeout(Duration::from_millis(options.timeout_ms));
+        // Not `timeout()`: that is a deadline on the whole body as well, which cut a server-sent
+        // event stream at the mark and lost everything it had delivered. The deadline for an
+        // ordinary response is kept by `send_inner`; the client enforces idleness — per connect,
+        // per read — which is the only timeout a stream has.
+        let limit = Duration::from_millis(options.timeout_ms);
+        builder = builder.connect_timeout(limit).read_timeout(limit);
     }
 
     if !options.proxy_url.trim().is_empty() {
@@ -204,46 +309,13 @@ fn build_client(
         }
     }
 
-    if !options.client_cert_path.trim().is_empty() {
-        builder = builder.identity(client_identity(
-            options.client_cert_path.trim(),
-            &options.client_cert_password,
-        )?);
+    if let Some(identity) = crate::api::tls::identity_for(options)? {
+        builder = builder.identity(identity.reqwest()?);
     }
 
     builder
         .build()
         .map_err(|e| format!("Could not build the HTTP client: {e}"))
-}
-
-/// The TLS backend is rustls, which only accepts a PEM identity — an encrypted key or a PKCS#12
-/// container has to be converted first, and saying so beats a handshake failure with no cause.
-fn client_identity(path: &str, password: &str) -> Result<reqwest::Identity, String> {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".p12") || lower.ends_with(".pfx") {
-        return Err(format!(
-            "Client certificate '{path}' is a PKCS#12 container. This build uses rustls, which \
-             needs an unencrypted PEM bundle (certificate chain + private key in one file). \
-             Convert it with: openssl pkcs12 -in '{path}' -out client.pem -nodes"
-        ));
-    }
-    // Refusing beats accepting the passphrase and quietly not using it: rustls cannot decrypt a
-    // private key, so a cert that needs one would fail the handshake with no explanation.
-    if !password.is_empty() {
-        return Err(format!(
-            "A passphrase was set for client certificate '{path}', but rustls cannot decrypt a \
-             private key. Decrypt it first with: openssl pkcs8 -topk8 -nocrypt -in key.pem \
-             -out key-decrypted.pem"
-        ));
-    }
-    let pem = std::fs::read(path)
-        .map_err(|e| format!("Cannot read the client certificate at '{path}': {e}"))?;
-    reqwest::Identity::from_pem(&pem).map_err(|e| {
-        format!(
-            "'{path}' is not a usable PEM client identity: {e}. It must hold the certificate \
-             chain and an unencrypted PKCS#8 or PKCS#1 private key."
-        )
-    })
 }
 
 fn redirect_policy(options: &NetworkOptions, hops: &Arc<Mutex<Vec<String>>>) -> redirect::Policy {
@@ -800,46 +872,113 @@ fn preview_bytes(bytes: &[u8]) -> String {
 // Response
 // ---------------------------------------------------------------------------
 
-/// Reads at most `cap` bytes (0 = unlimited) and returns what it got: hitting the cap is a
-/// truncation, not a failure — a 2 GB response should still show its first megabyte.
-/// Reads the body, stopping at `cap` bytes (0 = unlimited).
+fn body_error(url: &Url, e: reqwest::Error) -> String {
+    match crate::api::root_cause(&e) {
+        Some(cause) => format!("Reading the response body from {url} failed: {cause}"),
+        None => format!("Reading the response body from {url} failed: {e}"),
+    }
+}
+
+/// Reads the body into `progress`, stopping at `cap` bytes (0 = unlimited). `Err` carries why it
+/// stopped short — the bytes already read stay in `progress` either way.
 ///
-/// Returns `(bytes, truncated)`. `truncated` is only true when bytes were actually left behind:
-/// filling the buffer to exactly `cap` is *not* truncation on its own, because a payload can be
-/// exactly that long, and flagging it would put a "this body is incomplete" warning over a
-/// complete one. Telling the two apart costs one more `chunk()` poll, which is the same await the
-/// loop was going to make anyway — and at most one, since we break either way.
+/// Hitting the cap is a truncation, not a failure — a 2 GB response should still show its first
+/// megabyte — and `truncated` is only set when bytes were actually left behind: filling the buffer
+/// to exactly `cap` is not truncation on its own, because a payload can be exactly that long, and
+/// flagging it would put a "this body is incomplete" warning over a complete one. Telling the two
+/// apart costs one more `chunk()` poll, which is the same await the loop was going to make anyway.
 async fn read_body(
     mut response: reqwest::Response,
     cap: u64,
+    progress: &Mutex<Progress>,
     url: &Url,
-) -> Result<(Vec<u8>, bool), String> {
-    let describe = |e: reqwest::Error| match crate::api::root_cause(&e) {
-        Some(cause) => format!("Reading the response body from {url} failed: {cause}"),
-        None => format!("Reading the response body from {url} failed: {e}"),
-    };
-
-    let mut body = Vec::new();
-    let mut truncated = false;
-    while let Some(chunk) = response.chunk().await.map_err(describe)? {
-        if cap == 0 {
-            body.extend_from_slice(&chunk);
-            continue;
-        }
-        let room = (cap - body.len() as u64) as usize;
-        if chunk.len() > room {
-            body.extend_from_slice(&chunk[..room]);
-            truncated = true;
-            break;
-        }
-        body.extend_from_slice(&chunk);
-        if body.len() as u64 == cap {
+) -> Result<(), String> {
+    loop {
+        let Some(chunk) = response.chunk().await.map_err(|e| body_error(url, e))? else {
+            return Ok(());
+        };
+        // Decided under the lock, awaited outside it: a std guard held across an await would make
+        // the whole send `!Send`.
+        let full = {
+            let Ok(mut progress) = progress.lock() else { return Ok(()) };
+            if cap == 0 {
+                progress.body.extend_from_slice(&chunk);
+                false
+            } else {
+                let room = cap.saturating_sub(progress.body.len() as u64) as usize;
+                if chunk.len() > room {
+                    progress.body.extend_from_slice(&chunk[..room]);
+                    progress.truncated = true;
+                    return Ok(());
+                }
+                progress.body.extend_from_slice(&chunk);
+                progress.body.len() as u64 == cap
+            }
+        };
+        if full {
             // Full to the byte. Whether anything followed is the whole question.
-            truncated = response.chunk().await.map_err(describe)?.is_some();
-            break;
+            let more = response.chunk().await.map_err(|e| body_error(url, e))?.is_some();
+            if let Ok(mut progress) = progress.lock() {
+                progress.truncated = more;
+            }
+            return Ok(());
         }
     }
-    Ok((body, truncated))
+}
+
+/// Reads a streamed body to its end — or until it goes quiet for `idle`, errors, or is stopped —
+/// emitting it to `sink` as it arrives: always as text chunks, and for an event stream as parsed
+/// events too. Past `cap` the body stops growing but the stream keeps being delivered; a stream is
+/// read for what it says next, not to be kept whole.
+async fn read_stream(
+    mut response: reqwest::Response,
+    cap: u64,
+    progress: &Mutex<Progress>,
+    sink: &StreamSink,
+    sse: bool,
+    url: &Url,
+    idle: Option<Duration>,
+) -> Result<(), String> {
+    let mut text = Utf8Stream::default();
+    let mut parser = SseParser::default();
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => return Ok(()),
+            Err(e) if e.is_timeout() => {
+                let seconds = idle.map(|d| d.as_secs_f64()).unwrap_or_default();
+                return Err(format!("No data for {seconds} s, so the stream was closed."));
+            }
+            Err(e) => return Err(body_error(url, e)),
+        };
+        if let Ok(mut progress) = progress.lock() {
+            let room = if cap == 0 {
+                chunk.len()
+            } else {
+                cap.saturating_sub(progress.body.len() as u64) as usize
+            };
+            let kept = room.min(chunk.len());
+            progress.body.extend_from_slice(&chunk[..kept]);
+            if kept < chunk.len() {
+                progress.truncated = true;
+            }
+        }
+        let decoded = text.push(&chunk);
+        let at = now_ms();
+        if !decoded.is_empty() {
+            sink(HttpStreamEvent::Chunk { text: decoded.clone(), size: chunk.len() as u64, at });
+        }
+        if sse {
+            for event in parser.push(&decoded) {
+                sink(HttpStreamEvent::Event {
+                    event: event.event,
+                    data: event.data,
+                    last_event_id: event.last_event_id,
+                    at,
+                });
+            }
+        }
+    }
 }
 
 fn parse_set_cookies(headers: &HeaderMap, url: &Url) -> Vec<ParsedCookie> {
@@ -1347,5 +1486,149 @@ mod decode_tests {
         // 0xF1 is `ñ` in Latin-1 and invalid on its own in UTF-8.
         let (text, _) = decode_body(vec![b'a', 0xF1, b'o'], Some("text/plain; charset=iso-8859-1"));
         assert_eq!(text, "año");
+    }
+}
+
+/// The streaming path against a real socket on the loopback interface: a server that writes its
+/// response in timed pieces, and a sink that records what the UI would have been sent.
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt as _;
+
+    /// Serves one connection: waits for the request head, writes `pieces` after their delays, then
+    /// holds the connection open until the client goes away.
+    async fn serve(pieces: Vec<(u64, &'static str)>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let read = socket.read(&mut buf).await.unwrap();
+                if read == 0 {
+                    return;
+                }
+                head.extend_from_slice(&buf[..read]);
+            }
+            for (delay, piece) in pieces {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                if socket.write_all(piece.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+            let _ = socket.read(&mut buf).await;
+        });
+        port
+    }
+
+    const SSE_HEAD: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+
+    fn get(port: u16, timeout_ms: u64) -> HttpSendRequest {
+        HttpSendRequest {
+            method: "GET".into(),
+            url: format!("http://127.0.0.1:{port}/v1/events"),
+            headers: Vec::new(),
+            body_text: None,
+            body_base64: None,
+            body_file: None,
+            form_data: None,
+            urlencoded: None,
+            auth: None,
+            options: NetworkOptions { timeout_ms, max_response_bytes: 0, ..NetworkOptions::default() },
+        }
+    }
+
+    fn recorder() -> (StreamSink, Arc<Mutex<Vec<HttpStreamEvent>>>) {
+        let seen: Arc<Mutex<Vec<HttpStreamEvent>>> = Arc::default();
+        let sink_seen = Arc::clone(&seen);
+        let sink: StreamSink = Arc::new(move |event| sink_seen.lock().unwrap().push(event));
+        (sink, seen)
+    }
+
+    fn events(seen: &Arc<Mutex<Vec<HttpStreamEvent>>>) -> Vec<(String, String)> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                HttpStreamEvent::Event { event, data, .. } => Some((event.clone(), data.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_event_stream_is_delivered_as_it_arrives_and_kept_when_it_goes_quiet() {
+        let port = serve(vec![(0, SSE_HEAD), (0, "data: one\n\n"), (40, "event: tick\ndata: two\n\n")]).await;
+        let (sink, seen) = recorder();
+        // 300 ms is the *idle* limit here: the stream outlives it by staying open, and still ends
+        // as a response rather than an error.
+        let response = send(get(port, 300), None, Some(sink)).await.unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(events(&seen), vec![("message".into(), "one".into()), ("tick".into(), "two".into())]);
+        assert!(matches!(seen.lock().unwrap().first(), Some(HttpStreamEvent::Open { sse: true, .. })));
+        assert!(response.body_text.contains("data: one") && response.body_text.contains("data: two"));
+        let reason = response.interrupted.expect("an idle stream says why it ended");
+        assert!(reason.contains("No data"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_stream_keeps_what_had_arrived() {
+        let port = serve(vec![(0, SSE_HEAD), (0, "data: one\n\n"), (5_000, "data: never\n\n")]).await;
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+        let cancel_tx = Mutex::new(Some(cancel_tx));
+        let seen: Arc<Mutex<Vec<HttpStreamEvent>>> = Arc::default();
+        let sink_seen = Arc::clone(&seen);
+        // Pressing Stop the moment the first event lands.
+        let sink: StreamSink = Arc::new(move |event| {
+            let first_event = matches!(event, HttpStreamEvent::Event { .. });
+            sink_seen.lock().unwrap().push(event);
+            if first_event {
+                if let Some(tx) = cancel_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            }
+        });
+        let response = send(get(port, 10_000), Some(cancel_rx), Some(sink)).await.unwrap();
+        assert_eq!(response.interrupted.as_deref(), Some("Stopped."));
+        assert!(response.body_text.contains("data: one"));
+        assert!(!response.body_text.contains("never"));
+    }
+
+    #[tokio::test]
+    async fn an_unwatched_send_keeps_its_deadline_but_not_at_the_cost_of_the_body() {
+        let port = serve(vec![(0, SSE_HEAD), (0, "data: one\n\n")]).await;
+        // No sink: a script's `pm.sendRequest` must not hang on an endless stream…
+        //
+        // The deadline has to outlast the first chunk's arrival or there is no "what arrived" to
+        // keep. 300 ms held on an idle machine but not with several cargo builds competing for
+        // it; the stream never ends, so a longer deadline tests exactly the same thing.
+        let response = send(get(port, 1_500), None, None).await.unwrap();
+        // …and when the deadline cuts it, what arrived is still the response.
+        assert!(response.body_text.contains("data: one"));
+        assert!(response.interrupted.unwrap_or_default().contains("Timed out"));
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_body_streams_only_when_asked_to() {
+        let plain = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello";
+        let port = serve(vec![(0, plain)]).await;
+        let (sink, seen) = recorder();
+        let response = send(get(port, 2_000), None, Some(sink)).await.unwrap();
+        assert_eq!(response.body_text, "hello");
+        assert!(response.interrupted.is_none());
+        assert!(seen.lock().unwrap().is_empty(), "a plain body is not streamed by default");
+
+        let port = serve(vec![(0, plain)]).await;
+        let (sink, seen) = recorder();
+        let mut request = get(port, 2_000);
+        request.options.stream = true;
+        let response = send(request, None, Some(sink)).await.unwrap();
+        assert_eq!(response.body_text, "hello");
+        let seen = seen.lock().unwrap();
+        assert!(matches!(seen.first(), Some(HttpStreamEvent::Open { sse: false, .. })));
+        assert!(seen.iter().any(|event| matches!(event, HttpStreamEvent::Chunk { text, .. } if text == "hello")));
     }
 }

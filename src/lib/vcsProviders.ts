@@ -1,11 +1,11 @@
-import { Cloud, GitFork, GitMerge, LayoutGrid, SquareKanban, type LucideIcon } from "lucide-react";
+import { Cloud, FolderGit2, GitFork, GitMerge, LayoutGrid, SquareKanban, type LucideIcon } from "lucide-react";
 
 export interface VcsProviderOption {
-  id: "azure" | "github" | "gitlab";
+  id: "azure" | "github" | "gitlab" | "bitbucket";
   label: string;
   icon: LucideIcon;
-  /** Whether the provider has a credential form and a working PR pipeline behind it. All three
-   * do today; the flag stays so a fourth can be listed before it is finished, shown disabled with
+  /** Whether the provider has a credential form and a working PR pipeline behind it. All four
+   * do today; the flag stays so a fifth can be listed before it is finished, shown disabled with
    * a "coming soon" badge rather than absent. */
   available: boolean;
 }
@@ -14,10 +14,11 @@ export const VCS_PROVIDERS: VcsProviderOption[] = [
   { id: "azure", label: "Azure DevOps", icon: Cloud, available: true },
   { id: "github", label: "GitHub", icon: GitFork, available: true },
   { id: "gitlab", label: "GitLab", icon: GitMerge, available: true },
+  { id: "bitbucket", label: "Bitbucket", icon: FolderGit2, available: true },
 ];
 
 /**
- * Everything the hosting settings section connects to — the three above plus the two boards.
+ * Everything the hosting settings section connects to — the four above plus the two boards.
  *
  * Neither Jira nor monday.com is a `VcsProvider`, and deliberately neither ever becomes one:
  * nothing on the pull-request side may offer them, because they host no code. They belong on this

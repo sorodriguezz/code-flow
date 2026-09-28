@@ -4,6 +4,7 @@ import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { ProfileMenu } from "../terminal/ProfileMenu";
+import { confirmCloseTerminal } from "../terminal/confirmClose";
 import { ServiceEditor } from "./ServiceEditor";
 import { ServiceImportModal } from "./ServiceImportModal";
 import { ServiceConsole } from "./ServiceConsole";
@@ -57,7 +58,9 @@ const DockPane = memo(function DockPane({
   visible: boolean;
 }) {
   const close = useCallback(() => {
-    void useTerminalStore.getState().close(projectId, tabId);
+    void confirmCloseTerminal(tabId).then((ok) => {
+      if (ok) void useTerminalStore.getState().close(projectId, tabId);
+    });
   }, [projectId, tabId]);
   return <TerminalPane sessionId={tabId} visible={visible} onClose={close} />;
 });
@@ -300,7 +303,12 @@ export function ServicesDock() {
               onSplit={() =>
                 project && void openNew(project.id, project.local_path, { split: true })
               }
-              onClose={() => project && void closeTab(project.id, tab.id)}
+              onClose={() =>
+                project &&
+                void confirmCloseTerminal(tab.id).then((ok) => {
+                  if (ok) void closeTab(project.id, tab.id);
+                })
+              }
             />
           ))}
         </div>

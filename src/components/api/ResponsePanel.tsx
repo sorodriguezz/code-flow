@@ -66,6 +66,7 @@ const BODY_VIEWS: { id: BodyView; label: TranslationKey }[] = [
 
 const TAB_LABELS: Record<ResponseTab, TranslationKey> = {
   body: "api.tab.body",
+  events: "api.response.events",
   headers: "api.response.headers",
   cookies: "api.response.cookies",
   tests: "api.response.testResults",
@@ -74,6 +75,8 @@ const TAB_LABELS: Record<ResponseTab, TranslationKey> = {
 };
 
 const TAB_ORDER: ResponseTab[] = ["body", "headers", "cookies", "tests", "console", "timeline"];
+/** An event stream's tabs: the events are what it is read for, so they come right after the body. */
+const SSE_TAB_ORDER: ResponseTab[] = ["body", "events", "headers", "cookies", "tests", "console", "timeline"];
 
 export function ResponsePanel({ tabId }: { tabId: string }) {
   // A saved example shadows the live response while it's open, and gives it back untouched on
@@ -96,7 +99,7 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
   // The sub-tab is per *request tab*, in the runtime store: one `ResponsePanel` instance serves
   // every open request (`RequestBuilder` is mounted once, without a key), so a local `useState`
   // here meant reading one response's headers switched every other tab to Headers too.
-  const tab = useApiRuntimeStore((s) => s.tabView[tabId]?.responseTab ?? DEFAULT_TAB_VIEW.responseTab);
+  const storedTab = useApiRuntimeStore((s) => s.tabView[tabId]?.responseTab ?? DEFAULT_TAB_VIEW.responseTab);
   const setTabView = useApiRuntimeStore((s) => s.setTabView);
   const setTab = (next: ResponseTab) => setTabView(tabId, { responseTab: next });
   // `null` means "whatever suits this payload". Only an explicit click on the picker pins a
@@ -182,6 +185,10 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
   };
 
   const truncated = wasTruncated(response, maxResponseBytes);
+  const sse = response.stream?.sse === true;
+  // Events are remembered per request tab; on a response that isn't an event stream the tab it
+  // points at doesn't exist, so the body stands in.
+  const tab: ResponseTab = storedTab === "events" && !sse ? "body" : storedTab;
 
   const testsPassed = response.tests.filter((test) => test.passed).length;
 
@@ -211,6 +218,12 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
             <Metric label={t("api.response.time")} value={formatDuration(response.duration_ms)} />
           )}
           <Metric label={t("api.response.size")} value={formatBytes(response.size_bytes)} />
+          {response.stream?.live && (
+            <span className="flex shrink-0 items-center gap-1.5 text-[var(--cf-success)]">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--cf-success)]" />
+              {t("api.response.streaming")}
+            </span>
+          )}
           {response.redirects.length > 0 && (
             <span title={response.redirects.join("\n")}>
               {t("api.response.redirects", { n: response.redirects.length })}
@@ -249,6 +262,16 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
           image/HTML preview, the visualizer — showed nothing at all, so a capped PDF read as a
           complete one right next to a Save button that would write half a file. A body that stops
           short has to say so wherever it is being looked at. */}
+      {/* A stream stopped, gone idle or cut off keeps what it delivered; this is what says that is
+          not all there was. The reason is the backend's own sentence. */}
+      {response.interrupted && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-3 py-1 text-[11px] text-[var(--cf-text)]">
+          <AlertTriangle size={12} className="shrink-0 text-[var(--cf-warning)]" />
+          <span className="min-w-0 truncate" title={response.interrupted}>
+            {response.interrupted}
+          </span>
+        </div>
+      )}
       {truncated && (
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-3 py-1 text-[11px] text-[var(--cf-text)]">
           <AlertTriangle size={12} className="shrink-0 text-[var(--cf-warning)]" />
@@ -266,7 +289,7 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
             {/* The tabs give way to the picker when the panel is narrow: which rendering you're
                 reading the body in has to stay reachable, where a tab you can scroll to doesn't. */}
             <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-              {TAB_ORDER.map((id) => (
+              {(sse ? SSE_TAB_ORDER : TAB_ORDER).map((id) => (
                 <ViewTab
                   key={id}
                   label={t(TAB_LABELS[id])}
@@ -328,6 +351,7 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
               </>
             )}
 
+            {tab === "events" && <EventsView response={response} />}
             {tab === "headers" && <HeadersView headers={response.headers} />}
             {tab === "cookies" && <CookiesView response={response} />}
             {tab === "tests" && <TestsView response={response} />}
@@ -477,7 +501,9 @@ function countBadge(
   response: ApiResponse,
 ): { text: string; tone: "muted" | "success" | "danger" } | null {
   const count =
-    tab === "headers"
+    tab === "events"
+      ? (response.stream?.events.length ?? 0) + (response.stream?.droppedEvents ?? 0)
+      : tab === "headers"
       ? response.headers.length
       : tab === "cookies"
         ? response.set_cookies.length
@@ -821,6 +847,45 @@ const CONSOLE_COLORS: Record<string, string> = {
   warn: "var(--cf-warning)",
   error: "var(--cf-danger)",
 };
+
+/**
+ * An event stream as a list — when each event arrived, its name, its data. Newest last, in the
+ * order they came, the way the stream itself reads.
+ */
+function EventsView({ response }: { response: ApiResponse }) {
+  const t = useT();
+  const stream = response.stream;
+  if (!stream || stream.events.length === 0) {
+    return <EmptyState icon={Inbox} title={t("api.response.noEvents")} />;
+  }
+  return (
+    <div className="h-full overflow-auto py-1 font-mono text-[11px]">
+      {stream.droppedEvents > 0 && (
+        <p className="px-3 py-0.5 text-[var(--cf-text-muted)]">
+          {t("api.response.eventsDropped", { n: stream.droppedEvents })}
+        </p>
+      )}
+      {stream.events.map((event, index) => (
+        <div
+          key={index}
+          className="flex gap-2 border-b border-[var(--cf-border)] px-3 py-1 [content-visibility:auto]"
+        >
+          <span className="shrink-0 text-[var(--cf-text-muted)]">{formatEventClock(event.at)}</span>
+          <span className="shrink-0 text-[var(--cf-accent)]" title={event.lastEventId ? `id: ${event.lastEventId}` : undefined}>
+            {event.event}
+          </span>
+          <span className="min-w-0 select-text whitespace-pre-wrap break-all text-[var(--cf-text)]">{event.data}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Milliseconds matter between events that arrive a few apart. */
+function formatEventClock(at: number): string {
+  const date = new Date(at);
+  return `${date.toLocaleTimeString()}.${String(date.getMilliseconds()).padStart(3, "0")}`;
+}
 
 function ConsoleView({ response }: { response: ApiResponse }) {
   const t = useT();

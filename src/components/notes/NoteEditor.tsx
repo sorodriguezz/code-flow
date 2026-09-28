@@ -14,6 +14,8 @@ import {
   Copy,
   Download,
   Eye,
+  FileCode2,
+  FileText,
   LayoutTemplate,
   ListTree,
   MoreHorizontal,
@@ -24,7 +26,6 @@ import {
   X,
   History as HistoryIcon,
 } from "lucide-react";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { NotePreview } from "./NotePreview";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -47,12 +48,11 @@ import type { NoteMonacoHandle } from "./NoteMonaco";
 import type { MarkdownTool } from "../../lib/notes/markdownTools";
 import { outlineOf } from "../../lib/notes/outline";
 import { bookPath } from "../../lib/notes/tree";
-import { writeFileBytes } from "../../lib/tauri/commands";
+import { exportNotes, type NoteExportFormat } from "../../lib/notes/exportActions";
 import type { NoteViewMode } from "../../types/notes";
 import { useNotesStore } from "../../state/notesStore";
-import { confirmAction } from "../../state/confirmStore";
 import { useLayoutStore } from "../../state/layoutStore";
-import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { useToastStore } from "../../state/toastStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 
 /**
@@ -115,6 +115,9 @@ export function NoteEditor() {
    *  time it is used. */
   const [aiSelection, setAiSelection] = useState<string | null>(null);
   const [caretHeadingLine, setCaretHeadingLine] = useState(0);
+  /** The title as it was when the field took focus — what a rename is measured against when the
+   *  field is left. A ref: it is read on blur and nothing renders from it. */
+  const titleAtFocus = useRef<string | null>(null);
 
   const note = draft ? notes.find((n) => n.id === draft.id) ?? null : null;
   const content = draft?.content ?? "";
@@ -271,21 +274,14 @@ export function NoteEditor() {
   const showEditor = viewMode !== "preview";
   const showPreview = viewMode !== "editor";
 
-  const exportMarkdown = async () => {
-    const name = `${(note.title || t("notes.untitled")).replace(/[/\\:*?"<>|]/g, "-")}.md`;
-    try {
-      const path = await saveDialog({
-        defaultPath: name,
-        filters: [{ name: "Markdown", extensions: ["md"] }],
-      });
-      if (!path) return;
-      // The *draft*, not the row: what is on screen is what the user means by "this note", and
-      // exporting the last saved version would silently drop the sentence they just typed.
-      await writeFileBytes(path, new TextEncoder().encode(draft.content));
-    } catch (error) {
-      pushErrorToast(String(error));
-    }
-  };
+  // The *draft*, not the row: what is on screen is what the user means by "this note", and
+  // exporting the last saved version would silently drop the sentence they just typed.
+  const exportAs = (format: NoteExportFormat) =>
+    void exportNotes(
+      format,
+      [{ id: draft.id, title: draft.title, content: draft.content }],
+      draft.title || t("notes.untitled"),
+    );
 
   const MODES: { mode: NoteViewMode; icon: typeof PenLine; labelKey: Parameters<typeof t>[0] }[] = [
     { mode: "editor", icon: PenLine, labelKey: "notes.modeEditor" },
@@ -384,22 +380,26 @@ export function NoteEditor() {
                   {
                     label: t("notes.exportMarkdown"),
                     icon: Download,
-                    onClick: () => void exportMarkdown(),
+                    separated: true,
+                    onClick: () => exportAs("md"),
                   },
                   {
-                    label: t("notes.delete"),
+                    label: t("notes.exportHtml"),
+                    icon: FileCode2,
+                    onClick: () => exportAs("html"),
+                  },
+                  {
+                    label: t("notes.exportPdf"),
+                    icon: FileText,
+                    onClick: () => exportAs("pdf"),
+                  },
+                  {
+                    // No confirmation: it lands in the trash, which is where it is undone.
+                    label: t("notes.moveToTrash"),
                     icon: Trash2,
                     danger: true,
                     separated: true,
-                    onClick: () => {
-                      void confirmAction(
-                        t("notes.deleteNoteConfirm", {
-                          name: note.title || t("notes.untitled"),
-                        }),
-                        true,
-                        t("notes.delete"),
-                      ).then((ok) => ok && void deleteNote(note.id));
-                    },
+                    onClick: () => void deleteNote(note.id),
                   },
                 ],
               })
@@ -427,6 +427,21 @@ export function NoteEditor() {
         <input
           value={draft.title}
           onChange={(event) => editDraft({ title: event.target.value })}
+          onFocus={() => {
+            titleAtFocus.current = draft.title;
+          }}
+          // A rename is judged when the field is left, not per keystroke: "Ret", "Retr", "Retro" are
+          // not three renames. The store asks, with the count, before rewriting any link.
+          onBlur={(event) => {
+            const before = titleAtFocus.current;
+            titleAtFocus.current = null;
+            if (before !== null) {
+              void useNotesStore.getState().offerLinkRewrite(draft.id, before, event.target.value);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+          }}
           placeholder={t("notes.untitled")}
           aria-label={t("notes.noteTitle")}
           spellCheck={false}

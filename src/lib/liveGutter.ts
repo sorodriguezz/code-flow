@@ -181,6 +181,72 @@ function marksOf(ops: Op[], firstLine: number): GutterMark[] {
 }
 
 /**
+ * A changed region between two texts: lines `[baseStart, baseEnd)` of the base became lines
+ * `[bufferStart, bufferEnd)` of the buffer. 0-based, half-open.
+ */
+export interface LineHunk {
+  baseStart: number;
+  baseEnd: number;
+  bufferStart: number;
+  bufferEnd: number;
+}
+
+/**
+ * The regions where `buffer` differs from `base`, by the same diff the marks use — for turning a
+ * formatter's whole-file answer into edits that touch only the lines it changed (see
+ * `lib/formatting`), so the caret and everything decorated on an untouched line stay put.
+ *
+ * Line endings are ignored here as they are for the marks: a text that differs only in them has no
+ * hunks, and the caller deals with the endings on their own. Past the limits the whole changed
+ * region is one hunk, which is still correct — only coarser.
+ */
+export function lineHunks(base: string, buffer: string): LineHunk[] {
+  if (base === buffer) return [];
+  const before = splitLines(base);
+  const after = splitLines(buffer);
+  const [a, b] = intern(before, after);
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start]) start += 1;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+    endA -= 1;
+    endB -= 1;
+  }
+  if (endA === start && endB === start) return [];
+  const whole = [{ baseStart: start, baseEnd: endA, bufferStart: start, bufferEnd: endB }];
+  if (before.length > MAX_LINES || after.length > MAX_LINES) return whole;
+  const ops = editScript(a.subarray(start, endA), b.subarray(start, endB), MAX_EDITS);
+  if (!ops) return whole;
+
+  const hunks: LineHunk[] = [];
+  let i = start;
+  let j = start;
+  let k = 0;
+  while (k < ops.length) {
+    if (ops[k] === EQUAL) {
+      i += 1;
+      j += 1;
+      k += 1;
+      continue;
+    }
+    const hunk = { baseStart: i, baseEnd: i, bufferStart: j, bufferEnd: j };
+    while (k < ops.length && ops[k] !== EQUAL) {
+      if (ops[k] === DELETE) {
+        hunk.baseEnd += 1;
+        i += 1;
+      } else {
+        hunk.bufferEnd += 1;
+        j += 1;
+      }
+      k += 1;
+    }
+    hunks.push(hunk);
+  }
+  return hunks;
+}
+
+/**
  * The marks for `buffer` measured against `base`, or `null` when the file is too long to diff live
  * (the caller keeps its marks from disk then).
  */

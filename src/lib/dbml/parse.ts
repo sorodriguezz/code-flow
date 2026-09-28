@@ -412,7 +412,7 @@ function parseWithRegex(source: string): DbmlSchema {
   const tables: DbmlTable[] = [];
   const enums: DbmlEnum[] = [];
   const refs: DbmlRef[] = [];
-  const clean = source.replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
+  const clean = withoutCommentsOrRecords(source);
   const named = (raw: string) => raw.replace(/^["'`]|["'`]$/g, "");
 
   let match: RegExpExecArray | null;
@@ -550,6 +550,94 @@ function parseWithRegex(source: string): DbmlSchema {
   const declared = new Set(tables.map((table) => table.id));
   for (const group of groups) group.tables = group.tables.filter((id) => declared.has(id));
   return { tables, enums, refs: unique, groups, error: null, errorAt: null };
+}
+
+/**
+ * The source with its comments and its `Records` blocks blanked out — what the forgiving reader's
+ * regular expressions are allowed to see.
+ *
+ * **`Records` are data, and data can say anything.** A row is free text — `2, 'table x {'`, a URL,
+ * a JSON value full of braces — so left in place, the table regex found a phantom `x` in a string,
+ * an unclosed table ran on through the rows below it, and a URL's `//` was read as a comment that
+ * swallowed the rest of its line. The real parser has understood `Records` since the switch to
+ * `dbmlv2`; this is the reader that answers while the document is mid-edit, and it had never heard
+ * of them. Both forms are blanked: the top-level `Records users(id, name) { … }` and the nested
+ * `records { … }` inside a table. Neither carries anything the canvas draws.
+ *
+ * One pass, quote-aware, which is also what makes the comment stripping right: a `//` inside a
+ * string (a note, a default) is text, not a comment. Newlines are kept so nothing downstream sees
+ * lines merge.
+ */
+function withoutCommentsOrRecords(source: string): string {
+  const out: string[] = [];
+  let at = 0;
+  const blank = (from: number, to: number) => {
+    out.push(source.slice(from, to).replace(/[^\n]/g, " "));
+  };
+  /** Where a string starting at `start` ends (exclusive). Single-line quotes stop at a newline, so a
+   *  quote left open mid-keystroke costs one line, not the rest of the document. */
+  const endOfString = (start: number): number => {
+    if (source.startsWith("'''", start)) {
+      const close = source.indexOf("'''", start + 3);
+      return close === -1 ? source.length : close + 3;
+    }
+    const quote = source[start];
+    let cursor = start + 1;
+    while (cursor < source.length && source[cursor] !== quote && source[cursor] !== "\n") {
+      cursor += source[cursor] === "\\" ? 2 : 1;
+    }
+    return Math.min(source.length, cursor + 1);
+  };
+  const recordsHeader = /^records\s*(?:"?[\w.]+"?\s*\([^)\n]*\)\s*)?\{/i;
+
+  while (at < source.length) {
+    const char = source[at];
+    if (char === "/" && source[at + 1] === "/") {
+      const end = source.indexOf("\n", at);
+      const stop = end === -1 ? source.length : end;
+      blank(at, stop);
+      at = stop;
+      continue;
+    }
+    if (char === "/" && source[at + 1] === "*") {
+      const close = source.indexOf("*/", at + 2);
+      const stop = close === -1 ? source.length : close + 2;
+      blank(at, stop);
+      at = stop;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      const stop = endOfString(at);
+      out.push(source.slice(at, stop));
+      at = stop;
+      continue;
+    }
+    const header =
+      (char === "r" || char === "R") && !/\w/.test(source[at - 1] ?? "")
+        ? recordsHeader.exec(source.slice(at, at + 400))
+        : null;
+    if (header) {
+      // To the brace that closes the block, counting only braces outside strings.
+      let cursor = at + header[0].length;
+      let depth = 1;
+      while (cursor < source.length && depth > 0) {
+        const inner = source[cursor];
+        if (inner === "'" || inner === '"' || inner === "`") {
+          cursor = endOfString(cursor);
+          continue;
+        }
+        if (inner === "{") depth += 1;
+        else if (inner === "}") depth -= 1;
+        cursor += 1;
+      }
+      blank(at, cursor);
+      at = cursor;
+      continue;
+    }
+    out.push(char);
+    at += 1;
+  }
+  return out.join("");
 }
 
 /** `core.users` → `["core", "users"]`; `users` → `["public", "users"]`. */

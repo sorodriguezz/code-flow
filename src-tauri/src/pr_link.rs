@@ -17,6 +17,9 @@ pub enum PrLinkTarget {
     /// `project` is the full path including every group (`acme/backend/auth`), and `number` is the
     /// merge request's per-project `iid` — the number the URL shows.
     GitLab { host: String, project: String, number: i64 },
+    /// Bitbucket Cloud: `workspace` and the repository slug, both lower-case, and the pull request's
+    /// number within the repository.
+    Bitbucket { workspace: String, repo: String, number: i64 },
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -169,6 +172,26 @@ fn parse_gitlab(host: &str, segments: &[String], known_gitlab_hosts: &[String]) 
     })
 }
 
+/// Recognizes a Bitbucket Cloud pull-request link: `https://bitbucket.org/{workspace}/{repo}/
+/// pull-requests/{n}`, plus whatever tab follows it (`/diff`, `/commits`, `/overview`). No allowlist,
+/// unlike GitHub Enterprise or self-managed GitLab: Bitbucket Cloud is one host.
+fn parse_bitbucket(host: &str, segments: &[String]) -> Option<PrLinkTarget> {
+    if !matches!(host.to_ascii_lowercase().as_str(), "bitbucket.org" | "www.bitbucket.org") {
+        return None;
+    }
+    let [workspace, repo, kind, number, ..] = segments else {
+        return None;
+    };
+    if !kind.eq_ignore_ascii_case("pull-requests") {
+        return None;
+    }
+    Some(PrLinkTarget::Bitbucket {
+        workspace: workspace.to_ascii_lowercase(),
+        repo: repo.trim_end_matches(".git").to_ascii_lowercase(),
+        number: number.parse().ok()?,
+    })
+}
+
 /// Parses a pasted pull-request or merge-request link. Returns `None` for anything that isn't one
 /// on a host we can talk to — including a GitHub Enterprise or self-managed GitLab host the user
 /// hasn't connected yet, which is indistinguishable from any other self-hosted git server.
@@ -180,6 +203,7 @@ pub fn parse(
     let (host, segments) = split(url)?;
     parse_github(&host, &segments, known_github_hosts)
         .or_else(|| parse_gitlab(&host, &segments, known_gitlab_hosts))
+        .or_else(|| parse_bitbucket(&host, &segments))
         .or_else(|| parse_azure(&host, &segments))
 }
 
@@ -305,6 +329,26 @@ mod tests {
                 number: 5,
             })
         );
+    }
+
+    #[test]
+    fn parses_bitbucket_links() {
+        let expected = Some(PrLinkTarget::Bitbucket {
+            workspace: "example-workspace".into(),
+            repo: "example-repo".into(),
+            number: 12,
+        });
+        assert_eq!(parse("https://bitbucket.org/example-workspace/example-repo/pull-requests/12", &hosts()), expected);
+        // A tab, a query and a fragment are the same pull request; so is a mixed-case copy.
+        assert_eq!(
+            parse("https://bitbucket.org/Example-Workspace/Example-Repo/pull-requests/12/diff?w=1#comment-345", &hosts()),
+            expected
+        );
+        assert_eq!(parse("bitbucket.org/example-workspace/example-repo/pull-requests/12/overview", &hosts()), expected);
+        // Not a pull request, or not Bitbucket Cloud.
+        assert_eq!(parse("https://bitbucket.org/example-workspace/example-repo/src/main", &hosts()), None);
+        assert_eq!(parse("https://bitbucket.org/example-workspace/example-repo/pull-requests/new", &hosts()), None);
+        assert_eq!(parse("https://bitbucket.example.test/ws/repo/pull-requests/12", &hosts()), None);
     }
 
     #[test]

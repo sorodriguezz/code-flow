@@ -95,10 +95,20 @@ export const apiDeleteRequest = (id: string) => invoke<void>("api_delete_request
 export const apiDuplicateRequest = (id: string) =>
   invoke<ApiRequestRow>("api_duplicate_request", { id });
 
+/** Every row a move stamped, and the `updated_at` they all carry now — mirrors `MoveOutcome`. */
+export interface MoveOutcome {
+  stamp: string;
+  folders: string[];
+  requests: string[];
+}
+
 /**
  * Reparents/reorders one node after a drag. `kind` is `"folder"` or `"request"`; `parentId` is
  * the destination folder (`null` = collection root). The backend renumbers `sort_order` for the
  * destination's children so the list stays dense — the UI only supplies the target index.
+ *
+ * Every row whose place changed is stamped, so the move reaches the other members of a shared
+ * collection; the stamps come back so an open tab can move with its own drag.
  */
 export const apiMoveNode = (
   kind: "folder" | "request",
@@ -106,7 +116,7 @@ export const apiMoveNode = (
   collectionId: string,
   parentId: string | null,
   index: number,
-) => invoke<void>("api_move_node", { kind, id, collectionId, parentId, index });
+) => invoke<MoveOutcome>("api_move_node", { kind, id, collectionId, parentId, index });
 
 /** Reorders whole collections in the sidebar. */
 export const apiReorderCollections = (workspaceId: string, ids: string[]) =>
@@ -150,8 +160,18 @@ export const apiListHistoryMeta = (workspaceId: string, limit: number) =>
 export const apiGetHistorySnapshot = (id: string) =>
   invoke<string | null>("api_get_history_snapshot", { id });
 
-/** The workspace comes from the entry itself, and is what the trim-to-limit is counted within. */
-export const apiAddHistory = (entry: ApiHistoryEntry) => invoke<void>("api_add_history", { entry });
+/** The auth blocks and variable lists in scope for a send, as JSON — see `historySecrets`. */
+export interface HistorySecrets {
+  auths: string[];
+  variables: string[];
+}
+
+/** The workspace comes from the entry itself, and is what the trim-to-limit is counted within.
+ *
+ * Stored **without its credentials**: sensitive headers keep their name with `•••`, and every
+ * credential among `secrets` is scrubbed wherever it appears. Resolves to the entry as stored. */
+export const apiAddHistory = (entry: ApiHistoryEntry, secrets: HistorySecrets) =>
+  invoke<ApiHistoryEntry>("api_add_history", { entry, secrets });
 
 export const apiDeleteHistory = (id: string) => invoke<void>("api_delete_history", { id });
 
@@ -171,6 +191,95 @@ export const apiDeleteCookie = (id: string) => invoke<void>("api_delete_cookie",
 export const apiClearCookies = (workspaceId: string) =>
   invoke<void>("api_clear_cookies", { workspaceId });
 
+// ---------- import ----------
+
+/** One imported tree, already row-shaped: auth, variables and specs are the JSON the columns store. */
+export interface ImportTreePayload {
+  /** `postman`, `openapi`, `bruno`… — recorded as the origin of every script the import brings. */
+  format: string;
+  collections: ImportTreeCollection[];
+  environments: { name: string; variables: string }[];
+}
+
+export interface ImportTreeCollection {
+  name: string;
+  description: string;
+  auth: string;
+  pre_script: string;
+  post_script: string;
+  variables: string;
+  items: ImportTreeItem[];
+}
+
+export type ImportTreeItem =
+  | {
+      kind: "folder";
+      name: string;
+      description: string;
+      auth: string;
+      pre_script: string;
+      post_script: string;
+      items: ImportTreeItem[];
+    }
+  | { kind: "request"; name: string; protocol: string; spec: string };
+
+export interface ImportTreeOutcome {
+  collection_ids: string[];
+  environment_ids: string[];
+  folders: number;
+  requests: number;
+}
+
+/** The whole tree in one transaction — a failure part way creates nothing. */
+export const apiImportTree = (workspaceId: string, payload: ImportTreePayload) =>
+  invoke<ImportTreeOutcome>("api_import_tree", { workspaceId, payload });
+
+// ---------- script trust ----------
+
+/** One row of `api_script_trust`. See `src-tauri/src/db/api_trust.rs`. */
+export interface ScriptTrustRow {
+  /** Lowercase hex SHA-256 of the script's exact text. */
+  hash: string;
+  trusted: boolean;
+  /** `authored` | `approved` | `migration` | `shared` | `import:<format>`. */
+  origin: string;
+}
+
+export const apiScriptTrustLookup = (hashes: string[]) =>
+  invoke<ScriptTrustRow[]>("api_script_trust_lookup", { hashes });
+
+/** Trust only ratchets up — nothing recorded here can demote a trusted script. */
+export const apiScriptTrustRecord = (entries: ScriptTrustRow[]) =>
+  invoke<void>("api_script_trust_record", { entries });
+
+// ---------- credentials in the OS credential store ----------
+
+/** What moving the stored credentials into the OS credential store did — mirrors `SealReport`. */
+export interface SealReport {
+  sealed: number;
+  failed: number;
+  history: number;
+  skipped: boolean;
+}
+
+/** Moves whatever is still stored in the clear into the OS credential store. Cheap once done. */
+export const apiSealStoredSecrets = () => invoke<SealReport>("api_seal_stored_secrets");
+
+/** `api_open_tabs:<workspace>` with every draft's credentials put back; `null` when never saved. */
+export const apiLoadOpenTabs = (workspaceId: string) =>
+  invoke<string | null>("api_load_open_tabs", { workspaceId });
+
+/** Persists the open tabs with their drafts' credentials moved into the credential store. */
+export const apiSaveOpenTabs = (workspaceId: string, value: string) =>
+  invoke<void>("api_save_open_tabs", { workspaceId, value });
+
+/** `api_settings` with every client certificate's passphrase put back. */
+export const apiLoadSettings = () => invoke<string | null>("api_load_settings");
+
+/** Writes `api_settings` with the passphrases moved into the credential store, and tells every
+ *  window, as `setSetting` does. */
+export const apiSaveSettings = (value: string) => invoke<void>("api_save_settings", { value });
+
 // ---------- HTTP / GraphQL ----------
 
 /** Sends one fully-resolved request. Rejects with a human-readable string on transport failure. */
@@ -183,6 +292,19 @@ export const apiCancelHttp = (id: string) => invoke<void>("api_cancel_http", { i
 /** Same as `apiSendHttp` but registered under a cancellation token. */
 export const apiSendHttpTracked = (id: string, request: HttpSendRequest) =>
   invoke<HttpResponse>("api_send_http_tracked", { id, request });
+
+/**
+ * The browser leg of an OAuth 2 redirect grant: binds the registered loopback redirect, opens the
+ * authorization URL in the system browser and resolves with the redirect's parameters once their
+ * `state` matched. Cancel it with `apiCancelHttp(id)`.
+ */
+export const apiOAuthAuthorize = (request: {
+  id: string;
+  authorizeUrl: string;
+  redirectUri: string;
+  state: string;
+  implicit: boolean;
+}) => invoke<[string, string][]>("api_oauth_authorize", request);
 
 /** Reads a file for `binary` bodies and file form-parts, returning base64 + a guessed MIME type. */
 export const apiReadFileBase64 = (path: string) =>
@@ -261,6 +383,13 @@ export const apiSaveBinaryFile = (defaultName: string, base64: string) =>
 export const apiReadTextFile = (path: string) => invoke<string>("api_read_text_file", { path });
 
 /**
+ * A Bruno collection folder: every `.bru` file and `bruno.json` in it, paths relative and
+ * `/`-separated. `null` when `path` is not a folder — the caller reads it as a file instead.
+ */
+export const apiReadCollectionDir = (path: string) =>
+  invoke<{ path: string; text: string }[] | null>("api_read_collection_dir", { path });
+
+/**
  * The result of applying a batch of records, shared by the shared-collection sync.
  *
  * The whole-install backup no longer goes through here at all — it is built, sealed and applied
@@ -308,6 +437,10 @@ export interface SupabaseCheck {
   reachable: boolean;
   /** `cf_ping` exists, so the schema script has been run. */
   schema_installed: boolean;
+  /** Which copy of the script the project runs (1 for one older than the version function). */
+  schema_version: number;
+  /** Older than this build expects — the host should run `supabase_schema.sql` again. */
+  schema_outdated: boolean;
 }
 
 export interface SharedCollection {
@@ -361,8 +494,10 @@ export interface SyncConflict {
   detected_at: string;
 }
 
-/** The SQL the host runs once in their project's editor. */
-export const supabaseInstallSql = () => invoke<string>("supabase_install_sql");
+/** The SQL the host runs once in their project's editor. Asked about one project, it also records
+ *  this machine as the owner of the collections it already shares there. */
+export const supabaseInstallSql = (url?: string) =>
+  invoke<string>("supabase_install_sql", { url: url ?? null });
 
 /** Stores the anon key **for one project** — a user can be on several at once. */
 export const supabaseSetAnonKey = (url: string, anonKey: string) =>

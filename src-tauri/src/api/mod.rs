@@ -19,6 +19,8 @@ pub mod grpc;
 pub mod http;
 pub mod mqtt;
 pub mod socketio;
+pub mod stream;
+pub mod tls;
 pub mod ws;
 
 use serde::{Deserialize, Serialize};
@@ -132,6 +134,11 @@ pub struct NetworkOptions {
     pub proxy_url: String,
     /// PKCS#12 (`.p12`/`.pfx`) or a PEM bundle, for mTLS.
     pub client_cert_path: String,
+    /// The private key as a PEM file of its own; `""` when `client_cert_path` holds it. Defaulted so
+    /// a caller written before it existed still deserialises.
+    #[serde(default)]
+    pub client_key_path: String,
+    /// Decrypts an encrypted PEM key or a PKCS#12 container.
     pub client_cert_password: String,
     /// Extra PEM CA bundle to trust on top of the system roots.
     pub ca_cert_path: String,
@@ -142,6 +149,10 @@ pub struct NetworkOptions {
     /// When it bites, `HttpResponse::truncated` says so — a body that stops short must never be
     /// indistinguishable from one that ended there.
     pub max_response_bytes: u64,
+    /// Emit the body as it arrives even when it isn't `text/event-stream` (which always streams),
+    /// timing it by idleness instead of a total deadline. See `api::stream`.
+    #[serde(default)]
+    pub stream: bool,
 }
 
 impl Default for NetworkOptions {
@@ -154,6 +165,7 @@ impl Default for NetworkOptions {
             keep_auth_on_redirect: false,
             proxy_url: String::new(),
             client_cert_path: String::new(),
+            client_key_path: String::new(),
             client_cert_password: String::new(),
             ca_cert_path: String::new(),
             cookies: Vec::new(),
@@ -167,6 +179,7 @@ impl Default for NetworkOptions {
             // caller that builds `NetworkOptions` itself would get. The number the app actually
             // runs with lives in `defaultApiSettings()`.
             max_response_bytes: 4 * 1024 * 1024,
+            stream: false,
         }
     }
 }
@@ -266,6 +279,11 @@ pub struct HttpResponse {
     /// by whatever the setting said *then*, not by what it says now. Both of those read wrong when
     /// the comparison is redone at display time.
     pub truncated: bool,
+    /// Why the body stopped before its end — stopped by the user, idle too long, timed out, the
+    /// connection dropping. `None` for a body read to its end. What arrived before is kept either
+    /// way; this is what says it isn't all there is.
+    #[serde(default)]
+    pub interrupted: Option<String>,
     pub duration_ms: i64,
     pub timings: ResponseTimings,
     /// Every hop when redirects were followed; the final URL is last.

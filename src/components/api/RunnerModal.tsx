@@ -14,7 +14,10 @@ import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { resolveRequest, sendResolved } from "../../lib/api/send";
-import { runPostResponseScript, runPreRequestScript, type SandboxScopes } from "../../lib/api/sandbox";
+import type { SandboxScopes } from "../../lib/api/sandbox";
+import { chainScripts, folderChain, runScriptChain, type ChainOwner } from "../../lib/api/scriptChain";
+import { gateScripts, type GateResult, type ScriptRef } from "../../lib/api/scriptTrust";
+import { askScriptTrust, useScriptTrustPrompt } from "./ScriptTrustModal";
 import type { VariableContext } from "../../lib/api/variables";
 import { apiPickFile, apiReadTextFile, apiSaveFile } from "../../lib/tauri/apiCommands";
 import { defaultRequestSpec } from "../../types/api";
@@ -298,6 +301,9 @@ export function RunnerModal({
     (s) => s.collections.find((c) => c.id === collectionId)?.name ?? "",
   );
   const running = useApiRuntimeStore((s) => s.runnerRunning);
+  // The trust question is a dialog of its own on top of this one, and `ApiModal`'s Escape listener
+  // is window-wide: without locking this one while it is up, one Escape would close both.
+  const asking = useScriptTrustPrompt((s) => s.request !== null);
   const pushToast = useToastStore((s) => s.pushToast);
 
   const candidates = useMemo(
@@ -438,6 +444,37 @@ export function RunnerModal({
     const store = useApiStore.getState();
     const runtime = useApiRuntimeStore.getState();
     const { settings, cookies, activeEnvironmentId } = store;
+
+    /**
+     * Every row's script chain, planned once, before the gate — and these exact arrays are what the
+     * run executes. Re-deriving them per request would read the tree as it is *then*, and a shared
+     * collection's pull landing mid-run could swap in a script the gate never saw.
+     */
+    const collection = store.collections.find((candidate) => candidate.id === collectionId) ?? null;
+    const plans = new Map<string, { pre: ScriptRef[]; post: ScriptRef[] }>();
+    for (const row of chosen) {
+      const spec = parseSpec(row);
+      const owner: ChainOwner = {
+        collection,
+        folders: folderChain(store.folders, row.folder_id),
+        request: { name: row.name, preScript: spec.preScript, postScript: spec.postScript },
+      };
+      plans.set(row.id, { pre: chainScripts(owner, "pre"), post: chainScripts(owner, "post") });
+    }
+    let gate: GateResult | null;
+    try {
+      // Asked once for the whole run, listing every untrusted script in it.
+      gate = await gateScripts(
+        [...plans.values()].flatMap((plan) => [...plan.pre, ...plan.post]),
+        (untrusted) => askScriptTrust(untrusted, "run"),
+      );
+    } catch (e) {
+      pushErrorToast(String(e));
+      gate = null;
+    }
+    if (gate === null) return;
+    const allows = gate.allows;
+
     const seed = store.variableContext(collectionId);
     const environmentName =
       store.environments.find(
@@ -461,6 +498,19 @@ export function RunnerModal({
     setView("results");
     runtime.setRunnerReport(null);
     runtime.setRunnerRunning(true);
+    if (gate.skipped.length > 0) {
+      runtime.pushConsole({
+        level: "warn",
+        text: t("api.trust.skipped", { n: gate.skipped.length }),
+        at: Date.now(),
+      });
+    }
+
+    const scriptFailure = ({ ref, error }: { ref: ScriptRef; error: string }) =>
+      t("api.scripts.error", {
+        where: `${ref.owner} · ${t(ref.phase === "pre" ? "api.entity.preRequest" : "api.entity.postResponse")}`,
+        error,
+      });
 
     /**
      * The one mutable piece of the whole run. Every script's writes land here and the next request
@@ -507,6 +557,16 @@ export function RunnerModal({
 
       let resolved: ResolvedRequest;
       try {
+        // Refreshed against the run's own scopes, so a token variable a previous request's script
+        // just wrote is what the refresh sees.
+        const refreshError = await store.refreshExpiredOAuth2({ requestId: row.id }, ctx);
+        if (refreshError !== null) {
+          runtime.pushConsole({
+            level: "warn",
+            text: t("api.auth.refreshFailed", { error: refreshError }),
+            at: Date.now(),
+          });
+        }
         resolved = await resolveRequest(spec, ctx, store.effectiveAuthChain(row.id), settings, cookies);
       } catch (e) {
         return { item: { ...item, error: String(e) }, next: null };
@@ -526,14 +586,16 @@ export function RunnerModal({
       item.capture = capture;
 
       let next: string | null = null;
+      const plan = plans.get(row.id) ?? { pre: [], post: [] };
 
-      if (spec.preScript.trim() !== "") {
-        const pre = await runPreRequestScript(spec.preScript, { request: resolved, scopes });
-        scopes = pre.scopes;
-        next = pre.nextRequest;
-        for (const line of pre.console) runtime.pushConsole(line);
-        if (pre.error) return { item: { ...item, error: pre.error }, next };
-      }
+      // Collection → folders → request. A failing setup script stops here: this request is not
+      // sent, which is what the runner has always done with a broken pre-request script.
+      const pre = await runScriptChain(plan.pre.filter(allows), { request: resolved, scopes }, { stopOnError: true });
+      scopes = pre.scopes;
+      next = pre.nextRequest;
+      item.tests = [...pre.tests];
+      for (const line of pre.console) runtime.pushConsole(line);
+      if (pre.errors.length > 0) return { item: { ...item, error: scriptFailure(pre.errors[0]) }, next };
 
       const sentAt = Date.now();
       let http: HttpResponse;
@@ -546,6 +608,9 @@ export function RunnerModal({
       item.status = http.status;
       item.durationMs = http.duration_ms;
       item.sizeBytes = http.size_bytes;
+      // A body cut short (the deadline, a dropped connection) still gets its tests run on what
+      // arrived — but the row says it was cut short, rather than passing as a complete exchange.
+      if (http.interrupted) item.error = http.interrupted;
 
       capture.statusText = http.status_text;
       capture.responseHeaders = http.headers;
@@ -561,7 +626,8 @@ export function RunnerModal({
         captured += capture.responseBody.length;
       }
 
-      if (spec.postScript.trim() !== "") {
+      const runnablePost = plan.post.filter(allows);
+      if (runnablePost.length > 0) {
         const response: ApiResponse = {
           ...http,
           tests: [],
@@ -569,16 +635,14 @@ export function RunnerModal({
           visualizer: null,
           error: null,
         };
-        const post = await runPostResponseScript(spec.postScript, {
-          request: resolved,
-          response,
-          scopes,
-        });
+        // Every test script runs even when an earlier one threw: a broken collection-level check
+        // must not hide the request's own assertions.
+        const post = await runScriptChain(runnablePost, { request: resolved, response, scopes });
         scopes = post.scopes;
-        item.tests = post.tests;
+        item.tests = [...item.tests, ...post.tests];
         if (post.nextRequest !== null) next = post.nextRequest;
         for (const line of post.console) runtime.pushConsole(line);
-        if (post.error) return { item: { ...item, error: post.error }, next };
+        if (post.errors.length > 0) return { item: { ...item, error: scriptFailure(post.errors[0]) }, next };
       }
 
       return { item, next };
@@ -749,7 +813,7 @@ export function RunnerModal({
       // two columns of form. Sizing both to the wider one would leave the setup pane mostly empty.
       width={view === "results" ? "max-w-6xl" : "max-w-4xl"}
       height="h-[80vh]"
-      busy={running}
+      busy={running || asking}
       onClose={onClose}
       toolbar={
         // Two views of the same run — the segmented control. One runner is open at a time, so a

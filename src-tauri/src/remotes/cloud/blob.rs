@@ -77,8 +77,14 @@ pub async fn download(
         let mut target = tokio::fs::File::create(&file.local)
             .await
             .map_err(|e| format!("Couldn't write {}: {e}", file.local))?;
-        pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
-            .await?;
+        if let Err(error) =
+            pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
+                .await
+        {
+            drop(target);
+            super::super::files::discard_partial_local(&file.local, &error).await;
+            return Err(error);
+        }
         target.flush().await.map_err(|e| format!("Couldn't finish {}: {e}", file.local))?;
     }
     Ok(())
@@ -103,6 +109,20 @@ pub async fn upload(
             return Err("Pick a container to upload into — the account root only holds containers.".into());
         }
         let url = blob_url(spec, &at)?;
+        // Past a size, staged blocks rather than one PUT — see `upload_blocks`.
+        if file.size > BLOCK_THRESHOLD {
+            let piece = super::s3::Piece {
+                app,
+                id,
+                name: &file.name,
+                total,
+                file_index: index as u64,
+                files: files.len() as u64,
+            };
+            upload_blocks(spec, &credential, &url, file, &piece, &mut done).await?;
+            super::super::files::progress(app, id, &file.name, done, total, index as u64 + 1, files.len() as u64);
+            continue;
+        }
         let handle = tokio::fs::File::open(&file.local)
             .await
             .map_err(|e| format!("Couldn't read {}: {e}", file.local))?;
@@ -139,6 +159,91 @@ pub async fn upload(
         if !response.status().is_success() {
             return Err(super::explain(&format!("write {}", file.remote), response).await);
         }
+    }
+    Ok(())
+}
+
+/// Above this, a blob goes up as staged blocks. The same line S3 draws, for the same reason: one
+/// `PUT` caps out (at 5,000 MiB on this API version) and loses everything when it fails late.
+pub(crate) const BLOCK_THRESHOLD: u64 = super::s3::MULTIPART_THRESHOLD;
+
+/// The block size for a blob of `size` bytes: 8 MiB, grown in whole MiB when a blob would need more
+/// than the 50,000 blocks one blob may have.
+pub(crate) fn block_size(size: u64) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    const MAX_BLOCKS: u64 = 50_000;
+    let needed = size.div_ceil(MAX_BLOCKS).div_ceil(MIB) * MIB;
+    needed.max(8 * MIB)
+}
+
+/// A block's id: base64 of a fixed-width counter. The service insists every id in one blob has the
+/// same length *before* encoding, which a bare number would not.
+pub(crate) fn block_id(index: u64) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(format!("block-{index:08}"))
+}
+
+/// The `Put Block List` document: commit these blocks, in this order, as the blob.
+fn block_list(ids: &[String]) -> String {
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>");
+    for id in ids {
+        xml.push_str(&format!("<Latest>{id}</Latest>"));
+    }
+    xml.push_str("</BlockList>");
+    xml
+}
+
+/// One blob as staged blocks, committed with one block list at the end.
+///
+/// **Nothing changes until the commit.** Staged blocks are invisible, and a blob being replaced
+/// keeps its old content through every block — so an upload that fails or is cancelled part way
+/// leaves the blob exactly as it was. The uncommitted blocks it leaves behind are not something to
+/// clean up: the service discards them after a week, and there is no call that removes them sooner.
+async fn upload_blocks(
+    spec: &RemoteHostSpec,
+    credential: &Credential,
+    url: &url::Url,
+    file: &Planned,
+    piece: &super::s3::Piece<'_>,
+    done: &mut u64,
+) -> Result<(), String> {
+    let mut source = tokio::fs::File::open(&file.local)
+        .await
+        .map_err(|e| format!("Couldn't read {}: {e}", file.local))?;
+    let size = block_size(file.size);
+    let mut ids: Vec<String> = Vec::new();
+    let mut offset = 0u64;
+    while offset < file.size {
+        let id = block_id(ids.len() as u64);
+        let length = size.min(file.size - offset);
+        let mut staged = url.clone();
+        staged.query_pairs_mut().append_pair("comp", "block").append_pair("blockid", &id);
+        let response = super::s3::stream_piece(&mut source, length, piece, done, |body| {
+            azure::send(spec, credential, "PUT", &staged, &[], Some((body, length)))
+        })
+        .await?;
+        if !response.status().is_success() {
+            return Err(super::explain(&format!("write block {} of {}", ids.len() + 1, file.remote), response).await);
+        }
+        ids.push(id);
+        offset += length;
+    }
+
+    let mut committed = url.clone();
+    committed.query_pairs_mut().append_pair("comp", "blocklist");
+    let xml = block_list(&ids);
+    let length = xml.len() as u64;
+    let response = azure::send(
+        spec,
+        credential,
+        "PUT",
+        &committed,
+        &[("content-type".to_string(), "application/xml".to_string())],
+        Some((reqwest::Body::from(xml), length)),
+    )
+    .await?;
+    if !response.status().is_success() {
+        return Err(super::explain(&format!("finish {}", file.remote), response).await);
     }
     Ok(())
 }
@@ -570,6 +675,34 @@ mod tests {
         let mut s = RemoteHostSpec { kind: RemoteKind::AzureBlob, ..Default::default() };
         s.azure.account = "contoso".into();
         s
+    }
+
+    /// Every id one blob uses has the same length before encoding, which the service requires —
+    /// and the list commits them in the order they were staged.
+    #[test]
+    fn staged_blocks_have_equal_length_ids_and_commit_in_order() {
+        use base64::Engine as _;
+        let ids: Vec<String> = [0u64, 7, 12_345].iter().map(|n| block_id(*n)).collect();
+        let decoded: Vec<Vec<u8>> =
+            ids.iter().map(|id| base64::engine::general_purpose::STANDARD.decode(id).unwrap()).collect();
+        assert!(decoded.iter().all(|raw| raw.len() == decoded[0].len()));
+        assert_eq!(decoded[1], b"block-00000007");
+        assert_eq!(
+            block_list(&ids[..2]),
+            format!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList><Latest>{}</Latest><Latest>{}</Latest></BlockList>",
+                ids[0], ids[1]
+            )
+        );
+    }
+
+    #[test]
+    fn a_block_is_eight_mebibytes_until_the_block_count_forces_more() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(block_size(200 * MIB), 8 * MIB);
+        let huge = 1024 * 1024 * MIB;
+        assert!(huge.div_ceil(block_size(huge)) <= 50_000);
+        assert_eq!(block_size(huge) % MIB, 0);
     }
 
     #[test]

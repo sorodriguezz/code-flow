@@ -156,7 +156,12 @@ export default defineConfig({
       // ships no CORS layer: there is no cross-origin request to allow, because the proxy makes
       // them same-origin. Change the port here if the server's was changed in settings.
       "/api": {
-        target: "http://localhost:8787",
+        // HTTPS, because the server speaks it unless its switch is off — a plain request would get
+        // the handoff page's `tls_required` (see `remotectl/tls.rs`). `CODEFLOW_REMOTE_URL` points it
+        // at `http://localhost:8787` for an install with HTTPS turned off, or at another port.
+        target: process.env.CODEFLOW_REMOTE_URL ?? "https://localhost:8787",
+        // The certificate is self-signed by design; this is a proxy on the developer's own machine.
+        secure: false,
         changeOrigin: true,
         // The event stream is a WebSocket upgrade, which a plain HTTP proxy would drop.
         ws: true,

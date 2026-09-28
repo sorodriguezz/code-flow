@@ -3,6 +3,7 @@ import { useShortcutsStore, activeChords, bindingFor } from "../state/shortcutsS
 import { useTourStore } from "../state/tourStore";
 import { useDataDirsStore } from "../state/dataDirsStore";
 import { SHORTCUT_BY_ID } from "./shortcuts";
+import { shortcutBlockedByDialog } from "./useFocusTrap";
 import { eventToChord, isFunctionKey, isTypingTarget, usesMod } from "./keys";
 
 /**
@@ -42,6 +43,9 @@ export function useGlobalShortcuts(): void {
       if (!chord) return;
       const id = chords.get(chord);
       if (!id) return;
+      // Nothing acts behind an open dialog but the chord that toggles it — ⌘1 used to switch the
+      // view under the clone dialog. See `shortcutBlockedByDialog`.
+      if (shortcutBlockedByDialog(id)) return;
       // Shortcuts without ⌘/Ctrl would fight with text input, so they only fire when the user
       // isn't typing. Mod chords always fire, as they do in every editor.
       //
@@ -93,10 +97,14 @@ export function useRemoteActionShortcuts(): void {
 
   useEffect(() => {
     const chords = new Map<string, () => void>();
+    const chordIds = new Map<string, string>();
     for (const id of ["git.fetch", "git.pull", "git.push", "branch.switcher"] as const) {
       const chord = bindingFor(id, overrides);
       const run = SHORTCUT_BY_ID.get(id)?.run;
-      if (chord && run) chords.set(chord, run);
+      if (chord && run) {
+        chords.set(chord, run);
+        chordIds.set(chord, id);
+      }
     }
     if (chords.size === 0) return;
 
@@ -106,6 +114,8 @@ export function useRemoteActionShortcuts(): void {
       if (!chord) return;
       const run = chords.get(chord);
       if (!run) return;
+      // Not behind a dialog either — the branch switcher is the one that owns its own chord.
+      if (shortcutBlockedByDialog(chordIds.get(chord) ?? "")) return;
       // The same two guards the main handler applies, for the same reasons — see above. All three
       // of these default to Mod chords, but they are rebindable, so a user who puts fetch on F5
       // must not have it fire into a commit message.

@@ -280,6 +280,315 @@ pub fn write_file_text(repo_path: &str, rel_path: &str, content: &str) -> Result
     std::fs::write(&full, content).map_err(|e| e.to_string())
 }
 
+/// What the editor knew about a file's bytes when it last read or wrote them — what a save asks
+/// before it writes: is what is on disk still what this buffer started from?
+///
+/// **The hash decides; the timestamp and the size only save work.** A timestamp alone misses two
+/// writes inside one tick of a coarse clock, and it calls a file changed that was merely rewritten
+/// with what it already held — a checkout of an identical blob, a formatter that found nothing to
+/// do — which would put a "changed on disk" question in front of the user over no change at all. So
+/// a size that differs is an answer on its own, and everything else is settled by the bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskVersion {
+    /// Modification time in milliseconds since the Unix epoch; `0` where the platform won't say.
+    pub mtime_ms: u64,
+    pub size: u64,
+    /// SHA-256 of the bytes, as hex. Empty for a file past [`MAX_EDITOR_READ_BYTES`], which is not
+    /// hashed: nothing of it is held as a buffer, so there is nothing for the hash to protect.
+    pub hash: String,
+}
+
+/// The error a checked write refuses with when the file moved under the buffer. The editor matches
+/// on it (`isChangedOnDisk` in `lib/editorFiles.ts`) to ask instead of reporting a failure, so the
+/// two spellings have to stay in step.
+pub const CHANGED_ON_DISK: &str = "changed-on-disk";
+
+/// The most the editor reads without being asked twice. Past it a file is a log, a dump or a build
+/// artifact far more often than something to edit, and Monaco — one model with a line index, tokens
+/// and a minimap — is slow long before memory runs out. The tab says how large the file is and
+/// offers to open it anyway, read-only.
+pub const MAX_EDITOR_READ_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The ceiling on "open anyway". What is read crosses the IPC bridge as one JSON string and lands in
+/// a webview as a JS string twice its size, so this is where "slow" becomes a frozen window.
+pub const MAX_FORCED_READ_BYTES: u64 = 100 * 1024 * 1024;
+
+/// A file as the editor opens it. Five things, and only the first is a buffer anyone types into
+/// and saves — which is the point: every other kind used to open as an editable tab too, holding
+/// either the read error's text or the file decoded lossily, one ⌘S away from replacing the real
+/// file with that.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum EditorFile {
+    /// UTF-8 text: the one kind the editor edits and writes back.
+    Text { text: String, version: DiskVersion },
+    /// Text in another encoding, decoded so it can be read. Never written back: the editor writes
+    /// UTF-8, so a save would re-encode every non-ASCII byte in the file.
+    Legacy {
+        text: String,
+        /// `windows-1252`, `utf-16le` or `utf-16be`.
+        encoding: String,
+        version: DiskVersion,
+    },
+    /// An image, recognised by its signature rather than its name — a `.png` holding a Git LFS
+    /// pointer is text, and opens as text.
+    Image {
+        mime: String,
+        base64: String,
+        version: DiskVersion,
+    },
+    /// Anything else with a NUL in its first 8 KB.
+    Binary { size: u64, version: DiskVersion },
+    /// Over the read cap, so nothing was read. `can_force` is whether "open anyway" is on offer.
+    TooLarge {
+        size: u64,
+        can_force: bool,
+        version: DiskVersion,
+    },
+}
+
+fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_millis() as u64)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// The version of bytes that were just read (or written) — the size is theirs rather than the
+/// metadata's, so a file that grew between the two calls is described by what was actually held.
+fn version_of(meta: &std::fs::Metadata, bytes: &[u8]) -> DiskVersion {
+    DiskVersion {
+        mtime_ms: mtime_ms(meta),
+        size: bytes.len() as u64,
+        hash: sha256_hex(bytes),
+    }
+}
+
+/// The version of a file that is not read: its stamp alone.
+fn stamp_of(meta: &std::fs::Metadata) -> DiskVersion {
+    DiskVersion {
+        mtime_ms: mtime_ms(meta),
+        size: meta.len(),
+        hash: String::new(),
+    }
+}
+
+/// Reads a file for an editor tab — see [`EditorFile`] for what can come back. `allow_large` is the
+/// tab's "open anyway", which raises the cap to [`MAX_FORCED_READ_BYTES`].
+pub fn read_editor_file(
+    repo_path: &str,
+    rel_path: &str,
+    allow_large: bool,
+) -> Result<EditorFile, String> {
+    let full = resolve_within_repo(repo_path, rel_path)?;
+    if full.is_dir() {
+        return Err(format!("{rel_path} is a folder, not a file"));
+    }
+    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
+    let size = meta.len();
+    let cap = if allow_large {
+        MAX_FORCED_READ_BYTES
+    } else {
+        MAX_EDITOR_READ_BYTES
+    };
+    if size > cap {
+        return Ok(EditorFile::TooLarge {
+            size,
+            can_force: size <= MAX_FORCED_READ_BYTES,
+            version: stamp_of(&meta),
+        });
+    }
+    let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
+    let version = version_of(&meta, &bytes);
+    Ok(classify(bytes, version))
+}
+
+/// Which of [`EditorFile`]'s kinds these bytes are. An image's signature is looked at first (most
+/// have NULs in their headers and would otherwise be plain binary), then a UTF-16 byte-order mark
+/// (UTF-16 text is full of NULs too), then the NUL test, then UTF-8.
+fn classify(bytes: Vec<u8>, version: DiskVersion) -> EditorFile {
+    if let Some(mime) = image_mime(&bytes) {
+        use base64::Engine;
+        return EditorFile::Image {
+            mime: mime.to_string(),
+            base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            version,
+        };
+    }
+    if let Some((encoding, text)) = decode_utf16(&bytes) {
+        return EditorFile::Legacy {
+            text,
+            encoding: encoding.to_string(),
+            version,
+        };
+    }
+    if crate::search::looks_binary(&bytes) {
+        return EditorFile::Binary {
+            size: bytes.len() as u64,
+            version,
+        };
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => EditorFile::Text { text, version },
+        // Not UTF-8 and no NULs: almost always a Latin-1 / Windows-1252 file — an old source file,
+        // a CSV out of a spreadsheet. Windows-1252 decodes every byte, so nothing is dropped.
+        Err(e) => EditorFile::Legacy {
+            text: decode_windows_1252(&e.into_bytes()),
+            encoding: "windows-1252".to_string(),
+            version,
+        },
+    }
+}
+
+/// The image formats a webview draws, by their opening bytes.
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    // `BM` is two letters a text file can start with, so a bitmap also has to look binary — which
+    // every real one does, its header being full of zeroed fields. An icon's signature starts with
+    // two NULs, which no text file does.
+    if bytes.starts_with(b"BM") && crate::search::looks_binary(bytes) {
+        return Some("image/bmp");
+    }
+    if bytes.starts_with(&[0, 0, 1, 0]) {
+        return Some("image/x-icon");
+    }
+    None
+}
+
+/// UTF-16 text, recognised by its byte-order mark — the one reliable sign of it, and what Windows
+/// tools (PowerShell's `>`, `.reg` exports) write.
+fn decode_utf16(bytes: &[u8]) -> Option<(&'static str, String)> {
+    let (encoding, big_endian) = match bytes {
+        [0xFF, 0xFE, ..] => ("utf-16le", false),
+        [0xFE, 0xFF, ..] => ("utf-16be", true),
+        _ => return None,
+    };
+    let units: Vec<u16> = bytes[2..]
+        .chunks_exact(2)
+        .map(|pair| {
+            if big_endian {
+                u16::from_be_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_le_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect();
+    Some((encoding, String::from_utf16_lossy(&units)))
+}
+
+/// 0x80–0x9F in Windows-1252, as the WHATWG Encoding Standard maps them — the only range where it
+/// differs from ISO-8859-1. The five unassigned bytes map to the C1 controls of the same value, as
+/// WHATWG does, so every byte reads as something.
+const WINDOWS_1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{0081}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{008D}', '\u{017D}', '\u{008F}',
+    '\u{0090}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{009D}', '\u{017E}', '\u{0178}',
+];
+
+fn decode_windows_1252(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&byte| match byte {
+            0x80..=0x9F => WINDOWS_1252_HIGH[usize::from(byte - 0x80)],
+            _ => char::from(byte),
+        })
+        .collect()
+}
+
+/// The version of what is on disk now, for the editor's sweep over its open tabs; `None` when
+/// nothing (or a folder) is there.
+///
+/// `known` is the version the tab holds. When the file's timestamp and size still match it, it is
+/// handed back as it is and the file is not read: this runs for every open tab on every watcher
+/// event, and the watcher fires for any file in the repository. Only a file whose stamp moved is
+/// read and hashed, and the hash is what says whether it actually changed.
+pub fn stat_editor_file(
+    repo_path: &str,
+    rel_path: &str,
+    known: Option<DiskVersion>,
+) -> Result<Option<DiskVersion>, String> {
+    let full = resolve_within_repo(repo_path, rel_path)?;
+    let meta = match std::fs::metadata(&full) {
+        Ok(meta) if meta.is_file() => meta,
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    if let Some(known) = known {
+        if known.mtime_ms == mtime_ms(&meta) && known.size == meta.len() {
+            return Ok(Some(known));
+        }
+    }
+    if meta.len() > MAX_EDITOR_READ_BYTES {
+        return Ok(Some(stamp_of(&meta)));
+    }
+    let bytes = std::fs::read(&full).map_err(|e| e.to_string())?;
+    Ok(Some(version_of(&meta, &bytes)))
+}
+
+/// The editor's save: writes `content` unless the file changed on disk since `expected` was read,
+/// and answers with the version it wrote, which is what the next save checks against.
+///
+/// Refused with [`CHANGED_ON_DISK`] when the file is no longer what the buffer started from — an AI
+/// run, a `git pull`, a checkpoint restored, a project-wide replace, another editor: every one of
+/// them writes under open tabs, and a save that did not look first put the buffer back over their
+/// work without a word. A file deleted since counts as changed too; recreating it is the user's call.
+/// `expected: None` is the answer "overwrite it", given once the user has said so.
+pub fn write_file_text_checked(
+    repo_path: &str,
+    rel_path: &str,
+    content: &str,
+    expected: Option<&DiskVersion>,
+) -> Result<DiskVersion, String> {
+    let full = resolve_within_repo(repo_path, rel_path)?;
+    if let Some(expected) = expected {
+        if changed_since(&full, expected)? {
+            return Err(format!(
+                "{CHANGED_ON_DISK}: {rel_path} changed on disk since it was opened"
+            ));
+        }
+    }
+    std::fs::write(&full, content).map_err(|e| e.to_string())?;
+    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
+    Ok(version_of(&meta, content.as_bytes()))
+}
+
+/// Whether the file at `full` is no longer the one `expected` describes. The check and the write
+/// after it are not atomic — nothing on a plain filesystem makes them so — but the window between
+/// them is one `write` call, where before this there was no check at all.
+fn changed_since(full: &Path, expected: &DiskVersion) -> Result<bool, String> {
+    let meta = match std::fs::metadata(full) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(e.to_string()),
+    };
+    if !meta.is_file() || meta.len() != expected.size {
+        return Ok(true);
+    }
+    if expected.hash.is_empty() {
+        return Ok(mtime_ms(&meta) != expected.mtime_ms);
+    }
+    let bytes = std::fs::read(full).map_err(|e| e.to_string())?;
+    Ok(sha256_hex(&bytes) != expected.hash)
+}
+
 /// Writes raw bytes to an **absolute** path chosen by the user in a native save dialog.
 ///
 /// Deliberately not scoped to a repo like the rest of this module: the whole point of an export
@@ -1346,6 +1655,176 @@ mod tests {
         // A file is not a folder, and nothing outside the repository is walked.
         assert!(dir_tree(&root, "README.md", &[], 100).is_err());
         assert!(dir_tree(&root, "..", &[], 100).is_err());
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    fn read_text_version(root: &str, rel: &str) -> DiskVersion {
+        match read_editor_file(root, rel, false).unwrap() {
+            EditorFile::Text { version, .. } => version,
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    /// The point of the version: a save over a file somebody else changed since it was read is
+    /// refused, and the other writer's bytes are left exactly as they were. Overwriting is a
+    /// separate answer, given without a version.
+    #[test]
+    fn refuses_a_save_over_a_file_that_changed_on_disk() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+        std::fs::write(repo.join("a.ts"), "one").unwrap();
+        let version = read_text_version(&root, "a.ts");
+
+        // Same length, other bytes — the size cannot tell, the hash does.
+        std::fs::write(repo.join("a.ts"), "two").unwrap();
+        let error = write_file_text_checked(&root, "a.ts", "mine", Some(&version)).unwrap_err();
+        assert!(error.starts_with(CHANGED_ON_DISK), "got {error}");
+        assert_eq!(std::fs::read_to_string(repo.join("a.ts")).unwrap(), "two");
+        // Another length is refused without reading anything.
+        std::fs::write(repo.join("a.ts"), "twenty-two").unwrap();
+        assert!(write_file_text_checked(&root, "a.ts", "mine", Some(&version)).is_err());
+
+        let written = write_file_text_checked(&root, "a.ts", "mine", None).unwrap();
+        assert_eq!(std::fs::read_to_string(repo.join("a.ts")).unwrap(), "mine");
+        assert_eq!(written.hash, sha256_hex(b"mine"));
+        // The version a save hands back is what the next one checks against — and only that one.
+        let again = write_file_text_checked(&root, "a.ts", "mine again", Some(&written)).unwrap();
+        assert_eq!(again.size, "mine again".len() as u64);
+        assert!(write_file_text_checked(&root, "a.ts", "stale", Some(&written)).is_err());
+        assert_eq!(std::fs::read_to_string(repo.join("a.ts")).unwrap(), "mine again");
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A file rewritten with the bytes it already held has a new timestamp and is the same file — a
+    /// save over it goes through. A file deleted since it was read is a change, and is not
+    /// recreated behind the user's back.
+    #[test]
+    fn a_rewrite_with_the_same_bytes_is_no_change_but_a_deletion_is() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+        std::fs::write(repo.join("a.ts"), "same").unwrap();
+        let version = read_text_version(&root, "a.ts");
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::fs::write(repo.join("a.ts"), "same").unwrap();
+        write_file_text_checked(&root, "a.ts", "saved", Some(&version)).unwrap();
+
+        let version = read_text_version(&root, "a.ts");
+        std::fs::remove_file(repo.join("a.ts")).unwrap();
+        let error = write_file_text_checked(&root, "a.ts", "x", Some(&version)).unwrap_err();
+        assert!(error.starts_with(CHANGED_ON_DISK), "got {error}");
+        assert!(!repo.join("a.ts").exists());
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Every kind the editor tells apart, each by what the bytes are rather than by the name — an
+    /// LFS pointer called `.png` is text.
+    #[test]
+    fn opens_each_kind_of_file_as_what_it_is() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+        std::fs::write(repo.join("text.ts"), "const a = 1;\n").unwrap();
+        std::fs::write(repo.join("latin.txt"), b"caf\xe9 \x80 \x93q\x94").unwrap();
+        std::fs::write(repo.join("wide.txt"), [0xFF, 0xFE, b'h', 0, b'i', 0]).unwrap();
+        std::fs::write(repo.join("pixel.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").unwrap();
+        std::fs::write(repo.join("pointer.png"), "version https://git-lfs.github.com/spec/v1\n").unwrap();
+        std::fs::write(repo.join("icon.ico"), [0, 0, 1, 0, 1, 0]).unwrap();
+        std::fs::write(repo.join("blob.bin"), [1, 2, 0, 3]).unwrap();
+        std::fs::write(repo.join("BMW.txt"), "BMW, not a bitmap\n").unwrap();
+
+        match read_editor_file(&root, "text.ts", false).unwrap() {
+            EditorFile::Text { text, version } => {
+                assert_eq!(text, "const a = 1;\n");
+                assert_eq!(version.size, 13);
+            }
+            other => panic!("got {other:?}"),
+        }
+        match read_editor_file(&root, "latin.txt", false).unwrap() {
+            EditorFile::Legacy { text, encoding, .. } => {
+                assert_eq!(text, "caf\u{e9} \u{20ac} \u{201c}q\u{201d}");
+                assert_eq!(encoding, "windows-1252");
+            }
+            other => panic!("got {other:?}"),
+        }
+        match read_editor_file(&root, "wide.txt", false).unwrap() {
+            EditorFile::Legacy { text, encoding, .. } => {
+                assert_eq!(text, "hi");
+                assert_eq!(encoding, "utf-16le");
+            }
+            other => panic!("got {other:?}"),
+        }
+        match read_editor_file(&root, "pixel.png", false).unwrap() {
+            EditorFile::Image { mime, base64, .. } => {
+                assert_eq!(mime, "image/png");
+                assert!(base64.starts_with("iVBORw0KGgo"), "got {base64}");
+            }
+            other => panic!("got {other:?}"),
+        }
+        assert!(matches!(read_editor_file(&root, "pointer.png", false).unwrap(), EditorFile::Text { .. }));
+        assert!(matches!(
+            read_editor_file(&root, "icon.ico", false).unwrap(),
+            EditorFile::Image { mime, .. } if mime == "image/x-icon"
+        ));
+        assert!(matches!(read_editor_file(&root, "blob.bin", false).unwrap(), EditorFile::Binary { size: 4, .. }));
+        assert!(matches!(read_editor_file(&root, "BMW.txt", false).unwrap(), EditorFile::Text { .. }));
+        // A folder is refused in words, and nothing outside the repository is read.
+        assert!(read_editor_file(&root, "", false).is_err());
+        assert!(read_editor_file(&root, "../escaped.txt", false).is_err());
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Past the cap nothing is read unless asked, and asked is still bounded.
+    #[test]
+    fn a_large_file_is_only_read_when_asked() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+        // Sparse: set_len allocates nothing, so this costs the test no real disk.
+        let big = std::fs::File::create(repo.join("big.log")).unwrap();
+        big.set_len(MAX_EDITOR_READ_BYTES + 1).unwrap();
+        drop(big);
+
+        match read_editor_file(&root, "big.log", false).unwrap() {
+            EditorFile::TooLarge { size, can_force, version } => {
+                assert_eq!(size, MAX_EDITOR_READ_BYTES + 1);
+                assert!(can_force);
+                assert!(version.hash.is_empty());
+            }
+            other => panic!("got {other:?}"),
+        }
+        // Zeros all the way down: read, it is binary.
+        assert!(matches!(read_editor_file(&root, "big.log", true).unwrap(), EditorFile::Binary { .. }));
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The sweep's check: a stamp that still matches is taken at its word and the file is not read —
+    /// so a hash that no longer describes the file comes straight back — and a moved one is hashed.
+    #[test]
+    fn a_sweep_reads_only_files_whose_stamp_moved() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+        std::fs::write(repo.join("a.ts"), "one").unwrap();
+        let fresh = stat_editor_file(&root, "a.ts", None).unwrap().unwrap();
+        assert_eq!(fresh.hash, sha256_hex(b"one"));
+
+        let vouched = DiskVersion {
+            hash: "not-read".to_string(),
+            ..fresh
+        };
+        let answer = stat_editor_file(&root, "a.ts", Some(vouched.clone())).unwrap().unwrap();
+        assert_eq!(answer.hash, "not-read");
+
+        std::fs::write(repo.join("a.ts"), "three").unwrap();
+        let answer = stat_editor_file(&root, "a.ts", Some(vouched)).unwrap().unwrap();
+        assert_eq!(answer.hash, sha256_hex(b"three"));
+        assert_eq!(answer.size, 5);
+
+        assert_eq!(stat_editor_file(&root, "gone.ts", None).unwrap(), None);
+        create_dir(&root, "dir").unwrap();
+        assert_eq!(stat_editor_file(&root, "dir", None).unwrap(), None);
 
         std::fs::remove_dir_all(&repo).ok();
     }

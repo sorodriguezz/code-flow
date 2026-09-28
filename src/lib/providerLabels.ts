@@ -18,6 +18,7 @@ export const VIEW_ON_KEYS: Record<VcsProvider, TranslationKey> = {
   azure: "chat.viewOnAdo",
   github: "chat.viewOnGithub",
   gitlab: "chat.viewOnGitlab",
+  bitbucket: "chat.viewOnBitbucket",
 };
 
 /** The confirmation shown before publishing a review's comments onto the host. */
@@ -25,6 +26,7 @@ export const CONFIRM_POST_KEYS: Record<VcsProvider, TranslationKey> = {
   azure: "chat.confirmPost",
   github: "chat.confirmPostGithub",
   gitlab: "chat.confirmPostGitlab",
+  bitbucket: "chat.confirmPostBitbucket",
 };
 
 /** The button's label once they landed. */
@@ -32,4 +34,5 @@ export const POSTED_KEYS: Record<VcsProvider, TranslationKey> = {
   azure: "chat.posted",
   github: "chat.postedGithub",
   gitlab: "chat.postedGitlab",
+  bitbucket: "chat.postedBitbucket",
 };

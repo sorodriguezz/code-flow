@@ -118,7 +118,73 @@ fn detect() -> Vec<ShellProfile> {
     if let Some(cmd) = which("cmd.exe") {
         found.push(profile("cmd", "Command Prompt", cmd, &[]));
     }
+    // One profile per installed WSL distribution, each opened by name: `wsl.exe` alone would be
+    // whichever the user last set as default, and a machine with Ubuntu beside Debian wants both.
+    // `wsl.exe` starts in the folder it was launched from, translated, so a tab opened on a project
+    // lands in that project's `/mnt/c/…` without being told.
+    if let Some(wsl) = which("wsl.exe") {
+        for distro in wsl_distributions(&wsl) {
+            let id = format!("wsl-{}", distro.to_lowercase().replace(|c: char| !c.is_ascii_alphanumeric(), "-"));
+            let name = format!("{distro} (WSL)");
+            found.push(profile(&id, &name, wsl.clone(), &["-d", distro.as_str()]));
+        }
+    }
     found
+}
+
+/// The distributions `wsl.exe -l -q` lists. Bounded: a WSL service that hangs must not freeze the
+/// profile picker, so the listing gets two seconds and is abandoned after that.
+#[cfg(target_os = "windows")]
+fn wsl_distributions(wsl: &std::path::Path) -> Vec<String> {
+    use std::io::Read;
+    let Ok(mut child) = crate::proc::std_command(wsl)
+        .args(["-l", "-q"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return Vec::new(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                let _ = child.kill();
+                return Vec::new();
+            }
+        }
+    }
+    let mut bytes = Vec::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_end(&mut bytes);
+    }
+    parse_wsl_list(&bytes)
+}
+
+/// Reads `wsl.exe -l -q`'s output.
+///
+/// **It is UTF-16**, little-endian, whatever the console's code page — the one Windows tool that
+/// still writes its console encoding to a pipe — unless `WSL_UTF8=1` is set, when it is UTF-8. Read
+/// as UTF-8 blindly, every name comes back with a NUL between its letters. Told apart by the NULs:
+/// ASCII-range text in UTF-16LE has one in every other byte, UTF-8 text has none. Docker Desktop's
+/// own distributions are its plumbing, not somewhere to open a shell, and are left out.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_wsl_list(bytes: &[u8]) -> Vec<String> {
+    let bytes = bytes.strip_prefix(&[0xFF, 0xFE]).unwrap_or(bytes);
+    let text = if bytes.len() >= 2 && bytes.iter().skip(1).step_by(2).any(|b| *b == 0) {
+        let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)).into_owned()
+    };
+    text.lines()
+        .map(|line| line.trim_matches(|c: char| c.is_whitespace() || c == '\0' || c == '\u{feff}').to_string())
+        .filter(|name| !name.is_empty() && !name.to_ascii_lowercase().starts_with("docker-desktop"))
+        .collect()
 }
 
 /// The flag that makes a shell a *login* shell, for the shells that spell it `-l`.
@@ -355,6 +421,26 @@ mod tests {
         };
         let found = detect();
         assert_eq!(found[0].command, shell.to_string_lossy());
+    }
+
+    fn utf16(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    /// `wsl.exe -l -q` writes UTF-16LE to a pipe; read as UTF-8 every name would carry NULs.
+    #[test]
+    fn wsl_distributions_are_read_from_utf16() {
+        let listing = utf16("Ubuntu-22.04\r\ndocker-desktop\r\nDebian\r\ndocker-desktop-data\r\n\r\n");
+        assert_eq!(parse_wsl_list(&listing), vec!["Ubuntu-22.04", "Debian"]);
+        // With the byte-order mark some builds put first.
+        let mut marked = vec![0xFF, 0xFE];
+        marked.extend(utf16("Ubuntu\r\n"));
+        assert_eq!(parse_wsl_list(&marked), vec!["Ubuntu"]);
+        // `WSL_UTF8=1` switches it to UTF-8.
+        assert_eq!(parse_wsl_list(b"Ubuntu\nkali-linux\n"), vec!["Ubuntu", "kali-linux"]);
+        // No WSL: nothing, not a garbled line.
+        assert!(parse_wsl_list(b"").is_empty());
+        assert!(parse_wsl_list(&utf16("\r\n")).is_empty());
     }
 
     fn fake(id: &str) -> ShellProfile {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Loader2, Smartphone, TriangleAlert } from "lucide-react";
+import { CheckCircle2, Info, Loader2, ShieldCheck, Smartphone, TriangleAlert } from "lucide-react";
 import { t } from "../i18n";
 import { hello, pair, storedName } from "../transport";
 import { Button } from "../ui/Button";
@@ -20,6 +20,44 @@ import { Button } from "../ui/Button";
  * red box saying the desktop was unreachable. "Not asked yet" is now its own state and says it is
  * looking.
  */
+/**
+ * The certificate's SHA-256 as the desktop reports it, beside the desktop's own pairing pane.
+ *
+ * What proves there is nobody in between is the value the *browser* printed when it warned about the
+ * certificate matching the one on the desk — this line is what the user holds between the two, not
+ * a proof on its own (see `tls.rs`). Four rows of eight pairs, the grouping browsers use. The why is
+ * one tap away rather than on screen, like every hint in this client.
+ */
+function Fingerprint({ value }: { value: string }) {
+  const [explained, setExplained] = useState(false);
+  const pairs = value.split(":");
+  const rows = [0, 8, 16, 24].map((start) => pairs.slice(start, start + 8).join(":")).filter(Boolean);
+  return (
+    <div className="mt-3 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 py-2">
+      <button
+        type="button"
+        aria-expanded={explained}
+        onClick={() => setExplained((open) => !open)}
+        className="flex w-full items-center gap-1.5 text-left text-xs font-semibold text-[var(--cf-text-faint)]"
+      >
+        <ShieldCheck size={13} className="shrink-0 text-[var(--cf-success-text)]" aria-hidden />
+        <span className="min-w-0 flex-1">{t("pair.fingerprint")}</span>
+        <Info size={13} className="shrink-0" aria-hidden />
+      </button>
+      <code className="cf-selectable mt-1 block font-mono text-2xs leading-snug text-[var(--cf-text)]">
+        {rows.map((row) => (
+          <span key={row} className="block">
+            {row}
+          </span>
+        ))}
+      </code>
+      {explained && (
+        <p className="mt-1.5 text-xs leading-relaxed text-[var(--cf-text-muted)]">{t("pair.fingerprintHint")}</p>
+      )}
+    </div>
+  );
+}
+
 export function PairScreen({ onPaired }: { onPaired: () => void }) {
   const [code, setCode] = useState("");
   const [name, setName] = useState(storedName);
@@ -28,6 +66,8 @@ export function PairScreen({ onPaired }: { onPaired: () => void }) {
   /** `undefined` while the first probe is in flight, `null` when the desktop cannot be reached, and
    *  a boolean for whether a pairing window is open. */
   const [windowOpen, setWindowOpen] = useState<boolean | null | undefined>(undefined);
+  /** The certificate the desktop says it presents, when this page came over HTTPS. */
+  const [fingerprint, setFingerprint] = useState<string | null>(null);
 
   // Polled, because the state being watched is on another screen in another room: the user is
   // meant to walk to the desktop, press a button, and come back. Five seconds is well inside the
@@ -37,7 +77,9 @@ export function PairScreen({ onPaired }: { onPaired: () => void }) {
     let alive = true;
     const check = async () => {
       const info = await hello();
-      if (alive) setWindowOpen(info ? info.pairing : null);
+      if (!alive) return;
+      setWindowOpen(info ? info.pairing : null);
+      if (info) setFingerprint(info.fingerprint ?? null);
     };
     void check();
     const id = window.setInterval(() => void check(), 5000);
@@ -103,6 +145,8 @@ export function PairScreen({ onPaired }: { onPaired: () => void }) {
           </span>
           {probe.text}
         </p>
+
+        {fingerprint && <Fingerprint value={fingerprint} />}
 
         <label htmlFor="cf-pair-code" className="mt-6 block text-xs font-semibold text-[var(--cf-text-faint)]">
           {t("pair.code")}

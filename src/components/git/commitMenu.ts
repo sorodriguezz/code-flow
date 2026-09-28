@@ -19,11 +19,14 @@
  */
 
 import {
+  Bug,
+  Check,
   Copy,
   CornerUpLeft,
   GitBranchPlus,
   GitCommitVertical,
   Pencil,
+  SkipForward,
   Tag,
 } from "lucide-react";
 import type { MenuItem } from "../common/ContextMenu";
@@ -44,6 +47,9 @@ export interface CommitMenuContext {
   onAmend: () => void;
   onRevert: (commit: CommitInfo) => void;
   onCherryPick: (commit: CommitInfo) => void;
+  /** A bisect is running — the entries mark this commit instead of starting one. */
+  bisectActive: boolean;
+  onBisect: (commit: CommitInfo, verdict: "good" | "bad" | "skip") => void;
 }
 
 export function commitMenuItems(context: CommitMenuContext): MenuItem[] {
@@ -110,6 +116,29 @@ export function commitMenuItems(context: CommitMenuContext): MenuItem[] {
     disabled: dirty || isMerge || isHead,
     onClick: () => context.onCherryPick(commit),
   });
+
+  // Bisect is started from the graph: say one commit is bad (or good), then the other end, and git
+  // takes it from there. While one runs the same entries mark commits instead — see `git/bisect.rs`.
+  items.push(
+    {
+      label: context.bisectActive ? t("bisect.menuMarkBad") : t("bisect.menuStartBad"),
+      icon: Bug,
+      separated: true,
+      onClick: () => context.onBisect(commit, "bad"),
+    },
+    {
+      label: context.bisectActive ? t("bisect.menuMarkGood") : t("bisect.menuStartGood"),
+      icon: Check,
+      onClick: () => context.onBisect(commit, "good"),
+    },
+  );
+  if (context.bisectActive) {
+    items.push({
+      label: t("bisect.menuSkip"),
+      icon: SkipForward,
+      onClick: () => context.onBisect(commit, "skip"),
+    });
+  }
 
   return items;
 }

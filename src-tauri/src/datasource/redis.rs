@@ -129,7 +129,7 @@ pub struct RedisSession {
     /// than a hand-kept list being consulted. That covers modules, `EVAL_RO`, `GETEX` and every
     /// command added after this code was written — none of which a list here would know about.
     /// One round trip per distinct command name per session.
-    flags: Mutex<HashMap<String, CommandFlags>>,
+    flags: Mutex<HashMap<String, Option<CommandFlags>>>,
 }
 
 /// What the server says about a command. `None` for a command it does not know.
@@ -255,9 +255,10 @@ impl RedisSession {
         }
     }
 
-    /// Whether the server says this command writes. Cached; falls back to a built-in list when
-    /// `COMMAND INFO` is unavailable, which managed Redis and restrictive ACLs both do.
-    async fn command_flags(&self, name: &str) -> CommandFlags {
+    /// What the server says about this command, or `None` when it will not say — `COMMAND INFO`
+    /// is unavailable on some managed Redis and under restrictive ACLs, and a command the server
+    /// doesn't know has no entry. Cached, answers included.
+    async fn command_flags(&self, name: &str) -> Option<CommandFlags> {
         let key = name.to_ascii_uppercase();
         if let Some(hit) = self.flags.lock().ok().and_then(|map| map.get(&key).copied()) {
             return hit;
@@ -266,14 +267,10 @@ impl RedisSession {
             Ok(Value::Array(items)) => items.first().and_then(parse_command_info),
             _ => None,
         };
-        let flags = answered.unwrap_or_else(|| CommandFlags {
-            write: FALLBACK_WRITES.contains(&key.as_str()),
-            admin: FALLBACK_ADMIN.contains(&key.as_str()),
-        });
         if let Ok(mut map) = self.flags.lock() {
-            map.insert(key, flags);
+            map.insert(key, answered);
         }
-        flags
+        answered
     }
 }
 
@@ -287,14 +284,79 @@ fn parse_command_info(entry: &Value) -> Option<CommandFlags> {
         .map(|f| f.to_ascii_lowercase())
         .collect();
     Some(CommandFlags {
-        write: named.contains("write") || named.contains("denyoom"),
+        // `may_replicate` is how Redis 7 marks what can write without being a write command in its
+        // own right — scripts and functions, `PUBLISH`.
+        write: named.contains("write") || named.contains("denyoom") || named.contains("may_replicate"),
         admin: named.contains("admin"),
     })
 }
 
-/// Used only when the server will not answer `COMMAND INFO`. Deliberately short: it covers the
-/// commands a person actually types, and anything unknown is treated as a write under read-only,
-/// which is the safe direction to be wrong in.
+/// Whether a command is refused on a read-only connection, given what the server said about it.
+///
+/// Three layers, because the server's own flags are necessary and not sufficient. They are the best
+/// source for a plain command (`SET` says `write`), but a Redis before 7 flags `EVAL` as nothing in
+/// particular though a script can write anything, and a *container* (`CONFIG`, `CLIENT`, `XGROUP`)
+/// carries no flags of its own — its subcommands do — so `CONFIG SET` read as harmless. So: the
+/// writes this list knows are refused whatever the server says; a container is allowed only for
+/// the subcommands listed as reads; and a command the server would not describe is refused unless
+/// it is a known read — the old fallback let every command it didn't list through, while its own
+/// comment said the opposite.
+fn refused_under_read_only(argv: &[Vec<u8>], server: Option<CommandFlags>) -> bool {
+    let Some(first) = argv.first() else { return false };
+    let name = String::from_utf8_lossy(first).to_ascii_uppercase();
+    if FALLBACK_WRITES.contains(&name.as_str()) || FALLBACK_ADMIN.contains(&name.as_str()) {
+        return true;
+    }
+    if let Some((_, reads)) = CONTAINER_READS.iter().find(|(container, _)| *container == name) {
+        let sub = argv.get(1).map(|arg| String::from_utf8_lossy(arg).to_ascii_uppercase()).unwrap_or_default();
+        return !reads.contains(&sub.as_str());
+    }
+    match server {
+        Some(flags) => flags.write || flags.admin,
+        None => !KNOWN_READS.contains(&name.as_str()),
+    }
+}
+
+/// Container commands, and the subcommands of each that only read. Every other subcommand is
+/// refused on a read-only connection.
+const CONTAINER_READS: &[(&str, &[&str])] = &[
+    ("CONFIG", &["GET", "HELP"]),
+    ("CLIENT", &["LIST", "INFO", "GETNAME", "ID", "TRACKINGINFO", "GETREDIR", "HELP"]),
+    ("SCRIPT", &["EXISTS", "HELP"]),
+    ("FUNCTION", &["LIST", "STATS", "DUMP", "HELP"]),
+    ("XGROUP", &["HELP"]),
+    ("XINFO", &["STREAM", "GROUPS", "CONSUMERS", "HELP"]),
+    ("OBJECT", &["ENCODING", "FREQ", "IDLETIME", "REFCOUNT", "HELP"]),
+    ("MEMORY", &["USAGE", "STATS", "DOCTOR", "MALLOC-STATS", "HELP"]),
+    ("MODULE", &["LIST", "HELP"]),
+    ("ACL", &["WHOAMI", "LIST", "USERS", "CAT", "GETUSER", "HELP"]),
+    ("CLUSTER", &["INFO", "NODES", "SLOTS", "SHARDS", "MYID", "KEYSLOT", "COUNTKEYSINSLOT", "GETKEYSINSLOT", "HELP"]),
+    ("COMMAND", &["", "COUNT", "DOCS", "INFO", "LIST", "GETKEYS", "GETKEYSANDFLAGS", "HELP"]),
+    ("LATENCY", &["LATEST", "HISTORY", "DOCTOR", "GRAPH", "HISTOGRAM", "HELP"]),
+    ("SLOWLOG", &["GET", "LEN", "HELP"]),
+    ("PUBSUB", &["CHANNELS", "NUMSUB", "NUMPAT", "SHARDCHANNELS", "SHARDNUMSUB", "HELP"]),
+];
+
+/// The reads a person types, for when the server will not describe its commands. Anything not here
+/// and not described is refused under read-only — the safe direction to be wrong in.
+const KNOWN_READS: &[&str] = &[
+    "GET", "MGET", "STRLEN", "GETRANGE", "SUBSTR", "LCS", "EXISTS", "TYPE", "TTL", "PTTL",
+    "EXPIRETIME", "PEXPIRETIME", "SCAN", "DUMP", "RANDOMKEY", "DBSIZE", "INFO", "PING", "ECHO",
+    "TIME", "LOLWUT", "HGET", "HMGET", "HGETALL", "HKEYS", "HVALS", "HLEN", "HEXISTS", "HSCAN",
+    "HSTRLEN", "HRANDFIELD", "LRANGE", "LINDEX", "LLEN", "LPOS", "SMEMBERS", "SISMEMBER",
+    "SMISMEMBER", "SCARD", "SSCAN", "SRANDMEMBER", "SINTER", "SUNION", "SDIFF", "SINTERCARD",
+    "ZRANGE", "ZRANGEBYSCORE", "ZRANGEBYLEX", "ZREVRANGE", "ZREVRANGEBYSCORE", "ZREVRANGEBYLEX",
+    "ZRANK", "ZREVRANK", "ZSCORE", "ZMSCORE", "ZCARD", "ZCOUNT", "ZLEXCOUNT", "ZSCAN",
+    "ZRANDMEMBER", "ZDIFF", "ZINTER", "ZUNION", "ZINTERCARD", "XRANGE", "XREVRANGE", "XLEN",
+    "XREAD", "XPENDING", "BITCOUNT", "BITPOS", "GETBIT", "BITFIELD_RO", "PFCOUNT", "GEOPOS",
+    "GEODIST", "GEOHASH", "GEOSEARCH", "GEORADIUS_RO", "GEORADIUSBYMEMBER_RO", "SORT_RO",
+    "EVAL_RO", "EVALSHA_RO", "FCALL_RO", "TOUCH", "JSON.GET", "JSON.MGET", "JSON.TYPE",
+    "JSON.STRLEN", "JSON.ARRLEN", "JSON.OBJKEYS", "JSON.OBJLEN",
+];
+
+/// Refused on a read-only connection whatever the server says about them. Writes, plus the ways of
+/// running code (`EVAL`, `FCALL`) and of reaching other clients (`PUBLISH`) that older servers do
+/// not flag as writes.
 const FALLBACK_WRITES: &[&str] = &[
     "SET", "SETEX", "SETNX", "PSETEX", "GETSET", "GETDEL", "GETEX", "APPEND", "SETRANGE", "INCR",
     "DECR", "INCRBY", "DECRBY", "INCRBYFLOAT", "DEL", "UNLINK", "EXPIRE", "PEXPIRE", "EXPIREAT",
@@ -303,13 +365,20 @@ const FALLBACK_WRITES: &[&str] = &[
     "LPOP", "RPOP", "LSET", "LINSERT", "LREM", "LTRIM", "LMOVE", "RPOPLPUSH", "SADD", "SREM",
     "SPOP", "SMOVE", "SINTERSTORE", "SUNIONSTORE", "SDIFFSTORE", "ZADD", "ZREM", "ZINCRBY",
     "ZPOPMIN", "ZPOPMAX", "ZREMRANGEBYRANK", "ZREMRANGEBYSCORE", "ZREMRANGEBYLEX", "XADD", "XDEL",
-    "XTRIM", "XSETID", "XGROUP", "XACK", "XCLAIM", "XAUTOCLAIM", "SETBIT", "BITFIELD", "PFADD",
-    "PFMERGE", "GEOADD", "EVAL", "EVALSHA", "FCALL", "SCRIPT", "FUNCTION", "JSON.SET", "JSON.DEL",
+    "XTRIM", "XSETID", "XACK", "XCLAIM", "XAUTOCLAIM", "XREADGROUP", "SETBIT", "BITFIELD",
+    "BITOP", "PFADD", "PFMERGE", "GEOADD", "GEORADIUS", "GEORADIUSBYMEMBER", "GEOSEARCHSTORE",
+    "SORT", "ZRANGESTORE", "ZUNIONSTORE", "ZINTERSTORE", "ZDIFFSTORE", "LMPOP", "ZMPOP",
+    "HGETDEL", "HGETEX", "HSETEX", "HEXPIRE", "HPEXPIRE", "HEXPIREAT", "HPEXPIREAT", "HPERSIST",
+    "EVAL", "EVALSHA", "FCALL", "PUBLISH", "SPUBLISH", "MIGRATE", "RESTORE-ASKING", "JSON.SET",
+    "JSON.DEL", "JSON.FORGET", "JSON.MSET", "JSON.MERGE", "JSON.ARRAPPEND", "JSON.ARRINSERT",
+    "JSON.ARRPOP", "JSON.ARRTRIM", "JSON.CLEAR", "JSON.NUMINCRBY", "JSON.STRAPPEND", "JSON.TOGGLE",
 ];
 
+/// Administrative commands refused on a read-only connection. The containers among the old list
+/// (`CONFIG`, `CLIENT`, …) moved to [`CONTAINER_READS`], where their read subcommands are allowed.
 const FALLBACK_ADMIN: &[&str] = &[
-    "CONFIG", "ACL", "CLIENT", "CLUSTER", "REPLICAOF", "SLAVEOF", "FAILOVER", "BGSAVE",
-    "BGREWRITEAOF", "SAVE", "LASTSAVE", "LATENCY", "SLOWLOG", "MEMORY", "MODULE", "DEBUG",
+    "REPLICAOF", "SLAVEOF", "FAILOVER", "BGSAVE", "BGREWRITEAOF", "SAVE", "DEBUG", "SHUTDOWN",
+    "SWAPDB", "FLUSHDB", "FLUSHALL",
 ];
 
 // ---------------------------------------------------------------------------
@@ -946,6 +1015,14 @@ fn trim_separator<'a>(prefix: &'a str, separator: &str) -> &'a str {
 /// `#` at the start of a line is a comment. `redis-cli` has no such rule, so this is a deliberate
 /// addition: a console you keep a scratch buffer in needs a way to label things, and no Redis
 /// command begins with `#`.
+/// Whether any command in a console buffer could write. Judged without the server's command table —
+/// only the known reads pass — because this is for "export everything", which runs it again.
+pub fn statement_writes(input: &str) -> bool {
+    split_redis_statements(input)
+        .iter()
+        .any(|line| parse_argv(line).map(|argv| refused_under_read_only(&argv, None)).unwrap_or(true))
+}
+
 fn split_redis_statements(input: &str) -> Vec<String> {
     input
         .lines()
@@ -1189,7 +1266,7 @@ impl RedisSession {
             let name = String::from_utf8_lossy(&argv[0]).to_ascii_uppercase();
             if self.read_only {
                 let flags = self.command_flags(&name).await;
-                if flags.write || flags.admin {
+                if refused_under_read_only(&argv, flags) {
                     results.push(DbStatementResult::failed(&line, read_only_refusal()));
                     break;
                 }
@@ -2276,6 +2353,51 @@ mod tests {
     #[test]
     fn a_plain_line_splits_on_whitespace() {
         assert_eq!(argv("GET  user:42   "), ["GET", "user:42"]);
+    }
+
+    fn read_only_refuses(line: &str, server: Option<CommandFlags>) -> bool {
+        refused_under_read_only(&parse_argv(line).unwrap(), server)
+    }
+
+    const DESCRIBED_READ: Option<CommandFlags> = Some(CommandFlags { write: false, admin: false });
+    const DESCRIBED_WRITE: Option<CommandFlags> = Some(CommandFlags { write: true, admin: false });
+
+    /// The server's flags decide a plain command either way.
+    #[test]
+    fn read_only_follows_the_server_for_plain_commands() {
+        assert!(!read_only_refuses("GET user:42", DESCRIBED_READ));
+        assert!(read_only_refuses("SET user:42 x", DESCRIBED_WRITE));
+        assert!(read_only_refuses("SOMEMODULE.WRITE k", DESCRIBED_WRITE));
+    }
+
+    /// The holes the server's flags leave: a script flagged as nothing in particular on an older
+    /// server, and a container whose flags live on its subcommands.
+    #[test]
+    fn read_only_refuses_scripts_and_container_writes_the_flags_miss() {
+        assert!(read_only_refuses("EVAL \"return redis.call('DEL', KEYS[1])\" 1 k", DESCRIBED_READ));
+        assert!(read_only_refuses("FCALL purge 0", DESCRIBED_READ));
+        assert!(read_only_refuses("PUBLISH jobs go", DESCRIBED_READ));
+        assert!(read_only_refuses("CONFIG SET maxmemory 1", DESCRIBED_READ));
+        assert!(read_only_refuses("CLIENT KILL ID 7", DESCRIBED_READ));
+        assert!(read_only_refuses("XGROUP DESTROY stream group", DESCRIBED_READ));
+        assert!(read_only_refuses("SCRIPT FLUSH", DESCRIBED_READ));
+        assert!(read_only_refuses("MEMORY PURGE", DESCRIBED_READ));
+        assert!(!read_only_refuses("CONFIG GET maxmemory", DESCRIBED_READ));
+        assert!(!read_only_refuses("CLIENT LIST", DESCRIBED_READ));
+        assert!(!read_only_refuses("XINFO STREAM s", DESCRIBED_READ));
+        assert!(!read_only_refuses("OBJECT ENCODING k", DESCRIBED_READ));
+        assert!(!read_only_refuses("EVAL_RO \"return 1\" 0", DESCRIBED_READ));
+    }
+
+    /// When the server won't describe its commands, only the known reads go through — the old
+    /// fallback let every command it hadn't listed pass.
+    #[test]
+    fn read_only_without_command_info_allows_only_known_reads() {
+        assert!(!read_only_refuses("GET user:42", None));
+        assert!(!read_only_refuses("HGETALL user:42", None));
+        assert!(!read_only_refuses("SCAN 0 MATCH user:* COUNT 100", None));
+        assert!(read_only_refuses("SET user:42 x", None));
+        assert!(read_only_refuses("SOMEMODULE.DOTHING k", None));
     }
 
     #[test]

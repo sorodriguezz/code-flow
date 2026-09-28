@@ -8,6 +8,7 @@ export type LayoutKey =
   | "settingsNavWidth"
   | "editorTreeWidth"
   | "editorChangesWidth"
+  | "editorPanelHeight"
   | "graphColRefs"
   | "graphColAuthor"
   | "graphColHash"
@@ -54,6 +55,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   settingsNavWidth: "layout_settings_nav_width",
   editorTreeWidth: "layout_editor_tree_width",
   editorChangesWidth: "layout_editor_changes_width",
+  editorPanelHeight: "layout_editor_panel_height",
   graphColRefs: "layout_graph_col_refs",
   graphColAuthor: "layout_graph_col_author",
   graphColHash: "layout_graph_col_hash",
@@ -101,6 +103,8 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   settingsNavWidth: 208,
   editorTreeWidth: 260,
   editorChangesWidth: 300,
+  // The Problems / results panel under the editor groups.
+  editorPanelHeight: 220,
   graphColRefs: 200,
   graphColAuthor: 130,
   graphColHash: 70,

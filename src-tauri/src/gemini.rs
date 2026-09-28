@@ -22,31 +22,46 @@
 //!     not one that refuses it.
 //!   - `-p` does **not** read stdin, and there's no `--system-prompt` / `--file` flag. So the whole
 //!     prompt (system + ask + data) can't ride on stdin. Two delivery paths, chosen by
-//!     [`write_brief_file_if_unsafe_inline`]:
-//!       * **small and single-line** — passed inline as the `-p` argument. The installs verified
-//!         above resolve `agy` to a native binary, so a multi-line argument wouldn't hit the `.cmd`
-//!         shim newline rejection `claude.rs`/`grok.rs` guard against — but nothing stops a future
-//!         or platform-specific packaging from landing as `agy.cmd` instead (npm is exactly how
-//!         `opencode` ships), so a brief with an embedded newline still routes to a file rather than
-//!         betting on that.
-//!       * **large, or multi-line** — a review diff can be 120k, past the ~32k Windows argv limit;
-//!         either way it's written to a temp file, the temp dir added with `--add-dir`, and a short
-//!         `-p` message tells agy to read it. Reading it headlessly needs
-//!         `--dangerously-skip-permissions` (no prompt to answer). agy has no granular
-//!         tool-allowlist flag, so permissions are all-or-nothing.
+//!     [`delivery`]:
+//!       * **inline** — passed as the `-p` argument. The installs verified above resolve `agy` to a
+//!         native binary, so a multi-line argument wouldn't hit the `.cmd` shim newline rejection
+//!         `claude.rs`/`grok.rs` guard against — but nothing stops a future or platform-specific
+//!         packaging from landing as `agy.cmd` instead (npm is exactly how `opencode` ships), so a
+//!         brief with an embedded newline goes inline only when the program is known not to be a
+//!         batch shim, and only on a read-only run (below).
+//!       * **a file** — a review diff can be 120k, past the ~32k Windows argv limit. It is written
+//!         to a private per-call directory (see `crate::ai_prompt_files`, which deletes it when the
+//!         run ends), that directory is added with `--add-dir`, and a short `-p` message tells agy
+//!         to read it. Reading it headlessly needs `--dangerously-skip-permissions` (no prompt to
+//!         answer). agy has no granular tool-allowlist flag, so permissions are all-or-nothing.
 //!
-//! **Sessions: the blocker is gone, the swap is not made yet.** This engine used to say a headless
-//! caller could not learn agy's conversation id — true on 1.1.7, where nothing printed it and there
-//! was no `--output-format` to ask for it (google-antigravity/antigravity-cli#7). On 1.1.10 the
-//! `result` event carries `conversation_id`, and `--conversation <id>` has always accepted one. So
-//! the two halves now exist and [`SESSION_SENTINEL`] could be replaced by the real id.
+//! **Read-only, as far as agy allows.** Re-verified on agy 1.2.12: in print mode, a tool request
+//! that needs confirmation is *soft-denied* ("Print mode: soft-denying tool confirmation"), so a
+//! run **without** `--dangerously-skip-permissions` cannot edit or run commands the user has not
+//! pre-approved — and `--sandbox` restricts the terminal on top. So an invocation marked
+//! [`AiInvocation::read_only`] gets its brief inline whenever the command line can carry it (no
+//! file to read, so no bypass needed) plus `--sandbox`. It is still not a guarantee, and
+//! [`AiEngine::enforces_read_only`] says so: the user's own settings can pre-approve writes
+//! (`permission.allow`), and a brief too large for the command line needs the file, and with it the
+//! bypass. `--mode plan` was considered and left out: the strings inside the binary show it is a
+//! prompt ("DO NOT make any source code changes…"), not a gate, and it asks for plan artifacts
+//! nobody here reads.
 //!
-//! It deliberately has **not** been, because that is a change to how chat resumes rather than a
-//! bug fix on the way past: `--continue` keeps working exactly as it has, with its known
-//! limitation — two conversations open on the same project can resume each other's context,
-//! silently. Making the swap is a decision about chat behaviour and wants to be made on purpose,
-//! with the id threaded through `AiRun::session_id` and `build_command` moved off `--continue` in
-//! the same change.
+//! **Sessions are resumed by id.** 1.1.7 gave a headless caller no conversation id — nothing
+//! printed it and there was no `--output-format` to ask for it (google-antigravity/antigravity-cli#7)
+//! — so every turn resumed "the most recent conversation" with `--continue`, and two chats (or two
+//! agents) on one project resumed each other's context without a word. Since 1.1.10 the closing
+//! `result` event carries `conversation_id`, and `--conversation <id>` ("Resume a previous
+//! conversation by ID", in `agy --help` on 1.2.11 and 1.2.12) takes it back. [`interpret_output`]
+//! hands that id to the caller as the session, and [`GeminiEngine::build_command`] resumes exactly
+//! it.
+//!
+//! **Which versions get it is decided by evidence, not by a version string.** An id is used only
+//! when the CLI printed one, and a CLI that printed none — a build old enough to ignore
+//! `--output-format`, or a conversation whose stored session is still the [`SESSION_SENTINEL`] an
+//! earlier CodeFlow wrote — keeps `--continue`, exactly as before. That is the only fallback that
+//! can occur: a build older than 1.1.10 rejects `--output-format stream-json` outright, so it
+//! never reaches a second turn here at all.
 
 use tokio::process::Command;
 
@@ -60,12 +75,19 @@ const DEFAULT_BINARY: &str = "agy";
 /// user's plan doesn't expose.
 const COMMIT_MESSAGE_MODEL: &str = "";
 
-/// Stand-in for a session id, because agy never tells a `--print` caller its real conversation id
-/// (see the module docs). It identifies nothing — its only job is to keep the app's chat state at
-/// "there is a session" so the next turn passes *something*, which
-/// [`GeminiEngine::build_command`] turns into `--continue`. Being a fixed string is why chat turns
-/// group under the app's own conversation id and not this one (see `db::migrations`).
+/// Stand-in for a session id, for a run whose CLI did not print its conversation id (see the module
+/// docs). It identifies nothing — its only job is to keep the app's chat state at "there is a
+/// session" so the next turn passes *something*, which [`GeminiEngine::build_command`] turns into
+/// `--continue`. Conversations stored by earlier builds hold it too, which is why it is still
+/// recognised. Being a fixed string is why chat turns group under the app's own conversation id
+/// and not this one (see `db::migrations`).
 const SESSION_SENTINEL: &str = "agy-last";
+
+/// Whether a stored session names a real agy conversation, rather than the sentinel.
+fn is_conversation_id(session: &str) -> bool {
+    let session = session.trim();
+    !session.is_empty() && session != SESSION_SENTINEL
+}
 
 /// Above this many chars the prompt is delivered via a temp file + `--add-dir` instead of inline,
 /// to stay clear of the Windows ~32k command-line limit (a review diff alone can reach 120k).
@@ -113,10 +135,14 @@ impl AiEngine for GeminiEngine {
             brief.push_str(inv.stdin_content);
         }
 
-        // Deliver the prompt inline when it's small and single-line, else via a temp file agy is
-        // told to read.
+        // Deliver the prompt inline when the command line can carry it, else via a private file agy
+        // is told to read. See [`delivery`] for which is which.
         let mut needs_read_permission = false;
-        match write_brief_file_if_unsafe_inline(&brief) {
+        let file = match delivery(binary, &brief, inv.read_only) {
+            Delivery::Inline => None,
+            Delivery::File => write_brief(inv, &brief),
+        };
+        match file {
             Some((dir, file)) => {
                 cmd.arg("-p").arg(format!(
                     "Read the file at {} and carry out the instructions it contains, replying with only the requested output.",
@@ -125,6 +151,8 @@ impl AiEngine for GeminiEngine {
                 cmd.arg("--add-dir").arg(dir);
                 needs_read_permission = true;
             }
+            // Either it fits, or the file could not be written and an inline attempt is the better
+            // of two bad outcomes.
             None => {
                 cmd.arg("-p").arg(&brief);
             }
@@ -155,23 +183,32 @@ impl AiEngine for GeminiEngine {
         // one that was asked to refactor a repository. That is tolerable when the caller opted into
         // writing; it is not what a read-only conversation was promised.
         //
-        // Since the brief goes to a file whenever it contains a newline — which a system prompt
-        // joined to a user message always does — this is not a corner case: it is every turn of
-        // every repo-less chat. `--sandbox` does not undo the over-grant, but it is the only
-        // narrowing agy offers, and it takes the shell away, which is the part that turns a read
-        // grant into an arbitrary one. See `commands::chat_cmd`'s module doc, which is careful to
-        // claim intent rather than enforcement for exactly this reason.
-        if inv.auto_approve_edits || needs_read_permission {
+        // A brief with a newline used to go to a file on every turn — and a system prompt joined to
+        // a user message always has one — so every repo-less chat ran with the bypass. A read-only
+        // run now keeps its brief inline wherever the command line can carry it (see [`delivery`]),
+        // which leaves agy's own permission system in charge: in print mode it soft-denies what it
+        // would have asked about. `--sandbox` takes the shell away on top, and is the only narrowing
+        // agy offers for the one read-only case that still needs the bypass — a brief too large for
+        // the command line. See [`AiEngine::enforces_read_only`] for why that is still not a
+        // guarantee, which the UI says in so many words.
+        let writes = inv.auto_approve_edits && !inv.read_only;
+        if writes || needs_read_permission {
             cmd.arg("--dangerously-skip-permissions");
-            if !inv.auto_approve_edits {
-                cmd.arg("--sandbox");
-            }
         }
-        // Multi-turn chat: resume the most recent conversation. Not this conversation — agy gives a
-        // headless caller no id to be specific with, so two chats on one project can cross. See the
-        // module docs; `--conversation <id>` is the fix once the id is obtainable.
-        if inv.resume_session_id.is_some() {
-            cmd.arg("--continue");
+        if !writes && (needs_read_permission || inv.read_only) {
+            cmd.arg("--sandbox");
+        }
+        // Multi-turn chat: resume *this* conversation, by the id the previous turn reported. Only a
+        // session with no id to be specific with — the sentinel — falls back to "the most recent
+        // conversation", which is what could cross two chats on one project. See the module docs.
+        match inv.resume_session_id {
+            Some(id) if is_conversation_id(id) => {
+                cmd.arg("--conversation").arg(id.trim());
+            }
+            Some(_) => {
+                cmd.arg("--continue");
+            }
+            None => {}
         }
         if let Some(dir) = inv.cwd {
             cmd.current_dir(dir);
@@ -197,6 +234,12 @@ impl AiEngine for GeminiEngine {
 
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
         interpret_output(success, status_label, stdout, stderr)
+    }
+
+    /// A run that ended on a model error still closes with its `result` event — since 1.2.10 with
+    /// exit code 3 and "the partial response" — and the usage in it was spent.
+    fn reported_usage(&self, stdout: &str, _stderr: &str) -> Option<AiUsage> {
+        result_event(stdout).and_then(|result| result.usage).map(usage_of)
     }
 
     fn list_models_args(&self) -> Option<Vec<String>> {
@@ -228,19 +271,46 @@ fn model_id(raw: &str) -> &str {
     raw.split_whitespace().next().unwrap_or("")
 }
 
-/// Returns `Some((tempdir, file))` when `content` is too big, or has an embedded newline, to pass
-/// inline, and was written to a temp file; `None` when it fits inline as-is (the caller then passes
-/// it as the `-p` argument). A failed write also returns `None`, degrading to an inline attempt
-/// rather than failing the whole call. See the module docs for why a newline alone routes here too.
-fn write_brief_file_if_unsafe_inline(content: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-    if content.len() <= INLINE_LIMIT && !content.contains('\n') {
-        return None;
+/// How a brief reaches agy.
+#[derive(Debug, PartialEq, Eq)]
+enum Delivery {
+    /// As the `-p` argument itself.
+    Inline,
+    /// In a private file agy is told to read — which needs the permission bypass.
+    File,
+}
+
+/// Which delivery a brief gets, on this program.
+///
+/// Too large for the command line always means a file. A single line always fits. A **multi-line**
+/// brief is the case that decides read-only: it goes inline only for a read-only run, and only
+/// when `program` is known not to be a batch shim (`.cmd`/`.bat`, whose `cmd.exe` layer rejects a
+/// newline in an argument). Every other run keeps the file it has always had, and with it the
+/// permission bypass its reads were verified with — a review is not the place to find out what
+/// agy's default permissions refuse.
+fn delivery(program: &str, brief: &str, read_only: bool) -> Delivery {
+    if brief.len() > INLINE_LIMIT {
+        return Delivery::File;
     }
-    // A per-call subdirectory so `--add-dir` scopes agy to exactly this file and nothing else.
-    let dir = std::env::temp_dir().join(format!("codeflow-agy-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).ok()?;
-    let file = dir.join("brief.txt");
-    std::fs::write(&file, content).ok()?;
+    if !brief.contains('\n') || (read_only && !is_batch_shim(program)) {
+        return Delivery::Inline;
+    }
+    Delivery::File
+}
+
+/// Whether `program` is run through `cmd.exe`. `program` is the resolved path, which on Windows
+/// carries its extension (see `ai::resolve_binary`), so the extension is the whole answer.
+fn is_batch_shim(program: &str) -> bool {
+    let lower = program.trim().to_ascii_lowercase();
+    lower.ends_with(".cmd") || lower.ends_with(".bat")
+}
+
+/// Writes the brief into a private directory of its own — so `--add-dir` scopes agy to exactly
+/// this file and nothing else — and returns `(directory, file)`. Both go when the run ends. `None`
+/// on a failed write, which degrades to an inline attempt rather than failing the call.
+fn write_brief(inv: &AiInvocation, content: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let dir = inv.prompt_files.dir("agy")?;
+    let file = crate::ai_prompt_files::write_into(&dir, "brief.txt", content)?;
     Some((dir, file))
 }
 
@@ -249,8 +319,25 @@ fn write_brief_file_if_unsafe_inline(content: &str) -> Option<(std::path::PathBu
 struct AgyResult {
     #[serde(default)]
     response: String,
+    /// The conversation this turn ran in — what the next turn resumes with `--conversation`.
+    /// Printed since 1.1.10; absent from anything older, which then keeps `--continue`.
+    #[serde(default)]
+    conversation_id: Option<String>,
     #[serde(default)]
     usage: Option<AgyUsage>,
+}
+
+/// One `result` event's usage, in this app's terms.
+fn usage_of(u: AgyUsage) -> AiUsage {
+    AiUsage {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens + u.thinking_tokens,
+        cache_read_tokens: u.cache_read_tokens,
+        cache_write_tokens: 0,
+        // agy prices nothing. `None` and not `0.0`: the meter shows "no price" for this engine
+        // rather than claiming its turns were free.
+        cost_usd: None,
+    }
 }
 
 /// Defaulted field by field, like every other engine's: agy has already added fields to this
@@ -332,18 +419,19 @@ fn interpret_output(
     if refusal_reply(&text, generated) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
-    let usage = parsed.and_then(|result| result.usage).map(|u| AiUsage {
-        input_tokens: u.input_tokens,
-        output_tokens: u.output_tokens + u.thinking_tokens,
-        cache_read_tokens: u.cache_read_tokens,
-        cache_write_tokens: 0,
-        // agy prices nothing. `None` and not `0.0`: the meter shows "no price" for this engine
-        // rather than claiming its turns were free.
-        cost_usd: None,
-    });
+    // The real conversation when the CLI named it, the sentinel when it did not — the evidence that
+    // decides between `--conversation` and `--continue` next turn. See the module docs.
+    let session_id = parsed
+        .as_ref()
+        .and_then(|result| result.conversation_id.as_deref())
+        .map(str::trim)
+        .filter(|id| is_conversation_id(id))
+        .unwrap_or(SESSION_SENTINEL)
+        .to_string();
+    let usage = parsed.and_then(|result| result.usage).map(usage_of);
     Ok(AiRun {
         text,
-        session_id: Some(SESSION_SENTINEL.to_string()),
+        session_id: Some(session_id),
         model: None,
         usage: usage.filter(|u| !u.is_empty()),
         // `None`: this app does not read this CLI's output step by step, so it has no
@@ -417,14 +505,112 @@ mod tests {
 
     #[test]
     fn small_single_line_prompts_stay_inline() {
-        assert!(write_brief_file_if_unsafe_inline("hola").is_none());
+        assert_eq!(delivery("agy", "hola", false), Delivery::Inline);
     }
 
     /// A brief under `INLINE_LIMIT` still moves to a file once it has a newline — the module docs
     /// explain why this engine doesn't bet on `agy` always resolving to a native binary.
     #[test]
     fn a_short_multiline_brief_still_moves_to_a_file() {
-        assert!(write_brief_file_if_unsafe_inline("system prompt\n\nthe ask").is_some());
+        assert_eq!(delivery("agy", "system prompt\n\nthe ask", false), Delivery::File);
+    }
+
+    fn args_of(inv: &AiInvocation, program: &str) -> Vec<String> {
+        GeminiEngine
+            .build_command(program, inv)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The whole point of the read-only path: a chat turn's brief — a system prompt joined to a
+    /// message, so always multi-line — rides the command line, and with no file to read there is no
+    /// permission bypass. agy's print mode then soft-denies what it would have asked about.
+    #[test]
+    fn a_read_only_turn_needs_no_permission_bypass() {
+        let mut inv = AiInvocation::new("¿qué es esto?", "");
+        inv.system_prompt = Some("Eres un asistente.\nResponde en texto.");
+        inv.read_only = true;
+        let args = args_of(&inv, "/usr/local/bin/agy");
+        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--sandbox"), "{args:?}");
+        let prompt = &args[args.iter().position(|a| a == "-p").unwrap() + 1];
+        assert!(prompt.contains("Responde en texto."), "the brief itself, not a pointer: {prompt}");
+    }
+
+    /// Where the command line cannot carry it — a batch shim, or a brief past the limit — the file
+    /// and the bypass come back, with the sandbox. That is why agy is not reported as enforcing.
+    #[test]
+    fn a_read_only_brief_that_cannot_go_inline_keeps_the_sandbox() {
+        assert_eq!(delivery(r"C:\npm\agy.cmd", "a\nb", true), Delivery::File);
+        assert_eq!(delivery("agy", &"x".repeat(INLINE_LIMIT + 1), true), Delivery::File);
+
+        let mut inv = AiInvocation::new("pregunta", "");
+        inv.system_prompt = Some("uno\ndos");
+        inv.read_only = true;
+        let args = args_of(&inv, r"C:\npm\agy.cmd");
+        assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"), "{args:?}");
+        assert!(args.iter().any(|a| a == "--sandbox"), "{args:?}");
+        assert!(!GeminiEngine.enforces_read_only());
+    }
+
+    /// A run that may write is exactly what it was: the bypass, and no sandbox in its way.
+    #[test]
+    fn a_writing_run_is_unchanged() {
+        let mut inv = AiInvocation::new("corrige", "");
+        inv.auto_approve_edits = true;
+        let args = args_of(&inv, "agy");
+        assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--sandbox"), "{args:?}");
+    }
+
+    /// The brief file is private, scoped by `--add-dir` to its own directory, and gone with the run.
+    #[test]
+    fn the_brief_file_goes_with_the_invocation() {
+        let mut inv = AiInvocation::new("pregunta", "");
+        inv.system_prompt = Some("uno\ndos");
+        let args = args_of(&inv, "agy");
+        let dir = std::path::PathBuf::from(&args[args.iter().position(|a| a == "--add-dir").unwrap() + 1]);
+        assert!(dir.join("brief.txt").exists());
+        drop(inv);
+        assert!(!dir.exists());
+    }
+
+    /// Captured from `agy -p … --output-format stream-json` on 1.1.10: the closing event names the
+    /// conversation, and that is the session from now on.
+    #[test]
+    fn the_conversation_id_is_the_session() {
+        let run = interpret_output(true, "exit status: 0", STREAM, "").unwrap();
+        assert_eq!(run.session_id.as_deref(), Some("c8bb"));
+    }
+
+    /// Resumed by id — never "the most recent conversation", which is what crossed two chats.
+    #[test]
+    fn a_turn_resumes_its_own_conversation() {
+        let mut inv = AiInvocation::new("¿y ahora?", "");
+        inv.resume_session_id = Some("c8bb");
+        let args = args_of(&inv, "agy");
+        assert!(args.windows(2).any(|pair| pair == ["--conversation", "c8bb"]), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--continue"), "{args:?}");
+    }
+
+    /// The fallback: a session stored by an earlier build, or reported by a CLI that printed no id,
+    /// is the sentinel — and keeps `--continue`, as before.
+    #[test]
+    fn the_sentinel_still_continues() {
+        let mut inv = AiInvocation::new("¿y ahora?", "");
+        inv.resume_session_id = Some(SESSION_SENTINEL);
+        let args = args_of(&inv, "agy");
+        assert!(args.iter().any(|a| a == "--continue"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--conversation"), "{args:?}");
+    }
+
+    #[test]
+    fn a_failed_run_still_reports_what_it_spent() {
+        let usage = GeminiEngine.reported_usage(STREAM, "").expect("the result event carries usage");
+        assert_eq!(usage.output_tokens, 20);
+        assert!(GeminiEngine.reported_usage("", "boom").is_none());
     }
 
     /// Captured verbatim from a failing run: `agy models` handed back `id\tlabel` pairs, and the

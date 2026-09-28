@@ -4,6 +4,7 @@ import {
   ArchiveRestore,
   ChevronDown,
   ChevronRight,
+  Download,
   Folder,
   FolderPlus,
   FolderOpen,
@@ -18,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { exportChatConversation, exportMenuItems } from "./exportChat";
 import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { StatusDot, type ConversationStatus } from "./StatusDot";
@@ -362,6 +364,16 @@ export function ConversationSidebar() {
             } satisfies MenuItem,
           ];
         })(),
+        // Out of the app as a file — Markdown to read or share, JSON to keep. Behind one entry for
+        // the same reason filing is: one verb, several objects.
+        {
+          label: t("chat.export"),
+          icon: Download,
+          separated: true,
+          // Never called — see `MenuItem.children`.
+          onClick: () => {},
+          children: exportMenuItems((format, traces) => void exportChatConversation(conversation.id, format, traces)),
+        } satisfies MenuItem,
         {
           label: t("chat.cmdBranch"),
           icon: GitBranch,

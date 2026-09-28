@@ -303,5 +303,6 @@ function draft(
     created_at: "",
     updated_at: "",
     detected_ports: "[]",
+    env_files: JSON.stringify(candidate.envFiles ?? []),
   };
 }

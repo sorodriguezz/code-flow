@@ -19,6 +19,7 @@ import {
   type PanelTarget,
 } from "../state/aiPanelStore";
 import type { TrackedPr } from "../state/prWatchStore";
+import type { RepoStatusInfo } from "../types/domain";
 
 /**
  * The ways into the assistant panel, written once.
@@ -146,16 +147,26 @@ function projectPath(projectId: string): string | null {
 }
 
 /**
- * How many files an analysis of `projectId` would read: its unstaged and untracked changes, which is
- * the diff `analyze_working_changes` takes (index → working tree — staged changes are not in it).
+ * How many files a status lists as not committed — staged, unstaged and untracked, each file once
+ * (a file staged and then edited again is in two of the lists and one diff).
+ */
+export function uncommittedFileCount(status: Pick<RepoStatusInfo, "staged" | "unstaged" | "untracked">): number {
+  return new Set([...status.staged, ...status.unstaged, ...status.untracked].map((entry) => entry.path)).size;
+}
+
+/**
+ * How many files an analysis of `projectId` would read: everything not yet committed, staged or not,
+ * which is the diff `analyze_working_changes` takes (HEAD → working tree). It used to be the unstaged
+ * and untracked files only, so the buttons went dark right after "stage all" — the one moment an
+ * analysis before committing is for.
  *
  * `null` when this window holds no status for that repository — it keeps the open repository's
- * only — and `null` is not a no: the backend refuses an empty tree on its own.
+ * only — and `null` is not a no: the backend refuses an empty diff on its own.
  */
 export function changesToAnalyze(projectId: string): number | null {
   const { repoPath, status } = useRepoStore.getState();
   if (!status || !samePath(repoPath, projectPath(projectId))) return null;
-  return status.unstaged.length + status.untracked.length;
+  return uncommittedFileCount(status);
 }
 
 /** `changesToAnalyze`, kept current — what turns every "Analyze changes" button off. */
@@ -166,7 +177,7 @@ export function useChangesToAnalyze(projectId: string | null): number | null {
   const repoPath = useRepoStore((s) => s.repoPath);
   const status = useRepoStore((s) => s.status);
   if (!status || !samePath(repoPath, localPath)) return null;
-  return status.unstaged.length + status.untracked.length;
+  return uncommittedFileCount(status);
 }
 
 /**

@@ -1,4 +1,5 @@
-import { useEffect } from "react";
+import { useId, useRef } from "react";
+import { useDialog } from "../../lib/useFocusTrap";
 import { Download, Loader2, RotateCw, Sparkles, TriangleAlert, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Markdown } from "../common/Markdown";
@@ -52,14 +53,11 @@ export function UpdateNotesModal() {
   const install = useUpdateStore((s) => s.install);
   const restart = useUpdateStore((s) => s.restart);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeNotes();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, closeNotes]);
+  // Tab stays in the notes and Escape closes them — while they are the top layer. Above the early
+  // return: a hook after it would change the hook count on the render that opens the dialog.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, open && !!update, closeNotes);
 
   if (!open || !update) return null;
 
@@ -70,12 +68,16 @@ export function UpdateNotesModal() {
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-20" onClick={closeNotes}>
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
         className="flex max-h-[70vh] w-[540px] flex-col rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
       >
         <div className="flex shrink-0 items-start justify-between gap-2 border-b border-[var(--cf-border)] p-4">
           <div className="min-w-0">
-            <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
+            <h3 id={titleId} className="flex items-center gap-1.5 text-[15px] font-semibold">
               <Sparkles size={14} className="shrink-0 text-[var(--cf-accent)]" />
               {t("update.whatsNew", { version: `v${update.version}` })}
             </h3>
@@ -86,7 +88,7 @@ export function UpdateNotesModal() {
               {date && <span>· {date}</span>}
             </p>
           </div>
-          <button onClick={closeNotes} className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
+          <button onClick={closeNotes} aria-label={t("common.close")} className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
             <X size={15} />
           </button>
         </div>

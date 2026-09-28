@@ -13,6 +13,7 @@ import { parseClaudeError } from "../lib/claudeError";
 import { loadJiraConnections } from "../lib/jiraConnections";
 import { renderMarkdown } from "../lib/markdown";
 import { htmlToText, splitCriteriaHtml, storyPayload } from "../lib/workItemHtml";
+import { boardLabelKey } from "../lib/boardLabel";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
@@ -947,7 +948,7 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
   },
 
   /**
-   * Writes one staged part to Azure DevOps.
+   * Writes one staged part to the item's board.
    *
    * The only thing in this store that changes something other people are working from, so it is
    * deliberately narrow: one part at a time, only what is in the draft, and never a field the user
@@ -971,7 +972,9 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       set((state) => ({
         published: { ...state.published, [part]: { at: new Date().toISOString(), count } },
       }));
-      useToastStore.getState().pushToast(translate("huReview.published"), "success");
+      useToastStore
+        .getState()
+        .pushToast(translate("huReview.published", { board: translate(boardLabelKey(s.provider)) }), "success");
       void get()
         .persist()
         .catch((e: unknown) => pushErrorToast(String(e)));
@@ -1005,7 +1008,9 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       // the session open, which is the point: closing a review whose criteria never reached the
       // board would file a half-published story as done.
       set({ status: "published" });
-      useToastStore.getState().pushToast(translate("huReview.published"), "success");
+      useToastStore
+        .getState()
+        .pushToast(translate("huReview.published", { board: translate(boardLabelKey(s.provider)) }), "success");
     } catch (e: unknown) {
       pushErrorToast(parseClaudeError(String(e)).message);
     } finally {

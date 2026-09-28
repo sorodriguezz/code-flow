@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ClipboardCopy, ListTree, Pin, PinOff, SplitSquareHorizontal, X } from "lucide-react";
+import { ClipboardCopy, ListTree, Pin, PinOff, SaveAll, SplitSquareHorizontal, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { FileGlyph } from "../common/FileGlyph";
 import { Tooltip } from "../common/Tooltip";
@@ -16,6 +16,9 @@ import { isScratchPath, scratchName } from "../../lib/scratchTabs";
 export interface EditorTabItem {
   path: string;
   dirty: boolean;
+  /** The file changed on disk under this tab's unsaved edits: its dirty dot turns to the warning
+   *  colour, so the tab says so even while another one is on top. */
+  stale?: boolean;
   /** Ephemeral tab (single click in the tree): shown in italics and reused by the next
    * single-click open instead of piling up a tab per file you merely peeked at. */
   preview: boolean;
@@ -35,6 +38,8 @@ export interface TabMenuActions {
   /** Show this file's row in the explorer beside the editor: open every folder above it and scroll
    *  it into view. Distinct from the tree's own "Reveal in file manager", which opens Finder. */
   revealInTree: (path: string) => void;
+  /** Every unsaved tab of the project, not just this one — `saveAll` in `EditorView`. */
+  saveAll: () => void;
 }
 
 function baseName(path: string): string {
@@ -261,7 +266,10 @@ export function EditorTabs({
           { label: t("editor.revealInTree"), icon: ListTree, onClick: () => menu.revealInTree(tab.path) },
         ]),
     { label: t("editor.splitRight"), icon: SplitSquareHorizontal, onClick: () => menu.splitRight(tab.path) },
-    { label: t("editor.closeAllTabs"), icon: X, separated: true, onClick: menu.closeAll },
+    // Here because this is where the files are — and the one menu every platform has: the macOS
+    // menu bar is not drawn on Windows and Linux. The chord is the registry's (⌘⌥S by default).
+    { label: t("editor.saveAll"), icon: SaveAll, separated: true, onClick: menu.saveAll },
+    { label: t("editor.closeAllTabs"), icon: X, onClick: menu.closeAll },
   ];
 
   return (
@@ -378,7 +386,11 @@ export function EditorTabs({
                         focus, so a modified tab is still one click from closing. */}
                     {tab.dirty ? (
                       <>
-                        <span className="h-[7px] w-[7px] rounded-full bg-[var(--cf-accent-fill)] group-focus-within/doctab:hidden group-hover/doctab:hidden" />
+                        <span
+                          className={`h-[7px] w-[7px] rounded-full ${
+                            tab.stale ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-accent-fill)]"
+                          } group-focus-within/doctab:hidden group-hover/doctab:hidden`}
+                        />
                         {tab.pinned ? (
                           <PinOff size={12} className="hidden group-focus-within/doctab:block group-hover/doctab:block" />
                         ) : (

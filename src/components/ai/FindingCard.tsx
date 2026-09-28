@@ -403,6 +403,9 @@ export interface FindingMark {
   motivo?: string | null;
   /** Whether the finding was published to the PR — only then is there a thread to close. */
   posted: boolean;
+  /** Published in the very iteration on screen: a second publish must leave it alone, or its
+   * brand-new thread gets a "sigue presente" reply about itself. */
+  publishedNow?: boolean;
 }
 
 export function isDiscarded(mark?: FindingMark | null): boolean {

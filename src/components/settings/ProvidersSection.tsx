@@ -550,6 +550,72 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
   );
 }
 
+/** Mirrors `ai_runs::IDLE_TIMEOUT_KEY` / `DEFAULT_IDLE_MINUTES` / `MAX_IDLE_MINUTES`. */
+const IDLE_TIMEOUT_KEY = "ai_idle_timeout_minutes";
+const DEFAULT_IDLE_MINUTES = 20;
+const MAX_IDLE_MINUTES = 24 * 60;
+
+/**
+ * The watchdog's limit: how long a run may print nothing before it is taken to be hung, stopped,
+ * and its repository's lease released (`ai_runs::gone_quiet`). Minutes; `0` is off.
+ *
+ * Here, beside the engines, because it is about them — a CLI that stalls — and because this is the
+ * pane the watchdog's own error message sends people to. Read by the backend at the start of every
+ * run, so a change applies to the next one with no store to keep in step.
+ */
+function IdleTimeoutField() {
+  const t = useT();
+  const [value, setValue] = useState(String(DEFAULT_IDLE_MINUTES));
+
+  useEffect(() => {
+    let live = true;
+    void getSetting(IDLE_TIMEOUT_KEY)
+      .then((raw) => {
+        const stored = raw?.trim();
+        if (live && stored && /^\d+$/.test(stored)) setValue(stored);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const save = (raw: string) => {
+    const parsed = Math.floor(Number(raw));
+    // Blank or nonsense goes back to the default rather than to "off", which is also how the
+    // backend reads it: a watchdog a typo switched off would be missed on the one day it mattered.
+    const minutes =
+      raw.trim() !== "" && Number.isFinite(parsed)
+        ? Math.min(Math.max(parsed, 0), MAX_IDLE_MINUTES)
+        : DEFAULT_IDLE_MINUTES;
+    setValue(String(minutes));
+    void setSetting(IDLE_TIMEOUT_KEY, String(minutes));
+  };
+
+  return (
+    <label
+      title={t("settings.aiIdleTimeoutHint")}
+      className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]"
+    >
+      {t("settings.aiIdleTimeoutLabel")}
+      <input
+        type="number"
+        min={0}
+        max={MAX_IDLE_MINUTES}
+        step={1}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={(e) => save(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+        className={fieldClass({ size: "sm", className: "w-16 tabular-nums" })}
+      />
+      {t("settings.aiIdleTimeoutUnit")}
+    </label>
+  );
+}
+
 /** The "which engines do I have" half of the AI settings: every provider, its availability, and
  * its configuration — separate from the "which engine runs what" routing table below it. */
 export function ProvidersSection() {
@@ -563,7 +629,8 @@ export function ProvidersSection() {
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-end">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <IdleTimeoutField />
         <button
           onClick={() => void checkAll()}
           disabled={checking}

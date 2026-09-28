@@ -49,7 +49,7 @@ import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore, type ShareHealth } from "../../state/collabStore";
 import { useUiStore } from "../../state/uiStore";
 import { useRowHoverStore } from "../../state/rowHoverStore";
-import { confirmAction } from "../../state/confirmStore";
+import { chooseAction, confirmAction } from "../../state/confirmStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { encodeInvite, syncCollection } from "../../lib/api/sync";
@@ -964,17 +964,49 @@ export function CollectionTree() {
   }, []);
 
   const remove = async (node: NodeRef) => {
-    const message =
-      node.kind === "collection"
-        ? t("api.deleteCollectionConfirm", { name: node.name })
-        : node.kind === "folder"
-          ? t("api.deleteFolderConfirm", { name: node.name })
-          : t("api.deleteRequestConfirm", { name: node.name });
-    if (!(await confirmAction(message, true, t("api.delete")))) return;
     const state = useApiStore.getState();
-    if (node.kind === "collection") await state.deleteCollection(node.id);
-    else if (node.kind === "folder") await state.deleteFolder(node.id);
+    if (node.kind === "collection") {
+      await removeCollection(node);
+      return;
+    }
+    const message =
+      node.kind === "folder"
+        ? t("api.deleteFolderConfirm", { name: node.name })
+        : t("api.deleteRequestConfirm", { name: node.name });
+    if (!(await confirmAction(message, true, t("api.delete")))) return;
+    if (node.kind === "folder") await state.deleteFolder(node.id);
     else await state.deleteRequest(node.id);
+  };
+
+  /**
+   * Deleting a shared collection means two different things depending on whose it is.
+   *
+   * A guest's copy is theirs to drop, and nobody else's: the backend leaves the share and deletes
+   * only this machine's copy (`api_delete_collection`), so the question says exactly that. The
+   * host's delete is the one that reaches every member — which is why it is never the default:
+   * stopping sharing is offered first, and deleting for everyone is the one marked as destructive.
+   */
+  const removeCollection = async (node: NodeRef) => {
+    const state = useApiStore.getState();
+    const share = useCollabStore.getState().shareFor(node.id);
+    if (share?.role === "owner") {
+      const choice = await chooseAction({
+        message: t("api.collab.deleteForEveryoneConfirm", { name: node.name }),
+        danger: true,
+        choices: [
+          { id: "unshare", label: t("api.collab.leave"), variant: "primary" },
+          { id: "delete", label: t("api.collab.deleteForEveryone"), variant: "danger" },
+        ],
+      });
+      if (choice === "unshare") await useCollabStore.getState().leave(node.id);
+      else if (choice === "delete") await state.deleteCollection(node.id);
+      return;
+    }
+    const message = share
+      ? t("api.collab.deleteGuestConfirm", { name: node.name })
+      : t("api.deleteCollectionConfirm", { name: node.name });
+    if (!(await confirmAction(message, true, t("api.delete")))) return;
+    await state.deleteCollection(node.id);
   };
 
   // ---------- examples ----------

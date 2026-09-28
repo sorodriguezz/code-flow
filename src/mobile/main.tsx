@@ -3,9 +3,14 @@ import { App } from "./App";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { locale } from "./i18n";
 import { initNav } from "./nav";
-import { rememberBundle } from "./transport";
+import { adoptHandoff, rememberBundle } from "./transport";
 import { trackViewport } from "./viewport";
 import "./mobile.css";
+
+// First of all: a phone arriving from the old `http://` address carries its pairing in the URL
+// fragment, and it has to be in storage — and out of the address bar — before anything reads the
+// token or writes a history entry. See `adoptHandoff`.
+adoptHandoff();
 
 // Before the first render, so the shell is laid out against the real viewport from its first frame
 // rather than resizing under the user a moment later. See `viewport.ts` for why `100%` and `100dvh`

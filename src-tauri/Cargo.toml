@@ -156,6 +156,21 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # call directly.
 rustls-pemfile = "2"
 rustls-native-certs = "0.8"
+# The API client's client certificates. rustls only reads an *unencrypted* PEM identity, so a PKCS#12
+# bundle (.p12/.pfx) or a passphrase-protected key is decoded to DER here first (`api/tls.rs`).
+# RustCrypto's own crates, from the generation `der`, `spki`, `sha1`/`sha2`, `hmac`, `aes` and `md-5`
+# already in the tree belong to — rather than a bundle crate (`p12-keystore`) that brings a second
+# ASN.1 stack (`x509-parser`, `nom`) for the same job. `des` and `rc2` are here for one reason: the
+# legacy PKCS#12 ciphers (3DES keys, 40-bit RC2 certificates) that macOS Keychain, Windows and
+# `openssl pkcs12 -legacy` still write.
+pkcs8 = { version = "0.10", features = ["encryption", "pem", "3des"] }
+pkcs12 = { version = "0.1", features = ["kdf"] }
+cms = "0.2"
+der = { version = "0.7", features = ["alloc", "oid"] }
+cbc = { version = "0.1", features = ["alloc"] }
+des = "0.8"
+rc2 = "0.8"
+aes = "0.8"
 globset = "0.4.19"
 
 # ---------------- API client ----------------
@@ -345,6 +360,16 @@ tower-http = { version = "0.6", features = ["fs", "set-header"] }
 # layering them onto the API routes as well. Already in the tree as axum's own foundation, so this
 # is a name, not a dependency.
 tower = "0.5"
+# The phone server's HTTPS certificate: one self-signed certificate per install, minted on this
+# machine the first time TLS is needed (`remotectl/tls.rs`). The only new crate the feature needs —
+# the handshake itself is `tokio-rustls`/`rustls` below and above, already in the tree for FTPS and
+# the database drivers. `ring` and not the default provider set: `aws-lc-rs` must stay out of the
+# binary (see `mysql_async`), and `pem` is how the pair is written to disk.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+# Reads the expiry back out of that certificate, so it is renewed before phones stop accepting it
+# (iOS refuses a server certificate valid for more than 825 days). Already compiled in this tree as
+# `cms`'s own parser, so this names a crate rather than building one.
+x509-cert = { version = "0.2", default-features = false }
 russh-sftp = "2.4.0"
 # FTP/FTPS — the one file transport that is *not* a subsystem of the user's `ssh`, so unlike
 # `russh-sftp` this crate owns its socket. `tokio-rustls-ring` rather than any native-tls or
@@ -379,6 +404,17 @@ hickory-resolver = "0.26"
 # lockfile outright — `cargo add smb` fails before it writes anything. This one's crypto is all on
 # released RustCrypto, so it unifies with what is already here.
 smb2 = "0.22"
+# Jupyter kernels (`jupyter/`), which speak ZeroMQ: DEALER sockets for shell/control/stdin, SUB for
+# iopub, REQ for the heartbeat. A native Rust implementation, so there is no libzmq to build or ship
+# — the constraint that picked it, same as `smb2` above. Only the tokio runtime and TCP: a kernel's
+# connection file names `tcp` ports, and the IPC transport would bring `win_uds` for nothing.
+#
+# Not nteract's `jupyter-zmq-client` (formerly `runtimelib`) on top of it, which was the first
+# choice: its `jupyter-protocol` types every message into a Rust enum, and this app wants the
+# opposite — the kernel's JSON carried to the notebook untouched, because what an output holds is
+# what gets saved in the `.ipynb`, and a field the enum does not know would be a field lost. The
+# wire format under it is four signed JSON frames (`jupyter/wire.rs`).
+zeromq = { version = "0.6", default-features = false, features = ["tokio-runtime", "tcp-transport"] }
 
 # Sending a signal to a *process group*, which is what stopping an AI run needs: `child.kill()`
 # reaches the CLI and nothing it started, and every one of these CLIs is a Node process that spawns

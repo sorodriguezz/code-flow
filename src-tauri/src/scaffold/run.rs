@@ -18,7 +18,9 @@
 //! minute ago by this same dialog is the one the generator finds.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Runtime, State};
 
 use crate::terminal::{self, Origin, PtyHooks, TerminalRegistry};
@@ -68,6 +70,69 @@ pub fn ensure_free(root: &Path) -> Result<(), String> {
         Err(_) if root.is_file() => Err(format!("{} is a file", root.display())),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// The project folders runs of this app session set out to create, and whether each was already
+/// there — empty — when they did. The only folders [`discard`] will delete.
+///
+/// Kept here rather than trusted from the dialog because the dialog only has a path, and "delete
+/// this path" is not a door the webview should have. A folder is claimed after the same check the
+/// form makes ([`ensure_free`]), so what a claim covers is by construction something this app
+/// created: a folder that did not exist, or the contents of one that was empty.
+fn claims() -> &'static Mutex<HashMap<PathBuf, bool>> {
+    static CLAIMS: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+    CLAIMS.get_or_init(Mutex::default)
+}
+
+/// Records that a run is about to create `root`, refusing a root that is not free.
+pub fn claim(root: &Path) -> Result<(), String> {
+    if !root.is_absolute() {
+        return Err("The project root must be an absolute path".into());
+    }
+    ensure_free(root)?;
+    let existed = root.is_dir();
+    claims().lock().map_err(|e| e.to_string())?.insert(root.to_path_buf(), existed);
+    Ok(())
+}
+
+/// Deletes what a failed run left at `root` — only a root a run of this session claimed: the whole
+/// folder when the run created it, only what is inside it when it was there (empty) before.
+///
+/// This is what "delete and retry" runs. A failed generator leaves a half-made folder behind, and
+/// the form then refuses the same name as not empty; the only way on was to find the folder in the
+/// file manager and delete it by hand.
+pub fn discard(root: &Path) -> Result<(), String> {
+    let existed = claims()
+        .lock()
+        .map_err(|e| e.to_string())?
+        .get(root)
+        .copied()
+        .ok_or_else(|| format!("{} was not created by this dialog", root.display()))?;
+    let meta = match std::fs::symlink_metadata(root) {
+        Ok(meta) => meta,
+        // Nothing was left: nothing to delete.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    // A link where the folder was is not the folder this run made; deleting through it would reach
+    // somewhere else entirely.
+    if !meta.is_dir() {
+        return Err(format!("{} is no longer a folder", root.display()));
+    }
+    if existed {
+        for entry in std::fs::read_dir(root).map_err(|e| e.to_string())? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            let is_dir = std::fs::symlink_metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+            if is_dir {
+                std::fs::remove_dir_all(&path).map_err(|e| e.to_string())?;
+            } else {
+                std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+            }
+        }
+    } else {
+        std::fs::remove_dir_all(root).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -273,6 +338,45 @@ mod tests {
         assert!(path.split(':').count() > 4, "{path}");
         let _ = std::fs::remove_dir_all(&cwd);
         assert_eq!(scripts(), before, "the script file is removed when the session ends");
+    }
+
+    /// "Delete and retry" deletes what the run made and nothing else: the folder it created, or the
+    /// contents of the empty one it was given — never a folder no run of this session claimed.
+    #[test]
+    fn only_a_claimed_folder_is_discarded_and_only_what_the_run_made() {
+        let base = std::env::temp_dir().join(format!("cf-claim-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Created by the run: the whole folder goes.
+        let fresh = base.join("fresh");
+        claim(&fresh).unwrap();
+        std::fs::create_dir_all(fresh.join("node_modules/x")).unwrap();
+        std::fs::write(fresh.join("package.json"), "{}").unwrap();
+        discard(&fresh).unwrap();
+        assert!(!fresh.exists());
+        // And it can be claimed again for the retry.
+        claim(&fresh).unwrap();
+        discard(&fresh).unwrap();
+
+        // Given empty: it stays, emptied.
+        let given = base.join("given");
+        std::fs::create_dir_all(&given).unwrap();
+        claim(&given).unwrap();
+        std::fs::write(given.join("half.txt"), "x").unwrap();
+        discard(&given).unwrap();
+        assert!(given.is_dir());
+        assert_eq!(std::fs::read_dir(&given).unwrap().count(), 0);
+
+        // Never claimed, or taken when it was not free: refused, untouched.
+        let foreign = base.join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("keep.txt"), "x").unwrap();
+        assert!(discard(&foreign).is_err());
+        assert!(claim(&foreign).is_err(), "a folder with something in it is not free");
+        assert!(foreign.join("keep.txt").exists());
+        assert!(claim(Path::new("relative/dir")).is_err());
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

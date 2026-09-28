@@ -6,7 +6,13 @@
 //! with a role attached, not a second way to run a CLI, and giving it its own runner would mean
 //! two code paths that have to keep agreeing about checkpoints, MCP config and cancellation.
 
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
+
 use tauri::State;
+use tokio::io::AsyncReadExt;
+use tokio::sync::Notify;
 
 use crate::db::{
     models::{
@@ -22,7 +28,167 @@ use crate::db::{
 /// bound that cut those short would push people towards checks that prove nothing. Bounded at all
 /// because a command that hangs is a chain that hangs: there is no user watching an autonomous run
 /// to notice that `npm test` is sitting on a prompt it will never be answered.
-const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+const CHECK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// How long the output pipes are waited on once the check itself is over. A background process the
+/// check left behind holds them open for as long as it lives, and a verdict must not wait on that.
+const PIPE_DRAIN: Duration = Duration::from_secs(3);
+
+/// Checks in flight, by step id: the chain each belongs to, and the signal that stops it.
+///
+/// The only way an abort can reach a check. The check is awaited inside a command the webview is
+/// waiting on, and nothing else holds its process — so without a registry, aborting a plan left
+/// its test suite running to the end (up to [`CHECK_TIMEOUT`]) in a tree the user had just
+/// declared finished.
+static RUNNING_CHECKS: LazyLock<Mutex<HashMap<String, (String, Arc<Notify>)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Removes a check from [`RUNNING_CHECKS`] however its command ends — returned, or dropped.
+struct CheckRegistration(String);
+
+impl CheckRegistration {
+    fn new(step_id: &str, chain_id: &str, stop: Arc<Notify>) -> Self {
+        if let Ok(mut map) = RUNNING_CHECKS.lock() {
+            map.insert(step_id.to_string(), (chain_id.to_string(), stop));
+        }
+        CheckRegistration(step_id.to_string())
+    }
+}
+
+impl Drop for CheckRegistration {
+    fn drop(&mut self) {
+        if let Ok(mut map) = RUNNING_CHECKS.lock() {
+            map.remove(&self.0);
+        }
+    }
+}
+
+/// Stops every check a chain has running. `notify_one` rather than `notify_waiters`: it leaves a
+/// permit behind, so an abort that lands in the instant between registering and waiting still
+/// stops the check instead of being lost.
+fn stop_checks_for_chain(chain_id: &str) {
+    if let Ok(map) = RUNNING_CHECKS.lock() {
+        for (owner, stop) in map.values() {
+            if owner == chain_id {
+                stop.notify_one();
+            }
+        }
+    }
+}
+
+/// How a check's process ended.
+#[derive(Debug)]
+enum CheckEnd {
+    Exited { success: bool, output: String },
+    TimedOut { output: String },
+    /// Stopped from outside — the plan was aborted or deleted.
+    Stopped,
+    /// It could not be started at all.
+    Failed(String),
+}
+
+/// Reads one of a check's pipes to its end on a task of its own, so neither pipe can fill up and
+/// stall the process while the other is being read.
+fn drain<R: tokio::io::AsyncRead + Unpin + Send + 'static>(pipe: Option<R>) -> tokio::task::JoinHandle<Vec<u8>> {
+    tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buffer).await;
+        }
+        buffer
+    })
+}
+
+/// Signals a process group that has lost its leader. [`crate::ai_runs::kill_tree`] needs the
+/// `Child`, which only knows its pid until it has been waited on; this is for what a finished check
+/// left running behind it.
+fn kill_group(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        // SAFETY: `kill` takes only integers. The pid is the group id (`proc::own_process_group`),
+        // and a group that has already emptied answers `ESRCH`, which is the outcome wanted anyway.
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Runs one check command to its end, its timeout, or `stop` — whichever comes first — and makes
+/// sure **nothing it started outlives it**.
+///
+/// The check is its own process group (`proc::own_process_group`), because what people write here
+/// is `npm test` or `cargo test`: a shell that starts a runner that starts workers. The old
+/// `timeout(cmd.output())` dropped the future on timeout and killed nothing at all — not even the
+/// shell — so a hung suite kept its workers, its ports and its CPU for as long as it cared to, with
+/// the chain long since moved on. Now a timeout or a stop takes the whole group down
+/// ([`crate::ai_runs::kill_tree`]), and a check that exits on its own has its leftovers reaped too.
+async fn run_check_process(command: &str, cwd: &str, timeout: Duration, stop: &Notify) -> CheckEnd {
+    let mut cmd = if cfg!(windows) {
+        let mut c = crate::proc::command("cmd");
+        c.arg("/C").arg(command);
+        c
+    } else {
+        let mut c = crate::proc::command("sh");
+        c.arg("-c").arg(command);
+        c
+    };
+    cmd.current_dir(cwd);
+    // Never inherited: a check that reads stdin would block forever behind a terminal that does
+    // not exist.
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    crate::proc::own_process_group(&mut cmd);
+    // If this future is ever dropped mid-check (the app quitting), the shell at least goes with it.
+    cmd.kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        // The command could not be started at all — a missing binary, an unreadable directory.
+        Err(e) => return CheckEnd::Failed(format!("{command}: {e}")),
+    };
+    // Read now: `id()` answers `None` once the child has been waited on, and the group has to be
+    // reachable after that.
+    let pid = child.id();
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+
+    enum Ending {
+        Exited(bool),
+        TimedOut,
+        Stopped,
+    }
+    let ending = tokio::select! {
+        status = child.wait() => Ending::Exited(status.map(|s| s.success()).unwrap_or(false)),
+        _ = tokio::time::sleep(timeout) => Ending::TimedOut,
+        _ = stop.notified() => Ending::Stopped,
+    };
+    match ending {
+        Ending::Exited(_) => kill_group(pid),
+        Ending::TimedOut | Ending::Stopped => crate::ai_runs::kill_tree(&mut child).await,
+    }
+
+    let collect = |task: tokio::task::JoinHandle<Vec<u8>>| async move {
+        match tokio::time::timeout(PIPE_DRAIN, task).await {
+            Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+            _ => String::new(),
+        }
+    };
+    let mut output = collect(stdout).await;
+    let errors = collect(stderr).await;
+    if !errors.trim().is_empty() {
+        if !output.trim().is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&errors);
+    }
+
+    match ending {
+        Ending::Exited(success) => CheckEnd::Exited { success, output },
+        Ending::TimedOut => CheckEnd::TimedOut { output },
+        Ending::Stopped => CheckEnd::Stopped,
+    }
+}
 
 /// Runs one step's declared check in its own repository and reports what happened.
 ///
@@ -42,51 +208,34 @@ pub async fn run_chain_step_check(db: State<'_, Db>, step_id: String) -> Result<
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::chain_step_check(&conn, &step_id).map_err(|e| e.to_string())?
     };
-    let Some((command, cwd)) = target else {
+    let Some((chain_id, command, cwd)) = target else {
         return Ok(StepCheck { ran: false, passed: false, output: String::new() });
     };
 
-    let mut cmd = if cfg!(windows) {
-        let mut c = crate::proc::command("cmd");
-        c.arg("/C").arg(&command);
-        c
-    } else {
-        let mut c = crate::proc::command("sh");
-        c.arg("-c").arg(&command);
-        c
-    };
-    cmd.current_dir(&cwd);
-    // Never inherited: a check that reads stdin would block forever behind a terminal that does
-    // not exist.
-    cmd.stdin(std::process::Stdio::null());
-
-    let output = match tokio::time::timeout(CHECK_TIMEOUT, cmd.output()).await {
-        Err(_) => {
-            return Ok(StepCheck {
-                ran: true,
-                passed: false,
-                output: format!("The check timed out after {} minutes.", CHECK_TIMEOUT.as_secs() / 60),
-            })
-        }
-        // The command could not be started at all — a missing binary, an unreadable directory.
-        // Reported as a *failed* check rather than as an error, because a step whose verdict cannot
-        // be taken has not been verified, and silently passing it is the one outcome that would
-        // make the whole mechanism worse than not having it.
-        Ok(Err(e)) => {
-            return Ok(StepCheck { ran: true, passed: false, output: format!("{command}: {e}") })
-        }
-        Ok(Ok(output)) => output,
-    };
-
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
-        if !text.trim().is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&stderr);
-    }
-    Ok(StepCheck { ran: true, passed: output.status.success(), output: text })
+    let stop = Arc::new(Notify::new());
+    let _registered = CheckRegistration::new(&step_id, &chain_id, stop.clone());
+    Ok(match run_check_process(&command, &cwd, CHECK_TIMEOUT, &stop).await {
+        CheckEnd::Exited { success, output } => StepCheck { ran: true, passed: success, output },
+        // What it printed before it hung goes with the verdict: "where did it stop" is the first
+        // thing the next attempt needs to know.
+        CheckEnd::TimedOut { output } => StepCheck {
+            ran: true,
+            passed: false,
+            output: format!(
+                "The check timed out after {} minutes.\n{output}",
+                CHECK_TIMEOUT.as_secs() / 60
+            )
+            .trim_end()
+            .to_string(),
+        },
+        // The plan was aborted under it. No verdict at all rather than a failed one: a failure
+        // would send the plan back to an earlier step, and there is no plan left to send.
+        CheckEnd::Stopped => StepCheck { ran: false, passed: false, output: String::new() },
+        // Reported as a *failed* check rather than as an error, because a step whose verdict
+        // cannot be taken has not been verified, and silently passing it is the one outcome that
+        // would make the whole mechanism worse than not having it.
+        CheckEnd::Failed(output) => StepCheck { ran: true, passed: false, output },
+    })
 }
 
 #[tauri::command]
@@ -407,10 +556,42 @@ pub fn resume_chain(db: State<Db>, chain_id: String) -> Result<Option<AgentChain
     queries::resume_chain(&conn, &chain_id).map_err(|e| e.to_string())
 }
 
+/// Aborts the plan **and whatever check it has running**. The row first, so the check's own
+/// verdict — which the stop makes it deliver at once — finds a chain that is already aborted and
+/// moves nothing (see `queries::complete_chain_step`).
 #[tauri::command]
 pub fn abort_chain(db: State<Db>, chain_id: String) -> Result<Option<AgentChain>, String> {
+    let chain = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::abort_chain(&conn, &chain_id).map_err(|e| e.to_string())?
+    };
+    stop_checks_for_chain(&chain_id);
+    Ok(chain)
+}
+
+/// Arms (seconds since the epoch) or, with `0`, disarms a paused chain's automatic resume. See
+/// [`queries::set_chain_resume_at`].
+#[tauri::command]
+pub fn set_chain_resume_at(db: State<Db>, chain_id: String, resume_at: i64) -> Result<Option<AgentChain>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::abort_chain(&conn, &chain_id).map_err(|e| e.to_string())
+    queries::set_chain_resume_at(&conn, &chain_id, resume_at).map_err(|e| e.to_string())
+}
+
+/// One chain waiting on an automatic resume.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScheduledResume {
+    pub chain_id: String,
+    /// Seconds since the epoch.
+    pub resume_at: i64,
+}
+
+/// Every armed automatic resume, across every workspace — what the scheduler re-arms its timers
+/// from after the webview reloads. See [`queries::list_scheduled_resumes`].
+#[tauri::command]
+pub fn list_scheduled_resumes(db: State<Db>) -> Result<Vec<ScheduledResume>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let rows = queries::list_scheduled_resumes(&conn).map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(|(chain_id, resume_at)| ScheduledResume { chain_id, resume_at }).collect())
 }
 
 /// Deletes the plan, the tasks its steps produced, and its memory.
@@ -425,6 +606,7 @@ pub fn delete_chain(db: State<Db>, chain_id: String) -> Result<Vec<String>, Stri
     let orphans = queries::chain_task_ids(&conn, &chain_id).map_err(|e| e.to_string())?;
     let repos = queries::chain_repo_paths(&conn, &chain_id).unwrap_or_default();
     queries::delete_chain(&conn, &chain_id).map_err(|e| e.to_string())?;
+    stop_checks_for_chain(&chain_id);
     crate::chain_memory::forget(&chain_id, &repos);
     // Handed back so the frontend can drop the same tasks out of its own list, rather than
     // discovering them missing on the next workspace load.
@@ -566,4 +748,138 @@ pub fn list_workspace_chain_steps(
 ) -> Result<Vec<ChainStepBrief>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::list_workspace_chain_steps(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only asks whether the process exists.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// Reaping is asynchronous — an orphan is collected by init shortly after it dies — so "gone"
+    /// is polled for rather than asserted on the spot.
+    async fn gone_within(pid: i32, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        while alive(pid) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        !alive(pid)
+    }
+
+    fn scratch() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-check-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    async fn pid_in(file: &std::path::Path) -> i32 {
+        // The script writes it a moment after starting; wait for the line to be there.
+        for _ in 0..100 {
+            if let Ok(text) = std::fs::read_to_string(file) {
+                if let Ok(pid) = text.trim().parse() {
+                    return pid;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the check never wrote its child's pid");
+    }
+
+    /// A check that hangs is killed at its timeout **with everything it started** — the old
+    /// `timeout(cmd.output())` dropped the future and killed nothing, not even the shell.
+    #[tokio::test]
+    async fn a_check_that_times_out_takes_its_whole_tree_with_it() {
+        let dir = scratch();
+        let pidfile = dir.join("pid");
+        let command = format!("sleep 30 & echo $! > '{}'; echo empezó; wait", pidfile.display());
+        let started = Instant::now();
+        let end = run_check_process(&command, &dir.to_string_lossy(), Duration::from_millis(600), &Notify::new()).await;
+
+        match end {
+            CheckEnd::TimedOut { output } => assert!(output.contains("empezó"), "what it printed is kept: {output}"),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "and it did not wait for the sleep");
+        let pid = pid_in(&pidfile).await;
+        assert!(gone_within(pid, Duration::from_secs(3)).await, "the sleep the check started is gone too");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Aborting the plan stops its check at once, grandchildren included.
+    #[tokio::test]
+    async fn a_stopped_check_is_killed_straight_away() {
+        let dir = scratch();
+        let pidfile = dir.join("pid");
+        let command = format!("sleep 30 & echo $! > '{}'; wait", pidfile.display());
+        let stop = Arc::new(Notify::new());
+        let trigger = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            trigger.notify_one();
+        });
+        let started = Instant::now();
+        let end = run_check_process(&command, &dir.to_string_lossy(), Duration::from_secs(60), &stop).await;
+        assert!(matches!(end, CheckEnd::Stopped), "got {end:?}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let pid = pid_in(&pidfile).await;
+        assert!(gone_within(pid, Duration::from_secs(3)).await);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A stop that arrives before the check has even started waiting is not lost.
+    #[tokio::test]
+    async fn a_stop_sent_before_the_check_waits_still_stops_it() {
+        let dir = scratch();
+        let stop = Notify::new();
+        stop.notify_one();
+        let end = run_check_process("sleep 30", &dir.to_string_lossy(), Duration::from_secs(60), &stop).await;
+        assert!(matches!(end, CheckEnd::Stopped), "got {end:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A check that finishes on its own reports its exit code and both streams — and whatever it
+    /// left running in the background is reaped rather than kept alive holding the pipes.
+    #[tokio::test]
+    async fn a_finished_check_reports_its_verdict_and_leaves_nothing_behind() {
+        let dir = scratch();
+        let pidfile = dir.join("pid");
+        let command = format!("sleep 30 & echo $! > '{}'; echo hola; echo mal >&2; exit 3", pidfile.display());
+        let started = Instant::now();
+        let end = run_check_process(&command, &dir.to_string_lossy(), Duration::from_secs(60), &Notify::new()).await;
+        match end {
+            CheckEnd::Exited { success, output } => {
+                assert!(!success, "exit 3 is a failed check");
+                assert!(output.contains("hola") && output.contains("mal"), "both streams: {output}");
+            }
+            other => panic!("expected an exit, got {other:?}"),
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "the background sleep did not hold the verdict");
+        let pid = pid_in(&pidfile).await;
+        assert!(gone_within(pid, Duration::from_secs(3)).await, "the leftover is reaped");
+
+        let passed = run_check_process("true", &dir.to_string_lossy(), Duration::from_secs(60), &Notify::new()).await;
+        assert!(matches!(passed, CheckEnd::Exited { success: true, .. }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Only the aborted chain's checks are stopped — a registry that stopped every check would let
+    /// one abort kill the verdict of an unrelated plan.
+    #[test]
+    fn stopping_a_chains_checks_leaves_the_others_running() {
+        let mine = Arc::new(Notify::new());
+        let theirs = Arc::new(Notify::new());
+        let _a = CheckRegistration::new("step-a", "chain-a", mine.clone());
+        let _b = CheckRegistration::new("step-b", "chain-b", theirs.clone());
+        stop_checks_for_chain("chain-a");
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        runtime.block_on(async {
+            assert!(tokio::time::timeout(Duration::from_millis(50), mine.notified()).await.is_ok());
+            assert!(tokio::time::timeout(Duration::from_millis(50), theirs.notified()).await.is_err());
+        });
+    }
 }

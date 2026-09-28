@@ -14,7 +14,7 @@
 use tokio::io::AsyncWriteExt as _;
 
 use super::super::files::{
-    plan_upload, pump, sort_entries, ListPage, Planned, RemoteFile, RemoteListing, PAGE,
+    self, plan_upload, pump, sort_entries, ListPage, Planned, RemoteFile, RemoteListing, PAGE,
 };
 use super::super::RemoteHostSpec;
 use super::aws::{self, Body, Credentials};
@@ -92,8 +92,14 @@ pub async fn download(
         let mut target = tokio::fs::File::create(&file.local)
             .await
             .map_err(|e| format!("Couldn't write {}: {e}", file.local))?;
-        pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
-            .await?;
+        if let Err(error) =
+            pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
+                .await
+        {
+            drop(target);
+            super::super::files::discard_partial_local(&file.local, &error).await;
+            return Err(error);
+        }
         target.flush().await.map_err(|e| format!("Couldn't finish {}: {e}", file.local))?;
     }
     Ok(())
@@ -117,6 +123,13 @@ pub async fn upload(
         let at = Location::parse(&file.remote);
         if at.container.is_empty() {
             return Err("Pick a bucket to upload into — the account root only holds buckets.".into());
+        }
+        // Past a size, parts rather than one PUT — see `upload_multipart`.
+        if file.size > MULTIPART_THRESHOLD {
+            let piece = Piece { app, id, name: &file.name, total, file_index: index as u64, files: files.len() as u64 };
+            upload_multipart(spec, &creds, &at, file, &piece, &mut done).await?;
+            files::progress(app, id, &file.name, done, total, index as u64 + 1, files.len() as u64);
+            continue;
         }
         // No parent to create, unlike SFTP and FTP: a key's slashes are part of its name, and the
         // folder it appears to be in comes into existence with it.
@@ -163,6 +176,164 @@ pub async fn upload(
         }
     }
     Ok(())
+}
+
+/// Above this, a file goes up in parts.
+///
+/// A single `PUT` tops out at 5 GiB, and a failure at 4.9 of them costs the whole upload. Parts can
+/// each fail and be the only thing lost, which is worth their extra requests well before the limit.
+pub(crate) const MULTIPART_THRESHOLD: u64 = 64 * 1024 * 1024;
+
+/// The part size for a file of `size` bytes: 16 MiB, grown in whole MiB when a file would need more
+/// than the 10,000 parts S3 allows — which keeps a 5 TiB object, the largest there is, possible.
+pub(crate) fn part_size(size: u64) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    const MAX_PARTS: u64 = 10_000;
+    let needed = size.div_ceil(MAX_PARTS).div_ceil(MIB) * MIB;
+    needed.max(16 * MIB)
+}
+
+/// Where one transfer's progress goes, for a copy that is one piece of a file.
+pub(super) struct Piece<'a> {
+    pub app: &'a tauri::AppHandle,
+    pub id: &'a str,
+    pub name: &'a str,
+    pub total: u64,
+    pub file_index: u64,
+    pub files: u64,
+}
+
+/// Streams `length` bytes of `source` as one request body, counting them into the shared bar.
+///
+/// The pipe-and-join of the single `PUT`, for a slice of a file — used for S3 parts and Azure
+/// blocks alike. `send` is handed the reader half as the body.
+pub(super) async fn stream_piece<F, Fut>(
+    source: &mut tokio::fs::File,
+    length: u64,
+    piece: &Piece<'_>,
+    done: &mut u64,
+    send: F,
+) -> Result<reqwest::Response, String>
+where
+    F: FnOnce(reqwest::Body) -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, String>>,
+{
+    use tokio::io::AsyncReadExt as _;
+    let (reader, writer) = tokio::io::duplex(64 * 1024);
+    let request = send(reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(reader)));
+    let pumped = async {
+        let mut target = writer;
+        let mut slice = source.take(length);
+        let result = files::stream(
+            piece.app, piece.id, &mut slice, &mut target, piece.name, done, piece.total, piece.file_index, piece.files,
+        )
+        .await;
+        let _ = target.shutdown().await;
+        result
+    };
+    let (response, pumped) = tokio::join!(request, pumped);
+    pumped?;
+    response
+}
+
+/// One file, as an S3 multipart upload: initiate, a `PUT` per part, complete.
+///
+/// **Aborted on any failure, cancel included.** Parts that were uploaded and never completed are
+/// invisible in every listing and billed as storage until somebody aborts the upload — so an
+/// upload that stops for any reason says so to the service before it returns.
+async fn upload_multipart(
+    spec: &RemoteHostSpec,
+    creds: &Credentials,
+    at: &Location,
+    file: &Planned,
+    piece: &Piece<'_>,
+    done: &mut u64,
+) -> Result<(), String> {
+    let mut url = aws::url(spec, &at.container, &at.key)?;
+    url.query_pairs_mut().append_pair("uploads", "");
+    let response = aws::send(spec, creds, "POST", &url, &[], Body::Empty).await?;
+    if !response.status().is_success() {
+        return Err(super::explain(&format!("start uploading {}", file.remote), response).await);
+    }
+    let body = response.text().await.map_err(|e| format!("Couldn't read S3's answer: {e}"))?;
+    let upload_id = super::xml_text(&body, "UploadId")
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("S3 didn't return an upload id for {}.", file.remote))?;
+
+    let result = async {
+        let mut source = tokio::fs::File::open(&file.local)
+            .await
+            .map_err(|e| format!("Couldn't read {}: {e}", file.local))?;
+        let size = part_size(file.size);
+        let mut parts: Vec<(u32, String)> = Vec::new();
+        let mut offset = 0u64;
+        while offset < file.size {
+            let number = parts.len() as u32 + 1;
+            let length = size.min(file.size - offset);
+            let mut url = aws::url(spec, &at.container, &at.key)?;
+            url.query_pairs_mut()
+                .append_pair("partNumber", &number.to_string())
+                .append_pair("uploadId", &upload_id);
+            let content_length = vec![("content-length".to_string(), length.to_string())];
+            let response = stream_piece(&mut source, length, piece, done, |body| {
+                aws::send(spec, creds, "PUT", &url, &content_length, Body::Streamed(body))
+            })
+            .await?;
+            if !response.status().is_success() {
+                return Err(super::explain(&format!("write part {number} of {}", file.remote), response).await);
+            }
+            let etag = response
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+                .ok_or_else(|| format!("S3 accepted part {number} of {} without an ETag.", file.remote))?;
+            parts.push((number, etag));
+            offset += length;
+        }
+
+        let mut url = aws::url(spec, &at.container, &at.key)?;
+        url.query_pairs_mut().append_pair("uploadId", &upload_id);
+        let xml = complete_body(&parts);
+        let response = aws::send(
+            spec,
+            creds,
+            "POST",
+            &url,
+            &[("content-type".to_string(), "application/xml".to_string())],
+            Body::Bytes(xml.into_bytes()),
+        )
+        .await?;
+        if !response.status().is_success() {
+            return Err(super::explain(&format!("finish {}", file.remote), response).await);
+        }
+        // Like a copy, completing can fail *inside* a 200 once the headers have gone out.
+        let body = response.text().await.unwrap_or_default();
+        if body.contains("<Error") {
+            let detail = super::xml_text(&body, "Message").unwrap_or_else(|| "the upload was not completed".into());
+            return Err(format!("Couldn't finish {}: {detail}", file.remote));
+        }
+        Ok(())
+    }
+    .await;
+
+    if result.is_err() {
+        let mut url = aws::url(spec, &at.container, &at.key)?;
+        url.query_pairs_mut().append_pair("uploadId", &upload_id);
+        let _ = aws::send(spec, creds, "DELETE", &url, &[], Body::Empty).await;
+    }
+    result
+}
+
+/// The `CompleteMultipartUpload` document: every part's number and the ETag S3 gave it, in order.
+fn complete_body(parts: &[(u32, String)]) -> String {
+    let mut xml = String::from("<CompleteMultipartUpload>");
+    for (number, etag) in parts {
+        let etag = etag.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        xml.push_str(&format!("<Part><PartNumber>{number}</PartNumber><ETag>{etag}</ETag></Part>"));
+    }
+    xml.push_str("</CompleteMultipartUpload>");
+    xml
 }
 
 /// Makes a folder persist, by writing the zero-byte marker object the convention calls for.
@@ -579,6 +750,30 @@ mod tests {
             .filter_map(|block| super::super::xml_text(block, "Name"))
             .collect();
         assert_eq!(names, vec!["photos", "backups"]);
+    }
+
+    /// 16 MiB parts until a file would need more than S3's 10,000 of them — so the largest object
+    /// S3 stores, 5 TiB, still fits.
+    #[test]
+    fn a_part_is_sixteen_mebibytes_until_the_part_count_forces_more() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(part_size(100 * MIB), 16 * MIB);
+        assert_eq!(part_size(10_000 * 16 * MIB), 16 * MIB);
+        let huge = 5 * 1024 * 1024 * MIB;
+        let size = part_size(huge);
+        assert_eq!(size % MIB, 0, "whole mebibytes");
+        assert!(huge.div_ceil(size) <= 10_000, "{} parts", huge.div_ceil(size));
+        assert!(MULTIPART_THRESHOLD < 5 * 1024 * MIB, "long before the single-PUT limit");
+    }
+
+    #[test]
+    fn completing_an_upload_names_every_part_and_its_etag_in_order() {
+        let xml = complete_body(&[(1, "\"a1\"".into()), (2, "\"b2\"".into())]);
+        assert_eq!(
+            xml,
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"a1\"</ETag></Part>\
+             <Part><PartNumber>2</PartNumber><ETag>\"b2\"</ETag></Part></CompleteMultipartUpload>"
+        );
     }
 
     /// A key with an `&` in it arrives escaped, and a row named `a&amp;b.txt` would be wrong on

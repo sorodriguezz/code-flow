@@ -72,7 +72,7 @@ pub fn literal(value: Option<&str>, dialect: SqlDialect) -> Result<String, Strin
 /// hex literal — SQLite's `X'00FF'`, MySQL's `0x00FF` — need it written back *unquoted*, or the
 /// blob would be replaced by the text of its own literal. It is emitted verbatim only when it is
 /// exactly that shape and nothing but hex digits, so there is nothing in it to escape.
-fn cell_literal(cell: &DbCell, dialect: SqlDialect) -> Result<String, String> {
+pub(super) fn cell_literal(cell: &DbCell, dialect: SqlDialect) -> Result<String, String> {
     if let Some(value) = cell.value.as_deref() {
         let binary_column = {
             let t = cell.type_name.to_ascii_uppercase();
@@ -196,6 +196,30 @@ pub fn select_page(
             }
         }
     })
+}
+
+/// `SELECT * FROM t [WHERE …] [ORDER BY …]` with no page — every row, for an export that streams
+/// the result instead of holding it. The same filter and sort the grid pages with, so the file has
+/// what the grid showed, all of it.
+pub fn select_all(
+    node: &DbNodeRef,
+    dialect: SqlDialect,
+    filter: &str,
+    sort: &[DbSortKey],
+) -> Result<String, String> {
+    let target = qualify(node, dialect)?;
+    let where_clause = if filter.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", filter.trim())
+    };
+    let keys: Vec<String> = sort
+        .iter()
+        .filter(|key| !key.column.trim().is_empty())
+        .map(|key| format!("{}{}", quote_ident(&key.column, dialect), if key.descending { " DESC" } else { " ASC" }))
+        .collect();
+    let order = if keys.is_empty() { String::new() } else { format!(" ORDER BY {}", keys.join(", ")) };
+    Ok(format!("SELECT * FROM {target}{where_clause}{order}"))
 }
 
 pub fn count_rows(node: &DbNodeRef, dialect: SqlDialect, filter: &str) -> Result<String, String> {
@@ -464,6 +488,16 @@ mod tests {
         let oracle = select_page(&node(), SqlDialect::Oracle, "", &[], 20, 10).unwrap();
         assert!(oracle.ends_with("OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY"), "{oracle}");
         assert!(!oracle.contains("ORDER BY"), "{oracle}");
+    }
+
+    /// An export reads everything the grid would page through: same filter, same order, no page.
+    #[test]
+    fn an_export_selects_every_row_with_the_grids_filter_and_order() {
+        let sort = vec![DbSortKey { column: "name".into(), descending: true }];
+        let sql = select_all(&node(), SqlDialect::TSql, "active = 1", &sort).unwrap();
+        assert_eq!(sql, "SELECT * FROM [public].[users] WHERE active = 1 ORDER BY [name] DESC");
+        let plain = select_all(&node(), SqlDialect::Postgres, "", &[]).unwrap();
+        assert_eq!(plain, "SELECT * FROM \"public\".\"users\"");
     }
 
     #[test]

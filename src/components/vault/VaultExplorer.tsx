@@ -14,6 +14,7 @@ import { useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
+  FileDown,
   FileUp,
   Folder,
   FolderPlus,
@@ -395,6 +396,15 @@ export function VaultExplorer() {
           data-tour="vault-import"
         >
           <FileUp size={13} />
+        </button>
+        <button
+          type="button"
+          title={t("vault.export.button")}
+          aria-label={t("vault.export.button")}
+          onClick={() => useVaultModalStore.getState().openVaultModal({ kind: "export" })}
+          className={ICON_BUTTON}
+        >
+          <FileDown size={13} />
         </button>
         <button
           type="button"

@@ -45,6 +45,10 @@ export const AI_TASKS: AiTaskDef[] = [
   { key: "fix", labelKey: "task.fix", hintKey: "task.fixHint", agenticOnly: true, area: "code" },
   { key: "conflict", labelKey: "task.conflict", hintKey: "task.conflictHint", area: "git" },
   { key: "inline", labelKey: "task.inline", hintKey: "task.inlineHint", area: "code", modelForKey: "task.inlineModelFor" },
+  // Text-only like `inline`: the cells go to the engine on stdin and what comes back is shown as a
+  // diff to accept. Its own row because a notebook is analysis more often than application code,
+  // and which engine explains a traceback is not the one a team picks for a quick rewrite.
+  { key: "notebook", labelKey: "task.notebook", hintKey: "task.notebookHint", area: "code", modelForKey: "task.notebookModelFor" },
   // Text-only for the same reason `inline` is: the schema is read by CodeFlow's own driver and put
   // on stdin, so the engine never reaches the database and any provider can answer.
   { key: "db_query", labelKey: "task.dbQuery", hintKey: "task.dbQueryHint", area: "data", modelForKey: "task.dbQueryModelFor" },

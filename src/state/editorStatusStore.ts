@@ -27,6 +27,8 @@ export interface EditorStatus {
   tabSize: number;
   insertSpaces: boolean;
   eol: LineEnding;
+  /** How the file was decoded: `UTF-8`, or the encoding of one shown read-only (`WINDOWS-1252`). */
+  encoding: string;
   languageId: string;
   /** Monaco's display name for it — "TypeScript", "HTML" — or the id when it has none. */
   languageName: string;
@@ -68,6 +70,7 @@ function sameStatus(a: EditorStatus, b: EditorStatus): boolean {
     a.tabSize === b.tabSize &&
     a.insertSpaces === b.insertSpaces &&
     a.eol === b.eol &&
+    a.encoding === b.encoding &&
     a.languageId === b.languageId &&
     a.languageName === b.languageName
   );

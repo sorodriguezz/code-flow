@@ -600,8 +600,13 @@ fn rehome_vault_rows(conn: &Connection, from: &str) -> rusqlite::Result<()> {
 pub fn delete_workspace(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     rehome_global_rows(&tx, id)?;
+    // The cascade takes the Remote hosts' rows but not their keychain entries, which are keyed by
+    // host id — so the ids are read first and forgotten once the delete has committed.
+    let remote_hosts = super::remote_queries::host_ids(&tx, id)?;
     tx.execute("DELETE FROM workspaces WHERE id = ?1", params![id])?;
-    tx.commit()
+    tx.commit()?;
+    super::remote_queries::forget_hosts(&remote_hosts);
+    Ok(())
 }
 
 pub fn update_workspace_color(conn: &Connection, id: &str, color: &str) -> rusqlite::Result<()> {
@@ -635,6 +640,9 @@ pub fn create_project(conn: &Connection, input: NewProject) -> rusqlite::Result<
         gitlab_host: input.gitlab_host,
         sort_order: 0,
         created_at: now(),
+        // Never set at creation — see the note on `Project::bitbucket_workspace`.
+        bitbucket_workspace: None,
+        bitbucket_repo: None,
     };
     conn.execute(
         "INSERT INTO projects (id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, github_owner, github_repo, github_host, gitlab_project, gitlab_host, sort_order, created_at)
@@ -681,10 +689,12 @@ fn map_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
         gitlab_host: row.get(14)?,
         sort_order: row.get(15)?,
         created_at: row.get(16)?,
+        bitbucket_workspace: row.get(17)?,
+        bitbucket_repo: row.get(18)?,
     })
 }
 
-const PROJECT_COLUMNS: &str = "id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, github_owner, github_repo, github_host, gitlab_project, gitlab_host, sort_order, created_at";
+const PROJECT_COLUMNS: &str = "id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, github_owner, github_repo, github_host, gitlab_project, gitlab_host, sort_order, created_at, bitbucket_workspace, bitbucket_repo";
 
 pub fn list_projects(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<Project>> {
     let sql = format!(
@@ -786,7 +796,22 @@ pub fn link_project_gitlab(
     Ok(())
 }
 
-/// Clears every VCS link — Azure DevOps, GitHub *and* GitLab — on a project. A project is linked
+/// Links a project to a Bitbucket Cloud repository: its workspace and its repository slug. Sets only
+/// Bitbucket's columns, like its siblings — clearing the others is [`unlink_project`]'s job.
+pub fn link_project_bitbucket(
+    conn: &Connection,
+    id: &str,
+    bitbucket_workspace: &str,
+    bitbucket_repo: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE projects SET bitbucket_workspace = ?1, bitbucket_repo = ?2 WHERE id = ?3",
+        params![bitbucket_workspace, bitbucket_repo, id],
+    )?;
+    Ok(())
+}
+
+/// Clears every VCS link — Azure DevOps, GitHub, GitLab *and* Bitbucket — on a project. A project is linked
 /// to at most one host at a time, so "disconnect" wipes whichever one is set without the caller
 /// needing to know which provider it was.
 ///
@@ -798,7 +823,8 @@ pub fn unlink_project(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE projects SET ado_org = NULL, ado_project = NULL, ado_repo_id = NULL, \
          github_owner = NULL, github_repo = NULL, github_host = NULL, \
-         gitlab_project = NULL, gitlab_host = NULL WHERE id = ?1",
+         gitlab_project = NULL, gitlab_host = NULL, \
+         bitbucket_workspace = NULL, bitbucket_repo = NULL WHERE id = ?1",
         params![id],
     )?;
     Ok(())
@@ -1346,6 +1372,27 @@ const MAX_STEP_ATTEMPTS: i64 = 3;
 /// past the point where the loop is the problem.
 pub const MAX_CHAIN_DISPATCHES: i64 = 128;
 
+/// The reason a chain parks under when its engine could not take the turn at all, by what
+/// [`crate::ai::classify_failure`] made of the error — or `None` for a failure worth retrying.
+///
+/// **These three are not the step failing.** A plan that runs out of quota halfway, whose CLI is
+/// signed out, or whose CLI is not installed would hit the same wall on every retry, and the retries
+/// are what used to kill it: three instant attempts, `failed`, and a "Reintentar" with no attempts
+/// left to spend — a chain promised to stop and wait, dead in seconds instead. So these park the
+/// plan and hand the attempt back; what the user fixes (the window reopening, a sign-in, an
+/// install) is exactly what "Reanudar" then continues from.
+///
+/// Keys rather than prose, like every other `last_reason`: the reader's client renders them in the
+/// reader's language. The provider's own words stay on the step's `last_error`, untouched.
+pub fn chain_pause_reason(error: &str) -> Option<&'static str> {
+    match crate::ai::classify_failure(error).kind {
+        crate::ai::AiFailureKind::Quota => Some("chain.pausedQuota"),
+        crate::ai::AiFailureKind::AuthRequired => Some("chain.pausedAuth"),
+        crate::ai::AiFailureKind::CliMissing => Some("chain.pausedCliMissing"),
+        crate::ai::AiFailureKind::Overloaded | crate::ai::AiFailureKind::Other => None,
+    }
+}
+
 /// How many repositories one chain may work across.
 ///
 /// The ceiling is not the database's, it is the clock's: the steps of a chain run one after another
@@ -1501,7 +1548,7 @@ fn memory_notes(conn: &Connection, chain_id: &str, before: i64) -> rusqlite::Res
 /// multiply the chain row by its repositories.
 const CHAIN_COLUMNS: &str = "id, project_id, title, goal, status, current_step, step_count, last_reason, \
      created_at, updated_at, agent_project_id, pinned, kind, work_item_provider, work_item_org, \
-     work_item_id, work_item_key, work_item_url, work_item_title, dispatches, \
+     work_item_id, work_item_key, work_item_url, work_item_title, dispatches, resume_at, \
      (SELECT COUNT(*) FROM agent_chain_repos r WHERE r.chain_id = agent_chains.id)";
 
 /// The same columns qualified for the join in [`list_agent_chains`]. Written out rather than
@@ -1510,7 +1557,8 @@ const CHAIN_COLUMNS: &str = "id, project_id, title, goal, status, current_step, 
 const CHAIN_COLUMNS_QUALIFIED: &str = "c.id, c.project_id, c.title, c.goal, c.status, c.current_step, \
      c.step_count, c.last_reason, c.created_at, c.updated_at, c.agent_project_id, c.pinned, c.kind, \
      c.work_item_provider, c.work_item_org, c.work_item_id, c.work_item_key, c.work_item_url, \
-     c.work_item_title, c.dispatches, (SELECT COUNT(*) FROM agent_chain_repos r WHERE r.chain_id = c.id)";
+     c.work_item_title, c.dispatches, c.resume_at, \
+     (SELECT COUNT(*) FROM agent_chain_repos r WHERE r.chain_id = c.id)";
 
 fn map_chain(row: &rusqlite::Row) -> rusqlite::Result<AgentChain> {
     Ok(AgentChain {
@@ -1534,7 +1582,8 @@ fn map_chain(row: &rusqlite::Row) -> rusqlite::Result<AgentChain> {
         work_item_url: row.get(17)?,
         work_item_title: row.get(18)?,
         dispatches: row.get(19)?,
-        repo_count: row.get(20)?,
+        resume_at: row.get(20)?,
+        repo_count: row.get(21)?,
     })
 }
 
@@ -1676,12 +1725,42 @@ fn previous_output(
     .optional()
 }
 
+/// Every transition also disarms an automatic resume. `resume_at` is consent the user gave to one
+/// particular pause — "carry on when the quota window reopens" — and a chain that has moved since,
+/// whichever way, is no longer parked on the thing that was agreed to.
 fn set_chain_state(conn: &Connection, id: &str, status: &str, reason: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE agent_chains SET status = ?2, last_reason = ?3, updated_at = ?4 WHERE id = ?1",
+        "UPDATE agent_chains SET status = ?2, last_reason = ?3, resume_at = 0, updated_at = ?4 WHERE id = ?1",
         params![id, status, reason, now()],
     )?;
     Ok(())
+}
+
+/// Arms (or, with `0`, disarms) the automatic resume of a chain paused by
+/// [`chain_pause_reason`], at `resume_at` seconds since the epoch.
+///
+/// Only a paused chain takes one: armed on anything else it would be a timer waiting to move a
+/// plan that is already moving, or one the user stopped for a reason of their own. The frontend
+/// holds the timer — it is the only thing that dispatches — and this row is what lets a reloaded
+/// webview arm it again. A *process* restart does not: see [`recover_after_restart`].
+pub fn set_chain_resume_at(conn: &Connection, chain_id: &str, resume_at: i64) -> rusqlite::Result<Option<AgentChain>> {
+    conn.execute(
+        "UPDATE agent_chains SET resume_at = ?2 WHERE id = ?1 AND (status = 'paused' OR ?2 = 0)",
+        params![chain_id, resume_at.max(0)],
+    )?;
+    chain_row(conn, chain_id)
+}
+
+/// Every chain waiting on an automatic resume, in **every** workspace — `(chain id, epoch seconds)`.
+///
+/// Unscoped for the reason [`list_gated_chains`] is: a timer the user armed in one workspace has to
+/// fire while they are looking at another, and the chain list this window holds is one workspace's.
+pub fn list_scheduled_resumes(conn: &Connection) -> rusqlite::Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, resume_at FROM agent_chains WHERE status = 'paused' AND resume_at > 0 ORDER BY resume_at",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
 }
 
 /// Chains of the workspace, newest activity first. Joined against `projects` rather than storing a
@@ -1906,6 +1985,7 @@ fn create_chain_inner(
         step_count: rows.len() as i64,
         last_reason: String::new(),
         dispatches: 0,
+        resume_at: 0,
         created_at: stamp.clone(),
         updated_at: stamp.clone(),
         kind: kind.to_string(),
@@ -2202,6 +2282,31 @@ pub fn set_chain_step_input(conn: &Connection, step_id: &str, input: &str) -> ru
         params![step_id, input, now()],
     )?;
     Ok(())
+}
+
+/// The phase of the story-realizer step a run is executing, if the run is one — `"analyze"` or
+/// `"implement"`.
+///
+/// Asked by the turn itself (`claude_cmd::send_chat_message`), which is what makes a story's
+/// analysis pass read-only on the server's word rather than the client's: the claim recorded this
+/// run id on the step before the run existed, so nothing the webview sends can move a turn out of
+/// the phase its step is in.
+///
+/// **Story runs only** (`kind = 'story'`, which only [`create_story_chain`] makes). A hand-authored
+/// chain can carry the same phase words — templates keep them — and it is deliberately left free:
+/// its instructions are the user's, and the read-only guarantee is the realizer's reason to exist
+/// beside it. `None` for every turn that is not a running realizer step.
+pub fn running_story_step_phase(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<String>> {
+    if run_id.trim().is_empty() {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT s.phase FROM agent_chain_steps s JOIN agent_chains c ON c.id = s.chain_id
+         WHERE s.run_id = ?1 AND s.status = 'running' AND c.kind = 'story' LIMIT 1",
+        params![run_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 /// Takes one step out of the plan, or puts it back.
@@ -2524,21 +2629,28 @@ pub fn chain_summary_sections(
 ///
 /// Both come off the *step* rather than off the chain — a multi-repo plan runs each step somewhere
 /// else, and a check that ran in the chain's primary repository while its step edited another would
-/// pass or fail on the wrong tree. `None` when there is no check, or when the repository it named
-/// has left the workspace.
-pub fn chain_step_check(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<(String, String)>> {
-    let row: Option<(String, Option<String>)> = conn
+/// pass or fail on the wrong tree. `None` when there is no check, when the repository it named
+/// has left the workspace, or when the plan has been aborted — a check started for a plan the user
+/// already stopped would run a test suite nobody will read the verdict of.
+///
+/// Answers `(chain id, command, working copy)`: the chain is what an abort finds the check by.
+pub fn chain_step_check(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<(String, String, String)>> {
+    let row: Option<(String, String, Option<String>, String)> = conn
         .query_row(
-            "SELECT s.check_command, p.local_path
-               FROM agent_chain_steps s LEFT JOIN projects p ON p.id = s.project_id
+            "SELECT s.chain_id, s.check_command, p.local_path, COALESCE(c.status, '')
+               FROM agent_chain_steps s
+               LEFT JOIN projects p ON p.id = s.project_id
+               LEFT JOIN agent_chains c ON c.id = s.chain_id
               WHERE s.id = ?1",
             params![step_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
     Ok(match row {
-        Some((command, Some(path))) if !command.trim().is_empty() && !path.trim().is_empty() => {
-            Some((command.trim().to_string(), path))
+        Some((chain_id, command, Some(path), status))
+            if !command.trim().is_empty() && !path.trim().is_empty() && status != "aborted" =>
+        {
+            Some((chain_id, command.trim().to_string(), path))
         }
         _ => None,
     })
@@ -2558,6 +2670,32 @@ pub fn complete_chain_step(
 ) -> rusqlite::Result<Option<AgentChain>> {
     let Some(step) = step_row(conn, step_id)? else { return Ok(None) };
     let chain_id = step.chain_id.clone();
+
+    // An aborted plan is over, and nothing arriving late may start it again. Late is the ordinary
+    // case, not a corner: Stop cancels the running turn and aborts the chain as two calls, and the
+    // cancelled turn's settle — or a check the abort killed — can land after the abort. Every arm
+    // below ends by moving the chain (`queued`, `paused`), which on an aborted row was a
+    // resurrection. So only the step is written: what it produced if it answered, and otherwise
+    // that it is no longer running.
+    if chain_row(conn, &chain_id)?.is_some_and(|chain| chain.status == "aborted") {
+        if outcome == "done" {
+            let (clamped, truncated) = clamp_handoff(output_text.trim());
+            conn.execute(
+                "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3,
+                    run_id = '', updated_at = ?4
+                 WHERE id = ?1",
+                params![step.id, clamped, truncated, now()],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE agent_chain_steps SET status = CASE WHEN status = 'running' THEN 'pending' ELSE status END,
+                    run_id = '', updated_at = ?2
+                 WHERE id = ?1",
+                params![step.id, now()],
+            )?;
+        }
+        return chain_row(conn, &chain_id);
+    }
 
     match outcome {
         "done" => {
@@ -2631,6 +2769,25 @@ pub fn complete_chain_step(
             jump_to(conn, &chain_id, step.step_index, target, &note)?;
             set_chain_state(conn, &chain_id, "queued", "chain.checkFailed")?;
         }
+        // The engine could not take the turn at all — see [`chain_pause_reason`]. Parked, not
+        // failed, and **without spending the attempt**: the claim counted one (and one dispatch)
+        // before the engine was asked, and a refusal that ran nothing must not bring the step any
+        // closer to its cap. The step goes back to `pending` so "Reanudar" re-sends it as it was;
+        // the provider's own words stay on it, which is where the pane reads the reset time from.
+        "error" if chain_pause_reason(reason).is_some() => {
+            let key = chain_pause_reason(reason).unwrap_or_default();
+            conn.execute(
+                "UPDATE agent_chain_steps SET status = 'pending', run_id = '', last_error = ?2,
+                    attempts = MAX(attempts - 1, 0), updated_at = ?3
+                 WHERE id = ?1",
+                params![step.id, reason, now()],
+            )?;
+            conn.execute(
+                "UPDATE agent_chains SET dispatches = MAX(dispatches - 1, 0) WHERE id = ?1",
+                params![chain_id],
+            )?;
+            set_chain_state(conn, &chain_id, "paused", key)?;
+        }
         "error" => {
             let retryable = step.attempts < MAX_STEP_ATTEMPTS;
             conn.execute(
@@ -2643,11 +2800,25 @@ pub fn complete_chain_step(
         // Back to `pending`, never to `error`: the turn was either stopped (never persisted) or
         // refused before it ran (the repository was busy), so re-sending the identical message
         // cannot duplicate anything.
+        //
+        // A refusal also gives back what the claim spent on it. A busy repository is somebody else
+        // working, not this step failing, and counting it used to exhaust a step in three quick
+        // bounces while the user typed in another task of the same repository. A *stopped* turn
+        // keeps its count: it ran, for as long as it was let.
         "cancelled" | "requeue" => {
+            let refund = outcome == "requeue";
             conn.execute(
-                "UPDATE agent_chain_steps SET status = 'pending', run_id = '', updated_at = ?2 WHERE id = ?1",
-                params![step.id, now()],
+                "UPDATE agent_chain_steps SET status = 'pending', run_id = '',
+                    attempts = CASE WHEN ?3 THEN MAX(attempts - 1, 0) ELSE attempts END, updated_at = ?2
+                 WHERE id = ?1",
+                params![step.id, now(), refund],
             )?;
+            if refund {
+                conn.execute(
+                    "UPDATE agent_chains SET dispatches = MAX(dispatches - 1, 0) WHERE id = ?1",
+                    params![chain_id],
+                )?;
+            }
             let next = if outcome == "requeue" { "queued" } else { "paused" };
             set_chain_state(conn, &chain_id, next, reason)?;
         }
@@ -2742,10 +2913,27 @@ pub fn skip_chain_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<Op
     chain_row(conn, chain_id)
 }
 
-/// Puts a failed or interrupted step back in the queue. `attempts` is deliberately not reset —
-/// three tries is three tries, however they were spent.
+/// Puts a failed or interrupted step back in the queue — "Reintentar".
+///
+/// **A person pressing Retry buys the step a fresh round of attempts.** The cap exists to stop the
+/// plan retrying *itself* into a wall; once it has, the only way forward used to be a re-run from
+/// the step, because this refused an exhausted step outright and left the button on screen doing
+/// nothing. Spending more is the user's call to make, the same one [`rerun_chain_from`] honours, and
+/// each round still ends at the cap, so nothing here can spin.
+///
+/// Also reaches the step a failed chain stopped *before*: a plan that exhausted a step through its
+/// own check loop leaves that step `pending` (the claim refused it) rather than `error`, and it is
+/// still the step the user is asking to retry.
+///
+/// The dispatch budget is the one thing a retry cannot buy back — it is the bound on the whole plan
+/// (see [`MAX_CHAIN_DISPATCHES`]) — so a chain that spent it stays failed.
 pub fn retry_chain_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<AgentChain>> {
-    let target: Option<AgentChainStep> = conn
+    let Some(chain) = chain_row(conn, chain_id)? else { return Ok(None) };
+    if chain.dispatches >= MAX_CHAIN_DISPATCHES {
+        set_chain_state(conn, chain_id, "failed", "chain.dispatchesExhausted")?;
+        return chain_row(conn, chain_id);
+    }
+    let failed = conn
         .query_row(
             &format!(
                 "SELECT {STEP_COLUMNS} {STEP_FROM}
@@ -2756,13 +2944,15 @@ pub fn retry_chain_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<O
             map_step,
         )
         .optional()?;
-    let Some(step) = target else { return chain_row(conn, chain_id) };
-    if step.attempts >= MAX_STEP_ATTEMPTS {
-        set_chain_state(conn, chain_id, "failed", "chain.attemptsExhausted")?;
-        return chain_row(conn, chain_id);
-    }
+    let target = match failed {
+        Some(step) => Some(step),
+        None if chain.status == "failed" => next_pending_step(conn, chain_id)?,
+        None => None,
+    };
+    let Some(step) = target else { return Ok(Some(chain)) };
     conn.execute(
-        "UPDATE agent_chain_steps SET status = 'pending', run_id = '', last_error = '', updated_at = ?2
+        "UPDATE agent_chain_steps SET status = 'pending', run_id = '', last_error = '', attempts = 0,
+            updated_at = ?2
          WHERE id = ?1",
         params![step.id, now()],
     )?;
@@ -2812,9 +3002,28 @@ pub fn rerun_chain_from(
     chain_row(conn, chain_id)
 }
 
+/// "Reanudar": hands a parked chain back to the scheduler. Only from a state the user or the engine
+/// parked it in — a failed chain goes through [`retry_chain_step`].
+///
+/// After a restart ([`recover_after_restart`] parks with `chain.interrupted`), the step it cut off
+/// (`interrupted`), or whose turn landed as an error while the app was closing, is put back in the
+/// queue first. The scheduler only ever picks `pending` steps, so resuming without this skipped the
+/// very step the plan had stopped on and carried on from the one after it, with nothing on screen
+/// saying a step had been dropped. Only after a restart: an `error` row in any other paused plan is
+/// one a re-run deliberately moved past. Attempts are left as they were — the cap still counts, and
+/// [`retry_chain_step`] is where a person buys more.
 pub fn resume_chain(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<AgentChain>> {
     let Some(chain) = chain_row(conn, chain_id)? else { return Ok(None) };
     if chain.status == "paused" {
+        if chain.last_reason == "chain.interrupted" {
+            conn.execute(
+                "UPDATE agent_chain_steps SET status = 'pending', run_id = '', updated_at = ?2
+                 WHERE id = (SELECT id FROM agent_chain_steps
+                              WHERE chain_id = ?1 AND status IN ('interrupted', 'error')
+                              ORDER BY step_index LIMIT 1)",
+                params![chain_id, now()],
+            )?;
+        }
         set_chain_state(conn, chain_id, "queued", "")?;
     }
     chain_row(conn, chain_id)
@@ -2911,7 +3120,8 @@ pub fn harvest_chain_step(conn: &Connection, step_id: &str) -> rusqlite::Result<
     Ok(HarvestOutcome { chain: settled, gone: false })
 }
 
-/// Run once per launch, from `db::init`, before any UI exists.
+/// Run once per launch, from `db::finish` — the last step of opening the database in `setup` (see
+/// `boot_guard::open`) — before any UI exists.
 ///
 /// This is where "the app was killed mid-step" is answered, and it deliberately lives here rather
 /// than in a store: the frontend's own demotion only runs if the user opens the Agents view, so a
@@ -2968,6 +3178,12 @@ pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
          WHERE status IN ('running', 'queued')",
         params![now()],
     )?;
+    // An automatic resume the user armed does not survive the process either. It was consent to
+    // carry on *while the app was running* — "when the quota reopens tonight" — and honouring it
+    // at the next launch would dispatch an engine the instant the app opens, into a tree nobody has
+    // looked at since, which is the one thing this function exists to prevent. The pause and its
+    // reason stay; only the timer goes.
+    conn.execute("UPDATE agent_chains SET resume_at = 0 WHERE resume_at <> 0", [])?;
     // A batch still claiming to be generating is one whose app was killed mid-run: there is no
     // process left to finish it, and leaving it would show a spinner that never resolves. Its
     // stories, if the previous run had already written any, are untouched.
@@ -3181,14 +3397,16 @@ pub fn add_activity_log(
 const ACTIVITY_COLUMNS: &str =
     "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id";
 
-/// [`ACTIVITY_COLUMNS`] with `trace` replaced by a literal `NULL`, so [`read_activity_row`] can
-/// read it unchanged and the turn comes back with `trace: None`.
+/// [`ACTIVITY_COLUMNS`] with `trace` replaced by [`TRACE_PRESENCE`], so [`read_activity_row`] can
+/// read it unchanged and the turn comes back with `trace: Some("")` when it has one, `None` when not.
 ///
 /// This exists because reopening a conversation returned every turn *with* its trace: 30 turns at
 /// the 600 KB ceiling is ~18 MB in a single IPC response, which is a visible freeze on the click
 /// that opens it. A trace read this way is fetched per turn, on demand, by [`get_turn_trace`].
 const ACTIVITY_COLUMNS_NO_TRACE: &str =
-    "id, project_id, session_id, engine_session_id, question, answer, NULL, created_at, response_time_ms, is_error, provider, model, engine_version, account_id";
+    "id, project_id, session_id, engine_session_id, question, answer, \
+     CASE WHEN trace IS NULL OR trace = '' OR trace = '[]' THEN NULL ELSE '' END, \
+     created_at, response_time_ms, is_error, provider, model, engine_version, account_id";
 
 fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> {
     Ok(ActivityLogEntry {
@@ -3384,12 +3602,22 @@ pub fn get_conversation_messages_lite(
 /// `None` covers both "this turn never had one" (it predates traces, or the engine printed
 /// nothing) and "no such row" — the caller draws no disclosure either way, which is exactly what
 /// the eager path does today with a `null` trace.
+///
+/// The ids are UUIDs, so one lookup serves both places a turn's trace is kept: `activity_log` (the
+/// repository chat and the agent tasks) and `chat_messages` (the chat workspace). One disclosure,
+/// one command, whichever transcript it is drawn in.
 pub fn get_turn_trace(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
-    conn.query_row(
-        "SELECT trace FROM activity_log WHERE id = ?1",
-        params![id],
-        |row| row.get::<_, Option<String>>(0),
-    )
+    let logged = conn
+        .query_row("SELECT trace FROM activity_log WHERE id = ?1", params![id], |row| {
+            row.get::<_, Option<String>>(0)
+        })
+        .optional()?;
+    if let Some(trace) = logged {
+        return Ok(trace);
+    }
+    conn.query_row("SELECT trace FROM chat_messages WHERE id = ?1", params![id], |row| {
+        row.get::<_, Option<String>>(0)
+    })
     .optional()
     .map(Option::flatten)
 }
@@ -3948,11 +4176,33 @@ pub fn set_doc_page_target(
     wiki_name: &str,
     page_path: &str,
 ) -> rusqlite::Result<()> {
+    // A target that points somewhere else forgets the version tag it held: that tag names a version
+    // of the *old* page, and sending it to a different one would be refused for the wrong reason.
+    // `SET` expressions read the row as it was, so the comparison is against the old target.
     conn.execute(
-        "UPDATE doc_pages SET ado_org = ?2, ado_project = ?3, wiki_id = ?4, wiki_name = ?5, \
-         page_path = ?6, updated_at = ?7 WHERE id = ?1",
+        "UPDATE doc_pages SET \
+            wiki_etag = CASE WHEN ado_org = ?2 AND ado_project = ?3 AND wiki_id = ?4 AND page_path = ?6 \
+                             THEN wiki_etag ELSE '' END, \
+            ado_org = ?2, ado_project = ?3, wiki_id = ?4, wiki_name = ?5, \
+            page_path = ?6, updated_at = ?7 WHERE id = ?1",
         params![id, org, project, wiki_id, wiki_name, page_path, now()],
     )?;
+    Ok(())
+}
+
+/// The version of the wiki page this document last read or wrote — what its next publish sends as
+/// `If-Match`. Empty when it has never been read from or written to the wiki. Kept off `DocPage`
+/// on purpose: nothing in the webview has a use for it, and a field there is one more thing a
+/// client could send back stale.
+pub fn doc_page_etag(conn: &Connection, id: &str) -> rusqlite::Result<String> {
+    conn.query_row("SELECT wiki_etag FROM doc_pages WHERE id = ?1", params![id], |row| row.get(0))
+        .optional()
+        .map(Option::unwrap_or_default)
+}
+
+/// Records the version a document now corresponds to — after an import, a publish, or a reload.
+pub fn set_doc_page_etag(conn: &Connection, id: &str, etag: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE doc_pages SET wiki_etag = ?2 WHERE id = ?1", params![id, etag])?;
     Ok(())
 }
 
@@ -4741,6 +4991,51 @@ mod tests {
         assert!(gone.chain.is_none());
     }
 
+    /// What makes a story's analysis pass read-only on the server's word: the run id the claim
+    /// bound to the step names its phase, only while the step is running, and only for a story run
+    /// — a hand-authored chain carrying the same phase word is left as free as it always was.
+    #[test]
+    fn a_running_story_steps_phase_is_found_by_its_run() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, project) = workspace_with_project(&conn, "phase");
+        let agent =
+            upsert_workspace_agent(&conn, None, &ws, "Bot", "role", "claude", "sonnet", "", true, None).unwrap();
+        let item = crate::db::models::NewStoryWorkItem {
+            provider: "azure".into(),
+            id: 7,
+            title: "Exportar a CSV".into(),
+            body: "Como usuario quiero…".into(),
+            ..Default::default()
+        };
+        let story =
+            create_story_chain(&conn, &[project.clone()], "Historia", "", &agent.id, &agent.id, "", &item).unwrap();
+        resume_chain(&conn, &story.chain.id).unwrap();
+        assert_eq!(running_story_step_phase(&conn, "run-story").unwrap(), None, "nothing claimed yet");
+
+        let step = claim_next_chain_step(&conn, &story.chain.id, "run-story").unwrap().step.unwrap();
+        assert_eq!(running_story_step_phase(&conn, "run-story").unwrap().as_deref(), Some("analyze"));
+        assert_eq!(running_story_step_phase(&conn, "some-other-run").unwrap(), None);
+        assert_eq!(running_story_step_phase(&conn, "").unwrap(), None, "a blank id names no step");
+
+        complete_chain_step(&conn, &step.id, "done", "VERDICT: TOUCHES", "").unwrap();
+        assert_eq!(running_story_step_phase(&conn, "run-story").unwrap(), None, "a finished step is no longer running");
+
+        // A hand-authored chain whose step says "analyze" is not a story run.
+        let chain = create_agent_chain(
+            &conn,
+            &[project],
+            "plan",
+            "objetivo",
+            &[NewChainStep { agent_id: agent.id, instruction: "lee".into(), phase: "analyze".into(), ..Default::default() }],
+            "",
+        )
+        .unwrap();
+        resume_chain(&conn, &chain.chain.id).unwrap();
+        claim_next_chain_step(&conn, &chain.chain.id, "run-chain").unwrap();
+        assert_eq!(running_story_step_phase(&conn, "run-chain").unwrap(), None);
+    }
+
     /// A workspace with one repository, for the cross-workspace tests below — `fixture` makes one
     /// and these need two.
     fn workspace_with_project(conn: &Connection, name: &str) -> (String, String) {
@@ -5296,6 +5591,29 @@ mod tests {
         assert_eq!(list_doc_pages(&conn, &workspace).unwrap().len(), 1);
     }
 
+    /// A document remembers the wiki version it was read or written at, and forgets it the moment
+    /// its target points at a different page — sending that tag to another page would be refused
+    /// for the wrong reason.
+    #[test]
+    fn a_documents_wiki_version_belongs_to_its_target() {
+        let (conn, project) = fixture();
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+        let doc = create_doc_page(&conn, &workspace, None, "workspace", "Arquitectura").unwrap();
+        assert_eq!(doc_page_etag(&conn, &doc.id).unwrap(), "", "never read, never published");
+
+        set_doc_page_target(&conn, &doc.id, "acme", "Plataforma", "wiki-1", "Plataforma.wiki", "/Arquitectura").unwrap();
+        set_doc_page_etag(&conn, &doc.id, "\"v1\"").unwrap();
+        // The same target again (a rename of the wiki's display name, say) keeps it.
+        set_doc_page_target(&conn, &doc.id, "acme", "Plataforma", "wiki-1", "Wiki", "/Arquitectura").unwrap();
+        assert_eq!(doc_page_etag(&conn, &doc.id).unwrap(), "\"v1\"");
+        // Another page does not.
+        set_doc_page_target(&conn, &doc.id, "acme", "Plataforma", "wiki-1", "Wiki", "/Otra").unwrap();
+        assert_eq!(doc_page_etag(&conn, &doc.id).unwrap(), "");
+        assert_eq!(doc_page_etag(&conn, "missing").unwrap(), "");
+    }
+
     /// A row still claiming to be mid-generation after a restart would show a spinner nothing is
     /// going to stop, so the recovery pass demotes it **on disk** — and the document it had already
     /// written survives that, because a killed run's work is still work.
@@ -5741,6 +6059,229 @@ mod tests {
         let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
         assert_eq!(steps[0].status, "done");
         assert_eq!(steps[0].output_text, "el plan", "the failed attempt left no residue on it");
+    }
+
+    /// Out of quota, signed out or with no CLI, a chain **parks and waits** — it does not retry
+    /// itself to death. This is the bug the three instant attempts produced: a plan that hit the
+    /// quota halfway was `failed` within seconds, with "Reintentar" left pointing at a step whose
+    /// attempts were spent.
+    #[test]
+    fn an_engine_that_cannot_run_parks_the_chain_without_spending_an_attempt() {
+        let cases = [
+            ("QUOTA_EXCEEDED::You've hit your session limit · resets 12am (America/Santiago)", "chain.pausedQuota"),
+            ("Failed to authenticate: OAuth session expired and could not be refreshed", "chain.pausedAuth"),
+            ("failed to launch 'agy': No such file or directory (os error 2)", "chain.pausedCliMissing"),
+        ];
+        for (error, reason) in cases {
+            let (conn, project) = fixture();
+            let chain_id = queued_chain(&conn, &project, 2).chain.id;
+
+            // Two refusals in a row: however many times it hits the wall, nothing is spent.
+            for run in ["run-1", "run-2"] {
+                let step = claim_next_chain_step(&conn, &chain_id, run).unwrap().step.unwrap();
+                let chain = complete_chain_step(&conn, &step.id, "error", "", error).unwrap().unwrap();
+                assert_eq!(chain.status, "paused", "{reason}: parked, not failed and not queued");
+                assert_eq!(chain.last_reason, reason);
+                assert_eq!(chain.dispatches, 0, "{reason}: the dispatch it never ran is given back");
+
+                let parked = step_row(&conn, &step.id).unwrap().unwrap();
+                assert_eq!(parked.status, "pending", "so Reanudar re-sends it as it was");
+                assert_eq!(parked.attempts, 0, "{reason}: the attempt is given back");
+                assert_eq!(parked.last_error, error, "the provider's own words are kept, untouched");
+
+                // Nothing moves a paused chain by itself: the scheduler refuses to claim from it.
+                assert_eq!(claim_next_chain_step(&conn, &chain_id, "idle").unwrap().kind, "idle");
+                resume_chain(&conn, &chain_id).unwrap();
+            }
+        }
+    }
+
+    /// The other half of the split: a provider having a bad moment is still retried by the plan
+    /// itself, and those retries do count.
+    #[test]
+    fn an_overloaded_provider_is_still_retried_and_counted() {
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 1).chain.id;
+        let step = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        let chain = complete_chain_step(&conn, &step.id, "error", "", "API Error: 529 Overloaded").unwrap().unwrap();
+        assert_eq!(chain.status, "queued");
+        assert_eq!(step_row(&conn, &step.id).unwrap().unwrap().attempts, 1);
+    }
+
+    /// "Reintentar" is a person deciding to spend more, and it has to work once the plan has given
+    /// up — which is precisely when it is pressed. It used to refuse an exhausted step and leave the
+    /// button doing nothing.
+    #[test]
+    fn retry_buys_an_exhausted_step_a_fresh_round() {
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 1).chain.id;
+        for attempt in 1..=MAX_STEP_ATTEMPTS {
+            let step = claim_next_chain_step(&conn, &chain_id, &format!("run-{attempt}")).unwrap().step.unwrap();
+            complete_chain_step(&conn, &step.id, "error", "", "boom").unwrap();
+        }
+        assert_eq!(chain_row(&conn, &chain_id).unwrap().unwrap().status, "failed");
+
+        let chain = retry_chain_step(&conn, &chain_id).unwrap().unwrap();
+        assert_eq!(chain.status, "queued");
+        let claim = claim_next_chain_step(&conn, &chain_id, "run-again").unwrap();
+        assert_eq!(claim.kind, "run", "the step runs again");
+        assert_eq!(claim.step.unwrap().attempts, 1, "on a fresh count");
+    }
+
+    /// A check loop that exhausted its step leaves that step `pending`, not `error` — and Retry has
+    /// to reach it all the same.
+    #[test]
+    fn retry_reaches_a_step_the_plan_stopped_before() {
+        let (conn, project) = fixture();
+        let chain_id = queued_plan(&conn, &project, &[("exit 1", -1)]).chain.id;
+        for attempt in 1..=MAX_STEP_ATTEMPTS {
+            let step = claim_next_chain_step(&conn, &chain_id, &format!("run-{attempt}")).unwrap().step.unwrap();
+            complete_chain_step(&conn, &step.id, "check_failed", "algo", "falló").unwrap();
+        }
+        let refused = claim_next_chain_step(&conn, &chain_id, "run-4").unwrap();
+        assert_eq!(refused.chain.status, "failed");
+        assert_eq!(refused.chain.last_reason, "chain.attemptsExhausted");
+
+        assert_eq!(retry_chain_step(&conn, &chain_id).unwrap().unwrap().status, "queued");
+        assert_eq!(claim_next_chain_step(&conn, &chain_id, "run-5").unwrap().kind, "run");
+    }
+
+    /// A repository somebody else is working in is not the step failing: the bounce is refunded, so a
+    /// plan waiting its turn cannot exhaust itself while the user types in another task.
+    #[test]
+    fn a_busy_repository_costs_the_step_nothing() {
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 1).chain.id;
+        for bounce in 0..5 {
+            let step = claim_next_chain_step(&conn, &chain_id, &format!("run-{bounce}")).unwrap().step.unwrap();
+            let chain = complete_chain_step(&conn, &step.id, "requeue", "", "chain.repoBusy").unwrap().unwrap();
+            assert_eq!(chain.status, "queued");
+        }
+        let chain = chain_row(&conn, &chain_id).unwrap().unwrap();
+        assert_eq!(chain.dispatches, 0);
+        assert_eq!(claim_next_chain_step(&conn, &chain_id, "run-free").unwrap().step.unwrap().attempts, 1);
+    }
+
+    /// Resuming after a restart re-runs the step the restart cut off. The scheduler only picks
+    /// `pending` rows, so without this "Reanudar" silently carried on from the step *after* it.
+    #[test]
+    fn resuming_after_a_restart_runs_the_interrupted_step_again() {
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 2).chain.id;
+        let first = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        recover_after_restart(&conn).unwrap();
+        assert_eq!(step_row(&conn, &first.id).unwrap().unwrap().status, "interrupted");
+
+        resume_chain(&conn, &chain_id).unwrap();
+        let again = claim_next_chain_step(&conn, &chain_id, "run-2").unwrap().step.unwrap();
+        assert_eq!(again.id, first.id, "the interrupted step, not the one behind it");
+    }
+
+    /// An aborted plan stays aborted, whatever lands after the abort — the cancelled turn's settle,
+    /// or the verdict of a check the abort killed. Each of those used to move the chain again.
+    #[test]
+    fn nothing_arriving_after_an_abort_brings_the_chain_back() {
+        for outcome in ["cancelled", "check_failed", "error", "requeue", "done"] {
+            let (conn, project) = fixture();
+            let chain_id = queued_chain(&conn, &project, 2).chain.id;
+            let step = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+            abort_chain(&conn, &chain_id).unwrap();
+
+            let chain = complete_chain_step(&conn, &step.id, outcome, "respuesta", "late").unwrap().unwrap();
+            assert_eq!(chain.status, "aborted", "{outcome} must not revive the plan");
+            let settled = step_row(&conn, &step.id).unwrap().unwrap();
+            assert_ne!(settled.status, "running", "{outcome}: the step is not left running");
+            if outcome == "done" {
+                assert_eq!(settled.output_text, "respuesta", "an answer that landed is still kept");
+            }
+        }
+    }
+
+    /// A check is not started for a plan that has already been aborted.
+    #[test]
+    fn an_aborted_plan_has_no_check_to_run() {
+        let (conn, project) = fixture();
+        conn.execute("UPDATE projects SET local_path = '/tmp' WHERE id = ?1", params![project]).unwrap();
+        let chain_id = queued_plan(&conn, &project, &[("true", -1)]).chain.id;
+        let step = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        let (owner, command, _) = chain_step_check(&conn, &step.id).unwrap().expect("a check to run");
+        assert_eq!(owner, chain_id);
+        assert_eq!(command, "true");
+        abort_chain(&conn, &chain_id).unwrap();
+        assert!(chain_step_check(&conn, &step.id).unwrap().is_none());
+    }
+
+    /// A transcript read light says *which* turns have a trace without sending any of them, and each
+    /// trace is then one read away by its row id — from `activity_log` and `chat_messages` alike.
+    #[test]
+    fn a_light_transcript_marks_its_traces_and_each_is_fetched_alone() {
+        let (conn, project) = fixture();
+        let trace = r#"[{"stream":"stdout","line":"Read src/app.ts"}]"#;
+        let with = add_activity_log(&conn, &project, "conv", None, "q1", "a1", Some(trace), TurnMeta::default(), false)
+            .unwrap();
+        let without =
+            add_activity_log(&conn, &project, "conv", None, "q2", "a2", None, TurnMeta::default(), false).unwrap();
+        let empty =
+            add_activity_log(&conn, &project, "conv", None, "q3", "a3", Some("[]"), TurnMeta::default(), false).unwrap();
+
+        let light = get_conversation_messages_lite(&conn, &project, "conv").unwrap();
+        let by_id = |id: &str| light.iter().find(|entry| entry.id == id).unwrap().trace.clone();
+        assert_eq!(by_id(&with.id).as_deref(), Some(""), "present, not sent");
+        assert_eq!(by_id(&without.id), None);
+        assert_eq!(by_id(&empty.id), None, "an empty trace is no trace");
+
+        assert_eq!(get_turn_trace(&conn, &with.id).unwrap().as_deref(), Some(trace));
+        assert_eq!(get_turn_trace(&conn, &without.id).unwrap(), None);
+
+        // The chat workspace keeps its traces elsewhere; the same lookup reaches them.
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0)).unwrap();
+        let chat =
+            crate::db::chat_queries::create_conversation(&conn, &workspace, None, "claude", None, "", "").unwrap();
+        let message = crate::db::models::ChatMessageRow {
+            id: "msg-1".into(),
+            conversation_id: chat.id.clone(),
+            turn: 0,
+            role: "assistant".into(),
+            content: "hecho".into(),
+            provider: Some("claude".into()),
+            model: None,
+            engine_version: None,
+            response_time_ms: None,
+            is_error: false,
+            is_cancelled: false,
+            trace: Some(trace.into()),
+            outputs: None,
+            created_at: now(),
+        };
+        crate::db::chat_queries::append_message(&conn, &message).unwrap();
+        assert_eq!(get_turn_trace(&conn, "msg-1").unwrap().as_deref(), Some(trace));
+        assert_eq!(get_turn_trace(&conn, "nobody").unwrap(), None);
+    }
+
+    /// The automatic resume is consent to one pause: only a paused chain takes it, any move clears
+    /// it, and a restart voids it rather than dispatching at launch.
+    #[test]
+    fn an_automatic_resume_belongs_to_one_pause() {
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 1).chain.id;
+
+        assert_eq!(set_chain_resume_at(&conn, &chain_id, 1_900_000_000).unwrap().unwrap().resume_at, 0, "queued");
+
+        let step = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        complete_chain_step(&conn, &step.id, "error", "", "QUOTA_EXCEEDED::quota exceeded").unwrap();
+        let armed = set_chain_resume_at(&conn, &chain_id, 1_900_000_000).unwrap().unwrap();
+        assert_eq!(armed.resume_at, 1_900_000_000);
+        assert_eq!(list_scheduled_resumes(&conn).unwrap(), vec![(chain_id.clone(), 1_900_000_000)]);
+
+        recover_after_restart(&conn).unwrap();
+        assert_eq!(chain_row(&conn, &chain_id).unwrap().unwrap().resume_at, 0, "a restart voids it");
+        assert_eq!(chain_row(&conn, &chain_id).unwrap().unwrap().status, "paused", "the pause itself stays");
+
+        set_chain_resume_at(&conn, &chain_id, 1_900_000_000).unwrap();
+        let resumed = resume_chain(&conn, &chain_id).unwrap().unwrap();
+        assert_eq!(resumed.resume_at, 0, "resuming by hand disarms it");
+        assert!(list_scheduled_resumes(&conn).unwrap().is_empty());
     }
 }
 

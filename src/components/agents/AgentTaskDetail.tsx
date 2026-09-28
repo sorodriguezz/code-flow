@@ -3,9 +3,11 @@ import {
   Bot,
   CircleCheck,
   GitCompare,
+  History,
   Link2,
   MoreHorizontal,
   Pencil,
+  Play,
   RotateCcw,
   Send,
   Square,
@@ -17,6 +19,7 @@ import { ChainStrip } from "./ChainStrip";
 import { ContinueWithModal } from "./ContinueWithModal";
 import { useChainStore } from "../../state/chainStore";
 import { AiRunLog } from "../ai/AiRunLog";
+import { CheckpointsModal } from "../ai/CheckpointsModal";
 import { ChatMessageBubble } from "../chat/ChatMessageBubble";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
@@ -50,12 +53,23 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
 
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [continuing, setContinuing] = useState(false);
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [logExpanded, setLogExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const messages = live?.messages ?? [];
   const sending = live?.sending ?? false;
+  // The working copy the turns edit — where its restore points live. Read off the task's own
+  // workspace rather than the one on screen: a task opened from a notification can belong to
+  // another one.
+  const repo = useWorkspaceStore((s) =>
+    task ? ((s.projectsByWorkspace[task.workspace_id] ?? []).find((p) => p.id === task.project_id) ?? null) : null,
+  );
+  const repoPath = repo?.local_path ?? "";
+  // Another task already running in this repository — the Run button waits for it like the
+  // composer's send does.
+  const repoTaken = useAgentsStore((s) => (task ? s.runningInProject(task.project_id, task.id) !== null : false));
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -107,6 +121,17 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
         void focusProject(task.workspace_id, task.project_id).then(() => setActiveView("changes"));
       },
     },
+    // Every turn takes a restore point before it edits anything; this is where an agent's edits are
+    // undone from, without leaving the task for the AI panel. The same list the panel opens.
+    ...(repoPath
+      ? [
+          {
+            label: t("checkpoints.title"),
+            icon: History,
+            onClick: () => setCheckpointsOpen(true),
+          },
+        ]
+      : []),
     {
       label: t("agents.deleteTask"),
       icon: Trash2,
@@ -198,9 +223,25 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
         {/* One column of a readable width, like every transcript in the app. */}
         <div className="mx-auto w-full max-w-[760px] space-y-3.5">
           {messages.length === 0 && !sending && (
-            <p className="whitespace-pre-wrap rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3.5 py-3 text-[13px] leading-relaxed text-[var(--cf-text-muted)]">
-              {task.goal}
-            </p>
+            <div className="rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3.5 py-3">
+              <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--cf-text-muted)]">{task.goal}</p>
+              {/* A task that has never run — its first turn was refused because the repository was
+                  busy, or it was never sent — has its goal on screen and nothing that sends it. The
+                  composer below would work, but only by retyping the goal into it. */}
+              {task.turns === 0 && live?.loaded !== false && (
+                <Tooltip label={repoTaken ? t("agents.busyInRepo", { name: repo?.name ?? "" }) : t("agents.runTaskHint")}>
+                  <button
+                    type="button"
+                    disabled={repoTaken || !task.goal.trim()}
+                    onClick={() => void useAgentsStore.getState().send(taskId, task.goal)}
+                    className={buttonClass({ variant: "primary", size: "sm", className: "mt-2.5" })}
+                  >
+                    <Play size={12} />
+                    {t("agents.runTask")}
+                  </button>
+                </Tooltip>
+              )}
+            </div>
           )}
           {messages.map((message, i) => (
             // The panel's own bubble, lifted into `components/chat` and shared by all three
@@ -225,6 +266,9 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={overflow} onClose={() => setMenu(null)} />}
       {continuing && <ContinueWithModal taskId={taskId} onClose={() => setContinuing(false)} />}
+      {checkpointsOpen && repoPath && (
+        <CheckpointsModal repoPath={repoPath} onClose={() => setCheckpointsOpen(false)} />
+      )}
     </>
   );
 }
@@ -273,13 +317,22 @@ function AgentComposer({ taskId }: { taskId: string }) {
   // produces `status: "draft"`, so there is no such thing as a task waiting to be sent.
   const [input, setInput] = useState("");
   const sending = live?.sending ?? false;
+  // A follow-up the backend turned away (another turn took the repository first) comes back here,
+  // unless something new has been typed since — that is the user's newer thought, and wins.
+  const bounced = useAgentsStore((s) => s.bounced[taskId]);
+  useEffect(() => {
+    if (bounced === undefined) return;
+    const text = useAgentsStore.getState().takeBounced(taskId);
+    if (text) setInput((current) => (current.trim() ? current : text));
+  }, [bounced, taskId]);
 
   if (!task) return null;
 
   const submit = () => {
     if (!input.trim() || sending || blockedBy || chainLocked) return;
-    useAgentsStore.getState().send(taskId, input);
-    setInput("");
+    // Cleared only for a send the store took: its guards are read fresh and can refuse one that
+    // `blockedBy` — a render behind — waved through, and emptying the box then lost the message.
+    if (useAgentsStore.getState().send(taskId, input)) setInput("");
   };
 
   return (
@@ -293,7 +346,11 @@ function AgentComposer({ taskId }: { taskId: string }) {
           disabled={chainLocked}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
+            // Not while an IME is composing: that Enter confirms a candidate (Japanese, Chinese,
+            // accented input on some layouts), and sending there shipped half a word. `keyCode 229`
+            // is the same condition for the WebKit builds that report it instead — the same guard
+            // the chat and panel composers use.
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
               e.preventDefault();
               submit();
             }

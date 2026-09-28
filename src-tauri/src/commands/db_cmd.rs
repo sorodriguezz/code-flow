@@ -9,13 +9,18 @@
 //! Everything else about a statement — which schema, which limit, which filter — is decided in the
 //! frontend and arrives fully resolved, the same split the API client draws.
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_dialog::DialogExt;
 
+use crate::datasource::csv_import::{self, CsvPreview, ImportOutcome, ImportRequest};
+use crate::datasource::export::{ExportFormat, ExportWriter};
 use crate::datasource::{
-    filter_children, scope_to_current_database, DbConnectionConfig, DbEditResult, DbExecContext,
-    DbExecuteResult, DbForeignKey, DbNode, DbNodeKind, DbNodeRef, DbObjectInfo, DbQueryOptions,
-    DbRegistry, DbRowEdit,
-    DbSchemaDiagram, DbSchemaGroup, DbServerInfo, DbStatementResult, DbTableDataRequest, Session,
+    export_refusal, filter_children, next_transaction_state, read_only_refusal,
+    scope_to_current_database, DbConnectionConfig,
+    DbConsoleRun, DbEditResult, DbExecContext, DbForeignKey, DbKind, DbLane, DbNode, DbNodeKind,
+    DbNodeRef, DbObjectInfo, DbQueryOptions, DbRegistry, DbRowEdit, DbSchemaDiagram,
+    DbSchemaGroup, DbServerInfo, DbStatementResult, DbTableDataRequest, DbTransactionState,
+    Session,
 };
 use crate::db::datasource_queries as queries;
 use crate::db::{models::*, Db};
@@ -505,6 +510,9 @@ pub async fn db_schema_catalog(
     }
 }
 
+/// Runs statements. `lane` is the console's when a console sends them — its own session, the one a
+/// transaction can be left open on — and the app's otherwise (the explorer's "drop", say). See
+/// [`DbLane`]. The answer carries the transaction state the session was left in.
 #[tauri::command]
 pub async fn db_execute(
     db: State<'_, Db>,
@@ -513,13 +521,45 @@ pub async fn db_execute(
     sql: String,
     ctx: DbExecContext,
     run_id: String,
-) -> Result<DbExecuteResult, String> {
+    lane: Option<DbLane>,
+) -> Result<DbConsoleRun, String> {
     let config = resolve_config(&db, &connection_id)?;
-    let session = registry.session(&config, ctx.database.as_deref()).await?;
-    let key = DbRegistry::session_key(&connection_id, ctx.database.as_deref());
-    registry
-        .run(&run_id, &session, &key, session.execute(&sql, &ctx))
-        .await
+    let lane = lane.unwrap_or_default().for_kind(config.kind);
+    let session = registry.session_in(&config, ctx.database.as_deref(), lane).await?;
+    let key = DbRegistry::session_key_in(&connection_id, ctx.database.as_deref(), lane);
+    let before = registry.transaction_state(&key);
+    match registry.run(&run_id, &session, &key, session.execute(&sql, &ctx)).await {
+        Ok(result) => {
+            let transaction = next_transaction_state(config.kind, before, &result.results);
+            registry.set_transaction_state(&key, &session, transaction);
+            Ok(DbConsoleRun { result, transaction })
+        }
+        Err(error) => {
+            // A cancel stops the statement on a Postgres server, which aborts a transaction around
+            // it; an engine whose session a cancel poisons has lost the transaction with it.
+            let after = match config.kind {
+                DbKind::Postgres | DbKind::Supabase if before != DbTransactionState::None => {
+                    DbTransactionState::Aborted
+                }
+                _ if !session.is_alive() => DbTransactionState::None,
+                _ => before,
+            };
+            registry.set_transaction_state(&key, &session, after);
+            Err(error)
+        }
+    }
+}
+
+/// The transaction state a console's session is in right now — for a console that is opened, or
+/// switched back to, after its last run.
+#[tauri::command]
+pub fn db_transaction_state(
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    database: Option<String>,
+) -> Result<DbTransactionState, String> {
+    let key = DbRegistry::session_key_in(&connection_id, database.as_deref(), DbLane::Console);
+    Ok(registry.transaction_state(&key))
 }
 
 #[tauri::command]
@@ -530,10 +570,12 @@ pub async fn db_explain(
     sql: String,
     ctx: DbExecContext,
     run_id: String,
+    lane: Option<DbLane>,
 ) -> Result<String, String> {
     let config = resolve_config(&db, &connection_id)?;
-    let session = registry.session(&config, ctx.database.as_deref()).await?;
-    let key = DbRegistry::session_key(&connection_id, ctx.database.as_deref());
+    let lane = lane.unwrap_or_default().for_kind(config.kind);
+    let session = registry.session_in(&config, ctx.database.as_deref(), lane).await?;
+    let key = DbRegistry::session_key_in(&connection_id, ctx.database.as_deref(), lane);
     registry
         .run(&run_id, &session, &key, session.explain(&sql, &ctx))
         .await
@@ -672,6 +714,180 @@ pub async fn db_object_ddl(
             async move { session.object_ddl(&node).await }
         })
         .await
+}
+
+/// Where an export's rows come from.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DbExportSource {
+    /// A table, with the filter and sort the grid shows — every page of it.
+    Table { request: DbTableDataRequest },
+    /// One statement from a console, run again on the console's own session, so it sees what the
+    /// console sees (an open transaction's rows, a temporary table).
+    Statement { sql: String, ctx: DbExecContext },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DbExportOutcome {
+    pub path: String,
+    pub rows: u64,
+}
+
+/// `db:export-progress`: how many rows an export has written so far.
+#[derive(Debug, Clone, serde::Serialize)]
+struct DbExportProgress {
+    run_id: String,
+    rows: u64,
+}
+
+/// Writes *every* row of a table or a query to a file the user picks — not the page on screen.
+///
+/// The rows go straight from the driver to disk (see `datasource::export`) and never cross into the
+/// webview; progress is reported as `db:export-progress` events, and `db_cancel(run_id)` stops it,
+/// leaving no half-written file behind. `Ok(None)` when the save dialog was dismissed.
+#[tauri::command]
+pub async fn db_export_rows(
+    app: AppHandle,
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    source: DbExportSource,
+    format: String,
+    default_name: String,
+    run_id: String,
+) -> Result<Option<DbExportOutcome>, String> {
+    let format = ExportFormat::parse(&format)?;
+    let config = resolve_config(&db, &connection_id)?;
+    if let DbExportSource::Statement { sql, .. } = &source {
+        if let Some(refusal) = export_refusal(config.kind, sql) {
+            return Err(refusal);
+        }
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(default_name.as_str())
+        .save_file(move |file| {
+            let _ = tx.send(file.map(|p| p.to_string()));
+        });
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let file = std::fs::File::create(&path).map_err(|e| format!("{path}: {e}"))?;
+    let emitter = app.clone();
+    let progress_id = run_id.clone();
+    let mut writer = ExportWriter::new(
+        std::io::BufWriter::new(file),
+        format,
+        Box::new(move |rows| {
+            let _ = emitter.emit("db:export-progress", DbExportProgress { run_id: progress_id.clone(), rows });
+        }),
+    );
+
+    let outcome = match &source {
+        DbExportSource::Table { request } => {
+            // A session of its own: a long read holds its connection for as long as it runs, and
+            // the explorer and the grid must not queue behind it. Cancelling closes it outright.
+            let tag = format!("@export-{run_id}");
+            match Session::open_tagged(&config, request.node.database.as_deref(), &tag).await {
+                Ok(session) => {
+                    let session = std::sync::Arc::new(session);
+                    let key = format!("export|{run_id}");
+                    let result = registry
+                        .run(&run_id, &session, &key, session.export_table(request, &mut writer))
+                        .await;
+                    drop(session);
+                    registry.close_tunnel_if_unused(&config.id);
+                    result
+                }
+                Err(error) => {
+                    registry.close_tunnel_if_unused(&config.id);
+                    Err(error)
+                }
+            }
+        }
+        DbExportSource::Statement { sql, ctx } => {
+            let lane = DbLane::Console.for_kind(config.kind);
+            let session = registry.session_in(&config, ctx.database.as_deref(), lane).await?;
+            let key = DbRegistry::session_key_in(&connection_id, ctx.database.as_deref(), lane);
+            registry
+                .run(&run_id, &session, &key, session.export_statement(sql, ctx, &mut writer))
+                .await
+        }
+    };
+    match outcome.and_then(|()| writer.finish()) {
+        Ok(rows) => Ok(Some(DbExportOutcome { path, rows })),
+        Err(error) => {
+            // A cancelled or failed export leaves no file that looks finished and isn't.
+            let _ = std::fs::remove_file(&path);
+            Err(error)
+        }
+    }
+}
+
+/// What a CSV file looks like, for the import dialog: its separator (detected unless `delimiter`
+/// says), whether the first row names columns (`table_columns` helps decide), and its first rows.
+/// Reads only the start of the file.
+#[tauri::command]
+pub fn db_csv_inspect(
+    path: String,
+    delimiter: Option<String>,
+    table_columns: Vec<String>,
+) -> Result<CsvPreview, String> {
+    let delimiter = delimiter.and_then(|text| text.chars().next());
+    csv_import::inspect(&path, delimiter, &table_columns)
+}
+
+/// `db:import-progress`: how many rows an import has written so far.
+#[derive(Debug, Clone, serde::Serialize)]
+struct DbImportProgress {
+    run_id: String,
+    rows: u64,
+}
+
+/// Imports a CSV file into a table, in one transaction — see `csv_import::run` for how a bad row is
+/// found, named and either kept out or allowed to sink the whole import.
+///
+/// On a session of its own, never one the explorer or a console uses: the import holds its
+/// transaction open for as long as the file takes, and `db_cancel(run_id)` stops it by closing that
+/// connection, which every engine answers by rolling the transaction back.
+#[tauri::command]
+pub async fn db_import_csv(
+    app: AppHandle,
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    request: ImportRequest,
+    run_id: String,
+) -> Result<ImportOutcome, String> {
+    let config = resolve_config(&db, &connection_id)?;
+    if config.read_only {
+        return Err(read_only_refusal());
+    }
+    let tag = format!("@import-{run_id}");
+    let session = match Session::open_tagged(&config, request.node.database.as_deref(), &tag).await {
+        Ok(session) => std::sync::Arc::new(session),
+        Err(error) => {
+            registry.close_tunnel_if_unused(&config.id);
+            return Err(error);
+        }
+    };
+    let Some(dialect) = session.dialect() else {
+        return Err("A CSV file can be imported into a SQL table; this engine has none.".to_string());
+    };
+    let emitter = app.clone();
+    let progress_id = run_id.clone();
+    let mut progress = move |rows: u64| {
+        let _ = emitter.emit("db:import-progress", DbImportProgress { run_id: progress_id.clone(), rows });
+    };
+    let key = format!("import|{run_id}");
+    let outcome = registry
+        .run(&run_id, &session, &key, csv_import::run(&session, dialect, &request, &mut progress))
+        .await;
+    drop(session);
+    registry.close_tunnel_if_unused(&config.id);
+    outcome
 }
 
 /// Stops a running statement. Unknown run ids are fine — a cancel legitimately races a query that

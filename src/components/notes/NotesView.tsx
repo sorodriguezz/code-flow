@@ -6,6 +6,7 @@ import { ViewSkeleton } from "../common/ViewSkeleton";
 import { NoteExplorer } from "./NoteExplorer";
 import { NoteEditor } from "./NoteEditor";
 import { NoteGallery } from "./NoteGallery";
+import { NoteTrash } from "./NoteTrash";
 import { CARD } from "./notesChrome";
 import { ensureNotesStoreLoaded, useNotesStore } from "../../state/notesStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -30,6 +31,7 @@ export function NotesView() {
   const workspaceId = useNotesStore((s) => s.workspaceId);
   const loading = useNotesStore((s) => s.loading);
   const activeId = useNotesStore((s) => s.activeId);
+  const trashOpen = useNotesStore((s) => s.trashOpen);
   // A boolean, deliberately, and not `s.draft`. The draft object is replaced on every keystroke,
   // so subscribing to it would re-render this component — and therefore the whole explorer tree
   // beside it — once per character typed. All this view needs to know is whether a body has
@@ -90,7 +92,7 @@ export function NotesView() {
 
       <div className="min-w-0 flex-1">
         {activeId === null ? (
-          <NoteGallery />
+          trashOpen ? <NoteTrash /> : <NoteGallery />
         ) : !hasDraft ? (
           // The body is still in flight. A skeleton rather than the gallery, because falling back
           // to the gallery for two frames makes clicking a note look like it did nothing.

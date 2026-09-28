@@ -15,6 +15,7 @@ import {
   THUMBNAIL_MAX_CHARS,
 } from "../../lib/diagrams/embed";
 import { bytesFromDataUri, saveBytes, type ExportFormat } from "../../lib/diagrams/exportFile";
+import { pngToPdf } from "../../lib/diagrams/pdf";
 import { exportMessage } from "../../lib/diagrams/exportOptions";
 import { useDiagramsStore } from "../../state/diagramsStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -333,7 +334,7 @@ export function DrawioFrame({
             // `.drawio` answers on `xml` and leaves `data` unset — there is no picture to render,
             // the document *is* the file. Everything else arrives as a `data:` URI.
             const xml = typeof message.xml === "string" ? message.xml : "";
-            void writeExport(wanted === "drawio" ? xml : data, wanted);
+            void writeExport(wanted === "drawio" ? xml : data, wanted, awaitingScale.current);
             break;
           }
           // Oversized pictures are dropped rather than stored — see `THUMBNAIL_MAX_CHARS`. An empty
@@ -363,6 +364,8 @@ export function DrawioFrame({
    * a re-render would achieve nothing but re-registering it.
    */
   const awaitingFile = useRef<ExportFormat | null>(null);
+  /** The scale that export was asked for at — what sizes a PDF's page to the drawing. */
+  const awaitingScale = useRef(1);
 
   /**
    * Turns what the editor exported into a file the user chose a place for.
@@ -373,11 +376,16 @@ export function DrawioFrame({
    * a saved diagram and opens as nothing.
    */
   const writeExport = useCallback(
-    async (exported: string, format: ExportFormat) => {
+    async (exported: string, format: ExportFormat, scale: number) => {
       try {
         if (!exported) throw new Error(t("diagrams.exportEmpty"));
+        // A PDF arrives as the PNG `exportMessage` asked for, and is built here — see `lib/diagrams/pdf`.
         const bytes =
-          format === "drawio" ? new TextEncoder().encode(exported) : bytesFromDataUri(exported);
+          format === "drawio"
+            ? new TextEncoder().encode(exported)
+            : format === "pdf"
+              ? await pngToPdf(bytesFromDataUri(exported), scale)
+              : bytesFromDataUri(exported);
         const title = useDiagramsStore.getState().diagrams.find((d) => d.id === diagramId)?.title;
         const saved = await saveBytes(bytes, format, title || "diagram");
         if (saved) useToastStore.getState().pushToast(t("diagrams.exported"), "success");
@@ -391,9 +399,11 @@ export function DrawioFrame({
   /**
    * The export the toolbar asked for.
    *
-   * PDF goes through the editor rather than through `pdfmake`, which the app already carries: the
-   * editor is the only thing that knows how the diagram is drawn, and a second renderer would be a
-   * second answer to "what does this look like".
+   * PDF is drawn by the editor too — as the PNG a PNG export would give — and only *wrapped* by
+   * `pdfmake` here: the editor is the only thing that knows how the diagram is drawn, and a second
+   * renderer would be a second answer to "what does this look like". It used to be asked for as
+   * `pdf`, which the embedded draw.io has no branch for: it answered with an SVG, written under a
+   * `.pdf` name.
    *
    * `.drawio` goes through the editor too, and that is a choice worth stating: the store already
    * holds the document, so it could be written straight from `draft.doc`. It isn't, because the
@@ -406,6 +416,7 @@ export function DrawioFrame({
   useEffect(() => {
     if (!pendingExport || !ready) return;
     awaitingFile.current = pendingExport.format;
+    awaitingScale.current = pendingExport.format === "drawio" ? 1 : pendingExport.options.zoom / 100;
     useDiagramsStore.getState().clearPendingExport();
     // Nothing is rendered for `.drawio`, so the picture options are left off rather than sent and
     // ignored — a background and a scale on a text export would only read as if they did something.

@@ -11,7 +11,7 @@ a backlog, and let AI write your commits, find your bugs and resolve your confli
 native app. Then test the endpoint you just changed, query the database behind it and SSH into the
 box it runs on without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-2.0.4-6C5CE7)
+![version](https://img.shields.io/badge/version-2.0.5-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -45,11 +45,12 @@ credentials together — and none of them leaks into the next client's window.
 
 | | | |
 |---|---|---|
-| **Git** — graph, diffs, branches, stashes | **Pull requests** — GitHub · GitLab · Azure DevOps | **Pipelines** — the run as a waterfall, with logs |
-| **Editor** — Monaco, LSP, local autocomplete | **Terminal & services** — started in dependency order | **Agents** — roles with their own model |
-| **API client** — REST · GraphQL · WS · gRPC · MQTT | **Databases** — Postgres · SQL Server · IRIS · Mongo · Redis | **Diagrams** — DBML and the full draw.io |
-| **Remote** — SSH, SFTP, port forwarding, S3 & Azure | **Notes** — Markdown notebooks with an AI panel | **Llavero** — an encrypted password vault |
+| **Git** — graph, diffs, branches, stashes | **Pull requests** — GitHub · GitLab · Bitbucket · Azure DevOps | **Pipelines** — runs, approvals, artifacts |
+| **Editor** — Monaco, LSP, notebooks, local autocomplete | **Terminal & services** — started in dependency order | **Agents** — roles with their own model |
+| **API client** — REST · GraphQL · WS · gRPC · MQTT · SSE | **Databases** — ten engines, SQLite to Oracle | **Diagrams** — DBML and the full draw.io |
+| **Remote** — SSH, SFTP, SMB, remote desktops, S3 & Azure | **Notes** — Markdown notebooks with an AI panel | **Llavero** — an encrypted password vault |
 | **Stories** — a document turned into a backlog | **Wiki** — docs written from the code | **Backups** — encrypted, scheduled, restorable |
+| **Chat** — your AI CLIs, with or without a repo | **New project** — twenty generators, one form | **Quick ask** — the AI from any app, on a hotkey |
 
 ## 🪟 Windows of their own
 
@@ -75,7 +76,7 @@ on another, the repository you're actually editing in the middle.
   </tr>
   <tr>
     <td align="center"><b>AI</b> — six engines detected, one model per task</td>
-    <td align="center"><b>API client</b> — six protocols, collections, environments</td>
+    <td align="center"><b>API client</b> — six protocols, OAuth 2.0, mTLS, live streams</td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/screenshots/diagrams.png" alt="DBML schema editor" /></td>
@@ -83,7 +84,7 @@ on another, the repository you're actually editing in the middle.
   </tr>
   <tr>
     <td align="center"><b>Diagrams</b> — a schema as text, drawn as you type</td>
-    <td align="center"><b>Pipelines</b> — the run as a graph, logs included</td>
+    <td align="center"><b>Pipelines</b> — the run as a graph: start it, approve it, keep its artifacts</td>
   </tr>
 </table>
 
@@ -147,11 +148,11 @@ without going through Settings.
 
 - **Chat with your repo** — it reads files, searches the code and checks Git state to answer you.
 - **Commit messages** written from what you've staged.
-- **Pre-commit analysis** — finds bugs and vulnerabilities before you commit, with a quality gate
-  for reliability, security and maintainability.
+- **Pre-commit analysis** — finds bugs and vulnerabilities in everything not yet committed, staged or
+  not, with a quality gate for reliability, security and maintainability.
 - **Fix findings in one click** — the AI applies the change in your working tree.
-- **Resolve conflicts** — an editable proposal, diffed against the original file, that touches
-  nothing until you accept.
+- **Resolve conflicts** — the AI's proposal is one action in the three-way conflict editor: written
+  into the result for you to review and edit, and ⌘Z takes it back.
 - **Create pull requests** with a title and description generated from the diff.
 - **Customizable templates** for all five actions, shared across providers.
 
@@ -188,6 +189,21 @@ Everything the AI starts lives in the background, not in the screen that started
   the stop button still there.
 - **The timer tells the truth**: it counts from when the task started, not from when you looked back
   at it.
+- **A run that goes silent is stopped** after the minutes you set, and an out-of-quota message says
+  when the provider's quota resets.
+
+### A chat of its own
+
+The **Chat** app keeps your conversations with the AI CLIs in one flat list — pinned, searchable,
+grouped into projects with their own instructions and documents — and it stays put when you switch
+workspace.
+
+- **With or without a repository.** Without one, turn on file generation and it builds what you ask
+  for — a spreadsheet, a slide deck, a PDF — right under the answer, ready to save.
+- **"Text only" is enforced on Claude Code, Codex and Grok**, by their own CLIs. On Gemini, Open Code
+  and Cline it is a request, and the chat says so instead of promising it.
+- **Export any conversation** as Markdown or JSON, with or without the model's working.
+- **Quick ask** opens a one-line box to the AI over whatever app you're in, on a hotkey you choose.
 
 ## 🤖 Agents that keep working while you don't
 
@@ -204,12 +220,15 @@ two lists to keep in step.
 - **Review what it did** against the real diff of that repository, the same way you'd review your
   own work.
 - **Move up a model mid-conversation** when the job turns out harder than it looked.
-- If a step fails the chain **stops and waits**: retry, skip or abort. It never quietly loops or
-  reruns on its own.
+- **A failed step is retried, then handed to you.** It is re-sent up to three times, waiting longer
+  each time; after that the chain **stops and waits** — retry, skip or abort. Out of quota, a
+  signed-out CLI or a missing one **pauses** it instead, without spending an attempt: resume it
+  yourself, or let it pick up at the time the provider says the quota resets. A chain stops after
+  128 step runs, so nothing loops forever.
 
-> ⚠️ Agents edit your working copy **for real**. Every turn takes a restore point before it starts,
-> and only one agent runs per repository at a time — but these are your files, not a sandbox. To
-> work in parallel, split the work across repositories.
+> ⚠️ Agents edit your working copy **for real**. Every turn takes a restore point before it starts —
+> restorable from the task's own view — and only one agent runs per repository at a time. But these
+> are your files, not a sandbox. To work in parallel, split the work across repositories.
 
 ## 🌳 Git, visually
 
@@ -220,11 +239,25 @@ two lists to keep in step.
   </tr>
 </table>
 
-- **Commit graph** with branches, to read history at a glance.
-- **Stage, commit and discard** changes; **unified or side-by-side** diff, selectable for copying.
-- **Branches, remotes and stashes** within reach, with **undo commit** for when you get it wrong.
+- **Commit graph** with branches, to read history at a glance — and **bisect** right from it.
+- **Stage, commit and discard** whole files or just the lines you pick in the diff (click, drag or
+  Shift-click the line numbers); **unified or side-by-side** diff, selectable for copying.
+- **Branches, remotes, tags and stashes** within reach: add or remove a remote, publish a branch,
+  push or delete tags, delete a branch on the remote.
+- **Undo the last operation** when you get it wrong — or go back to anywhere in the reflog, shown to
+  you before it runs and with a backup ref kept.
+- **Pull the way you mean it** — merge, rebase or fast-forward only, remembered per repository — and
+  when a push is rejected, **force with lease**, which refuses if someone pushed what you haven't
+  pulled.
+- **A three-way conflict editor** (ours · base · theirs), whatever stopped you: a merge, a rebase,
+  a cherry-pick or a revert.
+- **Submodules and worktrees**, each one openable as a project of its own.
+- **Your hooks, commit signing (GPG or SSH) and Git LFS are honoured**: when a repository uses them,
+  commits go through git itself. No name or email set yet? A form sets them, for this repository or
+  for all of them.
 - **Automatic background fetch**: you always know how many commits you're ahead or behind.
-- **Clone repositories**, open several projects and group them into **workspaces**.
+- **Clone repositories, or start one from twenty generators** — React to Spring Boot to Rust, one
+  form each — open several projects and group them into **workspaces**.
 - **Secret scanning before every commit** — deterministic rules, nothing sent anywhere.
 - **Hide the noise**: right-click anything in the file tree to hide it from *your* view — a
   per-repository filter that never touches disk and never reaches a commit.
@@ -236,23 +269,38 @@ two lists to keep in step.
 The same Monaco you already know, wired to the repository around it.
 
 - **Local autocomplete** as you type, from the engine bundled in the app — no key, no network.
-- **Go to definition, hover and diagnostics** through the language server for the project you're in.
+- **Go to definition, hover and diagnostics** through the language server for the project you're in —
+  every diagnostic in one **Problems** panel, with a whole-project TypeScript check a click away, and
+  **Find All References** (⇧⌥F12) listed there too.
+- **Rename across the whole project**, open files or not, with a restore point taken before anything
+  on disk changes.
+- **Formats with the repository's own Prettier** when it has one, on save if you like; **Save all**
+  with ⌘⌥S.
+- **Jupyter notebooks** open as notebooks — cells, rich outputs (tables, images, errors) and real
+  kernels, the project's `.venv` included. The AI generates, explains, fixes or documents a cell as a
+  diff you accept, and the file stays in Jupyter's own format, so its git diffs stay readable.
+  Running cells needs Python with `ipykernel`, which the app offers to install.
 - **Inline blame** on the line under your cursor: who last touched it, when, and in which commit.
 - **Split editors**, drafts that survive a restart, snippets, file nesting and custom icon rules.
+- **It notices what changed underneath it**: a file edited on disk while open offers to compare,
+  reload or overwrite, and quitting asks about unsaved work first. Images open as a preview.
 - **Markdown and diagram preview** side by side with the source.
-- **Run and debug** through the Debug Adapter Protocol, with breakpoints and variables.
+- **Run and debug** through the Debug Adapter Protocol — breakpoints (conditional too), logpoints,
+  exception breakpoints, watch expressions, and the variables of any frame.
 - **A terminal and a services dock** in the same panel: *services* belong to the workspace, because
   a system spans repositories, and *terminals* belong to the repository they were opened in.
   Services start in dependency order and each one waits on a real gate — a port that opens, an HTTP
-  probe that answers, or a line that appears in the log.
+  probe that answers, or a line that appears in the log. They read the `.env` files you give them
+  and use the project's own virtualenv or Maven/Gradle wrapper; terminals search (⌘F), open links,
+  and on Windows list every WSL distribution as a profile.
 
 ## 🚦 The build that follows the push
 
 <img src="docs/screenshots/pipelines.png" alt="Pipelines" width="880" />
 
 A **Pipelines** tab appears on repositories linked to a host that has CI — **GitHub Actions**,
-**GitLab CI** and **Azure Pipelines** — and stays away from the ones that don't, rather than showing
-an empty screen.
+**GitLab CI**, **Azure Pipelines** and **Bitbucket Pipelines** — and stays away from the ones that
+don't, rather than showing an empty screen.
 
 - **Runs newest first**, with status, branch, commit, duration and **the date and time each one
   ran**, filterable by branch and by status.
@@ -260,17 +308,26 @@ an empty screen.
   and what was waiting, which is where the minutes really went.
 - **Job logs in the app**, ANSI intact, so a red build doesn't send you to a browser tab.
 - **Live while it's live**: a running build refreshes itself and the elapsed time keeps counting.
+- **Start a run by hand** — a GitHub workflow with its inputs, a GitLab pipeline with variables, an
+  Azure pipeline with parameters, a Bitbucket custom pipeline with its variables — from a form read
+  out of the pipeline's own file, confirmed with the branch named.
+- **Answer what it's waiting on**: approve or reject a GitHub environment review, a GitLab
+  protected-environment deployment or an Azure approval, and play a GitLab manual job — each one
+  flagged in the list and marked on the graph.
+- **Artifacts** listed with their size and expiry, and saved with a progress bar you can stop.
 
 ## 🔀 Pull requests, without leaving the app
 
-- Connect **GitHub**, **GitLab** and **Azure DevOps** — all at once, if you need to. Several
-  accounts per host, too.
+- Connect **GitHub**, **GitLab**, **Bitbucket** and **Azure DevOps** — all at once, if you need to.
+  Several accounts per host, too.
 - **Review a PR by pasting only its link** (⇧⌘L): CodeFlow works out which of your repos it belongs
   to — even one in another workspace — and starts the review.
 - Repo not on your machine? **Review it anyway, without cloning**: the diff is read from the host's
   API. That's a shallower review (the model can't see the rest of the code), so you can also clone
   it in one click for the full one.
-- **List, review and comment** on PRs; **approve, request changes or close** them.
+- **List, review and comment** on PRs; **approve, request changes, close or merge** them — with the
+  merge methods the host allows, and on Azure DevOps *complete* with its linked work items — and
+  read their **CI checks** without leaving the PR.
 - **The review is planned before anything is spent**: CodeFlow trims each file down to the symbols
   the PR touched — the whole method, numbered, with `>` marking what changed — splits the work
   across several reviewers in parallel, and closes with a cross-file pass looking for what no
@@ -284,7 +341,8 @@ an empty screen.
   other PRs comes back as context, and whoever else in the repository references the symbols you are
   touching arrives as a hint for contract changes.
 - **Create a PR** with an AI title and description, as a draft too.
-- Publish the **AI review's** comments straight onto the pull request.
+- Publish the **AI review's** comments straight onto the pull request, and see item by item which
+  ones landed.
 
 ## 📄 From a document to a backlog — and to the code
 
@@ -311,7 +369,8 @@ questions the documentation left unanswered.
   their labels and estimate; on monday, whichever columns your board actually has, and the panel
   tells you which ones it matched before you publish.
 - Everything is editable before any of that: fix a title, rewrite a scenario, drop a story. Edits
-  save as you leave the field.
+  save as you leave the field. And publishing doesn't freeze a story: one already on the board is
+  updated there from its draft, after a before-and-after of what will change.
 
 ### Review
 
@@ -336,7 +395,8 @@ A story doesn't have to stop at the board. Hand it to an agent chain and it beco
 - **One story, one to many repositories.** A change that spans an API, a front end and a schema is
   one run, not three you have to keep in step by hand.
 - **Two phases with a human gate between them.** It plans first and shows you the plan; nothing is
-  written until you say so.
+  written until you say so. On Claude Code, Codex and Grok the CLI itself keeps the planning run
+  read-only; on Gemini, Open Code and Cline it is asked to be.
 - It ends where your own work ends — in your working copy, with a diff to read.
 
 ### Wiki
@@ -349,7 +409,8 @@ tabs assume somebody wrote.
 - **Per workspace** — how several repositories fit together as a system: who calls whom, the
   contracts between them and where they're coupled.
 
-It comes out as editable Markdown, and publishes to your wiki when it says what you mean.
+It comes out as editable Markdown, and publishes to your wiki when it says what you mean — never over
+an edit someone made there in the meantime: that turns into a question, not a lost change.
 
 ## 🛰️ An API client, built in
 
@@ -359,30 +420,45 @@ changed it.
 <img src="docs/screenshots/api-client.png" alt="API client" width="880" />
 
 - **Six protocols**: REST, GraphQL (with schema introspection), WebSocket, Socket.IO, gRPC (from a
-  `.proto` file or server reflection) and MQTT.
+  `.proto` file or server reflection) and MQTT — and Server-Sent Events shown event by event as they
+  arrive.
 - **Collections, folders and environments**, with variables resolved everywhere — URL, headers, body
   and auth.
-- **Pre-request scripts and tests** in JavaScript, so a login can feed the call after it.
-- **Bring what you already have**: import from Postman, OpenAPI/Swagger, Insomnia, HAR or a raw cURL
-  command. Export back to Postman, OpenAPI or CodeFlow's own format.
+- **Auth that does the dance for you**: OAuth 2.0 — Authorization Code (with PKCE too), Client
+  Credentials, Password and Implicit, the browser's redirect caught on a local loopback address — and
+  **client certificates** for mTLS, `.p12` or PEM, encrypted keys included.
+- **Pre-request scripts and tests** in JavaScript, so a login can feed the call after it. A script
+  that arrives in an import or a shared collection waits for your approval before it first runs.
+- **Bring what you already have**: import from Postman, OpenAPI/Swagger, Insomnia (v4 and v5), Bruno,
+  HAR or a raw cURL command. Export back to Postman, OpenAPI or CodeFlow's own format.
 - **Run a whole collection** and read the result as a report.
 - **Generate the code** for a request in the language you work in.
-- **Share a collection with your team** through **your own** Supabase project — you host it, so the
-  requests and their secrets stay on infrastructure you control.
+- **Share a collection with your team** through **your own** Supabase project. Secret values never
+  leave your machine — only their names travel — and neither do your current values: teammates get
+  the initial values and the `{{references}}`. A project set up on an older install script says so,
+  and its row copies the new one for you to run.
 
 ## 🗄️ Your databases, in the same window
 
 The query you need to check is one tab away from the migration you just wrote.
 
-- **Six engines**: PostgreSQL, Supabase, SQL Server, InterSystems IRIS, MongoDB and Redis.
+- **Ten engines**: PostgreSQL, Supabase, MySQL, MariaDB, SQL Server, Oracle, SQLite, InterSystems
+  IRIS, MongoDB and Redis.
 - **Browse the tree** — schemas, tables, views, routines, sequences, columns, indexes and keys.
-- **SQL console** with history, `EXPLAIN`, and results you can export.
+- **SQL console** with history, `EXPLAIN`, a formatter (⇧⌥F) and results you can export — the page on
+  screen or every row. Each console is a session of its own, and says so when it's inside a
+  transaction.
+- **Import a CSV** into a table, all in one transaction — or keep what goes in and list what didn't.
 - **Edit rows in a grid**: changes stage locally and you see the exact statements before anything
   runs.
 - **Read the DDL** of any object, and the **schema diagram** with its foreign keys.
-- **Read-only connections** for the ones you must not touch by accident, and an **SSH tunnel** when
+- **Read-only connections** for the ones you must not touch by accident — refused before anything is
+  sent on every SQL engine, and enforced by the server too on PostgreSQL — and an **SSH tunnel** when
   the database sits behind a bastion.
-- Passwords go to the **system keychain**, never into the app's database.
+- **Microsoft Entra ID** sign-in for Azure SQL and Azure Database for PostgreSQL, through your Azure
+  CLI session or a service principal.
+- Passwords go to the **system keychain** — one typed inside a connection URL too — never into the
+  app's database.
 
 ## 📐 Schemas you can write, draw and try out
 
@@ -397,8 +473,9 @@ A schema written as **DBML** is drawn while you type — and the drawing is not 
   you a grid to fill it by hand — foreign keys become pickers over real parent rows — and a free SQL
   console with no production guards, because here `DELETE FROM users` is a thing you write every
   day. A drift bar tells you when the diagram has moved under the data.
-- **Generate the SQL** for your engine, **import an existing schema**, and **compare** two versions
-  side by side.
+- **Generate the SQL** for your engine, **import an existing schema**, and **compare** it with the file
+  on disk, the last commit or a saved version — with the `ALTER` migration between the two, for
+  PostgreSQL or MySQL.
 - **A `.dbml` file in the repository is the same document.** Open it from the editor and the file on
   disk stays the medium: the diagram writes it, the editor writes it, neither reloads over unsaved
   work, and a detached diagram window hears the save the editor just made.
@@ -411,9 +488,15 @@ for the flowcharts, C4 and sequence diagrams that aren't a database. Export to P
 An SSH client that knows it lives next to your repositories, in the same workspace as them.
 
 - **Terminal sessions over SSH**, with your keys or a password, and **hosts imported from your
-  existing `~/.ssh/config`** rather than typed in again.
-- **Files both ways over SFTP and FTP**, so getting a log off a server isn't a context switch.
+  existing `~/.ssh/config`** rather than typed in again. A host you haven't met asks you to check its
+  fingerprint before it's trusted, a new ed25519 key is one click, and shells keep running when you
+  switch workspace.
+- **Files both ways over SFTP, FTP/FTPS and SMB**, so getting a log off a server isn't a context
+  switch — you choose when a file already exists, and every transfer can be cancelled. On macOS a
+  saved password signs in the file browser and the tunnels too.
 - **Port forwarding** for the database, the debugger or the staging app behind a bastion.
+- **Remote desktops**: VNC right in a tab beside the terminal, over the same SSH tunnel, or in your
+  own viewer — and RDP, handed to your system's Remote Desktop client.
 - **Cloud storage in the same tree**: Azure **Blob**, **Queue**, **Table** and **File shares**, and
   **Amazon S3** — browse buckets and containers, upload, download and delete, with the account key in
   the system keychain and never in the connection you saved.
@@ -423,7 +506,9 @@ An SSH client that knows it lives next to your repositories, in the same workspa
 Markdown notebooks for the writing *around* the work — the decision, the runbook, the postmortem —
 with templates for the documents you write more than once and an AI panel that drafts and rewrites
 without leaving the page. **Per workspace**, so a client's notes don't turn up in another client's
-window.
+window. Deleted notes wait in a trash you can restore from, renaming one offers to update every
+`[[link]]` to it, and a note or a whole notebook exports to HTML or PDF — while `.md` files import the
+other way.
 
 ## 🔑 Llavero, a password manager in the app
 
@@ -436,8 +521,11 @@ desktop.
 - **No stored verifier.** A wrong password fails to unwrap the key, and that *is* the check — there
   is nothing on disk that says what the right answer looks like.
 - **Locks itself** after a while, and checks on use rather than only on a timer — a sleeping laptop
-  runs no timers.
+  runs no timers, so it wakes up locked.
 - Items, folders, attachments and an audit trail of what was opened and when.
+- **Yours to take away**: export it as an encrypted `.cfkeyring`, attachments included, or as the
+  JSON or CSV that Bitwarden and most password managers import. Bitwarden and 1Password exports
+  import the other way.
 
 ## 📱 Your phone, when you're not at the machine
 
@@ -448,7 +536,14 @@ internet.
 - **Watch what's running**: agent tasks and chains, live, and answer the ones waiting at *Your turn*
   from wherever you are.
 - **Review a pull request**, read the repository, and keep chatting to the assistant.
+- **More than watching**: pipelines (runs, jobs, re-run and cancel), services (start, stop,
+  restart), stashes (apply and pop) and your notifications.
 - **A terminal on your machine**, if you allow it — its own switch, off unless you turn it on.
+- **Encrypted by default**: the phone talks to your machine over HTTPS, with a certificate made on
+  that machine. The first time, the phone warns about it — compare the fingerprint it shows with the
+  one on the desktop, once. Phones paired before are moved over on their own.
+- **A flaky connection can't double an action**: every change the phone sends carries a key, so a
+  retry after a timeout gets the first answer instead of doing it again.
 - **Every device is revocable** one by one from the desktop, and administering the feature is
   something only the machine can do: a paired phone can't open a pairing window, move the port or
   revoke the device beside it.
@@ -466,7 +561,12 @@ internet.
 
 - **Secret scanning before every commit** — catches API keys, tokens and private keys, and stops you
   in time. Deterministic rules, nothing sent anywhere.
-- Your **tokens live in the system keychain**, never in plain text.
+- Your **tokens and passwords live in the system keychain**, never in plain text — Git hosting
+  tokens, database passwords and every API credential: auth fields, secret variables, certificate
+  passphrases and OAuth tokens. The API client's cookie jar is sealed at rest with a key kept there,
+  and its history is stored without the credentials a request carried.
+- **A strict Content-Security-Policy** on the app's own windows: a script smuggled into a page has
+  nowhere to run.
 - **Per-user data.** The database, settings and vault live in your own account's application data,
   where another account on the same machine cannot read them.
 - **Two ways to stay fully offline**: Cline over Ollama for the conversational work, and the bundled
@@ -513,7 +613,8 @@ Under **Model per task**, give each action a different engine. Everything starts
 only touch what you want to change.
 
 **5. Connect your platform (optional)**
-Under **Settings › Git Hosting**, connect **GitHub**, **GitLab** or **Azure DevOps** to see and
+Under **Settings › Git Hosting**, connect **GitHub**, **GitLab**, **Bitbucket** (an Atlassian API
+token, or a workspace or repository access token) or **Azure DevOps** to see and
 review pull requests and watch their pipelines — and, on Azure DevOps, to read wikis. **Jira** and
 **monday.com** connect on the same screen — they host no code, so they appear for your backlog and
 not for pull requests. Tokens are stored in your operating system's keychain, never in the app's own
@@ -526,10 +627,26 @@ database.
 ## 💾 Download
 
 Available for **Windows** and **macOS**. Grab the latest build from **[Releases](../../releases)**,
-run the installer and open it. The app **updates itself** when a new version lands.
+run the installer and open it — the first launch takes one extra step, [see below](#first-launch-of-an-unsigned-build).
+The app **updates itself** when a new version lands.
 
-It can keep running in the background (tray icon) so your terminals and AI tasks stay alive even when
-you close the window.
+Closing the window can hide it in the tray, so your terminals, services and AI tasks stay alive — or
+quit it for real; you choose in Settings, and it can open when you log in too. Something wrong?
+**Settings › About and diagnostics** copies the version and system details for a bug report.
+
+### First launch of an unsigned build
+
+CodeFlow's builds are not signed with a paid Apple or Microsoft certificate, so each system asks
+once:
+
+- **macOS** won't open it the first time. Go to **System Settings › Privacy & Security**, click
+  **Open Anyway** next to the message about CodeFlow and confirm — or run
+  `xattr -dr com.apple.quarantine /Applications/CodeFlow.app` once.
+- **Windows** SmartScreen says *Windows protected your PC*. Click **More info › Run anyway**.
+
+Updates stay verified without a paid certificate: the built-in updater installs a package only after
+checking its update signature against the public key built into the app. And because it downloads
+outside the browser, macOS doesn't ask again.
 
 ## 🌐 Languages
 
@@ -545,6 +662,13 @@ CodeFlow is **source-available, not open source** — see [`LICENSE`](LICENSE).
 - **Read the source, and send pull requests** — see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **What you may not do:** redistribute it, modify it, fork it into your own product, sell it, offer
   it as a hosted service, or use its code to train a model.
+
+CodeFlow also ships code it did not write — Rust crates, npm packages, C libraries compiled into the
+app, and a handful of runtimes and drivers bundled into the installers, each under its own licence.
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) lists them with their licences and carries the
+notices some of those licences require, including where to obtain the source of the MPL-2.0
+components and of the bundled Java runtime. It is generated — `pnpm notices` rebuilds it,
+`pnpm notices:check` fails when it has gone stale.
 
 Copyright © 2026 Sebastián Rodríguez Zapata. All rights reserved.
 

@@ -53,7 +53,7 @@ import {
 import { isRepoBusy, notifyStateChange, REPO_BUSY_MARKER } from "../lib/tauri/commands";
 import { onAiChatDelta, onAiDone, onStateInvalidate, type AiChatDeltaEvent } from "../lib/tauri/events";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
-import { parseTrace } from "./chatStore";
+import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { formatAgentLogLine } from "../lib/agentLog";
 import { providerCapabilities } from "../lib/aiProviders";
 import { translate } from "./languageStore";
@@ -109,6 +109,10 @@ export interface ConversationMessage extends Omit<ChatMessageRow, "trace"> {
   /** What the engine printed while producing this answer. Only present when the transcript was read
    *  with traces, or when the turn happened in this session. */
   trace?: AiRunLine[];
+  /** Set on a reopened turn whose trace exists but was not read with the transcript: the bubble's
+   *  disclosure fetches it by this id when opened (`lib/turnTrace.ts`). Without it the "N steps"
+   *  disclosure vanished from every turn the moment the conversation was reopened. */
+  traceId?: string;
   /** The model's reasoning, from `thinking_delta`. Feeds the collapsible block, never the answer
    *  bubble — the two interleave in the stream and must not interleave on screen. */
   thinking?: string;
@@ -540,6 +544,7 @@ function toMessage(row: ChatMessageRow): ConversationMessage {
     isError: !!row.isError,
     isCancelled: !!row.isCancelled,
     trace: traceOf(row.trace),
+    traceId: traceIdOf(row.trace, row.id),
     outputs: pathsOf(row.outputs),
   };
 }
@@ -1196,7 +1201,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     // return: a second device can add a turn to the same conversation, and a cache that is only
     // refreshed on eviction means "close it and open it again" would not surface it. The read is one
     // indexed query against the conversation the user just asked to see, and it deliberately does
-    // **not** ask for traces — see `chatGetConversation`.
+    // **not** ask for traces — see `chatGetConversation`. A turn that has one keeps its `traceId`,
+    // and its disclosure fetches that trace alone when it is opened.
     const rows = await chatGetConversation(conversationId, false).catch(() => null);
     set((s) => {
       // Re-checked after the await: a turn could have been started here while the read was in

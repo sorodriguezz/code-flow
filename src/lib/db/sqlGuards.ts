@@ -1,22 +1,25 @@
 /**
  * The checks a console runs *before* sending a statement.
  *
- * There is exactly one at the moment, and it earns its place: `DELETE FROM t` with no `WHERE` is a
- * single keystroke away from `DELETE FROM t WHERE …` and empties the table instead of removing a
- * row. Every other mistake a console can make is either visible (you read the rows that came back)
- * or recoverable (an `UPDATE` you can invert); this one is neither, and it is the only statement
- * where the *absence* of a clause is what does the damage.
+ * There is one, and it earns its place: a `DELETE` or an `UPDATE` with no `WHERE` is a single
+ * keystroke away from the one with a `WHERE`, and it rewrites the whole table instead of a row. Most
+ * mistakes a console can make are visible (you read the rows that came back) or recoverable; these
+ * two are neither. A `DELETE` takes the rows with it. An `UPDATE` is no more reversible — it
+ * *overwrites*: after `UPDATE users SET email = 'x'` the old values are gone just as surely, it only
+ * looks gentler because the rows are still there. This file used to exempt `UPDATE` on the grounds
+ * that it could be inverted; it cannot, without the values it replaced.
  *
- * It is a refusal rather than a confirmation on purpose. A prompt that appears in front of a
- * statement you meant to run is a prompt you learn to dismiss, and it would be shown most often to
- * the people running the statement deliberately. Deleting every row is still perfectly possible —
- * `WHERE 1=1` says it out loud, which is the point.
+ * What it does about them is ask, naming the statement: the answer has to be given against the text
+ * that is about to run, not against a generic warning. It used to refuse outright and make the user
+ * write `WHERE 1=1`, which protected nothing — people typed it and moved on — and left a rewritten
+ * statement in the history that no longer said what they had meant.
  *
- * The analysis is deliberately syntactic and conservative: comments and string literals are blanked
- * first (so a `--` or a `'…WHERE…'` can neither hide a `DELETE` nor fake a `WHERE`), the text is
- * split on statement boundaries, and only a statement that *starts* with `DELETE` is judged. It is
- * not a SQL parser and doesn't try to be — a false "this looks unguarded" is a statement the user
- * rewrites slightly, and the failure it prevents is a table.
+ * The analysis is syntactic and conservative: comments and string literals are blanked first (so a
+ * `--` or a `'…WHERE…'` can neither hide a verb nor fake a `WHERE`), and a `WHERE` only counts at the
+ * statement's own nesting level — the one inside `SET a = (SELECT … WHERE …)` filters the subquery,
+ * not the rows being updated. A verb counts wherever it starts a statement, which includes the body
+ * of a `WITH d AS (DELETE …)` and the statement after the CTEs. It is not a SQL parser and doesn't
+ * try to be: a false alarm costs one click, and the failure it prevents is a table.
  */
 
 /**
@@ -81,14 +84,51 @@ export function blankQuotedAndComments(sql: string): string {
   return out;
 }
 
+/** One word or bracket of a masked statement, with where it sits. */
+interface GuardWord {
+  /** Upper-cased word, or `(`, `)`, `;`. */
+  text: string;
+  /** Parenthesis depth: 0 at the statement's own level. */
+  depth: number;
+  /** Offset into the masked (and therefore the original) text. */
+  at: number;
+}
+
+function guardWords(masked: string): GuardWord[] {
+  const words: GuardWord[] = [];
+  let depth = 0;
+  const pattern = /[A-Za-z_][A-Za-z0-9_$#@]*|[();]/g;
+  for (let match = pattern.exec(masked); match; match = pattern.exec(masked)) {
+    const text = match[0].toUpperCase();
+    if (text === "(") {
+      words.push({ text, depth, at: match.index });
+      depth += 1;
+    } else if (text === ")") {
+      depth = Math.max(0, depth - 1);
+      words.push({ text, depth, at: match.index });
+    } else {
+      words.push({ text, depth, at: match.index });
+    }
+  }
+  return words;
+}
+
+/** What `unguardedWrite` found: the verb, and the statement it belongs to (trimmed, and shortened
+ *  when long) so the question can quote it. */
+export interface UnguardedWrite {
+  verb: "DELETE" | "UPDATE";
+  statement: string;
+}
+
 /**
- * The first `DELETE` in `sql` that has no `WHERE`, or `null` when there is none.
+ * Every `DELETE` and `UPDATE` in `sql` that has no `WHERE` of its own, in order.
  *
- * Returns the offending statement (trimmed, and shortened if it is long) so the message can name
- * it — with several statements in the box, "one of these has no WHERE" is not an answer.
+ * Several statements can be in the box and several can be unguarded; the question names each one,
+ * because "one of these has no WHERE" is not something anyone can answer.
  */
-export function unguardedDelete(sql: string): string | null {
+export function unguardedWrites(sql: string): UnguardedWrite[] {
   const masked = blankQuotedAndComments(sql);
+  const found: UnguardedWrite[] = [];
   let start = 0;
   for (let index = 0; index <= masked.length; index += 1) {
     // Statement boundaries come from the masked text, so a `;` inside a literal doesn't split one.
@@ -96,11 +136,34 @@ export function unguardedDelete(sql: string): string | null {
     const maskedStatement = masked.slice(start, index);
     const original = sql.slice(start, index).trim();
     start = index + 1;
-    if (!/^\s*delete\b/i.test(maskedStatement)) continue;
-    // `RETURNING`/`USING` and any amount of whitespace or newlines are irrelevant: the question is
-    // only whether the word appears at all outside a literal.
-    if (/\bwhere\b/i.test(maskedStatement)) continue;
-    return original.length > 160 ? `${original.slice(0, 160)}…` : original;
+    const words = guardWords(maskedStatement);
+    words.forEach((word, position) => {
+      const verb = word.text;
+      if (verb !== "DELETE" && verb !== "UPDATE") return;
+      // A verb only where a statement can begin: first, after `(` (a CTE body or a subquery), or
+      // after `)` (the statement that follows a `WITH` list, or the next one in a T-SQL batch).
+      // That is what keeps `FOR UPDATE`, `ON DELETE CASCADE`, `ON CONFLICT DO UPDATE` and `MERGE …
+      // THEN DELETE` — all scoped by something other than a `WHERE` — from reading as unguarded.
+      const previous = words[position - 1]?.text;
+      if (position > 0 && previous !== "(" && previous !== ")") return;
+      for (const later of words.slice(position + 1)) {
+        if (later.depth < word.depth) break;
+        if (later.depth !== word.depth) continue;
+        if (later.text === "WHERE") return;
+        // The next statement of a batch — its `WHERE` is not this one's.
+        if (["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"].includes(later.text)) break;
+      }
+      const shown = original.length > 160 ? `${original.slice(0, 160)}…` : original;
+      found.push({ verb, statement: shown });
+    });
   }
-  return null;
+  return found;
+}
+
+/**
+ * The first `DELETE` in `sql` that has no `WHERE`, or `null` when there is none. Kept for the
+ * callers that only ever asked about deletes; `unguardedWrites` is the whole answer.
+ */
+export function unguardedDelete(sql: string): string | null {
+  return unguardedWrites(sql).find((write) => write.verb === "DELETE")?.statement ?? null;
 }

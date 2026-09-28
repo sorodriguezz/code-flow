@@ -17,7 +17,8 @@ import {
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { TransferBar, formatSize, joinRemote, parentRemote } from "./remoteChrome";
-import { useRemoteStore } from "../../state/remoteStore";
+import { conflictQuestions } from "./transferQuestions";
+import { offerHostKeyTrust, useRemoteStore } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
@@ -26,14 +27,18 @@ import { useT } from "../../state/languageStore";
 import { onRemoteTransfer, type RemoteTransferEvent } from "../../lib/tauri/events";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import {
+  remoteCancelTransfer,
+  remoteCloseFiles,
   remoteDownloadFile,
   remoteListFiles,
   remoteListLocalFiles,
   remoteMakeDir,
+  remotePathsExist,
   remoteRemoveFile,
   remoteRenameFile,
   remoteUploadFile,
 } from "../../lib/tauri/remoteCommands";
+import { isCancelled, resolveTransfers } from "../../lib/remote/transfers";
 import type { RemoteFile, RemoteListing } from "../../types/remote";
 import { riseDelay } from "../../lib/rise";
 
@@ -155,6 +160,9 @@ export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
         // *this host* — a key with a passphrase the agent doesn't have, a server with the subsystem
         // disabled — and the message belongs where the user is looking, next to a Retry.
         setRemoteError(String(error));
+        // A host `known_hosts` has never seen is the one of those the app can fix: ask about its
+        // key, and list again once it is trusted.
+        offerHostKeyTrust(error, hostId, () => void loadRemote(path));
       }
     },
     [hostId],
@@ -165,6 +173,27 @@ export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
     void loadRemote(root);
   }, [loadLocal, loadRemote, root]);
 
+  // A save that changed how this host is reached closed the session the listing came from, so the
+  // pane lists again — from the top, since the directory it was in belongs to the old address.
+  const epoch = useRemoteStore((s) => s.connectionEpoch[hostId] ?? 0);
+  const seenEpoch = useRef(epoch);
+  useEffect(() => {
+    if (epoch === seenEpoch.current) return;
+    seenEpoch.current = epoch;
+    void loadRemote(root);
+  }, [epoch, loadRemote, root]);
+
+  /** Retry drops whatever file session is held first: the one that failed may be dead, and asking it
+   *  again was what kept a browser broken after a laptop slept. */
+  const retry = async () => {
+    await remoteCloseFiles(hostId).catch(() => {});
+    await loadRemote(root);
+  };
+
+  /** The transfer the bar's cancel stops — `null` between transfers, including while the overwrite
+   *  question is still open, when there is nothing running to stop. */
+  const running = useRef<string | null>(null);
+
   /**
    * Moves `pick` in `direction`. Directories included — the backend walks them.
    *
@@ -173,22 +202,36 @@ export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
    */
   const transfer = async (direction: "up" | "down", pick: RemoteFile | null) => {
     if (!pick || busy) return;
-    const id = `${paneId}-${++transferId.current}`;
+    const up = direction === "up";
+    let started = false;
     setBusy(true);
     setProgress(null);
     try {
-      if (direction === "up") {
-        await remoteUploadFile(id, hostId, pick.path, joinRemote(remotePath, pick.name));
-        await loadRemote(remotePath);
-      } else {
-        await remoteDownloadFile(id, hostId, pick.path, joinLocal(localPath, pick.name));
-        await loadLocal(localPath);
-      }
+      // Asked before anything moves: every transport truncates what is at the destination.
+      const plan = await resolveTransfers(
+        [{ source: pick.path, name: pick.name, isDir: pick.is_dir, dir: up ? remotePath : localPath }],
+        (paths) => remotePathsExist(hostId, paths, !up),
+        conflictQuestions,
+        up ? joinRemote : joinLocal,
+      );
+      const item = plan?.[0];
+      if (!item) return;
+      const id = `${paneId}-${++transferId.current}`;
+      running.current = id;
+      started = true;
+      if (up) await remoteUploadFile(id, hostId, item.source, item.dest);
+      else await remoteDownloadFile(id, hostId, item.source, item.dest);
     } catch (error) {
-      pushErrorToast(String(error));
+      // A cancel is the user's own doing; the partial file is already gone.
+      if (!isCancelled(error)) pushErrorToast(String(error));
     } finally {
+      running.current = null;
       setBusy(false);
       setProgress(null);
+      // However it ended, the pane it was going to is re-read: a cancel or a failure part way
+      // through a folder still leaves the files that did arrive.
+      if (started && up) void loadRemote(remotePath);
+      else if (started) void loadLocal(localPath);
     }
   };
 
@@ -255,7 +298,7 @@ export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
             </p>
             <button
               type="button"
-              onClick={() => void loadRemote(root)}
+              onClick={() => void retry()}
               className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
             >
               <RefreshCw size={13} />
@@ -315,7 +358,12 @@ export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
       </div>
       </div>
 
-      {progress && <TransferBar progress={progress} />}
+      {progress && (
+        <TransferBar
+          progress={progress}
+          onCancel={() => running.current && void remoteCancelTransfer(running.current)}
+        />
+      )}
     </div>
   );
 }

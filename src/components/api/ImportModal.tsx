@@ -9,6 +9,7 @@ import {
   FileJson,
   FileText,
   Folder,
+  FolderOpen,
   Globe,
   Link2,
   Loader2,
@@ -23,15 +24,18 @@ import { badgeColor, badgeLabel, statusColor } from "./methodStyle";
 import { useApiStore } from "../../state/apiStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import { detectFormat, importAny } from "../../lib/api/importers";
+import { detectFormat, importAny, importBrunoFolder } from "../../lib/api/importers";
+import { buildImportPayload } from "../../lib/api/importPayload";
 import { SpecFetchError, fetchSpec } from "../../lib/api/specFetch";
-import { apiPickFile, apiReadTextFile } from "../../lib/tauri/apiCommands";
+import { apiImportTree, apiPickFile, apiReadCollectionDir, apiReadTextFile } from "../../lib/tauri/apiCommands";
+import { pickFolder } from "../../lib/tauri/commands";
+import { Tooltip } from "../common/Tooltip";
 import type { ImportFormat, ImportResult, ImportedItem } from "../../types/api";
 
 /** Parsing a 5 MB OpenAPI document on every keystroke would make the textarea unusable. */
 const PARSE_DEBOUNCE_MS = 250;
 
-const FILE_EXTENSIONS = ["json", "yaml", "yml", "har", "txt", "sh", "curl"];
+const FILE_EXTENSIONS = ["json", "yaml", "yml", "har", "bru", "txt", "sh", "curl"];
 
 /** Format names are product names, not UI copy — they read the same in every language. */
 const FORMAT_LABELS: Record<ImportFormat, string> = {
@@ -40,6 +44,7 @@ const FORMAT_LABELS: Record<ImportFormat, string> = {
   curl: "cURL",
   har: "HAR",
   insomnia: "Insomnia",
+  bruno: "Bruno",
   codeflow: "CodeFlow",
 };
 
@@ -345,6 +350,11 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
 
   const [text, setText] = useState("");
   const [sourcePath, setSourcePath] = useState<string | null>(null);
+  /**
+   * A Bruno collection read from a folder. It has no single text to put in the paste box, so it
+   * stands in for `text` while it is set — and any typing, a file or a clear replaces it.
+   */
+  const [folder, setFolder] = useState<{ path: string; files: { path: string; text: string }[] } | null>(null);
   /** Where a fetched document came from — the host an OpenAPI description usually omits. */
   const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
@@ -368,9 +378,19 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
   const busy = importing || fetching;
 
   // Detection is cheap (structure sniffing, no full parse) so the badge can follow every keystroke.
-  const format = useMemo(() => (text.trim() ? detectFormat(text) : null), [text]);
+  const format = useMemo(
+    () => (folder ? "bruno" : text.trim() ? detectFormat(text) : null),
+    [text, folder],
+  );
+  /** What the current selection was made for: the pasted text, or the folder standing in for it. */
+  const documentKey = folder ? `folder:${folder.path}` : text;
 
   useEffect(() => {
+    if (folder) {
+      const name = folder.path.split(/[\\/]/).filter(Boolean).pop() ?? "";
+      setResult(importBrunoFolder(folder.files, name));
+      return;
+    }
     if (!text.trim()) {
       setResult(null);
       return;
@@ -390,7 +410,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
       live = false;
       clearTimeout(timer);
     };
-  }, [text, includeExamples, sourceUrl]);
+  }, [text, includeExamples, sourceUrl, folder]);
 
   // A fresh document starts fully selected; a re-parse of the same one (toggling examples) keeps
   // whatever the user had unticked, because the keys are positional and the positions didn't move.
@@ -399,18 +419,26 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
       selectionSource.current = null;
       return;
     }
-    if (selectionSource.current === text) return;
-    selectionSource.current = text;
+    if (selectionSource.current === documentKey) return;
+    selectionSource.current = documentKey;
     setSelected(new Set(allRequestKeys(result)));
     setToggled(new Set());
     setFilter("");
     if (!nameDirty) setName(result.collections[0]?.name ?? "");
-  }, [result, text, nameDirty]);
+  }, [result, documentKey, nameDirty]);
 
   const loadFile = useCallback(
     async (path: string) => {
       try {
-        setText(await apiReadTextFile(path));
+        // A folder is a Bruno collection; anything else is read as the one document it is.
+        const files = await apiReadCollectionDir(path);
+        if (files !== null) {
+          setFolder({ path, files });
+          setText("");
+        } else {
+          setFolder(null);
+          setText(await apiReadTextFile(path));
+        }
         setSourcePath(path);
         setSourceUrl(null);
         setFetchNote(null);
@@ -464,12 +492,21 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
     if (path) await loadFile(path);
   };
 
+  const pickCollectionFolder = async () => {
+    const path = await pickFolder().catch((e: unknown) => {
+      pushErrorToast(String(e));
+      return null;
+    });
+    if (path) await loadFile(path);
+  };
+
   const load = async () => {
     if (!url.trim()) return;
     setFetching(true);
     setFetchNote(null);
     try {
       const spec = await fetchSpec(url, settings);
+      setFolder(null);
       setText(spec.text);
       setSourcePath(null);
       // Where the document actually was, not the page that pointed at it — that is what a relative
@@ -556,61 +593,25 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
     toggleSelect(keys, next);
   };
 
+  /**
+   * One IPC call and one transaction for the whole tree (`api_import_tree`): a failure half way
+   * leaves nothing half-created, where a row-per-call import left a collection missing whichever
+   * requests came after the one that failed. The scripts it brings are recorded as untrusted in the
+   * same transaction, so the first send that would run one asks first.
+   */
   const runImport = async () => {
     if (!result || !hasSomething) return;
-    setImporting(true);
     const store = useApiStore.getState();
-
-    const createItems = async (
-      collectionId: string,
-      folderId: string | null,
-      items: ImportedItem[],
-    ): Promise<void> => {
-      for (const item of items) {
-        if (item.kind === "request") {
-          await store.createRequest(collectionId, folderId, item.name, item.spec);
-          continue;
-        }
-        const folder = await store.createFolder(collectionId, folderId, item.name);
-        if (!folder) continue;
-        await store.updateFolder({
-          ...folder,
-          description: item.description,
-          auth: item.auth ? JSON.stringify(item.auth) : "",
-          pre_script: item.preScript,
-          post_script: item.postScript,
-        });
-        await createItems(collectionId, folder.id, item.items);
-      }
-    };
-
+    const workspaceId = store.workspaceId;
+    if (workspaceId === null) return;
+    setImporting(true);
     try {
-      for (const imported of pruned) {
-        // The name field only stands in for a single collection — with several there is nothing
-        // sensible for one typed name to mean.
-        const label = pruned.length === 1 && name.trim() ? name.trim() : imported.name;
-        const collection = await store.createCollection(label);
-        if (!collection) continue;
-        await store.updateCollection({
-          ...collection,
-          description: imported.description,
-          auth: imported.auth ? JSON.stringify(imported.auth) : "",
-          pre_script: imported.preScript,
-          post_script: imported.postScript,
-          variables: JSON.stringify(imported.variables),
-        });
-        await createItems(collection.id, null, imported.items);
-      }
-
-      for (const environment of result.environments) {
-        const created = await store.createEnvironment(environment.name);
-        if (!created) continue;
-        await store.updateEnvironment({
-          ...created,
-          variables: JSON.stringify(environment.variables),
-        });
-      }
-
+      await apiImportTree(
+        workspaceId,
+        buildImportPayload(result.format, pruned, result.environments, name),
+      );
+      await store.reloadTree();
+      await store.reloadEnvironments();
       pushToast(
         t("api.import.done", { collections: totals.collections, requests: totals.requests }),
         "success",
@@ -714,17 +715,26 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
             <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]">
               {dropActive
                 ? t("api.import.dropActive")
-                : sourcePath
-                  ? t("api.import.fileRead", { path: sourcePath })
-                  : t("api.import.dropHint")}
+                : folder
+                  ? t("api.import.folderRead", { n: folder.files.length, path: folder.path })
+                  : sourcePath
+                    ? t("api.import.fileRead", { path: sourcePath })
+                    : t("api.import.dropHint")}
             </span>
             <GhostButton onClick={() => void pick()} disabled={busy}>
               {t("api.import.pickFile")}
             </GhostButton>
-            {text !== "" && (
+            <Tooltip label={t("api.import.pickFolder")} description={t("api.import.pickFolderHint")}>
+              <GhostButton onClick={() => void pickCollectionFolder()} disabled={busy}>
+                <FolderOpen size={13} />
+                {t("api.import.pickFolder")}
+              </GhostButton>
+            </Tooltip>
+            {(text !== "" || folder !== null) && (
               <GhostButton
                 onClick={() => {
                   setText("");
+                  setFolder(null);
                   setSourcePath(null);
                   setSourceUrl(null);
                   setFetchNote(null);
@@ -748,6 +758,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
           value={text}
           onChange={(e) => {
             setText(e.target.value);
+            setFolder(null);
             setSourcePath(null);
             setSourceUrl(null);
             setFetchNote(null);

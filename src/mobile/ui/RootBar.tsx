@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ChevronDown, Settings2 } from "lucide-react";
+import { Bell, ChevronDown, Settings2 } from "lucide-react";
 import { t } from "../i18n";
 import { useMobileStore } from "../store";
 import { useNav } from "../nav";
@@ -33,6 +33,8 @@ export function RootBar({
 }) {
   const push = useNav((s) => s.push);
   const project = useMobileStore((s) => s.projects.find((p) => p.id === s.projectId)?.name ?? null);
+  // Something arrived at the desk's notification centre since this phone last looked.
+  const unseen = useMobileStore((s) => s.notices.some((notice) => notice.finishedAt > s.noticesSeenAt));
 
   return (
     <AppBar
@@ -65,6 +67,22 @@ export function RootBar({
       actions={
         <>
           {actions}
+          <span className="relative">
+            <IconButton
+              icon={<Bell size={18} />}
+              label={unseen ? t("notices.unseen") : t("notices.title")}
+              onClick={() => {
+                navigated();
+                push({ k: "notifications" });
+              }}
+            />
+            {unseen && (
+              <span
+                aria-hidden
+                className="pointer-events-none absolute right-2 top-2 h-2 w-2 rounded-full bg-[var(--cf-accent-strong)]"
+              />
+            )}
+          </span>
           <IconButton
             icon={<Settings2 size={18} />}
             label={t("nav.settings")}

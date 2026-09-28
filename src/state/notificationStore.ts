@@ -1,7 +1,9 @@
 import { create } from "zustand";
-import { translate } from "./languageStore";
+import { translate, useLanguageStore } from "./languageStore";
 import { usePreferencesStore } from "./preferencesStore";
 import { sendNativeNotification } from "../lib/nativeNotify";
+import { remotectlPublishNotifications } from "../lib/tauri/commands";
+import { isMainWindow } from "../lib/windowIdentity";
 import { useUiStore, type MainView, type StoriesMode } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type { TranslationKey } from "../lib/i18n/translations";
@@ -527,4 +529,43 @@ export async function followTarget(
     const unhandled: never = kind;
     void unhandled;
   }
+}
+
+/**
+ * Hands the list to paired phones, whenever it changes (`list_notifications` in
+ * `src-tauri/src/remotectl/dispatch.rs`).
+ *
+ * The list lives here and nowhere else — session state, never persisted — so a phone has nothing to
+ * read unless this window publishes it. Rendered in this window's language, because the phone's own
+ * string table has none of these keys; and republished when the language changes, so the copy never
+ * drifts into the one the user just left.
+ *
+ * The main window only: the bell and its list are its, and a satellite's store is a partial copy.
+ * Coalesced to one handover per burst — a run of jobs finishing together is one publish, not ten —
+ * and skipped outside Tauri, where there is no server to publish to.
+ */
+function publishToPhones(): void {
+  remotectlPublishNotifications(
+    useNotificationStore.getState().items.map((item) => ({
+      id: item.id,
+      source: translate(NOTIFICATION_SOURCE_LABEL[item.source]),
+      title: translate(item.titleKey, item.params),
+      detail: item.detail ?? null,
+      status: item.status,
+      finishedAt: item.finishedAt,
+      workspaceId: item.workspaceId,
+    })),
+  );
+}
+
+if (isMainWindow() && typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+  let pending: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    clearTimeout(pending);
+    pending = setTimeout(publishToPhones, 250);
+  };
+  useNotificationStore.subscribe((state, previous) => {
+    if (state.items !== previous.items) schedule();
+  });
+  useLanguageStore.subscribe(schedule);
 }

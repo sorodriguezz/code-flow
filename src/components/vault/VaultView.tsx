@@ -20,6 +20,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { ensureVaultStoreLoaded, useVaultStore } from "../../state/vaultStore";
 import { useVaultModalStore } from "../../state/vaultModalStore";
 import { VaultExplorer } from "./VaultExplorer";
+import { VaultExportModal } from "./VaultExportModal";
 import { VaultImportModal } from "./VaultImportModal";
 import { VaultSettingsModal } from "./VaultSettingsModal";
 import { VaultGallery, VaultItemDetail } from "./VaultItemDetail";
@@ -67,6 +68,10 @@ export function VaultView() {
       )}
       {modal?.kind === "settings" && (
         <VaultSettingsModal onClose={() => useVaultModalStore.getState().closeVaultModal()} />
+      )}
+      {/* Only while unlocked: exporting reads every entry, and the backend refuses it locked. */}
+      {modal?.kind === "export" && unlocked && (
+        <VaultExportModal onClose={() => useVaultModalStore.getState().closeVaultModal()} />
       )}
     </>
   );

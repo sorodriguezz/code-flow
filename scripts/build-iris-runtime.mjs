@@ -4,6 +4,8 @@
 //   runtime/                     a jlink-trimmed JRE — the only Java the app ever runs
 //   iris-bridge.jar              the NDJSON servant in `src-tauri/java/`
 //   intersystems-jdbc-<v>.jar    the driver, from Maven Central, checksum-pinned
+//   InterSystems-External-Repository-Terms-of-Use.pdf
+//                                the driver's terms, which must travel with it — see DRIVER_TERMS
 //
 // IRIS has no pure-Rust driver, so a JVM is not optional — but a *full* JRE would be. `jlink` cuts
 // it to the four modules the driver actually resolves (verified with `jdeps`), which is the
@@ -73,6 +75,29 @@ const DRIVERS = [
 ];
 
 /**
+ * The terms the InterSystems driver is redistributed under, shipped beside it.
+ *
+ * The driver's POM licenses it under the InterSystems External Repository Terms of Use, and those
+ * terms ask for a copy of them to accompany every distribution of the driver. Oracle's driver
+ * meets the same condition by carrying its licence inside the jar; this one does not, so a copy is
+ * written into `resources/iris/`. That folder is shipped verbatim inside the installer, so the copy
+ * travels with the jar — the way `build-llama-runtime.mjs` writes llama.cpp's LICENSE beside its
+ * binaries.
+ *
+ * Fetched from InterSystems rather than kept in this repository: the terms are theirs, they publish
+ * the version in force at a stable address, and the copy an installer has to carry is the one in
+ * force when it is built. For the same reason it is not pinned by hash — InterSystems revising its
+ * terms must not break a release.
+ *
+ * What *is* checked is that the answer is a PDF. A captive portal's HTML page saved under this name
+ * would ship something that is not the terms while looking as if the condition were met.
+ */
+const DRIVER_TERMS = {
+  url: "https://www.intersystems.com/IERTU/",
+  file: "InterSystems-External-Repository-Terms-of-Use.pdf",
+};
+
+/**
  * What the runtime has to carry. `jdeps --print-module-deps` on the IRIS driver answers
  * `java.base,java.security.jgss,java.sql`; `java.naming` is added because `DriverManager` reaches
  * for JNDI on some paths, and `java.logging` because the driver's own tracing writes through it.
@@ -135,6 +160,10 @@ async function main() {
   await buildRuntime(jdk);
   await fetchDriver();
   await buildBridge(jdk);
+  // Last, so that under `--optional` a network hiccup here costs only the terms file and not the
+  // bridge a developer is iterating on. Packaging runs without `--optional`, where this failing
+  // fails the build: an installer must not carry the driver without its terms.
+  await fetchDriverTerms();
 
   console.log(`\niris-runtime: ready in ${OUT}`);
 }
@@ -416,6 +445,36 @@ async function removeStaleDrivers(keep, prefix) {
       await rm(join(OUT, entry), { force: true });
     }
   }
+}
+
+/** The PDF signature: the first five bytes of every PDF, and of no HTML page. */
+function isPdf(bytes) {
+  return bytes.subarray(0, 5).toString("latin1") === "%PDF-";
+}
+
+/** Writes the InterSystems terms beside the driver. See `DRIVER_TERMS` for why, and why unpinned. */
+async function fetchDriverTerms() {
+  const target = join(OUT, DRIVER_TERMS.file);
+
+  if (!force && existsSync(target) && isPdf(await readFile(target))) {
+    console.log(`iris-runtime: ${DRIVER_TERMS.file} is present, skipping download`);
+    return;
+  }
+
+  console.log(`iris-runtime: downloading ${DRIVER_TERMS.url}`);
+  const response = await fetch(DRIVER_TERMS.url, { redirect: "follow" });
+  if (!response.ok) {
+    throw new Error(`InterSystems answered ${response.status} for the driver's terms (${DRIVER_TERMS.url})`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!isPdf(bytes)) {
+    throw new Error(
+      `${DRIVER_TERMS.url} did not answer with a PDF. Nothing was written: the driver's terms have to ` +
+        "ship beside it, and a web page saved in their place would not be them.",
+    );
+  }
+  await writeFile(target, bytes);
+  console.log(`iris-runtime: ${DRIVER_TERMS.file} written (${Math.round(bytes.length / 1024)} KB)`);
 }
 
 // ---------------------------------------------------------------------------

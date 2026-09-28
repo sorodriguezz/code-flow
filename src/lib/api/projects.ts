@@ -33,6 +33,8 @@ export interface Connection {
   ready: boolean;
   /** When that check last passed, for "connected 4 minutes ago". */
   checkedAt: string;
+  /** The project runs an older copy of the install script than this build expects. */
+  schemaOutdated: boolean;
   /** In `settings.supabaseProjects`, as opposed to only inferred from a share. */
   saved: boolean;
   /** Collections hosted here that sync against it. */
@@ -98,7 +100,14 @@ export function listConnections(
       }
       return existing;
     }
-    const created: Connection = { url: url.trim(), ready: false, checkedAt: "", saved, shares: 0 };
+    const created: Connection = {
+      url: url.trim(),
+      ready: false,
+      checkedAt: "",
+      schemaOutdated: false,
+      saved,
+      shares: 0,
+    };
     byHost.set(host, created);
     return created;
   };
@@ -108,6 +117,7 @@ export function listConnections(
     if (!row) continue;
     row.ready = project.ready;
     row.checkedAt = project.checkedAt;
+    row.schemaOutdated = project.schemaOutdated === true;
   }
 
   for (const share of shares) {

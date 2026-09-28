@@ -21,9 +21,14 @@ import {
   apiListCookies,
   apiListEnvironments,
   apiListHistoryMeta,
+  apiLoadOpenTabs,
+  apiLoadSettings,
   apiLoadTree,
   apiMoveNode,
   apiReorderCollections,
+  apiSaveOpenTabs,
+  apiSaveSettings,
+  apiSealStoredSecrets,
   apiStreamDisconnect,
   apiUpdateCollection,
   apiUpdateEnvironment,
@@ -59,7 +64,16 @@ import type {
   SavedExample,
   VariableScope,
 } from "../types/api";
-import type { VariableContext } from "../lib/api/variables";
+import { resolve, type VariableContext } from "../lib/api/variables";
+import { historySecrets } from "../lib/api/historySecrets";
+import { flushAuthoredScripts } from "../lib/api/scriptTrust";
+import {
+  refreshOAuth2Token,
+  resolveOAuth2,
+  shouldRefreshOAuth2,
+  tokenNetworkOptions,
+  type OAuth2Token,
+} from "../lib/api/auth";
 
 /** Global on purpose: timeouts, proxy and certificates are transport configuration, not content. */
 const SETTINGS_KEY = "api_settings";
@@ -70,7 +84,8 @@ const SETTINGS_KEY = "api_settings";
  * the switch that was supposed to leave them behind.
  */
 const activeEnvironmentKey = (workspaceId: string) => `api_active_environment:${workspaceId}`;
-const openTabsKey = (workspaceId: string) => `api_open_tabs:${workspaceId}`;
+// The open tabs live under `api_open_tabs:<workspace>`, a key only the backend builds now — it is
+// read and written through `apiLoadOpenTabs`/`apiSaveOpenTabs`, which seal the drafts' credentials.
 
 /**
  * One editor tab in the builder. `requestId: null` is a scratch request — it exists only here
@@ -313,6 +328,16 @@ interface ApiState {
   effectiveAuthChain: (requestId: string) => (AuthConfig | null)[];
   /** Same walk as `effectiveAuthChain` but rooted in the tab's unsaved draft. */
   authChainForTab: (tabId: string) => (AuthConfig | null)[];
+  /**
+   * Refreshes the OAuth 2 token a send is about to use when it is missing or (nearly) expired and a
+   * refresh token is on hand, writing the new one back where that auth lives. Resolves to an error
+   * message for the console, or `null` — a failed refresh never stops the send; the server's 401
+   * then says the rest.
+   */
+  refreshExpiredOAuth2: (
+    target: { tabId: string } | { requestId: string },
+    ctx: VariableContext,
+  ) => Promise<string | null>;
 }
 
 /**
@@ -361,10 +386,13 @@ export const useApiStore = create<ApiState>((set, get) => ({
     // environment) keys off it, and those writes can land while the load is still running.
     set({ workspaceId, loading: true });
     try {
+      // Settings and tabs come back through the commands that put their credentials back — a
+      // certificate's passphrase and an open draft's token live in the OS credential store now, and
+      // the rows only name them (see `db::api_secrets`).
       const [rawSettings, rawEnvironment, rawTabs] = await Promise.all([
-        getSetting(SETTINGS_KEY).catch(() => null),
+        apiLoadSettings().catch(() => null),
         getSetting(activeEnvironmentKey(workspaceId)).catch(() => null),
-        getSetting(openTabsKey(workspaceId)).catch(() => null),
+        apiLoadOpenTabs(workspaceId).catch(() => null),
       ]);
 
       // Merged over the defaults rather than used as-is, so a field added in a later version
@@ -374,7 +402,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
       const settings = migrated ?? { ...defaultApiSettings(), ...stored };
       // A migration that only lived in memory would run again on every launch — and would be undone
       // the moment any other setting was written back over it.
-      if (migrated !== null) void setSetting(SETTINGS_KEY, JSON.stringify(migrated)).catch(() => {});
+      if (migrated !== null) void apiSaveSettings(JSON.stringify(migrated)).catch(() => {});
 
       const [tree, environments, history, cookies] = await Promise.all([
         apiLoadTree(workspaceId),
@@ -423,6 +451,10 @@ export const useApiStore = create<ApiState>((set, get) => ({
       // The tabs were restored from disk and the tree was just read: a request one of them points
       // at may well have moved on since it was persisted.
       get().adoptRemoteChanges();
+      // In the background, and only once per install in practice: whatever an earlier version stored
+      // in the clear moves into the OS credential store. Nothing on screen changes — what was loaded
+      // above already holds the real values either way.
+      void apiSealStoredSecrets().catch(() => {});
     } catch (e) {
       pushErrorToast(String(e));
     } finally {
@@ -538,6 +570,8 @@ export const useApiStore = create<ApiState>((set, get) => ({
 
   deleteCollection: async (id) => {
     await guarded(async () => {
+      // For a guest the backend leaves the share and deletes only this copy (see
+      // `api_delete_collection`), so the share list changes too — re-read below.
       await apiDeleteCollection(id);
       // The cascade is in SQLite; mirroring it here avoids a full tree reload for a delete.
       const orphaned = get()
@@ -551,6 +585,8 @@ export const useApiStore = create<ApiState>((set, get) => ({
       detachTabs(set, get, orphaned);
       // The cascade took the collection's folders too, so their settings tabs go as well.
       syncEntityTabs(set, get);
+      const { useCollabStore } = await import("./collabStore");
+      if (useCollabStore.getState().shareFor(id)) await useCollabStore.getState().refresh();
     });
   },
 
@@ -689,7 +725,28 @@ export const useApiStore = create<ApiState>((set, get) => ({
         : { requests: moveRequestLocally(previous.requests, id, collectionId, parentId, index) },
     );
     try {
-      await apiMoveNode(kind, id, collectionId, parentId, index);
+      const moved = await apiMoveNode(kind, id, collectionId, parentId, index);
+      // The move stamped every row it touched so it can travel to a shared collection's members.
+      // Those stamps are this machine's own write: the rows take them, and so does every open tab
+      // that agreed with the row until now — otherwise the next tree reload would read our own drag
+      // as somebody else's edit and flag a tab with unsaved changes as stale.
+      const folders = new Set(moved.folders);
+      const requests = new Set(moved.requests);
+      set((s) => {
+        const before = new Map(s.requests.map((r) => [r.id, r.updated_at]));
+        return {
+          folders: s.folders.map((f) => (folders.has(f.id) ? { ...f, updated_at: moved.stamp } : f)),
+          requests: s.requests.map((r) => (requests.has(r.id) ? { ...r, updated_at: moved.stamp } : r)),
+          openTabs: s.openTabs.map((t) =>
+            t.requestId !== null &&
+            requests.has(t.requestId) &&
+            t.rowUpdatedAt !== undefined &&
+            t.rowUpdatedAt === before.get(t.requestId)
+              ? { ...t, rowUpdatedAt: moved.stamp }
+              : t,
+          ),
+        };
+      });
     } catch (e) {
       set(previous);
       pushErrorToast(String(e));
@@ -762,7 +819,9 @@ export const useApiStore = create<ApiState>((set, get) => ({
 
   addHistory: async (entry) => {
     await guarded(async () => {
-      await apiAddHistory(entry);
+      // Stored without its credentials (see `api_add_history`), and kept here as stored: a replay
+      // from memory must not show a token that a replay from disk would not.
+      const stored = await apiAddHistory(entry, historySecrets(get()));
       // Only the newest three rows keep their snapshot in memory; older ones are stripped down to
       // the metadata the list actually draws (name, method, url, status, duration, size).
       //
@@ -780,7 +839,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
       // from a previous session is reopened today.
       set((s) => ({
         history: [
-          entry,
+          stored,
           ...s.history.map((h, i) => (i < 2 || h.snapshot === "" ? h : { ...h, snapshot: "" })),
         ].slice(0, s.settings.historyLimit),
       }));
@@ -841,7 +900,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
   updateSettings: async (patch) => {
     const settings = { ...get().settings, ...patch };
     set({ settings });
-    await setSetting(SETTINGS_KEY, JSON.stringify(settings)).catch((e) => pushErrorToast(String(e)));
+    await apiSaveSettings(JSON.stringify(settings)).catch((e) => pushErrorToast(String(e)));
   },
 
   // ---------- tabs ----------
@@ -950,6 +1009,9 @@ export const useApiStore = create<ApiState>((set, get) => ({
   saveEntityTab: async (tabId) => {
     const tab = get().entityTabs.find((entry) => entry.id === tabId);
     if (!tab) return;
+    // A script typed here is trusted from the keystroke for this session and written down a moment
+    // later; a save is the moment not to leave that to the debounce. See `lib/api/scriptTrust.ts`.
+    void flushAuthoredScripts().catch(() => {});
     const { description, auth, preScript, postScript, variables } = tab.draft;
     // An `inherit` at this level configures nothing, which is exactly what the empty string means
     // in the column — writing the config out would make the level a decision the chain stops at.
@@ -1048,6 +1110,8 @@ export const useApiStore = create<ApiState>((set, get) => ({
   saveTab: async (tabId, target) => {
     const tab = get().openTabs.find((t) => t.id === tabId);
     if (!tab) return null;
+    // Same as `saveEntityTab`: what the editor authored is written down as trusted now, not later.
+    void flushAuthoredScripts().catch(() => {});
     const spec = JSON.stringify(tab.draft);
 
     return guarded(async () => {
@@ -1231,7 +1295,126 @@ export const useApiStore = create<ApiState>((set, get) => ({
     if (!tab) return [];
     return [tab.draft.auth, ...ancestorAuth(get, tab.collectionId, tab.folderId)];
   },
+
+  refreshExpiredOAuth2: async (target, ctx) => {
+    const owner = authOwners(get(), target).find((entry) => entry.auth !== null && entry.auth.type !== "inherit");
+    if (!owner || owner.auth === null || owner.auth.type !== "oauth2") return null;
+    const auth = owner.auth;
+    const resolved = resolveOAuth2(auth.oauth2, (text) => resolve(text, ctx));
+    if (!shouldRefreshOAuth2(resolved)) return null;
+
+    // One refresh per owner at a time: two tabs sending under the same collection's auth must not
+    // both spend the refresh token — providers that rotate it revoke the family on reuse.
+    const key = `${owner.kind}:${owner.id}`;
+    let flight = refreshesInFlight.get(key);
+    if (!flight) {
+      flight = refreshOAuth2Token(resolved, tokenNetworkOptions(get().settings)).finally(() =>
+        refreshesInFlight.delete(key),
+      );
+      refreshesInFlight.set(key, flight);
+    }
+    let token: OAuth2Token;
+    try {
+      token = await flight;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+
+    const withToken = (config: AuthConfig): AuthConfig =>
+      config.type !== "oauth2"
+        ? config
+        : {
+            ...config,
+            oauth2: {
+              ...config.oauth2,
+              accessToken: token.accessToken,
+              // Unchanged means the response carried none; keep what was stored, template and all.
+              refreshToken:
+                token.refreshToken === resolved.refreshToken ? config.oauth2.refreshToken : token.refreshToken,
+              expiresAt: token.expiresAt,
+            },
+          };
+
+    // Written back where the auth lives, the way "Get New Access Token" would have: into the tab's
+    // draft for a request's own auth, into the saved row for a runner's request, a folder or the
+    // collection.
+    switch (owner.kind) {
+      case "draft":
+        get().updateDraft(owner.id, { auth: withToken(auth) });
+        break;
+      case "request": {
+        const row = get().requests.find((r) => r.id === owner.id);
+        if (!row) break;
+        await get().updateRequest({ ...row, spec: JSON.stringify({ ...parseSpec(row), auth: withToken(auth) }) });
+        // A tab showing this request carries the token too, so its next save doesn't put the old
+        // one back.
+        set((s) => ({
+          openTabs: s.openTabs.map((tab) =>
+            tab.requestId === owner.id ? { ...tab, draft: { ...tab.draft, auth: withToken(tab.draft.auth) } } : tab,
+          ),
+        }));
+        break;
+      }
+      case "folder": {
+        const folder = get().folders.find((f) => f.id === owner.id);
+        if (folder) await get().updateFolder({ ...folder, auth: JSON.stringify(withToken(auth)) });
+        break;
+      }
+      case "collection": {
+        const collection = get().collections.find((c) => c.id === owner.id);
+        if (collection) await get().updateCollection({ ...collection, auth: JSON.stringify(withToken(auth)) });
+        break;
+      }
+    }
+    return null;
+  },
 }));
+
+/** Refreshes in progress, by the owner of the auth being refreshed. */
+const refreshesInFlight = new Map<string, Promise<OAuth2Token>>();
+
+interface AuthOwner {
+  kind: "draft" | "request" | "folder" | "collection";
+  /** The tab id for `draft`, otherwise the row id. */
+  id: string;
+  auth: AuthConfig | null;
+}
+
+/**
+ * The auth chain with who holds each level — request (or its tab's draft), folders innermost first,
+ * then the collection. The same walk as `ancestorAuth`; kept beside it so the two stay one order.
+ */
+function authOwners(state: ApiState, target: { tabId: string } | { requestId: string }): AuthOwner[] {
+  let head: AuthOwner;
+  let collectionId: string | null;
+  let folderId: string | null;
+  if ("tabId" in target) {
+    const tab = state.openTabs.find((t) => t.id === target.tabId);
+    if (!tab) return [];
+    head = { kind: "draft", id: tab.id, auth: tab.draft.auth };
+    collectionId = tab.collectionId;
+    folderId = tab.folderId;
+  } else {
+    const row = state.requests.find((r) => r.id === target.requestId);
+    if (!row) return [];
+    head = { kind: "request", id: row.id, auth: parseSpec(row).auth };
+    collectionId = row.collection_id;
+    folderId = row.folder_id;
+  }
+  const owners: AuthOwner[] = [head];
+  const seen = new Set<string>();
+  let current = folderId;
+  while (current !== null && !seen.has(current)) {
+    seen.add(current);
+    const folder = state.folders.find((f) => f.id === current);
+    if (!folder) break;
+    owners.push({ kind: "folder", id: folder.id, auth: parseAuth(folder.auth) });
+    current = folder.parent_id;
+  }
+  const collection = state.collections.find((c) => c.id === collectionId);
+  if (collection) owners.push({ kind: "collection", id: collection.id, auth: parseAuth(collection.auth) });
+  return owners;
+}
 
 /** Keeps a shared collection's remote label in step with a local rename, silently. */
 async function renameShareIfShared(collectionId: string, name: string) {
@@ -1288,7 +1471,9 @@ function persistTabs(get: () => ApiState) {
     order: tabOrder,
     activeTabId,
   };
-  void setSetting(openTabsKey(workspaceId), JSON.stringify(payload)).catch(() => {});
+  // Through the command that moves each draft's credentials into the OS credential store: a tab
+  // holds the same token its request does, and an unsaved one may hold a token nothing else does.
+  void apiSaveOpenTabs(workspaceId, JSON.stringify(payload)).catch(() => {});
 }
 
 function schedulePersistTabs(get: () => ApiState) {
@@ -1808,7 +1993,7 @@ watchSettings([SETTINGS_KEY], async () => {
   if (workspaceId === null && !loading) return;
   // A failed read keeps what is in memory: falling back to the defaults would drop a working proxy
   // on a hiccup, which is worse than being one edit behind.
-  const raw = await getSetting(SETTINGS_KEY).catch(() => undefined);
+  const raw = await apiLoadSettings().catch(() => undefined);
   if (raw === undefined) return;
   const stored = parseJson<StoredSettings>(raw, {});
   useApiStore.setState({ settings: migrateSettings(stored) ?? { ...defaultApiSettings(), ...stored } });

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Bot,
   Braces,
@@ -25,6 +25,8 @@ import {
   Route,
   Workflow,
   Zap,
+  Sparkles,
+  SaveAll,
 } from "lucide-react";
 import { ServicesDockIcon } from "../services/ServicesDockIcon";
 import { canPasteJsonHere, pasteJsonInFocusedEditor } from "../editor/pasteJsonAsCode";
@@ -36,12 +38,19 @@ import { useRepoStore } from "../../state/repoStore";
 import { useUiStore, type ApiWorkspace, type MainView, type PaletteScope } from "../../state/uiStore";
 import { SETTINGS_SECTIONS } from "../../lib/settingsCatalog";
 import { useTerminalStore } from "../../state/terminalStore";
+import { useEditorCommandStore } from "../../state/editorCommandStore";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Search } from "lucide-react";
 import { Kbd } from "../common/Button";
+import { useDialog } from "../../lib/useFocusTrap";
+import { quickAskOpen } from "../../lib/tauri/windows";
+import { acceleratorKeycaps } from "../../lib/globalHotkey";
+import { isMac } from "../../lib/platform";
+import { useQuickAskHotkeyStore } from "../../state/quickAskHotkeyStore";
+import { pushErrorToast } from "../../state/toastStore";
 
 /** Folded for matching: case and accents both ignored, so "configuracion" finds "Configuración". */
 function fold(text: string): string {
@@ -56,6 +65,8 @@ interface PaletteItem {
   label: string;
   group: PaletteGroup;
   onSelect: () => void;
+  /** Key caps drawn at the end of the row — for the one action whose chord is not an app chord. */
+  keys?: string[];
 }
 
 /** A scoped opening (from the "switch repository" / "switch workspace" / "switch branch"
@@ -145,6 +156,10 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const openProjectInit = useUiStore((s) => s.openProjectInit);
   const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
   const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
+  const quickAskChord = useQuickAskHotkeyStore((s) => s.accelerator);
+  useEffect(() => {
+    void useQuickAskHotkeyStore.getState().load();
+  }, []);
 
   const items = useMemo<PaletteItem[]>(() => {
     const workspaceItems: PaletteItem[] = workspaces.map((w) => ({
@@ -264,6 +279,16 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
         group: "actions",
         onSelect: () => openProjectInit(),
       },
+      // The hotkey ask box, reachable from here too — and the place its system-wide chord is
+      // shown, which is otherwise only learnt from Settings.
+      {
+        key: "action:quick-ask",
+        icon: Sparkles,
+        label: t("quickAsk.paletteAction"),
+        group: "actions",
+        onSelect: () => void quickAskOpen().catch((e: unknown) => pushErrorToast(String(e))),
+        keys: quickAskChord ? acceleratorKeycaps(quickAskChord, isMac()) : undefined,
+      },
       // Where VS Code users look for it (⇧⌘P, "paste json"). Listed only with a file open in the
       // Editor — there is nothing to paste into anywhere else, and every row here has to do
       // something. Runs from this very click or Enter, which the clipboard read needs.
@@ -275,6 +300,19 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
               label: t("pasteJson.action"),
               group: "actions" as const,
               onSelect: pasteJsonInFocusedEditor,
+            },
+          ]
+        : []),
+      // Every unsaved tab of the project (`saveAll` in `EditorView`) — with the Editor on screen,
+      // which is where there are tabs to save.
+      ...(activeView === "editor"
+        ? [
+            {
+              key: "action:save-all",
+              icon: SaveAll,
+              label: t("editor.saveAll"),
+              group: "actions" as const,
+              onSelect: () => useEditorCommandStore.getState().send("saveAll"),
             },
           ]
         : []),
@@ -371,6 +409,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     openProjectInit,
     toggleAiPanel,
     toggleTerminalPanel,
+    quickAskChord,
   ]);
 
   const groups = SCOPE_GROUPS[scope];
@@ -398,9 +437,24 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     onClose();
   };
 
+  // A dialog like any other: Tab stays in it, Escape closes it while it is on top, and no app chord
+  // runs behind it but the ones that open it (`data-shortcut-owner` below).
+  const panelRef = useRef<HTMLDivElement>(null);
+  useDialog(panelRef, true, onClose);
+  // The combobox pattern: the field keeps the focus, the list is announced as its popup, and the
+  // row the arrows are on is named through `aria-activedescendant` — so a screen reader reads the
+  // highlighted row the way a sighted user sees it.
+  const listId = useId();
+  const rowId = (index: number) => `${listId}-row-${index}`;
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[12vh]" onClick={onClose}>
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("shortcuts.cmdCommandPalette")}
+        data-shortcut-owner="app.commandPalette project.switcher workspace.switcher"
         onClick={(e) => e.stopPropagation()}
         className="cf-fade-in flex max-h-[64vh] w-[600px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
       >
@@ -408,10 +462,14 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
           <Search size={17} className="shrink-0 text-[var(--cf-text-faint)]" />
           <input
             autoFocus
+            role="combobox"
+            aria-expanded="true"
+            aria-controls={listId}
+            aria-autocomplete="list"
+            aria-activedescendant={filtered[active] ? rowId(active) : undefined}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") onClose();
               if (e.key === "ArrowDown") {
                 e.preventDefault();
                 setActive((i) => (filtered.length ? (i + 1) % filtered.length : 0));
@@ -428,13 +486,16 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
           <Kbd>esc</Kbd>
         </div>
 
-        <div ref={listRef} className="flex-1 overflow-auto p-1.5">
+        <div ref={listRef} id={listId} role="listbox" aria-label={t("shortcuts.cmdCommandPalette")} className="flex-1 overflow-auto p-1.5">
           {groups.map((group) => {
             const groupItems = filtered.filter((item) => item.group === group);
             if (groupItems.length === 0) return null;
             return (
-              <div key={group} className="mb-1">
-                <p className="px-2.5 pb-1 pt-2.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+              <div key={group} role="group" aria-labelledby={`${listId}-${group}`} className="mb-1">
+                <p
+                  id={`${listId}-${group}`}
+                  className="px-2.5 pb-1 pt-2.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]"
+                >
                   {t(GROUP_LABEL_KEY[group])}
                 </p>
                 {groupItems.map((item) => {
@@ -444,7 +505,12 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
                   return (
                     <button
                       key={item.key}
+                      id={rowId(index)}
                       data-row={index}
+                      role="option"
+                      // Out of the tab order: the field holds the focus and the arrows move the
+                      // highlight, as in any combobox.
+                      tabIndex={-1}
                       onClick={() => choose(item)}
                       onMouseMove={() => !on && setActive(index)}
                       aria-selected={on}
@@ -457,6 +523,13 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
                         className={`shrink-0 ${on ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`}
                       />
                       <span className="truncate">{item.label}</span>
+                      {item.keys && (
+                        <span className="ml-auto flex shrink-0 items-center gap-1">
+                          {item.keys.map((key, i) => (
+                            <Kbd key={`${key}-${i}`}>{key}</Kbd>
+                          ))}
+                        </span>
+                      )}
                     </button>
                   );
                 })}

@@ -28,11 +28,11 @@
 //! repeated keystroke or a restored layout from a machine with a higher limit cannot open windows
 //! without end.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
 /// Backstop, not the user's limit. See the module note.
 const MAX_SATELLITES: usize = 8;
@@ -47,17 +47,20 @@ const LABEL_PREFIX: &str = "sat-";
 /// What a satellite holds.
 ///
 /// Three kinds, because they scope differently and the difference is visible to the user. An `App`
-/// belongs to the **workspace**, so it follows whichever workspace the main window is showing. A
-/// `Repo` belongs to one repository, which lives in exactly one workspace — so when the main window
-/// moves to another workspace, that window has nothing to show and says so rather than going on
-/// displaying the previous workspace's repository.
+/// belongs to a **workspace** — its own: every window holds the workspace it was opened on or
+/// switched to from its own title bar, and follows no other window. A `Repo` belongs to one
+/// repository, which lives in exactly one workspace, so its workspace is derived from the
+/// repository rather than chosen — and a repository that is removed leaves the window saying so
+/// rather than showing somebody else's.
 ///
 /// `Quick` belongs to **nothing**, and that is its entire design. It is the global-hotkey ask box:
 /// one composer, one answer, no sidebar and no workspace, raised over whatever the user was doing
 /// in whatever application. It is a satellite only in the mechanical sense — it is built by this
 /// module, it carries the `sat-` prefix so `capabilities/default.json` covers it, and it appears in
-/// the registry so the ceiling counts it. Everywhere the other two kinds follow the main window,
-/// this one deliberately does not; see [`close_all`].
+/// the registry so `forget` reaps it — but it is **not** counted against the ceiling, the user's or
+/// [`MAX_SATELLITES`]: it is hidden, not closed, between uses, so it is "open" all day, and a limit
+/// of four windows that quietly meant three once the hotkey had been pressed was a limit that lied.
+/// Everywhere the main window's desk is put away, this one deliberately stays; see [`close_all`].
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum SatelliteKind {
@@ -110,6 +113,10 @@ pub struct SatelliteRegistry {
     /// because anybody closed them — and drained by [`restore_satellites`] when the main window
     /// comes back from the tray. In memory, so it dies with the process.
     ///
+    /// It was declared and never written: `close_all` closed the windows and parked nothing, so the
+    /// tray restore always found an empty list and the only test filled it by hand. Parking now
+    /// happens in [`SatelliteRegistry::put_away`], which `close_all` calls and the tests go through.
+    ///
     /// # Why this is not a settings row any more
     ///
     /// It was, and the feature that built on it was wrong twice over. The small wrong: a satellite
@@ -119,7 +126,71 @@ pub struct SatelliteRegistry {
     /// fixing that: opening three windows nobody asked for, before the user has done anything, is
     /// not a service. Putting the app away for a moment and bringing it back should look the same;
     /// *starting* it should start with one window.
-    parked: Mutex<Vec<SatelliteInfo>>,
+    parked: Mutex<Vec<Parked>>,
+    /// The satellites that hold work nothing else has — an editor buffer typed into and not saved.
+    /// Reported by each window itself through [`set_window_unsaved`], because the webview is the
+    /// only place that knows; read by [`close_all`], which hides these instead of closing them.
+    unsaved: Mutex<HashSet<String>>,
+}
+
+/// One window put away by [`close_all`].
+#[derive(Clone)]
+struct Parked {
+    info: SatelliteInfo,
+    /// Hidden rather than closed, because closing it would have destroyed unsaved work — so the
+    /// restore shows the same window again instead of building a new one.
+    hidden: bool,
+}
+
+/// What [`SatelliteRegistry::put_away`] decided: which windows to close and which to hide.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PutAway {
+    close: Vec<String>,
+    hide: Vec<String>,
+}
+
+impl SatelliteRegistry {
+    /// The satellites that count against the ceilings — every one but the ask box. See
+    /// [`SatelliteKind::Quick`].
+    fn counted(held: &HashMap<String, SatelliteInfo>) -> usize {
+        held.values().filter(|info| info.kind != SatelliteKind::Quick).count()
+    }
+
+    /// Parks the desk and says what to do with each window: the half of [`close_all`] that needs no
+    /// window system, and the half the tests exercise.
+    ///
+    /// Replaces whatever was parked before rather than adding to it: this runs once per trip to the
+    /// tray and the restore drains it on the way back, so an older list can only be one the user has
+    /// already been handed back.
+    fn put_away(&self) -> PutAway {
+        let unsaved = self.unsaved.lock().map(|set| set.clone()).unwrap_or_default();
+        let mut parked = Vec::new();
+        let mut plan = PutAway::default();
+        if let Ok(held) = self.open.lock() {
+            let mut desk: Vec<&SatelliteInfo> =
+                held.values().filter(|info| info.kind != SatelliteKind::Quick).collect();
+            // A stable order, so the windows come back in the same one every time.
+            desk.sort_by(|a, b| a.label.cmp(&b.label));
+            for info in desk {
+                let hidden = unsaved.contains(&info.label);
+                if hidden {
+                    plan.hide.push(info.label.clone());
+                } else {
+                    plan.close.push(info.label.clone());
+                }
+                parked.push(Parked { info: info.clone(), hidden });
+            }
+        }
+        if let Ok(mut slot) = self.parked.lock() {
+            *slot = parked;
+        }
+        plan
+    }
+
+    /// Takes the parked desk, once. See [`restore_satellites`].
+    fn take_parked(&self) -> Vec<Parked> {
+        self.parked.lock().map(|mut held| std::mem::take(&mut *held)).unwrap_or_default()
+    }
 }
 
 /// The label for a given satellite, derived so that opening the same thing twice is the same
@@ -204,7 +275,7 @@ pub async fn open_satellite(
     let registry = app.state::<SatelliteRegistry>();
     {
         let held = registry.open.lock().map_err(|e| e.to_string())?;
-        if held.len() >= MAX_SATELLITES {
+        if SatelliteRegistry::counted(&held) >= MAX_SATELLITES {
             return Err(format!("too many windows are open (limit {MAX_SATELLITES})"));
         }
     }
@@ -330,17 +401,26 @@ pub fn focus_satellite(app: AppHandle, label: String) -> Result<(), String> {
     window.set_focus().map_err(|e| e.to_string())
 }
 
-/// Closes every satellite. Called when the main window goes away.
+/// Puts every satellite away. Called when the main window goes to the tray.
 ///
-/// A satellite cannot outlive the window it was detached from: it has no sidebar to pick a
-/// workspace with, no rail to reattach itself to, and no settings — so a satellite alone on screen
-/// is an app the user cannot navigate. The main window hiding to the tray is the same event as the
-/// main window closing, and it is treated the same way here.
+/// A satellite cannot stay on screen without the window it was detached from: it has no rail to
+/// reattach itself to and no settings — so a satellite alone on screen is an app the user cannot
+/// navigate. The main window hiding to the tray is the same event as the main window closing, and
+/// it is treated the same way here.
 ///
-/// **The remembered list is left exactly as it is.** These windows are not being dismissed; the
-/// desk is being put away, and the next time it comes out — a tray restore, tomorrow's launch — it
-/// should look the way it was left. Closing one satellite by hand is the gesture that means "not
-/// this one any more", and that path does update the list.
+/// **The desk is parked, not dismissed.** What was open is recorded in
+/// [`SatelliteRegistry::parked`] and the tray restore ([`restore_satellites`]) puts it back — only
+/// that restore: a launch starts with one window. Closing one satellite by hand is the gesture that
+/// means "not this one any more", and it never passes through here.
+///
+/// **A satellite holding unsaved work is hidden, not closed.** Closing destroys its webview, and an
+/// editor buffer nobody saved exists only there — so the close button of the *main* window used to
+/// throw away the unsaved tabs of every detached editor, silently. Asking first was the
+/// alternative, and the worse one: the user pressed the button that means "put the app away", and
+/// a question about another window's files is not what that gesture asks for. Hidden, the window
+/// keeps its buffers exactly as the hidden main window keeps its own, and the restore shows it
+/// again. A real quit still asks about all of it (`quit_guard`). Which windows those are, each
+/// window says for itself — see [`set_window_unsaved`].
 ///
 /// # The one exception: [`SatelliteKind::Quick`]
 ///
@@ -358,21 +438,48 @@ pub fn focus_satellite(app: AppHandle, label: String) -> Result<(), String> {
 ///
 /// It is still closed on quit: the process going takes every window with it, which is the real
 /// lifetime this window is scoped to.
-pub fn close_all(app: &AppHandle) {
-    let labels: Vec<String> = app
-        .state::<SatelliteRegistry>()
-        .open
-        .lock()
-        .map(|held| {
-            held.values()
-                .filter(|info| info.kind != SatelliteKind::Quick)
-                .map(|info| info.label.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    for label in labels {
+pub fn close_all<R: Runtime>(app: &AppHandle<R>) {
+    let plan = app.state::<SatelliteRegistry>().put_away();
+    if !plan.close.is_empty() || !plan.hide.is_empty() {
+        crate::applog::info(&format!(
+            "window: putting the desk away — {} closed, {} hidden (unsaved work)",
+            plan.close.len(),
+            plan.hide.len()
+        ));
+    }
+    for label in plan.close {
         if let Some(window) = app.get_webview_window(&label) {
             let _ = window.close();
+        }
+    }
+    for label in plan.hide {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.hide();
+        }
+    }
+}
+
+/// A window saying whether it holds unsaved work — the satellites' half of [`close_all`]'s rule.
+///
+/// Called by `lib/unsavedWork.ts` whenever the set of unsaved things in that window changes. The
+/// caller is the window itself, so the label comes from the webview rather than from an argument
+/// any window could fill in for another. The main window's answer is ignored: it is never closed
+/// by [`close_all`], only hidden, so there is nothing to protect.
+#[tauri::command]
+pub fn set_window_unsaved(
+    webview: tauri::Webview,
+    registry: tauri::State<SatelliteRegistry>,
+    unsaved: bool,
+) {
+    let label = webview.label();
+    if !is_satellite(label) {
+        return;
+    }
+    if let Ok(mut set) = registry.unsaved.lock() {
+        if unsaved {
+            set.insert(label.to_string());
+        } else {
+            set.remove(label);
         }
     }
 }
@@ -386,12 +493,22 @@ pub fn forget(app: &AppHandle, label: &str) {
     if !is_satellite(label) {
         return;
     }
-    let removed = app
-        .state::<SatelliteRegistry>()
+    let registry = app.state::<SatelliteRegistry>();
+    let removed = registry
         .open
         .lock()
         .map(|mut held| held.remove(label).is_some())
         .unwrap_or(false);
+    if let Ok(mut unsaved) = registry.unsaved.lock() {
+        unsaved.remove(label);
+    }
+    // The repository this window was watching. Its own teardown releases the claim when the page
+    // unloads cleanly, but a window the platform destroys runs no JavaScript on the way out, and a
+    // claim left behind is a native watcher running for nobody until the app quits.
+    crate::watcher::release_holder(
+        &app.state::<crate::watcher::WatcherRegistry>(),
+        &crate::watcher::window_holder(label),
+    );
     if removed {
         announce(app);
     }
@@ -417,26 +534,30 @@ pub fn forget_persisted_desk(app: &AppHandle) {
 ///
 /// Draining, so a second foreground event cannot reopen what the user has closed since. Failures
 /// are silent per window: a repository deleted in the meantime simply does not come back.
+///
+/// A window [`close_all`] hid — the ones holding unsaved work — is shown again rather than rebuilt:
+/// it never went away, and its buffers are still in it.
 #[tauri::command]
 pub async fn restore_satellites(app: AppHandle) -> usize {
-    let parked: Vec<SatelliteInfo> = {
-        let registry = app.state::<SatelliteRegistry>();
-        let Ok(mut held) = registry.parked.lock() else { return 0 };
-        std::mem::take(&mut *held)
-    };
+    let parked = app.state::<SatelliteRegistry>().take_parked();
 
     if !parked.is_empty() {
         crate::applog::info(&format!("window: restoring {} parked satellite(s)", parked.len()));
     }
     let mut opened = 0;
-    for entry in parked {
-        // Already open — nothing was ever put away, or this ran twice.
-        if app.get_webview_window(&entry.label).is_some() {
+    for Parked { info, hidden } in parked {
+        if let Some(window) = app.get_webview_window(&info.label) {
+            // Hidden with its work in it: bring it back. Anything else already on screen was never
+            // put away, or this ran twice.
+            if hidden {
+                let _ = window.show();
+                opened += 1;
+            }
             continue;
         }
         // No workspace: a restored window goes back to the one it recorded, not to the main
         // window's.
-        if open_satellite(app.clone(), entry.kind, entry.ref_id, entry.title, None).await.is_ok() {
+        if open_satellite(app.clone(), info.kind, info.ref_id, info.title, None).await.is_ok() {
             opened += 1;
         }
     }
@@ -456,14 +577,73 @@ const QUICK_REF_ID: &str = "ask";
 
 /// The accelerator the ask box is bound to when the user has expressed no preference.
 ///
-/// ⌥Space is what ChatGPT's own desktop app uses on macOS, which is the whole argument: a chord
-/// people already have in their fingers for "ask something" beats one this app picked for being
-/// free. It is rebindable precisely because it is somebody else's choice — see
-/// [`register_quick_ask_shortcut`].
+/// ⌥Space on macOS is what ChatGPT's own desktop app uses there, which is the whole argument: a
+/// chord people already have in their fingers for "ask something" beats one this app picked for
+/// being free.
+///
+/// **Not on Windows.** Alt+Space is the system's own window menu there — restore, move, size,
+/// close — in every application, and a global hotkey on it took that menu away from all of them for
+/// as long as CodeFlow ran. Ctrl+Alt+Space is free on a stock install and one finger from the old
+/// chord. Linux follows Windows: its desktops put the window menu on Alt+Space too.
+///
+/// Rebindable, and switchable off, precisely because it is a claim on the whole machine — see
+/// [`register_quick_ask_shortcut`] and [`QUICK_ASK_OFF`].
+#[cfg(target_os = "macos")]
 pub const DEFAULT_QUICK_ASK_ACCELERATOR: &str = "Alt+Space";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_QUICK_ASK_ACCELERATOR: &str = "Ctrl+Alt+Space";
 
 /// The `app_settings` key holding the user's accelerator, read at startup by `lib.rs`.
 pub const QUICK_ASK_ACCELERATOR_KEY: &str = "quick_ask_accelerator";
+
+/// The stored value that means "no global hotkey at all".
+///
+/// A value of its own rather than an empty row, because empty already has a meaning: "never
+/// chosen", which gets the default. Folding "off" into it is how switching the hotkey off came back
+/// on at the next launch.
+pub const QUICK_ASK_OFF: &str = "off";
+
+/// The chord to bind, from what is stored: `None` when the user switched it off.
+pub fn resolve_quick_ask_accelerator(stored: Option<&str>) -> Option<String> {
+    match stored.map(str::trim) {
+        None | Some("") => Some(DEFAULT_QUICK_ASK_ACCELERATOR.to_string()),
+        Some(value) if value.eq_ignore_ascii_case(QUICK_ASK_OFF) => None,
+        Some(value) => Some(value.to_string()),
+    }
+}
+
+/// What the settings screen shows for the hotkey.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickAskShortcut {
+    /// The chord bound right now from the stored preference — `None` when switched off.
+    pub accelerator: Option<String>,
+    /// This platform's default, for the "reset" control.
+    pub default_accelerator: String,
+}
+
+/// The stored preference, resolved. Read-only: binding is [`register_quick_ask_shortcut`]'s.
+#[tauri::command]
+pub fn get_quick_ask_shortcut(db: tauri::State<crate::db::Db>) -> QuickAskShortcut {
+    let stored = db
+        .0
+        .lock()
+        .ok()
+        .and_then(|conn| crate::db::queries::get_setting(&conn, QUICK_ASK_ACCELERATOR_KEY).ok().flatten());
+    QuickAskShortcut {
+        accelerator: resolve_quick_ask_accelerator(stored.as_deref()),
+        default_accelerator: DEFAULT_QUICK_ASK_ACCELERATOR.to_string(),
+    }
+}
+
+/// Drops the system-wide chord, leaving the ask box reachable from the tray and the palette only.
+#[tauri::command]
+pub fn unregister_quick_ask_shortcut(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    app.global_shortcut().unregister_all().map_err(|e| e.to_string())?;
+    crate::applog::info("window: quick-ask shortcut switched off");
+    Ok(())
+}
 
 /// Raises the ask box, building it if it is not there.
 ///
@@ -474,8 +654,8 @@ pub const QUICK_ASK_ACCELERATOR_KEY: &str = "quick_ask_accelerator";
 /// focus the moment it is drawn behind it.
 ///
 /// It is still registered in [`SatelliteRegistry`], and that is deliberate: `forget` must reap it
-/// on `Destroyed`, `list_satellites` must count it against the ceiling, and [`close_all`] has to be
-/// able to *see* it in order to skip it.
+/// on `Destroyed`, the claim on its label is what keeps it to one window, and [`close_all`] has to
+/// be able to *see* it in order to skip it. It is the one entry the ceilings do not count.
 pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
     let label = label_for(SatelliteKind::Quick, QUICK_REF_ID);
     crate::applog::info(&format!("window: open_quick_ask {label}"));
@@ -508,9 +688,8 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
         if held.contains_key(&label) {
             return Ok(label);
         }
-        if held.len() >= MAX_SATELLITES {
-            return Err(format!("too many windows are open (limit {MAX_SATELLITES})"));
-        }
+        // No ceiling check: the ask box is one window, never counted against either limit (see
+        // `SatelliteKind::Quick`), and the label claim above is what keeps it to one.
         held.insert(
             label.clone(),
             SatelliteInfo {
@@ -772,28 +951,62 @@ mod tests {
         );
     }
 
-    /// Putting the desk away and bringing it back is one round trip, not a standing offer.
-    ///
-    /// The drain is what makes a second `app:foreground` — alt-tabbing back after already
-    /// restoring — reopen nothing. Without it, closing a satellite and then coming back to the app
-    /// would put it on screen again, which is the same "it came back on its own" this whole change
-    /// is about.
+    fn info(label: &str, kind: SatelliteKind, ref_id: &str) -> SatelliteInfo {
+        SatelliteInfo { label: label.into(), kind, ref_id: ref_id.into(), title: String::new() }
+    }
+
+    /// A running (mock) app with these satellites in its registry. No windows exist behind them,
+    /// which `close_all` tolerates: a label whose window is already gone is simply skipped.
+    fn desk(entries: &[(&str, SatelliteKind, &str)]) -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_app();
+        app.manage(SatelliteRegistry::default());
+        {
+            let registry = app.state::<SatelliteRegistry>();
+            let mut held = registry.open.lock().unwrap();
+            for (label, kind, ref_id) in entries {
+                held.insert(label.to_string(), info(label, *kind, ref_id));
+            }
+        }
+        app
+    }
+
+    const NOTES: (&str, SatelliteKind, &str) = ("sat-app-notes", SatelliteKind::App, "notes");
+    const REPO: (&str, SatelliteKind, &str) = ("sat-repo-p1", SatelliteKind::Repo, "p1");
+    const ASK: (&str, SatelliteKind, &str) = ("sat-quick-ask", SatelliteKind::Quick, QUICK_REF_ID);
+
+    /// **The regression.** `close_all` closed the windows and parked nothing, so the tray restore
+    /// always found an empty list — the only test filled `parked` by hand. Through `close_all` now,
+    /// and the restore's drain after it.
     #[test]
-    fn parking_the_desk_hands_it_back_exactly_once() {
-        let registry = SatelliteRegistry::default();
-        let entry = SatelliteInfo {
-            label: "sat-app-notes".into(),
-            kind: SatelliteKind::App,
-            ref_id: "notes".into(),
-            title: "Notas".into(),
-        };
-        *registry.parked.lock().unwrap() = vec![entry];
+    fn putting_the_desk_away_parks_it_for_the_restore() {
+        let app = desk(&[NOTES, REPO, ASK]);
+        close_all(app.handle());
 
-        let first = std::mem::take(&mut *registry.parked.lock().unwrap());
-        let second = std::mem::take(&mut *registry.parked.lock().unwrap());
+        let registry = app.state::<SatelliteRegistry>();
+        let parked = registry.take_parked();
+        let labels: Vec<&str> = parked.iter().map(|p| p.info.label.as_str()).collect();
+        assert_eq!(labels, ["sat-app-notes", "sat-repo-p1"], "the ask box is never put away");
+        assert!(parked.iter().all(|p| !p.hidden));
+        // Drained: a second `app:foreground` — alt-tabbing back after already restoring — must not
+        // reopen what the user has closed since.
+        assert!(registry.take_parked().is_empty(), "the desk comes back exactly once");
+    }
 
-        assert_eq!(first.len(), 1, "the desk comes back");
-        assert!(second.is_empty(), "and does not come back a second time");
+    /// Closing the main window used to destroy every detached editor, unsaved tabs and all. A
+    /// window that reported unsaved work is hidden instead, and the restore shows it again.
+    #[test]
+    fn a_window_holding_unsaved_work_is_hidden_not_closed() {
+        let app = desk(&[NOTES, REPO]);
+        let registry = app.state::<SatelliteRegistry>();
+        registry.unsaved.lock().unwrap().insert("sat-repo-p1".into());
+
+        assert_eq!(
+            registry.put_away(),
+            PutAway { close: vec!["sat-app-notes".into()], hide: vec!["sat-repo-p1".into()] }
+        );
+        let parked = registry.take_parked();
+        assert!(parked.iter().any(|p| p.info.label == "sat-repo-p1" && p.hidden));
+        assert!(parked.iter().any(|p| p.info.label == "sat-app-notes" && !p.hidden));
     }
 
     /// Nothing is parked until something parks it. A launch therefore restores nothing, which is
@@ -802,7 +1015,7 @@ mod tests {
     #[test]
     fn a_fresh_registry_has_no_desk_to_restore() {
         let registry = SatelliteRegistry::default();
-        assert!(registry.parked.lock().unwrap().is_empty());
+        assert!(registry.take_parked().is_empty());
         assert!(registry.open.lock().unwrap().is_empty());
     }
 
@@ -816,40 +1029,42 @@ mod tests {
         assert_eq!(label, label_for(SatelliteKind::Quick, QUICK_REF_ID));
     }
 
-    /// The cascade trap, as a test. `close_all` runs when the main window hides to the tray, and
-    /// the whole point of the ask box is that it survives that — see the note on `close_all`.
+    /// The ask box is hidden, not closed, between uses — "open" all day — so counting it made a
+    /// limit of four windows mean three once the hotkey had been pressed.
     #[test]
-    fn hiding_the_desk_leaves_the_ask_box_alone() {
-        let registry = SatelliteRegistry::default();
-        {
-            let mut held = registry.open.lock().unwrap();
-            for (label, kind, ref_id) in [
-                ("sat-app-notes", SatelliteKind::App, "notes"),
-                ("sat-quick-ask", SatelliteKind::Quick, QUICK_REF_ID),
-            ] {
-                held.insert(
-                    label.to_string(),
-                    SatelliteInfo {
-                        label: label.to_string(),
-                        kind,
-                        ref_id: ref_id.to_string(),
-                        title: String::new(),
-                    },
-                );
-            }
+    fn the_ask_box_never_counts_against_the_ceiling() {
+        let app = desk(&[NOTES, ASK]);
+        let registry = app.state::<SatelliteRegistry>();
+        let held = registry.open.lock().unwrap();
+        assert_eq!(SatelliteRegistry::counted(&held), 1);
+    }
+
+    /// Unset gets the default, "off" gets nothing, anything else is the user's chord.
+    #[test]
+    fn the_hotkey_setting_tells_unset_from_off() {
+        assert_eq!(
+            resolve_quick_ask_accelerator(None).as_deref(),
+            Some(DEFAULT_QUICK_ASK_ACCELERATOR)
+        );
+        assert_eq!(
+            resolve_quick_ask_accelerator(Some("  ")).as_deref(),
+            Some(DEFAULT_QUICK_ASK_ACCELERATOR)
+        );
+        assert_eq!(resolve_quick_ask_accelerator(Some(QUICK_ASK_OFF)), None);
+        assert_eq!(
+            resolve_quick_ask_accelerator(Some("Ctrl+Shift+Space")).as_deref(),
+            Some("Ctrl+Shift+Space")
+        );
+    }
+
+    /// Alt+Space is the window menu of every application on Windows; the default must not take it.
+    #[test]
+    fn the_default_hotkey_leaves_the_windows_system_menu_alone() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(DEFAULT_QUICK_ASK_ACCELERATOR, "Alt+Space");
+        } else {
+            assert_ne!(DEFAULT_QUICK_ASK_ACCELERATOR, "Alt+Space");
         }
-
-        // The predicate `close_all` closes on, exercised without a window system.
-        let doomed: Vec<String> = registry
-            .open
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|info| info.kind != SatelliteKind::Quick)
-            .map(|info| info.label.clone())
-            .collect();
-
-        assert_eq!(doomed, vec!["sat-app-notes".to_string()]);
     }
 
     /// The main window is not a satellite, and neither is anything that merely mentions one.

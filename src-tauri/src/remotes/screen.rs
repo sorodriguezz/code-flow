@@ -275,19 +275,25 @@ fn default_viewer(
 ) -> Result<Vec<String>, String> {
     // No single desktop ships either, so the first one on PATH wins and the error names all of
     // them plus the escape hatch.
-    let candidates: &[(&str, Vec<String>)] = match protocol {
-        ScreenProtocol::Vnc => &[
+    //
+    // An owned `Vec`, not a borrowed slice of a temporary array: the arguments are `format!`ed, so
+    // nothing here can be promoted to a `'static`, and borrowing out of a `match` arm leans on
+    // temporary-lifetime extension this file has no reason to depend on. There is no third arm —
+    // `ScreenProtocol` has exactly the two (see its doc comment), which is also why this function
+    // once failed to compile on Linux alone: it named a `None` that does not exist, in the only
+    // `default_viewer` no build here ever compiled.
+    let candidates: Vec<(&str, Vec<String>)> = match protocol {
+        ScreenProtocol::Vnc => vec![
             ("vncviewer", vec![format!("{host}::{port}")]),
             ("remmina", vec!["-c".into(), format!("vnc://{host}:{port}")]),
             ("xdg-open", vec![format!("vnc://{host}:{port}")]),
         ],
-        ScreenProtocol::Rdp => &[
+        ScreenProtocol::Rdp => vec![
             ("xfreerdp", vec![format!("/v:{host}:{port}"), format!("/u:{user}")]),
             ("remmina", vec!["-c".into(), format!("rdp://{host}:{port}")]),
         ],
-        ScreenProtocol::None => return Err("No screen protocol.".into()),
     };
-    for (program, args) in candidates {
+    for (program, args) in &candidates {
         if which(program) {
             let mut command = vec![program.to_string()];
             command.extend(args.iter().cloned());

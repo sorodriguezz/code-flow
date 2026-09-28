@@ -40,7 +40,7 @@ import type { AgentChainStep, ChainDetail } from "../../types/domain";
  * died on a real error would show nothing, and without the table the phone showed the literal string
  * `chain.repoBusy` where the desktop showed a sentence.
  *
- * The twelve keys the desktop knows minus the two that only ever come back from *creating* a chain
+ * The keys the desktop knows minus the two that only ever come back from *creating* a chain
  * (`noSteps`, `tooManySteps`) — a phone cannot create one, so they can never land in these columns.
  */
 const REASON_KEYS: Record<string, MobileKey> = {
@@ -54,6 +54,10 @@ const REASON_KEYS: Record<string, MobileKey> = {
   "chain.emptyOutput": "chain.emptyOutput",
   "chain.stopped": "chain.stopped",
   "chain.timedOut": "chain.timedOut",
+  // Parked on its engine (quota, sign-in, missing CLI) — `queries::chain_pause_reason`.
+  "chain.pausedQuota": "chain.pausedQuota",
+  "chain.pausedAuth": "chain.pausedAuth",
+  "chain.pausedCliMissing": "chain.pausedCliMissing",
 };
 
 /**

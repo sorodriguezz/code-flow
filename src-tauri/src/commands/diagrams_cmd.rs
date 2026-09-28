@@ -91,7 +91,16 @@ pub fn diagrams_create_diagram(
     .map_err(|e| e.to_string())
 }
 
-/// The autosave path. `None` means the diagram was deleted while it was open.
+/// What a save answers: the row's metadata (`None` when the diagram was deleted while it was open),
+/// and — for a linked diagram — the version of the file it just wrote, which is what the next save
+/// checks against.
+#[derive(serde::Serialize)]
+pub struct DiagramSaved {
+    pub meta: Option<DiagramMeta>,
+    pub version: Option<fsops::DiskVersion>,
+}
+
+/// The autosave path.
 ///
 /// **A linked diagram is saved twice**: into the row, and out into the working tree it came from.
 /// Both here rather than one here and one in the caller, so no window and no code path can write
@@ -101,6 +110,11 @@ pub fn diagrams_create_diagram(
 /// The order is the row first, then the file, and the failure is reported rather than swallowed:
 /// the row is saved either way (so nothing the user drew is lost), and an `Err` leaves the draft
 /// dirty upstairs, so the next edit tries the file again. See `diagramsStore.flush`.
+///
+/// **The file is written only over the version the diagram last read** (`expected`), the editor's
+/// checked write (`fsops::write_file_text_checked`). The watcher follows only the active project,
+/// so a `git pull` in any other repository used to be put back by the next autosave without a word.
+/// Now it is refused with `changed-on-disk:` and the store asks — reload, or overwrite (`force`).
 #[tauri::command]
 pub fn diagrams_save_diagram(
     db: State<Db>,
@@ -108,7 +122,9 @@ pub fn diagrams_save_diagram(
     doc: String,
     format: String,
     thumbnail: String,
-) -> Result<Option<DiagramMeta>, String> {
+    expected: Option<fsops::DiskVersion>,
+    force: Option<bool>,
+) -> Result<DiagramSaved, String> {
     let (meta, target) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         // Before the write, so the snapshot holds what the diagram *was* — see the same call in
@@ -132,10 +148,56 @@ pub fn diagrams_save_diagram(
         (meta, target)
     };
 
-    if let Some((repo_path, rel_path)) = target {
-        fsops::write_file_text(&repo_path, &rel_path, &doc)?;
+    let version = match target {
+        Some((repo_path, rel_path)) => Some(write_linked(
+            &repo_path,
+            &rel_path,
+            &doc,
+            expected.as_ref(),
+            force.unwrap_or(false),
+        )?),
+        None => None,
+    };
+    Ok(DiagramSaved { meta, version })
+}
+
+/// Writes a linked diagram's file over the version it was read at — see [`diagrams_save_diagram`].
+///
+/// With no `expected` version the diagram never read the file (it was missing when the diagram
+/// opened): writing recreates it, unless something has put a file there since, which is a change on
+/// disk like any other. `force` is the user's "overwrite", given after they were asked.
+fn write_linked(
+    repo_path: &str,
+    rel_path: &str,
+    doc: &str,
+    expected: Option<&fsops::DiskVersion>,
+    force: bool,
+) -> Result<fsops::DiskVersion, String> {
+    if force {
+        return fsops::write_file_text_checked(repo_path, rel_path, doc, None);
     }
-    Ok(meta)
+    match expected {
+        Some(version) => fsops::write_file_text_checked(repo_path, rel_path, doc, Some(version)),
+        None => {
+            if fsops::stat_editor_file(repo_path, rel_path, None)?.is_some() {
+                return Err(format!(
+                    "{}: {rel_path} appeared on disk since the diagram was opened",
+                    fsops::CHANGED_ON_DISK
+                ));
+            }
+            fsops::write_file_text_checked(repo_path, rel_path, doc, None)
+        }
+    }
+}
+
+/// A linked diagram's file, and the version of the bytes read — both from one read, so the version
+/// is the version of exactly this text. Anything but UTF-8 text is an error: the diagram would save
+/// it back as something else.
+fn read_linked(repo_path: &str, rel_path: &str) -> Result<(String, fsops::DiskVersion), String> {
+    match fsops::read_editor_file(repo_path, rel_path, false)? {
+        fsops::EditorFile::Text { text, version } => Ok((text, version)),
+        _ => Err(format!("{rel_path} is not a UTF-8 text file")),
+    }
 }
 
 // ---------- the repository bridge ----------
@@ -174,6 +236,9 @@ pub struct DiagramSync {
     pub row: Option<DiagramRow>,
     /// Empty when the working tree was read. Otherwise the reason, already a sentence.
     pub file_error: String,
+    /// The version of the file that was read — what the next save is checked against. `None` for an
+    /// unlinked diagram, or when the file could not be read.
+    pub version: Option<fsops::DiskVersion>,
 }
 
 /// Files a `.dbml` file from a working tree as a diagram, and answers with it.
@@ -220,17 +285,17 @@ pub fn diagrams_link_file(
 pub fn diagrams_pull_file(db: State<Db>, id: String) -> Result<DiagramSync, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let Some(row) = diagram_queries::get_diagram(&conn, &id).map_err(|e| e.to_string())? else {
-        return Ok(DiagramSync { row: None, file_error: String::new() });
+        return Ok(DiagramSync { row: None, file_error: String::new(), version: None });
     };
     let Some((repo_path, rel_path)) = origin_of_row(&conn, &row) else {
-        return Ok(DiagramSync { row: Some(row), file_error: String::new() });
+        return Ok(DiagramSync { row: Some(row), file_error: String::new(), version: None });
     };
-    match fsops::read_file_text(&repo_path, &rel_path) {
-        Ok(doc) => {
+    match read_linked(&repo_path, &rel_path) {
+        Ok((doc, version)) => {
             let row = diagram_queries::pull_file(&conn, &id, &doc).map_err(|e| e.to_string())?;
-            Ok(DiagramSync { row, file_error: String::new() })
+            Ok(DiagramSync { row, file_error: String::new(), version: Some(version) })
         }
-        Err(message) => Ok(DiagramSync { row: Some(row), file_error: message }),
+        Err(message) => Ok(DiagramSync { row: Some(row), file_error: message, version: None }),
     }
 }
 
@@ -410,10 +475,29 @@ pub fn diagrams_reorder_folders(db: State<Db>, ids: Vec<String>) -> Result<(), S
 }
 
 /// Removes the folder, its subfolders **and every diagram in them**. Confirm before calling.
+///
+/// Their history goes too — the same leak the Notes trash fixed for notebooks: the folder's delete
+/// took the diagrams and left their `doc_versions`, so what was deleted survived in the database and
+/// in every backup with nothing able to show or remove it. Their scratch databases are reclaimed by
+/// the launch-time sweep (`sandbox::sweep`), which already covers a diagram gone by any route.
 #[tauri::command]
 pub fn diagrams_delete_folder(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    diagram_queries::delete_folder(&conn, &id).map_err(|e| e.to_string())
+    diagram_queries::delete_folder(&conn, &id).map_err(|e| e.to_string())?;
+    // Best effort, like `diagrams_delete_diagram`'s: the folder is gone either way, and the launch
+    // sweep takes whatever this misses.
+    let _ = sweep_orphan_versions(&conn);
+    Ok(())
+}
+
+/// Deletes the history of every diagram that no longer exists. Run after a folder delete and at
+/// launch, which between them cover a diagram gone by any route — a folder, a deleted workspace, a
+/// build from before this existed.
+pub fn sweep_orphan_versions(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM doc_versions WHERE kind = 'diagram' AND doc_id NOT IN (SELECT id FROM diagrams)",
+        [],
+    )
 }
 
 // ---------- templates ----------
@@ -581,4 +665,89 @@ pub fn diagrams_read_import(path: String) -> Result<String, String> {
     // DBML — so a file that is not valid UTF-8 is not one of them, and saying so beats importing
     // mojibake.
     std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-diagrams-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("db")).unwrap();
+        dir
+    }
+
+    /// The bug behind the checked write: a `git pull` in a repository the watcher was not following
+    /// changed the `.dbml`, and the next autosave put the diagram's copy back over it in silence.
+    #[test]
+    fn a_save_is_refused_over_a_file_that_changed_since_it_was_read() {
+        let root = repo();
+        let repo_path = root.to_string_lossy().to_string();
+        std::fs::write(root.join("db/schema.dbml"), "Table a {\n  id int\n}\n").unwrap();
+
+        let (text, version) = read_linked(&repo_path, "db/schema.dbml").unwrap();
+        assert!(text.starts_with("Table a"));
+        // Somebody else's write — a pull, another editor.
+        std::fs::write(root.join("db/schema.dbml"), "Table pulled {\n  id int\n}\n").unwrap();
+
+        let refused = write_linked(&repo_path, "db/schema.dbml", "mine", Some(&version), false).unwrap_err();
+        assert!(refused.starts_with(fsops::CHANGED_ON_DISK), "{refused}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("db/schema.dbml")).unwrap(),
+            "Table pulled {\n  id int\n}\n",
+            "and the file keeps what the pull wrote",
+        );
+
+        // The user's "overwrite".
+        let written = write_linked(&repo_path, "db/schema.dbml", "mine", None, true).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("db/schema.dbml")).unwrap(), "mine");
+        // The version handed back is what the next save checks against, and it passes.
+        write_linked(&repo_path, "db/schema.dbml", "mine, again", Some(&written), false).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_diagram_that_never_read_its_file_recreates_it_but_not_over_one_that_appeared() {
+        let root = repo();
+        let repo_path = root.to_string_lossy().to_string();
+        write_linked(&repo_path, "db/gone.dbml", "recreated", None, false).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("db/gone.dbml")).unwrap(), "recreated");
+
+        let refused = write_linked(&repo_path, "db/gone.dbml", "again", None, false).unwrap_err();
+        assert!(refused.starts_with(fsops::CHANGED_ON_DISK), "{refused}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_is_not_read_as_a_diagram() {
+        let root = repo();
+        std::fs::write(root.join("db/blob.dbml"), [0u8, 159, 146, 150]).unwrap();
+        assert!(read_linked(&root.to_string_lossy(), "db/blob.dbml").is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A folder's delete took its diagrams and left their history behind.
+    #[test]
+    fn the_sweep_takes_only_the_history_of_diagrams_that_are_gone() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                 VALUES ('w1', 'W', 'folder', '#111', 0, '2026-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+        let kept = diagram_queries::create_diagram(&conn, "w1", None, "Vivo", "<x/>", "mxgraph", "[]")
+            .unwrap();
+        for (id, kind) in [(kept.id.as_str(), "diagram"), ("gone", "diagram"), ("gone", "note")] {
+            version_queries::record_version(&conn, kind, id, "t", "cuerpo", "2026-01-01T00:00:00+00:00")
+                .unwrap();
+        }
+        assert_eq!(sweep_orphan_versions(&conn).unwrap(), 1);
+        assert_eq!(version_queries::list_versions(&conn, "diagram", &kept.id).unwrap().len(), 1);
+        assert_eq!(
+            version_queries::list_versions(&conn, "note", "gone").unwrap().len(),
+            1,
+            "a note's history is not this sweep's to take",
+        );
+    }
 }

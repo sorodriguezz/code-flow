@@ -24,6 +24,58 @@ use crate::secrets;
 /// readable SQL, and served to the UI through a command so the "copy" button can't drift from it.
 pub const INSTALL_SQL: &str = include_str!("supabase_schema.sql");
 
+/// The version of `supabase_schema.sql` this build was written against — what `cf_schema_version()`
+/// in the shipped script answers. A project that answers less has an older copy, and its host is
+/// asked to run the script again. The test below keeps the two numbers in step.
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// Whether a project running `version` of the script lacks something this build relies on.
+pub fn schema_outdated(version: i64) -> bool {
+    version < SCHEMA_VERSION
+}
+
+/// The hash `cf_shares.owner_hash` holds for a host secret — the same digest the script computes
+/// with `encode(sha256(convert_to(key, 'UTF8')), 'hex')`: SHA-256 over the UTF-8 bytes, lowercase hex.
+pub fn owner_hash(secret: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+    hex::encode(Sha256::digest(secret.as_bytes()))
+}
+
+/// The install script as this host should run it on one project: the shipped script, then one line
+/// per collection they already share there recording them as its owner.
+///
+/// That line is what closes the gap an upgrade opens. A share created before owners existed has
+/// none, and the first claim wins — so recording the host in the very script that introduces the
+/// rule leaves no moment in which a guest could claim it first. Only the hash is written into the
+/// script; the secret stays in this machine's credential store. `and owner_hash is null` makes the
+/// line a no-op on a share that already has an owner, so running the script twice changes nothing.
+pub fn install_sql_for(owned: &[String]) -> Result<String, String> {
+    let mut sql = INSTALL_SQL.to_string();
+    let mut lines = Vec::new();
+    for collection_id in owned {
+        // Ids come from this machine's own database, but they are spliced into SQL: only a uuid's
+        // alphabet gets through.
+        if collection_id.is_empty() || !collection_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            continue;
+        }
+        let hash = owner_hash(&owner_secret(collection_id)?);
+        lines.push(format!(
+            "update cf_shares set owner_hash = '{hash}' where id = '{collection_id}' and owner_hash is null;"
+        ));
+    }
+    if !lines.is_empty() {
+        sql.push_str(
+            "\n-- ---------------------------------------------------------------------------\n\
+             -- The collections you already share on this project\n\
+             -- ---------------------------------------------------------------------------\n\n\
+             -- Records you as their host — a hash of a secret only your app holds.\n",
+        );
+        sql.push_str(&lines.join("\n"));
+        sql.push('\n');
+    }
+    Ok(sql)
+}
+
 const SHARE_HEADER: &str = "x-cf-share";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,10 +114,32 @@ pub struct ConnectionCheck {
     pub reachable: bool,
     /// `cf_ping` exists, so the schema script has been run.
     pub schema_installed: bool,
+    /// Which copy of the script the project runs: `cf_schema_version()`, or 1 for a copy from before
+    /// that function existed. 0 when the schema is not installed at all.
+    pub schema_version: i64,
+    /// The project's copy is older than this build expects — the host should run it again.
+    pub schema_outdated: bool,
 }
 
 fn trimmed_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
+}
+
+/// Two URLs naming the same project, compared the way the credential store files a key per project.
+pub fn same_project(a: &str, b: &str) -> bool {
+    let host = |url: &str| {
+        trimmed_url(url)
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .to_ascii_lowercase()
+    };
+    !host(a).is_empty() && host(a) == host(b)
+}
+
+/// A PostgREST answer meaning "there is no such function" — an older copy of the script, not an
+/// error worth failing over.
+fn function_missing(status: reqwest::StatusCode, body: &str, function: &str) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND || (!status.is_success() && body.contains(function))
 }
 
 fn client() -> Result<reqwest::Client, String> {
@@ -178,6 +252,18 @@ fn require_token(collection_id: &str) -> Result<String, String> {
     share_token(collection_id)?.ok_or_else(|| "this collection is not shared".to_string())
 }
 
+/// The host's own secret for one shared collection, minted on first use. See
+/// `secrets::supabase_owner_key` for why it is not the share token.
+fn owner_secret(collection_id: &str) -> Result<String, String> {
+    let key = secrets::supabase_owner_key(collection_id);
+    if let Some(existing) = secrets::get_secret(&key)?.filter(|value| !value.trim().is_empty()) {
+        return Ok(existing);
+    }
+    let minted = mint_token();
+    secrets::set_secret(&key, &minted)?;
+    Ok(minted)
+}
+
 /// 32 bytes of entropy, URL-safe. Two v4 UUIDs because `uuid` is already the crate backed by the
 /// OS random source, and a share token is only ever compared for equality.
 fn mint_token() -> String {
@@ -201,15 +287,48 @@ fn mint_token() -> String {
 pub async fn check(url: String) -> Result<ConnectionCheck, String> {
     let key = anon_key(&url)?;
     match ping(&url, &key, "").await? {
-        Some(_) => Ok(ConnectionCheck {
-            reachable: true,
-            schema_installed: true,
-        }),
+        Some(_) => {
+            let version = schema_version(&url, &key).await?;
+            Ok(ConnectionCheck {
+                reachable: true,
+                schema_installed: true,
+                schema_version: version,
+                schema_outdated: schema_outdated(version),
+            })
+        }
         None => Ok(ConnectionCheck {
             reachable: true,
             schema_installed: false,
+            schema_version: 0,
+            schema_outdated: false,
         }),
     }
+}
+
+/// `cf_schema_version()`, or 1 when the project's copy of the script predates it.
+async fn schema_version(url: &str, key: &str) -> Result<i64, String> {
+    let http = client()?;
+    let response = request(
+        &http,
+        reqwest::Method::POST,
+        format!("{}/rest/v1/rpc/cf_schema_version", trimmed_url(url)),
+        key,
+        "",
+    )
+    .header(reqwest::header::CONTENT_TYPE, "application/json")
+    .body("{}")
+    .send()
+    .await
+    .map_err(|e| format!("could not reach the project: {e}"))?;
+    let status = response.status();
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    if function_missing(status, &body, "cf_schema_version") {
+        return Ok(1);
+    }
+    if !status.is_success() {
+        return Err(describe(status, &body));
+    }
+    Ok(body.trim().parse::<i64>().unwrap_or(1))
 }
 
 /// The name the remote has for this collection's share, or `None` when the token resolves to
@@ -310,12 +429,58 @@ pub async fn share(
 
     read_body(response).await?;
     set_share_token(&collection_id, &token)?;
+    // Recorded as the host straight away, while nobody else holds the token yet. Best-effort: on a
+    // project still running an older copy of the script there is nothing to record it in, and the
+    // share works regardless — the claim is retried on the next connection test.
+    let _ = claim_owner(url, collection_id.clone()).await;
 
     Ok(SharedCollection {
         id: collection_id,
         name,
         share_token: token,
     })
+}
+
+/// What asking the project to record this machine as a share's host came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// Recorded — now, or already, with this machine's secret.
+    Owner,
+    /// Somebody else's secret is recorded for it.
+    Taken,
+    /// The project runs a copy of the script from before owners existed.
+    Unsupported,
+}
+
+/// Records this machine as the host of one of its own shares, unless somebody already is.
+///
+/// Idempotent: a share already recorded with this machine's secret answers `Owner` again.
+pub async fn claim_owner(url: String, collection_id: String) -> Result<Claim, String> {
+    let key = anon_key(&url)?;
+    let token = require_token(&collection_id)?;
+    let owner = owner_secret(&collection_id)?;
+    let http = client()?;
+    let response = request(
+        &http,
+        reqwest::Method::POST,
+        format!("{}/rest/v1/rpc/cf_claim_owner", trimmed_url(&url)),
+        &key,
+        &token,
+    )
+    .header(reqwest::header::CONTENT_TYPE, "application/json")
+    .body(serde_json::json!({ "owner_key": owner }).to_string())
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    if function_missing(status, &body, "cf_claim_owner") {
+        return Ok(Claim::Unsupported);
+    }
+    if !status.is_success() {
+        return Err(describe(status, &body));
+    }
+    Ok(if body.trim() == "true" { Claim::Owner } else { Claim::Taken })
 }
 
 /// Keeps the remote share's display name in step with a local rename. Best-effort by design: a
@@ -394,11 +559,24 @@ pub async fn join(url: String, token: String) -> Result<SharedCollection, String
 
 /// Replaces the token, which is how access is taken back: anyone still holding the old one stops
 /// matching every policy on their next request.
+///
+/// On a current schema the project checks the host's secret itself (`cf_rotate_token`), so a guest
+/// calling it directly is refused whatever their app says. A project still running an older copy of
+/// the script has no owner to check; there the old call is used and the collaboration settings ask
+/// the host to run the script again.
 pub async fn rotate(url: String, collection_id: String) -> Result<String, String> {
     let key = anon_key(&url)?;
     let current = require_token(&collection_id)?;
     let next = mint_token();
     let http = client()?;
+
+    let body = match claim_owner(url.clone(), collection_id.clone()).await? {
+        Claim::Owner => serde_json::json!({ "new_token": next, "owner_key": owner_secret(&collection_id)? }),
+        Claim::Taken => {
+            return Err("the project records someone else as the host of this collection".to_string())
+        }
+        Claim::Unsupported => serde_json::json!({ "new_token": next }),
+    };
 
     let response = request(
         &http,
@@ -408,7 +586,7 @@ pub async fn rotate(url: String, collection_id: String) -> Result<String, String
         &current,
     )
     .header(reqwest::header::CONTENT_TYPE, "application/json")
-    .body(serde_json::json!({ "new_token": next }).to_string())
+    .body(body.to_string())
     .send()
     .await
     .map_err(|e| e.to_string())?;
@@ -419,9 +597,11 @@ pub async fn rotate(url: String, collection_id: String) -> Result<String, String
 }
 
 /// Stops syncing this collection here. Deliberately local-only: the remote copy and everyone else's
-/// access are the host's to end, with `rotate`.
+/// access are the host's to end, with `rotate`. The host's own secret goes too — with no share left
+/// here there is nothing it could still be used for.
 pub fn leave(collection_id: &str) -> Result<(), String> {
-    set_share_token(collection_id, "")
+    set_share_token(collection_id, "")?;
+    secrets::delete_secret(&secrets::supabase_owner_key(collection_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -622,18 +802,81 @@ mod tests {
     fn the_shipped_schema_locks_both_tables_down() {
         // The empty-token guard is what stops a client with only the anon key from reading
         // everything; a refactor that drops it must fail here rather than in production.
-        // Two policies, each with a `using` and a `with check` branch. Every one of the four has to
-        // carry the guard: a read branch without it leaks, a write branch without it lets anyone
-        // holding the anon key insert.
+        // `cf_items` has one policy with a `using` and a `with check` branch; `cf_shares` has three
+        // (read, create, change — the last with both branches). Every one of the six has to carry
+        // the guard: a read branch without it leaks, a write branch without it lets anyone holding
+        // the anon key insert.
         assert_eq!(
             INSTALL_SQL.matches("cf_token() <> ''").count(),
-            4,
+            6,
             "every policy branch must reject an absent share token"
         );
         for table in ["cf_shares", "cf_items"] {
             assert!(INSTALL_SQL.contains(&format!("alter table {table} enable row level security")));
             assert!(INSTALL_SQL.contains(&format!("alter table {table} force row level security")));
         }
+    }
+
+    /// The app-side half of the version check: the number the shipped script reports is the number
+    /// this build compares against, so a host who re-runs the script stops being told to.
+    #[test]
+    fn the_script_reports_the_schema_version_this_build_expects() {
+        let function = INSTALL_SQL
+            .split("create or replace function cf_schema_version()")
+            .nth(1)
+            .expect("the script defines cf_schema_version");
+        let body = function.split("$$").nth(1).expect("a function body");
+        assert_eq!(body.trim(), format!("select {SCHEMA_VERSION}"));
+    }
+
+    #[test]
+    fn an_older_copy_of_the_script_is_reported_as_outdated() {
+        assert!(schema_outdated(1), "a project without cf_schema_version runs version 1");
+        assert!(!schema_outdated(SCHEMA_VERSION));
+        assert!(!schema_outdated(SCHEMA_VERSION + 1), "a newer script is not a reason to nag");
+    }
+
+    /// Rotation is the host's alone, in the script itself — the app's own role check cannot stop a
+    /// guest who calls the function directly with the token every member holds.
+    #[test]
+    fn only_the_host_can_rotate_and_nobody_can_delete_a_share() {
+        // The old one-argument function is removed, not left beside the new one as an overload.
+        assert!(INSTALL_SQL.contains("drop function if exists cf_rotate_token(text);"));
+        assert!(INSTALL_SQL.contains("create or replace function cf_rotate_token(new_token text, owner_key text)"));
+        assert!(INSTALL_SQL.contains("and owner_hash = encode(sha256(convert_to(owner_key, 'UTF8')), 'hex')"));
+        // A guest cannot write their own hash over the host's.
+        assert!(INSTALL_SQL.contains("if old.owner_hash is not null and new.owner_hash is distinct from old.owner_hash"));
+        assert!(INSTALL_SQL.contains("create trigger cf_shares_guard_owner before update on cf_shares"));
+        // No delete policy on the parent of every item, and no catch-all that would imply one.
+        let shares_policies: Vec<&str> = INSTALL_SQL
+            .split("create policy")
+            .skip(1)
+            .filter(|policy| policy.trim_start().starts_with("cf_shares"))
+            .collect();
+        assert_eq!(shares_policies.len(), 3);
+        assert!(shares_policies.iter().all(|policy| !policy.contains("for all") && !policy.contains("for delete")));
+    }
+
+    /// The owner line the copy button appends has to hash exactly as the script's own
+    /// `encode(sha256(convert_to(key, 'UTF8')), 'hex')` does, or the host's claim would never
+    /// match. Pinned to the FIPS 180-2 vector for "abc".
+    #[test]
+    fn the_owner_hash_is_the_one_postgres_computes() {
+        assert_eq!(owner_hash("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn the_install_script_for_nothing_owned_is_the_shipped_one() {
+        assert_eq!(install_sql_for(&[]).unwrap(), INSTALL_SQL);
+        // Anything that is not a uuid's alphabet is never spliced into the script.
+        assert_eq!(install_sql_for(&["c1'; drop table cf_items; --".into()]).unwrap(), INSTALL_SQL);
+    }
+
+    #[test]
+    fn two_spellings_of_one_project_are_the_same_project() {
+        assert!(same_project("https://abc.supabase.co/", "https://ABC.supabase.co"));
+        assert!(!same_project("https://abc.supabase.co", "https://abd.supabase.co"));
+        assert!(!same_project("", ""));
     }
 
     /// `create table if not exists` silently leaves a workspace-shaped `cf_items` in place, and

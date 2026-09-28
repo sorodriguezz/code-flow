@@ -3,10 +3,18 @@ import {
   banner,
   baseType,
   codegenRefs,
+  compositeKey,
+  defaultOf,
+  findingLines,
+  isComposite,
+  isKeyColumn,
+  isNowExpression,
+  jsLiteral,
   lengthOf,
   NOTHING_TO_CONVERT,
   pascal,
   precisionOf,
+  quotedLiteral,
 } from "./shared";
 
 /** The `$table->…` call one column becomes. */
@@ -61,15 +69,25 @@ function column(field: DbmlField): string {
 export function toLaravel(schema: DbmlSchema): string {
   if (schema.tables.length === 0) return NOTHING_TO_CONVERT;
   const refs = codegenRefs(schema);
+  // `DB::raw` is only imported when an expression default needs it — an unused `use` is the first
+  // thing a linter flags in generated code.
+  const usesRaw = schema.tables.some((table) =>
+    table.fields.some((field) => {
+      const value = field.increment ? null : defaultOf(field);
+      return value?.kind === "expression" && !isNowExpression(value.sql);
+    }),
+  );
 
   const out: string[] = [
     "<?php",
     "",
     banner("Laravel migrations"),
     "// One migration per table — split these into database/migrations/ in dependency order.",
+    ...findingLines(schema),
     "",
     "use Illuminate\\Database\\Migrations\\Migration;",
     "use Illuminate\\Database\\Schema\\Blueprint;",
+    ...(usesRaw ? ["use Illuminate\\Support\\Facades\\DB;"] : []),
     "use Illuminate\\Support\\Facades\\Schema;",
     "",
   ];
@@ -82,23 +100,31 @@ export function toLaravel(schema: DbmlSchema): string {
     out.push("    {");
     out.push(`        Schema::create('${table.name}', function (Blueprint $table) {`);
 
+    // A key over several columns is one `$table->primary([...])` after them; `->primary()` on each
+    // would be a second primary key.
+    const composite = compositeKey(table);
     for (const field of table.fields) {
       const base = baseType(field.type);
       const auto = (field.pk && field.increment) || base === "serial" || base === "bigserial";
-      let line = `            ${column(field)}`;
+      let line = `            ${column(composite ? { ...field, pk: false } : field)}`;
       if (!auto) {
         if (field.unique && !field.pk) line += "->unique()";
-        if (!field.notNull && !field.pk) line += "->nullable()";
-        if (field.default !== null && !field.increment) {
-          const value = field.default;
-          line += /^`?(now\(\)|current_timestamp)`?$/i.test(value)
+        if (!field.notNull && !isKeyColumn(table, field)) line += "->nullable()";
+        const value = field.increment ? null : defaultOf(field);
+        if (value?.kind === "expression") {
+          // An expression is raw SQL. Quoted into `->default('now()')` it becomes a string default.
+          line += isNowExpression(value.sql)
             ? "->useCurrent()"
-            : `->default(${value.replace(/^`|`$/g, "'")})`;
+            : `->default(DB::raw(${quotedLiteral(value.sql)}))`;
+        } else if (value) {
+          line += `->default(${jsLiteral(value)})`;
         }
         if (field.note) line += `->comment(${JSON.stringify(field.note)})`;
       }
       out.push(`${line};`);
     }
+
+    if (composite) out.push(`            $table->primary([${composite.map((name) => `'${name}'`).join(", ")}]);`);
 
     for (const index of table.indexes) {
       if (index.pk || index.columns.length === 0) continue;
@@ -109,8 +135,11 @@ export function toLaravel(schema: DbmlSchema): string {
 
     for (const ref of refs) {
       if (ref.fkTable.id !== table.id || ref.kind === "many-to-many") continue;
+      // Blueprint takes an array for a composite key, in the same order on both sides.
+      const columns = (names: string[]) =>
+        isComposite(ref) ? `[${names.map((name) => `'${name}'`).join(", ")}]` : `'${names[0]}'`;
       out.push(
-        `            $table->foreign('${ref.fkField}')->references('${ref.pkField}')->on('${ref.pkTable.name}')->cascadeOnDelete();`,
+        `            $table->foreign(${columns(ref.fkFields)})->references(${columns(ref.pkFields)})->on('${ref.pkTable.name}')->cascadeOnDelete();`,
       );
     }
 

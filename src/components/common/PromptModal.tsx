@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Pencil } from "lucide-react";
-import { useFocusTrap } from "../../lib/useFocusTrap";
+import { useDialog } from "../../lib/useFocusTrap";
 import { usePromptStore } from "../../state/promptStore";
 import { useT } from "../../state/languageStore";
 import { buttonClass } from "./Button";
@@ -44,7 +44,10 @@ export function PromptModal() {
   // render" and unwinding to the nearest boundary. The nearest one here is the app's outermost, so
   // the whole window is replaced by the fatal card: every rename, every "new folder", every prompt
   // in the app. `ConfirmModal` has the same pair in the right order; keep them matching.
-  useFocusTrap(panelRef, request !== null);
+  //
+  // `useDialog` rather than the bare trap: Escape with the focus on a button (not in the field,
+  // which answers its own) used to do nothing here at all.
+  useDialog(panelRef, request !== null, () => respond(null));
 
   if (!request) return null;
 
@@ -82,8 +85,19 @@ export function PromptModal() {
           onKeyDown={(e) => {
             // Handled on the field rather than on the window: a global Enter listener would also
             // fire for the confirm button's own activation, answering twice.
-            if (e.key === "Enter" && ready) respond(trimmed);
-            if (e.key === "Escape") respond(null);
+            //
+            // `preventDefault` marks the key as answered for the window listeners still to come:
+            // this dialog is gone before they run (React commits the close inside the same event),
+            // so Settings, open underneath, could not tell from the layer stack alone that this
+            // Escape was not for it — and closed too.
+            if (e.key === "Enter" && ready) {
+              e.preventDefault();
+              respond(trimmed);
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              respond(null);
+            }
           }}
           className={fieldClass({ className: "w-full font-mono" })}
         />

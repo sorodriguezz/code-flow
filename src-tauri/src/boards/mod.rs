@@ -609,6 +609,154 @@ pub(crate) fn html_to_text(html: &str) -> String {
     lines.join("\n")
 }
 
+// ---------- a published story, brought up to date ----------
+
+/// The parts of a story that go onto its work item — what a publish wrote, and what an update
+/// rewrites. Borrowed from the stored draft by the command layer.
+pub struct StoryContent<'a> {
+    pub title: &'a str,
+    pub narrative: &'a str,
+    pub description: &'a str,
+    pub acceptance_criteria: &'a [String],
+    /// `0.0` leaves the board's estimate alone, as it did at creation.
+    pub story_points: f64,
+}
+
+/// One field an update would change, for the confirmation that lists them before anything is sent.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FieldChange {
+    /// `title` | `content` | `estimate` — a key the frontend names, not prose.
+    pub field: String,
+    /// What the board holds now and what it would hold after. Empty for `content`, which is too long
+    /// to quote in a dialog: the dialog says it is replaced.
+    pub before: String,
+    pub after: String,
+}
+
+/// The heading criteria sit under where a board keeps them inside the prose (a Basic-process Azure
+/// "Issue"; Jira and monday have no field of their own). Same words every client writes.
+const CRITERIA_HEADING: &str = "Criterios de aceptación";
+
+/// A story as an edit to the work item it was published as — the same composition the create used
+/// (`azure::create_work_item`, `jira::compose_description`, `monday::compose_text`), so an update
+/// writes each part where the publish put it rather than somewhere new.
+///
+/// `criteria_own_field` is Azure's question — does the item's type have an Acceptance Criteria
+/// field? — and `effort_field` names the field the item already reports its estimate in, so the new
+/// number lands where the board shows it. Both are ignored by the hosts that have no such thing.
+pub fn story_edit(
+    provider: BoardProvider,
+    story: &StoryContent<'_>,
+    criteria_own_field: bool,
+    effort_field: &str,
+) -> WorkItemEdit {
+    let criteria: Vec<String> = story
+        .acceptance_criteria
+        .iter()
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    let effort = (story.story_points > 0.0).then_some(story.story_points);
+    match provider {
+        BoardProvider::Azure => {
+            let mut html = String::new();
+            if !story.narrative.trim().is_empty() {
+                html.push_str(&format!("<p><b>{}</b></p>", escape_html(story.narrative.trim())));
+            }
+            html.push_str(&text_to_html(story.description));
+            let criteria_html = criteria_to_html(&criteria);
+            if !criteria_own_field && !criteria_html.is_empty() {
+                html.push_str(&format!("<p><b>{CRITERIA_HEADING}</b></p>{criteria_html}"));
+            }
+            WorkItemEdit {
+                title: Some(story.title.trim().to_string()),
+                description: Some(html),
+                repro_steps: None,
+                acceptance_criteria: criteria_own_field.then_some(criteria),
+                effort,
+                effort_field: effort_field.to_string(),
+                prose_is_html: true,
+            }
+        }
+        // Both keep the criteria inside the prose, under a heading their own update writes; the
+        // narrative opens the prose, as it did when the item was created.
+        BoardProvider::Jira | BoardProvider::Monday => {
+            let prose = [story.narrative.trim(), story.description.trim()]
+                .iter()
+                .filter(|part| !part.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            WorkItemEdit {
+                title: Some(story.title.trim().to_string()),
+                description: Some(prose),
+                repro_steps: None,
+                acceptance_criteria: Some(criteria),
+                effort,
+                effort_field: effort_field.to_string(),
+                prose_is_html: false,
+            }
+        }
+    }
+}
+
+/// The words of a text, markup and punctuation dropped — what "the same content" is judged by.
+///
+/// Each host hands prose back in its own dress (Azure's HTML, Jira's wiki markup rendered, monday's
+/// plain text), so comparing the strings would call every story changed. Comparing the words it
+/// says, in order, is blind to formatting and to nothing that matters: a word added, removed or
+/// changed is still a difference.
+fn words(text: &str) -> Vec<String> {
+    let without_heading = text.replace(CRITERIA_HEADING, " ");
+    without_heading
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        // The one piece of markup a word split keeps: Jira's `h3.` heading marker.
+        .filter(|word| !(word.len() == 2 && word.starts_with('h') && word[1..].chars().all(|c| c.is_ascii_digit())))
+        .map(str::to_string)
+        .collect()
+}
+
+/// What an update would change on the board, field by field, against the item as it is **now** —
+/// so an edit somebody else made on the board since the publish shows up here as something this
+/// update would overwrite, not only the user's own changes.
+pub fn story_changes(current: &WorkItem, story: &StoryContent<'_>) -> Vec<FieldChange> {
+    let mut changes = Vec::new();
+    if current.title.trim() != story.title.trim() {
+        changes.push(FieldChange {
+            field: "title".into(),
+            before: current.title.trim().to_string(),
+            after: story.title.trim().to_string(),
+        });
+    }
+    let board = format!(
+        "{}\n{}",
+        html_to_text(&current.description_html),
+        html_to_text(&current.acceptance_criteria_html)
+    );
+    let ours = format!(
+        "{}\n{}\n{}",
+        story.narrative,
+        story.description,
+        story.acceptance_criteria.join("\n")
+    );
+    if words(&board) != words(&ours) {
+        changes.push(FieldChange { field: "content".into(), before: String::new(), after: String::new() });
+    }
+    if story.story_points > 0.0 && (current.effort - story.story_points).abs() > f64::EPSILON {
+        let number = |value: f64| match value == 0.0 {
+            true => String::new(),
+            false => format!("{value}"),
+        };
+        changes.push(FieldChange {
+            field: "estimate".into(),
+            before: number(current.effort),
+            after: number(story.story_points),
+        });
+    }
+    changes
+}
+
 // ---------- dispatch ----------
 
 /// The kinds of work item this board offers.
@@ -857,5 +1005,100 @@ mod tests {
              <li>Dado que entro<br>Cuando guardo<br>Entonces veo el aviso</li>\
              </ol>"
         );
+    }
+    fn item(title: &str, description_html: &str, criteria_html: &str, effort: f64) -> WorkItem {
+        WorkItem {
+            id: 7,
+            url: String::new(),
+            key: String::new(),
+            work_item_type: "User Story".into(),
+            title: title.into(),
+            state: "New".into(),
+            team_project: "Web".into(),
+            container_id: String::new(),
+            description_html: description_html.into(),
+            repro_steps_html: String::new(),
+            system_info_html: String::new(),
+            acceptance_criteria_html: criteria_html.into(),
+            effort,
+            effort_field: "Microsoft.VSTS.Scheduling.StoryPoints".into(),
+            tags: String::new(),
+            area_path: String::new(),
+            iteration_path: String::new(),
+            children: Vec::new(),
+        }
+    }
+
+    fn content<'a>(title: &'a str, description: &'a str, criteria: &'a [String], points: f64) -> StoryContent<'a> {
+        StoryContent {
+            title,
+            narrative: "Como usuario quiero exportar",
+            description,
+            acceptance_criteria: criteria,
+            story_points: points,
+        }
+    }
+
+    /// An update writes each part where the publish put it: on Azure the narrative in bold over the
+    /// description and the criteria in their own field; on Jira and monday one prose block that
+    /// their own update files the criteria under.
+    #[test]
+    fn a_story_update_is_composed_the_way_it_was_published() {
+        let criteria = vec!["Dado que exporto\nEntonces bajo un CSV".to_string(), "  ".to_string()];
+        let story = content("Exportar", "Un botón en la tabla.", &criteria, 3.0);
+
+        let azure = story_edit(BoardProvider::Azure, &story, true, "Microsoft.VSTS.Scheduling.StoryPoints");
+        assert!(azure.prose_is_html);
+        let html = azure.description.unwrap();
+        assert!(html.starts_with("<p><b>Como usuario quiero exportar</b></p>"), "{html}");
+        assert!(!html.contains("Criterios de aceptación"), "own field: not folded into the prose");
+        assert_eq!(azure.acceptance_criteria.as_deref().map(<[String]>::len), Some(1), "blank ones dropped");
+        assert_eq!(azure.effort, Some(3.0));
+        assert_eq!(azure.effort_field, "Microsoft.VSTS.Scheduling.StoryPoints");
+
+        // A type without the field gets them under the heading inside the description instead.
+        let basic = story_edit(BoardProvider::Azure, &story, false, "");
+        assert!(basic.description.unwrap().contains("<p><b>Criterios de aceptación</b></p><ol>"));
+        assert!(basic.acceptance_criteria.is_none());
+
+        let jira = story_edit(BoardProvider::Jira, &story, false, "customfield_10016");
+        assert!(!jira.prose_is_html);
+        assert_eq!(jira.description.as_deref(), Some("Como usuario quiero exportar\n\nUn botón en la tabla."));
+        assert_eq!(jira.acceptance_criteria.map(|c| c.len()), Some(1));
+
+        // No estimate means the board's is left alone, as at creation.
+        assert_eq!(story_edit(BoardProvider::Monday, &content("x", "", &[], 0.0), false, "").effort, None);
+    }
+
+    /// The confirmation lists what would change against the item as it is now — and a story the
+    /// board already agrees with lists nothing, however differently the host formats it.
+    #[test]
+    fn only_real_differences_are_listed() {
+        let criteria = vec!["Dado que exporto\nEntonces bajo un CSV".to_string()];
+        let story = content("Exportar", "Un botón en la tabla.", &criteria, 3.0);
+        let same = item(
+            "Exportar",
+            "<p><b>Como usuario quiero exportar</b></p><p>Un botón en la tabla.</p>",
+            "<ol><li>Dado que exporto<br>Entonces bajo un CSV</li></ol>",
+            3.0,
+        );
+        assert_eq!(story_changes(&same, &story), vec![]);
+
+        // The criteria kept inside the prose under their heading (Basic process) read the same too.
+        let folded = item(
+            "Exportar",
+            "<p><b>Como usuario quiero exportar</b></p><p>Un botón en la tabla.</p>\
+             <p><b>Criterios de aceptación</b></p><ol><li>Dado que exporto<br>Entonces bajo un CSV</li></ol>",
+            "",
+            3.0,
+        );
+        assert_eq!(story_changes(&folded, &story), vec![]);
+
+        let edited = item("Exportar datos", "<p>Otra cosa</p>", "", 5.0);
+        let changes = story_changes(&edited, &story);
+        let fields: Vec<&str> = changes.iter().map(|c| c.field.as_str()).collect();
+        assert_eq!(fields, ["title", "content", "estimate"]);
+        assert_eq!((changes[0].before.as_str(), changes[0].after.as_str()), ("Exportar datos", "Exportar"));
+        assert_eq!((changes[2].before.as_str(), changes[2].after.as_str()), ("5", "3"));
     }
 }

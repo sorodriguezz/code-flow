@@ -136,11 +136,6 @@ pub fn get_working_diff_with_context(
     collect_diff(&diff)
 }
 
-/// The whole working diff at full file context — what every existing caller has always got.
-pub fn get_working_diff(path: &str) -> Result<Vec<FileDiffInfo>, String> {
-    get_working_diff_with_context(path, None)
-}
-
 /// The staged diff at a caller-chosen context. `None` means [`FULL_FILE_CONTEXT_LINES`].
 pub fn get_staged_diff_with_context(
     path: &str,
@@ -159,6 +154,25 @@ pub fn get_staged_diff_with_context(
 /// The whole staged diff at full file context — what every existing caller has always got.
 pub fn get_staged_diff(path: &str) -> Result<Vec<FileDiffInfo>, String> {
     get_staged_diff_with_context(path, None)
+}
+
+/// Everything not yet committed, as one diff: HEAD → working tree, through the index, untracked
+/// files included (with their content, like [`get_working_diff_with_context`]). A file both staged
+/// and edited again after staging appears once, as it now stands on disk — which is what
+/// "what am I about to commit" means once the rest is staged too. A repository with no commits yet
+/// is diffed against the empty tree, so everything in it reads as added.
+pub fn get_uncommitted_diff(path: &str, context_lines: Option<u32>) -> Result<Vec<FileDiffInfo>, String> {
+    let repo = open(path)?;
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let mut opts = DiffOptions::new();
+    opts.include_untracked(true)
+        .show_untracked_content(true)
+        .recurse_untracked_dirs(true)
+        .context_lines(context_lines.unwrap_or(FULL_FILE_CONTEXT_LINES));
+    let diff = repo
+        .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
+        .map_err(|e| e.message().to_string())?;
+    collect_diff(&diff)
 }
 
 /// One file's diff — the split view's and the editor diff tab's supply, and what an expanded row in
@@ -450,6 +464,11 @@ pub fn render_diff_for_prompt(files: &[FileDiffInfo]) -> String {
 
 pub fn stage_file(path: &str, file_path: &str) -> Result<(), String> {
     let repo = open(path)?;
+    // An LFS path is staged by git, whose `clean` filter turns it into a pointer; libgit2 would stage
+    // the whole binary — see `features.rs`.
+    if super::features::stage_needs_cli(&repo, file_path) {
+        return super::features::cli_add(path, &[file_path]);
+    }
     let mut index = repo.index().map_err(|e| e.message().to_string())?;
     let abs = Path::new(path).join(file_path);
     if abs.exists() {
@@ -463,6 +482,10 @@ pub fn stage_file(path: &str, file_path: &str) -> Result<(), String> {
 
 pub fn stage_all(path: &str) -> Result<(), String> {
     let repo = open(path)?;
+    // Same reason as `stage_file`: with LFS in play, only git can stage the tree correctly.
+    if super::features::stage_all_needs_cli(&repo) {
+        return super::features::cli_add_all(path);
+    }
     let mut index = repo.index().map_err(|e| e.message().to_string())?;
     index
         .add_all(["*"].iter(), IndexAddOption::DEFAULT, None)
@@ -471,20 +494,35 @@ pub fn stage_all(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Before the first commit there is no tree to reset the path back to, so unstaging is dropping it
+/// from the index outright — what `git rm --cached` does. The file itself is left on disk, so it
+/// lands back in "Cambios" as untracked, which is where it came from.
 pub fn unstage_file(path: &str, file_path: &str) -> Result<(), String> {
     let repo = open(path)?;
-    let head = repo.head().map_err(|e| e.message().to_string())?;
+    let Ok(head) = repo.head() else {
+        let mut index = repo.index().map_err(|e| e.message().to_string())?;
+        index.remove_path(Path::new(file_path)).map_err(|e| e.message().to_string())?;
+        index.write().map_err(|e| e.message().to_string())?;
+        return Ok(());
+    };
     let head_commit = head.peel_to_commit().map_err(|e| e.message().to_string())?;
     repo.reset_default(Some(head_commit.as_object()), [file_path])
         .map_err(|e| e.message().to_string())?;
     Ok(())
 }
 
+/// Same unborn-HEAD case as [`unstage_file`]: with no tree to read back, unstaging everything is
+/// emptying the index.
 pub fn unstage_all(path: &str) -> Result<(), String> {
     let repo = open(path)?;
     let mut index = repo.index().map_err(|e| e.message().to_string())?;
-    let head_tree = repo.head().map_err(|e| e.message().to_string())?.peel_to_tree().map_err(|e| e.message().to_string())?;
-    index.read_tree(&head_tree).map_err(|e| e.message().to_string())?;
+    match repo.head() {
+        Ok(head) => {
+            let head_tree = head.peel_to_tree().map_err(|e| e.message().to_string())?;
+            index.read_tree(&head_tree).map_err(|e| e.message().to_string())?;
+        }
+        Err(_) => index.clear().map_err(|e| e.message().to_string())?,
+    }
     index.write().map_err(|e| e.message().to_string())?;
     Ok(())
 }
@@ -565,6 +603,13 @@ pub fn discard_file_changes(path: &str, file_path: &str) -> Result<(), String> {
 
     if status.is_wt_new() {
         return remove_untracked(&workdir, file_path);
+    }
+
+    // An LFS path's index copy is a pointer: libgit2's checkout would write the pointer text over the
+    // file, where `git checkout` runs the smudge filter and puts the real content back.
+    if super::features::stage_needs_cli(&repo, file_path) {
+        let out = super::cli::run_in(path, &["checkout", "--", file_path], &[])?;
+        return if out.success { Ok(()) } else { Err(format!("{file_path}: {}", out.detail())) };
     }
 
     // Everything else the panel can list under Changes — modified, deleted, typechanged, or the
@@ -715,17 +760,43 @@ pub fn commit(
     author_name: Option<String>,
     author_email: Option<String>,
 ) -> Result<String, String> {
+    // Hooks or signing: the commit has to be git's own, or the hooks never run and nothing is
+    // signed — see `features.rs`. `git commit` finishes a stopped merge, revert or cherry-pick on its
+    // own terms, so this goes before the in-progress handling below rather than after it.
+    if super::features::detect(path)?.commits_via_cli() {
+        let author = author_name.zip(author_email);
+        return super::features::commit_via_cli(path, Some(message), super::features::CliCommit::New, author);
+    }
     let repo = open(path)?;
-    let mut index = repo.index().map_err(|e| e.message().to_string())?;
-    let tree_oid = index.write_tree().map_err(|e| e.message().to_string())?;
-    let tree = repo.find_tree(tree_oid).map_err(|e| e.message().to_string())?;
 
     let sig = match (author_name, author_email) {
         (Some(name), Some(email)) => {
             Signature::now(&name, &email).map_err(|e| e.message().to_string())?
         }
-        _ => repo.signature().map_err(|e| e.message().to_string())?,
+        _ => super::identity::repo_signature(&repo)?,
     };
+
+    let mut index = repo.index().map_err(|e| e.message().to_string())?;
+    // libgit2's own words for this are "cannot create a tree from a not fully merged index", which
+    // says nothing a person can act on.
+    if index.has_conflicts() {
+        return Err(format!("{}resolve the conflicts first", super::merge::UNRESOLVED_CONFLICTS_PREFIX));
+    }
+
+    // A merge, revert or cherry-pick that stopped for the user: the commit made now *is* that
+    // operation's commit, which is what `git commit` does in the same state. Committing it as an
+    // ordinary one-parent commit used to drop the merged branch from the history and leave
+    // `MERGE_HEAD` behind, so the banner went on asking for a merge that had already been committed.
+    // A rebase or a multi-commit sequence is git's own to walk, so a commit there stays ordinary.
+    let state = repo.state();
+    if let Some(kind) = super::merge::OperationKind::of(state) {
+        if !super::merge::is_sequenced(state) {
+            return super::merge::commit_in_progress(&repo, kind, Some(message), sig);
+        }
+    }
+
+    let tree_oid = index.write_tree().map_err(|e| e.message().to_string())?;
+    let tree = repo.find_tree(tree_oid).map_err(|e| e.message().to_string())?;
 
     let parent_commit = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
     let parents: Vec<&git2::Commit> = parent_commit.iter().collect();
@@ -784,6 +855,36 @@ mod tests {
         fs::write(dir.join("scratch.txt"), "new\n").unwrap();
 
         assert_eq!(quick_diff_base(dir.to_str().unwrap(), "scratch.txt", false).unwrap(), None);
+    }
+
+    /// "Stage all, then analyze before committing": the uncommitted diff holds the staged change, a
+    /// file staged and edited again appears once as it stands on disk, and untracked files come with
+    /// their content. The index → working tree diff sees none of the staged change.
+    #[test]
+    fn the_uncommitted_diff_includes_what_is_staged() {
+        let (dir, repo) = fixture();
+        let root = dir.to_str().unwrap();
+        fs::write(dir.join("tracked.txt"), "staged\n").unwrap();
+        fs::write(dir.join("added.txt"), "new file\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.add_path(Path::new("added.txt")).unwrap();
+        index.write().unwrap();
+
+        assert!(get_working_diff_with_context(root, Some(3)).unwrap().is_empty(), "everything is staged");
+        let staged_only = get_uncommitted_diff(root, Some(3)).unwrap();
+        let paths: Vec<_> = staged_only.iter().filter_map(|f| f.new_path.clone()).collect();
+        assert_eq!(paths, vec!["added.txt".to_string(), "tracked.txt".to_string()]);
+
+        fs::write(dir.join("tracked.txt"), "edited after staging\n").unwrap();
+        fs::write(dir.join("scratch.txt"), "untracked\n").unwrap();
+        let all = get_uncommitted_diff(root, Some(3)).unwrap();
+        let tracked: Vec<_> = all.iter().filter(|f| f.new_path.as_deref() == Some("tracked.txt")).collect();
+        assert_eq!(tracked.len(), 1, "one entry per file, not one per side of the index");
+        let added_lines: Vec<&str> = tracked[0].hunks.iter().flat_map(|h| &h.lines).filter(|l| l.origin == "+").map(|l| l.content.as_str()).collect();
+        assert_eq!(added_lines, vec!["edited after staging"], "measured from HEAD to what is on disk");
+        let scratch = all.iter().find(|f| f.new_path.as_deref() == Some("scratch.txt")).expect("untracked file listed");
+        assert!(!scratch.hunks.is_empty(), "with its content");
     }
 
     /// The bug this function was rewritten for: an untracked file is not in the index, so the
@@ -1173,6 +1274,124 @@ mod tests {
             "a conflicted path is the conflict banner's business, not this button's",
         );
         assert!(!dir.join("other.txt").exists(), "the rest of the discard still has to happen");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A repository whose first commit hasn't happened yet. `repo.head()` fails there, and treating
+    /// that as an error broke the very first thing anyone does in a fresh project: stage a file,
+    /// change their mind. With no tree to reset against, unstaging is a plain index removal.
+    #[test]
+    fn unstaging_before_the_first_commit_drops_the_path_instead_of_failing() {
+        let dir = std::env::temp_dir().join(format!("cf-diff-empty-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        Repository::init(&dir).unwrap();
+        let path = dir.to_str().unwrap();
+        fs::write(dir.join("a.txt"), "one\n").unwrap();
+        fs::write(dir.join("b.txt"), "two\n").unwrap();
+
+        // Read back through a fresh handle every time: the calls under test write `.git/index` from
+        // their own `Repository`, and a handle opened here would keep serving its own snapshot.
+        let staged = || -> Vec<String> {
+            let repo = Repository::open(&dir).unwrap();
+            let index = repo.index().unwrap();
+            index.iter().map(|e| String::from_utf8_lossy(&e.path).into_owned()).collect()
+        };
+
+        stage_file(path, "a.txt").unwrap();
+        stage_file(path, "b.txt").unwrap();
+        assert_eq!(staged(), vec!["a.txt", "b.txt"]);
+
+        unstage_file(path, "a.txt").unwrap();
+        assert_eq!(staged(), vec!["b.txt"], "only the unstaged path leaves the index");
+        assert!(dir.join("a.txt").exists(), "unstaging must not touch the working tree");
+
+        unstage_all(path).unwrap();
+        assert!(staged().is_empty(), "nothing may be left staged");
+        assert!(dir.join("b.txt").exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A commit made from the ordinary commit box while a merge is stopped on conflicts is that
+    /// merge's commit — two parents, state cleared — which is what `git commit` does there. It used
+    /// to be a one-parent commit that left `MERGE_HEAD` behind.
+    #[test]
+    fn committing_during_a_merge_records_the_merge() {
+        // The merge lands on the default branch, which the shipped lock rules cover.
+        let _pinned = super::super::lock_rules::pin_for_test(&[]);
+        let (dir, repo) = fixture();
+        let path = dir.to_str().unwrap();
+        {
+            // The commit below signs with the repository's identity; pin one rather than depend on
+            // whatever this machine has globally.
+            let mut config = repo.config().unwrap().open_level(git2::ConfigLevel::Local).unwrap();
+            config.set_str("user.name", "Test").unwrap();
+            config.set_str("user.email", "test@example.com").unwrap();
+        }
+        let sig = Signature::now("Test", "test@example.com").unwrap();
+        let base = repo.head().unwrap().peel_to_commit().unwrap();
+        let base_branch = repo.head().unwrap().name().unwrap().to_string();
+
+        // A side branch that rewrites the file, and a commit here that rewrites it differently.
+        repo.branch("side", &base, false).unwrap();
+        let blob_side = repo.blob(b"side\n").unwrap();
+        let mut builder = repo.treebuilder(Some(&base.tree().unwrap())).unwrap();
+        builder.insert("tracked.txt", blob_side, 0o100644).unwrap();
+        let side_tree = repo.find_tree(builder.write().unwrap()).unwrap();
+        repo.commit(Some("refs/heads/side"), &sig, &sig, "side", &side_tree, &[&base]).unwrap();
+        fs::write(dir.join("tracked.txt"), "ours\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        let ours_tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let ours = repo.commit(Some(&base_branch), &sig, &sig, "ours", &ours_tree, &[&base]).unwrap();
+
+        let outcome = super::super::merge::merge_branch(path, "side").unwrap();
+        assert_eq!(outcome.status, "conflicts");
+
+        let err = commit(path, "too early", None, None).unwrap_err();
+        assert!(err.starts_with(super::super::merge::UNRESOLVED_CONFLICTS_PREFIX), "{err}");
+
+        super::super::merge::resolve_conflict_side(path, "tracked.txt", "ours").unwrap();
+        commit(path, "merged by hand", None, None).unwrap();
+
+        let repo = Repository::open(&dir).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.parent_count(), 2, "the merged branch is recorded");
+        assert_eq!(head.parent_id(0).unwrap(), ours);
+        assert_eq!(head.message().unwrap(), "merged by hand");
+        assert_eq!(repo.state(), git2::RepositoryState::Clean, "no MERGE_HEAD left behind");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// No name to sign with is the one commit failure the UI answers with a form, so it has to be
+    /// recognisable — tagged, instead of libgit2's sentence about a config value.
+    #[test]
+    fn a_commit_with_no_identity_is_tagged_for_the_form() {
+        let (dir, repo) = fixture();
+        {
+            // An empty value at repository level beats whatever this machine has globally, which
+            // is what makes the missing identity reproducible here.
+            let mut config = repo.config().unwrap().open_level(git2::ConfigLevel::Local).unwrap();
+            config.set_str("user.name", "").unwrap();
+            config.set_str("user.email", "").unwrap();
+        }
+        fs::write(dir.join("tracked.txt"), "changed\n").unwrap();
+        stage_file(dir.to_str().unwrap(), "tracked.txt").unwrap();
+
+        let err = commit(dir.to_str().unwrap(), "message", None, None).unwrap_err();
+
+        assert!(err.starts_with(super::super::identity::IDENTITY_MISSING_PREFIX), "got: {err}");
+
+        // And the form's repository-level answer is what makes the retry go through.
+        super::super::identity::set_repo_identity(dir.to_str().unwrap(), "Someone", "someone@example.com")
+            .unwrap();
+        commit(dir.to_str().unwrap(), "message", None, None).unwrap();
+        let reopened = Repository::open(&dir).unwrap();
+        let head = reopened.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head.author().name(), Some("Someone"));
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -39,8 +39,11 @@ struct Rule {
     name: &'static str,
     severity: &'static str,
     /// When true, the matched value is run through [`is_placeholder`] and skipped if it looks
-    /// like a template/example rather than a real secret. Only the noisy generic rule sets this.
+    /// like a template/example rather than a real secret. Only the noisy generic rules set this.
     check_placeholder: bool,
+    /// When true, a value that cannot be a credential — a number, a boolean — is skipped too. For
+    /// the unquoted `.env` rule, where `API_TOKEN_TTL=3600`-shaped lines would otherwise dominate.
+    skip_trivial: bool,
     re: Regex,
 }
 
@@ -51,6 +54,7 @@ impl Rule {
             name,
             severity,
             check_placeholder: false,
+            skip_trivial: false,
             // Patterns are static and covered by tests; a compile failure is a programmer error.
             re: Regex::new(pattern).unwrap_or_else(|e| panic!("bad secret regex '{id}': {e}")),
         }
@@ -67,6 +71,35 @@ fn rules() -> &'static [Rule] {
             r#"(?i)(?:password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|private[_-]?key|token)\s*[:=]\s*['"](?P<val>[^'"\n]{8,})['"]"#,
         );
         generic.check_placeholder = true;
+
+        // The same idea for `.env` files and shell exports, where the value carries no quotes and the
+        // quoted rule above never sees it: `DB_PASSWORD=hunter2`, `export API_KEY=abc…`.
+        //
+        // Narrower than the quoted rule on purpose, because unquoted `NAME=value` is also what half
+        // the code in the world looks like. The whole line must be the assignment; the name must be
+        // UPPER_SNAKE (the env convention) and *end* in the sensitive word, so `API_KEY` and
+        // `STRIPE_SECRET_KEY` count while `TOKEN_TTL` and `PASSWORD_MIN_LENGTH` do not; and the value
+        // must be one token of credential-ish characters — a call, an index or a variable
+        // (`get_secret()`, `env["X"]`, `$X`) cannot match at all.
+        let mut dotenv = Rule::new(
+            "dotenv-secret",
+            "Secret in an environment assignment",
+            "warning",
+            r#"^\s*(?:export\s+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|PASS|PWD|SECRET|SECRET_KEY|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|CLIENT_SECRET|CREDENTIALS?)\s*=\s*(?P<val>[A-Za-z0-9_\-+/=.:@!%^&*~,]{4,})\s*(?:#.*)?$"#,
+        );
+        dotenv.check_placeholder = true;
+        dotenv.skip_trivial = true;
+
+        // A password spelled into a URL: `https://user:pass@example.com`, `postgres://app:pw@db:5432`.
+        // Only the password half is the secret, so that is what the preview masks; a URL with just a
+        // user (`ssh://git@example.com`) has none and does not match.
+        let mut url = Rule::new(
+            "url-credentials",
+            "Credentials in a URL",
+            "warning",
+            r#"(?i)\b[a-z][a-z0-9+.\-]*://[^\s:/@'"]+:(?P<val>[^\s@/'"]+)@[^\s/'"@]+"#,
+        );
+        url.check_placeholder = true;
 
         vec![
             Rule::new(
@@ -104,6 +137,8 @@ fn rules() -> &'static [Rule] {
             Rule::new("stripe-secret-key", "Stripe secret key", "critical", r"\bsk_live_[0-9A-Za-z]{16,}\b"),
             Rule::new("stripe-restricted-key", "Stripe restricted key", "critical", r"\brk_live_[0-9A-Za-z]{16,}\b"),
             Rule::new("openai-key", "OpenAI API key", "critical", r"\bsk-proj-[A-Za-z0-9_-]{20,}\b"),
+            // `sk-ant-api03-…`, `sk-ant-admin01-…`: every Anthropic key carries this prefix.
+            Rule::new("anthropic-key", "Anthropic API key", "critical", r"\bsk-ant-[A-Za-z0-9_-]{20,}"),
             Rule::new("npm-token", "npm access token", "critical", r"\bnpm_[A-Za-z0-9]{36}\b"),
             Rule::new(
                 "azure-storage-key",
@@ -118,20 +153,46 @@ fn rules() -> &'static [Rule] {
                 r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
             ),
             generic,
+            dotenv,
+            url,
         ]
     })
 }
 
 /// Values that look like templates/examples rather than real secrets — cuts most of the noise
-/// from the generic assignment rule (`token = "your-token-here"`, `secret = "${ENV_VAR}"`, …).
+/// from the generic assignment rules (`token = "your-token-here"`, `secret = "${ENV_VAR}"`,
+/// `API_KEY=<your-key>`, `postgres://user:password@localhost`, …).
 fn is_placeholder(v: &str) -> bool {
     if v.contains("${") || v.contains("{{") || v.contains("process.env") || v.contains("os.environ") || v.contains("getenv") {
         return true;
     }
+    // `$DB_PASSWORD` is a reference to the secret, not the secret.
+    if v.starts_with('$') {
+        return true;
+    }
     let lower = v.to_lowercase();
-    const NEEDLES: [&str; 9] =
-        ["example", "changeme", "placeholder", "your-", "your_", "yourtoken", "xxxx", "todo", "<"];
-    NEEDLES.iter().any(|n| lower.contains(n))
+    const NEEDLES: [&str; 12] = [
+        "example", "changeme", "placeholder", "your-", "your_", "yourtoken", "xxx", "todo", "<", "redacted", "dummy",
+        "replace",
+    ];
+    if NEEDLES.iter().any(|n| lower.contains(n)) {
+        return true;
+    }
+    // The word standing in for itself — `user:password@host` in every README.
+    const STAND_INS: [&str; 6] = ["password", "passwd", "pass", "secret", "token", "pwd"];
+    if STAND_INS.contains(&lower.as_str()) {
+        return true;
+    }
+    // One character repeated — `********`, `........`, `0000`.
+    let mut chars = v.chars();
+    chars.next().is_some_and(|first| chars.all(|c| c == first))
+}
+
+/// A value no credential looks like: a number, a boolean, a null.
+fn is_trivial(v: &str) -> bool {
+    let lower = v.to_lowercase();
+    v.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+        || matches!(lower.as_str(), "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "none" | "nil")
 }
 
 /// Masks a matched value so the report shows its shape without exposing the credential.
@@ -166,6 +227,9 @@ pub fn scan_diff(files: &[FileDiffInfo]) -> Vec<SecretHit> {
                     let whole = caps.get(0).unwrap();
                     let value = caps.name("val").map(|m| m.as_str()).unwrap_or_else(|| whole.as_str());
                     if rule.check_placeholder && is_placeholder(value) {
+                        continue;
+                    }
+                    if rule.skip_trivial && is_trivial(value) {
                         continue;
                     }
                     hits.push(SecretHit {
@@ -271,5 +335,96 @@ mod tests {
     #[test]
     fn clean_line_has_no_hits() {
         assert!(scan_diff(&[added("const total = a + b; // sums the values")]).is_empty());
+    }
+
+    fn rule_of(line: &str) -> Option<String> {
+        scan_diff(&[added(line)]).first().map(|h| h.rule.clone())
+    }
+
+    /// `.env` files and shell exports carry no quotes, and the quoted rule never saw them.
+    #[test]
+    fn detects_unquoted_env_assignments() {
+        for line in [
+            "API_KEY=abcd1234efgh5678",
+            "DB_PASSWORD=hunter2correct",
+            "export STRIPE_SECRET_KEY=live_0123456789",
+            "JWT_SECRET = s3cr3t-value  # rotate monthly",
+            "SMTP_PASS=mail-pass-99",
+        ] {
+            assert_eq!(rule_of(line).as_deref(), Some("dotenv-secret"), "for: {line}");
+        }
+        let hits = scan_diff(&[added("DB_PASSWORD=hunter2correct")]);
+        assert!(!hits[0].preview.contains("hunter2correct"), "the value is masked");
+    }
+
+    /// The false positives the unquoted rule has to stay clear of: empty values, placeholders,
+    /// references to another variable, numbers and flags, names that merely *contain* the word, and
+    /// code that happens to be shaped like an assignment.
+    #[test]
+    fn unquoted_env_rule_skips_what_is_not_a_secret() {
+        for line in [
+            "API_KEY=",
+            "API_KEY=changeme",
+            "API_KEY=${API_KEY}",
+            "API_KEY=$API_KEY",
+            "API_KEY=<your-key>",
+            "API_KEY=xxx",
+            "API_KEY=xxxxxxxx",
+            "DB_PASSWORD=********",
+            "DB_PASSWORD=password",
+            "SESSION_TOKEN=12345678",
+            "AUTH_TOKEN=true",
+            "TOKEN_TTL=3600",
+            "PASSWORD_MIN_LENGTH=12",
+            "SECRET_NAME=billing-service",
+            "API_KEY=os.getenv(\"API_KEY\")",
+            "    API_KEY=config[\"key\"]",
+            "const API_KEY = loadKey();",
+            "db_password=lowercase-is-code-not-env",
+        ] {
+            assert_eq!(rule_of(line), None, "should not flag: {line}");
+        }
+    }
+
+    #[test]
+    fn detects_anthropic_keys() {
+        // Built at runtime for the same reason as the GitLab fixture: push protection.
+        let key = format!("sk-ant-api03-{}", "AbCdEfGh0123456789_IjKlMnOpQrStUv-wxyz");
+        let hits = scan_diff(&[added(&format!("const client = new Anthropic({{ apiKey: \"{key}\" }});"))]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule, "anthropic-key");
+        assert_eq!(hits[0].severity, "critical");
+        assert!(!hits[0].preview.contains("AbCdEfGh0123456789"));
+        // In an env file too, where it wins over the generic assignment rule.
+        assert_eq!(rule_of(&format!("ANTHROPIC_API_KEY={key}")).as_deref(), Some("anthropic-key"));
+        assert_eq!(rule_of("// keys look like sk-ant-…"), None);
+    }
+
+    #[test]
+    fn detects_credentials_in_urls() {
+        for line in [
+            "remote = https://deploy:Sup3rS3cret!@example.com/o/r.git",
+            "DATABASE_URL=postgres://app:k8s-db-pw-771@db.example.com:5432/app",
+            "mongo: mongodb+srv://svc:Zr7qLm2x@cluster0.example.com/db",
+        ] {
+            assert_eq!(rule_of(line).as_deref(), Some("url-credentials"), "for: {line}");
+        }
+        let hits = scan_diff(&[added("url = https://deploy:Sup3rS3cret!@example.com/")]);
+        assert!(!hits[0].preview.contains("Sup3rS3cret"), "only a masked password is shown");
+    }
+
+    #[test]
+    fn urls_without_a_real_password_are_left_alone() {
+        for line in [
+            "https://example.com/path?x=1",
+            "ssh://git@example.com:22/o/r.git",
+            "git@example.com:o/r.git",
+            "postgres://user:password@localhost:5432/db",
+            "postgres://user:${DB_PASSWORD}@localhost/db",
+            "https://user:<token>@example.com",
+            "redis://:changeme@localhost:6379",
+        ] {
+            assert_eq!(rule_of(line), None, "should not flag: {line}");
+        }
     }
 }

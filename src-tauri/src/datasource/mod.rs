@@ -28,7 +28,9 @@
 //! Every type below is mirrored one-for-one in `src/types/database.ts`; field names are the serde
 //! wire names, so renaming one here is a breaking change on both sides.
 
+pub mod csv_import;
 pub mod entra;
+pub mod export;
 pub mod iris;
 pub mod jvm;
 pub mod mongo;
@@ -442,30 +444,372 @@ impl DbConnectionConfig {
 
 /// Rejects a statement that would write, when the connection is marked read-only.
 ///
-/// Deliberately a *prefix* check on the leading keyword rather than a parse: the real guard is a
-/// read-only database role, and pretending a keyword match is one would be worse than being
-/// obviously shallow about it. What it does buy is catching the `DELETE FROM users` typed into the
-/// wrong console, which is the accident this flag exists for.
-pub fn read_only_guard(statement: &str, read_only: bool) -> Result<(), String> {
+/// This is the *client's* half of read-only. Where the engine has a switch of its own it is thrown
+/// at connect time as well — Postgres and MySQL make the session's transactions read-only, SQLite
+/// opens the file read-only — and then this is defence in depth: it refuses a write before it
+/// leaves the machine, and it refuses the statements that would switch the server's guard back off
+/// (`SET … READ WRITE`, `RESET ALL`, `set_config(…)`). Where the engine has none (SQL Server, IRIS,
+/// and Oracle, whose `SET TRANSACTION READ ONLY` lasts one transaction and whose JDBC `setReadOnly`
+/// only stores a flag — both drivers were checked), this is the whole guard, so it errs towards
+/// refusing.
+///
+/// It used to look at the leading keyword alone, which let `WITH d AS (DELETE …) SELECT …`,
+/// `EXPLAIN ANALYZE DELETE …`, `SET …` and `CALL purge()` straight through. Now it reads the
+/// statement the way the server will: comments, string literals and quoted identifiers are removed
+/// first (so a column called `"delete"`, a string holding `'drop table'` or a `-- delete later`
+/// cannot trip it), then every statement in the text has to *start* with a read verb and contain no
+/// write verb anywhere — `updated_at` is one word, not `UPDATE`. See [`guard_refusal`] for the
+/// rules and the tests below for both directions.
+pub fn read_only_guard(statement: &str, read_only: bool, dialect: SqlDialect) -> Result<(), String> {
     if !read_only {
         return Ok(());
     }
-    let head = statement
-        .trim_start()
-        .split(|c: char| c.is_whitespace() || c == '(')
-        .find(|word| !word.is_empty())
-        .unwrap_or("")
-        .to_ascii_uppercase();
-    const READS: [&str; 9] = [
-        "SELECT", "WITH", "SHOW", "EXPLAIN", "DESCRIBE", "DESC", "SET", "USE", "CALL",
-    ];
-    if READS.contains(&head.as_str()) || head.is_empty() {
-        return Ok(());
+    let tokens = guard_tokens(statement, dialect);
+    for part in tokens.split(|token| *token == GuardToken::Semi) {
+        if let Some(head) = guard_refusal(part, dialect) {
+            return Err(format!(
+                "This connection is marked read-only, so `{head}` was not sent. Turn off \
+                 \"Read-only\" in the connection's settings to run it."
+            ));
+        }
     }
-    Err(format!(
-        "This connection is marked read-only, so `{head}` was not sent. Turn off \"Read-only\" in \
-         the connection's settings to run it."
-    ))
+    Ok(())
+}
+
+/// One piece of a statement, as the read-only guard sees it: words, and the punctuation that carries
+/// structure. Literals, comments and quoted identifiers are reduced to [`GuardToken::Opaque`] or
+/// dropped, which is the point of the whole exercise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GuardToken {
+    /// An unquoted word, upper-cased. `@var`, `@@global` and `#temp` spellings are words too.
+    Word(String),
+    /// A literal or a quoted identifier: data, never syntax.
+    Opaque,
+    Open,
+    Close,
+    Semi,
+    Dot,
+    /// Any other operator or punctuation.
+    Other,
+}
+
+/// Every statement verb a read-only console may begin with.
+///
+/// An allowlist rather than a list of writes, because the thing it has to catch is often not a
+/// keyword at all: on SQL Server a bare `purge_old_rows` (or `[dbo].[purge]`) as the first line of a
+/// batch *executes that procedure*. A leading word nobody listed here is refused.
+const GUARD_LEADING_READS: &[&str] = &[
+    "SELECT", "WITH", "VALUES", "TABLE", "SHOW", "EXPLAIN", "DESCRIBE", "DESC", "USE", "SET",
+    "RESET", "BEGIN", "START", "COMMIT", "ROLLBACK", "END", "ABORT", "SAVEPOINT", "RELEASE", "SAVE",
+    "DECLARE", "FETCH", "MOVE", "OPEN", "CLOSE", "DEALLOCATE", "PRINT", "RAISERROR", "THROW", "IF",
+    "ELSE", "WHILE", "WAITFOR", "PRAGMA", "HELP", "CHECK", "CHECKSUM", "PREPARE",
+];
+
+/// Verbs that write wherever they appear.
+///
+/// Anywhere, not only at the start, because a T-SQL batch needs no `;` between statements and a
+/// Postgres `WITH` can hide a `DELETE` in a CTE. They are reserved words nearly everywhere, so as a
+/// bare word they are the verb — except right after a `.`, where `t.update` is a column.
+const GUARD_WRITE_VERBS: &[&str] = &[
+    "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "CREATE", "ALTER", "DROP",
+    "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "DBCC",
+];
+
+/// Functions through which a `SELECT` itself writes (`nextval`), locks (`get_lock`), reaches
+/// another server (`openquery`, `dblink`) or turns the server's own read-only switch back off
+/// (`set_config`). Counted after a `.` too: Oracle's `seq.NEXTVAL` advances the sequence all the
+/// same. Advisory-lock functions are matched by their `PG_ADVISORY` prefix.
+const GUARD_WRITE_FUNCTIONS: &[&str] = &[
+    "OPENQUERY", "OPENROWSET", "OPENDATASOURCE", "SET_CONFIG", "NEXTVAL", "SETVAL", "DBLINK",
+    "DBLINK_EXEC", "PG_NOTIFY", "PG_TERMINATE_BACKEND", "PG_CANCEL_BACKEND", "PG_RELOAD_CONF",
+    "LO_IMPORT", "LO_EXPORT", "LO_UNLINK", "GET_LOCK",
+];
+
+/// The verbs that are also function names — `REPLACE(name, 'a', 'b')`, MySQL's
+/// `INSERT(str, pos, len, new)` and `TRUNCATE(x, d)`. Followed by `(` they are reads.
+const GUARD_ALSO_FUNCTIONS: &[&str] = &["REPLACE", "INSERT", "TRUNCATE"];
+
+/// The word that makes one statement a write, or `None` when it is a read.
+fn guard_refusal(tokens: &[GuardToken], dialect: SqlDialect) -> Option<String> {
+    let word_at = |index: usize| match tokens.get(index) {
+        Some(GuardToken::Word(word)) => Some(word.as_str()),
+        _ => None,
+    };
+    let has_word = |wanted: &str| tokens.iter().any(|t| matches!(t, GuardToken::Word(w) if w == wanted));
+
+    // The first thing that isn't an opening parenthesis — `(SELECT 1) UNION (SELECT 2)` is a read.
+    let Some(start) = tokens.iter().position(|token| *token != GuardToken::Open) else {
+        return None;
+    };
+    let lead = match &tokens[start] {
+        GuardToken::Word(word) => word.clone(),
+        // `[dbo].[purge] 1` runs a procedure on SQL Server; a literal or a quoted name has no
+        // business opening a statement anywhere else either.
+        _ => return Some("procedure call".to_string()),
+    };
+    if !GUARD_LEADING_READS.contains(&lead.as_str()) {
+        return Some(lead);
+    }
+    // Oracle's `BEGIN`/`DECLARE` open a PL/SQL block, which can call anything; elsewhere they start
+    // a transaction or declare a variable, and the scan below still reads what follows.
+    if dialect == SqlDialect::Oracle && (lead == "BEGIN" || lead == "DECLARE") {
+        return Some("PL/SQL block".to_string());
+    }
+    // `BEGIN READ WRITE`, `SET TRANSACTION READ WRITE`, `START TRANSACTION READ WRITE`: each one asks
+    // the server to lift the read-only mode the session was opened in.
+    let read_write = tokens.windows(2).any(|pair| {
+        matches!(pair, [GuardToken::Word(a), GuardToken::Word(b)] if a == "READ" && b == "WRITE")
+    });
+    if read_write {
+        return Some("READ WRITE".to_string());
+    }
+    match lead.as_str() {
+        // A plan is only a plan — `EXPLAIN DELETE` runs nothing — unless it is `ANALYZE`d, which
+        // executes the statement to time it. `DESCRIBE` is MySQL's synonym for `EXPLAIN`.
+        "EXPLAIN" | "DESCRIBE" | "DESC" => {
+            if !has_word("ANALYZE") && !has_word("ANALYSE") {
+                return None;
+            }
+        }
+        "SET" => {
+            let lifts = tokens.iter().find_map(|token| match token {
+                GuardToken::Word(word)
+                    if word.contains("READ_ONLY")
+                        || matches!(word.as_str(), "GLOBAL" | "PERSIST" | "PERSIST_ONLY" | "PASSWORD" | "OPTION")
+                        || word.starts_with("@@GLOBAL")
+                        || word.starts_with("@@PERSIST") =>
+                {
+                    Some(word.clone())
+                }
+                _ => None,
+            });
+            if lifts.is_some() {
+                return lifts;
+            }
+        }
+        // `RESET ALL` puts `default_transaction_read_only` back to the server's default.
+        "RESET" => {
+            if has_word("ALL") || tokens.iter().any(|t| matches!(t, GuardToken::Word(w) if w.contains("READ_ONLY"))) {
+                return Some("RESET".to_string());
+            }
+        }
+        _ => {}
+    }
+
+    for (index, token) in tokens.iter().enumerate() {
+        let GuardToken::Word(word) = token else { continue };
+        let word = word.as_str();
+        let next = tokens.get(index + 1);
+        if word.starts_with("PG_ADVISORY") || GUARD_WRITE_FUNCTIONS.contains(&word) {
+            return Some(word.to_string());
+        }
+        if GUARD_WRITE_VERBS.contains(&word) {
+            if GUARD_ALSO_FUNCTIONS.contains(&word) && next == Some(&GuardToken::Open) {
+                continue;
+            }
+            // `t.update` is a column, not a verb.
+            if index > 0 && tokens[index - 1] == GuardToken::Dot {
+                continue;
+            }
+            return Some(word.to_string());
+        }
+        match word {
+            // `SELECT … INTO new_table` creates a table and `INTO OUTFILE` writes a file; only
+            // MySQL's `INTO @variable` is a read.
+            "INTO" => {
+                if !word_at(index + 1).is_some_and(|next| next.starts_with('@')) {
+                    return Some("INTO".to_string());
+                }
+            }
+            // Row locks: `FOR SHARE`, `FOR KEY SHARE`, MySQL's `LOCK IN SHARE MODE`. (`FOR UPDATE`
+            // is already caught by its `UPDATE`.)
+            "FOR" | "IN" => {
+                if matches!(word_at(index + 1), Some("SHARE") | Some("KEY")) {
+                    return Some(format!("{word} {}", word_at(index + 1).unwrap_or_default()));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Cuts a statement into [`GuardToken`]s, dropping comments and turning every literal and quoted
+/// identifier into [`GuardToken::Opaque`].
+///
+/// The same lexical rules [`split_statements`] follows, per dialect: `$tag$` bodies and `E'…'`
+/// strings for Postgres, backslash escapes and `#` comments for MySQL, `[…]` identifiers for T-SQL,
+/// `q'[…]'` for Oracle. One rule is the opposite of a comment: MySQL runs the inside of `/*! … */`,
+/// so that is read as code rather than skipped.
+fn guard_tokens(sql: &str, dialect: SqlDialect) -> Vec<GuardToken> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mysql = matches!(dialect, SqlDialect::MySql { .. });
+    let backslash_escapes = matches!(dialect, SqlDialect::MySql { backslash_escapes: true });
+    let mut tokens = Vec::new();
+    let mut executable_comments = 0usize;
+    let mut i = 0;
+    let n = chars.len();
+    let word_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$' || c == '@' || (c == '#' && !mysql);
+
+    // Skips a quoted run starting at `from` (the opening quote), honouring doubled closers and,
+    // when asked, backslash escapes. Returns the index just past the closer.
+    let skip_quoted = |from: usize, close: char, backslash: bool| -> usize {
+        let mut j = from + 1;
+        while j < n {
+            if backslash && chars[j] == '\\' {
+                j += 2;
+                continue;
+            }
+            if chars[j] == close {
+                if chars.get(j + 1) == Some(&close) {
+                    j += 2;
+                    continue;
+                }
+                return j + 1;
+            }
+            j += 1;
+        }
+        n
+    };
+
+    while i < n {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if (c == '-' && next == Some('-')) || (c == '#' && mysql) {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && next == Some('*') {
+            if mysql && chars.get(i + 2) == Some(&'!') {
+                // MySQL executes what is inside, after an optional version number.
+                executable_comments += 1;
+                i += 3;
+                while i < n && chars[i].is_ascii_digit() {
+                    i += 1;
+                }
+                continue;
+            }
+            i += 2;
+            while i < n && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                i += 1;
+            }
+            i = (i + 2).min(n);
+            continue;
+        }
+        if c == '*' && next == Some('/') && executable_comments > 0 {
+            executable_comments -= 1;
+            i += 2;
+            continue;
+        }
+        let previous_is_word = i > 0 && word_char(chars[i - 1]);
+        // Postgres `E'…'`: a string in which a backslash escapes the next character.
+        if (c == 'E' || c == 'e') && next == Some('\'') && !previous_is_word && dialect == SqlDialect::Postgres {
+            i = skip_quoted(i + 1, '\'', true);
+            tokens.push(GuardToken::Opaque);
+            continue;
+        }
+        // Oracle `q'[…]'`: ends at the closing bracket followed by a quote.
+        if (c == 'q' || c == 'Q') && next == Some('\'') && !previous_is_word && dialect == SqlDialect::Oracle {
+            if let Some(&open) = chars.get(i + 2) {
+                let close = match open {
+                    '[' => ']',
+                    '{' => '}',
+                    '(' => ')',
+                    '<' => '>',
+                    other => other,
+                };
+                let mut j = i + 3;
+                while j < n && !(chars[j] == close && chars.get(j + 1) == Some(&'\'')) {
+                    j += 1;
+                }
+                i = (j + 2).min(n);
+                tokens.push(GuardToken::Opaque);
+                continue;
+            }
+        }
+        match c {
+            '\'' => {
+                i = skip_quoted(i, '\'', backslash_escapes);
+                tokens.push(GuardToken::Opaque);
+            }
+            '"' => {
+                // A quoted identifier everywhere but MySQL, where it is a string — opaque either way.
+                i = skip_quoted(i, '"', backslash_escapes);
+                tokens.push(GuardToken::Opaque);
+            }
+            '`' => {
+                i = skip_quoted(i, '`', false);
+                tokens.push(GuardToken::Opaque);
+            }
+            '[' if dialect == SqlDialect::TSql => {
+                i = skip_quoted(i, ']', false);
+                tokens.push(GuardToken::Opaque);
+            }
+            '$' if dialect == SqlDialect::Postgres => {
+                // `$tag$ … $tag$`, or a `$1` parameter.
+                let mut j = i + 1;
+                while j < n && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                    j += 1;
+                }
+                // A tag never starts with a digit, which is what tells `$1$` from `$tag$`.
+                let tag_shaped = j == i + 1 || !chars[i + 1].is_ascii_digit();
+                if chars.get(j) == Some(&'$') && tag_shaped {
+                    let tag: Vec<char> = chars[i..=j].to_vec();
+                    let mut k = j + 1;
+                    while k < n && !chars[k..].starts_with(&tag) {
+                        k += 1;
+                    }
+                    i = (k + tag.len()).min(n);
+                    tokens.push(GuardToken::Opaque);
+                } else {
+                    i = j;
+                    tokens.push(GuardToken::Other);
+                }
+            }
+            '(' => {
+                tokens.push(GuardToken::Open);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(GuardToken::Close);
+                i += 1;
+            }
+            ';' => {
+                tokens.push(GuardToken::Semi);
+                i += 1;
+            }
+            '.' => {
+                tokens.push(GuardToken::Dot);
+                i += 1;
+            }
+            _ if c.is_ascii_digit() => {
+                // A number, `1e5` and `0x1F` included, is never a verb.
+                while i < n && (chars[i].is_alphanumeric() || chars[i] == '.') {
+                    i += 1;
+                }
+                tokens.push(GuardToken::Other);
+            }
+            _ if word_char(c) => {
+                let begin = i;
+                while i < n && word_char(chars[i]) {
+                    i += 1;
+                }
+                let word: String = chars[begin..i].iter().collect();
+                tokens.push(GuardToken::Word(word.to_uppercase()));
+            }
+            _ => {
+                tokens.push(GuardToken::Other);
+                i += 1;
+            }
+        }
+    }
+    tokens
 }
 
 /// What a write is refused with when the connection is read-only. Separate from
@@ -1129,6 +1473,34 @@ pub struct DbRowEdit {
     pub document: Option<String>,
 }
 
+/// Whether an edit has to touch exactly one row to have done what the grid showed.
+///
+/// An update or a delete names one row — by its key, or without one by every value it had. Zero rows
+/// means that row changed or went away in another session since the page was read; several means
+/// its values could not tell it apart from its twins. Either way the statement did something other
+/// than what the user saw staged, so the batch is rolled back. An insert names no row and is left to
+/// the server.
+pub fn edit_expects_one_row(edit: &DbRowEdit) -> bool {
+    matches!(edit.kind, DbRowEditKind::Update | DbRowEditKind::Delete)
+}
+
+/// What a batch is refused with when one of its edits touched the wrong number of rows. `ordinal` is
+/// 1-based, the way the preview listed them.
+pub fn wrong_row_count(ordinal: usize, total: usize, affected: u64, statement: &str) -> String {
+    let why = if affected == 0 {
+        "It matched no row: the row was changed or deleted in another session after the page was \
+         loaded, or a value used to find it no longer compares equal. Reload and make the change \
+         again."
+    } else {
+        "The values used to find it match several rows — without a primary key, identical rows \
+         can't be told apart. Change them with an explicit statement in the console."
+    };
+    format!(
+        "Nothing was saved: change {ordinal} of {total} would have affected {affected} rows \
+         instead of one, so the whole batch was rolled back. {why}\n\n{statement}"
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbEditResult {
     pub applied: u32,
@@ -1163,6 +1535,18 @@ impl Session {
     /// config re-pointed at its local end, so no driver has to know tunnelling exists; and the
     /// startup script runs last, so a session is only ever handed out already set up.
     pub async fn open(config: &DbConnectionConfig, database: Option<&str>) -> Result<Self, String> {
+        Self::open_tagged(config, database, "").await
+    }
+
+    /// [`Self::open`], for a session that must not share the JVM bridge's slot with another one of
+    /// the same connection and database — a console's, or a one-off job's. The bridge keys sessions
+    /// by id, and opening a second under the same id closes the first; `tag` is what tells them
+    /// apart. The engines with a socket of their own ignore it.
+    pub async fn open_tagged(
+        config: &DbConnectionConfig,
+        database: Option<&str>,
+        tag: &str,
+    ) -> Result<Self, String> {
         let tunnelled;
         // A SQLite database is a file on this machine; there is nothing at the far end of a tunnel
         // to reach, so a stale `ssh_enabled` on one is ignored rather than dialled.
@@ -1198,7 +1582,7 @@ impl Session {
             DbKind::Mongodb => mongo::MongoSession::open(config, database)
                 .await
                 .map(Session::Mongo),
-            DbKind::Iris => iris::IrisSession::open(config, database)
+            DbKind::Iris => iris::IrisSession::open(config, database, tag)
                 .await
                 .map(Session::Iris),
             DbKind::Redis => redis::RedisSession::open(config, database)
@@ -1210,7 +1594,7 @@ impl Session {
             DbKind::Sqlite => sqlite::SqliteSession::open(config, database)
                 .await
                 .map(Session::Sqlite),
-            DbKind::Oracle => oracle::OracleSession::open(config, database)
+            DbKind::Oracle => oracle::OracleSession::open(config, database, tag)
                 .await
                 .map(Session::Oracle),
         }?;
@@ -1441,6 +1825,78 @@ impl Session {
         }
     }
 
+    /// Every row one statement returns, written to `sink` — "export everything" from a console.
+    ///
+    /// Postgres, MySQL and SQL Server stream: their protocols hand rows over as they arrive, and
+    /// each is written before the next is read. The others read the whole result and then write it,
+    /// which is how their drivers answer anyway (the JVM bridge and `runCommand` both return a
+    /// statement's result whole).
+    pub async fn export_statement(
+        &self,
+        sql: &str,
+        ctx: &DbExecContext,
+        sink: &mut dyn export::RowSink,
+    ) -> Result<(), String> {
+        match self {
+            Session::Postgres(s) => s.stream_rows(sql, ctx, sink).await,
+            Session::Mysql(s) => s.stream_rows(sql, ctx, sink).await,
+            Session::Mssql(s) => s.stream_rows(sql, ctx, sink).await,
+            _ => {
+                let unlimited = DbExecContext { max_rows: 0, ..ctx.clone() };
+                let result = self.execute(sql, &unlimited).await?;
+                let first = result
+                    .results
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "There is no statement to export.".to_string())?;
+                if let Some(error) = first.error {
+                    return Err(error);
+                }
+                write_result(&first, sink)
+            }
+        }
+    }
+
+    /// Every row of a table under the grid's filter and sort, written to `sink`.
+    ///
+    /// The streaming engines run one unpaged `SELECT` — paging an unordered table with `OFFSET`
+    /// can repeat or skip rows between pages on Postgres, whose synchronised scans start wherever
+    /// another scan is. The rest page through [`Self::table_data`], which keeps memory bounded and is
+    /// the read the grid itself trusts; the paging is on the same order the grid shows.
+    pub async fn export_table(
+        &self,
+        request: &DbTableDataRequest,
+        sink: &mut dyn export::RowSink,
+    ) -> Result<(), String> {
+        match self {
+            Session::Postgres(s) => s.export_table(request, sink).await,
+            Session::Mysql(s) => s.export_table(request, sink).await,
+            Session::Mssql(s) => s.export_table(request, sink).await,
+            _ => {
+                const PAGE: u32 = 2_000;
+                let mut page = request.clone();
+                page.offset = 0;
+                page.limit = PAGE;
+                let mut described = false;
+                loop {
+                    let result = self.table_data(&page).await?;
+                    if !described {
+                        sink.columns(&result.columns)?;
+                        described = true;
+                    }
+                    let read = result.rows.len();
+                    write_rows(&result, sink)?;
+                    // A short page is the last one. Decided from the count rather than from
+                    // `truncated`, which not every driver sets on a page that happened to be full.
+                    if read < PAGE as usize {
+                        return Ok(());
+                    }
+                    page.offset = page.offset.saturating_add(PAGE);
+                }
+            }
+        }
+    }
+
     pub async fn object_ddl(&self, node: &DbNodeRef) -> Result<String, String> {
         match self {
             Session::Postgres(s) => s.object_ddl(node).await,
@@ -1464,6 +1920,32 @@ impl Session {
             Session::Mysql(s) => s.explain(sql, ctx).await,
             Session::Sqlite(s) => s.explain(sql, ctx).await,
             Session::Oracle(s) => s.explain(sql, ctx).await,
+        }
+    }
+
+    /// The SQL this session speaks, or `None` for the engines without SQL. Per session, not per
+    /// kind: a MySQL server's `sql_mode` decides how a literal has to be written.
+    pub fn dialect(&self) -> Option<SqlDialect> {
+        match self {
+            Session::Postgres(_) => Some(SqlDialect::Postgres),
+            Session::Mssql(_) => Some(SqlDialect::TSql),
+            Session::Iris(_) => Some(SqlDialect::Iris),
+            Session::Mysql(s) => Some(s.dialect()),
+            Session::Sqlite(_) => Some(SqlDialect::Sqlite),
+            Session::Oracle(_) => Some(SqlDialect::Oracle),
+            Session::Mongo(_) | Session::Redis(_) => None,
+        }
+    }
+
+    /// Turns autocommit off for a multi-statement transaction, or back on after it. Only the JVM
+    /// engines need it — their JDBC connection commits every statement until told otherwise, and
+    /// neither IRIS nor Oracle has a `BEGIN` that overrides that. Everyone else opens a transaction
+    /// with a statement and ignores this.
+    pub async fn set_autocommit(&self, enabled: bool) -> Result<(), String> {
+        match self {
+            Session::Iris(s) => s.set_autocommit(enabled).await,
+            Session::Oracle(s) => s.set_autocommit(enabled).await,
+            _ => Ok(()),
         }
     }
 
@@ -1537,6 +2019,138 @@ fn session_key(connection_id: &str, database: Option<&str>) -> String {
     }
 }
 
+/// Which of a connection's sessions a call runs on.
+///
+/// Two per connection and database, because they used to be one and that was a bug with teeth: a
+/// `BEGIN` typed in a console was committed — or rolled back — by the next "Apply" in the data
+/// editor, which ran its own `BEGIN … COMMIT` on the same socket; and a Postgres transaction aborted
+/// by a typo in the console blocked the explorer, the grid and Apply alike, with no button anywhere
+/// to get out. The console now has a session of its own, which is the only one a user can leave a
+/// transaction open on, and everything the app does on the user's behalf — tree, pages, counts, DDL,
+/// Apply — runs on the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbLane {
+    /// The app's own work: the explorer, the grid and its Apply, counts, DDL, diagrams.
+    #[default]
+    Work,
+    /// Statements typed into a console.
+    Console,
+}
+
+impl DbLane {
+    /// The lane a call really gets. MongoDB and Redis have one: neither holds transaction state on
+    /// a session here (Redis's console refuses `MULTI`), and each driver's handle is already a pool
+    /// or a multiplexer — a second one would be a second pool for nothing.
+    pub fn for_kind(self, kind: DbKind) -> Self {
+        match kind {
+            DbKind::Mongodb | DbKind::Redis => DbLane::Work,
+            _ => self,
+        }
+    }
+
+    /// What the JVM bridge's session id carries, so a console and the explorer on the same
+    /// namespace are two sessions there too. See [`Session::open_tagged`].
+    fn tag(self) -> &'static str {
+        match self {
+            DbLane::Work => "",
+            DbLane::Console => "@console",
+        }
+    }
+}
+
+/// Whether a console's session is inside a transaction — what the console's indicator shows, with
+/// its Commit and Rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbTransactionState {
+    #[default]
+    None,
+    Open,
+    /// Postgres: a statement failed inside the transaction, and until it ends the server answers
+    /// every statement but `ROLLBACK` with "current transaction is aborted".
+    Aborted,
+}
+
+/// A console run's results, and the transaction state the session was left in.
+#[derive(Debug, Clone, Serialize)]
+pub struct DbConsoleRun {
+    #[serde(flatten)]
+    pub result: DbExecuteResult,
+    pub transaction: DbTransactionState,
+}
+
+/// The dialect a connection's console is parsed in, or `None` for the engines without SQL.
+pub fn console_dialect(kind: DbKind) -> Option<SqlDialect> {
+    match kind {
+        DbKind::Postgres | DbKind::Supabase => Some(SqlDialect::Postgres),
+        DbKind::Sqlserver => Some(SqlDialect::TSql),
+        DbKind::Iris => Some(SqlDialect::Iris),
+        // The escapes only matter for what is inside a literal, which is skipped either way.
+        DbKind::Mysql | DbKind::Mariadb => Some(SqlDialect::MySql { backslash_escapes: true }),
+        DbKind::Sqlite => Some(SqlDialect::Sqlite),
+        DbKind::Oracle => Some(SqlDialect::Oracle),
+        DbKind::Mongodb | DbKind::Redis => None,
+    }
+}
+
+/// The transaction state after a console run, from the state before it and what ran.
+///
+/// Read from the statements themselves — `BEGIN`/`START TRANSACTION` open one, `COMMIT`/`ROLLBACK`
+/// (and Postgres' `END`/`ABORT`) close it — because none of these drivers exposes the server's own
+/// flag. Two engine rules on top: Postgres aborts a transaction on *any* failed statement inside it
+/// (and says so, as SQLSTATE 25P02's "current transaction is aborted"), and MySQL commits one
+/// implicitly before DDL. A failed statement changes nothing else: a failed `COMMIT` did not commit.
+pub fn next_transaction_state(
+    kind: DbKind,
+    mut state: DbTransactionState,
+    results: &[DbStatementResult],
+) -> DbTransactionState {
+    let Some(dialect) = console_dialect(kind) else { return DbTransactionState::None };
+    let postgres = dialect == SqlDialect::Postgres;
+    let mysql = matches!(dialect, SqlDialect::MySql { .. });
+    for result in results {
+        if let Some(error) = &result.error {
+            let aborted = error.contains("current transaction is aborted");
+            if postgres && (state != DbTransactionState::None || aborted) {
+                state = DbTransactionState::Aborted;
+            }
+            continue;
+        }
+        let words: Vec<String> = guard_tokens(&result.statement, dialect)
+            .into_iter()
+            .filter_map(|token| match token {
+                GuardToken::Word(word) => Some(word),
+                _ => None,
+            })
+            .take(3)
+            .collect();
+        let word = |index: usize| words.get(index).map(String::as_str).unwrap_or("");
+        state = match word(0) {
+            // `BEGIN` alone is a block in T-SQL and PL/SQL; there a transaction says `TRAN`.
+            "BEGIN" if dialect == SqlDialect::TSql => {
+                if matches!(word(1), "TRAN" | "TRANSACTION" | "DISTRIBUTED") {
+                    DbTransactionState::Open
+                } else {
+                    state
+                }
+            }
+            "BEGIN" if dialect == SqlDialect::Oracle => state,
+            "BEGIN" => DbTransactionState::Open,
+            "START" if word(1) == "TRANSACTION" => DbTransactionState::Open,
+            // `ROLLBACK TO SAVEPOINT` stays inside the transaction.
+            "ROLLBACK" if word(1) == "TO" || word(2) == "TO" => state,
+            "COMMIT" | "ROLLBACK" => DbTransactionState::None,
+            "END" | "ABORT" if postgres => DbTransactionState::None,
+            "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "RENAME" | "GRANT" | "REVOKE" if mysql => {
+                DbTransactionState::None
+            }
+            _ => state,
+        };
+    }
+    state
+}
+
 /// One open session, plus what the idle sweep needs to know about it.
 struct Live {
     session: Arc<Session>,
@@ -1554,6 +2168,10 @@ struct Live {
     /// Zero means off, for both.
     keep_alive: std::time::Duration,
     auto_disconnect: std::time::Duration,
+    /// Whether a console left this session inside a transaction. Also what keeps the idle sweep
+    /// off it: closing a session with an open transaction rolls it back, and a transaction the user
+    /// is thinking about is not an idle connection.
+    transaction: Mutex<DbTransactionState>,
 }
 
 type Sessions = Arc<Mutex<HashMap<String, Arc<Live>>>>;
@@ -1602,8 +2220,19 @@ impl DbRegistry {
         config: &DbConnectionConfig,
         database: Option<&str>,
     ) -> Result<Arc<Session>, String> {
+        self.session_in(config, database, DbLane::Work).await
+    }
+
+    /// [`Self::session`], on a given lane — see [`DbLane`].
+    pub async fn session_in(
+        &self,
+        config: &DbConnectionConfig,
+        database: Option<&str>,
+        lane: DbLane,
+    ) -> Result<Arc<Session>, String> {
         self.ensure_sweeper();
-        let key = session_key(&config.id, database);
+        let lane = lane.for_kind(config.kind);
+        let key = Self::session_key_in(&config.id, database, lane);
         if let Some(existing) = self.lookup(&key) {
             if existing.session.is_alive() {
                 existing.last_used.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
@@ -1611,7 +2240,7 @@ impl DbRegistry {
             }
             self.forget(&key);
         }
-        let session = match Session::open(config, database).await {
+        let session = match Session::open_tagged(config, database, lane.tag()).await {
             Ok(session) => Arc::new(session),
             Err(e) => {
                 // The tunnel goes up before the driver dials (see `Session::open`), so a driver that
@@ -1630,11 +2259,31 @@ impl DbRegistry {
             last_pinged: std::sync::atomic::AtomicU64::new(now),
             keep_alive: std::time::Duration::from_secs(config.keep_alive_secs as u64),
             auto_disconnect: std::time::Duration::from_secs(config.auto_disconnect_secs as u64),
+            transaction: Mutex::new(DbTransactionState::None),
         });
         if let Ok(mut map) = self.sessions.lock() {
             map.insert(key, live);
         }
         Ok(session)
+    }
+
+    /// The transaction state recorded for the session under `key`. `None` when there is no session
+    /// — a session that closed took its transaction with it.
+    pub fn transaction_state(&self, key: &str) -> DbTransactionState {
+        self.lookup(key)
+            .and_then(|live| live.transaction.lock().ok().map(|state| *state))
+            .unwrap_or_default()
+    }
+
+    /// Records a console run's outcome — but only on the session it ran on. A session replaced in
+    /// the meantime (a reconnect, a cancel that poisoned it) starts with no transaction, and the old
+    /// one's state must not be written onto it.
+    pub fn set_transaction_state(&self, key: &str, session: &Arc<Session>, state: DbTransactionState) {
+        if let Some(live) = self.lookup(key).filter(|live| Arc::ptr_eq(&live.session, session)) {
+            if let Ok(mut current) = live.transaction.lock() {
+                *current = state;
+            }
+        }
     }
 
     /// Runs one read against a session, reopening once if the session turned out to be dead.
@@ -1706,20 +2355,23 @@ impl DbRegistry {
         }
     }
 
-    /// Closes every session of a connection — both the bare key and the per-database ones — and the
-    /// SSH tunnel they shared, which has nothing left to carry.
+    /// Closes every session of a connection — every database and both lanes — and the SSH tunnel
+    /// they shared, which has nothing left to carry.
     ///
     /// Sessions first, tunnel second. The other order cuts the forward out from under the drivers
     /// while they are still writing their goodbye through it, which turns a clean disconnect into an
     /// abandoned socket for the server to time out on its own.
+    ///
+    /// Matched on the entry's own `connection_id` rather than on the shape of its key, which is what
+    /// every function here does now: keys grew a lane, and a rule written against their spelling is
+    /// a rule the next change to that spelling silently breaks.
     pub fn disconnect(&self, connection_id: &str) {
-        let prefix = format!("{connection_id}#");
         let dropped: Vec<Arc<Live>> = match self.sessions.lock() {
             Ok(mut map) => {
                 let keys: Vec<String> = map
-                    .keys()
-                    .filter(|key| *key == connection_id || key.starts_with(&prefix))
-                    .cloned()
+                    .iter()
+                    .filter(|(_, live)| live.connection_id == connection_id)
+                    .map(|(key, _)| key.clone())
                     .collect();
                 keys.iter().filter_map(|key| map.remove(key)).collect()
             }
@@ -1735,14 +2387,10 @@ impl DbRegistry {
     /// fourth must not pull the forward out from under the three that are working — and neither must
     /// a Test run from the edit dialog of a connection that is open and being used right now.
     pub fn close_tunnel_if_unused(&self, connection_id: &str) {
-        let prefix = format!("{connection_id}#");
         let still_open = self
             .sessions
             .lock()
-            .map(|map| {
-                map.keys()
-                    .any(|key| key == connection_id || key.starts_with(&prefix))
-            })
+            .map(|map| map.values().any(|live| live.connection_id == connection_id))
             .unwrap_or(true);
         if !still_open {
             tunnel::close(connection_id);
@@ -1793,15 +2441,18 @@ impl DbRegistry {
         if let Ok(mut map) = self.sessions.lock() {
             let idle: Vec<String> = map
                 .iter()
-                .filter(|(_, live)| Arc::strong_count(&live.session) == 1)
+                // A console session inside a transaction is not idle, however quiet: closing it
+                // would roll the transaction back while the window is merely out of sight.
+                .filter(|(_, live)| {
+                    Arc::strong_count(&live.session) == 1
+                        && live.transaction.lock().map(|state| *state == DbTransactionState::None).unwrap_or(true)
+                })
                 .map(|(key, _)| key.clone())
                 .collect();
             for key in idle {
                 if let Some(live) = map.remove(&key) {
-                    let prefix = format!("{}#", live.connection_id);
-                    let still_open = map
-                        .keys()
-                        .any(|other| *other == live.connection_id || other.starts_with(&prefix));
+                    let still_open =
+                        map.values().any(|other| other.connection_id == live.connection_id);
                     if !still_open {
                         orphaned.push(live.connection_id.clone());
                     }
@@ -1821,10 +2472,7 @@ impl DbRegistry {
         let Ok(map) = self.sessions.lock() else {
             return Vec::new();
         };
-        let mut ids: Vec<String> = map
-            .keys()
-            .map(|key| key.split('#').next().unwrap_or(key).to_string())
-            .collect();
+        let mut ids: Vec<String> = map.values().map(|live| live.connection_id.clone()).collect();
         ids.sort();
         ids.dedup();
         ids
@@ -1879,6 +2527,15 @@ impl DbRegistry {
 
     pub fn session_key(connection_id: &str, database: Option<&str>) -> String {
         session_key(connection_id, database)
+    }
+
+    /// The registry key of a lane's session. A console's is its own entry, prefixed so that it can
+    /// never collide with a database that happens to be called "console".
+    pub fn session_key_in(connection_id: &str, database: Option<&str>, lane: DbLane) -> String {
+        match lane {
+            DbLane::Work => session_key(connection_id, database),
+            DbLane::Console => format!("console|{}", session_key(connection_id, database)),
+        }
     }
 }
 
@@ -1964,7 +2621,15 @@ async fn sweep(sessions: &Sessions) {
             }
             let idle = now.saturating_sub(live.last_used.load(Ordering::Relaxed));
             let quiet = now.saturating_sub(live.last_pinged.load(Ordering::Relaxed));
-            match sweep_action(idle, quiet, live.keep_alive, live.auto_disconnect) {
+            // Closing a session inside a transaction rolls it back behind the user's back, so one
+            // is never expired for being quiet — only kept alive.
+            let holding = live
+                .transaction
+                .lock()
+                .map(|state| *state != DbTransactionState::None)
+                .unwrap_or(false);
+            let auto_disconnect = if holding { std::time::Duration::ZERO } else { live.auto_disconnect };
+            match sweep_action(idle, quiet, live.keep_alive, auto_disconnect) {
                 SweepAction::Expire => expired.push((key.clone(), live.connection_id.clone())),
                 SweepAction::Ping => due.push(live.clone()),
                 SweepAction::Leave => {}
@@ -1994,10 +2659,7 @@ async fn sweep(sessions: &Sessions) {
                 }
                 // The tunnel belongs to the connection, not to one of its sessions, so it only goes
                 // when the last of them has.
-                let prefix = format!("{connection_id}#");
-                let still_open = map
-                    .keys()
-                    .any(|other| other == connection_id || other.starts_with(&prefix));
+                let still_open = map.values().any(|other| other.connection_id == *connection_id);
                 if !still_open {
                     orphaned.push(connection_id.clone());
                 }
@@ -2035,6 +2697,42 @@ async fn sweep(sessions: &Sessions) {
             }
         });
     }
+}
+
+/// Why a console statement can't be exported whole, if it can't.
+///
+/// Exporting runs the statement a second time — the console showed a page of its result, and the
+/// file wants all of it — so only a read may go: a `DELETE … RETURNING` or a `deleteMany` run twice
+/// has done its damage twice. Judged with the read-only guard's own rules, per engine.
+pub fn export_refusal(kind: DbKind, sql: &str) -> Option<String> {
+    let writes = match kind {
+        DbKind::Mongodb => mongo::statement_writes(sql),
+        DbKind::Redis => redis::statement_writes(sql),
+        _ => console_dialect(kind).is_some_and(|dialect| read_only_guard(sql, true, dialect).is_err()),
+    };
+    writes.then(|| {
+        "Only a statement that reads can be exported whole: exporting runs it again, and this one \
+         would write."
+            .to_string()
+    })
+}
+
+/// A whole result into a sink: its columns, then its rows.
+fn write_result(result: &DbStatementResult, sink: &mut dyn export::RowSink) -> Result<(), String> {
+    sink.columns(&result.columns)?;
+    write_rows(result, sink)
+}
+
+/// A result's rows into a sink — as documents when the engine has them, so a JSON export of a Mongo
+/// collection keeps the nesting the grid's columns flatten.
+fn write_rows(result: &DbStatementResult, sink: &mut dyn export::RowSink) -> Result<(), String> {
+    for (index, row) in result.rows.iter().enumerate() {
+        match result.documents.get(index) {
+            Some(document) => sink.document(document, row)?,
+            None => sink.row(row)?,
+        }
+    }
+    Ok(())
 }
 
 /// A connection config with every field at its default, for the drivers' own tests.
@@ -2914,11 +3612,237 @@ mod tests {
             ssh_user: String::new(),
             ssh_key_file: String::new(),
         };
-        let guard = |sql: &str| read_only_guard(sql, config.read_only);
+        let guard = |sql: &str| read_only_guard(sql, config.read_only, SqlDialect::Postgres);
         assert!(guard("WITH x AS (SELECT 1) SELECT * FROM x").is_ok());
         assert!(guard("  select 1").is_ok());
         let refused = guard("DELETE FROM users").unwrap_err();
         assert!(refused.contains("read-only"), "{refused}");
         assert!(guard("DROP TABLE users").is_err());
+        // Off means off: the guard has nothing to say about a writable connection.
+        assert!(read_only_guard("DELETE FROM users", false, SqlDialect::Postgres).is_ok());
+    }
+
+    fn ran(statement: &str) -> DbStatementResult {
+        DbStatementResult::empty(statement)
+    }
+
+    fn failed(statement: &str, error: &str) -> DbStatementResult {
+        DbStatementResult::failed(statement, error)
+    }
+
+    /// The console's transaction indicator follows what ran: opened by `BEGIN`, closed by
+    /// `COMMIT`/`ROLLBACK`, untouched by a savepoint rollback.
+    #[test]
+    fn a_console_transaction_opens_and_closes_with_its_statements() {
+        use DbTransactionState::{Aborted, None as Idle, Open};
+        let pg = |state, results: &[DbStatementResult]| next_transaction_state(DbKind::Postgres, state, results);
+        assert_eq!(pg(Idle, &[ran("BEGIN"), ran("UPDATE t SET a = 1")]), Open);
+        assert_eq!(pg(Open, &[ran("SELECT 1")]), Open);
+        assert_eq!(pg(Open, &[ran("ROLLBACK TO SAVEPOINT s")]), Open);
+        assert_eq!(pg(Open, &[ran("commit")]), Idle);
+        assert_eq!(pg(Open, &[ran("END")]), Idle);
+        assert_eq!(pg(Idle, &[ran("-- start\nSTART TRANSACTION ISOLATION LEVEL SERIALIZABLE")]), Open);
+        assert_eq!(pg(Idle, &[ran("BEGIN"), ran("INSERT INTO t VALUES (1)"), ran("COMMIT")]), Idle);
+        // A failed COMMIT did not commit.
+        assert_eq!(pg(Open, &[failed("COMMIT", "could not serialize access")]), Aborted);
+    }
+
+    /// Postgres aborts a transaction on any failure inside it, and refuses everything but ROLLBACK
+    /// until it ends — the state that used to block every tab with no way out.
+    #[test]
+    fn a_postgres_failure_inside_a_transaction_aborts_it() {
+        use DbTransactionState::{Aborted, None as Idle, Open};
+        let pg = |state, results: &[DbStatementResult]| next_transaction_state(DbKind::Postgres, state, results);
+        assert_eq!(pg(Open, &[failed("SELECT * FROM nope", "relation \"nope\" does not exist")]), Aborted);
+        assert_eq!(
+            pg(Idle, &[failed("SELECT 1", "current transaction is aborted, commands ignored until end of transaction block")]),
+            Aborted
+        );
+        // Outside a transaction a failure is just a failure.
+        assert_eq!(pg(Idle, &[failed("SELECT * FROM nope", "relation does not exist")]), Idle);
+        assert_eq!(pg(Aborted, &[ran("ROLLBACK")]), Idle);
+    }
+
+    /// Each engine's own spelling: T-SQL's `BEGIN` is a block unless it says `TRAN`, Oracle's opens
+    /// PL/SQL, and MySQL commits on DDL.
+    #[test]
+    fn each_engine_opens_and_ends_transactions_its_own_way() {
+        use DbTransactionState::{None as Idle, Open};
+        assert_eq!(next_transaction_state(DbKind::Sqlserver, Idle, &[ran("BEGIN TRAN")]), Open);
+        assert_eq!(next_transaction_state(DbKind::Sqlserver, Idle, &[ran("BEGIN SELECT 1 END")]), Idle);
+        assert_eq!(next_transaction_state(DbKind::Oracle, Idle, &[ran("BEGIN NULL; END;")]), Idle);
+        assert_eq!(next_transaction_state(DbKind::Mysql, Open, &[ran("CREATE TABLE t (id int)")]), Idle);
+        assert_eq!(next_transaction_state(DbKind::Postgres, Open, &[ran("CREATE TABLE t (id int)")]), Open);
+        // No SQL, no transactions to track.
+        assert_eq!(next_transaction_state(DbKind::Mongodb, Open, &[ran("db.t.find({})")]), Idle);
+    }
+
+    /// A console's key can't collide with a database that happens to be called "console".
+    #[test]
+    fn a_console_session_has_a_key_of_its_own() {
+        let work = DbRegistry::session_key_in("c1", Some("console"), DbLane::Work);
+        let console = DbRegistry::session_key_in("c1", None, DbLane::Console);
+        assert_ne!(work, console);
+        assert_eq!(DbRegistry::session_key_in("c1", Some("app"), DbLane::Work), "c1#app");
+        assert_eq!(DbLane::Console.for_kind(DbKind::Mongodb), DbLane::Work);
+        assert_eq!(DbLane::Console.for_kind(DbKind::Postgres), DbLane::Console);
+    }
+
+    const PG: SqlDialect = SqlDialect::Postgres;
+    const TSQL: SqlDialect = SqlDialect::TSql;
+    const MY: SqlDialect = SqlDialect::MySql { backslash_escapes: true };
+
+    fn allowed(sql: &str, dialect: SqlDialect) {
+        if let Err(refused) = read_only_guard(sql, true, dialect) {
+            panic!("{sql:?} should be allowed on {dialect:?}: {refused}");
+        }
+    }
+
+    /// Returns the refused word, as the message names it.
+    fn refused(sql: &str, dialect: SqlDialect) -> String {
+        let message = read_only_guard(sql, true, dialect)
+            .expect_err(&format!("{sql:?} should be refused on {dialect:?}"));
+        message.split('`').nth(1).unwrap_or_default().to_string()
+    }
+
+    /// The false positives that would make the flag unusable: a column, a string, a comment or a
+    /// function name that merely *spells* a write verb.
+    #[test]
+    fn read_only_lets_reads_through_whatever_they_mention() {
+        for sql in [
+            "SELECT updated_at, deleted_at, created_by FROM audit WHERE drop_count > 0",
+            "SELECT 'delete from users' AS reminder",
+            "SELECT \"delete\", \"update\" FROM t",
+            "SELECT * FROM t -- delete these later",
+            "SELECT /* DROP TABLE t */ 1",
+            "SELECT replace(name, 'a', 'b') FROM t",
+            "SELECT u.update, u.delete FROM t u",
+            "SELECT $$ delete from t $$",
+            "SELECT E'it\\'s; delete' AS s",
+            "WITH RECURSIVE r AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT * FROM r",
+            "(SELECT 1) UNION (SELECT 2)",
+            "EXPLAIN DELETE FROM users",
+            "EXPLAIN ANALYZE SELECT * FROM users",
+            "SHOW search_path",
+            "SET search_path TO app, public",
+            "SET statement_timeout = '5s'",
+            "BEGIN",
+            "START TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+            "COMMIT",
+            "ROLLBACK",
+            "VALUES (1), (2)",
+            "TABLE users",
+            "",
+            "-- only a comment",
+        ] {
+            allowed(sql, PG);
+        }
+        for sql in [
+            "SELECT [update], [drop] FROM t",
+            "DECLARE @n int = (SELECT COUNT(*) FROM t); SELECT @n",
+            "SET NOCOUNT ON",
+            "BEGIN TRAN; SELECT 1; COMMIT TRAN",
+            "SELECT * FROM #scratch",
+            "SELECT name FROM sys.tables FOR XML PATH",
+            "USE app",
+        ] {
+            allowed(sql, TSQL);
+        }
+        for sql in [
+            "SELECT `drop` FROM t",
+            "SELECT insert('abcdef', 2, 3, 'x'), truncate(1.25, 1)",
+            "SELECT x INTO @v FROM t",
+            "SELECT 'it\\'s; delete'",
+            "SET NAMES utf8mb4",
+            "SET @x = 1",
+            "SHOW TABLES",
+            "DESCRIBE users",
+        ] {
+            allowed(sql, MY);
+        }
+        allowed("SELECT q'[it's; delete]' FROM DUAL", SqlDialect::Oracle);
+    }
+
+    /// Every way the old leading-keyword check was walked around, and the ordinary writes.
+    #[test]
+    fn read_only_refuses_writes_wherever_they_hide() {
+        assert_eq!(refused("WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d", PG), "DELETE");
+        assert_eq!(refused("EXPLAIN ANALYZE DELETE FROM t", PG), "DELETE");
+        assert_eq!(refused("EXPLAIN (ANALYZE, BUFFERS) UPDATE t SET a = 1", PG), "UPDATE");
+        assert_eq!(refused("CALL purge()", PG), "CALL");
+        assert_eq!(refused("DO $$ BEGIN DELETE FROM t; END $$", PG), "DO");
+        assert_eq!(refused("SELECT * FROM t FOR UPDATE", PG), "UPDATE");
+        assert_eq!(refused("SELECT * FROM t FOR SHARE", PG), "FOR SHARE");
+        assert_eq!(refused("SELECT * INTO backup FROM t", PG), "INTO");
+        assert_eq!(refused("SELECT nextval('orders_id_seq')", PG), "NEXTVAL");
+        assert_eq!(refused("SELECT pg_advisory_lock(1)", PG), "PG_ADVISORY_LOCK");
+        for (sql, word) in [
+            ("INSERT INTO t VALUES (1)", "INSERT"),
+            ("UPDATE t SET a = 1", "UPDATE"),
+            ("MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN DELETE", "MERGE"),
+            ("CREATE TABLE t (id int)", "CREATE"),
+            ("ALTER TABLE t ADD COLUMN c int", "ALTER"),
+            ("DROP TABLE t", "DROP"),
+            ("TRUNCATE t", "TRUNCATE"),
+            ("GRANT SELECT ON t TO bob", "GRANT"),
+            ("REVOKE SELECT ON t FROM bob", "REVOKE"),
+            ("COPY t FROM '/tmp/rows.csv'", "COPY"),
+            ("LOCK TABLE t", "LOCK"),
+            ("VACUUM t", "VACUUM"),
+            ("ANALYZE t", "ANALYZE"),
+            ("REFRESH MATERIALIZED VIEW m", "REFRESH"),
+            ("COMMENT ON TABLE t IS 'x'", "COMMENT"),
+            ("DISCARD ALL", "DISCARD"),
+            ("PREPARE p AS DELETE FROM t", "DELETE"),
+            ("SELECT 1; DELETE FROM t", "DELETE"),
+        ] {
+            assert_eq!(refused(sql, PG), word, "{sql}");
+        }
+    }
+
+    /// The server-side read-only mode is only as good as the statements that could lift it, so those
+    /// are refused before they reach it.
+    #[test]
+    fn read_only_refuses_what_would_switch_the_server_guard_off() {
+        assert_eq!(refused("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE", PG), "READ WRITE");
+        assert_eq!(refused("SET TRANSACTION READ WRITE", PG), "READ WRITE");
+        assert_eq!(refused("BEGIN READ WRITE", PG), "READ WRITE");
+        assert_eq!(refused("SET default_transaction_read_only = off", PG), "DEFAULT_TRANSACTION_READ_ONLY");
+        assert_eq!(refused("RESET ALL", PG), "RESET");
+        assert_eq!(refused("RESET default_transaction_read_only", PG), "RESET");
+        assert_eq!(
+            refused("SELECT set_config('default_transaction_read_only', 'off', false)", PG),
+            "SET_CONFIG"
+        );
+        assert_eq!(refused("START TRANSACTION READ WRITE", MY), "READ WRITE");
+        assert_eq!(refused("SET SESSION TRANSACTION READ WRITE", MY), "READ WRITE");
+        assert_eq!(refused("SET @@SESSION.transaction_read_only = 0", MY), "TRANSACTION_READ_ONLY");
+        assert_eq!(refused("SET GLOBAL read_only = 0", MY), "GLOBAL");
+        assert_eq!(refused("SET PASSWORD = 'x'", MY), "PASSWORD");
+        assert_eq!(refused("SET OPTION COMPILEMODE = NOCHECK", SqlDialect::Iris), "OPTION");
+    }
+
+    /// What only an engine with batches, procedures or its own quirks can spell.
+    #[test]
+    fn read_only_knows_each_dialects_own_ways_to_write() {
+        // SQL Server: statements need no `;`, a bare name runs a procedure, and `EXEC` runs anything.
+        assert_eq!(refused("SELECT 1\nDELETE FROM t", TSQL), "DELETE");
+        assert_eq!(refused("purge_old_rows", TSQL), "PURGE_OLD_ROWS");
+        assert_eq!(refused("[dbo].[purge] 1", TSQL), "procedure call");
+        assert_eq!(refused("EXEC sp_who", TSQL), "EXEC");
+        assert_eq!(refused("DECLARE @s nvarchar(100) = 'x'; EXECUTE (@s)", TSQL), "EXECUTE");
+        assert_eq!(refused("SELECT * FROM OPENQUERY(srv, 'DELETE FROM t')", TSQL), "OPENQUERY");
+        assert_eq!(refused("BULK INSERT t FROM 'rows.csv'", TSQL), "BULK");
+        // MySQL: `REPLACE INTO`, files, and the comment it executes.
+        assert_eq!(refused("REPLACE INTO t VALUES (1)", MY), "REPLACE");
+        assert_eq!(refused("SELECT * FROM t INTO OUTFILE '/tmp/t'", MY), "INTO");
+        assert_eq!(refused("/*!50000 DROP TABLE t */", MY), "DROP");
+        assert_eq!(refused("SELECT * FROM t LOCK IN SHARE MODE", MY), "IN SHARE");
+        assert_eq!(refused("LOAD DATA INFILE 'x' INTO TABLE t", MY), "LOAD");
+        assert_eq!(refused("RENAME TABLE a TO b", MY), "RENAME");
+        // Oracle: a PL/SQL block can call anything, and a sequence advances from a `SELECT`.
+        assert_eq!(refused("BEGIN purge_rows; END;", SqlDialect::Oracle), "PL/SQL block");
+        assert_eq!(refused("DECLARE n NUMBER; BEGIN NULL; END;", SqlDialect::Oracle), "PL/SQL block");
+        assert_eq!(refused("SELECT orders_seq.NEXTVAL FROM DUAL", SqlDialect::Oracle), "NEXTVAL");
     }
 }

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Ban,
   Check,
   CheckCheck,
   ChevronUp,
   Copy,
   ExternalLink,
+  GitMerge,
   Link2,
   Loader2,
   MessageSquareShare,
@@ -24,12 +26,14 @@ import { CONFIRM_POST_KEYS, POSTED_KEYS, VIEW_ON_KEYS } from "../../lib/provider
 import { discardPrFinding, getReviewRun, notifyStateChange, REVIEW_SKIPPED } from "../../lib/tauri/commands";
 import {
   listCommentThreads,
+  mergeOptions as loadMergeOptions,
   resolveCommentThread,
   targetKey,
   targetPrKey,
   targetProjectId,
   type PrTarget,
 } from "../../lib/prTarget";
+import { tallyPublish } from "../../lib/prOutcomes";
 import {
   buildFixpack,
   formatDecisionComment,
@@ -53,6 +57,7 @@ import {
   type FindingMark,
 } from "./FindingCard";
 import { PrCommentCard, PrCommentsSkeleton } from "./PrCommentCard";
+import { PrChecksChip, PrChecksList, usePrChecks } from "./PrChecks";
 import { AiRunLog } from "./AiRunLog";
 import { AiErrorBanner } from "./AiErrorBanner";
 import { ReviewEngineTag } from "./ReviewEngineTag";
@@ -80,15 +85,25 @@ import { EMPTY_RESOLUTIONS, useResolutionsStore } from "../../state/resolutionsS
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { useAiPanelStore, type DocSegment, type TabView } from "../../state/aiPanelStore";
-import { confirmAction } from "../../state/confirmStore";
+import { confirmAction, confirmFlow } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { NotificationTarget } from "../../state/notificationStore";
-import type { PrCommentThread, PullRequestSummary, SavedFinding } from "../../types/domain";
+import type {
+  MergeChoice,
+  MergeMethod,
+  MergeOptions,
+  PrCommentThread,
+  PublishOutcome,
+  PullRequestSummary,
+  SavedFinding,
+  VcsProvider,
+} from "../../types/domain";
 
 const EMPTY_VIEW: TabView = {};
 const EMPTY_FLAGS: Record<string, boolean> = {};
 const EMPTY_FINDINGS: AnalysisFinding[] = [];
+const EMPTY_IDS: string[] = [];
 const LEVELS: ReviewLevel[] = ["basico", "completo", "ultra"];
 
 /** A stored JSON column (a run's `meta` / `findings`), or `null` when it can't be read — memory
@@ -168,6 +183,8 @@ export function PrDocument({
   const actOnPr = usePrStore((s) => s.actOnPr);
   const posting = usePrStore((s) => s.postingByPr[prKey] ?? false);
   const prActionBusy = usePrStore((s) => s.prActionBusy[prKey] ?? null);
+  const merging = usePrStore((s) => s.mergingByPr[prKey] ?? false);
+  const mergePr = usePrStore((s) => s.mergePr);
   const decision = usePrStore((s) => s.decisionByPr[prKey] ?? "none");
   const loadPrDecision = usePrStore((s) => s.loadPrDecision);
   const refreshPr = usePrStore((s) => s.refreshPr);
@@ -290,7 +307,12 @@ export function PrDocument({
   const marks = useMemo(() => {
     const map = new Map<string, FindingMark>();
     for (const f of runMemory?.all ?? []) {
-      map.set(f.id, { estado: f.estado, motivo: f.motivo_descarte, posted: f.thread_id != null });
+      map.set(f.id, {
+        estado: f.estado,
+        motivo: f.motivo_descarte,
+        posted: f.thread_id != null,
+        publishedNow: runMemory !== null && runMemory.iter > 0 && f.publicado_en_iter === runMemory.iter,
+      });
     }
     return map;
   }, [runMemory]);
@@ -316,11 +338,26 @@ export function PrDocument({
   const deselected = view.deselected ?? EMPTY_FLAGS;
   const selecting = Boolean(view.selecting) && !pinned && !runningJob;
   const includeSummary = view.includeSummary ?? true;
-  const chosen = activeFindings.filter((f) => !deselected[f.id]);
   const postedRun = usePrStore((s) => (displayJob ? (s.postedByPr[postedKey(prKey, displayJob.id)] ?? false) : false));
+  const postedFindings = usePrStore((s) =>
+    displayJob ? (s.postedFindingsByRun[postedKey(prKey, displayJob.id)] ?? EMPTY_IDS) : EMPTY_IDS,
+  );
+  // What this very review already put on the pull request: offered again, a finding opened a moment
+  // ago would get a "sigue presente" reply on its own new thread. A project review reads it from the
+  // memory; a link review has none, so it keeps the ids that landed this session.
+  const publishable = useMemo(
+    () =>
+      activeFindings.filter((f) => (linkOnly ? !postedFindings.includes(f.id) : !marks.get(f.id)?.publishedNow)),
+    [activeFindings, linkOnly, postedFindings, marks],
+  );
+  const chosen = publishable.filter((f) => !deselected[f.id]);
   // What is left to publish: a project review knows per finding (its memory has the thread); a
-  // link review only knows whether this run was published.
-  const unpublished = linkOnly ? (postedRun ? 0 : activeFindings.length) : activeFindings.filter((f) => !marks.get(f.id)?.posted).length;
+  // link review knows what landed this session, and whether the whole run went out.
+  const unpublished = linkOnly
+    ? postedRun
+      ? 0
+      : activeFindings.filter((f) => !postedFindings.includes(f.id)).length
+    : activeFindings.filter((f) => !marks.get(f.id)?.posted).length;
   // Nothing left to publish: every finding is on the PR, or this run was published. A clean run
   // that has not been published still offers its summary — the one thing worth posting then.
   const nothingLeft = unpublished === 0 && (postedRun || activeFindings.length > 0);
@@ -369,6 +406,9 @@ export function PrDocument({
     const confirmKey = chosen.length === 0 ? "pr.confirmPostSummaryOnly" : CONFIRM_POST_KEYS[pr.provider];
     if (!(await confirmAction(t(confirmKey, { id: pr.id, n: chosen.length }), false))) return;
     const items = chosen.map((f) => ({
+      // The id is what finds the finding's own thread — two findings of one category in one file
+      // used to land on the first one's.
+      id: f.id,
       file: f.location?.file ?? null,
       category: f.category,
       content: formatFindingAsComment(f),
@@ -379,12 +419,29 @@ export function PrDocument({
     const summaryBody = includeSummary
       ? formatSummaryComment(activeParsed, new Date().toISOString().slice(0, 10), chosen, runMemory)
       : null;
+    let outcome: PublishOutcome;
     try {
-      await postReview(target, pr.id, displayJob.id, items, includeSummary, summaryBody);
+      outcome = await postReview(target, pr.id, displayJob.id, items, includeSummary, summaryBody);
     } catch {
-      return; // Already said by the store; nothing was posted, nothing to reload.
+      return; // Nothing could even be attempted (no token, no host) — already said by the store.
     }
-    setView({ selecting: false });
+    // Said exactly as it happened. A partial publish is not a failed one: what landed is on the pull
+    // request and in the memory, and the choosing stays open with only the rest left to send — the
+    // landed ones drop out of it, and so does a summary that already went.
+    const tally = tallyPublish(outcome);
+    const landed = tally.opened + tally.followedUp + (outcome.summary_posted ? 1 : 0);
+    if (tally.failed === 0) {
+      useToastStore
+        .getState()
+        .pushToast(tally.fallback > 0 ? t("pr.publishedFallback", { n: tally.fallback }) : t("pr.publishedAll"), "success");
+      setView({ selecting: false });
+    } else if (landed > 0) {
+      pushErrorToast(t("pr.publishPartial", { ok: landed, failed: tally.failed, error: tally.firstError ?? "" }));
+      setView({ selecting: true, ...(outcome.summary_posted ? { includeSummary: false } : {}) });
+    } else {
+      pushErrorToast(t("pr.publishFailed", { error: tally.firstError ?? "" }));
+    }
+    if (tally.warning) pushErrorToast(t("pr.publishWarning", { error: tally.warning }));
     // Posting gives each finding its thread, and the thread is what a later "false positive" replies on.
     await loadRunMemory();
   };
@@ -398,6 +455,14 @@ export function PrDocument({
   const prClosed = pr.status === "merged" || pr.status === "closed";
   const commentOnDecide = view.commentOnDecide ?? true;
   const willComment = commentOnDecide && Boolean(parsed) && Boolean(displayJob);
+
+  // Read when the merge step opens, never before: two host requests nobody needs until then.
+  const loadMerge = useCallback(
+    () => loadMergeOptions(target, pr.id),
+    // `target` is rebuilt by the caller; what matters is the pull request it addresses.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [prKey],
+  );
 
   const doPrAction = (action: "approve" | "request_changes" | "close") => {
     const note =
@@ -488,13 +553,18 @@ export function PrDocument({
     }
   };
 
-  // Everything this document reads from the host, re-read at once: the PR, your decision, and the
-  // open conversation — one question ("what does it look like now"), stale together.
+  // The document's own scroll box — also how the checks tell whether this document is the one on
+  // screen (the assistant keeps a few mounted but hidden).
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const checks = usePrChecks(target, pr.id, prKey, scrollRef);
+
+  // Everything this document reads from the host, re-read at once: the PR, your decision, the open
+  // conversation and the checks — one question ("what does it look like now"), stale together.
   const [refreshing, setRefreshing] = useState(false);
   const refreshAll = async () => {
     setRefreshing(true);
     try {
-      await Promise.all([refreshPr(target, pr.id), loadPrDecision(target, pr.id), loadThreads()]);
+      await Promise.all([refreshPr(target, pr.id), loadPrDecision(target, pr.id), loadThreads(), checks.reload()]);
     } finally {
       setRefreshing(false);
     }
@@ -517,7 +587,6 @@ export function PrDocument({
     : undefined;
 
   // ── Layout ────────────────────────────────────────────────────────────────────────────────
-  const scrollRef = useRef<HTMLDivElement>(null);
   const width = useElementWidth(scrollRef);
   // Restored once, saved on the way out — never per scroll event, which would re-render on every
   // frame of a scroll.
@@ -564,6 +633,10 @@ export function PrDocument({
       <span className="mt-2 shrink-0" title={t("pr.selectToPost")}>
         {isDiscarded(marks.get(finding.id)) ? (
           <span className="block h-3.5 w-3.5" />
+        ) : !publishable.includes(finding) ? (
+          <span title={t("pr.publishedThisRun")} className="block">
+            <Check size={14} className="text-[var(--cf-success)]" />
+          </span>
         ) : (
           <Checkbox
             checked={!deselected[finding.id]}
@@ -703,6 +776,12 @@ export function PrDocument({
             <span className="min-w-0 truncate font-mono text-[11px]">
               {pr.source_branch} → {pr.target_branch}
             </span>
+            <PrChecksChip
+              data={checks.data}
+              error={checks.error}
+              open={Boolean(view.checksOpen)}
+              onToggle={() => setView({ checksOpen: !view.checksOpen })}
+            />
             {session && (
               <span className={chipClass("neutral", "min-w-0")}>
                 <Link2 size={12} className="shrink-0" />
@@ -726,6 +805,16 @@ export function PrDocument({
 
         <div className="space-y-2.5 p-3">
           {linkOnly && session && <LinkReviewNotice session={session} />}
+
+          {view.checksOpen && checks.data && checks.data.checks.length > 0 && (
+            <PrChecksList
+              data={checks.data}
+              loading={checks.loading}
+              onRefresh={() => void checks.reload()}
+              projectId={projectId}
+              provider={pr.provider}
+            />
+          )}
 
           {pinned && (
             <div className="flex items-center gap-2 rounded-lg bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] py-1.5 pl-3 pr-1.5 text-[12px] text-[var(--cf-text)]">
@@ -881,7 +970,7 @@ export function PrDocument({
         ) : selecting ? (
           <div className="flex items-center gap-2">
             <span className="shrink-0 text-[12px] font-semibold tabular-nums">
-              {t("doc.selectedOf", { n: chosen.length, total: activeFindings.length })}
+              {t("doc.selectedOf", { n: chosen.length, total: publishable.length })}
             </span>
             <label className="flex min-w-0 items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]" title={t("pr.postSummaryHint")}>
               <Checkbox checked={includeSummary} onChange={(value) => setView({ includeSummary: value })} />
@@ -940,18 +1029,24 @@ export function PrDocument({
                 </span>
               </button>
             </span>
-            {decision === "approved" ? (
-              <PrDecisionState status={pr.status} decision={decision} />
-            ) : (
-              <DecideMenu
-                decision={decision}
-                busy={prActionBusy}
-                willComment={commentOnDecide}
-                canComment={Boolean(parsed)}
-                onToggleComment={() => setView({ commentOnDecide: !commentOnDecide })}
-                onAct={doPrAction}
-              />
-            )}
+            {/* Offered after approving too: merging is the step that follows an approval, and the
+                approval itself shows in the header's chip and at the top of the menu. */}
+            <DecideMenu
+              decision={decision}
+              busy={prActionBusy ?? (merging ? "merge" : null)}
+              willComment={commentOnDecide}
+              canComment={Boolean(parsed)}
+              onToggleComment={() => setView({ commentOnDecide: !commentOnDecide })}
+              onAct={doPrAction}
+              merge={{
+                provider: pr.provider,
+                prId: pr.id,
+                sourceBranch: pr.source_branch,
+                targetBranch: pr.target_branch,
+                load: loadMerge,
+                onMerge: (choice) => void mergePr(target, pr.id, choice),
+              }}
+            />
           </div>
         )}
       </ActionBar>
@@ -1031,10 +1126,24 @@ const ACTION_TONES = {
   success: "text-[var(--cf-success)]",
   warning: "text-[var(--cf-warning)]",
   danger: "text-[var(--cf-danger)]",
+  accent: "text-[var(--cf-accent)]",
 } as const;
 
+type DecideAction = "approve" | "request_changes" | "close" | "merge";
+
+/** What the menu needs to offer merging: which host (its words differ — Azure "completes"), the
+ * branches the confirmation draws, how to read the options, and what to do with the choice. */
+interface MergeProps {
+  provider: VcsProvider;
+  prId: number;
+  sourceBranch: string;
+  targetBranch: string;
+  load: () => Promise<MergeOptions>;
+  onMerge: (choice: MergeChoice) => void;
+}
+
 /**
- * Approve · request changes · close, as one menu — confirmed inside it.
+ * Approve · request changes · merge · close, as one menu — confirmed inside it.
  *
  * Three buttons sat in the footer at all times, each behind a modal confirm. The decision is the
  * last step, not a permanent strip of chrome, and a second step inside the menu is confirmation
@@ -1045,6 +1154,9 @@ const ACTION_TONES = {
  * happen — what the host will record, and whether the summary goes with it — with its own Confirm.
  * It used to arm by rewording the item in place and wait for a second click on the same spot, which
  * looked like nothing had happened until the words were read.
+ *
+ * Merging is the one step that also goes through the app's danger confirmation: it cannot be taken
+ * back from here, and the confirmation draws which branch goes into which.
  */
 function DecideMenu({
   decision,
@@ -1053,6 +1165,7 @@ function DecideMenu({
   canComment,
   onToggleComment,
   onAct,
+  merge,
 }: {
   decision: string;
   busy: string | null;
@@ -1060,22 +1173,37 @@ function DecideMenu({
   canComment: boolean;
   onToggleComment: () => void;
   onAct: (action: "approve" | "request_changes" | "close") => void;
+  merge: MergeProps | null;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const [confirming, setConfirming] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<DecideAction | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const close = useCallback(() => {
     setOpen(false);
     setConfirming(null);
   }, []);
   useDismiss(ref, open, close);
+  const mergeVerb = merge?.provider === "azure" ? t("pr.complete") : t("pr.merge");
 
-  const items: { action: "approve" | "request_changes" | "close"; icon: LucideIcon; tone: keyof typeof ACTION_TONES; label: string; hint: string }[] = [
-    { action: "approve", icon: ThumbsUp, tone: "success", label: t("pr.approve"), hint: t("doc.approveHint") },
+  const items: { action: DecideAction; icon: LucideIcon; tone: keyof typeof ACTION_TONES; label: string; hint: string }[] = [
+    ...(decision === "approved"
+      ? []
+      : [{ action: "approve" as const, icon: ThumbsUp, tone: "success" as const, label: t("pr.approve"), hint: t("doc.approveHint") }]),
     ...(decision === "changes_requested"
       ? []
       : [{ action: "request_changes" as const, icon: ThumbsDown, tone: "warning" as const, label: t("pr.requestChanges"), hint: t("doc.requestChangesHint") }]),
+    ...(merge
+      ? [
+          {
+            action: "merge" as const,
+            icon: GitMerge,
+            tone: "accent" as const,
+            label: mergeVerb,
+            hint: t("doc.mergeHint", { target: merge.targetBranch }),
+          },
+        ]
+      : []),
     { action: "close", icon: Ban, tone: "danger", label: t("pr.close"), hint: t("doc.closeHint") },
   ];
 
@@ -1094,16 +1222,34 @@ function DecideMenu({
         <ChevronUp size={13} />
       </button>
       {open && (
-        <div role="menu" className={`absolute bottom-full right-0 z-30 mb-1.5 w-[280px] ${popoverClass}`}>
+        <div role="menu" className={`absolute bottom-full right-0 z-30 mb-1.5 w-[296px] ${popoverClass}`}>
           {decision === "changes_requested" && (
             <p className="flex items-center gap-1.5 px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-[var(--cf-warning)]">
               <ThumbsDown size={12} className="shrink-0" />
               {t("pr.stateChangesRequested")}
             </p>
           )}
+          {decision === "approved" && (
+            <p className="flex items-center gap-1.5 px-2.5 pb-1 pt-1.5 text-[11px] font-medium text-[var(--cf-success)]">
+              <ThumbsUp size={12} className="shrink-0" />
+              {t("pr.stateApproved")}
+            </p>
+          )}
           {items.map((item) => {
             const Icon = item.icon;
-            if (confirming === item.action) {
+            if (confirming === item.action && item.action === "merge" && merge) {
+              return (
+                <MergePanel
+                  key="merge"
+                  merge={merge}
+                  verb={mergeVerb}
+                  onCancel={() => setConfirming(null)}
+                  onClose={close}
+                />
+              );
+            }
+            if (confirming === item.action && item.action !== "merge") {
+              const action = item.action;
               return (
                 <div
                   key={item.action}
@@ -1126,7 +1272,7 @@ function DecideMenu({
                       autoFocus
                       onClick={() => {
                         close();
-                        onAct(item.action);
+                        onAct(action);
                       }}
                       aria-label={t("doc.confirmAction", { action: item.label.toLowerCase() })}
                       className={buttonClass({ variant: "primary", size: "sm" })}
@@ -1164,6 +1310,185 @@ function DecideMenu({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** How ready the host says the pull request is, as a tone for the line that says it. */
+const READINESS_TONE: Record<MergeOptions["readiness"], string> = {
+  clean: "text-[var(--cf-success)]",
+  conflicts: "text-[var(--cf-danger)]",
+  behind: "text-[var(--cf-warning)]",
+  blocked: "text-[var(--cf-danger)]",
+  approvals: "text-[var(--cf-warning)]",
+  checks_pending: "text-[var(--cf-warning)]",
+  checks_failing: "text-[var(--cf-danger)]",
+  draft: "text-[var(--cf-warning)]",
+  closed: "text-[var(--cf-text-muted)]",
+  unknown: "text-[var(--cf-text-muted)]",
+};
+
+/**
+ * The merge step, armed inside the decision menu: what the host says about merging now, the methods
+ * it allows (only those — a GitLab project's method is fixed, and says so), the switches that ride
+ * along, and the button that hands over to the danger confirmation.
+ *
+ * Nothing is blocked on readiness: the host decides, and a stale "has conflicts" must not stop a
+ * merge that would now go through. The line is there so a refusal is never a surprise.
+ */
+function MergePanel({
+  merge,
+  verb,
+  onCancel,
+  onClose,
+}: {
+  merge: MergeProps;
+  verb: string;
+  onCancel: () => void;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const [options, setOptions] = useState<MergeOptions | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [method, setMethod] = useState<MergeMethod | null>(null);
+  const [squash, setSquash] = useState(false);
+  const [deleteBranch, setDeleteBranch] = useState(false);
+  const [transition, setTransition] = useState(true);
+  const { load } = merge;
+
+  useEffect(() => {
+    let alive = true;
+    load()
+      .then((next) => {
+        if (!alive) return;
+        setOptions(next);
+        setMethod(next.default_method ?? next.methods[0] ?? null);
+        setSquash(next.squash === "always" || next.squash === "default_on");
+        setDeleteBranch(next.can_delete_source_branch && next.delete_source_branch_default);
+        setTransition(next.transition_work_items ?? true);
+      })
+      .catch((e: unknown) => {
+        if (alive) setError(String(e));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [load]);
+
+  const confirm = async () => {
+    if (!options || !method) return;
+    const choice: MergeChoice = {
+      method,
+      deleteSourceBranch: options.can_delete_source_branch && deleteBranch,
+      squash: options.squash ? squash : null,
+      transitionWorkItems: options.transition_work_items === null ? null : transition,
+    };
+    const note = [
+      t(`pr.mergeMethod.${method}` as never),
+      choice.squash ? t("pr.mergeSquash") : null,
+      choice.deleteSourceBranch ? t("pr.mergeDeleteBranch", { branch: merge.sourceBranch }) : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    // The menu goes first: the confirmation is its own modal, and a click in it is a click outside.
+    onClose();
+    const ok = await confirmFlow({
+      flow: { kind: "merge", source: merge.sourceBranch, target: merge.targetBranch, note },
+      message: t(merge.provider === "azure" ? "pr.confirmComplete" : "pr.confirmMerge", {
+        id: merge.prId,
+        target: merge.targetBranch,
+      }),
+      danger: true,
+      confirmLabel: verb,
+    });
+    if (ok) merge.onMerge(choice);
+  };
+
+  return (
+    <div role="group" aria-label={verb} className="my-0.5 space-y-2 rounded-md bg-[var(--cf-accent-soft)] px-2.5 py-2">
+      <p className="flex items-center gap-2.5 text-[13px] font-semibold text-[var(--cf-text)]">
+        <GitMerge size={15} className="shrink-0 text-[var(--cf-accent)]" />
+        {verb}
+      </p>
+      {error ? (
+        <p className="ml-[25px] break-words text-[12px] text-[var(--cf-danger)]">{t("pr.mergeOptionsFailed", { error })}</p>
+      ) : !options ? (
+        <p className="ml-[25px] flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
+          <Loader2 size={12} className="animate-spin" />
+          {t("pr.mergeLoading")}
+        </p>
+      ) : (
+        <div className="ml-[25px] space-y-2">
+          <p
+            className={`flex items-center gap-1.5 text-[12px] ${READINESS_TONE[options.readiness] ?? READINESS_TONE.unknown}`}
+            title={options.readiness_detail ?? undefined}
+          >
+            {options.readiness === "clean" ? <Check size={12} className="shrink-0" /> : <AlertTriangle size={12} className="shrink-0" />}
+            {t(`pr.mergeReady.${options.readiness}` as never, { target: merge.targetBranch })}
+          </p>
+          {options.methods.length > 1 ? (
+            <div
+              role="radiogroup"
+              aria-label={t("pr.mergeMethodLabel")}
+              title={options.methods_known ? undefined : t("pr.mergeMethodsUnknown")}
+              className="flex flex-wrap gap-1"
+            >
+              {options.methods.map((choice) => (
+                <button
+                  key={choice}
+                  role="radio"
+                  aria-checked={method === choice}
+                  onClick={() => setMethod(choice)}
+                  className={`h-6 rounded-md px-2 text-[12px] font-medium transition-colors duration-100 ${
+                    method === choice
+                      ? "bg-[var(--cf-surface)] text-[var(--cf-text)] shadow-[inset_0_0_0_1px_var(--cf-accent)]"
+                      : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+                  }`}
+                >
+                  {t(`pr.mergeMethod.${choice}` as never)}
+                </button>
+              ))}
+            </div>
+          ) : (
+            method && (
+              <p className="text-[12px] text-[var(--cf-text-muted)]" title={t("pr.mergeFixedByProject")}>
+                {t(`pr.mergeMethod.${method}` as never)}
+              </p>
+            )
+          )}
+          {options.squash && options.squash !== "never" && (
+            <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+              <Checkbox checked={squash} onChange={setSquash} disabled={options.squash === "always"} />
+              {t("pr.mergeSquash")}
+            </label>
+          )}
+          {options.can_delete_source_branch && (
+            <label className="flex min-w-0 cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+              <Checkbox checked={deleteBranch} onChange={setDeleteBranch} />
+              <span className="truncate">{t("pr.mergeDeleteBranch", { branch: merge.sourceBranch })}</span>
+            </label>
+          )}
+          {options.transition_work_items !== null && (
+            <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+              <Checkbox checked={transition} onChange={setTransition} />
+              {t("pr.mergeTransitionWorkItems")}
+            </label>
+          )}
+        </div>
+      )}
+      <div className="ml-[25px] flex items-center gap-1.5">
+        <button
+          autoFocus
+          onClick={() => void confirm()}
+          disabled={!options || !method}
+          className={buttonClass({ variant: "danger", size: "sm" })}
+        >
+          {verb}
+        </button>
+        <button onClick={onCancel} className={buttonClass({ variant: "ghost", size: "sm" })}>
+          {t("common.cancel")}
+        </button>
+      </div>
     </div>
   );
 }

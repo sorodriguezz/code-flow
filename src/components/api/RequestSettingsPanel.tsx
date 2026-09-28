@@ -83,11 +83,12 @@ export function RequestSettingsPanel({ tabId }: { tabId: string }) {
   if (!tab) return <div className="h-full" />;
 
   const boolRow = (
-    key: "followRedirects" | "verifySsl" | "sendCookies" | "encodeUrl",
+    key: "followRedirects" | "verifySsl" | "sendCookies" | "encodeUrl" | "streamResponse",
     label: string,
     globalValue: boolean,
   ) => {
-    const override = settings[key];
+    // `?? null`: a request saved before a setting existed has no key for it, which means inherit.
+    const override = settings[key] ?? null;
     const effective = override ?? globalValue;
     return (
       <SettingRow
@@ -148,6 +149,9 @@ export function RequestSettingsPanel({ tabId }: { tabId: string }) {
         {numberRow("timeoutMs", t("api.settings.timeout"), globals.timeoutMs)}
         {boolRow("sendCookies", t("api.settings.sendCookies"), globals.sendCookies)}
         {boolRow("encodeUrl", t("api.settings.encodeUrl"), DEFAULT_ENCODE_URL)}
+        {/* Off unless asked for — there is no app-wide default to inherit — and an event stream
+            streams regardless of it. */}
+        {boolRow("streamResponse", t("api.settings.streamResponse"), false)}
 
         {/* Not a toggle, because the backend cannot honour one: reqwest strips `Authorization`
             on every cross-host hop and exposes no opt-out. A switch that silently did nothing

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
@@ -135,8 +136,10 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   },
 
   install: async () => {
-    const { update } = get();
-    if (!update) return;
+    const { update, status } = get();
+    // A download already under way — this window's, or one the tray started (`applyNativeInstall`) —
+    // is not a reason for a second copy of the same release.
+    if (!update || status === "downloading") return;
     set({ status: "downloading", progress: 0, error: "", installError: "" });
     try {
       let total = 0;
@@ -170,3 +173,50 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     if (update) set({ dismissedVersion: update.version });
   },
 }));
+
+/**
+ * What the backend reports while it installs an update it found on its own — the tray's "Check for
+ * updates…" and the boot watchdog, both answered with native dialogs (`updates.rs`). Mirrors
+ * `updates::InstallEvent`.
+ */
+export type NativeInstallEvent =
+  | { phase: "downloading"; done: number; total: number | null }
+  | { phase: "failed"; error: string }
+  | { phase: "installed" };
+
+/** The event those arrive on — `updates::INSTALL_EVENT`. */
+export const NATIVE_INSTALL_EVENT = "update:native-install";
+
+/**
+ * Folds one of those into the store, so the corner notice and Settings follow a download they did not
+ * start — and, above all, stop offering to start a second one of the same release: `install` and
+ * `checkNow` both stand down while the status says `downloading`.
+ */
+export function applyNativeInstall(event: NativeInstallEvent) {
+  const { getState, setState } = useUpdateStore;
+  switch (event.phase) {
+    case "downloading": {
+      const { done, total } = event;
+      setState({
+        status: "downloading",
+        progress: total ? Math.min(100, Math.round((done / total) * 100)) : getState().progress,
+        error: "",
+        installError: "",
+      });
+      break;
+    }
+    case "failed":
+      // The native dialog has already said so, error and all. Back to a state this window can act
+      // on: an update it found itself stays installable from here, and one it never saw leaves
+      // nothing behind — not a retry button with no release to retry.
+      setState({ status: getState().update ? "available" : "idle", progress: 0 });
+      break;
+    case "installed":
+      setState({ status: "ready", progress: 100 });
+      break;
+  }
+}
+
+// Once per window, at module scope, like the store's other subscriptions: whichever window has the
+// store loaded hears it. Outside Tauri (tests, the mobile bundle) there is nothing to listen to.
+void listen<NativeInstallEvent>(NATIVE_INSTALL_EVENT, (e) => applyNativeInstall(e.payload)).catch(() => {});

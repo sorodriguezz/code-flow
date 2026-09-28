@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, GitBranch, LoaderCircle, RefreshCw } from "lucide-react";
+import { ExternalLink, GitBranch, Hand, LoaderCircle, Play, RefreshCw } from "lucide-react";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { riseDelay } from "../../lib/rise";
 import { useCiStore } from "../../state/ciStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { chipClass } from "../common/recipes";
 import { Select, type SelectOption } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
+import { RunPipelineModal } from "./RunPipelineModal";
 import {
   PIPELINE_STATUS,
   STATUS_ORDER,
@@ -157,6 +159,19 @@ function RunRow({
               #{run.number}
             </span>
           )}
+          {/* In amber, on the row itself: a run held at a gate waits for as long as nobody opens
+              it, and the list is where people look. The run's own flag, not "has gates": an
+              optional GitLab deploy button on a green pipeline is a gate the run view offers, not
+              a run waiting on anyone. An Azure row gets the flag once opened — `load` keeps the
+              detail's copy of the run in place of the list's. */}
+          {run.gated && (
+            <Tooltip label={t("pipelines.gatedChip")} description={t("pipelines.gatedHint")}>
+              <span className={chipClass("warn", "h-[17px] shrink-0 self-center px-1.5 text-[10.5px]")}>
+                <Hand size={10} />
+                {t("pipelines.gatedChip")}
+              </span>
+            </Tooltip>
+          )}
           <span className="ml-auto shrink-0 pl-1.5 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
             {formatDuration(took)}
           </span>
@@ -216,7 +231,17 @@ function RunRow({
  * provider offers "only the failures" as a query and asking for five pages to find three red runs
  * would spend a rate limit to do badly what a client-side filter does instantly.
  */
-export function RunList({ projectId, currentBranch }: { projectId: string; currentBranch: string | null }) {
+export function RunList({
+  projectId,
+  localPath,
+  currentBranch,
+}: {
+  projectId: string;
+  /** The working copy, where the "Run pipeline" dialog reads the pipeline files first. */
+  localPath: string;
+  currentBranch: string | null;
+}) {
+  const [runOpen, setRunOpen] = useState(false);
   const runs = useCiStore((s) => s.runsByProject[projectId]);
   const loading = useCiStore((s) => s.loadingProjectId === projectId);
   const selection = useCiStore((s) => s.selection);
@@ -280,6 +305,18 @@ export function RunList({ projectId, currentBranch }: { projectId: string; curre
         <span className="mr-auto truncate text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("pipelines.runs")}
         </span>
+        <Tooltip label={t("pipelines.runPipeline")}>
+          <button
+            type="button"
+            data-tour="pipelines-run"
+            aria-label={t("pipelines.runPipeline")}
+            onClick={() => setRunOpen(true)}
+            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+          >
+            <Play size={13} />
+          </button>
+        </Tooltip>
+        {runOpen && <RunPipelineModal projectId={projectId} localPath={localPath} onClose={() => setRunOpen(false)} />}
         <Tooltip label={t("pipelines.refresh")}>
           <button
             type="button"

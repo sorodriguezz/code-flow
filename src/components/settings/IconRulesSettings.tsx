@@ -103,6 +103,7 @@ function IconPicker({
         <button
           onClick={onClose}
           title={t("common.close")}
+          aria-label={t("common.close")}
           className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
         >
           <X size={11} />
@@ -735,6 +736,7 @@ export function IconRulesSettings() {
             <button
               onClick={() => setQuery("")}
               title={t("icons.clearFilter")}
+              aria-label={t("icons.clearFilter")}
               className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
             >
               <X size={11} />

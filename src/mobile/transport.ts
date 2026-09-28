@@ -11,6 +11,10 @@
  * (`state:resync`) rather than left quietly wrong.
  */
 
+import { newId } from "./ids";
+
+/** The three keys below are also read, by name, by the page that carries a pairing across from the
+ *  old `http://` address (`HANDOFF_PAGE` in `src-tauri/src/remotectl/tls.rs`). Rename them there too. */
 const TOKEN_KEY = "codeflow.remote.token";
 const NAME_KEY = "codeflow.remote.name";
 /**
@@ -47,6 +51,19 @@ export class Unpaired extends Error {
 export class NotAllowed extends Error {
   constructor() {
     super("not_allowed");
+  }
+}
+
+/**
+ * Raised when the desktop did not answer within `timeoutFor(cmd)`.
+ *
+ * The outcome is *unknown*, not failed: the desktop may well have done it and lost the answer on the
+ * way back. Which is why a mutating call that ends this way keeps its idempotency key for the retry
+ * — see `unsettled`.
+ */
+export class TimedOut extends Error {
+  constructor() {
+    super("timed_out");
   }
 }
 
@@ -132,6 +149,45 @@ export interface Hello {
   pairing: boolean;
   /** A digest of the mobile bundle this server is serving. See `bundle_id` in `server.rs`. */
   bundle: string | null;
+  /** Whether this answer came over HTTPS. Absent from a desktop older than its TLS switch. */
+  tls?: boolean;
+  /**
+   * The SHA-256 of the certificate the desktop says it presents, for the pairing screen to show.
+   * What the *browser* shows in its certificate warning is the value that proves anything — see
+   * `tls.rs` — and this is the one the user compares it with at the desk.
+   */
+  fingerprint?: string | null;
+}
+
+/**
+ * Adopts the pairing a phone brought over from the old `http://` address.
+ *
+ * When the desktop switched to HTTPS, a phone that opens the old address is sent a small page
+ * (`HANDOFF_PAGE` in `src-tauri/src/remotectl/tls.rs`) that reads this client's keys out of the plain
+ * origin's storage — which this origin cannot see — and comes here with them in the URL *fragment*,
+ * which the browser never sends to any server. Adopted only when this origin holds no pairing of its
+ * own, and either way the fragment is wiped from the history entry first, so the token sits neither
+ * in the address bar nor behind the back button.
+ *
+ * Runs before anything reads the token or writes the history — see `main.tsx`.
+ */
+export function adoptHandoff(): void {
+  const marker = "#cf-handoff=";
+  if (!location.hash.startsWith(marker)) return;
+  const carried = location.hash.slice(marker.length);
+  history.replaceState(history.state, "", location.pathname + location.search);
+  if (storedToken()) return;
+  try {
+    const pairing = JSON.parse(decodeURIComponent(carried)) as { t?: unknown; n?: unknown; d?: unknown };
+    if (typeof pairing.t !== "string" || pairing.t.length === 0) return;
+    remember(
+      pairing.t,
+      typeof pairing.n === "string" ? pairing.n : "",
+      typeof pairing.d === "string" && pairing.d.length > 0 ? pairing.d : undefined,
+    );
+  } catch {
+    // A fragment this client did not write. Nothing to adopt; the pairing screen will say the rest.
+  }
 }
 
 /** Whether the desktop is reachable at all, and whether it is currently offering a pairing code. */
@@ -201,24 +257,146 @@ export async function pair(code: string, name: string): Promise<void> {
 }
 
 /**
+ * The commands that change something, and so carry an idempotency key.
+ *
+ * Kept in step with the mutating arms of `remotectl/dispatch.rs`. A command missing from here is not
+ * a hole — the desktop runs an unkeyed call once, exactly as before keys existed — it is a retry that
+ * can run twice. The shell's per-keystroke `write_terminal` and `resize_terminal` are left out on
+ * purpose: a key per keystroke would fill the desktop's replay cache with nothing worth replaying.
+ */
+export const MUTATING = new Set([
+  "stage_file",
+  "stage_all",
+  "unstage_file",
+  "unstage_all",
+  "commit",
+  "checkout_local_branch",
+  "checkout_remote_tracking",
+  "create_branch",
+  "git_fetch",
+  "git_pull",
+  "git_push",
+  "stash_apply",
+  "stash_pop",
+  "approve_chain_gate",
+  "skip_chain_step",
+  "retry_chain_step",
+  "resume_chain",
+  "abort_chain",
+  "set_agent_task_pinned",
+  "cancel_ai_run",
+  "analyze_working_changes",
+  "review_pull_request",
+  "act_on_pull_request",
+  "post_pr_review_comment",
+  "discard_pr_finding",
+  "resolve_pr_comment_thread",
+  "rerun_pipeline",
+  "cancel_pipeline",
+  "services_start",
+  "services_stop",
+  "services_restart",
+  "send_chat_message",
+  "open_terminal",
+  "close_terminal",
+]);
+
+/** The three calls that run an engine, awaited inline for as long as a model takes. */
+const ENGINE = new Set(["analyze_working_changes", "review_pull_request", "send_chat_message"]);
+/** The three that wait on a git host at the other end of somebody's uplink. */
+const GIT_NETWORK = new Set(["git_fetch", "git_pull", "git_push"]);
+
+/**
+ * How long a call may go unanswered before this client stops waiting.
+ *
+ * Giving up is not cancelling: the desktop goes on with the call — a keyed one to the end, on a task
+ * of its own — so these only decide how long a phone shows a spinner. An engine gets minutes because
+ * it takes minutes; a push waits on a host; everything else crosses one LAN, where a minute of silence
+ * means the network is gone rather than the desktop thinking.
+ */
+export function timeoutFor(cmd: string): number {
+  if (ENGINE.has(cmd)) return 15 * 60_000;
+  if (GIT_NETWORK.has(cmd)) return 5 * 60_000;
+  return 60_000;
+}
+
+/**
+ * The keys of mutating calls whose outcome this client never heard — timed out, or cut off — by the
+ * exact request they were for.
+ *
+ * The retry that follows such a failure is the user pressing the same button again, and to the
+ * desktop it has to be the *same* request: reusing the key is what makes it answer with the first
+ * attempt's result instead of committing, pushing or commenting a second time. A definitive answer —
+ * success or refusal — retires the key, so pressing the button *after* one is a new intent with a new
+ * key. Entries older than the desktop's window (`REPLAY_WINDOW` in `dispatch.rs`, ten minutes) are
+ * useless — it has forgotten them — and are dropped.
+ */
+const unsettled = new Map<string, { key: string; since: number }>();
+const REPLAY_WINDOW_MS = 9 * 60_000;
+
+function keyFor(request: string): { key: string; since: number } {
+  const now = Date.now();
+  for (const [body, entry] of unsettled) {
+    if (now - entry.since > REPLAY_WINDOW_MS) unsettled.delete(body);
+  }
+  return unsettled.get(request) ?? { key: newId(), since: now };
+}
+
+/**
+ * One POST, bounded by `timeout` — and, for a keyed call, sent once more if the connection failed
+ * before any answer came back.
+ *
+ * Only a keyed call is retried here, and that is the whole reason keys exist: the desktop answers a
+ * key it has already seen with the first attempt's result, so a retry of a commit whose response was
+ * lost in a wifi handover lands as the same commit.
+ */
+async function post(body: string, headers: Record<string, string>, timeout: number, retry: boolean): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      return await fetch("/api/rpc", { method: "POST", headers, body, signal: controller.signal });
+    } catch (e) {
+      if (controller.signal.aborted) throw new TimedOut();
+      if (!retry || attempt > 0) throw e;
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
  * One command, by the same name the desktop calls it.
  *
  * The reachable set is fixed on the server (`remotectl/dispatch.rs`) — asking for anything outside
  * it comes back as an ordinary rejection, indistinguishable from a bad token, which is why a 401
  * here is treated as "unpaired" rather than retried.
+ *
+ * Every call has a deadline (`timeoutFor`), and every mutating one an idempotency key (`MUTATING`,
+ * `unsettled`).
  */
 export async function rpc<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
   const token = storedToken();
   if (!token) throw new Unpaired();
 
-  const res = await fetch("/api/rpc", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({ cmd, args }),
-  });
+  const body = JSON.stringify({ cmd, args });
+  const keyed = MUTATING.has(cmd) ? keyFor(body) : null;
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${token}`,
+  };
+  if (keyed) headers["idempotency-key"] = keyed.key;
+
+  let res: Response;
+  try {
+    res = await post(body, headers, timeoutFor(cmd), keyed !== null);
+  } catch (e) {
+    // No answer at all: the desktop may have done it. The key waits for the retry.
+    if (keyed) unsettled.set(body, keyed);
+    throw e;
+  }
+  if (keyed) unsettled.delete(body);
 
   // 401 is the *only* status that means "this token is no good", and dropping the token is a
   // destructive act that must never be reached by any other route. See `NotAllowed`.
@@ -232,9 +410,9 @@ export async function rpc<T>(cmd: string, args: Record<string, unknown> = {}): P
     throw new NotAllowed();
   }
 
-  const body = (await res.json()) as { ok: boolean; value?: T; error?: string };
-  if (!body.ok) throw new Error(body.error ?? "command failed");
-  return body.value as T;
+  const reply = (await res.json()) as { ok: boolean; value?: T; error?: string };
+  if (!reply.ok) throw new Error(reply.error ?? "command failed");
+  return reply.value as T;
 }
 
 export interface Frame {

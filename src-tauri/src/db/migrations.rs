@@ -1259,10 +1259,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             --
             -- The column stays nullable and the action stays SET NULL, because neither is what
             -- enforces the rule and changing them would mean rebuilding the table on every
-            -- existing database. `note_queries::delete_book` deletes the subtree's notes itself,
-            -- in the same transaction and *before* the books, so this clause never fires — it is
-            -- the backstop that would leave a visible orphan rather than a dangling reference if
-            -- some future path forgets.
+            -- existing database. `note_queries::delete_book` moves the subtree's notes to the trash
+            -- in the same transaction and *before* the books, so this clause only ever fires on a
+            -- trashed note — which `restore_note` files into a book again — and is otherwise the
+            -- backstop that would leave a visible orphan rather than a dangling reference.
             book_id    TEXT REFERENCES note_books(id) ON DELETE SET NULL,
             title        TEXT NOT NULL DEFAULT '',
             content      TEXT NOT NULL DEFAULT '',
@@ -1279,7 +1279,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             word_count   INTEGER NOT NULL DEFAULT 0,
             sort_order   INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL,
-            updated_at   TEXT NOT NULL
+            updated_at   TEXT NOT NULL,
+            -- '' on a live note, the moment it was trashed on one in the trash — see
+            -- `note_queries::trash_note`. Also added by `add_trash_to_notes` for older databases.
+            deleted_at   TEXT NOT NULL DEFAULT ''
         );
         -- The gallery's default order, and the sidebar's: most recently touched first.
         CREATE INDEX IF NOT EXISTS idx_notes_recent ON notes (workspace_id, updated_at DESC);
@@ -1909,6 +1912,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_github_columns_to_projects(conn)?;
     add_github_host_to_projects(conn)?;
     add_gitlab_columns_to_projects(conn)?;
+    add_bitbucket_columns_to_projects(conn)?;
     add_enabled_to_workspace_skills(conn)?;
     add_provider_to_workspace_agents(conn)?;
     add_pinned_to_api_collections(conn)?;
@@ -1925,6 +1929,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_grouping_to_agent_tasks(conn)?;
     add_grouping_to_agent_chains(conn)?;
     add_repos_to_agent_chains(conn)?;
+    add_resume_at_to_agent_chains(conn)?;
+    add_wiki_etag_to_doc_pages(conn)?;
     add_ai_usage(conn)?;
     add_group_name_to_db_connections(conn)?;
     add_scope_to_scoped_tables(conn)?;
@@ -1938,11 +1944,21 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_unread_to_chat_conversations(conn)?;
     add_compaction_to_chat_conversations(conn)?;
     add_detected_ports_to_services(conn)?;
+    add_env_files_to_services(conn)?;
     align_project_ado_org_with_connections(conn)?;
+    // Before `file_loose_notes_into_a_book`, which reads the column: a trashed note whose book was
+    // deleted has no book, and filing it would conjure a book into a workspace to hold the trash.
+    add_trash_to_notes(conn)?;
     file_loose_notes_into_a_book(conn)?;
     move_ollama_settings_to_cline(conn)?;
     move_openai_settings_to_cline(conn)?;
     add_ai_accounts(conn)?;
+    // After the API tables and `api_shared_collections` exist: the first run seeds trust from the
+    // scripts already in them — see `api_trust::migrate`.
+    super::api_trust::migrate(conn)?;
+    // Only initial values are shared now; a current value that merely repeats its initial would
+    // shadow a teammate's change to it — see `api_sync::split_current_values`.
+    super::api_sync::migrate_variable_split(conn)?;
     Ok(())
 }
 
@@ -2150,6 +2166,17 @@ fn move_ollama_settings_to_cline(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// The Notes trash: `notes.deleted_at`, empty on a live note. See `note_queries::trash_note`.
+///
+/// In the `CREATE TABLE` too, like the other late columns, so the two cannot disagree about the
+/// default. Nothing to backfill: every note that exists today is live.
+fn add_trash_to_notes(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "notes")? && !has_column(conn, "notes", "deleted_at")? {
+        conn.execute_batch("ALTER TABLE notes ADD COLUMN deleted_at TEXT NOT NULL DEFAULT '';")?;
+    }
+    Ok(())
+}
+
 /// Gives every note a book, which is now an invariant rather than a preference.
 ///
 /// The Notes workspace used to treat "no book" as an ordinary place — the root of the tree, where a
@@ -2169,7 +2196,7 @@ fn file_loose_notes_into_a_book(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     let workspaces: Vec<String> = conn
-        .prepare("SELECT DISTINCT workspace_id FROM notes WHERE book_id IS NULL")?
+        .prepare("SELECT DISTINCT workspace_id FROM notes WHERE book_id IS NULL AND deleted_at = ''")?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
@@ -2206,7 +2233,7 @@ fn file_loose_notes_into_a_book(conn: &Connection) -> rusqlite::Result<()> {
         )?;
         let loose: Vec<String> = conn
             .prepare(
-                "SELECT id FROM notes WHERE workspace_id = ?1 AND book_id IS NULL \
+                "SELECT id FROM notes WHERE workspace_id = ?1 AND book_id IS NULL AND deleted_at = '' \
                  ORDER BY sort_order, created_at",
             )?
             .query_map(params![&workspace_id], |row| row.get(0))?
@@ -2370,6 +2397,16 @@ fn add_detected_ports_to_services(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE services ADD COLUMN detected_ports TEXT NOT NULL DEFAULT '[]';
              UPDATE services SET ready_kind = 'auto' WHERE ready_kind = 'none';",
         )?;
+    }
+    Ok(())
+}
+
+/// Services learned to load `.env` files: a JSON array of paths relative to the working folder,
+/// read at every start — see `services::envfile`. Empty for every existing row, which is exactly
+/// how they ran before.
+fn add_env_files_to_services(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "services")? && !has_column(conn, "services", "env_files")? {
+        conn.execute_batch("ALTER TABLE services ADD COLUMN env_files TEXT NOT NULL DEFAULT '[]';")?;
     }
     Ok(())
 }
@@ -2578,6 +2615,26 @@ fn add_grouping_to_agent_chains(conn: &Connection) -> rusqlite::Result<()> {
     // mattering the first time a step is authored with a backward `on_fail`.
     if !has_column(conn, "agent_chains", "dispatches")? {
         conn.execute_batch("ALTER TABLE agent_chains ADD COLUMN dispatches INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    Ok(())
+}
+
+/// When a chain parked on its engine (out of quota, signed out, CLI missing) should carry on by
+/// itself — seconds since the epoch, `0` for "when the user says so", which is every existing row.
+fn add_resume_at_to_agent_chains(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "agent_chains")? && !has_column(conn, "agent_chains", "resume_at")? {
+        conn.execute_batch("ALTER TABLE agent_chains ADD COLUMN resume_at INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    Ok(())
+}
+
+/// The version tag of the wiki page a document was last read from or written to — what its next
+/// publish sends as `If-Match`, so a page somebody edited in the meantime refuses the write instead
+/// of losing that edit. Empty for every existing row: never imported, or published before this, so
+/// the first publish asks rather than assumes (see `boards::azure::put_wiki_page`).
+fn add_wiki_etag_to_doc_pages(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "doc_pages")? && !has_column(conn, "doc_pages", "wiki_etag")? {
+        conn.execute_batch("ALTER TABLE doc_pages ADD COLUMN wiki_etag TEXT NOT NULL DEFAULT '';")?;
     }
     Ok(())
 }
@@ -2947,6 +3004,21 @@ fn add_gitlab_columns_to_projects(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_column(conn, "projects", "gitlab_host")? {
         conn.execute_batch("ALTER TABLE projects ADD COLUMN gitlab_host TEXT;")?;
+    }
+    Ok(())
+}
+
+/// Bitbucket Cloud's coordinates for a linked project: the workspace and the repository slug.
+///
+/// A pair like GitHub's, because a Bitbucket path is always exactly those two segments — and no host
+/// column beside them, because Bitbucket Cloud is one host. Nullable, like every other provider's
+/// columns: a project is linked to at most one of them.
+fn add_bitbucket_columns_to_projects(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "projects", "bitbucket_workspace")? {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN bitbucket_workspace TEXT;")?;
+    }
+    if !has_column(conn, "projects", "bitbucket_repo")? {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN bitbucket_repo TEXT;")?;
     }
     Ok(())
 }
@@ -3520,6 +3592,29 @@ mod tests {
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_collections"), 0);
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_requests"), 0);
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_cookies"), 0);
+    }
+
+    /// The same move through what the app actually runs it in, `db::migrate` — one transaction, in
+    /// which the step's own `foreign_keys = OFF` is a no-op, or the run without one that it falls back
+    /// to when a step opens a transaction of its own. Either way the children must still point at
+    /// `api_collections`. The transactional half is pinned on its own by
+    /// `db::tests::a_rename_inside_it_leaves_the_children_pointing_where_they_did`.
+    #[test]
+    fn the_api_move_survives_the_migration_transaction() {
+        let conn = legacy_db();
+        crate::db::migrate(&conn, Some(2_000_005)).unwrap();
+
+        for child in ["api_folders", "api_requests"] {
+            let sql: String = conn
+                .query_row("SELECT sql FROM sqlite_master WHERE name = ?1", [child], |r| r.get(0))
+                .unwrap();
+            assert!(sql.contains("REFERENCES api_collections(id)"), "{sql}");
+            assert!(!sql.contains("legacy"), "{sql}");
+        }
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_requests"), 1);
+        assert!(!table_exists(&conn, "api_collections_legacy").unwrap());
+        assert_eq!(scalar(&conn, "PRAGMA foreign_keys"), 1);
+        assert_eq!(scalar(&conn, "PRAGMA user_version"), 2_000_005);
     }
 
     fn text(conn: &Connection, sql: &str) -> Option<String> {

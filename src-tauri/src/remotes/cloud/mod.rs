@@ -228,8 +228,13 @@ pub fn object_row(at: &Location, key: &str, size: u64, modified: u64) -> super::
 /// A zero-byte `photos/2024/` object is how [`make_dir`](s3::make_dir) makes an empty folder
 /// persist. Listing `photos/2024/` returns it as a member of itself, and showing it would put an
 /// unnamed zero-byte row inside every folder that was created rather than implied.
+///
+/// Equality is the whole test. The trailing slash needs no separate check because
+/// [`Location::prefix`] carries it already, and only the marker of the folder *being listed* can
+/// reach here: a listing is delimited by `/`, so a subfolder's own marker comes back as a
+/// `CommonPrefixes`/`BlobPrefix` entry and becomes a folder row, never a key in this loop.
 pub fn is_own_marker(key: &str, prefix: &str) -> bool {
-    key == prefix || (key.ends_with('/') && key == prefix)
+    key == prefix
 }
 
 /// Parses an RFC 1123 date — `Wed, 21 Oct 2015 07:28:00 GMT` — into epoch seconds.
@@ -343,6 +348,8 @@ mod tests {
     fn the_folder_marker_is_not_listed_inside_itself() {
         assert!(is_own_marker("photos/2024/", "photos/2024/"));
         assert!(!is_own_marker("photos/2024/cat.jpg", "photos/2024/"));
+        // A container root lists under the empty prefix, and no key is empty: nothing to hide.
+        assert!(!is_own_marker("photos/", ""));
     }
 
     #[test]

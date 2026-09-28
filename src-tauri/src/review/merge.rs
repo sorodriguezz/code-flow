@@ -76,18 +76,10 @@ impl Finding {
             // its previous run's id and mints a fresh one for anything new. Rendering it now would
             // stamp the pre-reconciliation number into a comment that gets posted under another.
             comentario_md: String::new(),
-        }
-    }
-
-    /// Identity across runs — the same key reconciliation and the posting flow already agree on, so
-    /// a finding, its stored memory and its comment thread never disagree about what "the same
-    /// thing" means.
-    pub fn identity(&self) -> String {
-        let base = crate::review_memory::finding_identity(self.archivo.as_deref(), &self.categoria);
-        if base == "|" {
-            self.subtitulo.to_lowercase()
-        } else {
-            base
+            // Publishing state belongs to the memory, never to a review: reconciliation carries it
+            // over from the earlier finding this one continues.
+            publicado_en_iter: None,
+            hilo_general: false,
         }
     }
 

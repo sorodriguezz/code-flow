@@ -16,15 +16,20 @@ import { FileUp, ShieldAlert, Upload } from "lucide-react";
 
 import { ApiModal } from "../api/ApiModal";
 import { apiPickFile } from "../../lib/tauri/apiCommands";
-import { keyvaultReadImportFile } from "../../lib/tauri/keyvaultCommands";
+import { keyvaultImportExport, keyvaultReadImportFile } from "../../lib/tauri/keyvaultCommands";
+import { vaultErrorKey } from "../../lib/vault/errors";
 import { importVaultExport, type ImportFormat, type ImportResult } from "../../lib/vault/import";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useVaultStore } from "../../state/vaultStore";
-import { BUTTON, BUTTON_QUIET } from "./vaultChrome";
+import { BUTTON, BUTTON_QUIET, INPUT } from "./vaultChrome";
 
-/** The extensions the picker offers. `1pux` is a zip; the backend sniffs the magic anyway. */
-const EXTENSIONS = ["json", "csv", "1pux"];
+/** The extensions the picker offers. `1pux` is a zip; the backend sniffs the magic anyway.
+ *  `cfkeyring` is this app's own encrypted export (`VaultExportModal`), restored by the backend. */
+const EXTENSIONS = ["json", "csv", "1pux", "cfkeyring"];
+
+/** Whether a picked file is our own encrypted export — which is never read as text here. */
+const isOwnExport = (path: string) => /\.cfkeyring$/i.test(path);
 
 const FORMAT_LABELS: Record<ImportFormat, string> = {
   "bitwarden-json": "vault.import.formatBitwardenJson",
@@ -41,19 +46,31 @@ export function VaultImportModal({ onClose }: { onClose: () => void }) {
   const [fileName, setFileName] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
   const [done, setDone] = useState(false);
+  /** The picked `.cfkeyring`, which is restored rather than parsed — see `keyvault_import_export`. */
+  const [ownExport, setOwnExport] = useState<string | null>(null);
+  const [passphrase, setPassphrase] = useState("");
+  const [passphraseError, setPassphraseError] = useState("");
 
   const choose = async () => {
     setReading(true);
     try {
       const path = await apiPickFile(EXTENSIONS);
       if (!path) return;
+      const name = path.split(/[\\/]/).pop() ?? "";
+      setFileName(name);
+      setDone(false);
+      setPassphraseError("");
+      if (isOwnExport(path)) {
+        // Sealed: nothing to preview until the backend opens it with the passphrase.
+        setOwnExport(path);
+        setResult(null);
+        return;
+      }
+      setOwnExport(null);
       // The keyring's own reader, not `apiReadTextFile`: it caps the size and it unpacks a `.1pux`,
       // which is a zip and unreadable from here — there is no zip reader on this side.
       const text = await keyvaultReadImportFile(path);
-      const name = path.split(/[\\/]/).pop() ?? "";
-      setFileName(name);
       setResult(importVaultExport(text, name));
-      setDone(false);
     } catch (error) {
       pushErrorToast(String(error));
     } finally {
@@ -61,7 +78,26 @@ export function VaultImportModal({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const restore = async () => {
+    if (!ownExport) return;
+    setRunning(true);
+    setPassphraseError("");
+    try {
+      const counts = await keyvaultImportExport(ownExport, passphrase);
+      await useVaultStore.getState().refresh();
+      useToastStore.getState().pushToast(t("vault.import.done", { n: counts.items }), "success");
+      setDone(true);
+    } catch (error) {
+      const key = vaultErrorKey(error);
+      if (key) setPassphraseError(t(key));
+      else pushErrorToast(String(error));
+    } finally {
+      setRunning(false);
+    }
+  };
+
   const run = async () => {
+    if (ownExport) return restore();
     if (!result || result.items.length === 0) return;
     setRunning(true);
     try {
@@ -93,11 +129,15 @@ export function VaultImportModal({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={() => void run()}
-            disabled={running || items === 0 || done}
+            disabled={running || done || (ownExport ? passphrase.length === 0 : items === 0)}
             className={BUTTON}
           >
             <Upload size={12} className="mr-1 inline" />
-            {running ? t("vault.import.running") : t("vault.import.run", { n: items })}
+            {running
+              ? t("vault.import.running")
+              : ownExport
+                ? t("vault.import.restore")
+                : t("vault.import.run", { n: items })}
           </button>
         </div>
       }
@@ -113,6 +153,26 @@ export function VaultImportModal({ onClose }: { onClose: () => void }) {
             </span>
           )}
         </div>
+
+        {ownExport && !done && (
+          <>
+            <input
+              type="password"
+              value={passphrase}
+              onChange={(event) => {
+                setPassphrase(event.target.value);
+                setPassphraseError("");
+              }}
+              placeholder={t("vault.export.passphrase")}
+              aria-label={t("vault.export.passphrase")}
+              autoComplete="off"
+              className={INPUT}
+            />
+            {passphraseError && (
+              <p className="text-[11.5px] text-[var(--cf-danger)]">{passphraseError}</p>
+            )}
+          </>
+        )}
 
         {result && (
           <>

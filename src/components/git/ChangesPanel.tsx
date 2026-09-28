@@ -21,6 +21,9 @@ import {
   Undo2,
   Copy,
   History,
+  Check,
+  Boxes,
+  GitMerge,
 } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
 import type { LucideIcon } from "lucide-react";
@@ -37,7 +40,7 @@ import { generateCommitMessage, getFileDiff, getStagedDiff, scanStagedSecrets } 
 import { useTaskModelLabel } from "../ai/ModelTag";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { diffToText } from "../../lib/diffText";
-import { parseClaudeError, type ClaudeErrorInfo } from "../../lib/claudeError";
+import { parseClaudeError, quotaRetryText, type ClaudeErrorInfo } from "../../lib/claudeError";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
@@ -55,6 +58,11 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { riseDelay } from "../../lib/rise";
 import { useMinimumSpin } from "../../lib/useMinimumSpin";
+import { useGitToolsStore } from "../../state/gitToolsStore";
+import { useConflictEditorStore } from "../../state/conflictEditorStore";
+import { RepoFeaturesBadge } from "./RepoFeaturesBadge";
+import type { DiffStaging } from "./StagingDiff";
+import type { SubmoduleInfo } from "../../lib/tauri/gitCommands";
 import type { FileDiffInfo, FileStatusEntry, SecretHit } from "../../types/domain";
 
 const LIST_MIN = 220;
@@ -173,6 +181,23 @@ function discardIcon(entry: FileStatusEntry): LucideIcon {
   return entry.status === "untracked" ? Trash2 : Undo2;
 }
 
+/** The little box on a row that is a submodule, with what it records and what is checked out. */
+function SubmoduleMarker({ submodule }: { submodule: SubmoduleInfo }) {
+  const t = useT();
+  const short = (id: string | null) => (id ? id.slice(0, 7) : "—");
+  const lines = [
+    t("submodules.marker"),
+    t("submodules.recorded", { sha: short(submodule.recorded_oid) }),
+    t("submodules.checkedOut", { sha: short(submodule.checked_out_oid) }),
+  ];
+  if (submodule.dirty) lines.push(t("submodules.dirty"));
+  return (
+    <span title={lines.join("\n")} className="flex shrink-0 items-center text-[var(--cf-text-faint)]">
+      <Boxes size={11} />
+    </span>
+  );
+}
+
 function FileRow({
   entry,
   selected,
@@ -182,11 +207,15 @@ function FileRow({
   at = 0,
   displayName,
   onContextMenu,
+  submodule,
 }: {
   entry: FileStatusEntry;
   selected: boolean;
   onSelect: () => void;
   actions: RowAction[];
+  /** Set when the row is a submodule: the change is "checked out at another commit", not a text
+   *  diff, and the marker says so — see `SubmodulesSection`. */
+  submodule?: SubmoduleInfo;
   /** Right-click. The hover buttons are the same verbs; this is where the ones that do not fit on
    *  a 26px row live — copy the path, open the file's history, reveal it on disk. */
   onContextMenu?: (event: React.MouseEvent) => void;
@@ -256,6 +285,7 @@ function FileRow({
           beside it, the editor dock's own handle, and the window itself. */}
       <span className="flex min-w-0 flex-1 items-center gap-1.5 font-mono" title={entry.path}>
         <span className="min-w-0 truncate text-[12px]">{name}</span>
+        {submodule && <SubmoduleMarker submodule={submodule} />}
         {dir && (
           <span className="min-w-0 shrink-[9999] truncate text-[11px] text-[var(--cf-text-muted)]">
             {dir}
@@ -294,12 +324,14 @@ function FileTreeSection({
   onSelectEntry,
   buildActions,
   onContextMenu,
+  submoduleOf,
 }: {
   entries: FileStatusEntry[];
   isSelected: (entry: FileStatusEntry) => boolean;
   onSelectEntry: (entry: FileStatusEntry) => void;
   buildActions: (entry: FileStatusEntry) => RowAction[];
   onContextMenu?: (event: React.MouseEvent, entry: FileStatusEntry) => void;
+  submoduleOf: (path: string) => SubmoduleInfo | undefined;
 }) {
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
   const tree = useMemo(() => buildFileTree(entries), [entries]);
@@ -325,6 +357,7 @@ function FileTreeSection({
           depth={depth}
           at={at}
           displayName={node.name}
+          submodule={submoduleOf(node.entry.path)}
         />
       );
     }
@@ -393,8 +426,12 @@ export function ChangesPanel({
   const discardFile = useRepoStore((s) => s.discardFile);
   const discardAll = useRepoStore((s) => s.discardAll);
   const commitChanges = useRepoStore((s) => s.commitChanges);
+  const markConflictResolved = useRepoStore((s) => s.markConflictResolved);
   const busy = useRepoStore((s) => s.busy);
-  const merging = useRepoStore((s) => s.merging);
+  const operation = useRepoStore((s) => s.operation);
+  const conflicts = useRepoStore((s) => s.conflicts);
+  const submodules = useGitToolsStore((s) => s.submodules);
+  const openConflictEditor = useConflictEditorStore((s) => s.open);
   const listWidth = useLayoutStore((s) => s.sizes.changesListWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
@@ -452,8 +489,15 @@ export function ChangesPanel({
     }
   };
 
+  /**
+   * Everything the "Changes" section lists — conflicted files first, in their own colour and letter.
+   *
+   * They used to be missing from it altogether: `get_status` has always put a conflicted path in a
+   * bucket of its own, and this list only read the other two, so outside a merge (where the banner
+   * at least named them) a conflicted file was simply nowhere on screen.
+   */
   const unstagedAndUntracked = useMemo(
-    () => [...(status?.unstaged ?? []), ...(status?.untracked ?? [])],
+    () => [...(status?.conflicted ?? []), ...(status?.unstaged ?? []), ...(status?.untracked ?? [])],
     [status],
   );
 
@@ -470,6 +514,26 @@ export function ChangesPanel({
     return pool.find((f) => (f.new_path ?? f.old_path) === selected.path);
   }, [selected, stagedDiff, workingDiff]);
   const selectedSignature = useMemo(() => diffSignature(selectedNarrow), [selectedNarrow]);
+  /** The submodule a row's path is, if it is one — for the marker, and to keep line picking off it. */
+  const submoduleOf = useCallback(
+    (path: string) => (submodules.length === 0 ? undefined : submodules.find((sm) => sm.path === path)),
+    [submodules],
+  );
+  const selectedIsSubmodule = selected ? submoduleOf(selected.path) !== undefined : false;
+  /**
+   * What makes the pane's diff stageable line by line and hunk by hunk. Keyed on the signature, not on
+   * `selectedNarrow` itself: the narrow array is rebuilt on every watcher tick, and `DiffView` is
+   * memoised on its props — a fresh object per tick would redraw a whole file's diff for a change
+   * that did not happen. The hunks inside only matter when the signature moves.
+   */
+  const staging = useMemo<DiffStaging | undefined>(
+    () =>
+      selected
+        ? { staged: selected.staged, path: selected.path, narrow: selectedNarrow, pickable: !selectedIsSubmodule }
+        : undefined,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selected, selectedSignature, selectedIsSubmodule],
+  );
 
   /** The selected file at full file context, straight from git — `null` while it is on its way,
    * `[]` when that path has no diff on that side any more (staged, discarded or committed out from
@@ -510,7 +574,9 @@ export function ChangesPanel({
    */
   useEffect(() => {
     if (!selected) return;
-    const pool = selected.staged ? (status?.staged ?? []) : [...(status?.unstaged ?? []), ...(status?.untracked ?? [])];
+    const pool = selected.staged
+      ? (status?.staged ?? [])
+      : [...(status?.conflicted ?? []), ...(status?.unstaged ?? []), ...(status?.untracked ?? [])];
     if (!pool.some((entry) => entry.path === selected.path)) setSelected(null);
   }, [status, selected]);
 
@@ -586,6 +652,27 @@ export function ChangesPanel({
   const buildUnstagedActions = (entry: FileStatusEntry): RowAction[] => {
     const isPending = pending?.path === entry.path;
     const blocked = pending !== null && !isPending;
+    // A conflicted file has one verb of its own — marking it resolved, which stages what is on disk
+    // — and no discard: the backend refuses that for a conflict, and a button that can only fail is
+    // worse than no button. Keeping one side wholesale lives in the conflicts banner above.
+    if (entry.status === "conflicted") {
+      return [
+        leadAction(entry, false),
+        {
+          icon: GitMerge,
+          title: t("conflictEditor.open"),
+          onClick: () => openConflictEditor(entry.path),
+          disabled: blocked,
+        },
+        {
+          icon: Check,
+          title: t("conflicts.markResolved"),
+          onClick: () => runAction(entry.path, "stage", () => markConflictResolved(entry.path)),
+          pending: isPending && pending?.kind === "stage",
+          disabled: blocked,
+        },
+      ];
+    }
     return [
       leadAction(entry, false),
       {
@@ -652,8 +739,9 @@ export function ChangesPanel({
     ];
 
     // Only where it means something: a staged file's change is already in the index, and
-    // "discard" on it would be the wrong verb for `git restore --staged`.
-    if (!staged) {
+    // "discard" on it would be the wrong verb for `git restore --staged`. Nor on a conflict, which
+    // the backend refuses to discard — see `buildUnstagedActions`.
+    if (!staged && entry.status !== "conflicted") {
       items.push({
         label: t("changes.discardChanges"),
         icon: discardIcon(entry),
@@ -717,9 +805,12 @@ export function ChangesPanel({
       setDiffNonce((n) => n + 1);
     });
 
+  /** Clears the box only when the commit landed. It used to clear it unconditionally, so a commit
+   * that failed — a hook, a missing identity, a conflict still in the index — took the message the
+   * user had just written down with it. */
   const performCommit = async () => {
-    await commitChanges(message.trim());
-    setMessage("");
+    const committed = await commitChanges(message.trim());
+    if (committed) setMessage("");
   };
 
   // Commit entry point: run the pre-commit secret scan first (when enabled). If it finds
@@ -745,7 +836,9 @@ export function ChangesPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {merging && <ConflictsBanner />}
+      {/* Whenever git has something half done *or* the index holds conflicts — not only during a
+          merge, which left a conflicted revert, cherry-pick, rebase or stash pop invisible. */}
+      {(operation !== null || conflicts.length > 0) && <ConflictsBanner />}
       <div className="relative flex min-h-0 flex-1">
       {/* Fixed-width only while it has a neighbour. With no file selected there is no diff pane to
           share the row with, so the list takes the whole width rather than leaving a placeholder
@@ -757,8 +850,11 @@ export function ChangesPanel({
         }`}
       >
         <div className="flex items-center justify-between gap-1.5 border-b border-[var(--cf-border)] px-3 py-2">
-          <span className="min-w-0 truncate text-[12px] font-semibold text-[var(--cf-text-muted)]">
-            {t("changes.changes")}
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="min-w-0 truncate text-[12px] font-semibold text-[var(--cf-text-muted)]">
+              {t("changes.changes")}
+            </span>
+            <RepoFeaturesBadge />
           </span>
           <div className="flex shrink-0 items-center gap-1.5">
             {/* The way back when the watcher has not seen something.
@@ -837,6 +933,7 @@ export function ChangesPanel({
                 onSelectEntry={(entry) => selectRow(entry, true)}
                 buildActions={(entry) => buildStagedActions(entry)}
                 onContextMenu={(event, entry) => openFileMenu(event, entry, true)}
+                submoduleOf={submoduleOf}
               />
             ) : (
               status.staged.map((entry, at) => (
@@ -848,6 +945,7 @@ export function ChangesPanel({
                   onSelect={() => selectRow(entry, true)}
                   actions={buildStagedActions(entry)}
                   onContextMenu={(event) => openFileMenu(event, entry, true)}
+                  submodule={submoduleOf(entry.path)}
                 />
               ))
             )}
@@ -887,8 +985,11 @@ export function ChangesPanel({
                 {unstagedAndUntracked.length > 0 && (
                   <button
                     onClick={async () => {
+                      // Conflicted rows are not counted: discarding all skips them (the banner
+                      // owns them), and the number should be what actually goes.
+                      const discardable = unstagedAndUntracked.filter((e) => e.status !== "conflicted").length;
                       const ok = await confirmAction(
-                        t("changes.discardAllConfirm", { n: unstagedAndUntracked.length }),
+                        t("changes.discardAllConfirm", { n: discardable }),
                         true,
                         t("changes.discardAll"),
                       );
@@ -932,6 +1033,7 @@ export function ChangesPanel({
                 onSelectEntry={(entry) => selectRow(entry, false)}
                 buildActions={(entry) => buildUnstagedActions(entry)}
                 onContextMenu={(event, entry) => openFileMenu(event, entry, false)}
+                submoduleOf={submoduleOf}
               />
             ) : (
               unstagedAndUntracked.map((entry, at) => (
@@ -943,6 +1045,7 @@ export function ChangesPanel({
                   onSelect={() => selectRow(entry, false)}
                   actions={buildUnstagedActions(entry)}
                   onContextMenu={(event) => openFileMenu(event, entry, false)}
+                  submodule={submoduleOf(entry.path)}
                 />
               ))
             )}
@@ -980,9 +1083,11 @@ export function ChangesPanel({
             (aiError.isQuotaExceeded ? (
               <div className="mt-1.5 flex items-start gap-2 rounded-md bg-[color-mix(in_oklab,var(--cf-warning)_14%,transparent)] px-2 py-1.5 text-[11px] text-[var(--cf-text)]">
                 <Clock size={13} className="mt-0.5 shrink-0 text-[var(--cf-warning)]" />
-                <span>
-                  {t("changes.quotaMessage")}{" "}
-                  {aiError.resetHint ? t("changes.quotaRetry", { hint: aiError.resetHint }) : t("changes.quotaRetryLater")}
+                <span className="min-w-0">
+                  {aiError.kind === "billing" ? t("ai.billingMessage") : t("changes.quotaMessage")}{" "}
+                  {quotaRetryText(aiError, t)}
+                  {/* The provider's own words: "resets 12am (…)" is the fact that matters here. */}
+                  <span className="mt-0.5 block break-words text-[var(--cf-text-muted)]">{aiError.message}</span>
                 </span>
               </div>
             ) : (
@@ -1030,7 +1135,7 @@ export function ChangesPanel({
                 pane that blanks for it would read as broken. `null` is "on its way", `[]` is
                 "nothing to show", which `DiffView` draws as its own empty state. */}
             {selectedDiff ? (
-              <DiffView files={selectedDiff} onClose={clearSelection} />
+              <DiffView files={selectedDiff} onClose={clearSelection} staging={staging} />
             ) : (
               <div className="flex h-full items-center justify-center">
                 <BouncingDots />

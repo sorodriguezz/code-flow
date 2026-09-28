@@ -10,11 +10,33 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::remotectl::RemoteCtl;
 
-/// The desktop window's claim on a repository, as one holder among several.
+/// The main window's claim on a repository, as one holder among several.
 ///
-/// A single string rather than one per window because there is one window: `src/App.tsx` watches
-/// whichever project is active and releases it when that changes.
+/// `src/App.tsx` watches whichever project is active and releases it when that changes. The main
+/// window keeps this historical name; every other window claims under [`window_holder`].
 pub const DESKTOP_HOLDER: &str = "desktop-window";
+
+/// The claim a window makes, derived from its label so no window can make one for another.
+///
+/// Satellites got one when a detached repository window turned out never to watch its repository
+/// at all: only the main window called `start_watching`, so Changes, the graph and the editor in a
+/// repository window never saw an edit made anywhere else — an agent's, a terminal's, a phone's.
+pub fn window_holder(label: &str) -> String {
+    if label == "main" {
+        DESKTOP_HOLDER.to_string()
+    } else {
+        format!("window:{label}")
+    }
+}
+
+/// The window behind a holder, when the holder is a window's.
+fn holder_window(holder: &str) -> Option<&str> {
+    if holder == DESKTOP_HOLDER {
+        Some("main")
+    } else {
+        holder.strip_prefix("window:")
+    }
+}
 
 /// A paired device's claim, namespaced so it can never collide with [`DESKTOP_HOLDER`] and so
 /// [`watched_by_a_device`] can tell the two apart by inspection.
@@ -162,15 +184,36 @@ fn is_noise(root: &Path, event: &Event) -> bool {
     !event.paths.is_empty() && event.paths.iter().all(|p| is_noise_path(root, p))
 }
 
-/// Whether the window is on screen.
+/// Whether a window is on screen.
 ///
 /// Both conditions, matching `window_state`: on Windows a minimised window still answers
-/// `is_visible() == true`. Defaulting to "seen" when the window cannot be queried at all keeps the
-/// old behaviour on any path where there is no main window.
-fn window_seen(app: &AppHandle) -> bool {
-    app.get_webview_window("main")
+/// `is_visible() == true`. A window that cannot be queried at all answers "seen" only for `main`,
+/// which keeps the old behaviour on any path where there is no main window; a satellite that is
+/// gone is simply not looking.
+fn window_seen(app: &AppHandle, label: &str) -> bool {
+    app.get_webview_window(label)
         .map(|w| !(!w.is_visible().unwrap_or(true) || w.is_minimized().unwrap_or(false)))
-        .unwrap_or(true)
+        .unwrap_or(label == "main")
+}
+
+/// The decision [`watched`] makes, over plain values so it can be tested.
+///
+/// The main window stays a reader of every repository: stores there other than the repository
+/// views listen too (a diagram opened from a repository file, for one). A repository window reads
+/// its own, so its being on screen counts for the repository it holds — with the main window
+/// minimised and a detached repository window in front, the old main-only test stopped every emit
+/// that window was waiting for.
+fn anyone_looking<'a>(
+    holders: impl IntoIterator<Item = &'a String>,
+    seen: impl Fn(&str) -> bool,
+    phones: bool,
+) -> bool {
+    phones
+        || seen("main")
+        || holders
+            .into_iter()
+            .filter_map(|holder| holder_window(holder))
+            .any(|label| label != "main" && seen(label))
 }
 
 /// Whether there is anyone to emit to at all.
@@ -188,8 +231,22 @@ fn window_seen(app: &AppHandle) -> bool {
 /// long as it is open (see `server::events`), so this is a count of phones listening right now and
 /// not of devices somebody once paired. `RemoteCtl` is managed unconditionally in `lib.rs`, so the
 /// lookup cannot fail.
-fn watched(app: &AppHandle) -> bool {
-    window_seen(app) || app.state::<RemoteCtl>().events.receiver_count() > 0
+///
+/// And which windows are looking: see [`anyone_looking`].
+fn watched(app: &AppHandle, repo_path: &str) -> bool {
+    let holders: Vec<String> = app
+        .state::<WatcherRegistry>()
+        .0
+        .lock()
+        .map(|watchers| {
+            watchers.get(repo_path).map(|entry| entry.holders.iter().cloned().collect()).unwrap_or_default()
+        })
+        .unwrap_or_default();
+    anyone_looking(
+        &holders,
+        |label| window_seen(app, label),
+        app.state::<RemoteCtl>().events.receiver_count() > 0,
+    )
 }
 
 /// Whether any *paired device* is depending on this repository being watched.
@@ -296,7 +353,7 @@ pub fn start_watching(
             // The same predicate as the emit, deliberately. When these two disagreed, a change made
             // while the window was hidden but a phone was connected took the "waiting on a person"
             // branch below and sat for up to a second before the emit it was already entitled to.
-            let seen = watched(&app);
+            let seen = watched(&app, &repo_path);
 
             // The timeout exists only to flush a *pending* change once its burst goes quiet, so
             // with nothing pending there is nothing a tick could do and the thread blocks on the
@@ -332,7 +389,7 @@ pub fn start_watching(
             // touched: an arbitrary number of unread bursts therefore collapse into exactly one
             // change, which fires on the first loop iteration after somebody comes back — so
             // restoring the window lands on a fully refreshed repository rather than a stale one.
-            if pending && watched(&app) && last_emit.elapsed() >= Duration::from_millis(400) {
+            if pending && watched(&app, &repo_path) && last_emit.elapsed() >= Duration::from_millis(400) {
                 pending = false;
                 last_emit = Instant::now();
                 let _ = app.emit("repo:fs-changed", RepoChangedEvent { repo_path: repo_path.clone() });
@@ -557,6 +614,40 @@ mod tests {
 
         release_holder(&registry, &first);
         assert!(watched_by_a_device(&registry, "/repos/api"));
+    }
+
+    /// A detached repository window watches under a claim of its own, so the main window switching
+    /// project cannot stop the watcher it depends on — and a satellite going away cannot stop main's.
+    #[test]
+    fn each_window_claims_under_its_own_label() {
+        assert_eq!(window_holder("main"), DESKTOP_HOLDER);
+        let satellite = window_holder("sat-repo-p1");
+        assert_ne!(satellite, DESKTOP_HOLDER);
+        assert_eq!(holder_window(&satellite), Some("sat-repo-p1"));
+        assert_eq!(holder_window(DESKTOP_HOLDER), Some("main"));
+        assert_eq!(holder_window(&device_holder("phone-1")), None);
+
+        let registry = WatcherRegistry::default();
+        claim(&registry, "/repos/api", DESKTOP_HOLDER);
+        claim(&registry, "/repos/api", &satellite);
+        stop_watching(&registry, "/repos/api", DESKTOP_HOLDER);
+        assert!(!registry.0.lock().unwrap().is_empty(), "the satellite's claim keeps it running");
+        release_holder(&registry, &satellite);
+        assert!(registry.0.lock().unwrap().is_empty());
+    }
+
+    /// Main minimised, the repository's own window in front: that window is looking, so the emit
+    /// must go out. It used to wait for main.
+    #[test]
+    fn the_satellite_holding_a_repo_counts_as_looking() {
+        let holders = vec![window_holder("sat-repo-p1")];
+        let only = |label: &'static str| move |l: &str| l == label;
+        assert!(anyone_looking(&holders, only("sat-repo-p1"), false));
+        assert!(anyone_looking(&holders, only("main"), false), "main still reads every repository");
+        assert!(!anyone_looking(&holders, |_| false, false), "nobody on screen, nobody to emit to");
+        assert!(anyone_looking(&holders, |_| false, true), "a connected phone is somebody");
+        // Another satellite being on screen says nothing about a repository it does not hold.
+        assert!(!anyone_looking(&holders, only("sat-repo-p2"), false));
     }
 
     /// The desktop's own hold must not read as a device's, or the bridge would forward filesystem

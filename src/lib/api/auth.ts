@@ -10,7 +10,15 @@
  */
 
 import { defaultApiSettings, defaultAuth } from "../../types/api";
-import type { AuthConfig, BackendAuth, JwtAuth, NetworkOptions, OAuth2Auth } from "../../types/api";
+import type {
+  ApiSettings,
+  AuthConfig,
+  BackendAuth,
+  JwtAuth,
+  NetworkOptions,
+  OAuth2Auth,
+  OAuth2GrantType,
+} from "../../types/api";
 import { apiSendHttp } from "../tauri/apiCommands";
 
 export interface AuthApplyResult {
@@ -241,13 +249,55 @@ export function isOAuth2TokenExpired(cfg: OAuth2Auth): boolean {
   return cfg.expiresAt > 0 && cfg.expiresAt <= Math.floor(Date.now() / 1000);
 }
 
+/** What a token endpoint (or an implicit redirect) handed back. */
+export interface OAuth2Token {
+  accessToken: string;
+  /** The stored one when the response carried none — see `postTokenForm`. */
+  refreshToken: string;
+  /** Unix seconds; 0 = unknown. */
+  expiresAt: number;
+  raw: unknown;
+}
+
 /**
- * Runs a token request against `accessTokenUrl` and returns what came back.
+ * The config with every `{{variable}}` resolved — what a token call has to send.
  *
- * Handles the two grants that are pure back-channel calls (`client_credentials`, `password`) plus
- * `refresh_token` whenever one is stored. The browser-redirect grants are *not* implemented: they
- * need a real user agent and a loopback listener for the callback, and a half-built version that
- * silently drops the `state` check would be worse than an honest error.
+ * The stored config keeps its templates: a client secret held in `{{clientSecret}}` must stay a
+ * reference in the collection, and only the call gets the value.
+ */
+export function resolveOAuth2(cfg: OAuth2Auth, expand: (text: string) => string): OAuth2Auth {
+  const out = { ...cfg };
+  for (const key of Object.keys(out) as (keyof OAuth2Auth)[]) {
+    const value = out[key];
+    if (typeof value === "string") (out as Record<string, unknown>)[key] = expand(value);
+  }
+  return out;
+}
+
+/** The grants whose first leg happens in the user's browser. */
+export function needsBrowser(grant: OAuth2GrantType): boolean {
+  return grant === "authorization_code" || grant === "authorization_code_pkce" || grant === "implicit";
+}
+
+/**
+ * Whether to refresh before sending: a refresh token is on hand and the access token is missing,
+ * expired, or within `skewSeconds` of expiring — a token that dies in flight fails the same way as
+ * one already dead. An unknown expiry (`0`) is never refreshed on a guess.
+ */
+export function shouldRefreshOAuth2(
+  cfg: OAuth2Auth,
+  nowSeconds = Math.floor(Date.now() / 1000),
+  skewSeconds = 30,
+): boolean {
+  if (cfg.refreshToken.trim() === "") return false;
+  if (cfg.accessToken.trim() === "") return true;
+  return cfg.expiresAt > 0 && cfg.expiresAt <= nowSeconds + skewSeconds;
+}
+
+/**
+ * The back-channel grants: `client_credentials` and `password` are one POST each. The redirect grants
+ * start in the browser (`authorizeInBrowser`); asked here with a refresh token stored, one of those
+ * is refreshed rather than refused, since that is the only token call it can make without a user.
  *
  * Goes through the Rust transport rather than `fetch` — the webview's fetch is subject to CORS
  * and would ignore the app's proxy, custom CA and TLS-verification settings.
@@ -255,24 +305,81 @@ export function isOAuth2TokenExpired(cfg: OAuth2Auth): boolean {
 export async function fetchOAuth2Token(
   cfg: OAuth2Auth,
   options: NetworkOptions = tokenRequestOptions(),
-): Promise<{ accessToken: string; refreshToken: string; expiresAt: number; raw: unknown }> {
-  const tokenUrl = cfg.accessTokenUrl.trim();
-  if (tokenUrl === "") throw new Error("Access Token URL is required.");
+): Promise<OAuth2Token> {
+  switch (cfg.grantType) {
+    case "client_credentials":
+      return postTokenForm(cfg, [["grant_type", "client_credentials"], ...extras(cfg)], options);
+    case "password":
+      return postTokenForm(
+        cfg,
+        [["grant_type", "password"], ["username", cfg.username], ["password", cfg.password], ...extras(cfg)],
+        options,
+      );
+    default:
+      if (cfg.refreshToken.trim() !== "") return refreshOAuth2Token(cfg, options);
+      throw new Error("This grant signs in through the browser — use Get New Access Token.");
+  }
+}
 
-  const grant = grantForTokenCall(cfg);
-  const form: [string, string][] = [["grant_type", grant]];
-  if (grant === "password") form.push(["username", cfg.username], ["password", cfg.password]);
-  if (grant === "refresh_token") form.push(["refresh_token", cfg.refreshToken]);
+/** `grant_type=refresh_token` (RFC 6749 §6). */
+export async function refreshOAuth2Token(
+  cfg: OAuth2Auth,
+  options: NetworkOptions = tokenRequestOptions(),
+): Promise<OAuth2Token> {
+  if (cfg.refreshToken.trim() === "") throw new Error("There is no refresh token to use.");
+  return postTokenForm(
+    cfg,
+    [["grant_type", "refresh_token"], ["refresh_token", cfg.refreshToken], ...extras(cfg)],
+    options,
+  );
+}
+
+/**
+ * Redeems an authorization code (RFC 6749 §4.1.3). `redirect_uri` must be byte-identical to the one
+ * the authorization request carried, and `code_verifier` is what proves — with PKCE — that whoever
+ * redeems the code is whoever started the flow.
+ */
+export async function exchangeAuthorizationCode(
+  cfg: OAuth2Auth,
+  code: string,
+  verifier: string | null,
+  options: NetworkOptions = tokenRequestOptions(),
+): Promise<OAuth2Token> {
+  const form: [string, string][] = [
+    ["grant_type", "authorization_code"],
+    ["code", code],
+    ["redirect_uri", cfg.redirectUri.trim()],
+  ];
+  if (verifier !== null) form.push(["code_verifier", verifier]);
+  return postTokenForm(cfg, form, options);
+}
+
+/** `scope`, `audience` and `resource`, when set — the extensions every token call may carry. */
+function extras(cfg: OAuth2Auth): [string, string][] {
+  const out: [string, string][] = [];
   for (const [name, value] of [
     ["scope", cfg.scope],
     ["audience", cfg.audience],
     ["resource", cfg.resource],
   ] as const) {
-    if (value.trim() !== "") form.push([name, value.trim()]);
+    if (value.trim() !== "") out.push([name, value.trim()]);
   }
+  return out;
+}
+
+/** One POST to `accessTokenUrl` with the client authenticated, and its answer read as a token. */
+async function postTokenForm(
+  cfg: OAuth2Auth,
+  form: [string, string][],
+  options: NetworkOptions,
+): Promise<OAuth2Token> {
+  const tokenUrl = cfg.accessTokenUrl.trim();
+  if (tokenUrl === "") throw new Error("Access Token URL is required.");
 
   const headers: [string, string][] = [["Accept", "application/json"]];
-  if (cfg.clientAuth === "header" && cfg.clientId !== "") {
+  // A client with no secret is a public client (RFC 6749 §2.3.1): it identifies itself with
+  // `client_id` in the body, and a `Basic id:` header would be read as a failed authentication.
+  if (cfg.clientAuth === "header" && cfg.clientId !== "" && cfg.clientSecret !== "") {
     // Raw, not form-encoded, before base64: RFC 6749 §2.3.1 asks for the encoded form but
     // effectively every server compares against the raw credentials, and every other client
     // sends them that way.
@@ -308,41 +415,128 @@ export async function fetchOAuth2Token(
       `The token endpoint answered with something that isn't a token response: ${excerpt(response.body_text)}`,
     );
   }
+  return tokenFromPayload(payload, cfg.refreshToken, response.body_text);
+}
 
+function tokenFromPayload(payload: Record<string, unknown>, storedRefresh: string, body: string): OAuth2Token {
   const accessToken = stringField(payload, "access_token");
   if (accessToken === "") {
-    throw new Error(`The token response has no access_token: ${excerpt(response.body_text)}`);
+    throw new Error(`The token response has no access_token: ${excerpt(body)}`);
   }
   // `expires_in` is relative seconds and some providers send it as a string; storing an absolute
   // instant means the UI doesn't have to remember when the response arrived.
   const expiresIn = Number(payload["expires_in"]);
   const known = Number.isFinite(expiresIn) && expiresIn > 0;
-
   return {
     accessToken,
     // A refresh response is allowed to omit the refresh token, and dropping the stored one then
     // would cost the user the whole re-authorization.
-    refreshToken: stringField(payload, "refresh_token") || cfg.refreshToken,
+    refreshToken: stringField(payload, "refresh_token") || storedRefresh,
     expiresAt: known ? Math.floor(Date.now() / 1000 + expiresIn) : 0,
     raw: payload,
   };
 }
 
-function grantForTokenCall(cfg: OAuth2Auth): "client_credentials" | "password" | "refresh_token" {
-  switch (cfg.grantType) {
-    case "client_credentials":
-    case "password":
-      return cfg.grantType;
-    case "authorization_code":
-    case "authorization_code_pkce":
-    case "implicit":
-      if (cfg.refreshToken !== "") return "refresh_token";
-      throw new Error(
-        `The ${cfg.grantType} grant is not supported yet — it needs a browser redirect and a ` +
-          "loopback listener for the callback. Obtain the token elsewhere and paste it into " +
-          "Access Token, or use a refresh token.",
-      );
+// ---------------------------------------------------------------------------
+// The browser grants
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the listener can receive this redirect: plain `http` on the loopback interface. The same
+ * test `oauth::loopback_redirect` applies in Rust; this one exists so the form can say so before a
+ * browser is ever opened.
+ */
+export function isLoopbackRedirect(uri: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(uri.trim());
+  } catch {
+    return false;
   }
+  if (parsed.protocol !== "http:") return false;
+  const host = parsed.hostname.toLowerCase();
+  return host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+/** The authorization request (RFC 6749 §4.1.1 / §4.2.1), appended to whatever query `authUrl` has. */
+export function buildAuthorizeUrl(
+  cfg: OAuth2Auth,
+  request: { state: string; codeChallenge?: string },
+): string {
+  const base = cfg.authUrl.trim();
+  if (base === "") throw new Error("Auth URL is required.");
+  let url: URL;
+  try {
+    url = new URL(base);
+  } catch {
+    throw new Error(`'${base}' is not a valid Auth URL.`);
+  }
+  const params = url.searchParams;
+  params.set("response_type", cfg.grantType === "implicit" ? "token" : "code");
+  params.set("client_id", cfg.clientId);
+  params.set("redirect_uri", cfg.redirectUri.trim());
+  if (cfg.scope.trim() !== "") params.set("scope", cfg.scope.trim());
+  params.set("state", request.state);
+  if (request.codeChallenge !== undefined) {
+    params.set("code_challenge", request.codeChallenge);
+    params.set("code_challenge_method", "S256");
+  }
+  // Some providers (Auth0's `audience`, Azure's v1 `resource`) read these at authorization time.
+  if (cfg.audience.trim() !== "") params.set("audience", cfg.audience.trim());
+  if (cfg.resource.trim() !== "") params.set("resource", cfg.resource.trim());
+  return url.toString();
+}
+
+/** An implicit grant's redirect parameters, read as a token. */
+export function tokenFromRedirect(params: [string, string][]): OAuth2Token {
+  const payload: Record<string, unknown> = {};
+  for (const [key, value] of params) payload[key] = value;
+  return tokenFromPayload(payload, "", new URLSearchParams(params).toString());
+}
+
+/** Starts the browser leg and waits for the redirect — `apiOAuthAuthorize` in the app. */
+export type BrowserAuthorize = (request: {
+  id: string;
+  authorizeUrl: string;
+  redirectUri: string;
+  state: string;
+  implicit: boolean;
+}) => Promise<[string, string][]>;
+
+/**
+ * The authorization-code (± PKCE, S256) and implicit grants, end to end: the authorization URL is
+ * opened in the system browser, the registered loopback redirect is captured, `state` is checked,
+ * and a code is redeemed at the token endpoint. `cfg` must already be resolved (`resolveOAuth2`).
+ *
+ * The state is the form's own when it has one, and otherwise 128 random bits.
+ */
+export async function authorizeInBrowser(
+  cfg: OAuth2Auth,
+  options: NetworkOptions,
+  flowId: string,
+  authorize: BrowserAuthorize,
+  pkce: () => Promise<{ verifier: string; challenge: string }> = buildPkceChallenge,
+): Promise<OAuth2Token> {
+  if (!isLoopbackRedirect(cfg.redirectUri)) {
+    throw new Error("The redirect URI must be a localhost address registered with the provider.");
+  }
+  const state = cfg.state.trim() || base64Url(crypto.getRandomValues(new Uint8Array(16)));
+  const challenge = cfg.grantType === "authorization_code_pkce" ? await pkce() : null;
+  const params = await authorize({
+    id: flowId,
+    authorizeUrl: buildAuthorizeUrl(cfg, { state, codeChallenge: challenge?.challenge }),
+    redirectUri: cfg.redirectUri.trim(),
+    state,
+    implicit: cfg.grantType === "implicit",
+  });
+  // The listener already refused a mismatch; checked again because the check is the whole point.
+  if (params.find(([key]) => key === "state")?.[1] !== state) {
+    throw new Error("The redirect's state did not match the request.");
+  }
+  if (cfg.grantType === "implicit") return tokenFromRedirect(params);
+  const code = params.find(([key]) => key === "code")?.[1] ?? "";
+  if (code === "") throw new Error("The redirect carried no authorization code.");
+  return exchangeAuthorizationCode(cfg, code, challenge?.verifier ?? null, options);
 }
 
 /** JSON first; a handful of older providers still answer `application/x-www-form-urlencoded`. */
@@ -386,38 +580,49 @@ function excerpt(body: string): string {
   return trimmed.length > 300 ? `${trimmed.slice(0, 300)}…` : trimmed || "(empty body)";
 }
 
-/** The token call can't reach the settings store from here, so it uses the shipped defaults; the
- * caller passes real `NetworkOptions` when the user has configured a proxy or a custom CA. */
-function tokenRequestOptions(): NetworkOptions {
-  const settings = defaultApiSettings();
+/**
+ * Network options for a token call. It is a back-channel POST to the identity provider, not to the
+ * request's own host: the cookie jar and the per-host client certificate are matched against the
+ * *request* URL, so neither applies here, while the proxy and the custom CA are network-wide and do.
+ */
+export function tokenNetworkOptions(settings: ApiSettings): NetworkOptions {
   return {
     timeout_ms: settings.timeoutMs,
     follow_redirects: settings.followRedirects,
     max_redirects: settings.maxRedirects,
     verify_ssl: settings.verifySsl,
     keep_auth_on_redirect: false,
-    proxy_url: "",
+    proxy_url: settings.proxyEnabled ? settings.proxyUrl : "",
     client_cert_path: "",
+    client_key_path: "",
     client_cert_password: "",
-    ca_cert_path: "",
+    ca_cert_path: settings.caCertPath,
     cookies: [],
     max_response_bytes: 1024 * 1024,
+    stream: false,
   };
 }
 
-/**
- * A PKCE verifier and its S256 challenge (RFC 7636). Nothing calls this yet — it's here so
- * finishing `authorization_code_pkce` is a matter of adding the redirect plumbing, not of
- * reworking this module.
- */
+/** The shipped defaults, for a caller with no settings at hand. */
+function tokenRequestOptions(): NetworkOptions {
+  return tokenNetworkOptions(defaultApiSettings());
+}
+
+/** A PKCE verifier and its S256 challenge (RFC 7636 §4.1–4.2). */
 export async function buildPkceChallenge(): Promise<{
   verifier: string;
   challenge: string;
   method: "S256";
 }> {
+  // 32 random bytes are 43 base64url characters — the minimum length §4.1 allows, at full entropy.
   const verifier = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+  return { verifier, challenge: await pkceChallenge(verifier), method: "S256" };
+}
+
+/** `BASE64URL(SHA256(ASCII(code_verifier)))`, RFC 7636 §4.2. */
+export async function pkceChallenge(verifier: string): Promise<string> {
   const digest = await subtle().digest("SHA-256", utf8(verifier));
-  return { verifier, challenge: base64Url(new Uint8Array(digest)), method: "S256" };
+  return base64Url(new Uint8Array(digest));
 }
 
 // ---------------------------------------------------------------------------

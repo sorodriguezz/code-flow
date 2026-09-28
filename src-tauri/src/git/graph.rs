@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use git2::{Oid, Repository, Sort};
+use git2::{ErrorCode, Oid, Repository, Sort};
 use serde::{Deserialize, Serialize};
 
 use super::repo::open;
@@ -98,6 +98,19 @@ fn build_ref_map(repo: &Repository) -> HashMap<String, Vec<CommitRef>> {
     map
 }
 
+/// Whether HEAD names a branch that has no commit yet — `git init` and nothing else.
+///
+/// Every walk that starts from HEAD (`push_head`) fails there with "reference 'refs/heads/main' not
+/// found", and that is not an error to show anyone: a repository with no commits has an empty
+/// history, which is the answer. Only the unborn case is caught; a HEAD that is broken some other
+/// way still reports itself.
+fn head_is_unborn(repo: &Repository) -> bool {
+    match repo.head() {
+        Ok(_) => false,
+        Err(e) => matches!(e.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound),
+    }
+}
+
 fn build_commit_info(repo: &Repository, oid: Oid, ref_map: &HashMap<String, Vec<CommitRef>>) -> Result<CommitInfo, String> {
     let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
     let author = commit.author();
@@ -128,6 +141,8 @@ pub fn list_commits(path: &str, all_refs: bool, limit: usize) -> Result<Vec<Comm
     if all_refs {
         walk.push_glob("refs/heads/*").map_err(|e| e.message().to_string())?;
         walk.push_glob("refs/remotes/*").map_err(|e| e.message().to_string())?;
+    } else if head_is_unborn(&repo) {
+        return Ok(vec![]);
     } else {
         walk.push_head().map_err(|e| e.message().to_string())?;
     }
@@ -173,6 +188,8 @@ pub fn list_commits_page(
     if all_refs {
         walk.push_glob("refs/heads/*").map_err(|e| e.message().to_string())?;
         walk.push_glob("refs/remotes/*").map_err(|e| e.message().to_string())?;
+    } else if head_is_unborn(&repo) {
+        return Ok(CommitPage { commits: vec![], has_more: false });
     } else {
         walk.push_head().map_err(|e| e.message().to_string())?;
     }
@@ -203,6 +220,11 @@ pub fn file_history(path: &str, rel_path: &str, limit: usize) -> Result<Vec<Comm
     let repo = open(path)?;
     let ref_map = build_ref_map(&repo);
     let target = std::path::Path::new(rel_path);
+
+    // No commits, no history — for this file or any other.
+    if head_is_unborn(&repo) {
+        return Ok(vec![]);
+    }
 
     let mut walk = repo.revwalk().map_err(|e| e.message().to_string())?;
     walk.set_sorting(Sort::TOPOLOGICAL | Sort::TIME).map_err(|e| e.message().to_string())?;
@@ -310,6 +332,26 @@ mod tests {
         // none yet, so it never had the same problem and must not acquire one.
         let commits = list_commits(dir.to_str().unwrap(), true, 500).unwrap();
         assert!(commits.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The walks that start from HEAD rather than from every ref — HEAD-only history, its paged
+    /// twin and a file's history — failed outright before the first commit ("reference not
+    /// found"). An unborn HEAD has an empty history, not a broken one.
+    #[test]
+    fn head_walks_are_empty_before_the_first_commit() {
+        let dir = std::env::temp_dir().join(format!("cf-graph-unborn-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        Repository::init(&dir).unwrap();
+        fs::write(dir.join("a.txt"), "one\n").unwrap();
+        let path = dir.to_str().unwrap();
+
+        assert!(list_commits(path, false, 500).unwrap().is_empty());
+        let page = list_commits_page(path, false, 0, 500).unwrap();
+        assert!(page.commits.is_empty() && !page.has_more);
+        assert!(list_commits_page(path, true, 0, 500).unwrap().commits.is_empty());
+        assert!(file_history(path, "a.txt", 100).unwrap().is_empty());
 
         fs::remove_dir_all(&dir).ok();
     }

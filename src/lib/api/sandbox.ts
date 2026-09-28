@@ -2,11 +2,18 @@
  * The `pm.*` scripting runtime for pre-request and post-response scripts.
  *
  * **This is not a security sandbox and does not try to be.** The scripts run in the webview's own
- * realm via `new Function`, with full access to everything the app's JavaScript can reach. That is
- * deliberate: these are the user's own scripts, typed into their own client, at exactly the trust
- * level of the terminal this app already embeds. "Sandbox" here means *the scoped set of globals a
- * Postman script expects to find*, nothing more. Anyone tempted to run someone else's collection
- * scripts unattended should reach for a Worker or the Rust side first.
+ * realm via `new Function`, with full access to everything the app's JavaScript can reach — every
+ * Tauri command included. "Sandbox" here means *the scoped set of globals a Postman script expects to
+ * find*, nothing more.
+ *
+ * What stands between this realm and a script somebody else wrote is the **trust gate** in
+ * `scriptTrust.ts`, which every caller goes through before calling in here (`RequestBuilder`'s send
+ * and the collection runner, via `scriptChain.ts`). A script runs unasked only when its exact text
+ * was typed into this app's own script editor, approved in the gate's dialog after the user saw the
+ * code, or already present when the gate shipped (outside collections linked to collaboration).
+ * Imports and shared collections therefore stop at a question, and any edit to a script — a
+ * collaborator's included — is a new text that asks again. Nothing here re-checks that: a new
+ * caller that runs scripts without the gate reopens the hole the gate closed.
  *
  * What it *does* guarantee is containment of failure: a script that throws, hangs on a bad
  * assertion, or dies inside a `pm.sendRequest` callback produces a `ScriptOutcome` with `error`
@@ -1508,6 +1515,7 @@ type ScriptFn = (
   consoleShim: unknown,
   lodash: unknown,
   cryptoShim: unknown,
+  insomnia: unknown,
 ) => Promise<unknown>;
 
 /** Rounds spawned by callbacks that themselves spawn work; bounded so a recursive script can't
@@ -1675,15 +1683,18 @@ async function runScript(
   let outcomeError: string | null = null;
   try {
     // Wrapped in an async IIFE so top-level `await` works and a bare `return` still exits cleanly.
+    // `insomnia` is the same object as `pm`: Insomnia's script API is modelled on Postman's
+    // (`insomnia.environment.set`, `insomnia.test`…), so an imported Insomnia script runs as written.
     const factory = new Function(
       "pm",
       "postman",
       "console",
       "_",
       "CryptoJS",
+      "insomnia",
       `return (async () => {\n${code}\n})();`,
     ) as ScriptFn;
-    await factory(pm, postman, consoleShim, LODASH, CRYPTO);
+    await factory(pm, postman, consoleShim, LODASH, CRYPTO, pm);
   } catch (error) {
     outcomeError = formatError(error);
   }

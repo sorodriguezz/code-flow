@@ -41,11 +41,13 @@ import { useOpenPrimary } from "./hostMenu";
 import { useRemoteStore, type RemoteDetailsTab } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import {
+  remoteAskpassSupported,
   remoteGetPassword,
   remoteListKeys,
   remoteParseAzureConnection,
   remoteSetPassword,
 } from "../../lib/tauri/remoteCommands";
+import { GenerateKeyModal } from "./GenerateKeyModal";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
 import { VaultPicker } from "../vault/VaultPicker";
@@ -112,6 +114,30 @@ const PASSWORD_DEBOUNCE_MS = 1500;
 const WIDTH_MIN = 280;
 const WIDTH_MAX = 560;
 
+/** Asked once per window: whether a background `ssh` here can be handed a saved password. */
+let askpassAnswer: Promise<boolean> | null = null;
+
+/**
+ * Whether a saved password can reach a background `ssh` on this machine — the file browser's and a
+ * forward's, which have no terminal to type it into (see `remotes::askpass`). `null` until known.
+ *
+ * It decides two things below: whether an SFTP host is offered a password at all — its only
+ * transport is a background `ssh`, so where the answer is no, the option could never work — and
+ * what the password hint promises an SSH host, whose sessions can still type it either way.
+ */
+function useAskpassSupported(): boolean | null {
+  const [supported, setSupported] = useState<boolean | null>(null);
+  useEffect(() => {
+    askpassAnswer ??= remoteAskpassSupported().catch(() => false);
+    let current = true;
+    void askpassAnswer.then((answer) => current && setSupported(answer));
+    return () => {
+      current = false;
+    };
+  }, []);
+  return supported;
+}
+
 export function HostDetailsPanel() {
   const hostId = useRemoteStore((s) => s.detailsHostId);
   const requestedTab = useRemoteStore((s) => s.detailsTab);
@@ -124,6 +150,7 @@ export function HostDetailsPanel() {
   const t = useT();
 
   const openPrimary = useOpenPrimary();
+  const askpass = useAskpassSupported();
   const checkCloud = useRemoteStore((s) => s.checkCloud);
   const cloudStatus = useRemoteStore((s) => (hostId ? s.cloudStatus[hostId] : undefined));
   const closeTab = useRemoteStore((s) => s.closeTab);
@@ -667,7 +694,7 @@ export function HostDetailsPanel() {
 
           {passwordLoaded && spec.auth === "password" && (
             <p className="pt-2 text-center text-[11px] text-[var(--cf-text-faint)]">
-              {t("remote.authPasswordHint")}
+              {t(askpass === false ? "remote.authPasswordHintSessionOnly" : "remote.authPasswordHint")}
             </p>
           )}
         </div>
@@ -810,11 +837,21 @@ function ConnectionTab({
   );
   const t = useT();
 
+  const askpass = useAskpassSupported();
   const AUTH: { value: RemoteAuth; label: string; hint: string }[] = [
     { value: "agent", label: t("remote.authAgent"), hint: t("remote.authAgentHint") },
     { value: "key", label: t("remote.authKey"), hint: t("remote.authKeyHint") },
-    { value: "password", label: t("remote.authPassword"), hint: t("remote.authPasswordHint") },
-  ];
+    {
+      value: "password",
+      label: t("remote.authPassword"),
+      hint: t(askpass === false ? "remote.authPasswordHintSessionOnly" : "remote.authPasswordHint"),
+    },
+  ].filter(
+    // An SFTP host has no session to type a password into — only the background `ssh` that cannot
+    // be handed one here. Kept when already chosen, so the select can still say what the row is.
+    (option) =>
+      !(option.value === "password" && spec.kind === "sftp" && askpass === false && spec.auth !== "password"),
+  ) as { value: RemoteAuth; label: string; hint: string }[];
 
   // Four families of fields, and every kind is in exactly one. SSH and SFTP share a transport and
   // therefore share every flag below; FTP and FTPS share none of them; a screen has neither an
@@ -1599,6 +1636,10 @@ function ColorPicker({ color, onColor }: { color: string; onColor: (value: strin
  * `in_agent` is the column worth reading: a key the agent already holds needs no `-i` at all, so
  * choosing it is usually unnecessary — and a key the agent *doesn't* hold is why a connection keeps
  * asking for a passphrase.
+ *
+ * "New key" is the last chip, so having none is not a dead end: `ssh-keygen` makes one in `~/.ssh`
+ * and the field points at it. Still discovery afterwards — the key is a file the user owns, which
+ * the next listing simply finds.
  */
 function KeyPicker({
   spec,
@@ -1608,6 +1649,8 @@ function KeyPicker({
   onPatch: (changes: Partial<RemoteHostSpec>) => void;
 }) {
   const [keys, setKeys] = useState<SshKey[] | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [listed, setListed] = useState(0);
   const t = useT();
 
   useEffect(() => {
@@ -1618,10 +1661,13 @@ function KeyPicker({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [listed]);
 
   // Only keys with a file can be passed to `-i`; an agent-only identity has nothing to name.
   const usable = (keys ?? []).filter((key) => key.path);
+  // Named after the machine it is probably for, which is also how the user will find it again in
+  // `~/.ssh`. Only the characters a key file name may carry — see `remotes::keys::checked_name`.
+  const suggested = `id_ed25519_${(spec.host.trim() || "codeflow").toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[.-]+/, "")}`;
 
   return (
     <>
@@ -1633,33 +1679,53 @@ function KeyPicker({
           placeholder="~/.ssh/id_ed25519"
         />
       </FormRow>
-      {usable.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1 pb-1.5">
+      <div className="flex flex-wrap items-center gap-1 pb-1.5">
+        {usable.length > 0 && (
           <span className="text-[11px] text-[var(--cf-text-faint)]">{t("remote.keysFound")}</span>
-          {usable.map((key) => (
-            <button
-              key={key.path}
-              type="button"
-              title={`${key.kind}${key.comment ? ` · ${key.comment}` : ""}`}
-              aria-pressed={spec.key_file === key.path}
-              onClick={() => onPatch({ key_file: key.path })}
-              className={
-                spec.key_file === key.path
-                  ? chipClass("accent", "font-mono")
-                  : chipClass("neutral", "font-mono transition-colors duration-100 hover:text-[var(--cf-text)]")
-              }
-            >
-              {key.in_agent && (
-                <span
-                  aria-label={t("remote.keyInAgent")}
-                  title={t("remote.keyInAgent")}
-                  className="h-1.5 w-1.5 rounded-full bg-[var(--cf-success)]"
-                />
-              )}
-              {key.label}
-            </button>
-          ))}
-        </div>
+        )}
+        {usable.map((key) => (
+          <button
+            key={key.path}
+            type="button"
+            title={`${key.kind}${key.comment ? ` · ${key.comment}` : ""}`}
+            aria-pressed={spec.key_file === key.path}
+            onClick={() => onPatch({ key_file: key.path })}
+            className={
+              spec.key_file === key.path
+                ? chipClass("accent", "font-mono")
+                : chipClass("neutral", "font-mono transition-colors duration-100 hover:text-[var(--cf-text)]")
+            }
+          >
+            {key.in_agent && (
+              <span
+                aria-label={t("remote.keyInAgent")}
+                title={t("remote.keyInAgent")}
+                className="h-1.5 w-1.5 rounded-full bg-[var(--cf-success)]"
+              />
+            )}
+            {key.label}
+          </button>
+        ))}
+        <Tooltip label={t("remote.generateKey")} description={t("remote.generateKeyHint")}>
+          <button
+            type="button"
+            onClick={() => setGenerating(true)}
+            className={chipClass("neutral", "transition-colors duration-100 hover:text-[var(--cf-text)]")}
+          >
+            <Plus size={11} />
+            {t("remote.generateKey")}
+          </button>
+        </Tooltip>
+      </div>
+      {generating && (
+        <GenerateKeyModal
+          suggestedName={suggested}
+          onCreated={(key) => {
+            onPatch({ key_file: key.path });
+            setListed((n) => n + 1);
+          }}
+          onClose={() => setGenerating(false)}
+        />
       )}
     </>
   );

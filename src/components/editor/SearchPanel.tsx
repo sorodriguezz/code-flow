@@ -381,8 +381,9 @@ export function SearchPanel({
   const replace = async (onlyPath?: string) => {
     const scope = onlyPath ?? null;
     // Replace writes to disk, and `syncOpenTabs` deliberately leaves dirty tabs alone — so a file
-    // the user is editing would silently swallow the replacement the next time they save. The
-    // per-file button is disabled outright for those; replace-all can't be, so it says so instead.
+    // the user is editing ends up with the replacement on disk and the old text in the buffer. The
+    // save no longer swallows it silently (it finds the file changed and asks), but the per-file
+    // button is still disabled outright for those; replace-all can't be, so it says so instead.
     const unsaved = grouped.filter(([path]) => bufferHits?.has(path)).length;
     const confirmed = await confirmAction(
       scope
@@ -398,6 +399,12 @@ export function SearchPanel({
       useToastStore
         .getState()
         .pushToast(t("editor.replaced", { n: outcome.replacements, files: outcome.files }), "success");
+      // Matched and not rewritten: a file in another encoding, which a replace would have had to
+      // decode lossily and write back with every accent broken. Named, because the results list
+      // still shows its hits and nothing else would say why they were not replaced.
+      if (outcome.skipped_not_utf8.length > 0) {
+        pushErrorToast(t("editor.replaceSkippedEncoding", { files: outcome.skipped_not_utf8.join(", ") }));
+      }
       // The files changed underneath the rest of the app; the status and diffs it shows are now
       // stale, and the results list has to be rebuilt against the new content.
       void useRepoStore.getState().refreshAll();

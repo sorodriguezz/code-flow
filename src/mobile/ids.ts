@@ -4,10 +4,11 @@
  * # Why `crypto.randomUUID()` cannot be used here
  *
  * It is only defined in a **secure context** — HTTPS, or localhost. This client is served over
- * plain HTTP from a LAN address (`http://192.168.x.x:8787`), so the property is simply absent and
- * calling it throws `crypto.randomUUID is not a function`. That is the same constraint that rules
- * out a service worker, arriving in a place nobody expects it: the failure is not a permission
- * prompt or a warning, it is a `TypeError` at the moment the user presses a button.
+ * HTTPS by default, but over plain HTTP from a LAN address (`http://192.168.x.x:8787`) whenever the
+ * desktop's HTTPS switch is off, and there the property is simply absent and calling it throws
+ * `crypto.randomUUID is not a function`. That is the same constraint that rules out a service worker,
+ * arriving in a place nobody expects it: the failure is not a permission prompt or a warning, it is a
+ * `TypeError` at the moment the user presses a button.
  *
  * `crypto.getRandomValues`, by contrast, **is** available in insecure contexts — it lives on
  * `Crypto` rather than on `SubtleCrypto`, which is the half that got restricted. So the entropy is

@@ -56,7 +56,7 @@ Una cadena pasa **la respuesta de un agente al siguiente**, en un mismo reposito
 2. Marca **"Revisar antes de ejecutar este paso"** en los pasos donde quieras entrar tú.
 3. **Iniciar cadena.** El paso 1 corre como una tarea normal y, al responder, el paso 2 arranca solo con lo anterior dentro.
 4. En una compuerta la cadena **para antes** de ejecutar y te enseña **el mensaje exacto** que va a enviar. Puedes editarlo — lo editado es lo que se manda.
-5. Si un turno falla, **la cadena lo reintenta sola** — hasta 3 intentos por paso, y el paso dice en qué intento va. Solo cuando se agotan se detiene y espera: *Reintentar paso*, *Saltar paso* o *Abortar*.
+5. Si un turno falla, **la cadena lo reintenta sola**, con una espera entre intentos — hasta 3 por paso, y el paso dice en qué intento va. Solo cuando se agotan se detiene y espera: *Reintentar paso* (le da una ronda nueva), *Saltar paso* o *Abortar*. Si lo que falla es el motor — **sin cuota, sin sesión iniciada o sin la CLI instalada** — no reintenta: se pone **en pausa** sin gastar el intento, dice por qué y cuándo se restablece, y *Reanudar* sigue desde el mismo paso. Cuando se sabe la hora, puedes dejar que se reanude sola.
 
 Mientras corre, la cadena se ve moverse: el raíl entre dos pasos se ilumina cuando la respuesta de uno está entrando en el siguiente, y la barra bajo el título avanza con los pasos resueltos.
 
@@ -185,7 +185,7 @@ A chain hands **one agent's answer to the next**, in one repository. The usual s
 2. Tick **"Review before running this step"** wherever you want to step in.
 3. **Start chain.** Step 1 runs as an ordinary task and, when it answers, step 2 starts by itself with what came before folded in.
 4. At a gate the chain **stops before running** and shows you **the exact message** it is about to send. You can edit it — what you edit is what gets sent.
-5. If a turn fails, **the chain retries it by itself** — up to 3 attempts per step, and the step says which attempt it is on. Only once they are gone does it stop and wait: *Retry step*, *Skip step* or *Abort*.
+5. If a turn fails, **the chain retries it by itself**, waiting a little between attempts — up to 3 per step, and the step says which attempt it is on. Only once they are gone does it stop and wait: *Retry step* (a fresh round), *Skip step* or *Abort*. If what fails is the engine — **out of quota, signed out, or its CLI missing** — it does not retry: it **pauses** without spending the attempt, says why and when the window resets, and *Resume* carries on from the same step. When the reset time is known, you can let it resume by itself.
 
 While it runs you can watch it move: the rail between two steps lights up as one answer feeds the next, and the bar under the title fills with the steps that are resolved.
 

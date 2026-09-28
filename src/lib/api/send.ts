@@ -378,10 +378,12 @@ function buildOptions(
     keep_auth_on_redirect: overrides.keepAuthOnRedirect ?? settings.keepAuthOnRedirect,
     proxy_url: settings.proxyEnabled ? settings.proxyUrl : "",
     client_cert_path: cert?.certPath ?? "",
+    client_key_path: cert?.keyPath ?? "",
     client_cert_password: cert?.passphrase ?? "",
     ca_cert_path: settings.caCertPath,
     cookies: sendCookies ? matchCookies(jar, url) : [],
     max_response_bytes: settings.maxResponseBytes,
+    stream: overrides.streamResponse ?? false,
   };
 }
 

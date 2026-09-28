@@ -697,3 +697,39 @@ mod tests {
         assert!(bridge.call("ping", "", Map::new()).await.is_ok());
     }
 }
+
+/// The data editor's `batch` request: every statement, and how many rows each must affect (`-1` for
+/// "don't check"). Shared by IRIS and Oracle, which apply edits the same way over the bridge.
+pub(super) fn edit_batch_request(statements: &[String], edits: &[super::DbRowEdit]) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::Value;
+    let expect: Vec<Value> = edits
+        .iter()
+        .map(|edit| Value::from(if super::edit_expects_one_row(edit) { 1 } else { -1 }))
+        .collect();
+    let mut request = serde_json::Map::new();
+    request.insert("statements".into(), Value::from(statements.to_vec()));
+    request.insert("transactional".into(), Value::from(true));
+    request.insert("expect".into(), Value::Array(expect));
+    request
+}
+
+/// The bridge's answer to [`edit_batch_request`], as the data editor reports it.
+pub(super) fn edit_batch_result(answer: &serde_json::Value, statements: Vec<String>) -> super::DbEditResult {
+    use serde_json::Value;
+    let applied = answer.get("applied").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let mismatch = answer.get("mismatchIndex").and_then(Value::as_u64);
+    let error = match mismatch {
+        Some(index) => {
+            let affected = answer.get("affected").and_then(Value::as_i64).unwrap_or(0).max(0) as u64;
+            let statement = statements.get(index as usize).map(String::as_str).unwrap_or_default();
+            Some(super::wrong_row_count(index as usize + 1, statements.len(), affected, statement))
+        }
+        None => answer.get("error").and_then(Value::as_str).map(|message| {
+            match answer.get("failedStatement").and_then(Value::as_str) {
+                Some(statement) if !statement.is_empty() => format!("{message}\n\n{statement}"),
+                _ => message.to_string(),
+            }
+        }),
+    };
+    super::DbEditResult { applied, statements, error }
+}

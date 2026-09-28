@@ -337,6 +337,11 @@ pub fn apply_hunk(
     context_lines: u32,
 ) -> Result<(), String> {
     let repo = open(path)?;
+    // An LFS path's index copy is a pointer, and the text the peek shows is the file behind it —
+    // applying one to the other would write content where git expects a pointer.
+    if super::lines::is_lfs_path(&repo, &want.file_path) {
+        return Err(format!("{HUNK_UNSUPPORTED_PREFIX}lfs"));
+    }
     let reversed = op.reverses();
 
     let mut opts = DiffOptions::new();
@@ -353,7 +358,7 @@ pub fn apply_hunk(
 
     let diff = match op.side() {
         Side::Unstaged => {
-            // `include_untracked` without `show_untracked_content`, unlike `diff::get_working_diff`:
+            // `include_untracked` without `show_untracked_content`, unlike `diff::get_working_diff_with_context`:
             // enough for a brand-new file to arrive as a delta this can refuse *by name* below,
             // without paying to diff its entire content for an answer we throw away.
             opts.include_untracked(true).recurse_untracked_dirs(true);

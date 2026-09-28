@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Clock, FilePen, Lock, Square, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, Download, FilePen, Lock, Square, UsersRound } from "lucide-react";
 import { useIsQueued, repoHolder } from "../../lib/repoQueue";
 import { resolveAccount } from "../../lib/aiAccounts";
 import { ChatMessageBubble, dayDivider } from "../chat/ChatMessageBubble";
+import { exportMenuItems, exportRepoConversation } from "../chat/exportChat";
+import { ContextMenu } from "../common/ContextMenu";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { EMPTY_CHAT, engineFor, useChatStore, type ChatEngine } from "../../state/chatStore";
@@ -63,6 +65,7 @@ export function PanelChat({
   const draft = useAiPanelStore((s) => s.drafts[tabKey] ?? "");
   const setDraft = (text: string) => useAiPanelStore.getState().setDraft(tabKey, text);
   const queued = useIsQueued(session.sending ? session.runId : null);
+  const [exportMenu, setExportMenu] = useState<{ x: number; y: number } | null>(null);
   const cancelling = useAiRunStore((s) => (session.runId ? (s.cancelling[session.runId] ?? false) : false));
 
   // Read back from disk when this session has not got it — a conversation reopened from history,
@@ -187,7 +190,34 @@ export function PanelChat({
             <FilePen size={9} />
             {t("assistant.canEdit")}
           </span>
+          {/* Out as a file, once there is a conversation on disk to write out — the export reads
+              what was recorded, not what this tab happens to be holding. */}
+          {session.persisted && session.messages.length > 0 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                setExportMenu({ x: rect.right - 4, y: rect.bottom + 2 });
+              }}
+              title={t("chat.export")}
+              aria-label={t("chat.export")}
+              aria-haspopup="menu"
+              className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            >
+              <Download size={12} />
+            </button>
+          )}
         </div>
+        {exportMenu && (
+          <ContextMenu
+            x={exportMenu.x}
+            y={exportMenu.y}
+            items={exportMenuItems(
+              (format, traces) => void exportRepoConversation(projectId, conversationId, repoName, format, traces),
+            )}
+            onClose={() => setExportMenu(null)}
+          />
+        )}
 
         <div className="space-y-2.5">
           {session.messages.map((message, i) => {

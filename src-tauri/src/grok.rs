@@ -15,7 +15,8 @@
 //!   - `--prompt-file <path>` takes the whole prompt from a file. This is the flag the sibling
 //!     engines wish they had: no argv length limit to dance around, and — unlike `gemini.rs`'s
 //!     temp-file workaround — the file is the *prompt*, not a file the agent has to be granted
-//!     permission to open. Used above [`INLINE_LIMIT`]; below it the prompt rides on `-p`.
+//!     permission to open. Used above [`INLINE_LIMIT`]; below it the prompt rides on `-p`. The file
+//!     is private and deleted when the run ends (see `crate::ai_prompt_files`).
 //!   - `--resume <id>` resumes by id, and `--output-format json` echoes the same id back.
 //!     Confirmed end to end: a first turn told it a word, a second turn resumed that id and
 //!     recalled it. So this engine gets **real per-conversation sessions** — no `--continue`
@@ -30,9 +31,22 @@
 //! not in `grok --help` on 0.2.117. Passing a flag this binary may not know, to save a background
 //! version check, is a bad trade — a hard startup failure in exchange for milliseconds.
 //!
-//! `--tools` / `--allow` do exist, so a tool allow-list is technically reachable. It stays unused
-//! until the rule syntax is verified the way everything above was: an allow-list that silently
-//! doesn't match is worse than none, because it reads as a restriction that is in force.
+//! **`--tools` is used, and it is what makes a read-only run read-only.** Re-verified against
+//! **grok 1.0.4** (`grok --help`, and the headless-mode page it ships in
+//! `~/.grok/docs/user-guide/14-headless-mode.md`): `--tools <TOOLS>` is a comma-separated
+//! allow-list of built-in tool **ids** — `read_file`, `grep`, `list_dir`, `web_search`,
+//! `web_fetch`, `search_replace`, `run_terminal_cmd`, `todo_write`, `task` — and "only the listed
+//! tools will be available". Named with those ids, never with Claude's (`Read`, `Grep`), which it
+//! would not recognise. The docs add one gap: "MCP meta-tools remain available unless denied", so a
+//! read-only run also passes `--deny MCPTool` — a permission rule ("deny wins over every other
+//! rule", even over always-approve), in the rule syntax the same docs define, whose worst case if a
+//! future build stopped recognising it is a warning rather than a failed run.
+//!
+//! **`--sandbox read-only` is kernel-enforced and deliberately not used.** A session's sandbox is
+//! saved with it and a *different* profile on `--resume` is refused with an error, so a
+//! conversation started read-only could never write again after the user switched file generation
+//! on — and one started without it would fail to resume. The tool allow-list carries the guarantee
+//! without that trap.
 
 use tokio::process::Command;
 
@@ -92,7 +106,7 @@ impl AiEngine for GrokEngine {
             brief.push_str(inv.stdin_content);
         }
 
-        match write_brief_file_if_unsafe_inline(&brief) {
+        match write_brief_file_if_unsafe_inline(inv, &brief) {
             Some(file) => {
                 cmd.arg("--prompt-file").arg(file);
             }
@@ -106,14 +120,18 @@ impl AiEngine for GrokEngine {
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
         }
-        if inv.auto_approve_edits {
+        if inv.auto_approve_edits && !inv.read_only {
             cmd.arg("--always-approve");
         }
-        // The allow-list, which this engine used to ignore entirely. `--tools` is comma-separated
-        // and, per grok's own docs, is applied *after* the agent profile injects its optional
-        // tools — so naming a read-only set here is what actually takes `write_file` and `bash`
-        // away from a conversation that was promised it could not write.
-        if !inv.allowed_tools.is_empty() {
+        // The allow-list. `--tools` is comma-separated and, per grok's own docs, leaves only the
+        // listed tools available — so naming a read-only set here is what actually takes
+        // `search_replace` and `run_terminal_cmd` away from a conversation that was promised it
+        // could not write. A read-only run always gets this engine's own set, whatever the caller
+        // passed, plus the one rule the allow-list does not cover: MCP tools. See the module docs.
+        if inv.read_only {
+            cmd.arg("--tools").arg(self.read_only_tools().join(","));
+            cmd.arg("--deny").arg("MCPTool");
+        } else if !inv.allowed_tools.is_empty() {
             cmd.arg("--tools").arg(inv.allowed_tools.join(","));
         }
         // Resume by id. Not `--session-id`: that names a **new** conversation and errors if the id
@@ -129,27 +147,46 @@ impl AiEngine for GrokEngine {
         cmd
     }
 
-    /// `grok --reasoning-effort <EFFORT>` (aliased `--effort`). The CLI's help does not enumerate
-    /// the accepted values, so the neutral level is passed through unchanged and `max` is sent as
-    /// `high` — the highest level every reasoning vocabulary in circulation agrees on. If a future
-    /// build documents its own top step, this is the one line that changes.
-    /// grok's own names, taken from its shipped docs (`~/.grok/docs/user-guide/`): it calls the
-    /// file reader `read_file` and the directory lister `list_dir`, so Claude's vocabulary would be
-    /// silently rejected here.
+    /// grok's own tool ids, from the table in its shipped headless-mode docs (re-checked on 1.0.4):
+    /// the file reader is `read_file` and the directory lister `list_dir`, so Claude's vocabulary
+    /// would be silently rejected here. `glob`, which this list used to carry, is not in that table
+    /// — the docs' own read-only example is `read_file,grep,list_dir` — so it is left out rather
+    /// than trusted to be ignored.
     ///
     /// That this engine can be limited at all was a late discovery. `--tools` and
     /// `--disallowed-tools` have been there the whole time, and both this module and
     /// `commands::chat_cmd` used to state that Claude Code was the only engine with an allow-list.
     /// It was not, and a read-only conversation on grok was running with the full agent profile —
-    /// `write_file` and `bash` included — on the strength of a comment nobody had re-checked.
+    /// its file editor and its shell included — on the strength of a comment nobody had re-checked.
     fn read_only_tools(&self) -> Vec<String> {
-        ["read_file", "grep", "list_dir", "glob", "web_search", "web_fetch"]
+        ["read_file", "grep", "list_dir", "web_search", "web_fetch"]
             .iter()
             .map(|s| s.to_string())
             .collect()
     }
 
+    /// The allow-list is enforced by the CLI — tools outside it are not available to the model at
+    /// all — and MCP calls are denied by rule. See the module docs.
+    fn enforces_read_only(&self) -> bool {
+        true
+    }
 
+    /// `--output-format json` prints one object when the turn is over and nothing before it, so
+    /// silence is how a working grok looks. See [`AiEngine::quiet_while_working`].
+    fn quiet_while_working(&self) -> bool {
+        true
+    }
+
+    /// A failed turn that got as far as printing its object still carries `usage`.
+    fn reported_usage(&self, stdout: &str, _stderr: &str) -> Option<AiUsage> {
+        let reply = serde_json::from_str::<GrokReply>(stdout.trim()).ok()?;
+        reply.usage.as_ref().map(|u| usage_of(u, reply.total_cost_usd))
+    }
+
+    /// `grok --reasoning-effort <EFFORT>` (aliased `--effort`). The CLI's help does not enumerate
+    /// the accepted values, so the neutral level is passed through unchanged and `max` is sent as
+    /// `high` — the highest level every reasoning vocabulary in circulation agrees on. If a future
+    /// build documents its own top step, this is the one line that changes.
     fn effort_args(&self, effort: &str) -> Vec<String> {
         let level = if effort == crate::ai::effort::MAX { "high" } else { effort };
         vec!["--reasoning-effort".into(), level.into()]
@@ -177,15 +214,24 @@ impl AiEngine for GrokEngine {
 /// with an embedded newline (any system prompt, or `stdin_content` folded in below it) is just as
 /// unsafe if this binary is ever resolved through an npm `.cmd` shim on Windows, which routes
 /// through `cmd.exe` and rejects multi-line arguments outright (see `claude.rs`, which hit exactly
-/// this). Routing those through `--prompt-file` too costs one temp-file write and closes the gap
-/// regardless of which case applies to a given install.
-fn write_brief_file_if_unsafe_inline(content: &str) -> Option<std::path::PathBuf> {
+/// this). Routing those through `--prompt-file` too costs one private file write and closes the
+/// gap regardless of which case applies to a given install. The file goes when the run ends.
+fn write_brief_file_if_unsafe_inline(inv: &AiInvocation, content: &str) -> Option<std::path::PathBuf> {
     if content.len() <= INLINE_LIMIT && !content.contains('\n') {
         return None;
     }
-    let file = std::env::temp_dir().join(format!("codeflow-grok-{}.txt", uuid::Uuid::new_v4()));
-    std::fs::write(&file, content).ok()?;
-    Some(file)
+    inv.prompt_files.write("grok", "txt", content)
+}
+
+/// One reply's usage, in this app's terms.
+fn usage_of(u: &GrokUsage, cost_usd: Option<f64>) -> AiUsage {
+    AiUsage {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        cache_read_tokens: u.cache_read_input_tokens,
+        cache_write_tokens: 0,
+        cost_usd,
+    }
 }
 
 /// Pulls the model ids out of `grok models`, which reports for humans rather than for scripts:
@@ -304,13 +350,7 @@ fn interpret_output(
         _ => None,
     };
 
-    let usage = reply.usage.as_ref().map(|u| AiUsage {
-        input_tokens: u.input_tokens,
-        output_tokens: u.output_tokens,
-        cache_read_tokens: u.cache_read_input_tokens,
-        cache_write_tokens: 0,
-        cost_usd: reply.total_cost_usd,
-    });
+    let usage = reply.usage.as_ref().map(|u| usage_of(u, reply.total_cost_usd));
 
     Ok(AiRun {
         text: text.to_string(),
@@ -400,13 +440,61 @@ mod tests {
 
     #[test]
     fn small_single_line_prompts_stay_inline() {
-        assert!(write_brief_file_if_unsafe_inline("hola").is_none());
+        assert!(write_brief_file_if_unsafe_inline(&AiInvocation::new("", ""), "hola").is_none());
     }
 
     /// A brief under `INLINE_LIMIT` still has to move to a file once it has a newline — a system
-    /// prompt or folded-in `stdin_content` makes this the common case, not an edge case.
+    /// prompt or folded-in `stdin_content` makes this the common case, not an edge case. And the
+    /// file goes with the run that needed it.
     #[test]
     fn a_short_multiline_brief_still_moves_to_a_file() {
-        assert!(write_brief_file_if_unsafe_inline("system prompt\n\nthe ask").is_some());
+        let inv = AiInvocation::new("", "");
+        let path = write_brief_file_if_unsafe_inline(&inv, "system prompt\n\nthe ask").expect("a file");
+        assert!(path.exists());
+        drop(inv);
+        assert!(!path.exists(), "deleted with the invocation");
+    }
+
+    fn args_of(inv: &AiInvocation) -> Vec<String> {
+        GrokEngine
+            .build_command("grok", inv)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Read-only is the allow-list of grok's own read ids plus the MCP deny, and never the
+    /// always-approve — whatever list or approval the caller also passed.
+    #[test]
+    fn a_read_only_run_gets_the_allow_list_and_no_mcp() {
+        let broad = vec!["read_file".to_string(), "search_replace".to_string()];
+        let mut inv = AiInvocation::new("¿qué hace esto?", "");
+        inv.allowed_tools = &broad;
+        inv.auto_approve_edits = true;
+        inv.read_only = true;
+        let args = args_of(&inv);
+        assert!(args.windows(2).any(|pair| pair == ["--tools", "read_file,grep,list_dir,web_search,web_fetch"]), "{args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["--deny", "MCPTool"]), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--always-approve"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("search_replace")), "{args:?}");
+    }
+
+    /// Every id in the read-only set is one grok's docs list as a read tool — none of them writes.
+    #[test]
+    fn the_read_only_set_names_only_documented_read_tools() {
+        for tool in GrokEngine.read_only_tools() {
+            assert!(
+                ["read_file", "grep", "list_dir", "web_search", "web_fetch"].contains(&tool.as_str()),
+                "{tool} is not a documented read-only tool id"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_turn_that_printed_its_object_reports_what_it_spent() {
+        let usage = GrokEngine.reported_usage(SAMPLE, "").expect("usage");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (13820, 22));
+        assert!(GrokEngine.reported_usage("", "not signed in").is_none());
     }
 }

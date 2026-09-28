@@ -398,8 +398,13 @@ export function Pill({
  *
  * The count is only shown for more than one file: on a single file "1 of 1" is noise, and on a
  * folder it is the only thing that says how much is left to start.
+ *
+ * `onCancel` puts the way out beside the bar it stops: the transfer ends at its next chunk and
+ * takes the file it was half way through with it (see `remotes::files::cancel`), so what a cancel
+ * leaves behind is only what had already finished.
  */
-export function TransferBar({ progress }: { progress: RemoteTransferEvent }) {
+export function TransferBar({ progress, onCancel }: { progress: RemoteTransferEvent; onCancel?: () => void }) {
+  const t = useT();
   const percent = progress.total > 0 ? Math.min(100, (progress.done / progress.total) * 100) : 0;
   return (
     <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-1.5">
@@ -411,6 +416,13 @@ export function TransferBar({ progress }: { progress: RemoteTransferEvent }) {
           </span>
         )}
         <span className="shrink-0 tabular-nums">{Math.round(percent)}%</span>
+        {onCancel && (
+          <Tooltip label={t("remote.transferCancel")}>
+            <button type="button" onClick={onCancel} aria-label={t("remote.transferCancel")} className={DANGER_ICON_BUTTON}>
+              <X size={12} />
+            </button>
+          </Tooltip>
+        )}
       </div>
       <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-[var(--cf-press)]">
         <div

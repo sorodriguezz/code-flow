@@ -28,12 +28,21 @@
 //!
 //! Notifications (`open`, `change`, `close`) get **no reply at all**, which is why they have their
 //! own entry point: awaiting a response for one would hang until the session died.
+//!
+//! # Events
+//!
+//! Almost everything tsserver says unprompted is dropped. The exception is diagnostics: `geterr`
+//! and `geterrForProject` answer *only* with events — one `syntaxDiag`/`semanticDiag`/
+//! `suggestionDiag` per file, then `requestCompleted` — and those are what the Problems panel lists
+//! for files nobody has open. They go out as `tsserver:event`, tagged with the repository the
+//! session belongs to, so a window looking at another repository can tell them apart.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
@@ -76,12 +85,43 @@ fn tsserver_script(root: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+/// What the reader does with one message off the wire.
+#[derive(Debug, PartialEq)]
+enum Route {
+    /// The answer to a request: resolves whoever is waiting on that `seq`.
+    Response(i64),
+    /// An event worth forwarding to the editor, by name.
+    Event(String),
+    /// Everything else — progress, telemetry, `projectLoadingStart`, stray lines.
+    Drop,
+}
+
+/// The events the editor listens for — the diagnostics `geterr` and `geterrForProject` produce,
+/// and the marker that says a batch of them is complete. Kept to these on purpose: tsserver is
+/// chatty (`typingsInstallerPid`, `projectsUpdatedInBackground`, telemetry), and every forwarded
+/// event is an IPC hop into every window.
+const FORWARDED_EVENTS: [&str; 4] = ["syntaxDiag", "semanticDiag", "suggestionDiag", "requestCompleted"];
+
+fn route(message: &Value) -> Route {
+    match message.get("type").and_then(Value::as_str) {
+        Some("response") => match message.get("request_seq").and_then(Value::as_i64) {
+            Some(seq) => Route::Response(seq),
+            None => Route::Drop,
+        },
+        Some("event") => match message.get("event").and_then(Value::as_str) {
+            Some(name) if FORWARDED_EVENTS.contains(&name) => Route::Event(name.to_string()),
+            _ => Route::Drop,
+        },
+        _ => Route::Drop,
+    }
+}
+
 /// Starts the server for a repository, reusing the one already running for it.
 ///
 /// Returns the path of the `tsserver.js` it started, which is the one piece of information worth
 /// surfacing: "which TypeScript is answering" is the first question when an answer looks wrong.
 #[tauri::command]
-pub async fn ts_start(repo_path: String) -> Result<String, String> {
+pub async fn ts_start(app: AppHandle, repo_path: String) -> Result<String, String> {
     // Already serving this repository. Restarting would throw away a loaded project — seconds of
     // work — to arrive at the same place.
     if let Some(existing) = current() {
@@ -139,8 +179,10 @@ pub async fn ts_start(repo_path: String) -> Result<String, String> {
         }
     });
 
-    // Reader. Resolves whichever request each response belongs to.
+    // Reader. Resolves whichever request each response belongs to, and forwards the diagnostics
+    // events (see the module note).
     let reader_session = session.clone();
+    let reader_root = repo_path.clone();
     tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stdout);
         loop {
@@ -173,17 +215,25 @@ pub async fn ts_start(repo_path: String) -> Result<String, String> {
             }
             let Ok(message) = serde_json::from_slice::<Value>(&body) else { continue };
 
-            // Only responses carry `request_seq`; events are dropped. Diagnostics arrive as events
-            // and are not wired yet — see the note in `lib/tsserver.ts` — and dropping them costs
-            // nothing until they are.
-            if message.get("type").and_then(Value::as_str) != Some("response") {
-                continue;
-            }
-            let Some(seq) = message.get("request_seq").and_then(Value::as_i64) else { continue };
-            if let Ok(mut pending) = reader_session.pending.lock() {
-                if let Some(tx) = pending.remove(&seq) {
-                    let _ = tx.send(message);
+            match route(&message) {
+                Route::Response(seq) => {
+                    if let Ok(mut pending) = reader_session.pending.lock() {
+                        if let Some(tx) = pending.remove(&seq) {
+                            let _ = tx.send(message);
+                        }
+                    }
                 }
+                Route::Event(name) => {
+                    let _ = app.emit(
+                        "tsserver:event",
+                        json!({
+                            "root": reader_root,
+                            "event": name,
+                            "body": message.get("body").cloned().unwrap_or(Value::Null),
+                        }),
+                    );
+                }
+                Route::Drop => {}
             }
         }
     });
@@ -232,12 +282,16 @@ pub async fn ts_request(command: String, arguments: Value) -> Result<Value, Stri
     Ok(answer.get("body").cloned().unwrap_or(Value::Null))
 }
 
-/// A message tsserver never replies to — `open`, `change`, `close`, `updateOpen`.
+/// A message tsserver never replies to — `open`, `change`, `close`, `updateOpen` — or replies to
+/// only with events: `geterr` and `geterrForProject`.
 ///
 /// Its own command because awaiting these through `ts_request` would block for the full timeout on
 /// every keystroke: there is no response coming, and the absence is correct rather than a fault.
+///
+/// Answers with the message's `seq`, which is what the `requestCompleted` event names when a
+/// `geterr` batch is done — the one way to know a project-wide check has finished.
 #[tauri::command]
-pub async fn ts_notify(command: String, arguments: Value) -> Result<(), String> {
+pub async fn ts_notify(command: String, arguments: Value) -> Result<i64, String> {
     let session = current().ok_or("tsserver is not running")?;
     let seq = session.next_seq.fetch_add(1, Ordering::Relaxed);
     let payload = json!({ "seq": seq, "type": "request", "command": command, "arguments": arguments });
@@ -245,7 +299,7 @@ pub async fn ts_notify(command: String, arguments: Value) -> Result<(), String> 
         .outbound
         .send(payload.to_string())
         .map_err(|_| "tsserver is not running".to_string())?;
-    Ok(())
+    Ok(seq)
 }
 
 /// Whether a server is up, and for which repository — what the editor asks before wiring providers.
@@ -281,5 +335,25 @@ mod tests {
         let repo = Path::new(root).parent().expect("src-tauri has a parent");
         assert!(tsserver_script(&repo.to_string_lossy()).is_some());
         assert!(tsserver_script("/definitely/not/a/project").is_none());
+    }
+
+    #[test]
+    fn responses_resolve_by_their_request_seq() {
+        let message = json!({ "type": "response", "request_seq": 7, "success": true, "body": {} });
+        assert_eq!(route(&message), Route::Response(7));
+        // A response with no seq has nobody to go to.
+        assert_eq!(route(&json!({ "type": "response" })), Route::Drop);
+    }
+
+    #[test]
+    fn only_the_diagnostics_events_are_forwarded() {
+        for name in ["syntaxDiag", "semanticDiag", "suggestionDiag", "requestCompleted"] {
+            let message = json!({ "type": "event", "event": name, "body": { "file": "/r/a.ts", "diagnostics": [] } });
+            assert_eq!(route(&message), Route::Event(name.to_string()));
+        }
+        for name in ["projectLoadingStart", "telemetry", "typingsInstallerPid", "projectsUpdatedInBackground"] {
+            assert_eq!(route(&json!({ "type": "event", "event": name })), Route::Drop);
+        }
+        assert_eq!(route(&json!({ "hello": "world" })), Route::Drop);
     }
 }

@@ -83,8 +83,9 @@ pub fn resource_dir() -> Option<&'static Path> {
 ///
 /// `CodeFlow`, and not the bundle identifier that Tauri's `app_local_data_dir()` would give
 /// (`com.codeflow.app`). The trade is deliberate. This module cannot use Tauri's resolver at all —
-/// `db::init()` runs at `.manage()` time, before any `AppHandle` exists, and `run()` migrates
-/// earlier still — so the path is computed here from `dirs` either way. Given that, the name the
+/// `run()` migrates the layout before the Tauri builder exists, let alone an `AppHandle`, and the
+/// database that `boot_guard::open` opens in `setup` has to be the file that migration wrote — so
+/// the path is computed here from `dirs` either way. Given that, the name the
 /// user reads when they press "Show in folder" should be the app's name and not its reverse-DNS id.
 ///
 /// The cost is that nothing can assert these agree with what Tauri would answer. The tests at the
@@ -236,9 +237,9 @@ fn resolve(layout: Layout, override_home: Option<PathBuf>, bases: &Bases) -> Roo
 
 /// The roots for this process, resolved once.
 ///
-/// Cached because `db::init()`, the migration and the requirements probe all ask before the window
-/// exists, and an environment variable that changed mid-session would give three different answers
-/// to three callers that must agree.
+/// Cached because the migration, the requirements probe and `boot_guard::open` all ask before the
+/// window exists, and an environment variable that changed mid-session would give three different
+/// answers to three callers that must agree.
 fn roots() -> &'static Roots {
     static ROOTS: OnceLock<Roots> = OnceLock::new();
     ROOTS.get_or_init(|| {
@@ -503,6 +504,16 @@ pub fn reset_marker_path() -> PathBuf {
 /// without one as an unknown occupant to abort on, not as an absent manifest to migrate over.
 pub fn layout_manifest_path() -> PathBuf {
     state_dir().join(".codeflow-layout.json")
+}
+
+/// The phone server's TLS certificate and its private key (`remotectl::tls`).
+///
+/// State, not cache: losing it is not free — every paired phone has accepted *this* certificate,
+/// and a new one means each of them showing the warning again. Not user data either, and a reset
+/// taking it is right: a fresh certificate is minted on the next start, which is what "reset"
+/// promises. Never in a backup — the key is this machine's identity, not configuration.
+pub fn remote_tls_dir() -> PathBuf {
+    state_dir().join("remote-tls")
 }
 
 // --------------------------------------------------------------- cache root

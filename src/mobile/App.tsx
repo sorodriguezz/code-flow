@@ -30,6 +30,10 @@ import { ChainScreen } from "./screens/ChainScreen";
 import { ReviewScreen } from "./screens/ReviewScreen";
 import { JobScreen } from "./screens/JobScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
+import { PipelineRunScreen } from "./screens/PipelinesScreen";
+import { StashScreen } from "./screens/StashScreen";
+import { NotificationsScreen } from "./screens/NotificationsScreen";
+import type { ServiceRuntime } from "../types/services";
 import { ScopeSheet } from "./screens/ScopeSheet";
 import { useSwipeBack } from "./ui/gestures";
 
@@ -198,6 +202,9 @@ export function App() {
           if (payload.origin && payload.origin === storedDeviceId()) break;
           if (payload.domain === "chains") void state.refreshChains();
           if (payload.domain === "repo") void state.refreshRepo();
+          // The desktop's notification centre moved. Its main window republishes the whole list, so
+          // this is one re-read, and the bell's dot follows.
+          if (payload.domain === "notifications") void state.refreshNotices();
           // Screens that own their own data are told directly. `tasks` is deliberately absent —
           // there is no task screen on this client, so there is nothing for it to make stale.
           if (
@@ -224,6 +231,11 @@ export function App() {
         case "git:done":
           void state.refreshRepo();
           announceInvalidation({ domain: "repo" });
+          break;
+        // A service changed state — started, passed its gate, crashed, stopped — at the desk or from
+        // here. One small frame per change; the Services list redraws from it.
+        case "services:runtime":
+          state.applyServiceRuntime(frame.payload as ServiceRuntime);
           break;
         // The server sends this when this socket fell far enough behind to lose frames — a locked
         // screen through a long run. Everything on screen is suspect, so everything is re-read, and
@@ -514,6 +526,12 @@ function RouteView({ route }: { route: Route }) {
       );
     case "job":
       return <JobScreen id={route.id} label={route.label} />;
+    case "pipeline":
+      return <PipelineRunScreen projectId={route.projectId} runId={route.runId} title={route.title} />;
+    case "stash":
+      return <StashScreen repoPath={route.repoPath} />;
+    case "notifications":
+      return <NotificationsScreen />;
     case "settings":
       return <SettingsScreen />;
     case "scope":

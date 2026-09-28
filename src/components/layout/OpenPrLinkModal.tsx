@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useDialog } from "../../lib/useFocusTrap";
 import {
   AlertTriangle,
   ExternalLink,
@@ -36,7 +37,9 @@ function looksLikePrLink(text: string): boolean {
     value.includes("/pullrequests/") ||
     // GitLab's own shape — without it a merge-request URL already on the clipboard is never
     // offered, which is the whole convenience this modal exists for.
-    value.includes("/merge_requests/")
+    value.includes("/merge_requests/") ||
+    // Bitbucket's, hyphenated.
+    value.includes("/pull-requests/")
   );
 }
 
@@ -302,22 +305,31 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
     </>
   );
 
+  // Tab stays in the dialog and Escape closes it while it is on top — the clone dialog it can open
+  // over itself takes the first Escape. Escape used to work only with the focus inside the card.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, true, onClose);
+
   return (
     <>
       <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={onClose}>
         <div
+          ref={panelRef}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={titleId}
+          // ⌘⇧L closes it again — the one app chord that may run over it.
+          data-shortcut-owner="pr.fromLink"
           onClick={(e) => e.stopPropagation()}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") onClose();
-          }}
           className="flex w-[480px] flex-col rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
         >
           <div className="mb-3 flex shrink-0 items-center justify-between">
-            <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
+            <h3 id={titleId} className="flex items-center gap-1.5 text-[15px] font-semibold">
               <Link2 size={14} />
               {t("prLink.title")}
             </h3>
-            <button onClick={onClose} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
+            <button onClick={onClose} aria-label={t("common.close")} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
               <X size={15} />
             </button>
           </div>

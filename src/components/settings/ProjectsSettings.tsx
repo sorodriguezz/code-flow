@@ -444,6 +444,7 @@ export function ProjectsSettings() {
                     <button
                       onClick={() => setRenamingId(null)}
                       title={t("common.cancel")}
+                      aria-label={t("common.cancel")}
                       className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
                     >
                       <X size={13} />

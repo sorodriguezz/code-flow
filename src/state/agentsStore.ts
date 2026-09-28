@@ -21,16 +21,27 @@ import {
 } from "../lib/tauri/commands";
 import { notifyTurnSettled } from "./agentEvents";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunAbout } from "./aiRunStore";
-import { parseTrace, type ChatMessage } from "./chatStore";
+import type { ChatMessage } from "./chatStore";
+import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
 import { notify } from "./notificationStore";
+import { useWorkspaceStore } from "./workspaceStore";
 import type { AgentProject, AgentTask, AgentTaskStatus, WorkspaceAgent } from "../types/domain";
 
 /** The repository name the backend put after its busy marker, for the "not now" message. */
 function busyRepoName(error: string): string {
   const at = error.indexOf(REPO_BUSY_MARKER);
   return at < 0 ? "" : error.slice(at + REPO_BUSY_MARKER.length).replace(/"$/, "").trim();
+}
+
+/** The same name, for a refusal decided here rather than by the backend. Empty if the workspace's
+ * repositories are not loaded — the sentence still reads without it, and this is a toast, not a
+ * reason to hold the refusal back. */
+function repoNameOf(workspaceId: string | null, projectId: string): string {
+  if (!workspaceId) return "";
+  const projects = useWorkspaceStore.getState().projectsByWorkspace[workspaceId] ?? [];
+  return projects.find((project) => project.id === projectId)?.name ?? "";
 }
 
 /** How a turn ended, for whoever asked for it. `busy` means it never ran at all. */
@@ -152,6 +163,18 @@ interface AgentsState {
    * nothing outside this view needs to open it. */
   rosterOpen: boolean;
   loading: boolean;
+  /**
+   * A follow-up the backend refused because the repository was taken, by task id — handed back so
+   * the composer can put it where the user typed it.
+   *
+   * The composer empties itself the moment a send is accepted, and a refusal from the backend's
+   * lease arrives only after that, withdrawing the optimistic bubble. With nowhere to go the text
+   * was simply gone. Kept here rather than in the composer because the composer may not be on
+   * screen when the refusal lands — the user can have opened another task in the meantime.
+   */
+  bounced: Record<string, string>;
+  /** Takes (and forgets) the text a refused follow-up left behind for a task. */
+  takeBounced: (taskId: string) => string | null;
 
   setWorkspace: (id: string | null) => Promise<void>;
   reloadRoster: () => Promise<void>;
@@ -191,7 +214,9 @@ interface AgentsState {
    * already removed — a chain deleted takes its step tasks with it — where calling `remove` would
    * mean a second delete of something that is gone. */
   forget: (taskIds: string[]) => void;
-  send: (taskId: string, message: string) => void;
+  /** Starts a turn unless one of its guards refuses it, and says which: `true` when the turn was
+   * dispatched. A caller that empties a box on send must only do so for a `true`. */
+  send: (taskId: string, message: string) => boolean;
   /** `send` without its guards, for a caller that has already decided. Always settles. */
   runTurn: (
     taskId: string,
@@ -249,6 +274,17 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   query: "",
   rosterOpen: false,
   loading: false,
+  bounced: {},
+
+  takeBounced: (taskId) => {
+    const text = get().bounced[taskId];
+    if (text === undefined) return null;
+    set((s) => {
+      const { [taskId]: _taken, ...bounced } = s.bounced;
+      return { bounced };
+    });
+    return text;
+  },
 
   setWorkspace: async (id) => {
     if (get().workspaceId === id) return;
@@ -349,6 +385,9 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     // Mark it loaded up front so a second click while the read is in flight doesn't start another.
     set((s) => ({ live: { ...s.live, [taskId]: { ...(s.live[taskId] ?? EMPTY_LIVE), loaded: true } } }));
 
+    // Read without traces: a long task's transcript carried every turn's (up to ~600 KB each) just
+    // to draw bubbles that show none of them. A turn keeps its `traceId` and fetches the one trace
+    // its disclosure is opened on — see `lib/turnTrace.ts`.
     const entries = await getChatConversation(task.project_id, task.conversation_id).catch(() => []);
     // One stored row is one exchange, so both halves carry its timestamp — the question was never
     // recorded separately, and splitting hairs there would mean inventing a time.
@@ -364,6 +403,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         engineVersion: entry.engine_version ?? undefined,
         isError: entry.is_error,
         trace: parseTrace(entry.trace),
+        traceId: traceIdOf(entry.trace, entry.id),
       },
     ]);
     const engineSession = entries.reduce<string | null>((last, e) => e.engine_session_id ?? last, null);
@@ -436,25 +476,41 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
 
   send: (taskId, message) => {
     const trimmed = message.trim();
-    if (!trimmed) return;
+    if (!trimmed) return false;
     const task = get().tasks.find((candidate) => candidate.id === taskId);
-    if (!task) return;
-    if ((get().live[taskId] ?? EMPTY_LIVE).sending) return;
+    if (!task) return false;
+    // Already running: the composer is showing a spinner and a Stop button, so the refusal is on
+    // screen already and does not need saying twice.
+    if ((get().live[taskId] ?? EMPTY_LIVE).sending) return false;
     // One agent at a time per repository. Two runs on one working copy would edit the same files
     // with independent restore points and race over the skills directory the app syncs in.
     // The backend takes a real lease on the folder, which is what actually enforces this; refusing
     // here as well is what keeps the user from watching a send bounce.
-    if (get().runningInProject(task.project_id, taskId)) return;
+    //
+    // A fresh read, so it can refuse a send the composer's own check waved through — that one is a
+    // subscribed selector a render behind. And it has to say so: the dialog that creates a task
+    // sends its goal through here and then closes, so a silent refusal left a task that looked
+    // started and had never run, with nothing on screen to say why.
+    if (get().runningInProject(task.project_id, taskId)) {
+      pushErrorToast(translate("agents.busyInRepo", { name: repoNameOf(get().workspaceId, task.project_id) }));
+      return false;
+    }
+    // Whether this is a follow-up: the opening turn of a task has its goal on screen and a Run
+    // button when it did not go, so only a follow-up has text that would otherwise be lost.
+    const followUp = (get().live[taskId]?.messages.length ?? 0) > 0 || task.turns > 0;
     // Losing the race to the backend's lease is rare but real — another window of this app, or a
     // chain that claimed the folder a moment ago. It is not a failure and the turn never ran, so
-    // it is said once, quietly, rather than filed in the transcript.
+    // it is said once, quietly, rather than filed in the transcript — and the text goes back to
+    // the composer it was typed in.
     void get().runTurn(taskId, trimmed, {
       onSettle: (outcome) => {
         if (outcome.kind === "error" && outcome.busy) {
           pushErrorToast(translate("agents.busyInRepo", { name: busyRepoName(outcome.message) }));
+          if (followUp) set((s) => ({ bounced: { ...s.bounced, [taskId]: trimmed } }));
         }
       },
     });
+    return true;
   },
 
   /**

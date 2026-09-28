@@ -26,7 +26,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { EditorSettings } from "./EditorSettings";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
-import { useFocusTrap } from "../../lib/useFocusTrap";
+import { isTopLayer, useFocusTrap } from "../../lib/useFocusTrap";
 import { scrollEdgeMask, useScrollEdges } from "../../lib/useScrollEdges";
 import {
   SELF_SCROLLING_SECTIONS,
@@ -363,6 +363,11 @@ export function SettingsView() {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // Not ours when a dialog is open over this one — a confirmation or a prompt raised from a
+        // pane. Both used to close with Settings on one Escape: this listener was registered first,
+        // so it ran first. `defaultPrevented` covers the dialog that answered and closed inside the
+        // same event, before this listener ran; the layer check covers the one still open.
+        if (e.defaultPrevented || !isTopLayer(panelRef.current)) return;
         // Escape clears the search before it closes the window: while a query is showing, the
         // results *are* what is on screen, and dismissing the whole window to get rid of them
         // throws away the section you were on as well.
@@ -390,6 +395,9 @@ export function SettingsView() {
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
         data-tour="settings-panel"
+        // ⌘, still closes it while it is open — the one app chord that may run over this dialog.
+        // See `shortcutBlockedByDialog`.
+        data-shortcut-owner="app.settings"
         tabIndex={-1}
         role="dialog"
         aria-modal="true"

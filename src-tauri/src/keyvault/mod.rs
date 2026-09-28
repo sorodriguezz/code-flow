@@ -20,6 +20,7 @@
 //! Read [`crypto`] before changing anything here; the key hierarchy is stated there.
 
 pub mod crypto;
+pub mod export;
 pub mod session;
 pub mod totp;
 

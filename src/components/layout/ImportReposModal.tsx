@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
+import { useDialog } from "../../lib/useFocusTrap";
 import { FolderGit2, GitBranch, Loader2, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import type { DuplicateProject, FoundRepo } from "../../lib/tauri/commands";
@@ -69,23 +70,34 @@ export function ImportReposModal({
     }
   };
 
+  // A dialog's keyboard contract: Tab stays inside, and Escape closes it while it is the top
+  // layer, and not while importing. It had neither — Tab walked into the app behind the backdrop.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, true, importing ? null : onClose);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24"
       onClick={importing ? undefined : onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
         className="flex max-h-[60vh] w-[460px] flex-col rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-1 flex items-center justify-between">
-          <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
+          <h3 id={titleId} className="flex items-center gap-1.5 text-[15px] font-semibold">
             <FolderGit2 size={14} />
             {t("import.title")}
           </h3>
           {!importing && (
             <button
               onClick={onClose}
+              aria-label={t("common.close")}
               className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
             >
               <X size={15} />

@@ -110,13 +110,14 @@ const BranchSwitcherModal = lazy(() =>
 
 function WindowsControls() {
   const maximized = useSyncExternalStore(subscribeWindowStatus, () => getWindowStatus().maximized);
+  const t = useT();
   return (
     // `data-window-control` for the same reason the main bar's carry it: these belong to the window
     // rather than the app, and an overlay laid across them must hand their presses back.
     // Full height and flush with the corner, like the main window's — see `TitleBar`.
     <div className="flex self-stretch">
       <button
-        aria-label="Minimize"
+        aria-label={t("windows.minimize")}
         data-window-control="minimize"
         onClick={() => win.minimize()}
         className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-[var(--cf-press)]"
@@ -124,7 +125,7 @@ function WindowsControls() {
         <Minus size={14} />
       </button>
       <button
-        aria-label={maximized ? "Restore" : "Maximize"}
+        aria-label={maximized ? t("windows.restore") : t("windows.maximize")}
         data-window-control="maximize"
         onClick={() => void toggleMaximize().catch((e) => console.error("toggleMaximize", e))}
         className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-[var(--cf-press)]"
@@ -132,7 +133,7 @@ function WindowsControls() {
         {maximized ? <Copy size={11} className="-scale-x-100" /> : <Square size={12} />}
       </button>
       <button
-        aria-label="Close"
+        aria-label={t("common.close")}
         data-window-control="close"
         onClick={() => win.close()}
         className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-red-500 hover:text-white"

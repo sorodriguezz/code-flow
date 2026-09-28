@@ -12,6 +12,7 @@ import {
   Radar,
   ScrollText,
   Server,
+  X,
   Zap,
   type LucideIcon,
 } from "lucide-react";
@@ -22,13 +23,14 @@ import { useT } from "../../state/languageStore";
 import { promptAction } from "../../state/promptStore";
 import { useServicesStore } from "../../state/servicesStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { detectServices, servicePathExists } from "../../lib/tauri/services";
+import { detectServices, listEnvFiles, servicePathExists } from "../../lib/tauri/services";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import {
   isComposeCommand,
   parseJson,
   serviceDeps,
   serviceDetectedPorts,
+  serviceEnvFiles,
   servicePorts,
   type ReadyKind,
   type ServiceCandidate,
@@ -99,12 +101,26 @@ export function ServiceEditor({
   const [autorestart, setAutorestart] = useState(service?.autorestart ?? false);
   const [pinned, setPinned] = useState(service ? servicePorts(service).join(", ") : "");
   const [envText, setEnvText] = useState(() => envToText(service?.env ?? "{}"));
+  const [envFiles, setEnvFiles] = useState<string[]>(() => (service ? serviceEnvFiles(service) : []));
+  /** Whether the env files were chosen by hand — until then a new service follows its folder's `.env`. */
+  const [envFilesTouched, setEnvFilesTouched] = useState(!!service);
+  /** The env files the folder has, offered as one click each. */
+  const [availableEnvFiles, setAvailableEnvFiles] = useState<string[]>([]);
+  const [envFileDraft, setEnvFileDraft] = useState("");
+  /** Keyring references the row holds — which the form cannot make and a service cannot be given.
+   *  Shown, and removable, instead of kept out of sight; see `supervisor::env_of`. */
+  const vaultKeys = useMemo(() => keyringKeys(service?.env ?? "{}"), [service?.env]);
+  const [dropVault, setDropVault] = useState(false);
   // Open from the start only when something in it was set by hand: a new service, or one left on
   // the defaults, has nothing in there worth reading first.
   const [advanced, setAdvanced] = useState(
     () =>
       !!service &&
-      (service.ready_kind !== "auto" || servicePorts(service).length > 0 || envToText(service.env) !== ""),
+      (service.ready_kind !== "auto" ||
+        servicePorts(service).length > 0 ||
+        envToText(service.env) !== "" ||
+        serviceEnvFiles(service).length > 0 ||
+        keyringKeys(service.env).length > 0),
   );
   const [saving, setSaving] = useState(false);
   /** `null` while unknown — the field is only marked wrong once the backend has actually looked. */
@@ -151,6 +167,36 @@ export function ServiceEditor({
     };
   }, [cwd, project]);
 
+  /** The env files the service's folder holds. A new service loads its `.env` unless told otherwise —
+   *  every framework's own dev command reads it, so the same command run here should too. */
+  useEffect(() => {
+    const target = project ? joinPath(project.local_path, cwd.trim()) : cwd.trim();
+    if (!target) {
+      setAvailableEnvFiles([]);
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(() => {
+      void listEnvFiles(target)
+        .then((found) => {
+          if (!alive) return;
+          setAvailableEnvFiles(found);
+          if (!envFilesTouched) setEnvFiles(found.includes(".env") ? [".env"] : []);
+        })
+        .catch(() => alive && setAvailableEnvFiles([]));
+    }, 300);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [cwd, project, envFilesTouched]);
+
+  const addEnvFile = (file: string) => {
+    const trimmed = literal(file).trim();
+    setEnvFilesTouched(true);
+    if (trimmed) setEnvFiles((current) => (current.includes(trimmed) ? current : [...current, trimmed]));
+  };
+
   /** Everything except this service — you cannot wait for yourself. */
   const others = useMemo(() => services.filter((row) => row.id !== service?.id), [services, service?.id]);
 
@@ -195,7 +241,7 @@ export function ServiceEditor({
       project_id: projectId || null,
       cwd: cwd.trim(),
       command: trimmed,
-      env: textToEnv(envText, service?.env ?? "{}"),
+      env: textToEnv(envText, dropVault ? "{}" : (service?.env ?? "{}")),
       ports: JSON.stringify(portList(pinned)),
       ready_kind: readyKind,
       ready_value: readyKind === "port" || readyKind === "log" || readyKind === "http" ? readyValue.trim() : "",
@@ -206,6 +252,7 @@ export function ServiceEditor({
       created_at: service?.created_at ?? "",
       updated_at: service ? new Date().toISOString() : "",
       detected_ports: service?.detected_ports ?? "[]",
+      env_files: JSON.stringify(envFiles),
     };
     let saved: ServiceRow | null = null;
     if (service) {
@@ -256,6 +303,7 @@ export function ServiceEditor({
     readyDescription(readyKind, readyValue.trim(), t),
     pinnedPorts.length ? t("services.advancedPorts", { ports: pinnedPorts.join(", ") }) : null,
     envCount === 1 ? t("services.advancedEnvOne") : envCount > 1 ? t("services.advancedEnv", { count: envCount }) : null,
+    envFiles.length ? t("services.advancedEnvFiles", { files: envFiles.join(", ") }) : null,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -571,8 +619,68 @@ export function ServiceEditor({
                     rows={3}
                     className={`${INPUT} resize-y font-mono leading-snug`}
                   />
+                  {vaultKeys.length > 0 && !dropVault && (
+                    <span className="mt-1 block text-[10.5px] leading-snug text-[var(--cf-danger)]">
+                      {t("services.vaultRefs", { keys: vaultKeys.join(", ") })}{" "}
+                      <button onClick={() => setDropVault(true)} className="underline hover:no-underline">
+                        {t("services.vaultRefsRemove")}
+                      </button>
+                    </span>
+                  )}
                 </Labelled>
               </div>
+              <Labelled label={t("services.envFiles")} hint={t("services.envFilesHint")}>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {envFiles.map((file) => (
+                    <span
+                      key={file}
+                      className="flex items-center gap-1 rounded-full border border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] py-0.5 pl-2 pr-1 font-mono text-[11px] text-[var(--cf-accent)]"
+                    >
+                      {file}
+                      <button
+                        onClick={() => {
+                          setEnvFilesTouched(true);
+                          setEnvFiles((current) => current.filter((other) => other !== file));
+                        }}
+                        title={t("services.envFileRemove", { file })}
+                        aria-label={t("services.envFileRemove", { file })}
+                        className="rounded-full p-0.5 hover:bg-[var(--cf-hover)]"
+                      >
+                        <X size={10} />
+                      </button>
+                    </span>
+                  ))}
+                  {availableEnvFiles
+                    .filter((file) => !envFiles.includes(file))
+                    .map((file) => (
+                      <button
+                        key={file}
+                        onClick={() => addEnvFile(file)}
+                        className="rounded-full border border-dashed border-[var(--cf-border)] px-2 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                      >
+                        + {file}
+                      </button>
+                    ))}
+                  <input
+                    value={envFileDraft}
+                    onChange={(e) => setEnvFileDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter" || !envFileDraft.trim()) return;
+                      e.preventDefault();
+                      addEnvFile(envFileDraft);
+                      setEnvFileDraft("");
+                    }}
+                    onBlur={() => {
+                      if (!envFileDraft.trim()) return;
+                      addEnvFile(envFileDraft);
+                      setEnvFileDraft("");
+                    }}
+                    {...MACHINE_TEXT}
+                    placeholder={t("services.envFilesAdd")}
+                    className="min-w-[120px] flex-1 bg-transparent py-0.5 font-mono text-[11px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
+                  />
+                </div>
+              </Labelled>
             </div>
           )}
         </div>
@@ -651,8 +759,16 @@ function Labelled({
   );
 }
 
+/** The keys of a stored environment whose values are not plain — `{"vault": id}` keyring references. */
+function keyringKeys(json: string): string[] {
+  return Object.entries(parseJson<Record<string, unknown>>(json, {}))
+    .filter(([, value]) => value !== null && typeof value === "object")
+    .map(([key]) => key);
+}
+
 /** `KEY=VALUE` lines from the stored JSON object. Entries that are not plain values (a keyring
- *  reference) are not shown — and are kept on save, see {@link textToEnv}. */
+ *  reference) are not shown here — they are listed under the field, and kept on save unless removed
+ *  there, see {@link textToEnv}. */
 function envToText(json: string): string {
   const env = parseJson<Record<string, unknown>>(json, {});
   return Object.entries(env)

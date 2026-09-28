@@ -28,7 +28,7 @@ use super::queries::now;
 
 const SERVICE_COLUMNS: &str = "id, workspace_id, group_id, name, kind, project_id, cwd, command, \
      env, ports, ready_kind, ready_value, depends_on, autorestart, color, sort_order, created_at, \
-     updated_at, detected_ports";
+     updated_at, detected_ports, env_files";
 const GROUP_COLUMNS: &str = "id, workspace_id, name, sort_order, created_at, updated_at";
 
 fn map_service(row: &rusqlite::Row) -> rusqlite::Result<Service> {
@@ -52,6 +52,7 @@ fn map_service(row: &rusqlite::Row) -> rusqlite::Result<Service> {
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
         detected_ports: row.get(18)?,
+        env_files: row.get(19)?,
     })
 }
 
@@ -104,8 +105,8 @@ pub fn create_service(conn: &Connection, service: &Service) -> rusqlite::Result<
     conn.execute(
         "INSERT INTO services (id, workspace_id, group_id, name, kind, project_id, cwd, command,
              env, ports, ready_kind, ready_value, depends_on, autorestart, color, sort_order,
-             created_at, updated_at, detected_ports)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17, '[]')",
+             created_at, updated_at, detected_ports, env_files)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17, '[]', ?18)",
         params![
             id,
             service.workspace_id,
@@ -124,6 +125,7 @@ pub fn create_service(conn: &Connection, service: &Service) -> rusqlite::Result<
             service.color,
             order,
             stamp,
+            service.env_files,
         ],
     )?;
     get_service(conn, &id).map(|found| found.expect("just inserted"))
@@ -138,7 +140,7 @@ pub fn update_service(conn: &Connection, service: &Service) -> rusqlite::Result<
     conn.execute(
         "UPDATE services SET group_id = ?2, name = ?3, kind = ?4, project_id = ?5, cwd = ?6,
              command = ?7, env = ?8, ports = ?9, ready_kind = ?10, ready_value = ?11,
-             depends_on = ?12, autorestart = ?13, color = ?14, updated_at = ?15
+             depends_on = ?12, autorestart = ?13, color = ?14, updated_at = ?15, env_files = ?16
          WHERE id = ?1",
         params![
             service.id,
@@ -156,6 +158,7 @@ pub fn update_service(conn: &Connection, service: &Service) -> rusqlite::Result<
             i64::from(service.autorestart),
             service.color,
             now(),
+            service.env_files,
         ],
     )?;
     Ok(())
@@ -280,7 +283,22 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             detected_ports: "[]".into(),
+            env_files: "[]".into(),
         }
+    }
+
+    /// The env files a service loads are saved and read back, on create and on update.
+    #[test]
+    fn env_files_are_stored_with_the_service() {
+        let conn = seeded();
+        let mut row = service("", "api", "[]");
+        row.env_files = r#"[".env"]"#.into();
+        let created = create_service(&conn, &row).unwrap();
+        assert_eq!(created.env_files, r#"[".env"]"#);
+        let mut edited = created.clone();
+        edited.env_files = r#"[".env",".env.local"]"#.into();
+        update_service(&conn, &edited).unwrap();
+        assert_eq!(get_service(&conn, &created.id).unwrap().unwrap().env_files, r#"[".env",".env.local"]"#);
     }
 
     /// New rows land at the end of the list rather than tying at zero.

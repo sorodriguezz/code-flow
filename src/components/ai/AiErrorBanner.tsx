@@ -1,6 +1,6 @@
 import { Check, Copy, ExternalLink, TerminalSquare } from "lucide-react";
 import { useState } from "react";
-import type { ClaudeErrorInfo, SetupProblem } from "../../lib/claudeError";
+import { quotaRetryNote, type ClaudeErrorInfo, type SetupProblem } from "../../lib/claudeError";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
@@ -45,6 +45,7 @@ export function AiErrorBanner({
     : error.kind === "billing"
       ? t("ai.billingMessage")
       : t("changes.quotaMessage");
+  const retry = quotaRetryNote(error);
 
   return (
     // Selectable: a provider error is the text most likely to be pasted into a search or an
@@ -52,13 +53,15 @@ export function AiErrorBanner({
     <div className="select-text rounded-lg border border-[var(--cf-danger)]/30 bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] p-4">
       <p className={`whitespace-pre-wrap break-words ${size} text-[var(--cf-danger)]`}>{headline}</p>
 
-      {error.isQuotaExceeded && (
+      {/* The provider's own words, as they are — "resets 12am (America/Santiago)" is the one fact
+          the user needs, and a parsed "N hours" was all that used to survive of it. */}
+      {error.isQuotaExceeded && error.message && (
+        <p className={`mt-1 whitespace-pre-wrap break-words ${subSize} text-[var(--cf-text)]`}>{error.message}</p>
+      )}
+
+      {error.isQuotaExceeded && (error.kind === "billing" || retry) && (
         <p className={`mt-1 ${subSize} text-[var(--cf-text-muted)]`}>
-          {error.kind === "billing"
-            ? t("ai.billingHint")
-            : error.resetHint
-              ? t("changes.quotaRetry", { hint: error.resetHint })
-              : t("changes.quotaRetryLater")}
+          {error.kind === "billing" ? t("ai.billingHint") : retry && t(retry.key, retry.params)}
         </p>
       )}
 

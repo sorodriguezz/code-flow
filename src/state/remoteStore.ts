@@ -22,6 +22,7 @@ import {
   remotePing,
   remoteRenameGroup,
   remoteReorderHosts,
+  remoteTypePassword,
   remoteUpdateHost,
   remoteUpdateSnippet,
 } from "../lib/tauri/remoteCommands";
@@ -29,7 +30,11 @@ import { closeTerminal, writeTerminal } from "../lib/tauri/commands";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { useHostKeyStore } from "./hostKeyStore";
+import { confirmAction } from "./confirmStore";
 import { looksSecret } from "../lib/remote/typedLines";
+import { hostKeyTarget } from "../lib/remote/hostKeyTarget";
+import { isNotAsking } from "../lib/remote/transfers";
 import {
   defaultHostSpec,
   parseHostSpec,
@@ -118,6 +123,12 @@ export interface RemoteSessionTab {
   sessionId: string;
   /** Set when the pty reported the process ended, so the tab can say so instead of looking live. */
   exited: boolean;
+  /** The workspace it was opened in — where it goes back to when the user switches away and back.
+   *  See `background`. */
+  workspaceId: string;
+  /** The unsaved spec a connect-bar session was opened on, so Reconnect has something to reopen:
+   *  such a tab has no host row to read it from. */
+  draft?: RemoteHostSpec;
 }
 
 /** A host's port forwards: the saved list, and which of them are up. */
@@ -281,6 +292,25 @@ interface RemoteState {
   tabs: RemoteTab[];
   activeTabId: string | null;
   /**
+   * The shells of the workspaces that are *not* on screen, still running.
+   *
+   * **A workspace switch used to kill every session** — the honest-sounding move ("they are
+   * processes, not documents") that in practice ended a build or a `tail -f` somebody had left
+   * running because they glanced at another workspace. So the session tabs of the workspace being
+   * left are kept here instead, and come back to the tab strip, scrollback and all, when the user
+   * returns. Their panes stay mounted (hidden) like any tab's, which is what keeps the scrollback —
+   * see `RemoteView`. The status bar counts them, so a running shell is never out of sight entirely.
+   *
+   * Only shells: a file session, a forward or a screen's tunnel is still released on the switch, as
+   * before — those reopen in a click and say nothing when they are cut.
+   */
+  background: RemoteSessionTab[];
+  /**
+   * Bumped for a host each time a save changed how it is reached — the backend closed its held file
+   * session, and an open browser lists again rather than going on showing the old machine.
+   */
+  connectionEpoch: Record<string, number>;
+  /**
    * Commands typed in this workspace's sessions, newest first.
    *
    * Reconstructed from keystrokes (see `typedLines`), so it is "what you typed" and not "what the
@@ -401,6 +431,10 @@ interface RemoteState {
   openScreen: (hostId: string) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   setActiveTab: (tabId: string) => void;
+  /** Opens a fresh shell in a session tab whose `ssh` has ended, in the same tab. */
+  reconnect: (tabId: string) => Promise<void>;
+  /** Types the host's saved password into a session's prompt. See `remote_type_password`. */
+  typePassword: (tabId: string) => Promise<void>;
 
   pollForwards: () => Promise<void>;
   startForward: (hostId: string, forward: ForwardSpec) => Promise<void>;
@@ -551,6 +585,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   latency: null,
   tabs: [],
   activeTabId: null,
+  background: [],
+  connectionEpoch: {},
   cloudStatus: {},
   renamingHostId: null,
   selectedHostId: null,
@@ -561,13 +597,14 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     if (pendingLoad?.workspaceId === workspaceId) return pendingLoad.promise;
     if (get().workspaceId === workspaceId && !get().loading) return;
 
-    // Every session belongs to the workspace being left. Killing them is the honest move: they are
-    // processes, not documents, and leaving them running behind a workspace switch means `ssh`
-    // children nothing on screen names.
-    for (const tab of get().tabs) {
-      if (tab.kind === "session") void closeTerminal(tab.sessionId).catch(() => {});
-    }
-    // And whatever the outgoing workspace's hosts are holding without a tab to show it — a file
+    // The shells of the workspace being left are kept running, not killed — see `background` for
+    // why — and the ones this workspace left behind the last time come back to the strip.
+    const leaving = get().tabs.filter((tab): tab is RemoteSessionTab => tab.kind === "session");
+    const parked = [...get().background, ...leaving];
+    const returning = parked.filter((tab) => tab.workspaceId === workspaceId);
+    const background = parked.filter((tab) => tab.workspaceId !== workspaceId);
+
+    // Whatever the outgoing workspace's hosts are holding without a tab to show it — a file
     // session, a forward, a screen's bridge route. Per host rather than a single release-everything:
     // the backend's registries carry no workspace id, so releasing all of them would kill forwards the
     // *incoming* workspace's hosts may own. The tab loop above used to be the whole teardown, which
@@ -588,8 +625,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       forwards: [],
       holds: {},
       disconnecting: [],
-      tabs: [],
-      activeTabId: null,
+      tabs: returning,
+      activeTabId: returning[returning.length - 1]?.id ?? null,
+      background,
       query: "",
       tagFilter: [],
       // Another workspace's accounts are other accounts; carrying their green dots across would be
@@ -698,8 +736,16 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   saveHost: async (row, spec) => {
     const updated: RemoteHostRow = { ...row, spec: JSON.stringify(spec) };
     try {
-      await remoteUpdateHost(updated);
-      set((s) => ({ hosts: s.hosts.map((host) => (host.id === row.id ? updated : host)) }));
+      // `true` when the edit changed how the host is reached: the backend has closed the file
+      // session it held with the old settings, and the epoch tells an open browser to list again.
+      const reconnect = await remoteUpdateHost(updated);
+      set((s) => ({
+        hosts: s.hosts.map((host) => (host.id === row.id ? updated : host)),
+        connectionEpoch: reconnect
+          ? { ...s.connectionEpoch, [row.id]: (s.connectionEpoch[row.id] ?? 0) + 1 }
+          : s.connectionEpoch,
+      }));
+      if (reconnect) void get().pollForwards();
       return true;
     } catch (error) {
       pushErrorToast(`${translate("remote.saveFailed")}: ${String(error)}`);
@@ -895,6 +941,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         name: host.name,
         sessionId,
         exited: false,
+        workspaceId: get().workspaceId ?? "",
       };
       set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, selectedHostId: hostId }));
       // Auto forwards came up with this session, on its own `ssh`. They are not in the live list,
@@ -918,6 +965,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       name,
       sessionId,
       exited: false,
+      workspaceId: get().workspaceId ?? "",
+      draft: spec,
     };
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
   },
@@ -935,11 +984,14 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     }
   },
 
+  // Both lists: a shell kept for another workspace can end while nobody is looking, and it has to
+  // come back reading as ended.
   markExited: (sessionId) =>
     set((s) => ({
       tabs: s.tabs.map((tab) =>
         tab.kind === "session" && tab.sessionId === sessionId ? { ...tab, exited: true } : tab,
       ),
+      background: s.background.map((tab) => (tab.sessionId === sessionId ? { ...tab, exited: true } : tab)),
     })),
 
   openForwards: (hostId) => {
@@ -1105,6 +1157,10 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
             : tab,
         ),
       }));
+      // A tunnelled screen reaches its host through `ssh`, whose first connection to a new host
+      // fails until the key is trusted. The `ssh` is the tunnel's: port and user from
+      // `~/.ssh/config`, never the screen's own (see `tunnel_via`).
+      offerHostKeyTrust(error, hostId, () => void get().openScreen(hostId), true);
     }
   },
 
@@ -1140,6 +1196,54 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       activeTabId,
       selectedHostId: s.tabs.find((tab) => tab.id === activeTabId)?.hostId || s.selectedHostId,
     })),
+
+  reconnect: async (tabId) => {
+    const tab = get().tabs.find((entry) => entry.id === tabId);
+    if (!tab || tab.kind !== "session") return;
+    const host = tab.hostId ? hostOf(get().hosts, tab.hostId) : null;
+    if (tab.hostId && !host) return;
+    try {
+      const sessionId = tab.hostId
+        ? await remoteOpenSession(tab.hostId)
+        : tab.draft
+          ? await remoteOpenDraftSession(tab.draft)
+          : null;
+      if (!sessionId) return;
+      // The old pty goes only once the new one exists: a reconnect that failed leaves the tab, and
+      // the scrollback that says why the last one ended, exactly as they were.
+      void closeTerminal(tab.sessionId).catch(() => {});
+      set((s) => ({
+        tabs: s.tabs.map((entry) =>
+          entry.id === tabId && entry.kind === "session"
+            ? { ...entry, sessionId, exited: false, name: host?.name ?? entry.name }
+            : entry,
+        ),
+        activeTabId: tabId,
+      }));
+      void get().pollForwards();
+    } catch (error) {
+      pushErrorToast(`${translate("remote.sessionFailed", { name: host?.name ?? tab.name })}: ${String(error)}`);
+    }
+  },
+
+  typePassword: async (tabId) => {
+    const tab = get().tabs.find((entry) => entry.id === tabId);
+    if (!tab || tab.kind !== "session" || tab.exited || !tab.hostId) return;
+    try {
+      await remoteTypePassword(tab.hostId, tab.sessionId);
+    } catch (error) {
+      if (!isNotAsking(error)) {
+        pushErrorToast(String(error));
+        return;
+      }
+      // Not at a password prompt, as far as the backend can tell — and at a shell prompt the same
+      // keys run the password as a command, on screen and into the far side's history. Asked, not
+      // refused, for the prompt it does not recognise.
+      if (!(await confirmAction(translate("remote.typePasswordAnyway"), true, translate("remote.typePasswordConfirm"))))
+        return;
+      await remoteTypePassword(tab.hostId, tab.sessionId, true).catch((failure) => pushErrorToast(String(failure)));
+    }
+  },
 
   // -------------------------------------------------------------------------
   // Forwards
@@ -1194,6 +1298,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
           );
       }
     } catch (error) {
+      // The first forward through a host `known_hosts` has never seen: ask about its key here, and
+      // raise the forward again once it is trusted.
+      if (offerHostKeyTrust(error, hostId, () => void get().startForward(hostId, forward))) return;
       pushErrorToast(`${translate("remote.forwardFailed")}: ${String(error)}`);
     }
   },
@@ -1338,6 +1445,51 @@ async function saveCollapsed(workspaceId: string, groups: string[]): Promise<voi
 }
 
 /**
+ * Opens the SSH host-key dialog when a Remote connection failed because a host is not in
+ * `known_hosts` yet, with `retry` as what to do once its key is trusted. Returns whether it did.
+ *
+ * Every background `ssh` here runs in batch mode, so a first connection to a new host has nobody to
+ * ask "are you sure you want to continue connecting?" — the file browser, a forward and a screen's
+ * tunnel all fail on it, and none has a terminal to answer from. This asks instead, on the machine
+ * `ssh` named (a bastion, behind a jump host — see `hostKeyTarget`). A *changed* key never gets
+ * here: the backend explains it and marks it differently, because that is the one to not click
+ * through.
+ *
+ * `tunnel` for a screen's tunnel, whose `ssh` dials the host at the port and as the user
+ * `~/.ssh/config` says — the row's own are the screen's.
+ */
+export function offerHostKeyTrust(error: unknown, hostId: string, retry: () => void, tunnel = false): boolean {
+  const host = hostOf(useRemoteStore.getState().hosts, hostId);
+  if (!host) return false;
+  const spec = parseHostSpec(host);
+  const target = hostKeyTarget(
+    error,
+    tunnel ? { host: spec.host, port: 0, user: "" } : { host: spec.host, port: spec.port, user: spec.user },
+  );
+  if (!target) return false;
+  useHostKeyStore.getState().open(target, retry);
+  return true;
+}
+
+/**
+ * Ends the kept shells of workspaces that no longer exist.
+ *
+ * `background` holds a workspace's sessions until the user comes back to it; a workspace that was
+ * deleted will never be come back to, and its shells would run on with nothing anywhere to reach
+ * them. Skipped while the list is empty, which is what it is before it has loaded — not a statement
+ * that every workspace is gone.
+ */
+function endOrphanedSessions(existing: string[]): void {
+  if (existing.length === 0) return;
+  const orphaned = useRemoteStore.getState().background.filter((tab) => !existing.includes(tab.workspaceId));
+  if (orphaned.length === 0) return;
+  for (const tab of orphaned) void closeTerminal(tab.sessionId).catch(() => {});
+  useRemoteStore.setState((s) => ({
+    background: s.background.filter((tab) => existing.includes(tab.workspaceId)),
+  }));
+}
+
+/**
  * Lets go of everything one host is holding — what "Disconnect" on a host row does.
  *
  * Its tabs, then the backend's side of it in one call: forwards, the screen's tunnel and bridge
@@ -1442,9 +1594,8 @@ export function hostIsHolding(
 }
 
 /**
- * Hosts, groups and command history belong to the workspace, so a switch swaps them — and closes
- * the open sessions, which are `ssh` processes that have to be ended rather than left as children
- * nothing on screen names.
+ * Hosts, groups and command history belong to the workspace, so a switch swaps them — and parks the
+ * open sessions in `background`, still running, to come back when the user does.
  *
  * # Why this is in the store and not in `App`
  *
@@ -1472,6 +1623,7 @@ export function hostIsHolding(
  * takes an id, and there is no tree to load without one.
  */
 useWorkspaceStore.subscribe((state, previous) => {
+  if (state.workspaces !== previous.workspaces) endOrphanedSessions(state.workspaces.map((workspace) => workspace.id));
   if (state.activeWorkspaceId === previous.activeWorkspaceId) return;
   if (state.activeWorkspaceId === null) return;
   const { workspaceId, loading } = useRemoteStore.getState();

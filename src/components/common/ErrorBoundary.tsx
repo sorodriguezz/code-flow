@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { RefreshCw, RotateCcw, TriangleAlert } from "lucide-react";
 import { translate } from "../../state/languageStore";
+import { reportError } from "../../lib/diagnostics";
 import { buttonClass } from "./Button";
 
 /**
@@ -52,9 +53,11 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
-    // The console is the only place this can go that survives the render being torn down. A toast
-    // would need a working React tree, which is exactly what we do not have.
+    // Not a toast — that would need a working React tree, which is exactly what we do not have. The
+    // console, as before, and the app log, which is what a user can actually send: a screen that
+    // broke on their machine used to leave nothing behind in it. The component stack says where.
     console.error("[codeflow] render error", error, info.componentStack);
+    reportError(this.props.fatal ? "render (window)" : "render", error, info.componentStack ?? error.stack ?? null);
   }
 
   render() {

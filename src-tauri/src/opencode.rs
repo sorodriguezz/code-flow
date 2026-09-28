@@ -19,7 +19,15 @@
 //! to a temp file, attach it with `--file`, and pass only a short, single-line, ASCII pointer
 //! message. That sidesteps all three constraints at once. Verified: opencode feeds `--file` content
 //! to the model, and the message must precede `--file` (a variadic flag that would otherwise eat
-//! it). Temp files aren't cleaned up yet.
+//! it). The file is private and deleted when the run ends — see `crate::ai_prompt_files`.
+//!
+//! **Read-only is a request here, not a guarantee.** `opencode run` has no tool allow-list flag,
+//! and its permissions come from the user's own config, which this app neither reads nor narrows.
+//! The one lever it holds is not passing `--dangerously-skip-permissions`, which a read-only run
+//! never gets. opencode's `plan` agent (`--agent plan`) was the candidate for
+//! more, but no opencode is installed where this was written to read its `--help` from, and a
+//! wrong flag here fails every run (see below) — so [`AiEngine::enforces_read_only`] stays false and
+//! the UI says as much instead.
 //!
 //! **Sessions.** Runs use `--format json`, which is what makes per-conversation resume possible:
 //! the real session id (`ses_…`) rides on every emitted event as `sessionID`, so
@@ -121,7 +129,7 @@ impl AiEngine for OpenCodeEngine {
         // spelling is not merely ignored — yargs is strict here, so the CLI printed its own help to
         // stdout and exited 1, and *every* write flow surfaced that help text as the engine's error.
         // Verified against 1.15.7: with this flag the run reaches the model.
-        if inv.auto_approve_edits {
+        if inv.auto_approve_edits && !inv.read_only {
             cmd.arg("--dangerously-skip-permissions");
         }
         if let Some(dir) = inv.cwd {
@@ -133,7 +141,7 @@ impl AiEngine for OpenCodeEngine {
             cmd.arg("--session").arg(id);
         }
         // `--file` last so the message positional above can't be mistaken for another attachment.
-        if let Some(path) = write_payload_file(&brief) {
+        if let Some(path) = write_payload_file(inv, &brief) {
             cmd.arg("--file").arg(path);
         }
         cmd
@@ -277,12 +285,12 @@ struct ExportCache {
     write: i64,
 }
 
-/// Writes the combined prompt (system + ask + input) to a uniquely-named temp file so it can be
+/// Writes the combined prompt (system + ask + input) to a private, uniquely-named file so it can be
 /// attached with `--file`. Returns the path, or `None` if the write failed — the run then proceeds
-/// with only the pointer message (a degraded but non-crashing outcome; temp writes ~never fail).
-fn write_payload_file(content: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::temp_dir().join(format!("codeflow-opencode-{}.txt", uuid::Uuid::new_v4()));
-    std::fs::write(&path, content).ok().map(|_| path)
+/// with only the pointer message (a degraded but non-crashing outcome; such writes ~never fail).
+/// Deleted when the run ends — see `crate::ai_prompt_files`.
+fn write_payload_file(inv: &AiInvocation, content: &str) -> Option<std::path::PathBuf> {
+    inv.prompt_files.write("opencode", "txt", content)
 }
 
 /// One line of `opencode run --format json`. Every event is `{type, timestamp, sessionID, ...data}`,
@@ -620,5 +628,36 @@ mod tests {
     fn empty_output_on_a_clean_exit_is_an_error_not_a_blank_reply() {
         let err = interpret_output(true, "exit status: 0", "   ", "").unwrap_err();
         assert_eq!(err, "opencode produced no output");
+    }
+
+    fn args_of(inv: &AiInvocation) -> Vec<String> {
+        OpenCodeEngine
+            .build_command("opencode", inv)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The only lever there is: a read-only run never gets the permission bypass. And since that is
+    /// all there is, the engine does not claim to enforce anything.
+    #[test]
+    fn a_read_only_run_never_skips_permissions() {
+        let mut inv = AiInvocation::new("¿qué hace esto?", "");
+        inv.auto_approve_edits = true;
+        inv.read_only = true;
+        assert!(!args_of(&inv).iter().any(|a| a == "--dangerously-skip-permissions"));
+        assert!(!OpenCodeEngine.enforces_read_only());
+    }
+
+    /// The attached brief is private and goes with the run.
+    #[test]
+    fn the_payload_file_goes_with_the_invocation() {
+        let inv = AiInvocation::new("pregunta", "datos");
+        let args = args_of(&inv);
+        let path = std::path::PathBuf::from(&args[args.iter().position(|a| a == "--file").unwrap() + 1]);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("datos"));
+        drop(inv);
+        assert!(!path.exists());
     }
 }

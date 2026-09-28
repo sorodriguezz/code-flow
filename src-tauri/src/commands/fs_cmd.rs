@@ -16,6 +16,44 @@ pub fn write_file_text(repo_path: String, rel_path: String, content: String) -> 
     fsops::write_file_text(&repo_path, &rel_path, &content)
 }
 
+/// The editor's read: the text and the disk version it was read at, or what the file is instead of
+/// editable text — see [`fsops::EditorFile`]. `allow_large` is a tab's "open anyway".
+///
+/// `(async)` because it reads and hashes up to the read cap, which is no job for the UI thread.
+#[tauri::command(async)]
+pub fn read_editor_file(
+    repo_path: String,
+    rel_path: String,
+    allow_large: Option<bool>,
+) -> Result<fsops::EditorFile, String> {
+    fsops::read_editor_file(&repo_path, &rel_path, allow_large.unwrap_or(false))
+}
+
+/// The disk version of an open tab's file now — `known` handed back untouched when its stamp still
+/// matches. The editor's sweep over its tabs on every watcher event; see [`fsops::stat_editor_file`].
+#[tauri::command(async)]
+pub fn stat_editor_file(
+    repo_path: String,
+    rel_path: String,
+    known: Option<fsops::DiskVersion>,
+) -> Result<Option<fsops::DiskVersion>, String> {
+    fsops::stat_editor_file(&repo_path, &rel_path, known)
+}
+
+/// The editor's save. Refuses with [`fsops::CHANGED_ON_DISK`] when the file is no longer the one
+/// `expected` describes; `expected: None` overwrites. Returns the version written.
+///
+/// Sync, like [`write_file_text`]: the UI thread is what orders two saves of the same file.
+#[tauri::command]
+pub fn write_editor_file(
+    repo_path: String,
+    rel_path: String,
+    content: String,
+    expected: Option<fsops::DiskVersion>,
+) -> Result<fsops::DiskVersion, String> {
+    fsops::write_file_text_checked(&repo_path, &rel_path, &content, expected.as_ref())
+}
+
 /// Saves an exported binary (today: a code snapshot PNG) to the absolute path the user picked in
 /// the native save dialog.
 #[tauri::command]

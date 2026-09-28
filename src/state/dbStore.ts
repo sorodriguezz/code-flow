@@ -36,15 +36,24 @@ import {
   dbSetConnectionScope,
   dbSetGroupScope,
   dbSetPassword,
+  dbExportRows,
   dbTableData,
+  dbTransactionState,
   dbUpdateConnection,
   dbUpdateConsole,
 } from "../lib/tauri/dbCommands";
+import type { DbExportSource } from "../lib/tauri/dbCommands";
 import { getSetting, setSetting } from "../lib/tauri/commands";
 // The AI run registry is a different one from the database's: `dbCancel` stops a statement on the
 // server, this stops a CLI subprocess. The assistant runs on the second and never the first.
 import { isCancellation, newRunId as newAiRunId, useAiRunStore } from "./aiRunStore";
-import { unguardedDelete } from "../lib/db/sqlGuards";
+import { unguardedWrites } from "../lib/db/sqlGuards";
+import { destructiveMongoCommands } from "../lib/db/mongoGuards";
+import { splitStatements } from "../lib/db/statements";
+import { confirmAction } from "./confirmStore";
+import { liftUrlSecret, maskConnectionSecrets, urlCarriesPassword } from "../lib/db/connectionSecrets";
+import { isUnknownHostKeyError } from "../lib/hostKey";
+import { useHostKeyStore } from "./hostKeyStore";
 import {
   dropContainerSql,
   dropRelationSql,
@@ -81,6 +90,7 @@ import {
   type DbServerInfo,
   type DbSortKey,
   type DbStatementResult,
+  type DbTransactionState,
 } from "../types/database";
 import type { DiagramColumnMode, DiagramDensity } from "../lib/db/erLayout";
 
@@ -631,6 +641,23 @@ interface DbState {
   explainConsole: (tabId: string, sql?: string) => Promise<void>;
   cancelRun: (tabId: string) => Promise<void>;
 
+  /**
+   * Whether each console session is inside a transaction, keyed by `transactionKey` (connection and
+   * database — the consoles on the same pair share one session). Absent means none.
+   */
+  transactions: Record<string, DbTransactionState>;
+  /** Commits or rolls back the transaction a console's session is in. */
+  endTransaction: (tabId: string, how: "commit" | "rollback") => Promise<void>;
+  /** Re-reads a console session's transaction state — for a console shown after its last run. */
+  refreshTransaction: (tabId: string) => Promise<void>;
+
+  /** Exports writing every row of a table or a query to a file, while they run. */
+  exports: DbExportJob[];
+  /** Writes every row behind a tab — the table under its filter, or the console's active
+   *  statement — to a file, rather than the page the tab shows. */
+  exportAll: (tabId: string, format: "csv" | "json") => Promise<void>;
+  cancelExport: (runId: string) => Promise<void>;
+
   /** Opens the console's AI ask bar, or closes it. Opening never clears the last answer — the
    * usual second question is a follow-up on what it just said. */
   toggleConsoleAi: (tabId: string) => void;
@@ -932,6 +959,8 @@ export const useDbStore = create<DbState>((set, get) => ({
   section: "explorer",
   renamingConsoleId: null,
   sqlLog: [],
+  transactions: {},
+  exports: [],
 
   init: async (workspaceId) => {
     set({ workspaceId, loading: true });
@@ -968,6 +997,9 @@ export const useDbStore = create<DbState>((set, get) => ({
         tabs,
         activeTabId: tabs[0]?.id ?? null,
       });
+      // In the background: the tree is usable without it, and each connection it touches is one
+      // keychain write — which on macOS may be a permission prompt the load must not wait behind.
+      void liftStoredUrlSecrets(tree.connections, set);
     } catch (e) {
       pushErrorToast(String(e));
     } finally {
@@ -1034,17 +1066,30 @@ export const useDbStore = create<DbState>((set, get) => ({
 
   saveConnection: async (row, config, password) => {
     // The password is stored separately and never lands in `spec`: that column is plain text in the
-    // config directory, and the keychain is the only place a database credential belongs.
-    const spec = JSON.stringify({ ...config, password: "" });
+    // config directory, and the keychain is the only place a database credential belongs. That
+    // includes the one a pasted URL or connection string carries — it is lifted out here and goes
+    // to the same keychain slot, and the driver adds it back when it connects. The URL's own
+    // password wins over a typed one, as it does at connect time. See `connectionSecrets`.
+    const lifted = liftUrlSecret(config.kind, config.url);
+    const stored: DbConnectionConfig = {
+      ...config,
+      url: lifted.url === config.url.trim() ? config.url : lifted.url,
+      user: lifted.user ?? config.user,
+      password: "",
+    };
+    const credential = lifted.password ?? password;
+    const spec = JSON.stringify(stored);
     const next: DbConnectionRow = { ...row, kind: config.kind, spec };
     // `row` still carries the settings as they were, which is what makes this decidable here and
     // nowhere else. A password the user retyped counts as a change whatever the fields say.
     const previous = parseSpec(row);
     const keepSession =
-      password === null && previous !== null && onlyChangesWhatIsListed(previous, config);
+      credential === null && previous !== null && onlyChangesWhatIsListed(previous, stored);
     const saved = await guarded(async () => {
+      // The keychain first: once the stripped spec is written, the keychain is the only copy of a
+      // password that came in a URL, so the spec must not lose it unless the keychain has it.
+      if (credential !== null) await dbSetPassword(row.id, credential);
       await dbUpdateConnection(next, keepSession);
-      if (password !== null) await dbSetPassword(row.id, password);
       return true;
     });
     if (!saved) return false;
@@ -1067,6 +1112,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       connections: s.connections.map((c) => (c.id === next.id ? next : c)),
       // Saving closed the session on the backend, so the dot has to go with it.
       connected: s.connected.filter((id) => id !== next.id),
+      transactions: dropConnectionTransactions(s.transactions, next.id),
       // Anything cached about the old server is now about a server we may not be talking to.
       children: dropConnection(s.children, next.id),
       expanded: s.expanded.filter((key) => !key.startsWith(`${next.id}|`)),
@@ -1323,8 +1369,13 @@ export const useDbStore = create<DbState>((set, get) => ({
     // busy rather than spinning until the next click.
     set((s) => ({ connecting: s.connecting.includes(id) ? s.connecting : [...s.connecting, id] }));
     try {
-      const info = await guarded(() => dbConnect(id));
-      if (!info) return false;
+      let info: DbServerInfo;
+      try {
+        info = await dbConnect(id);
+      } catch (e) {
+        if (!offerHostKeyTrust(get, id, e, () => void get().connect(id))) pushErrorToast(String(e));
+        return false;
+      }
       connectedEpoch += 1;
       set((s) => ({
         connected: s.connected.includes(id) ? s.connected : [...s.connected, id],
@@ -1347,6 +1398,8 @@ export const useDbStore = create<DbState>((set, get) => ({
         connected: s.connected.filter((c) => c !== id),
         children: dropConnection(s.children, id),
         expanded: s.expanded.filter((key) => !key.startsWith(`${id}|`)),
+        // Closing the sessions ended their transactions — the server rolled them back.
+        transactions: dropConnectionTransactions(s.transactions, id),
       }));
     } finally {
       set((s) => ({ connecting: s.connecting.filter((c) => c !== id) }));
@@ -1390,6 +1443,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       // Shown against the node rather than as a toast: "permission denied on schema auth" is about
       // that row, and a toast would leave the tree looking merely empty.
       set((s) => ({ nodeErrors: { ...s.nodeErrors, [key]: String(e) } }));
+      offerHostKeyTrust(get, connectionId, e, () => void get().refreshNode(connectionId, node, key));
     } finally {
       set((s) => ({ loadingNodes: s.loadingNodes.filter((entry) => entry !== key) }));
     }
@@ -1643,15 +1697,11 @@ export const useDbStore = create<DbState>((set, get) => ({
     const statement = (sql ?? tab.body).trim();
     if (!statement) return;
 
-    // The one statement that is never a typo you can recover from. See `unguardedDelete`.
+    // The statements that are never a typo you can recover from — a DELETE or UPDATE with no
+    // WHERE, a Mongo write aimed at every document, a dropped collection — are asked about first,
+    // each one by name. See `sqlGuards` and `mongoGuards`.
     const kind = get().connections.find((c) => c.id === tab.connectionId)?.kind;
-    if (kind && engineInfo(kind).sql) {
-      const unguarded = unguardedDelete(statement);
-      if (unguarded) {
-        pushErrorToast(translate("db.deleteNeedsWhere", { statement: unguarded }));
-        return;
-      }
-    }
+    if (kind && !(await confirmDestructive(kind, statement))) return;
     // Redis's equivalent, and a copy of the driver's own check — the backend refuses these too and
     // is what actually protects the server. This one only makes the refusal instant. See
     // `redisGuards`.
@@ -1682,7 +1732,8 @@ export const useDbStore = create<DbState>((set, get) => ({
 
     const started = Date.now();
     try {
-      const result = await dbExecute(tab.connectionId, statement, contextOf(tab), runId);
+      const result = await dbExecute(tab.connectionId, statement, contextOf(tab), runId, "console");
+      setTransaction(set, transactionKey(tab), result.transaction ?? "none");
       patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({
         ...current,
         result,
@@ -1726,6 +1777,11 @@ export const useDbStore = create<DbState>((set, get) => ({
       }
     } catch (e) {
       const message = String(e);
+      // A cancel or a dropped session changes the transaction the run was in; the backend knows how.
+      void get().refreshTransaction(tabId);
+      // A tunnel that failed on an unknown host key never reached the server, so running the same
+      // statement again once the key is trusted is exactly what was asked for.
+      offerHostKeyTrust(get, tab.connectionId, e, () => void get().runConsole(tabId, sql));
       patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({
         ...current,
         result: {
@@ -1774,7 +1830,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       runId,
     }));
     try {
-      const plan = await dbExplain(tab.connectionId, statement, contextOf(tab), runId);
+      const plan = await dbExplain(tab.connectionId, statement, contextOf(tab), runId, "console");
       patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({
         ...current,
         plan,
@@ -1813,6 +1869,91 @@ export const useDbStore = create<DbState>((set, get) => ({
     ].filter((id): id is string => typeof id === "string" && id.length > 0);
     if (runIds.length === 0) return;
     await Promise.all(runIds.map((runId) => guarded(() => dbCancel(runId))));
+  },
+
+  endTransaction: async (tabId, how) => {
+    const tab = findTab<DbConsoleTab>(get, tabId, "console");
+    if (!tab || tab.running) return;
+    const statement = how === "commit" ? "COMMIT" : "ROLLBACK";
+    const runWorkspaceId = get().workspaceId;
+    const started = Date.now();
+    try {
+      // Straight to the console's session and not through `runConsole`: this is the indicator's
+      // button, not a statement the user wrote, and it must not replace the result on screen.
+      const result = await dbExecute(tab.connectionId, statement, contextOf(tab), newRunId(), "console");
+      setTransaction(set, transactionKey(tab), result.transaction ?? "none");
+      const failed = result.results.find((entry) => entry.error);
+      get().logSql({
+        workspaceId: runWorkspaceId,
+        connectionId: tab.connectionId,
+        sql: statement,
+        source: "console",
+        durationMs: Date.now() - started,
+        rows: null,
+        error: failed?.error ?? null,
+      });
+      if (failed?.error) pushErrorToast(failed.error);
+    } catch (e) {
+      pushErrorToast(String(e));
+      void get().refreshTransaction(tabId);
+    }
+  },
+
+  exportAll: async (tabId, format) => {
+    const tab = get().tabs.find((entry) => entry.id === tabId);
+    if (!tab || (tab.kind !== "data" && tab.kind !== "console")) return;
+    let source: DbExportSource;
+    let name: string;
+    if (tab.kind === "data") {
+      source = {
+        kind: "table",
+        request: {
+          node: tab.node,
+          offset: 0,
+          limit: 0,
+          sort: tab.sort,
+          filter: tab.filter,
+          options: tab.options,
+        },
+      };
+      name = tab.node.name ?? "rows";
+    } else {
+      const active = tab.result?.results[tab.activeResult];
+      if (!active) return;
+      source = { kind: "statement", sql: active.statement, ctx: contextOf(tab) };
+      name = "result";
+    }
+    const runId = newRunId();
+    const label = `${name}.${format}`;
+    set((s) => ({ exports: [...s.exports, { runId, label, rows: 0 }] }));
+    try {
+      const saved = await dbExportRows(tab.connectionId, source, format, label, runId);
+      if (saved) {
+        useToastStore
+          .getState()
+          .pushToast(translate("db.exportedAll", { rows: saved.rows, path: saved.path }), "success");
+      }
+    } catch (e) {
+      if (String(e) === CANCELLED) useToastStore.getState().pushToast(translate("db.exportCancelled"), "info");
+      else pushErrorToast(String(e));
+    } finally {
+      set((s) => ({ exports: s.exports.filter((job) => job.runId !== runId) }));
+    }
+  },
+
+  cancelExport: async (runId) => {
+    await guarded(() => dbCancel(runId));
+  },
+
+  refreshTransaction: async (tabId) => {
+    const tab = findTab<DbConsoleTab>(get, tabId, "console");
+    if (!tab) return;
+    try {
+      const state = await dbTransactionState(tab.connectionId, tab.database || null);
+      setTransaction(set, transactionKey(tab), state);
+    } catch {
+      // Nothing to show is the right answer when the question can't be asked.
+    }
   },
 
   // ---------------------------------------------------------------- assistant
@@ -2760,6 +2901,44 @@ function cellAt(tab: DbDataTab, row: number, column: string): string | null {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** One "export everything" while it runs — what the progress chip shows. */
+export interface DbExportJob {
+  runId: string;
+  /** The file name offered, which is also how the chip names it. */
+  label: string;
+  rows: number;
+}
+
+/** The error text a cancelled run comes back with — `CANCELLED` in `datasource/mod.rs`. */
+const CANCELLED = "Query cancelled";
+
+/** The console session a tab runs on: its connection and database — see `transactions`. */
+export function transactionKey(tab: Pick<DbConsoleTab, "connectionId" | "database">): string {
+  return `${tab.connectionId}|${tab.database}`;
+}
+
+function setTransaction(
+  set: (fn: (state: DbState) => Partial<DbState>) => void,
+  key: string,
+  state: DbTransactionState,
+) {
+  set((current) => {
+    if ((current.transactions[key] ?? "none") === state) return {};
+    const next = { ...current.transactions };
+    if (state === "none") delete next[key];
+    else next[key] = state;
+    return { transactions: next };
+  });
+}
+
+function dropConnectionTransactions(
+  transactions: Record<string, DbTransactionState>,
+  connectionId: string,
+): Record<string, DbTransactionState> {
+  const prefix = `${connectionId}|`;
+  return Object.fromEntries(Object.entries(transactions).filter(([key]) => !key.startsWith(prefix)));
+}
+
 function contextOf(tab: DbConsoleTab) {
   return {
     database: tab.database || null,
@@ -2791,6 +2970,57 @@ function quoteLiteral(value: string, kind: DbKind): string {
   return `'${text.replace(/'/g, "''")}'`;
 }
 
+/**
+ * Opens the SSH host-key dialog when a connection's tunnel failed because its host isn't in
+ * `known_hosts` yet — the one tunnel failure the app can fix — with `retry` as what to do once the
+ * key is trusted. Returns whether it did. See `lib/hostKey.ts`.
+ */
+function offerHostKeyTrust(
+  get: () => DbState,
+  connectionId: string,
+  error: unknown,
+  retry: () => void,
+): boolean {
+  if (!isUnknownHostKeyError(error)) return false;
+  const row = get().connections.find((c) => c.id === connectionId);
+  const config = row ? parseSpec(row) : null;
+  if (!config?.ssh_enabled || !config.ssh_host.trim()) return false;
+  useHostKeyStore
+    .getState()
+    .open({ host: config.ssh_host.trim(), port: config.ssh_port, user: config.ssh_user.trim() }, retry);
+  return true;
+}
+
+/**
+ * Asks about each destructive statement in a console run, one question per statement. `false` as
+ * soon as one is declined: the batch was written in order, and running the rest without the one
+ * that was refused is not what anybody asked for.
+ */
+async function confirmDestructive(kind: DbKind, statement: string): Promise<boolean> {
+  const engine = engineInfo(kind);
+  const questions: string[] = [];
+  if (engine.sql) {
+    for (const write of unguardedWrites(statement)) {
+      questions.push(
+        translate(write.verb === "DELETE" ? "db.deleteWithoutWhere" : "db.updateWithoutWhere", {
+          statement: write.statement,
+        }),
+      );
+    }
+  }
+  if (engine.consoleLanguage === "javascript") {
+    for (const found of destructiveMongoCommands(splitStatements(statement, "javascript"))) {
+      questions.push(
+        translate(`db.mongoDestructive.${found.operation}`, { target: found.target || "?" }),
+      );
+    }
+  }
+  for (const question of questions) {
+    if (!(await confirmAction(question, true, translate("db.runAnyway")))) return false;
+  }
+  return true;
+}
+
 /** The connection's saved settings. Returns null on a blob that predates a field rename rather than
  * throwing — the connection dialog is where that gets fixed. */
 export function parseSpec(row: DbConnectionRow): DbConnectionConfig | null {
@@ -2809,7 +3039,7 @@ export function describeConnection(row: DbConnectionRow): string {
   if (!config) return engine.label;
   if (config.url) {
     // A URI can carry a password; showing it in the sidebar would put a credential on screen.
-    return `${engine.label} · ${redactUrl(config.url)}`;
+    return `${engine.label} · ${maskConnectionSecrets(config.url)}`;
   }
   const port = config.port || engine.defaultPort;
   const where = `${config.host}:${port}`;
@@ -2817,30 +3047,67 @@ export function describeConnection(row: DbConnectionRow): string {
 }
 
 /**
- * Whether a connection URI carries a password of its own.
+ * Whether a connection URL carries a password of its own.
  *
- * What it decides is whether the separate password box is worth showing: a URI with `user:pass@` in
- * it has already answered that question, and every engine here prefers the URI's own credential. A
- * URI with a user and no password has not, and then the box is the only path to the OS keychain —
- * which is the whole reason it exists, since the URI itself is stored in the app's database as
- * typed.
- *
- * The same shape `redactUrl` matches, deliberately: one reading of "where the credentials are in a
- * URI", so a URL that redacts as having a password is a URL that counts as having one.
+ * What it decides is whether the separate password box is worth showing: a URL with a password in
+ * it has already answered that question, and saving lifts that password into the same keychain
+ * slot the box writes (see `connectionSecrets`). Knows every shape the drivers accept, including a
+ * SQL Server connection string's `Password=` — the old check only knew `user:pass@`.
  */
-export function urlHasPassword(url: string): boolean {
-  const match = url.match(/\/\/([^/@]*)@/);
-  if (!match) return false;
-  const at = match[1].indexOf(":");
-  return at >= 0 && match[1].slice(at + 1).length > 0;
+export function urlHasPassword(url: string, kind: DbKind): boolean {
+  return urlCarriesPassword(kind, url);
 }
 
-/** Strips the credentials out of a connection URI for display. */
+/** A connection URL with every password in it masked, for display. */
 export function redactUrl(url: string): string {
-  return url.replace(/\/\/([^/@]*)@/, (_match, credentials: string) => {
-    const user = credentials.split(":")[0];
-    return user ? `//${user}:••••@` : "//";
-  });
+  return maskConnectionSecrets(url);
+}
+
+/**
+ * Moves the passwords that saved connections still carry in their URL into the keychain.
+ *
+ * For connections saved before `saveConnection` started lifting them. Idempotent — a URL already
+ * stripped has nothing to lift — so it simply runs on every load. The keychain is written before the
+ * spec, and a connection whose keychain write fails is left exactly as it was: stripping the URL
+ * first would lose the only copy of the password. One at a time, since on macOS the first keychain
+ * write can be a permission prompt.
+ */
+async function liftStoredUrlSecrets(
+  rows: DbConnectionRow[],
+  set: (fn: (state: DbState) => Partial<DbState>) => void,
+) {
+  let moved = false;
+  for (const row of rows) {
+    const config = parseSpec(row);
+    if (!config?.url) continue;
+    const lifted = liftUrlSecret(row.kind, config.url);
+    if (lifted.password === null) continue;
+    let spec: Record<string, unknown>;
+    try {
+      spec = JSON.parse(row.spec) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    spec.url = lifted.url;
+    if (lifted.user !== null) spec.user = lifted.user;
+    spec.password = "";
+    const next: DbConnectionRow = { ...row, spec: JSON.stringify(spec) };
+    try {
+      await dbSetPassword(row.id, lifted.password);
+      // The credential is the same one the URL carried, so an open session is still right.
+      await dbUpdateConnection(next, true);
+      set((state) => ({
+        connections: state.connections.map((c) => (c.id === next.id ? next : c)),
+      }));
+      moved = true;
+    } catch (e) {
+      // Left as it was, to try again on the next load. The keychain may be locked or refusing.
+      console.warn(`[db] couldn't move ${row.name}'s password into the keychain`, e);
+    }
+  }
+  // Storing a password closes the connection's sessions (the old one held the old credential), so
+  // the explorer's dots are re-read rather than left lit for sessions that just went away.
+  if (moved) void useDbStore.getState().syncConnected();
 }
 
 /**
@@ -3137,6 +3404,15 @@ function newRunId(): string {
  */
 void listen("app:foreground", () => {
   void useDbStore.getState().syncConnected();
+});
+
+void listen<{ run_id: string; rows: number }>("db:export-progress", (event) => {
+  const { run_id: runId, rows } = event.payload;
+  useDbStore.setState((s) =>
+    s.exports.some((job) => job.runId === runId)
+      ? { exports: s.exports.map((job) => (job.runId === runId ? { ...job, rows } : job)) }
+      : {},
+  );
 });
 
 /**

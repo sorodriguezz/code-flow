@@ -18,6 +18,7 @@ import type { TranslationKey } from "../i18n/translations";
 
 const MESSAGES: Record<string, TranslationKey> = {
   "cf-keyvault/wrong-password": "vault.error.wrongPassword",
+  "cf-keyvault/wrong-passphrase": "vault.error.wrongPassphrase",
   "cf-keyvault/locked": "vault.error.locked",
   "cf-keyvault/not-initialised": "vault.error.notInitialised",
   "cf-keyvault/already-initialised": "vault.error.alreadyInitialised",

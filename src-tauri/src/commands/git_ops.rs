@@ -1,6 +1,9 @@
 use tauri::AppHandle;
 
-use crate::git::{blame, branch, diff, graph, history, hunk, identity, merge, remotes, repo, stash};
+use crate::git::{
+    bisect, blame, branch, conflict, diff, features, graph, history, hunk, identity, lines, merge, reflog, remotes, repo,
+    stash, submodule, worktree,
+};
 use crate::remote;
 
 // ---------- why the read commands carry `(async)` and the write ones don't ----------
@@ -59,6 +62,13 @@ pub fn create_branch(repo_path: String, name: String, start_point: Option<String
 #[tauri::command]
 pub fn delete_branch(repo_path: String, name: String, is_remote: bool) -> Result<(), String> {
     branch::delete_branch(&repo_path, &name, is_remote)
+}
+
+/// Commits a local branch has that neither HEAD nor its upstream has — what deleting it would lose.
+/// See `branch::unmerged_commit_count`.
+#[tauri::command(async)]
+pub fn branch_unmerged_count(repo_path: String, name: String) -> Result<usize, String> {
+    branch::unmerged_commit_count(&repo_path, &name)
 }
 
 #[tauri::command]
@@ -276,7 +286,13 @@ pub fn discard_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) 
     hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Discard, context_lines)
 }
 
-#[tauri::command]
+/// `(async)`, unlike the other writes — see the note at the top of this file for what that trades.
+/// A repository with commit hooks or signing commits through `git commit` (see `git::features`), and a
+/// `pre-commit` that runs a type check and a test suite takes a minute; on the UI thread that minute is
+/// a frozen window. The race it opens is a benign one: the CLI holds `index.lock` for the whole commit,
+/// so a stage clicked meanwhile fails with a lock error instead of interleaving, and the libgit2 commit
+/// reads the index once, atomically, as it always has.
+#[tauri::command(async)]
 pub fn commit(
     repo_path: String,
     message: String,
@@ -316,7 +332,8 @@ pub fn head_commit_message(repo_path: String) -> Result<String, String> {
     history::head_commit_message(&repo_path)
 }
 
-#[tauri::command]
+/// `(async)` for the reason [`commit`] gives: with hooks or signing it is `git commit --amend`.
+#[tauri::command(async)]
 pub fn amend_commit(
     repo_path: String,
     message: String,
@@ -380,6 +397,16 @@ pub fn set_remote_url(repo_path: String, name: String, url: String) -> Result<()
 }
 
 #[tauri::command]
+pub fn add_remote(repo_path: String, name: String, url: String) -> Result<(), String> {
+    remotes::add_remote(&repo_path, &name, &url)
+}
+
+#[tauri::command]
+pub fn remove_remote(repo_path: String, name: String) -> Result<(), String> {
+    remotes::remove_remote(&repo_path, &name)
+}
+
+#[tauri::command]
 pub fn get_git_identity() -> Result<identity::GitIdentity, String> {
     identity::get_identity()
 }
@@ -387,6 +414,13 @@ pub fn get_git_identity() -> Result<identity::GitIdentity, String> {
 #[tauri::command]
 pub fn set_git_identity(name: String, email: String) -> Result<(), String> {
     identity::set_identity(&name, &email)
+}
+
+/// The "only this repository" answer to a commit that failed for want of a name and email — see
+/// `identity::set_repo_identity`.
+#[tauri::command]
+pub fn set_repo_git_identity(repo_path: String, name: String, email: String) -> Result<(), String> {
+    identity::set_repo_identity(&repo_path, &name, &email)
 }
 
 #[tauri::command]
@@ -424,6 +458,42 @@ pub fn abort_merge(repo_path: String) -> Result<(), String> {
     merge::abort_merge(&repo_path)
 }
 
+/// Which operation is half done, its unresolved paths (read whatever the state), and the message
+/// git prepared for it — everything the conflicts banner draws from.
+#[tauri::command(async)]
+pub fn get_operation_state(repo_path: String) -> Result<merge::OperationState, String> {
+    merge::operation_state(&repo_path)
+}
+
+/// The banner's Continue, whatever is in progress. A single merge, revert or cherry-pick is
+/// committed here with `message` (or the one git prepared); a rebase or a multi-commit sequence is
+/// git's own to walk, so that goes to `git <op> --continue` — see `merge::is_sequenced`.
+#[tauri::command]
+pub async fn continue_operation(app: AppHandle, repo_path: String, message: Option<String>) -> Result<(), String> {
+    let state = merge::operation_state(&repo_path)?;
+    let kind = state.kind.ok_or("nothing is in progress")?;
+    if state.sequenced {
+        return remote::sequencer(app, repo_path, kind, remote::SequencerAction::Continue).await;
+    }
+    // On a blocking thread: with hooks or signing this is `git commit`, and a hook can run for a
+    // minute — too long to hold one of the async runtime's workers. See `git::features`.
+    tauri::async_runtime::spawn_blocking(move || merge::continue_operation(&repo_path, message.as_deref()).map(|_| ()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The banner's Abort — the same split as [`continue_operation`]. The single-step undo touches only
+/// the paths the operation wrote; see `merge::abort_operation`.
+#[tauri::command]
+pub async fn abort_operation(app: AppHandle, repo_path: String) -> Result<(), String> {
+    let state = merge::operation_state(&repo_path)?;
+    let kind = state.kind.ok_or("nothing is in progress")?;
+    if state.sequenced {
+        return remote::sequencer(app, repo_path, kind, remote::SequencerAction::Abort).await;
+    }
+    merge::abort_operation(&repo_path)
+}
+
 #[tauri::command]
 pub async fn git_clone(app: AppHandle, url: String, dest: String) -> Result<(), String> {
     remote::clone(app, url, dest).await
@@ -437,6 +507,19 @@ pub async fn git_fetch(app: AppHandle, repo_path: String, remote_name: Option<St
 #[tauri::command]
 pub async fn git_pull(app: AppHandle, repo_path: String) -> Result<(), String> {
     remote::pull(app, repo_path).await
+}
+
+/// The answer to a pull refused because the branches diverged: merge, rebase or fast-forward only,
+/// optionally remembered for the repository. A separate command rather than an argument to
+/// `git_pull`, whose signature the phone's dispatcher calls as it is.
+#[tauri::command]
+pub async fn git_pull_with(
+    app: AppHandle,
+    repo_path: String,
+    mode: remote::PullMode,
+    remember: bool,
+) -> Result<(), String> {
+    remote::pull_with(app, repo_path, mode, remember).await
 }
 
 #[tauri::command]
@@ -457,4 +540,197 @@ pub async fn git_push(app: AppHandle, repo_path: String, set_upstream: bool) -> 
 #[tauri::command]
 pub async fn git_push_branch(app: AppHandle, repo_path: String, branch: String) -> Result<(), String> {
     remote::push_branch(app, repo_path, branch).await
+}
+
+/// Force push with lease, offered only after a push came back rejected — see
+/// `remote::push_force_with_lease` for why it is never a bare `--force`.
+#[tauri::command]
+pub async fn git_push_force_with_lease(app: AppHandle, repo_path: String) -> Result<(), String> {
+    remote::push_force_with_lease(app, repo_path).await
+}
+
+// ---------- lines — the Changes screen's gutter selection ----------
+//
+// The same three verbs as the per-hunk commands above, one level finer, and sync for the same reason:
+// they write the index (or, for discard, take its lock through libgit2's apply). What crosses the wire
+// is the drawn lines, never bytes to write — see `git::lines`.
+
+/// Adds the selected lines to the index; the working tree is not touched.
+#[tauri::command]
+pub fn stage_lines(repo_path: String, selection: lines::LineSelection) -> Result<(), String> {
+    lines::apply_lines(&repo_path, &selection, lines::LineOp::Stage)
+}
+
+/// Takes the selected lines back out of the index; the working tree is not touched.
+#[tauri::command]
+pub fn unstage_lines(repo_path: String, selection: lines::LineSelection) -> Result<(), String> {
+    lines::apply_lines(&repo_path, &selection, lines::LineOp::Unstage)
+}
+
+/// Throws the selected lines of working-tree change away, back to the index copy. Not recoverable —
+/// the caller confirms.
+#[tauri::command]
+pub fn discard_lines(repo_path: String, selection: lines::LineSelection) -> Result<(), String> {
+    lines::apply_lines(&repo_path, &selection, lines::LineOp::Discard)
+}
+
+// ---------- hooks, signing, LFS ----------
+
+/// What the repository has set up that decides the commit route — the Changes screen's indicator.
+#[tauri::command(async)]
+pub fn get_repo_features(repo_path: String) -> Result<features::RepoFeatures, String> {
+    features::detect(&repo_path)
+}
+
+// ---------- the three-way conflict editor ----------
+
+#[tauri::command(async)]
+pub fn get_conflict_detail(repo_path: String, rel_path: String) -> Result<conflict::ConflictDetail, String> {
+    conflict::detail(&repo_path, &rel_path)
+}
+
+/// The file re-merged from its stages with base sections — the editor's "start over".
+#[tauri::command(async)]
+pub fn get_conflict_merge_text(repo_path: String, rel_path: String) -> Result<String, String> {
+    conflict::merged_text(&repo_path, &rel_path)
+}
+
+/// Writes the editor's result and stages it — "mark resolved".
+#[tauri::command]
+pub fn resolve_conflict_with_text(repo_path: String, rel_path: String, text: String) -> Result<(), String> {
+    conflict::resolve_with_text(&repo_path, &rel_path, &text)
+}
+
+/// Resolves a modify/delete conflict as deleted — `git rm`.
+#[tauri::command]
+pub fn resolve_conflict_deleted(repo_path: String, rel_path: String) -> Result<(), String> {
+    conflict::resolve_deleted(&repo_path, &rel_path)
+}
+
+// ---------- reflog and undo ----------
+
+#[tauri::command(async)]
+pub fn list_reflog(repo_path: String, limit: usize) -> Result<Vec<reflog::ReflogEntry>, String> {
+    reflog::list(&repo_path, limit)
+}
+
+/// What "undo the last operation" would do, for the confirmation to describe. `null` when the last
+/// entry is nothing this can undo.
+#[tauri::command(async)]
+pub fn get_undo_plan(repo_path: String) -> Result<Option<reflog::UndoPlan>, String> {
+    reflog::undo_plan(&repo_path)
+}
+
+/// Carries out the plan, if HEAD is still `expected_head`. Returns the backup ref it wrote.
+#[tauri::command]
+pub fn undo_last_operation(repo_path: String, expected_head: String) -> Result<Option<String>, String> {
+    reflog::undo(&repo_path, &expected_head)
+}
+
+/// "Restore to here" from the reflog view. Returns the backup ref it wrote first.
+#[tauri::command]
+pub fn restore_reflog_entry(repo_path: String, oid: String) -> Result<Option<String>, String> {
+    reflog::restore(&repo_path, &oid)
+}
+
+// ---------- submodules ----------
+
+#[tauri::command(async)]
+pub fn list_submodules(repo_path: String) -> Result<Vec<submodule::SubmoduleInfo>, String> {
+    submodule::list(&repo_path)
+}
+
+/// `git submodule update --init`, for one submodule or all of them. A network operation, so it runs
+/// through `remote` with the same progress events and failure classification as a fetch.
+#[tauri::command]
+pub async fn git_submodule_update(
+    app: AppHandle,
+    repo_path: String,
+    path: Option<String>,
+    recursive: bool,
+) -> Result<(), String> {
+    remote::submodule_update(app, repo_path, path, recursive).await
+}
+
+// ---------- worktrees ----------
+//
+// Add and remove are `(async)`: they run `git worktree`, which checks out (or deletes) a whole tree —
+// seconds on a large repository — and touch a *different* working tree from the one the UI thread's
+// index writes are about.
+
+#[tauri::command(async)]
+pub fn list_worktrees(repo_path: String) -> Result<Vec<worktree::WorktreeInfo>, String> {
+    worktree::list(&repo_path)
+}
+
+#[tauri::command(async)]
+pub fn add_worktree(
+    repo_path: String,
+    target: String,
+    branch: String,
+    new_branch: bool,
+    start_point: Option<String>,
+) -> Result<(), String> {
+    worktree::add(&repo_path, &target, &branch, new_branch, start_point.as_deref())
+}
+
+/// Refuses a worktree with local changes unless `force` — tagged `WORKTREE_DIRTY` so the UI can ask a
+/// second time.
+#[tauri::command(async)]
+pub fn remove_worktree(repo_path: String, target: String, force: bool) -> Result<(), String> {
+    worktree::remove(&repo_path, &target, force)
+}
+
+#[tauri::command(async)]
+pub fn prune_worktrees(repo_path: String) -> Result<(), String> {
+    worktree::prune(&repo_path)
+}
+
+// ---------- tags and branches on the remote ----------
+
+#[tauri::command]
+pub async fn git_push_tag(app: AppHandle, repo_path: String, remote_name: Option<String>, tag: String) -> Result<(), String> {
+    remote::push_tag(app, repo_path, remote_name, tag).await
+}
+
+#[tauri::command]
+pub async fn git_push_all_tags(app: AppHandle, repo_path: String, remote_name: Option<String>) -> Result<(), String> {
+    remote::push_all_tags(app, repo_path, remote_name).await
+}
+
+#[tauri::command]
+pub async fn git_delete_remote_tag(app: AppHandle, repo_path: String, remote_name: String, tag: String) -> Result<(), String> {
+    remote::delete_remote_tag(app, repo_path, remote_name, tag).await
+}
+
+#[tauri::command]
+pub async fn git_delete_remote_branch(app: AppHandle, repo_path: String, remote_branch: String) -> Result<(), String> {
+    remote::delete_remote_branch(app, repo_path, remote_branch).await
+}
+
+// ---------- bisect ----------
+//
+// Through the CLI, and `(async)`: every verdict checks the next candidate out, which is a checkout of
+// the whole tree and the same seconds a branch switch takes.
+
+#[tauri::command(async)]
+pub fn get_bisect_state(repo_path: String) -> Result<bisect::BisectState, String> {
+    bisect::state(&repo_path)
+}
+
+/// Starts a bisect with its first verdict: `rev` is `bad` or `good` per `verdict`.
+#[tauri::command(async)]
+pub fn bisect_start(repo_path: String, verdict: String, rev: String) -> Result<bisect::BisectState, String> {
+    bisect::start(&repo_path, &verdict, &rev)
+}
+
+/// `good`, `bad` or `skip` — for `rev`, or for the candidate when it is `null`.
+#[tauri::command(async)]
+pub fn bisect_mark(repo_path: String, verdict: String, rev: Option<String>) -> Result<bisect::BisectState, String> {
+    bisect::mark(&repo_path, &verdict, rev.as_deref())
+}
+
+#[tauri::command(async)]
+pub fn bisect_reset(repo_path: String) -> Result<(), String> {
+    bisect::reset(&repo_path)
 }

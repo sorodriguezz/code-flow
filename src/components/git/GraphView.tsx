@@ -4,8 +4,10 @@ import { useRepoStore } from "../../state/repoStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
-import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast, useToastStore } from "../../state/toastStore";
+import { useUiStore } from "../../state/uiStore";
 import * as api from "../../lib/tauri/commands";
+import { describeGitError, stoppedOperation } from "../../lib/gitErrors";
 import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -21,6 +23,7 @@ import {
   RotateCcw,
   Search,
   Tag,
+  Undo2,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -28,6 +31,12 @@ import { useT } from "../../state/languageStore";
 import { ContextMenu } from "../common/ContextMenu";
 import { matchesCommit } from "../../lib/gitActions";
 import { commitMenuItems } from "./commitMenu";
+import { useGitToolsStore } from "../../state/gitToolsStore";
+import { reportCommitFailure } from "../../state/gitOutputStore";
+import { BisectBanner } from "./BisectBanner";
+import { ReflogModal } from "./ReflogModal";
+import { reflogOpKey } from "../../lib/undoPlan";
+import type { BisectState } from "../../lib/tauri/gitCommands";
 import type { CommitInfo } from "../../types/domain";
 import { Skeleton, SkeletonRows } from "../common/Skeleton";
 import {
@@ -269,6 +278,47 @@ function RefChips({ refs, currentBranch }: { refs: CommitRef[]; currentBranch: s
   );
 }
 
+type BisectMark = "candidate" | "first_bad" | "bad" | "good" | "skip";
+
+/** Which commits a running bisect has something to say about — see `BisectChip`. */
+function bisectMarks(bisect: BisectState | null): Map<string, BisectMark> {
+  const marks = new Map<string, BisectMark>();
+  if (!bisect?.active) return marks;
+  for (const id of bisect.good) marks.set(id, "good");
+  for (const id of bisect.skipped) marks.set(id, "skip");
+  if (bisect.bad) marks.set(bisect.bad, "bad");
+  if (bisect.candidate) marks.set(bisect.candidate, "candidate");
+  if (bisect.first_bad) marks.set(bisect.first_bad, "first_bad");
+  return marks;
+}
+
+const BISECT_HUE: Record<BisectMark, string> = {
+  candidate: "var(--cf-warning)",
+  first_bad: "var(--cf-danger)",
+  bad: "var(--cf-danger)",
+  good: "var(--cf-success)",
+  skip: "var(--cf-text-faint)",
+};
+
+/** A bisect verdict on a commit, as a pill beside its refs — the candidate loudest. */
+function BisectChip({ mark, t }: { mark: BisectMark; t: ReturnType<typeof useT> }) {
+  const hue = BISECT_HUE[mark];
+  return (
+    <span
+      className={`inline-flex h-[19px] shrink-0 items-center rounded-full border px-1.5 text-[11px] ${
+        mark === "candidate" || mark === "first_bad" ? "font-semibold" : "font-medium"
+      }`}
+      style={{
+        color: hue,
+        borderColor: `color-mix(in oklab, ${hue} 55%, transparent)`,
+        background: `color-mix(in oklab, ${hue} ${mark === "candidate" || mark === "first_bad" ? 22 : 10}%, transparent)`,
+      }}
+    >
+      {t(`bisect.mark.${mark}` as Parameters<typeof t>[0])}
+    </span>
+  );
+}
+
 /**
  * One changed path inside an expanded commit, as `git status --short` writes it: a letter, then the
  * file.
@@ -355,6 +405,11 @@ const CommitTable = memo(function CommitTable() {
   const selectCommitFile = useRepoStore((s) => s.selectCommitFile);
   const selectCommit = useRepoStore((s) => s.selectCommit);
   const undoCommit = useRepoStore((s) => s.undoCommit);
+  // A running bisect marks its candidate and its verdicts on the rows — see `BisectChip`.
+  const bisect = useGitToolsStore((s) => s.bisect);
+  const bisectStart = useGitToolsStore((s) => s.bisectStart);
+  const bisectMark = useGitToolsStore((s) => s.bisectMark);
+  const marks = useMemo(() => bisectMarks(bisect), [bisect]);
   const colHash = useLayoutStore((s) => s.sizes.graphColHash);
   const colDate = useLayoutStore((s) => s.sizes.graphColDate);
   const colAuthor = useLayoutStore((s) => s.sizes.graphColAuthor);
@@ -408,7 +463,21 @@ const CommitTable = memo(function CommitTable() {
       await useRepoStore.getState().refreshAll();
       pushSuccessToast(done);
     } catch (e) {
-      pushErrorToast(String(e));
+      // A revert or cherry-pick that conflicted did not fail: it is in progress, stopped for the
+      // user the way `git revert` stops. Reload so the conflicts banner appears, and go to it —
+      // the history is not where that work continues.
+      if (stoppedOperation(e)) {
+        await useRepoStore
+          .getState()
+          .refreshAll()
+          .catch(() => {});
+        useUiStore.getState().setActiveView("changes");
+        useToastStore.getState().pushToast(describeGitError(e, t), "info");
+        return;
+      }
+      // An amend through `git commit --amend` that a hook refused: the dialog shows what it said.
+      if (reportCommitFailure(e)) return;
+      pushErrorToast(describeGitError(e, t));
     }
   };
 
@@ -416,6 +485,24 @@ const CommitTable = memo(function CommitTable() {
     void (async () => {
       const repoPath = useRepoStore.getState().repoPath;
       if (!repoPath) return;
+      // A commit that is already on its upstream is somebody else's history too: amending rewrites
+      // it, and the next push will be rejected until it is forced. Said before the rewrite, while
+      // "no" still costs nothing. "On the upstream" is the branch tracking one and HEAD not being
+      // among the commits it has yet to push.
+      const repo = useRepoStore.getState();
+      const branch = repo.branches.find((b) => b.is_head);
+      const headId = repo.status?.head_oid ?? null;
+      const pushed = !!branch?.upstream && !!headId && !repo.unpushedCommits.some((c) => c.id === headId);
+      if (
+        pushed &&
+        !(await confirmAction(
+          t("graph.amendPushedConfirm", { upstream: branch?.upstream ?? "" }),
+          true,
+          t("graph.menuAmend"),
+        ))
+      ) {
+        return;
+      }
       // Opens on the existing message rather than on an empty box: an amend is almost always a
       // correction to what is already there, and retyping it from memory is how the rest of it
       // gets lost.
@@ -849,6 +936,21 @@ const CommitTable = memo(function CommitTable() {
               <circle key={r.commit.id} cx={laneX(r.lane)} cy={rowY(r.row)} r={DOT_RADIUS} fill={laneColor(r.lane)} />
             ),
           )}
+          {/* The commit a bisect is testing wears a ring of its own, outside the dot, so it can be
+              found in a long history at a glance. */}
+          {visibleRows
+            .filter((r) => marks.get(r.commit.id) === "candidate" || marks.get(r.commit.id) === "first_bad")
+            .map((r) => (
+              <circle
+                key={`bisect:${r.commit.id}`}
+                cx={laneX(r.lane)}
+                cy={rowY(r.row)}
+                r={HEAD_RADIUS + 3}
+                fill="none"
+                stroke={BISECT_HUE[marks.get(r.commit.id) as BisectMark]}
+                strokeWidth={2}
+              />
+            ))}
         </svg>
 
         <div>
@@ -891,6 +993,7 @@ const CommitTable = memo(function CommitTable() {
                   <span style={{ width: graphWidth }} className="shrink-0" aria-hidden />
                   <span style={{ width: messageWidth }} className="flex min-w-0 shrink-0 items-center gap-2">
                     <span className="min-w-0 flex-1 truncate text-[var(--cf-text)]">{r.commit.summary}</span>
+                    {marks.has(r.commit.id) && <BisectChip mark={marks.get(r.commit.id) as BisectMark} t={t} />}
                     <RefChips refs={r.commit.refs} currentBranch={currentBranch} />
                   </span>
                   <span style={{ width: colAuthor }} className="shrink-0 truncate text-[12px] text-[var(--cf-text-muted)]">
@@ -1029,6 +1132,11 @@ const CommitTable = memo(function CommitTable() {
             onAmend: openAmend,
             onRevert: (commit) => void revertHere(commit),
             onCherryPick: (commit) => void cherryPickHere(commit),
+            bisectActive: bisect?.active ?? false,
+            onBisect: (commit, verdict) => {
+              if (bisect?.active) void bisectMark(verdict, commit.id);
+              else if (verdict !== "skip") void bisectStart(verdict, commit.id);
+            },
           })}
           onClose={() => setMenu(null)}
         />
@@ -1059,6 +1167,10 @@ const CommitTable = memo(function CommitTable() {
  */
 function GraphToolbar() {
   const t = useT();
+  const undoPlan = useGitToolsStore((s) => s.undoPlan);
+  const undoLast = useGitToolsStore((s) => s.undoLast);
+  const pending = useGitToolsStore((s) => s.pending);
+  const [reflogOpen, setReflogOpen] = useState(false);
   const query = useRepoStore((s) => s.commitQuery);
   const setQuery = useRepoStore((s) => s.setCommitQuery);
   const total = useRepoStore((s) => s.commits.length);
@@ -1109,6 +1221,30 @@ function GraphToolbar() {
           {t("graph.searchCount", { shown, total })}
         </span>
       )}
+      <span className="flex-1" />
+      {/* Undo whatever moved HEAD last, explained before it runs — and the record it reads from. */}
+      <Tooltip label={undoPlan ? t("undo.buttonHint", { op: t(reflogOpKey(undoPlan.op)) }) : t("undo.nothing")}>
+        <button
+          type="button"
+          disabled={!undoPlan || pending !== null}
+          onClick={() => void undoLast()}
+          aria-label={t("undo.button")}
+          className={iconButtonClass({ size: "sm" })}
+        >
+          {pending === "undo" ? <Loader2 size={13} className="animate-spin" /> : <Undo2 size={14} />}
+        </button>
+      </Tooltip>
+      <Tooltip label={t("reflog.title")}>
+        <button
+          type="button"
+          onClick={() => setReflogOpen(true)}
+          aria-label={t("reflog.title")}
+          className={iconButtonClass({ size: "sm" })}
+        >
+          <History size={14} />
+        </button>
+      </Tooltip>
+      {reflogOpen && <ReflogModal onClose={() => setReflogOpen(false)} />}
     </div>
   );
 }
@@ -1148,6 +1284,7 @@ export function GraphView() {
     <div className="flex h-full min-h-0">
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)]">
         <GraphToolbar />
+        <BisectBanner />
         <CommitTable />
       </div>
 

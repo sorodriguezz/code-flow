@@ -15,6 +15,11 @@
 //
 // A regular expression over `git ls-files`, like check-translations.mjs, because the question needs
 // no parser: tab, LF and CR are the only bytes below 0x20 that belong in source, and DEL never does.
+//
+// The C1 controls (U+0080–U+009F) are caught too, for a related accident: UTF-8 read as Latin-1 and
+// written back. An em dash (E2 80 94) comes out as "â" followed by U+0080 and U+0094 — invisible in
+// most editors, and exactly what once shipped in an English UI string. Nothing legitimate in this
+// repository's source is a raw C1 character.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -23,8 +28,8 @@ import { readFileSync } from "node:fs";
  *  on purpose. */
 const SOURCE = /\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs|rs)$/;
 
-/** Every C0 control except tab, LF and CR, plus DEL. */
-const CONTROL = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
+/** Every C0 control except tab, LF and CR, plus DEL — and the C1 controls, see above. */
+const CONTROL = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u0080-\u009F]/g;
 
 const files = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
   .split("\0")
@@ -45,8 +50,12 @@ for (const path of files) {
     const before = source.slice(0, match.index);
     const line = before.split("\n").length;
     const column = match.index - before.lastIndexOf("\n");
-    const byte = match[0].charCodeAt(0).toString(16).padStart(2, "0");
-    problems.push(`${path}:${line}:${column}: raw 0x${byte}`);
+    const code = match[0].charCodeAt(0);
+    const what =
+      code >= 0x80
+        ? `U+${code.toString(16).toUpperCase().padStart(4, "0")} (mojibake?)`
+        : `raw 0x${code.toString(16).padStart(2, "0")}`;
+    problems.push(`${path}:${line}:${column}: ${what}`);
   }
 }
 
@@ -55,6 +64,7 @@ if (problems.length > 0) {
   for (const problem of problems.slice(0, 50)) console.error(`  ${problem}`);
   if (problems.length > 50) console.error(`  … and ${problems.length - 50} more`);
   console.error("\nWrite each as its escape (\\0, \\x1b, …): the same string at runtime, and text to git.");
+  console.error("A U+0080–U+009F one is usually a character decoded twice: put back the one that was meant.");
   process.exit(1);
 }
 

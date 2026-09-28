@@ -61,6 +61,10 @@ export const clearServiceLog = (id: string) => invoke<void>("service_clear_log",
 /** What a folder can run, best first. */
 export const detectServices = (path: string) => invoke<ServiceCandidate[]>("service_detect", { path });
 
+/** The env files in a folder, `.env` first — what the editor offers to load. Templates
+ *  (`.env.example`) are left out. */
+export const listEnvFiles = (path: string) => invoke<string[]>("service_env_files", { path });
+
 /** What every repository in a workspace can run. */
 export const detectWorkspaceServices = (workspaceId: string) =>
   invoke<ProjectCandidates[]>("services_detect_workspace", { workspaceId });

@@ -11,6 +11,7 @@ import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { JobLogPane } from "./JobLogPane";
 import { RunActions } from "./RunActions";
+import { RunGates } from "./RunGates";
 import { RunGraph } from "./RunGraph";
 import { RunList } from "./RunList";
 import type { PipelineAvailability, PipelineRun } from "../../types/domain";
@@ -137,7 +138,7 @@ export function PipelinesView() {
           style={{ width: listWidth }}
           className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
         >
-          <RunList projectId={project.id} currentBranch={branch} />
+          <RunList projectId={project.id} localPath={project.local_path} currentBranch={branch} />
         </div>
 
         <ResizeHandle
@@ -167,6 +168,10 @@ export function PipelinesView() {
                   <RunActions projectId={project.id} run={detail.run} />
                 </div>
               )}
+
+              {/* Between the verbs and the drawing: a run held at a gate will wait forever unless
+                  somebody notices, so what it waits on is the first thing under the toolbar. */}
+              {detail && <RunGates projectId={project.id} detail={detail} />}
 
               <div
                 data-tour="pipelines-graph"

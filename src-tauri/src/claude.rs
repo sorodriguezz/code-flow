@@ -13,8 +13,16 @@
 //! (`--append-system-prompt`), several of whose fixed templates in `ai.rs` are themselves
 //! multi-paragraph. [`ClaudeEngine::build_command`] routes both off the command line when that's
 //! the case: the ask goes to stdin behind a fixed pointer (mirrors [`PROMPT_POINTER`]), and the
-//! system prompt goes to a temp file via `--append-system-prompt-file` — verified against the
-//! installed CLI (`claude --append-system-prompt-file <path>` reads it; confirmed against 2.1.226).
+//! system prompt goes to a file via `--append-system-prompt-file` — verified against the installed
+//! CLI (`claude --append-system-prompt-file <path>` reads it; confirmed against 2.1.226). The file
+//! is private and deleted when the run ends; see `crate::ai_prompt_files`.
+//!
+//! **Read-only is enforced here, not requested.** For an invocation marked
+//! [`AiInvocation::read_only`], `--tools` names the only built-in tools that *exist* for the run —
+//! `--allowedTools` merely pre-approves some, and anything the user's own settings allow (an
+//! `Edit` rule, `Bash(npm test:*)`) would still run beside them — and `--strict-mcp-config` with no
+//! `--mcp-config` loads no MCP server, so no server's tools can write either. Both verified against
+//! `claude --help` on 2.1.266.
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -41,13 +49,12 @@ fn needs_stdin_prompt(prompt: &str) -> bool {
     prompt.contains('\n')
 }
 
-/// Writes the system prompt to a temp file for `--append-system-prompt-file`, so a multi-paragraph
-/// prompt never has to survive the `.cmd` shim as a single argument. `None` on a failed write, so
-/// the caller can fall back to passing it inline rather than losing the system prompt outright.
-fn write_system_prompt_file(sp: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::temp_dir().join(format!("codeflow-claude-system-{}.txt", uuid::Uuid::new_v4()));
-    std::fs::write(&path, sp).ok()?;
-    Some(path)
+/// Writes the system prompt to a private file for `--append-system-prompt-file`, so a
+/// multi-paragraph prompt never has to survive the `.cmd` shim as a single argument. `None` on a
+/// failed write, so the caller can fall back to passing it inline rather than losing the system
+/// prompt outright. Deleted when the run ends — see `crate::ai_prompt_files`.
+fn write_system_prompt_file(inv: &AiInvocation, sp: &str) -> Option<std::path::PathBuf> {
+    inv.prompt_files.write("claude-system", "txt", sp)
 }
 
 pub struct ClaudeEngine;
@@ -98,7 +105,7 @@ impl AiEngine for ClaudeEngine {
             cmd.arg("-p").arg(inv.prompt);
         }
         if let Some(sp) = inv.system_prompt {
-            match write_system_prompt_file(sp) {
+            match write_system_prompt_file(inv, sp) {
                 Some(path) => cmd.arg("--append-system-prompt-file").arg(path),
                 None => cmd.arg("--append-system-prompt").arg(sp),
             };
@@ -121,10 +128,17 @@ impl AiEngine for ClaudeEngine {
         if inv.stream_deltas.is_some() {
             cmd.arg("--include-partial-messages");
         }
+        // Read-only first, because it narrows what the line below approves: `--tools` decides which
+        // built-in tools exist at all for this run, where `--allowedTools` only decides which of the
+        // existing ones run without asking. See the module docs.
+        if inv.read_only {
+            cmd.arg("--tools").arg(self.read_only_tools().join(","));
+            cmd.arg("--strict-mcp-config");
+        }
         if !inv.allowed_tools.is_empty() {
             cmd.arg("--allowedTools").arg(inv.allowed_tools.join(","));
         }
-        if inv.auto_approve_edits {
+        if inv.auto_approve_edits && !inv.read_only {
             cmd.arg("--permission-mode").arg("acceptEdits");
         }
         if let Some(id) = inv.resume_session_id {
@@ -136,17 +150,30 @@ impl AiEngine for ClaudeEngine {
         cmd
     }
 
-    /// Claude's scale is this app's scale — `--effort low|medium|high|xhigh|max`. The two extra
-    /// steps it offers above `high` are why the neutral scale tops out at `max` rather than at
-    /// `high`: this is the one CLI that would have lost a level to a three-step vocabulary.
-    /// Claude Code's read-only set, which is the one this app's `--allowedTools` actually enforces.
+    /// Claude Code's read-only set. Passed as both `--tools` (what exists) and `--allowedTools`
+    /// (what runs unasked) on a read-only run — see the module docs.
     fn read_only_tools(&self) -> Vec<String> {
         ["Read", "Grep", "Glob", "WebFetch", "WebSearch"].iter().map(|s| s.to_string()).collect()
     }
 
+    /// Enforced by the CLI: `--tools` leaves the write and shell tools out of the run entirely, and
+    /// `--strict-mcp-config` loads no MCP server whose tools could write instead.
+    fn enforces_read_only(&self) -> bool {
+        true
+    }
 
+    /// Claude's scale is this app's scale — `--effort low|medium|high|xhigh|max`. The two extra
+    /// steps it offers above `high` are why the neutral scale tops out at `max` rather than at
+    /// `high`: this is the one CLI that would have lost a level to a three-step vocabulary.
     fn effort_args(&self, effort: &str) -> Vec<String> {
         vec!["--effort".into(), effort.into()]
+    }
+
+    /// A failed run still ends in a `result` event, and that event carries the turn's usage and
+    /// cost — an `error_during_execution` after twelve tool calls says so. A refusal's are zeros,
+    /// and an empty report is dropped by the caller.
+    fn reported_usage(&self, stdout: &str, _stderr: &str) -> Option<AiUsage> {
+        result_payload(stdout).as_ref().and_then(usage_of)
     }
 
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
@@ -728,6 +755,89 @@ mod tests {
         let stdout = r#"{"type":"result","is_error":false,"result":"Claude AI usage limit reached|1751234567","usage":{"input_tokens":0,"output_tokens":0}}"#;
         let err = interpret_output(true, "exit status: 0", stdout, "").unwrap_err();
         assert!(err.starts_with(QUOTA_MARKER), "got {err}");
+    }
+
+    /// Claude Code's real refusals — synthetic messages, zero tokens, `is_error: true` — in the
+    /// wordings the CLI actually uses. None of them matched the old vocabulary, so a session limit
+    /// reached the user as a raw red error. The provider's own words must survive intact: "resets
+    /// 12am" is the one fact the user needs.
+    #[test]
+    fn claude_codes_own_limit_wordings_are_quota_refusals() {
+        for text in [
+            "You've hit your session limit · resets 12am (America/Santiago)",
+            "You've hit your weekly limit · resets Mon 9am",
+            "API Error: 400 You're out of extra usage. Add more at claude.ai/settings/usage",
+            "You're out of usage credits",
+            "Your org is out of usage · ask your admin",
+            "You\u{2019}ve reached your usage limit",
+        ] {
+            let stdout = format!(
+                r#"{{"type":"result","subtype":"success","is_error":true,"result":"{text}","usage":{{"input_tokens":0,"output_tokens":0}}}}"#
+            );
+            let err = interpret_output(false, "exit status: 1", &stdout, "").unwrap_err();
+            assert_eq!(err, format!("{QUOTA_MARKER}{text}"), "not recognised: {text}");
+        }
+    }
+
+    /// The token-evidence rule holds for the new wordings too: an answer the model generated is an
+    /// answer, even when it happens to open like a refusal.
+    #[test]
+    fn a_generated_answer_that_sounds_like_a_limit_is_still_an_answer() {
+        let stdout = r#"{"type":"result","is_error":false,"result":"You've hit your session limit for this cache, so evict first.","usage":{"input_tokens":9,"output_tokens":31}}"#;
+        let run = interpret_output(true, "exit status: 0", stdout, "").unwrap();
+        assert!(run.text.starts_with("You've hit your session limit"));
+    }
+
+    /// Ordinary English that shares an opening is not a limit, even on the failed path.
+    #[test]
+    fn an_opening_without_a_limit_is_just_an_error() {
+        let stdout = r#"{"is_error":true,"result":"You've hit your stride; the build failed for another reason"}"#;
+        let err = interpret_output(false, "exit status: 1", stdout, "").unwrap_err();
+        assert!(!err.starts_with(QUOTA_MARKER), "got {err}");
+    }
+
+    /// Read-only is a limit the CLI enforces: the tools that exist, and no MCP server — and never
+    /// the edit auto-approval, whatever else the invocation says.
+    #[test]
+    fn a_read_only_run_is_limited_by_the_cli_itself() {
+        let tools = ClaudeEngine.read_only_tools();
+        let mut inv = AiInvocation::new("¿qué hace esto?", "");
+        inv.allowed_tools = &tools;
+        inv.read_only = true;
+        inv.auto_approve_edits = true;
+        let args = command_args(&ClaudeEngine.build_command("claude", &inv));
+        assert!(args.windows(2).any(|pair| pair == ["--tools", "Read,Grep,Glob,WebFetch,WebSearch"]), "{args:?}");
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "acceptEdits"), "{args:?}");
+
+        // An ordinary run is untouched by any of it.
+        let plain = command_args(&ClaudeEngine.build_command("claude", &AiInvocation::new("hola", "")));
+        assert!(!plain.iter().any(|a| a == "--tools" || a == "--strict-mcp-config"), "{plain:?}");
+    }
+
+    /// A failed run that spent tokens says so on its `result` event, and the meter now reads it.
+    #[test]
+    fn a_failed_run_still_reports_what_it_spent() {
+        let stdout = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom","usage":{"input_tokens":1200,"output_tokens":80},"total_cost_usd":0.02}"#;
+        let usage = ClaudeEngine.reported_usage(stdout, "").expect("reported");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (1200, 80));
+        assert_eq!(usage.cost_usd, Some(0.02));
+        // A refusal reported zeros, which is nothing to record.
+        let refusal = r#"{"type":"result","is_error":true,"result":"You've hit your session limit","usage":{"input_tokens":0,"output_tokens":0}}"#;
+        assert!(ClaudeEngine.reported_usage(refusal, "").is_none());
+    }
+
+    /// The system prompt file is private and goes with the run.
+    #[test]
+    fn the_system_prompt_file_lives_as_long_as_the_invocation() {
+        let mut inv = AiInvocation::new("hola", "");
+        inv.system_prompt = Some("line one\nline two");
+        let args = command_args(&ClaudeEngine.build_command("claude", &inv));
+        let at = args.iter().position(|a| a == "--append-system-prompt-file").expect("a file");
+        let path = std::path::PathBuf::from(&args[at + 1]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "line one\nline two");
+        drop(inv);
+        assert!(!path.exists(), "deleted with the invocation");
     }
 
     #[test]

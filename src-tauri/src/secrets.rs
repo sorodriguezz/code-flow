@@ -315,6 +315,17 @@ pub fn gitlab_token_key(host: &str) -> String {
     format!("gitlab-token:{host}")
 }
 
+/// Bitbucket Cloud has one host, so its credentials are keyed by **workspace** — the boundary an
+/// access token is scoped to and the first segment of every remote URL — the way Azure DevOps keys
+/// its PATs by organisation. Lower-cased: Bitbucket issues workspace ids in lower case and routes
+/// them case-insensitively, so two spellings must not become two entries.
+///
+/// The value is the whole credential as JSON (`bitbucket::BitbucketAuth`): an API token only works
+/// together with its account's e-mail.
+pub fn bitbucket_token_key(workspace: &str) -> String {
+    format!("bitbucket-token:{}", workspace.trim().to_ascii_lowercase())
+}
+
 /// Jira's API token, keyed per site, so a work account and a personal one can be connected at once.
 ///
 /// Only the token lives here. Jira Cloud authenticates it against the account **e-mail**, and that
@@ -409,6 +420,36 @@ fn project_host(project_url: &str) -> String {
 /// be able to resolve as a collection's.
 pub fn supabase_share_token(collection_id: &str) -> String {
     format!("supabase-collection:{collection_id}")
+}
+
+/// The host's proof of owning one shared collection.
+///
+/// Separate from the share token on purpose: that token is handed to every guest, so it cannot be
+/// what tells the project who the host is. Only a hash of this one ever reaches the project
+/// (`cf_shares.owner_hash`), and `cf_rotate_token` refuses anyone who cannot produce the original —
+/// which is what stops a guest from rotating the code and locking the host out.
+pub fn supabase_owner_key(collection_id: &str) -> String {
+    format!("supabase-owner:{collection_id}")
+}
+
+/// One credential of the API client — an auth token, a secret variable's value, a client
+/// certificate's passphrase — lifted out of the `api_*` rows that name it.
+///
+/// Keyed by what owns it (`collection`, `folder`, `request`, `environment`, `tab`, `cert`), that
+/// owner's id and the slot inside it (`auth.bearer.token`, `var.<id>.initialValue`), so the key is
+/// derivable from the row alone — see `db::api_secrets` for the markers the rows keep instead.
+pub fn api_secret_key(owner: &str, id: &str, path: &str) -> String {
+    format!("api-secret:{owner}:{id}:{path}")
+}
+
+/// The key that seals the API client's cookie jar at rest (`db::api_cookie_seal`): 32 random bytes,
+/// base64, minted the first time a cookie is stored.
+///
+/// One key for the whole jar rather than one credential per cookie: a jar holds hundreds of short
+/// values that change on every response, and the credential store is the wrong place for something
+/// written that often — on macOS every write rewrites the one vault item.
+pub fn api_cookie_key() -> String {
+    "api-cookie-key".to_string()
 }
 
 #[cfg(test)]

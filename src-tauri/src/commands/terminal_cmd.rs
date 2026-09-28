@@ -121,6 +121,13 @@ pub fn close_terminal(registry: State<TerminalRegistry>, id: String) -> Result<(
     terminal::close_terminal(&registry, &id)
 }
 
+/// What a terminal is busy with — the program in its foreground other than the shell — so closing
+/// its tab can ask first. `None` when it sits at its prompt. Reads the process table, hence async.
+#[tauri::command(async)]
+pub fn terminal_foreground(registry: State<TerminalRegistry>, id: String) -> Option<String> {
+    terminal::foreground_process(&registry, &id)
+}
+
 // ---------------------------------------------------------------------------
 // The agent console's terminal bench
 // ---------------------------------------------------------------------------

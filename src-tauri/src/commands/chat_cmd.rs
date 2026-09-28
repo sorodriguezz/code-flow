@@ -7,29 +7,38 @@
 //! premise: **a conversation does not have to be about a repository.** Three of this module's
 //! decisions come straight out of that, and each is a decision rather than a default.
 //!
-//! # 1. A conversation with no repository is read-only
+//! # 1. A conversation with no repository writes only where it was told it may
 //!
 //! The panel's chat runs with edits auto-approved because it is always pointed at a checkout the
 //! user is working in, wrapped in a checkpoint pair so anything it does is undoable. A conversation
-//! about no repository has neither: no working copy to snapshot, and — crucially — no place the
-//! user asked for files to be written. So [`chat_send`] passes `auto_approve_edits: false` and a
-//! read-only tool set for it.
+//! about no repository has neither, and what it may do is the `chat_file_generation` setting's
+//! call ([`CHAT_FILE_GENERATION_KEY`]):
 //!
-//! **This is best-effort for most engines, and it is never a sandbox.** Say it plainly, because the
-//! distinction decides whether anyone should rely on it. Two of the six take a tool allow-list and
-//! are therefore genuinely limited: Claude Code through `--allowedTools`, and grok through
-//! `--tools`. Each names its own set in `AiEngine::read_only_tools` — the vocabularies differ, which
-//! is exactly why one hardcoded list here was wrong and why grok spent its first release running
-//! these conversations with `write_file` and `bash` in hand.
+//! - **On** (the default): the turn runs with write access in a directory of its own
+//!   ([`crate::paths::chat_conversation_outputs_dir`]), which is where the files it builds are found
+//!   afterwards. That folder is where the engine *starts*, not a wall: an engine with a shell can
+//!   reach outside it, and the settings copy says so rather than promising isolation.
+//! - **Off**: the turn is **read-only** — [`chat_send`] passes `auto_approve_edits: false`, the
+//!   engine's own read-only tool set, and `read_only: true`, which asks each engine for the
+//!   strongest read-only mode its CLI really has (see `ai::AiInvocation::read_only`).
 //!
-//! The other four have no allow-list flag at all; their access is a permission or sandbox *mode* of
-//! their own, which this app does not set. For those, the whole of the protection is
-//! `auto_approve_edits: false` — which means the engine is not told to accept edits, not that the
-//! operating system will stop it. A CLI that writes anyway writes.
-//! The read-only claim in the UI is therefore about intent, and the honest statement of it is that
-//! a repo-less conversation runs in an empty scratch directory ([`crate::paths::chat_scratch_dir`])
-//! where there is nothing of the user's to damage — that part is real and does not depend on any
-//! engine cooperating.
+//! **Whether "read-only" is a guarantee depends on the engine, and the UI says which.** Three of the
+//! six enforce it, each verified against its own `--help`: Claude Code (`--tools` leaves the write
+//! and shell tools out of the run, `--strict-mcp-config` loads no MCP server), Codex (its
+//! `read-only` sandbox, which the operating system enforces) and grok (`--tools` with its own tool
+//! ids, and MCP calls denied by rule). The other three cannot promise it: agy's permission system
+//! soft-denies unapproved tools in print mode — so its brief now rides the command line wherever
+//! it fits, without the bypass a file needed — but the user's own settings can pre-approve writes;
+//! opencode has no flag for it; and Cline's plan mode can switch itself to act mode. For those the
+//! whole protection is "not told to accept edits", and a CLI that writes anyway writes.
+//! `ai::AiEngine::enforces_read_only` is the one place that answer lives, and
+//! `claude_cmd::ai_read_only_engines` is how the composer and the settings learn it — so where it
+//! is false they say that "text only" is a request, not a guarantee, instead of promising it.
+//!
+//! Each engine names its read-only tools in its own vocabulary (`AiEngine::read_only_tools`) —
+//! Claude's `Read`/`Grep` are grok's `read_file`/`grep` — which is exactly why one hardcoded list
+//! here was wrong, and why grok spent its first release running these conversations with its file
+//! editor and its shell in hand.
 //!
 //! # 2. The lease is per conversation, not per path
 //!
@@ -203,10 +212,10 @@ const REPO_LESS_READONLY_NOTE: &str =
 ///
 /// It says **where**, and it says it twice on purpose. An engine told merely that it may write
 /// files writes them wherever its own habits suggest — `~/Desktop`, an absolute path it invented,
-/// the last repository it remembers — and the working directory is the only boundary this app
-/// actually has (two of the six CLIs honour a tool allow-list; the other four do not). A file
-/// written outside it is a file the user is never offered and never told about, which is the one
-/// outcome worse than not writing it at all.
+/// the last repository it remembers — and for a turn allowed to write, the working directory is
+/// where it starts rather than a wall (an engine with a shell can leave it). A file written outside
+/// it is a file the user is never offered and never told about, which is the one outcome worse
+/// than not writing it at all.
 ///
 /// It also keeps steering plain text back to the code block. A `.xlsx` holding two columns of data
 /// is worse for the user than a CSV they can see in the transcript before they save it, and an
@@ -531,6 +540,10 @@ pub struct InflightTurn {
     /// Milliseconds since the epoch, so an adopting window's elapsed timer starts from when the
     /// turn really began rather than from when that window happened to open.
     pub started_at_ms: i64,
+    /// The exchange's number — the question is already stored under it. Kept for
+    /// [`record_turns_stopped_at_quit`], which files the answer the quit cut off; no window needs it.
+    #[serde(skip)]
+    pub turn: i64,
 }
 
 fn inflight() -> &'static std::sync::Mutex<std::collections::HashMap<String, InflightTurn>> {
@@ -562,6 +575,60 @@ fn mark_inflight(turn: InflightTurn) -> InflightGuard {
         held.insert(key.clone(), turn);
     }
     InflightGuard(key)
+}
+
+/// Files every turn the app is quitting in the middle of as **stopped**. Called from the quit path
+/// right after `ai_runs::stop_all`.
+///
+/// Quitting ends in `std::process::exit`, so `chat_send`'s own ending — which writes exactly this
+/// row for a turn the user stopped — may or may not get to run in the moments that are left. When
+/// it did not, the question sat in the transcript answered by nothing, which reads as a turn still
+/// in progress in a conversation that will never finish it. This writes the row the cancellation
+/// would have. The two cannot both land: the row's id is the message id minted before the run, it
+/// is the table's primary key, and whichever insert comes second fails — harmlessly, since each
+/// ignores its own error.
+///
+/// Bounded, because a quit must never hang: the database lock is tried for a second at most.
+pub fn record_turns_stopped_at_quit(app: &AppHandle) {
+    use tauri::Manager;
+    let turns: Vec<InflightTurn> = inflight().lock().map(|held| held.values().cloned().collect()).unwrap_or_default();
+    if turns.is_empty() {
+        return;
+    }
+    let Some(db) = app.try_state::<Db>() else { return };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let conn = loop {
+        match db.0.try_lock() {
+            Ok(conn) => break conn,
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return,
+        }
+    };
+    for turn in turns {
+        let _ = chat_queries::append_message(&conn, &stopped_row(turn));
+    }
+}
+
+/// The assistant row of a turn that was stopped — the same shape `chat_send` files for a Stop.
+fn stopped_row(turn: InflightTurn) -> ChatMessageRow {
+    ChatMessageRow {
+        id: turn.message_id,
+        conversation_id: turn.conversation_id,
+        turn: turn.turn,
+        role: "assistant".to_string(),
+        content: String::new(),
+        provider: Some(turn.provider),
+        model: None,
+        engine_version: None,
+        response_time_ms: Some((chrono::Utc::now().timestamp_millis() - turn.started_at_ms).max(0)),
+        is_error: false,
+        is_cancelled: true,
+        trace: None,
+        outputs: None,
+        created_at: String::new(),
+    }
 }
 
 /// Every chat turn the process is currently working on.
@@ -881,6 +948,9 @@ pub fn chat_branch_conversation(
         let copy = ChatMessageRow {
             id: uuid::Uuid::new_v4().to_string(),
             conversation_id: fork.id.clone(),
+            // The light read marks a message that has a trace with `Some("")` rather than sending
+            // it (see `MESSAGE_COLUMNS_NO_TRACE`); that marker is not a trace and is not copied.
+            trace: None,
             // Turn numbers are kept, not renumbered: `branched_at_turn` is only meaningful if the
             // two threads agree on what turn N is.
             ..message
@@ -1304,6 +1374,7 @@ pub async fn chat_send(
         message_id: assistant_message_id.clone(),
         provider: config.provider.clone(),
         started_at_ms: chrono::Utc::now().timestamp_millis(),
+        turn,
     });
 
     // Only where there is a working copy to snapshot. A repo-less turn writes nothing by design,
@@ -1327,6 +1398,9 @@ pub async fn chat_send(
                 // "medium": it leaves whatever the user configured in the CLI itself in charge.
                 effort: (!conversation.effort.is_empty()).then_some(conversation.effort.as_str()),
                 attachments: &attachments,
+                // A turn that may not write asks its engine for the strongest read-only mode that
+                // engine's CLI enforces — see the module docs, §1, for which ones that is.
+                read_only: !write_access,
             },
         )
         .await
@@ -1816,6 +1890,8 @@ async fn run_compaction(
                 // on a précis.
                 effort: None,
                 attachments: &[],
+                // It reads a transcript and writes a paragraph; nothing else is its business.
+                read_only: true,
             },
         )
         .await
@@ -2487,6 +2563,26 @@ plain prose with no leading slash
         assert!(parse_markdown_commands("").is_empty());
         assert!(parse_markdown_commands("# Introduction\n\nThis CLI has no commands.\n").is_empty());
         assert!(parse_markdown_commands("- / ").is_empty(), "a bare slash is not a command");
+    }
+
+    /// A turn the quit cut off is filed exactly as a Stop files one: the minted message id (so it
+    /// cannot land twice), no content, `is_cancelled` — never an error, which would mark the thread
+    /// unread and read as the engine failing.
+    #[test]
+    fn a_turn_stopped_at_quit_is_filed_like_a_stop() {
+        let row = stopped_row(InflightTurn {
+            conversation_id: "c1".into(),
+            run_id: "r1".into(),
+            message_id: "m1".into(),
+            provider: "claude".into(),
+            started_at_ms: chrono::Utc::now().timestamp_millis() - 1_000,
+            turn: 4,
+        });
+        assert_eq!((row.id.as_str(), row.conversation_id.as_str(), row.turn), ("m1", "c1", 4));
+        assert_eq!(row.role, "assistant");
+        assert!(row.content.is_empty());
+        assert!(row.is_cancelled && !row.is_error);
+        assert!(row.response_time_ms.unwrap_or_default() >= 1_000);
     }
 
     /// Read-only means read-only, in whichever vocabulary the engine speaks.

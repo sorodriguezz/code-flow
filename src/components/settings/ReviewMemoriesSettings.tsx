@@ -54,7 +54,7 @@ const ESTADOS: Record<string, { icon: LucideIcon; color: string; labelKey: Trans
  * The provider prefix is dropped and, for GitHub, the host too — what identifies the repository in
  * a list of a workspace's own repositories is the last part of the path. */
 function repoLabel(repoKey: string): string {
-  const withoutProvider = repoKey.replace(/^(github|gitlab|azure):/, "");
+  const withoutProvider = repoKey.replace(/^(github|gitlab|bitbucket|azure):/, "");
   const parts = withoutProvider.split("/").filter(Boolean);
   return parts.slice(-2).join("/") || withoutProvider;
 }

@@ -5,6 +5,7 @@ import {
   Database,
   FileCode2,
   LayoutList,
+  Loader2,
   Network,
   Plus,
   Rows3,
@@ -17,6 +18,7 @@ import { buttonClass, iconButtonClass, Kbd } from "../common/Button";
 import { docStripClass, docTabClass } from "../common/recipes";
 import { Segmented } from "../common/Segmented";
 import { Tooltip } from "../common/Tooltip";
+import { HostKeyDialog } from "../common/HostKeyDialog";
 import { DbExplorer } from "./DbExplorer";
 import { SqlConsolePanel } from "./SqlConsolePanel";
 import { DataTabPanel } from "./DataTabPanel";
@@ -25,10 +27,17 @@ import { DocumentEditorModal } from "./DocumentEditorModal";
 import { DiagramPanel } from "./DiagramPanel";
 import { SchemaPanel } from "./SchemaPanel";
 import { ConnectionModal } from "./ConnectionModal";
+import { ImportCsvModal } from "./ImportCsvModal";
 import { ObjectFilterModal } from "./TableFilterModal";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { CARD, EngineBadge, IdentityBadge, ToolbarButton, nodeIcon } from "./dbChrome";
-import { ensureDbStoreLoaded, pendingCount, useDbStore, type DbTab } from "../../state/dbStore";
+import {
+  ensureDbStoreLoaded,
+  pendingCount,
+  transactionKey,
+  useDbStore,
+  type DbTab,
+} from "../../state/dbStore";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useUiStore } from "../../state/uiStore";
 import { preventMiddleClickAutoscroll } from "../../lib/pointerDrag";
@@ -115,6 +124,7 @@ export function DatabaseView() {
               <DdlPanel tab={activeTab} />
             )}
           </div>
+          <DbExportsBar />
           <SqlLogPanel />
         </div>
       </div>
@@ -129,6 +139,9 @@ export function DatabaseView() {
           onClose={closeModal}
         />
       )}
+      {/* Outside the modal slot on purpose: it opens *over* the connection dialog, from a failed
+          test, and that dialog has to still be there when the key is trusted and the test reruns. */}
+      <HostKeyDialog />
       {modal?.kind === "objectFilter" && (
         <ObjectFilterModal
           connectionId={modal.connectionId}
@@ -137,6 +150,18 @@ export function DatabaseView() {
         />
       )}
       {modal?.kind === "cell" && <CellModal modal={modal} onClose={closeModal} />}
+      {modal?.kind === "importCsv" && (
+        <ImportCsvModal
+          connectionId={modal.connectionId}
+          node={modal.node}
+          columns={(() => {
+            const tab = tabs.find((entry) => entry.id === modal.tabId);
+            return tab?.kind === "data" ? tab.columns : [];
+          })()}
+          onClose={closeModal}
+          onImported={() => void useDbStore.getState().loadData(modal.tabId)}
+        />
+      )}
       {modal?.kind === "document" && (
         <DocumentEditorModal modal={modal} onClose={closeModal} />
       )}
@@ -167,6 +192,25 @@ async function closeTabSafely(tab: DbTab) {
   }
   if (tab.kind === "console" && tab.dirty && tab.body.trim()) {
     if (!(await confirmAction(translate("db.closeDirtyConsole", { name: tab.name })))) return;
+  }
+  // The last console on a session that is inside a transaction: closing it would leave the
+  // transaction — and whatever it has locked — open with nothing on screen to end it, and the idle
+  // sweep deliberately never closes such a session. So the tab ends it on the way out.
+  if (tab.kind === "console") {
+    const key = transactionKey(tab);
+    const open = store.transactions[key];
+    const sharing = store.tabs.some(
+      (other) => other.id !== tab.id && other.kind === "console" && transactionKey(other) === key,
+    );
+    if (open && open !== "none" && !sharing) {
+      const confirmed = await confirmAction(
+        translate("db.txOpenOnClose", { name: tab.name }),
+        true,
+        translate("db.txRollback"),
+      );
+      if (!confirmed) return;
+      await store.endTransaction(tab.id, "rollback");
+    }
   }
   store.closeTab(tab.id);
 }
@@ -615,6 +659,33 @@ function RecordsModal({
  * something to spend screen on the rest of the time. What it shows comes back *from the server
  * side of each call*, so it can't drift from what really ran.
  */
+/**
+ * The exports writing every row to a file, while they run: the file, the rows so far, and a way to
+ * stop. Apart from the tab that started one, because the tab can be closed or left and the export
+ * carries on — it reads on a session of its own. Nothing is drawn when nothing is running.
+ */
+function DbExportsBar() {
+  const t = useT();
+  const exports = useDbStore((s) => s.exports);
+  if (exports.length === 0) return null;
+  return (
+    <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-[var(--cf-border)] px-3 py-1">
+      {exports.map((job) => (
+        <span key={job.runId} className="flex items-center gap-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
+          <Loader2 size={11} className="animate-spin" />
+          <span className="max-w-[200px] truncate text-[var(--cf-text)]" title={job.label}>
+            {job.label}
+          </span>
+          <span className="tabular-nums">{t("db.exportingRows", { rows: job.rows.toLocaleString() })}</span>
+          <ToolbarButton onClick={() => void useDbStore.getState().cancelExport(job.runId)} title={t("db.cancel")}>
+            <X size={11} />
+          </ToolbarButton>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function SqlLogPanel() {
   const t = useT();
   const entries = useDbStore((s) => s.sqlLog);

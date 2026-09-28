@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { Check, GitCommitHorizontal } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import { Check, CircleX, GitCommitHorizontal, TriangleAlert } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { LanguagePicker } from "./LanguagePicker";
 import { FileGlyph } from "../common/FileGlyph";
@@ -8,6 +8,9 @@ import { useCursorBlameStore } from "../../state/cursorBlameStore";
 import { useEditorStatusStore, type LineEnding } from "../../state/editorStatusStore";
 import { extensionOf, useLanguageOverrideStore } from "../../state/languageOverrideStore";
 import { useT } from "../../state/languageStore";
+import { NotebookStatusItem } from "./notebook/kernelStatus";
+import { countProblems, useProblemsStore } from "../../state/problemsStore";
+import { useEditorPanelStore } from "../../state/editorPanelStore";
 
 /**
  * The Editor's own status line: who last changed the caret's line, where the caret is, how the file
@@ -47,15 +50,43 @@ export function EditorStatusLine() {
   );
 
   const extension = status ? extensionOf(status.path) : null;
+  const problemsByOwner = useProblemsStore((s) => s.byOwner);
+  const problems = useMemo(() => countProblems(problemsByOwner), [problemsByOwner]);
+  const problemsOpen = useEditorPanelStore((s) => s.open && s.tab === "problems");
 
   return (
     <div className="flex h-6 shrink-0 items-center justify-end gap-0.5 border-t border-[var(--cf-border)] px-2 text-[12px] text-[var(--cf-text-muted)]">
+      {/* The project's errors and warnings — every file, not just this one — at the far left where
+          VS Code keeps them. The toggle for the Problems panel under the groups. */}
+      <Tooltip
+        side="top"
+        label={t("editor.problems")}
+        description={t("editor.status.problemsTip", { errors: problems.error, warnings: problems.warning })}
+      >
+        <button
+          onClick={() => useEditorPanelStore.getState().toggle("problems")}
+          aria-pressed={problemsOpen}
+          aria-label={t("editor.problems")}
+          className={`${itemClass} mr-auto gap-2 tabular-nums`}
+        >
+          <span className="flex items-center gap-1">
+            <CircleX size={13} className={problems.error > 0 ? "text-[var(--cf-danger)]" : ""} />
+            {problems.error}
+          </span>
+          <span className="flex items-center gap-1">
+            <TriangleAlert size={13} className={problems.warning > 0 ? "text-[var(--cf-warning)]" : ""} />
+            {problems.warning}
+          </span>
+        </button>
+      </Tooltip>
       {blame && (
         <span className="mr-1 flex min-w-0 shrink items-center gap-1.5 px-1.5" title={t("editor.status.blameTip")}>
           <GitCommitHorizontal size={13} className="shrink-0" />
           <span className="min-w-0 truncate">{blame}</span>
         </span>
       )}
+      {/* The focused notebook's kernel — nothing for any other file. */}
+      <NotebookStatusItem />
       {status && actions && (
         <>
           <Tooltip side="top" label={t("editor.status.goToLine")}>
@@ -111,10 +142,11 @@ export function EditorStatusLine() {
               : t("editor.status.tabs", { size: status.tabSize })}
           </button>
 
-          {/* Not a control: the app reads and writes files as UTF-8 and nothing else, so there is
-              nothing to choose — the label says what is true, and the tooltip why it cannot change. */}
+          {/* Not a control: the app writes files as UTF-8 and nothing else, so there is nothing to
+              choose — the label says what is true, and the tooltip why it cannot change. A file in
+              another encoding is shown decoded and read-only, and this names what it was read as. */}
           <span className={staticClass} title={t("editor.status.encoding")}>
-            UTF-8
+            {status.encoding}
           </span>
 
           <button

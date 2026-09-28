@@ -69,6 +69,10 @@ const FORWARDED: &[&str] = &[
     // somebody started at the desk issued none.
     "ai:done",
     INVALIDATE_EVENT,
+    // A service starting, passing its gate, crashing or stopping: one small frame per change, never
+    // per line of output — the log itself is not forwarded. The phone's Services list is drawn from
+    // these, so a service stopped at the desk goes grey on the phone the way it does in the dock.
+    crate::services::supervisor::RUNTIME_EVENT,
 ];
 
 /// Events forwarded **only to the device whose shell they came from**.
@@ -346,14 +350,35 @@ pub fn emit_invalidation(
 ///
 /// No `action` and no `device`: the person who caused this is sitting in front of the window, and
 /// telling them what they just did is not a notification, it is an echo.
+///
+/// `window` is the label of the window that made the change, and it decides the `origin`: see
+/// [`window_origin`].
 pub fn emit_desktop_change(
     app: &AppHandle,
+    window: &str,
     inv: Invalidate,
     project_id: Option<&str>,
     conversation_id: Option<&str>,
 ) {
-    if let Some(payload) = desktop_payload(inv, project_id, conversation_id) {
+    if let Some(mut payload) = desktop_payload(inv, project_id, conversation_id) {
+        if let Value::Object(map) = &mut payload {
+            map.insert("origin".into(), Value::String(window_origin(window)));
+        }
         let _ = app.emit(INVALIDATE_EVENT, payload);
+    }
+}
+
+/// The `origin` a change made in one of the desktop's windows carries.
+///
+/// [`DESKTOP_ORIGIN`] for the main window, which is what it has always been and what phones and the
+/// main window already compare against; `desktop:<label>` for a satellite. One origin for every
+/// window meant the main window read a detached window's change as its own echo and dropped it — a
+/// task finished in a detached Agents window, a workspace renamed in another, never reached it.
+pub fn window_origin(label: &str) -> String {
+    if label == "main" {
+        DESKTOP_ORIGIN.to_string()
+    } else {
+        format!("{DESKTOP_ORIGIN}:{label}")
     }
 }
 
@@ -439,6 +464,15 @@ mod tests {
         // echo, not a notification.
         assert!(payload.get("action").is_none());
         assert!(payload.get("device").is_none());
+    }
+
+    /// Every desktop window skips only its own echo: the main window keeps the origin phones and it
+    /// already compare against, and each satellite gets one of its own.
+    #[test]
+    fn each_desktop_window_stamps_its_own_origin() {
+        assert_eq!(window_origin("main"), DESKTOP_ORIGIN);
+        assert_eq!(window_origin("sat-app-agents"), "desktop:sat-app-agents");
+        assert_ne!(window_origin("sat-app-agents"), window_origin("sat-repo-p1"));
     }
 
     /// A frame that names nothing to reload is one every listener wakes for and does nothing with.

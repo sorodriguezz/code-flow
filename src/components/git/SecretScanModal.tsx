@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { AlertOctagon, AlertTriangle, MapPin, ShieldAlert } from "lucide-react";
 import type { SecretHit } from "../../types/domain";
 import { useT } from "../../state/languageStore";
@@ -13,6 +14,22 @@ const SEVERITY_STYLE: Record<SecretHit["severity"], { icon: typeof AlertOctagon;
  * Blocking gate shown when the pre-commit secret scanner finds credential-looking content in the
  * staged diff. The safe default (Escape / backdrop / Cancel) aborts the commit; the user has to
  * deliberately choose "commit anyway". Nothing is deleted automatically.
+ *
+ * **It portals to `document.body`, and it has to.** The changes panel renders inside
+ * `.cf-ambient-bg` — and that carries `isolation: isolate` so its ambient gradient (a `::before` at
+ * `z-index: -1`) stays behind the view instead of the whole app. Isolation makes a stacking context,
+ * which traps every overlay rendered inside it: no `z-index` on a descendant can lift this gate over
+ * the terminal dock, the AI panel or the status bar, because those are later siblings of the
+ * isolated element. That is worse here than for an ordinary dialog — a gate the user can see *past*
+ * and click *through* is not blocking anything, which is the whole job of this one.
+ *
+ * `z-40` — the dialog layer — rather than the `z-[60]` this carried before the portal. That number
+ * only ever meant "above the trap"; nothing was reading it, since the stacking context made it moot.
+ * Out here it stops being free: `ConfirmModal` sits at `z-[60]` precisely so it can be raised on top
+ * of dialogs, and a portal appends *after* the app root, so an equal z-index would break the tie by
+ * DOM order and put this gate over the confirm. The layers are app chrome (unnumbered) < dialogs
+ * like this one (`z-40`) < the app-root overlays — Settings, the command palette, toasts (`z-50`) <
+ * `ConfirmModal` (`z-[60]`) < popovers (`z-[9999]`).
  */
 export function SecretScanModal({
   hits,
@@ -35,8 +52,8 @@ export function SecretScanModal({
 
   const criticalCount = hits.filter((h) => h.severity === "critical").length;
 
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40" onClick={onCancel}>
+  return createPortal(
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40" onClick={onCancel}>
       <div
         onClick={(e) => e.stopPropagation()}
         className="flex max-h-[80vh] w-[560px] max-w-[92vw] flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
@@ -108,6 +125,7 @@ export function SecretScanModal({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

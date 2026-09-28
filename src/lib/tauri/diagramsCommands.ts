@@ -3,6 +3,8 @@ import type {
   DiagramFolderRow,
   DiagramMetaRow,
   DiagramRow,
+  DiagramFileVersion,
+  DiagramSaved,
   DiagramSync,
   DiagramTemplateRow,
   DiagramThumbnailRow,
@@ -80,12 +82,20 @@ export const diagramsCreateDiagram = (
  * A rejection therefore means "the row is saved, the working tree is not", which is why
  * `diagramsStore.flush` leaves the draft dirty when it sees one: the next edit tries the file again.
  */
+/**
+ * The autosave. For a linked diagram the file is written only over `expected` — the version it was
+ * read at — and refused with `changed-on-disk:` otherwise (see `isChangedOnDisk`); `force` is the
+ * user's "overwrite". `meta` is `null` when the diagram was deleted while it was open.
+ */
 export const diagramsSaveDiagram = (
   id: string,
   doc: string,
   format: string,
   thumbnail: string,
-) => invoke<DiagramMetaRow | null>("diagrams_save_diagram", { id, doc, format, thumbnail });
+  expected: DiagramFileVersion | null = null,
+  force = false,
+) =>
+  invoke<DiagramSaved>("diagrams_save_diagram", { id, doc, format, thumbnail, expected, force });
 
 // ---------- the repository bridge ----------
 

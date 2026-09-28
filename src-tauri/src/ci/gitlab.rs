@@ -20,14 +20,22 @@
 //!   [`web_pipeline_url`].
 //!
 //! Everything on the wire goes through [`super::http`] rather than `crate::gitlab`'s own
-//! `get_json`: that client has no timeout of any kind, and this screen polls and downloads logs.
+//! `get_json`: that one is built for a review — 90 s a request, JSON only — and this screen polls,
+//! downloads plain-text logs and streams artifacts, each with a budget of its own.
+
+use std::collections::BTreeMap;
 
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 use crate::gitlab::{api_root, authed, encode_path};
 
 use super::http;
-use super::{status, JobLog, PipelineJob, PipelineRun, PipelineRunDetail, PROVIDER_GITLAB};
+use super::{
+    artifact_file_name, gate_kind, split_ref, status, JobLog, PipelineArtifact, PipelineDefinition,
+    PipelineGate, PipelineJob, PipelineLaunchContext, PipelineRun, PipelineRunDetail,
+    PipelineVariable, StartedPipeline, PROVIDER_GITLAB,
+};
 
 /// GitLab's default page size is 20 and its maximum is 100. Fifty is the size that keeps a typical
 /// "last 30 runs" request to a single round trip without making the first paint wait on a page
@@ -175,6 +183,21 @@ struct RawJob {
     /// not fail the pipeline — see [`bucket_status`].
     #[serde(default)]
     allow_failure: bool,
+    /// The job's downloadable archive — the `artifacts:paths` it uploaded, zipped. Absent when the
+    /// job kept none. The `artifacts` array next to it in the response also lists the log (`trace`)
+    /// and the reports, none of which the archive endpoint serves; this is the one it does.
+    #[serde(default)]
+    artifacts_file: Option<RawArtifactsFile>,
+    #[serde(default)]
+    artifacts_expire_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawArtifactsFile {
+    #[serde(default)]
+    filename: String,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +261,21 @@ fn bucket_status(status: &str, allow_failure: bool, detailed: Option<&str>) -> S
     .to_string()
 }
 
+/// Whether a pipeline is held at a gate: GitLab's `manual` **pipeline** status.
+///
+/// On a pipeline that word means one thing — a job with `when: manual` and `allow_failure: false`
+/// is holding everything behind it (GitLab's own list draws it as "blocked"). An *optional* manual
+/// job doesn't hold anything: the pipeline finishes `success` around it, play button and all. So
+/// this is exactly "somebody has to act before this run can go on", which is what the flag means,
+/// and not "there is a play button somewhere in it", which the run view shows either way.
+///
+/// It stays `SKIPPED` in [`bucket_status`] on purpose: a blocked pipeline is not moving, and a
+/// live bucket would have the poll re-read it every five seconds for as long as nobody acts —
+/// which, for a manual production deploy, is days.
+fn is_blocked(status: &str) -> bool {
+    status == "manual"
+}
+
 /// Flattens `detailed_status` into the one string [`bucket_status`] searches.
 ///
 /// Both halves are joined rather than picking one because GitLab has moved the word "warning"
@@ -296,6 +334,7 @@ fn map_pipeline(host: &str, project: &str, raw: RawPipeline) -> PipelineRun {
     let branch = raw.ref_name.unwrap_or_default();
     PipelineRun {
         provider: PROVIDER_GITLAB.to_string(),
+        gated: is_blocked(&raw.status),
         // The listing carries no `detailed_status`, so `None` here is not laziness — it is the
         // only thing the response supports. See `bucket_status`.
         status: bucket_status(&raw.status, false, None),
@@ -327,6 +366,7 @@ fn map_pipeline_detail(host: &str, project: &str, raw: RawPipelineDetail) -> Pip
     let hint = detailed_hint(raw.detailed_status.as_ref());
     PipelineRun {
         provider: PROVIDER_GITLAB.to_string(),
+        gated: is_blocked(&raw.status),
         status: bucket_status(&raw.status, false, hint.as_deref()),
         raw_status: raw.status,
         name: run_name(raw.name, &branch),
@@ -458,21 +498,49 @@ pub async fn pipeline_detail(
     let raw_run: RawPipelineDetail =
         http::get_json(authed(http::client().get(&run_url), token), http::Provider::GitLab).await?;
 
-    // `include_retried=false` is the default and is stated anyway: with retries included the same
-    // job name appears several times and the graph draws a column of ghosts alongside the attempt
-    // that actually counts. 100 is GitLab's maximum page size, and a pipeline with more than a
-    // hundred jobs is rare enough that a second page is not worth the round trip on every open.
-    let jobs_url =
-        format!("{root}/projects/{encoded}/pipelines/{id}/jobs?per_page=100&include_retried=false");
-    let raw_jobs: Vec<RawJob> =
-        http::get_json(authed(http::client().get(&jobs_url), token), http::Provider::GitLab).await?;
+    let raw_jobs = pipeline_jobs(host, project, pipeline_id, token).await?;
 
     let run = map_pipeline_detail(host, project, raw_run);
+    let mut gates = manual_gates(host, project, &run.id, &raw_jobs);
+    // A job may be waiting for more than a play button: when it deploys to a protected environment
+    // that requires approval, GitLab holds it until the approvers have spoken, and its deployment
+    // reads `blocked`. Asked for only when this pipeline is blocked or has a manual job — which a
+    // job held for approval makes it — rather than on every read of every pipeline, since the
+    // detail is re-read on each poll while a run is live. Best-effort, because approvals are a
+    // Premium feature: on any other tier the question has no answer, and the job is still a play
+    // button.
+    if run.gated || !gates.is_empty() {
+        if let Ok(blocked) = blocked_deployments(host, project, token).await {
+            gates = apply_approvals(host, project, &run.id, &raw_jobs, gates, blocked);
+        }
+    }
+
     let jobs = raw_jobs.into_iter().map(|job| map_job(host, project, &run.id, job)).collect();
     // GitLab names a job's stage and says nothing else about the stage itself — no state, no
     // start, no finish, and no endpoint that has them. The UI summarises the jobs instead, and
     // an empty vector is what tells it to.
-    Ok(PipelineRunDetail { run, jobs, stages: Vec::new() })
+    Ok(PipelineRunDetail { run, jobs, stages: Vec::new(), gates })
+}
+
+/// A pipeline's jobs, one page of them.
+///
+/// `include_retried=false` is the default and is stated anyway: with retries included the same
+/// job name appears several times and the graph draws a column of ghosts alongside the attempt
+/// that actually counts. 100 is GitLab's maximum page size, and a pipeline with more than a
+/// hundred jobs is rare enough that a second page is not worth the round trip on every open.
+async fn pipeline_jobs(
+    host: &str,
+    project: &str,
+    pipeline_id: &str,
+    token: &str,
+) -> Result<Vec<RawJob>, String> {
+    let url = format!(
+        "{}/projects/{}/pipelines/{}/jobs?per_page=100&include_retried=false",
+        api_root(host),
+        encode_path(project),
+        encode_path(pipeline_id)
+    );
+    http::get_json(authed(http::client().get(&url), token), http::Provider::GitLab).await
 }
 
 /// A job's log — GitLab calls it the trace.
@@ -720,4 +788,632 @@ pub async fn cancel(host: &str, project: &str, pipeline_id: &str, token: &str) -
     let id = encode_path(pipeline_id);
     let url = format!("{root}/projects/{encoded}/pipelines/{id}/cancel");
     http::send_write(authed(http::client().post(&url), token), http::Provider::GitLab).await
+}
+
+/// An id that is about to be put in a URL, checked rather than encoded: GitLab's job and deployment
+/// ids are integers, and anything else means the value was mangled between the listing and here.
+fn numeric_id(value: &str, what: &str) -> Result<i64, String> {
+    value.trim().parse::<i64>().map_err(|_| format!("“{value}” isn't a GitLab {what} id"))
+}
+
+// ---------------------------------------------------------------------------
+// Starting a pipeline by hand
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawProject {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    default_branch: Option<String>,
+    /// `null` or empty for the default `.gitlab-ci.yml`. Can also name a file in *another* project
+    /// (`ci/main.yml@group/ci-templates`) or a URL, which is why [`project_definition`] looks.
+    #[serde(default)]
+    ci_config_path: Option<String>,
+}
+
+/// The one pipeline a GitLab project has.
+///
+/// GitLab has no "pipeline definitions" to list: a project runs whatever its CI config says, and
+/// that config is one file. The dialog still gets a definition, so it can treat the three hosts
+/// alike — one entry, whose path is where the prefilled variables are read from.
+fn project_definition(host: &str, project: &str, raw: RawProject) -> PipelineDefinition {
+    let configured = raw
+        .ci_config_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string);
+    let path = match configured.as_deref() {
+        None => Some(".gitlab-ci.yml".to_string()),
+        // Another project's file, or one behind a URL: there is nothing in this working copy, or
+        // in this project's repository, to read it from.
+        Some(path) if path.contains('@') || path.contains("://") => None,
+        Some(path) => Some(path.trim_start_matches('/').to_string()),
+    };
+    let name = raw
+        .name
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| project.rsplit('/').next().unwrap_or(project).to_string());
+    PipelineDefinition {
+        provider: PROVIDER_GITLAB.to_string(),
+        id: configured.unwrap_or_else(|| ".gitlab-ci.yml".to_string()),
+        name,
+        path,
+        variables: Vec::new(),
+        web_url: format!("https://{host}/{}/-/pipelines/new", project.trim_matches('/')),
+    }
+}
+
+/// What the "Run pipeline" dialog opens with. One request: the project, for its default branch and
+/// its CI config path.
+pub async fn launch_context(host: &str, project: &str, token: &str) -> Result<PipelineLaunchContext, String> {
+    let url = format!("{}/projects/{}", api_root(host), encode_path(project));
+    let raw: RawProject =
+        http::get_json(authed(http::client().get(&url), token), http::Provider::GitLab).await?;
+    let default_branch = raw
+        .default_branch
+        .clone()
+        .map(|branch| branch.trim().to_string())
+        .filter(|branch| !branch.is_empty());
+    Ok(PipelineLaunchContext {
+        provider: PROVIDER_GITLAB.to_string(),
+        definitions: vec![project_definition(host, project, raw)],
+        default_branch,
+        // GitLab inputs have no `environment` type to fill.
+        environments: Vec::new(),
+    })
+}
+
+/// A file as the project's repository has it at `reference`. The path is encoded whole — slashes
+/// included — because that is how this endpoint takes it: `ci%2Fbuild.yml`, one segment.
+pub async fn definition_file(
+    host: &str,
+    project: &str,
+    path: &str,
+    reference: Option<&str>,
+    token: &str,
+) -> Result<Option<String>, String> {
+    let mut url = format!(
+        "{}/projects/{}/repository/files/{}/raw",
+        api_root(host),
+        encode_path(project),
+        encode_path(path)
+    );
+    if let Some(reference) = reference.map(str::trim).filter(|value| !value.is_empty()) {
+        url.push_str(&format!("?ref={}", encode_path(&split_ref(reference).1)));
+    }
+    http::get_text(
+        authed(http::client().get(&url), token),
+        http::Provider::GitLab,
+        http::MAX_DEFINITION_BYTES,
+    )
+    .await
+}
+
+/// The body `POST /pipeline` takes.
+///
+/// The ref is sent short (`main`, not `refs/heads/main`): GitLab resolves a branch or a tag by
+/// name and matches nothing for the full form. Variables go as `env_var` — the only type the
+/// dialog offers; a file variable is a thing you set up in the project, not type into a box.
+/// `inputs` (the typed `spec:inputs` of GitLab 17) is only sent when there are any, so an instance
+/// from before inputs existed never sees the key.
+fn create_body(
+    reference: &str,
+    variables: &[PipelineVariable],
+    inputs: &BTreeMap<String, Value>,
+) -> Value {
+    let mut body = json!({ "ref": split_ref(reference).1 });
+    if !variables.is_empty() {
+        body["variables"] = variables
+            .iter()
+            .map(|variable| {
+                json!({ "key": variable.key.trim(), "value": variable.value, "variable_type": "env_var" })
+            })
+            .collect();
+    }
+    if !inputs.is_empty() {
+        body["inputs"] = Value::Object(inputs.clone().into_iter().collect());
+    }
+    body
+}
+
+#[derive(Deserialize)]
+struct RawCreated {
+    id: i64,
+    #[serde(default)]
+    web_url: Option<String>,
+}
+
+/// Starts a pipeline on a ref. GitLab answers with the pipeline it created, so the run is known
+/// straight away.
+pub async fn create_pipeline(
+    host: &str,
+    project: &str,
+    reference: &str,
+    variables: &[PipelineVariable],
+    inputs: &BTreeMap<String, Value>,
+    token: &str,
+) -> Result<StartedPipeline, String> {
+    let url = format!("{}/projects/{}/pipeline", api_root(host), encode_path(project));
+    let request = authed(http::client().post(&url), token).json(&create_body(reference, variables, inputs));
+    let receipt = http::send_write_for::<RawCreated>(request, http::Provider::GitLab).await?;
+    Ok(match receipt {
+        Some(created) => StartedPipeline {
+            run_id: Some(created.id.to_string()),
+            web_url: created.web_url.filter(|url| !url.trim().is_empty()),
+        },
+        None => StartedPipeline::default(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Manual jobs and protected-environment approvals
+// ---------------------------------------------------------------------------
+
+/// Every job waiting for somebody to press play, as a gate.
+///
+/// Optional manual jobs included — the ones that don't block the pipeline. They are exactly as
+/// playable, and a deploy button left on a green pipeline is the most common manual job there is.
+fn manual_gates(host: &str, project: &str, run_id: &str, jobs: &[RawJob]) -> Vec<PipelineGate> {
+    jobs.iter()
+        .filter(|job| job.status == "manual")
+        .map(|job| {
+            let id = job.id.to_string();
+            PipelineGate {
+                provider: PROVIDER_GITLAB.to_string(),
+                run_id: run_id.to_string(),
+                web_url: job
+                    .web_url
+                    .clone()
+                    .filter(|url| !url.trim().is_empty())
+                    .unwrap_or_else(|| web_job_url(host, project, &id)),
+                kind: gate_kind::MANUAL.to_string(),
+                name: job.name.clone(),
+                stage_id: None,
+                job_ids: vec![id.clone()],
+                can_act: None,
+                reviewers: Vec::new(),
+                instructions: None,
+                since: None,
+                id,
+            }
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct RawDeployment {
+    id: i64,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    environment: Option<RawDeploymentEnvironment>,
+    /// The job doing the deploying — which is how a blocked deployment is joined to the manual job
+    /// in this pipeline that it is holding.
+    #[serde(default)]
+    deployable: Option<RawDeployable>,
+}
+
+#[derive(Deserialize)]
+struct RawDeploymentEnvironment {
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct RawDeployable {
+    id: i64,
+}
+
+/// The project's deployments waiting for approval. One page: a project with more than a hundred
+/// deployments blocked at once has a problem this screen is not going to solve.
+async fn blocked_deployments(host: &str, project: &str, token: &str) -> Result<Vec<RawDeployment>, String> {
+    let url = format!(
+        "{}/projects/{}/deployments?status=blocked&order_by=id&sort=desc&per_page=100",
+        api_root(host),
+        encode_path(project)
+    );
+    http::get_json(authed(http::client().get(&url), token), http::Provider::GitLab).await
+}
+
+/// Turns every job of this pipeline that is a blocked deployment into the approval it waits for.
+///
+/// Until the approvers have spoken, pressing play on that job does nothing but earn an error; what
+/// the person looking at it can actually do is approve or reject. So its manual gate, when it has
+/// one, is *replaced* — and a held job that isn't `manual` gets an approval gate all the same:
+/// GitLab documents that the jobs deploying to such an environment "are blocked", not which status
+/// word it files them under, and a gate that only appeared for one of the words would silently not
+/// appear for the other.
+///
+/// Once approved, GitLab still wants the job started by hand ("approval doesn't start the job"),
+/// and on the next read the gate is a play button again — because the deployment is no longer
+/// blocked. A blocked deployment of a job in some *other* pipeline is none of this run's business.
+fn apply_approvals(
+    host: &str,
+    project: &str,
+    run_id: &str,
+    jobs: &[RawJob],
+    gates: Vec<PipelineGate>,
+    deployments: Vec<RawDeployment>,
+) -> Vec<PipelineGate> {
+    let approval_for = |job: &RawJob| -> Option<PipelineGate> {
+        let deployment = deployments.iter().find(|deployment| {
+            deployment.status == "blocked"
+                && deployment.deployable.as_ref().is_some_and(|deployable| deployable.id == job.id)
+        })?;
+        let job_id = job.id.to_string();
+        let environment = deployment
+            .environment
+            .as_ref()
+            .map(|environment| environment.name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        Some(PipelineGate {
+            provider: PROVIDER_GITLAB.to_string(),
+            run_id: run_id.to_string(),
+            id: deployment.id.to_string(),
+            kind: gate_kind::APPROVAL.to_string(),
+            name: environment.unwrap_or_else(|| job.name.clone()),
+            stage_id: None,
+            job_ids: vec![job_id.clone()],
+            can_act: None,
+            reviewers: Vec::new(),
+            instructions: None,
+            since: deployment.created_at.clone(),
+            web_url: job
+                .web_url
+                .clone()
+                .filter(|url| !url.trim().is_empty())
+                .unwrap_or_else(|| web_job_url(host, project, &job_id)),
+        })
+    };
+
+    let mut out: Vec<PipelineGate> = gates
+        .into_iter()
+        .map(|gate| {
+            let job = jobs.iter().find(|job| job.id.to_string() == gate.id);
+            job.and_then(|job| approval_for(job)).unwrap_or(gate)
+        })
+        .collect();
+    for job in jobs {
+        let held = out.iter().any(|gate| gate.job_ids.iter().any(|id| *id == job.id.to_string()));
+        if held {
+            continue;
+        }
+        if let Some(gate) = approval_for(job) {
+            out.push(gate);
+        }
+    }
+    out
+}
+
+/// The body of `POST /jobs/:id/play`: the variables, only when there are any.
+fn play_body(variables: &[PipelineVariable]) -> Value {
+    if variables.is_empty() {
+        return json!({});
+    }
+    json!({
+        "job_variables_attributes": variables
+            .iter()
+            .map(|variable| json!({ "key": variable.key.trim(), "value": variable.value }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Starts a manual job, with job-level variables when the user typed any.
+pub async fn play_job(
+    host: &str,
+    project: &str,
+    job_id: &str,
+    variables: &[PipelineVariable],
+    token: &str,
+) -> Result<(), String> {
+    let id = numeric_id(job_id, "job")?;
+    let url = format!("{}/projects/{}/jobs/{id}/play", api_root(host), encode_path(project));
+    let request = authed(http::client().post(&url), token).json(&play_body(variables));
+    http::send_write(request, http::Provider::GitLab).await
+}
+
+fn approval_body(approve: bool, comment: &str) -> Value {
+    json!({ "status": if approve { "approved" } else { "rejected" }, "comment": comment.trim() })
+}
+
+/// Approves or rejects a deployment waiting at a protected environment.
+pub async fn review_deployment(
+    host: &str,
+    project: &str,
+    deployment_id: &str,
+    approve: bool,
+    comment: &str,
+    token: &str,
+) -> Result<(), String> {
+    let id = numeric_id(deployment_id, "deployment")?;
+    let url = format!(
+        "{}/projects/{}/deployments/{id}/approval",
+        api_root(host),
+        encode_path(project)
+    );
+    let request = authed(http::client().post(&url), token).json(&approval_body(approve, comment));
+    http::send_write(request, http::Provider::GitLab).await
+}
+
+// ---------------------------------------------------------------------------
+// Artifacts
+// ---------------------------------------------------------------------------
+
+/// One artifact per job that kept an archive, named after the job.
+///
+/// Named after the job rather than after the file because the file is `artifacts.zip` for every job
+/// there is — ten of them in a list would be ten identical rows. No `expired` flag: GitLab removes
+/// `artifacts_file` from the job when the archive is deleted, so a listed one is still there.
+fn map_artifacts(run_id: &str, jobs: Vec<RawJob>) -> Vec<PipelineArtifact> {
+    jobs.into_iter()
+        .filter_map(|job| {
+            let file = job.artifacts_file?;
+            if file.filename.trim().is_empty() && file.size.is_none() {
+                return None;
+            }
+            Some(PipelineArtifact {
+                provider: PROVIDER_GITLAB.to_string(),
+                run_id: run_id.to_string(),
+                id: job.id.to_string(),
+                file_name: artifact_file_name(&job.name),
+                size_bytes: file.size,
+                expires_at: job.artifacts_expire_at.filter(|stamp| !stamp.trim().is_empty()),
+                expired: false,
+                job_name: Some(job.name.clone()),
+                name: job.name,
+            })
+        })
+        .collect()
+}
+
+/// A pipeline's artifacts: one request, the same job list the detail reads.
+pub async fn list_artifacts(
+    host: &str,
+    project: &str,
+    pipeline_id: &str,
+    token: &str,
+) -> Result<Vec<PipelineArtifact>, String> {
+    let jobs = pipeline_jobs(host, project, pipeline_id, token).await?;
+    Ok(map_artifacts(pipeline_id, jobs))
+}
+
+/// The request that downloads a job's archive.
+///
+/// **`Authorization: Bearer`, not the `PRIVATE-TOKEN` every other call here sends**, and the
+/// difference is the whole reason this is not `authed(...)`. With object storage configured, GitLab
+/// answers this endpoint with a redirect to a signed URL on the storage host. reqwest strips
+/// `Authorization` on a cross-host hop — it knows that header is a credential — and forwards any
+/// custom header untouched, so `PRIVATE-TOKEN` would travel on to the storage provider. GitLab takes
+/// a personal or project access token in either header; only one of them stays home.
+pub fn artifact_download(
+    host: &str,
+    project: &str,
+    job_id: &str,
+    token: &str,
+) -> Result<reqwest::RequestBuilder, String> {
+    let id = numeric_id(job_id, "job")?;
+    let url = format!("{}/projects/{}/jobs/{id}/artifacts", api_root(host), encode_path(project));
+    Ok(http::download_client().get(&url).header("Authorization", format!("Bearer {token}")))
+}
+
+#[cfg(test)]
+mod launch_tests {
+    //! Fixtures are the response shapes GitLab's REST reference documents for each endpoint,
+    //! trimmed to the fields read here, with placeholder projects.
+    use super::*;
+    use crate::gitlab::GITLAB_COM;
+
+    fn jobs(json: &str) -> Vec<RawJob> {
+        serde_json::from_str(json).expect("jobs fixture")
+    }
+
+    #[test]
+    fn a_project_has_one_pipeline_and_it_is_its_ci_config() {
+        let raw: RawProject = serde_json::from_str(
+            r#"{"id":3,"name":"Example Repo","path_with_namespace":"example-org/example-repo",
+                "default_branch":"main","ci_config_path":null}"#,
+        )
+        .expect("project");
+        let definition = project_definition(GITLAB_COM, "example-org/example-repo", raw);
+        assert_eq!(definition.id, ".gitlab-ci.yml");
+        assert_eq!(definition.path.as_deref(), Some(".gitlab-ci.yml"));
+        assert_eq!(definition.name, "Example Repo");
+        assert_eq!(definition.web_url, "https://gitlab.com/example-org/example-repo/-/pipelines/new");
+
+        // A config in the repository under another name is still a file to read.
+        let custom: RawProject =
+            serde_json::from_str(r#"{"ci_config_path":"/ci/pipeline.yml"}"#).expect("custom");
+        let custom = project_definition(GITLAB_COM, "example-org/example-repo", custom);
+        assert_eq!(custom.path.as_deref(), Some("ci/pipeline.yml"));
+        // No name on the project: its path's last segment.
+        assert_eq!(custom.name, "example-repo");
+
+        // Another project's file, or a URL: nothing in this working copy to read inputs from.
+        for elsewhere in [".gitlab-ci.yml@example-org/ci-templates", "https://example.test/ci.yml"] {
+            let raw: RawProject =
+                serde_json::from_str(&format!(r#"{{"ci_config_path":"{elsewhere}"}}"#)).expect("elsewhere");
+            assert_eq!(project_definition(GITLAB_COM, "g/p", raw).path, None, "{elsewhere}");
+        }
+    }
+
+    #[test]
+    fn a_pipeline_is_created_on_the_short_ref_with_env_var_variables() {
+        let variables = vec![
+            PipelineVariable { key: " DEPLOY_ENV ".to_string(), value: "staging".to_string(), masked: false },
+            PipelineVariable { key: "API_TOKEN".to_string(), value: "s3cret".to_string(), masked: true },
+        ];
+        let body = create_body("refs/heads/release/2.0", &variables, &BTreeMap::new());
+        assert_eq!(
+            body,
+            json!({"ref":"release/2.0","variables":[
+                {"key":"DEPLOY_ENV","value":"staging","variable_type":"env_var"},
+                {"key":"API_TOKEN","value":"s3cret","variable_type":"env_var"}
+            ]})
+        );
+        // A tag goes short too; no variables and no inputs means neither key is sent.
+        assert_eq!(create_body("refs/tags/v1.0", &[], &BTreeMap::new()), json!({"ref":"v1.0"}));
+
+        // Typed inputs travel typed: GitLab's `spec:inputs` check their types.
+        let mut inputs = BTreeMap::new();
+        inputs.insert("replicas".to_string(), json!(3));
+        inputs.insert("dry_run".to_string(), json!(true));
+        assert_eq!(
+            create_body("main", &[], &inputs),
+            json!({"ref":"main","inputs":{"dry_run":true,"replicas":3}})
+        );
+    }
+
+    #[test]
+    fn a_created_pipeline_names_itself() {
+        let created: RawCreated = serde_json::from_str(
+            r#"{"id":61,"iid":21,"project_id":1,"sha":"384c444e840a515b23f21915ee5766b87068a70d",
+                "ref":"main","status":"pending","before_sha":"0000000000000000000000000000000000000000",
+                "tag":false,"yaml_errors":null,"created_at":"2026-09-11T11:43:35.012Z",
+                "web_url":"https://gitlab.example.test/example-org/example-repo/-/pipelines/61"}"#,
+        )
+        .expect("created");
+        assert_eq!(created.id, 61);
+        assert_eq!(
+            created.web_url.as_deref(),
+            Some("https://gitlab.example.test/example-org/example-repo/-/pipelines/61")
+        );
+    }
+
+    #[test]
+    fn manual_jobs_are_play_gates_and_a_blocked_deployment_turns_its_job_into_an_approval() {
+        let raw = jobs(
+            r#"[
+              {"id":7,"name":"build","stage":"build","status":"success","allow_failure":false},
+              {"id":8,"name":"deploy-staging","stage":"deploy","status":"manual","allow_failure":true,
+               "web_url":"https://gitlab.com/example-org/example-repo/-/jobs/8"},
+              {"id":9,"name":"deploy-production","stage":"deploy","status":"manual","allow_failure":false},
+              {"id":10,"name":"deploy-eu","stage":"deploy","status":"created","allow_failure":false}
+            ]"#,
+        );
+        let gates = manual_gates(GITLAB_COM, "example-org/example-repo", "901", &raw);
+        assert_eq!(gates.len(), 2);
+        assert!(gates.iter().all(|gate| gate.kind == gate_kind::MANUAL));
+        assert_eq!(gates[0].id, "8");
+        assert_eq!(gates[0].job_ids, vec!["8".to_string()]);
+        assert_eq!(gates[0].web_url, "https://gitlab.com/example-org/example-repo/-/jobs/8");
+        // No web_url on the job: built the browser way, with literal slashes.
+        assert_eq!(gates[1].web_url, "https://gitlab.com/example-org/example-repo/-/jobs/9");
+
+        let blocked: Vec<RawDeployment> = serde_json::from_str(
+            r#"[
+              {"created_at":"2026-09-11T07:36:40.222Z","updated_at":"2026-09-11T07:38:12.414Z",
+               "status":"blocked",
+               "deployable":{"id":9,"name":"deploy-production","stage":"deploy","status":"manual","ref":"main",
+                 "pipeline":{"id":901,"ref":"main","sha":"99d03678b90d914dbb1b109132516d71a4a03ea8","status":"manual",
+                   "web_url":"https://gitlab.com/example-org/example-repo/-/pipelines/901"}},
+               "environment":{"id":9,"name":"production","external_url":"https://example.test"},
+               "id":41,"iid":1,"ref":"main","sha":"99d03678b90d914dbb1b109132516d71a4a03ea8"},
+              {"status":"blocked","deployable":{"id":55},"environment":{"name":"elsewhere"},"id":42},
+              {"status":"blocked","deployable":{"id":10},"environment":{"name":"eu"},"id":43},
+              {"status":"success","deployable":{"id":8},"environment":{"name":"staging"},"id":40}
+            ]"#,
+        )
+        .expect("deployments");
+
+        let gates = apply_approvals(GITLAB_COM, "example-org/example-repo", "901", &raw, gates, blocked);
+        assert_eq!(gates.len(), 3);
+        // The optional staging deploy is still a play button: its deployment isn't blocked.
+        assert_eq!(gates[0].kind, gate_kind::MANUAL);
+        assert_eq!(gates[0].id, "8");
+        // Production waits for approval: answered with the *deployment* id, labelled by environment,
+        // and still marking its own job on the graph.
+        assert_eq!(gates[1].kind, gate_kind::APPROVAL);
+        assert_eq!(gates[1].id, "41");
+        assert_eq!(gates[1].name, "production");
+        assert_eq!(gates[1].job_ids, vec!["9".to_string()]);
+        assert_eq!(gates[1].since.as_deref(), Some("2026-09-11T07:36:40.222Z"));
+        // A held job GitLab didn't file as `manual` is still an approval — and 55, a job of some other
+        // pipeline, is not this run's gate at all.
+        assert_eq!(gates[2].kind, gate_kind::APPROVAL);
+        assert_eq!(gates[2].id, "43");
+        assert_eq!(gates[2].name, "eu");
+        assert_eq!(gates[2].job_ids, vec!["10".to_string()]);
+        assert_eq!(gates[2].web_url, "https://gitlab.com/example-org/example-repo/-/jobs/10");
+    }
+
+    #[test]
+    fn a_blocked_pipeline_is_gated_and_a_finished_one_with_a_play_button_is_not() {
+        let listed = |status: &str| {
+            let raw: RawPipeline = serde_json::from_str(&format!(
+                r#"{{"id":1,"ref":"main","status":"{status}","created_at":"2026-09-11T07:36:40Z"}}"#
+            ))
+            .expect("pipeline");
+            map_pipeline(GITLAB_COM, "g/p", raw)
+        };
+        let blocked = listed("manual");
+        assert!(blocked.gated);
+        // Still not live: a blocked pipeline must not be polled every five seconds for days.
+        assert!(!super::super::is_live(&blocked.status));
+        for other in ["success", "running", "failed", "skipped", "created"] {
+            assert!(!listed(other).gated, "{other}");
+        }
+    }
+
+    #[test]
+    fn play_and_approval_bodies_say_only_what_they_need() {
+        assert_eq!(play_body(&[]), json!({}));
+        let variables = vec![PipelineVariable { key: " TARGET ".to_string(), value: "eu".to_string(), masked: true }];
+        assert_eq!(play_body(&variables), json!({"job_variables_attributes":[{"key":"TARGET","value":"eu"}]}));
+
+        assert_eq!(approval_body(true, " looks good "), json!({"status":"approved","comment":"looks good"}));
+        assert_eq!(approval_body(false, "no")["status"], json!("rejected"));
+        // Ids are checked before they reach a URL.
+        assert!(numeric_id("41", "deployment").is_ok());
+        assert!(numeric_id("41/../../x", "deployment").is_err());
+    }
+
+    /// The archive is the one artifact the endpoint serves; a job that kept none has no row.
+    #[test]
+    fn a_job_with_an_archive_is_an_artifact_named_after_the_job() {
+        let raw = jobs(
+            r#"[
+              {"id":7,"name":"build:web","stage":"build","status":"success",
+               "artifacts":[{"file_type":"archive","size":1000,"filename":"artifacts.zip","file_format":"zip"},
+                            {"file_type":"metadata","size":186,"filename":"metadata.gz","file_format":"gzip"},
+                            {"file_type":"trace","size":1500,"filename":"job.log","file_format":"raw"}],
+               "artifacts_file":{"filename":"artifacts.zip","size":1000},
+               "artifacts_expire_at":"2026-10-23T17:54:27.895Z"},
+              {"id":8,"name":"lint","stage":"test","status":"success",
+               "artifacts":[{"file_type":"trace","size":1500,"filename":"job.log","file_format":"raw"}]}
+            ]"#,
+        );
+        let artifacts = map_artifacts("901", raw);
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].id, "7");
+        assert_eq!(artifacts[0].name, "build:web");
+        assert_eq!(artifacts[0].file_name, "build_web.zip");
+        assert_eq!(artifacts[0].size_bytes, Some(1000));
+        assert_eq!(artifacts[0].expires_at.as_deref(), Some("2026-10-23T17:54:27.895Z"));
+        assert_eq!(artifacts[0].job_name.as_deref(), Some("build:web"));
+        assert_eq!(artifacts[0].run_id, "901");
+    }
+
+    /// The token must not follow a redirect to object storage — see [`artifact_download`].
+    #[test]
+    fn an_artifact_download_authenticates_with_a_header_that_stays_home() {
+        let request = artifact_download(GITLAB_COM, "example-org/example-repo", "7", "glpat-example")
+            .expect("request")
+            .build()
+            .expect("built");
+        assert_eq!(
+            request.url().as_str(),
+            "https://gitlab.com/api/v4/projects/example-org%2Fexample-repo/jobs/7/artifacts"
+        );
+        assert_eq!(
+            request.headers().get("authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer glpat-example")
+        );
+        assert!(request.headers().get("private-token").is_none());
+        assert!(artifact_download(GITLAB_COM, "g/p", "7/../x", "t").is_err());
+    }
 }

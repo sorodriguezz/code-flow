@@ -135,6 +135,13 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
         push_unique(&mut keys, secrets::gitlab_token_key(&host.trim().to_ascii_lowercase()));
     }
 
+    // Bitbucket: one credential per workspace — every connected one, and any a linked project names.
+    let mut bitbucket_workspaces = field_of_each(conn, "bitbucket_connections", "workspace");
+    bitbucket_workspaces.extend(column(conn, "SELECT DISTINCT bitbucket_workspace FROM projects"));
+    for workspace in bitbucket_workspaces {
+        push_unique(&mut keys, secrets::bitbucket_token_key(&workspace));
+    }
+
     // No AI family here on purpose: every engine the app drives is a CLI that holds its own login,
     // so there is no AI credential of ours to carry. The one that existed — the API key of the
     // OpenAI-compatible engine — went with that engine.
@@ -162,7 +169,22 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
     }
     for id in column(conn, "SELECT collection_id FROM api_shared_collections") {
         push_unique(&mut keys, secrets::supabase_share_token(&id));
+        // The host's proof of owning it. Missing from a restore, the host could no longer issue a
+        // new invitation code for a collection they shared.
+        push_unique(&mut keys, secrets::supabase_owner_key(&id));
     }
+
+    // The API client's own credentials — auth tokens, secret variables, certificate passphrases —
+    // which its rows now name by marker instead of holding. `api_secrets` reads the markers back
+    // into keys; without these a restored collection would arrive with every token blank.
+    for key in crate::db::api_secrets::all_keys(conn) {
+        push_unique(&mut keys, key);
+    }
+
+    // The key the cookie jar is sealed with. `api_cookies` travels as it is stored — sealed — so
+    // without this a jar restored onto another machine would arrive unreadable. Fixed, like the
+    // passphrase above: one key per install, whether or not a cookie was ever stored under it.
+    push_unique(&mut keys, secrets::api_cookie_key());
 
     // Jira: one API token per site. The e-mail it authenticates against is not a credential and
     // travels with the rest of the connection in `app_settings`.
@@ -209,7 +231,19 @@ pub fn collect(conn: &Connection) -> Result<Vec<SecretEntry>, String> {
     let mut out = Vec::new();
     for key in keys {
         match secrets::get_secret(&key) {
-            Ok(Some(value)) if !value.is_empty() => out.push(SecretEntry { key, value }),
+            Ok(Some(value)) if !value.is_empty() => {
+                // A credential too long for one entry of this platform's store was split across
+                // several (see `api_secrets::Chunked`), and its own entry only says how many. The
+                // pieces are what hold the value, so they travel with it, verbatim.
+                let pieces = crate::db::api_secrets::chunk_count(&value).unwrap_or(0);
+                out.push(SecretEntry { key: key.clone(), value });
+                for index in 0..pieces {
+                    let piece = crate::db::api_secrets::chunk_key(&key, index);
+                    if let Ok(Some(value)) = secrets::get_secret(&piece) {
+                        out.push(SecretEntry { key: piece, value });
+                    }
+                }
+            }
             Ok(_) => {}
             Err(e) => {
                 failures += 1;
@@ -323,6 +357,34 @@ mod tests {
         assert!(secret_keys(&conn).contains(&"supabase-anon:legacy.supabase.co".to_string()));
     }
 
+    /// The API client's credentials left its rows for the credential store, so a backup has to find
+    /// them through the markers the rows keep — and the host's owner secret beside each share token.
+    /// The vault's master password must stay out: see the module docs of `keyvault`.
+    #[test]
+    fn api_credentials_and_share_ownership_are_carried() {
+        let conn = seeded();
+        conn.execute_batch(
+            r#"
+            INSERT INTO api_collections (id, workspace_id, name, auth, created_at, updated_at)
+                VALUES ('c9', 'w1', 'C', '{"bearer":{"token":"cf-keychain:auth.bearer.token"}}',
+                        '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+            INSERT INTO api_environments (id, workspace_id, name, variables, is_global, sort_order, created_at)
+                VALUES ('e9', 'w1', 'Dev', '[{"id":"v1","key":"k","initialValue":"cf-keychain:var.v1.initialValue","currentValue":"","secret":true}]',
+                        0, 0, '2026-01-01T00:00:00+00:00');
+            "#,
+        )
+        .unwrap();
+        let keys = secret_keys(&conn);
+        for expected in [
+            "api-secret:collection:c9:auth.bearer.token",
+            "api-secret:environment:e9:var.v1.initialValue",
+            "supabase-owner:c1",
+        ] {
+            assert!(keys.contains(&expected.to_string()), "missing {expected} in {keys:?}");
+        }
+        assert!(keys.iter().all(|key| !key.contains("keyvault")), "the master password never travels");
+    }
+
     #[test]
     fn a_key_named_twice_is_only_read_once() {
         let keys = secret_keys(&seeded());
@@ -340,5 +402,7 @@ mod tests {
         assert!(keys.contains(&"github-token:github.com".to_string()));
         assert!(keys.contains(&"gitlab-token:gitlab.com".to_string()));
         assert!(keys.contains(&secrets::backup_passphrase_key()));
+        // The cookie jar travels sealed, so its key has to travel beside it — see `api_cookie_seal`.
+        assert!(keys.contains(&secrets::api_cookie_key()));
     }
 }

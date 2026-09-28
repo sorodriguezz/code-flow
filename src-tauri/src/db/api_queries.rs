@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
+use super::api_sync;
 use super::models::{ApiCollection, ApiCookie, ApiEnvironment, ApiFolder, ApiHistoryEntry, ApiRequestRow, ApiTree};
 use super::queries::now;
 
@@ -272,7 +273,43 @@ fn next_collection_order(conn: &Connection, workspace_id: &str) -> rusqlite::Res
 /// `scope` is left out for a sharper version of the same reason: this runs on every debounced edit
 /// of the collection's settings, and a scope that could ride along with a renamed header is a
 /// scope that moves by accident. It is owned by `set_collection_scope` alone.
+///
+/// `updated_at` only moves when something a collaboration push would carry changed. A pin, a
+/// credential and a variable's current value are this machine's own — a login script writes a fresh
+/// token into a current value on every send — and stamping the row for them would push a record
+/// with nothing new in it, and freeze it as a conflict the moment a teammate edited it too.
 pub fn update_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Result<()> {
+    let unchanged = conn
+        .query_row(
+            "SELECT name, description, auth, pre_script, post_script, variables FROM api_collections WHERE id = ?1",
+            params![c.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .is_some_and(|(name, description, auth, pre_script, post_script, variables)| {
+            name == c.name
+                && description == c.description
+                && pre_script == c.pre_script
+                && post_script == c.post_script
+                && api_sync::same_when_shared(&auth, &c.auth, api_sync::redact_auth)
+                && api_sync::same_when_shared(&variables, &c.variables, api_sync::redact_variables)
+        });
+    if unchanged {
+        conn.execute(
+            "UPDATE api_collections SET auth = ?2, variables = ?3, pinned = ?4 WHERE id = ?1",
+            params![c.id, c.auth, c.variables, c.pinned],
+        )?;
+        return Ok(());
+    }
     conn.execute(
         "UPDATE api_collections
             SET name = ?2, description = ?3, auth = ?4, pre_script = ?5, post_script = ?6,
@@ -394,12 +431,41 @@ pub fn delete_collection(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     tx.commit()
 }
 
+/// Deletes a collection from **this machine only**: no tombstone is written, so nothing about the
+/// deletion can travel, and the share it belonged to is forgotten here with its base and conflicts.
+///
+/// What a guest's "Delete" means. A guest does not own the collection — deleting it through the
+/// ordinary path recorded a tombstone for the whole subtree, the next push handed it to the project,
+/// and every member's copy, the host's included, was deleted on their following pull.
+///
+/// Tombstones already waiting inside the collection go too: with the share gone they have nowhere
+/// to go, and a later re-join must not replay them.
+pub fn delete_collection_locally(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM api_collections WHERE id = ?1", params![id])?;
+    tx.execute("DELETE FROM api_tombstones WHERE collection_id = ?1", params![id])?;
+    tx.execute("DELETE FROM api_shared_collections WHERE collection_id = ?1", params![id])?;
+    tx.execute("DELETE FROM api_sync_base WHERE collection_id = ?1", params![id])?;
+    tx.execute("DELETE FROM api_sync_conflicts WHERE collection_id = ?1", params![id])?;
+    tx.commit()
+}
+
+/// A duplicated collection, and which new row came from which old one — what the caller needs to
+/// copy each row's sealed credentials to its copy (see `api_secrets::copy_credentials`).
+pub struct CollectionCopy {
+    pub collection: ApiCollection,
+    /// `(original, copy)` folder ids.
+    pub folders: Vec<(String, String)>,
+    /// `(original, copy)` request ids.
+    pub requests: Vec<(String, String)>,
+}
+
 /// Deep copy: every folder and request gets a fresh id and the parent links are remapped onto
 /// them, so the copy shares no row with the original and can diverge freely.
 ///
 /// The copy stays in the source's workspace — `workspace_id` rides along with the rest of
 /// `..source`, and its `sort_order` is drawn from that same workspace's sidebar.
-pub fn duplicate_collection(conn: &Connection, id: &str) -> rusqlite::Result<ApiCollection> {
+pub fn duplicate_collection_mapped(conn: &Connection, id: &str) -> rusqlite::Result<CollectionCopy> {
     let tx = conn.unchecked_transaction()?;
     let source: ApiCollection = tx.query_row(
         &format!("SELECT {COLLECTION_COLUMNS} FROM api_collections WHERE id = ?1"),
@@ -461,6 +527,7 @@ pub fn duplicate_collection(conn: &Connection, id: &str) -> rusqlite::Result<Api
         let rows = stmt.query_map(params![id], map_request)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
+    let mut request_pairs = Vec::with_capacity(requests.len());
     for request in &requests {
         let copied = ApiRequestRow {
             id: Uuid::new_v4().to_string(),
@@ -471,10 +538,12 @@ pub fn duplicate_collection(conn: &Connection, id: &str) -> rusqlite::Result<Api
             ..request.clone()
         };
         insert_request(&tx, &copied)?;
+        request_pairs.push((request.id.clone(), copied.id));
     }
 
     tx.commit()?;
-    Ok(copy)
+    let folder_pairs = folders.iter().map(|f| f.id.clone()).zip(new_folder_ids).collect();
+    Ok(CollectionCopy { collection: copy, folders: folder_pairs, requests: request_pairs })
 }
 
 /// `ids` is the sidebar's full order, top to bottom, for one workspace. The `workspace_id` guard is
@@ -581,7 +650,35 @@ pub fn create_folder(
 
 /// Editable fields only — the structural columns (`collection_id`, `parent_id`, `sort_order`)
 /// belong to `move_node`, which keeps them consistent as a set.
+///
+/// Stamped only for a change a push would carry — see `update_collection`.
 pub fn update_folder(conn: &Connection, f: &ApiFolder) -> rusqlite::Result<()> {
+    let unchanged = conn
+        .query_row(
+            "SELECT name, description, auth, pre_script, post_script FROM api_folders WHERE id = ?1",
+            params![f.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .is_some_and(|(name, description, auth, pre_script, post_script)| {
+            name == f.name
+                && description == f.description
+                && pre_script == f.pre_script
+                && post_script == f.post_script
+                && api_sync::same_when_shared(&auth, &f.auth, api_sync::redact_auth)
+        });
+    if unchanged {
+        conn.execute("UPDATE api_folders SET auth = ?2 WHERE id = ?1", params![f.id, f.auth])?;
+        return Ok(());
+    }
     conn.execute(
         "UPDATE api_folders
             SET name = ?2, description = ?3, auth = ?4, pre_script = ?5, post_script = ?6,
@@ -654,10 +751,24 @@ pub fn create_request(
     protocol: &str,
     spec: &str,
 ) -> rusqlite::Result<ApiRequestRow> {
+    create_request_as(conn, &Uuid::new_v4().to_string(), collection_id, folder_id, name, protocol, spec)
+}
+
+/// `create_request` under an id the caller chose — the command seals the spec's credentials under
+/// the row's id *before* the row exists, so it has to know the id first.
+pub fn create_request_as(
+    conn: &Connection,
+    id: &str,
+    collection_id: &str,
+    folder_id: Option<&str>,
+    name: &str,
+    protocol: &str,
+    spec: &str,
+) -> rusqlite::Result<ApiRequestRow> {
     let ts = now();
     let (method, url) = denormalize(spec);
     let request = ApiRequestRow {
-        id: Uuid::new_v4().to_string(),
+        id: id.to_string(),
         collection_id: collection_id.to_string(),
         folder_id: folder_id.map(str::to_string),
         name: name.to_string(),
@@ -680,7 +791,37 @@ pub fn create_request(
 /// column is that one authority sets it. A frontend that kept its own idea of when the row was
 /// last written would disagree with the row a moment later — and that disagreement is exactly
 /// what an open editor tab uses to decide whether someone else has changed the request under it.
+///
+/// A save that changed nothing a push would carry — only a credential — keeps the row's stamp and
+/// returns it, for the reason `update_collection` gives.
 pub fn update_request(conn: &Connection, r: &ApiRequestRow) -> rusqlite::Result<String> {
+    let stored = conn
+        .query_row(
+            "SELECT name, protocol, method, url, spec, updated_at FROM api_requests WHERE id = ?1",
+            params![r.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((name, protocol, method, url, spec, updated_at)) = stored {
+        if name == r.name
+            && protocol == r.protocol
+            && method == r.method
+            && url == r.url
+            && api_sync::same_when_shared(&spec, &r.spec, api_sync::redact_spec)
+        {
+            conn.execute("UPDATE api_requests SET spec = ?2 WHERE id = ?1", params![r.id, r.spec])?;
+            return Ok(updated_at);
+        }
+    }
     let stamp = now();
     conn.execute(
         "UPDATE api_requests
@@ -812,12 +953,32 @@ fn carry_subtree_to_collection(conn: &Connection, folder_id: &str, collection_id
     Ok(())
 }
 
+/// Every row a move changed, and the `updated_at` they all now carry — so the caller can move an
+/// open tab's idea of "the version I agree with" along with them instead of reading its own drag as
+/// someone else's edit.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct MoveOutcome {
+    pub stamp: String,
+    pub folders: Vec<String>,
+    pub requests: Vec<String>,
+}
+
 /// Reparents one node and renumbers the destination so `sort_order` stays dense `0..n` with the
 /// moved node sitting at `index`.
 ///
 /// Folders and requests are renumbered against their own kind: they live in separate tables with
 /// independent `sort_order` columns, and the tree renders folders above requests, so an index the
 /// UI computed is an index within one of the two lists.
+///
+/// **Every row whose place changed is stamped.** The collaboration push is a delta on `updated_at`,
+/// so a move that left the stamp alone never travelled: a teammate's tree kept the old order and the
+/// old parent for good. Only the rows that actually moved are stamped — the node, the subtree it
+/// carries into another collection, and the siblings whose position changed — because a stamp on a
+/// row nobody touched is a conflict waiting for the next person who edits it.
+///
+/// A move into **another collection** is, from the collection it left, a removal — and removals
+/// travel as tombstones. Without one, the peers of the source collection would keep the request
+/// forever, since it simply stops appearing in that collection's pushes.
 ///
 /// Returns `Err` rather than `rusqlite::Error` because the cycle and workspace checks catch caller
 /// mistakes, not database failures. The UI guards them too, but a bug there would corrupt the tree
@@ -830,7 +991,7 @@ pub fn move_node(
     collection_id: &str,
     parent_id: Option<&str>,
     index: i64,
-) -> Result<(), String> {
+) -> Result<MoveOutcome, String> {
     let (table, parent_col) = match kind {
         "folder" => ("api_folders", "parent_id"),
         "request" => ("api_requests", "folder_id"),
@@ -846,6 +1007,9 @@ pub fn move_node(
     let source_workspace = node_workspace(&tx, table, id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Unknown {kind} {id}"))?;
+    let source_collection: String = tx
+        .query_row(&format!("SELECT collection_id FROM {table} WHERE id = ?1"), params![id], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
     let (destination_workspace, destination_scope): (String, String) = tx
         .query_row(
             "SELECT workspace_id, scope FROM api_collections WHERE id = ?1",
@@ -863,41 +1027,103 @@ pub fn move_node(
         return Err("A node cannot be moved to a collection in another workspace".to_string());
     }
 
+    let stamp = now();
+    let mut outcome = MoveOutcome { stamp: stamp.clone(), ..Default::default() };
+    let touched = |outcome: &mut MoveOutcome, kind: &str, id: String| match kind {
+        "folder" => outcome.folders.push(id),
+        _ => outcome.requests.push(id),
+    };
+
+    // What leaves the source collection: the node, and for a folder every folder beneath it and
+    // every request in any of them. Read before the move, while they all still sit where they started.
+    let crossing = source_collection != collection_id;
+    let (carried_folders, carried_requests) = if kind == "folder" {
+        let folders = folder_and_descendants(&tx, id).map_err(|e| e.to_string())?;
+        let mut requests = Vec::new();
+        for folder in &folders {
+            let mut stmt = tx
+                .prepare("SELECT id FROM api_requests WHERE folder_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let ids = stmt
+                .query_map(params![folder], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?;
+            requests.extend(ids);
+        }
+        (folders, requests)
+    } else {
+        (Vec::new(), vec![id.to_string()])
+    };
+
     tx.execute(
-        &format!("UPDATE {table} SET collection_id = ?2, {parent_col} = ?3 WHERE id = ?1"),
-        params![id, collection_id, parent_id],
+        &format!("UPDATE {table} SET collection_id = ?2, {parent_col} = ?3, updated_at = ?4 WHERE id = ?1"),
+        params![id, collection_id, parent_id, stamp],
     )
     .map_err(|e| e.to_string())?;
+    touched(&mut outcome, kind, id.to_string());
 
     if kind == "folder" {
         carry_subtree_to_collection(&tx, id, collection_id).map_err(|e| e.to_string())?;
     }
 
-    let mut siblings: Vec<String> = {
+    if crossing {
+        // A folder's subtree changed collection with it, so every row of it is news to both sides.
+        if kind == "folder" {
+            for folder in carried_folders.iter().filter(|folder| folder.as_str() != id) {
+                tx.execute("UPDATE api_folders SET updated_at = ?2 WHERE id = ?1", params![folder, stamp])
+                    .map_err(|e| e.to_string())?;
+                outcome.folders.push(folder.clone());
+            }
+            for request in &carried_requests {
+                tx.execute("UPDATE api_requests SET updated_at = ?2 WHERE id = ?1", params![request, stamp])
+                    .map_err(|e| e.to_string())?;
+                outcome.requests.push(request.clone());
+            }
+        }
+        record_tombstones(&tx, "folder", &carried_folders, &source_workspace, &source_collection)
+            .map_err(|e| e.to_string())?;
+        record_tombstones(&tx, "request", &carried_requests, &source_workspace, &source_collection)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let mut siblings: Vec<(String, i64)> = {
         let mut stmt = tx
             .prepare(&format!(
-                "SELECT id FROM {table}
+                "SELECT id, sort_order FROM {table}
                   WHERE collection_id = ?1 AND {parent_col} IS ?2 AND id <> ?3
                   ORDER BY sort_order, created_at"
             ))
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![collection_id, parent_id, id], |row| row.get(0))
+            .query_map(params![collection_id, parent_id, id], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     let at = (index.max(0) as usize).min(siblings.len());
-    siblings.insert(at, id.to_string());
+    siblings.insert(at, (id.to_string(), -1));
 
-    for (order, sibling) in siblings.iter().enumerate() {
+    for (order, (sibling, current)) in siblings.iter().enumerate() {
+        let order = order as i64;
+        if sibling == id {
+            tx.execute(&format!("UPDATE {table} SET sort_order = ?2 WHERE id = ?1"), params![sibling, order])
+                .map_err(|e| e.to_string())?;
+            continue;
+        }
+        // A sibling already where it belongs is left alone, stamp and all.
+        if *current == order {
+            continue;
+        }
         tx.execute(
-            &format!("UPDATE {table} SET sort_order = ?2 WHERE id = ?1"),
-            params![sibling, order as i64],
+            &format!("UPDATE {table} SET sort_order = ?2, updated_at = ?3 WHERE id = ?1"),
+            params![sibling, order, stamp],
         )
         .map_err(|e| e.to_string())?;
+        touched(&mut outcome, kind, sibling.clone());
     }
 
-    tx.commit().map_err(|e| e.to_string())
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(outcome)
 }
 
 // ---------- environments ----------

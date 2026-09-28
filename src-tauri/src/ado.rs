@@ -53,7 +53,27 @@ pub(crate) fn encode_segment(s: &str) -> String {
 /// Nothing here varies the transport per call, so the pool is pure gain.
 pub(crate) fn client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new).clone()
+    CLIENT.get_or_init(pr_http_client).clone()
+}
+
+/// How long one request to a pull-request host may take, start to finish, before it is given up.
+///
+/// The three PR clients were `Client::new()`, which has no timeout of any kind: a host that accepted
+/// the connection and then stopped answering parked the request — and the spinner on screen — until
+/// the app was restarted. Generous on purpose, because this is a ceiling for the hung case, not a
+/// budget: a PR's diff can be megabytes, and a self-managed GitLab behind a VPN is not fast.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// Reaching the host at all is quick or it is not happening.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The transport all three pull-request clients (`ado`, `github`, `gitlab`) are built on, so they
+/// share one policy on how long to wait. The CI screen has its own (`ci::http`), tuned for polling.
+pub(crate) fn pr_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,6 +215,156 @@ pub struct PullRequestSummary {
     pub provider: String,
 }
 
+/// Which pull requests a list asks for.
+///
+/// The lists used to be one page of *every* state, newest first — a hundred rows that a busy
+/// repository fills with merged history in a week, so an open pull request only a few weeks old fell
+/// off the end and could be neither seen nor reviewed. Open is now the default and every scope pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrListScope {
+    /// Open and draft — what is still waiting on someone.
+    Open,
+    /// Merged and closed.
+    Closed,
+    All,
+}
+
+impl PrListScope {
+    /// `"open"` (also the answer for anything unrecognised) · `"closed"` · `"all"`.
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::trim) {
+            Some("closed") => Self::Closed,
+            Some("all") => Self::All,
+            _ => Self::Open,
+        }
+    }
+
+    /// Whether an already-bucketed pull request belongs in this scope. GitLab and Azure cannot ask for
+    /// "merged or closed" in one query, so their `Closed` pages ask for everything and are filtered
+    /// here — a page can then hold fewer rows than asked for, which is honest rather than wrong.
+    pub fn admits(self, status: &str) -> bool {
+        match self {
+            Self::Open => matches!(status, "open" | "draft"),
+            Self::Closed => matches!(status, "merged" | "closed"),
+            Self::All => true,
+        }
+    }
+}
+
+/// How many pull requests one page asks the host for.
+pub const PR_PAGE_SIZE: u32 = 50;
+
+/// One page of a pull-request list.
+#[derive(Debug, Clone, Serialize)]
+pub struct PrPage {
+    pub items: Vec<PullRequestSummary>,
+    /// 1-based, as asked for.
+    pub page: u32,
+    /// Whether the host has another page after this one.
+    pub has_more: bool,
+}
+
+/// One check on a pull request's head commit: a GitHub check run or commit status, a GitLab
+/// pipeline or one of its jobs, an Azure DevOps PR status or branch-policy evaluation. The same
+/// shape from all three, like [`PullRequestSummary`].
+#[derive(Debug, Clone, Serialize)]
+pub struct PrCheck {
+    /// `"check"` · `"status"` · `"pipeline"` · `"job"` · `"policy"` — where it came from.
+    pub kind: String,
+    pub name: String,
+    /// One of `crate::ci::status` — the vocabulary the Pipelines tab already draws.
+    pub state: String,
+    /// The host's own word, for the tooltip.
+    pub raw_state: String,
+    pub description: Option<String>,
+    /// Where it opens in a browser.
+    pub url: Option<String>,
+    /// The run's id in the Pipelines tab (a GitHub workflow run, a GitLab pipeline, an Azure build),
+    /// when this check is one — what lets the PR view jump straight to its jobs and logs.
+    pub pipeline_run_id: Option<String>,
+    /// Whether the host requires it to pass before merging. Known for Azure's policies (and GitLab's
+    /// "pipeline must succeed"); `None` where the host doesn't say.
+    pub required: Option<bool>,
+}
+
+/// The checks of a pull request's current head.
+#[derive(Debug, Clone, Serialize)]
+pub struct PrChecks {
+    pub head_sha: Option<String>,
+    pub checks: Vec<PrCheck>,
+}
+
+/// What merging a pull request from CodeFlow may look like on its host.
+#[derive(Debug, Clone, Serialize)]
+pub struct MergeOptions {
+    /// The strategies the host lets this pull request be merged with, in the order to offer them:
+    /// `"merge"` · `"squash"` · `"rebase"` · `"rebase_merge"` (Azure's semi-linear) · `"ff"` (a
+    /// GitLab project set to fast-forward — fixed by the project, not choosable per merge request).
+    pub methods: Vec<String>,
+    /// False when `methods` is the provider's whole menu because the repository's own settings
+    /// couldn't be read — the host may still refuse one of them, and says so when it does.
+    pub methods_known: bool,
+    pub default_method: Option<String>,
+    /// GitLab's squash, which is a toggle beside the method rather than a method:
+    /// `"never"` · `"always"` · `"default_on"` · `"default_off"`. `None` on the other hosts.
+    pub squash: Option<String>,
+    /// Whether deleting the source branch is offered at all — not for a branch in a fork.
+    pub can_delete_source_branch: bool,
+    pub delete_source_branch_default: bool,
+    /// Azure DevOps only: completing can move the linked work items to their done state.
+    pub transition_work_items: Option<bool>,
+    /// What the host says about merging it right now: `"clean"` · `"conflicts"` · `"behind"` ·
+    /// `"blocked"` · `"approvals"` · `"checks_pending"` · `"checks_failing"` · `"draft"` ·
+    /// `"closed"` · `"unknown"`.
+    pub readiness: String,
+    /// The host's own word behind `readiness`, for the tooltip.
+    pub readiness_detail: Option<String>,
+}
+
+/// Prefix of a merge the host refused for a reason the user can act on:
+/// `MERGE_BLOCKED::{kind}::{the host's own words}`, with `kind` from [`classify_merge_refusal`].
+/// The panel matches the kind to say *why* in its own words and keeps the host's sentence beside it
+/// — "405 Method Not Allowed" on its own tells nobody that the branch has conflicts.
+pub const MERGE_BLOCKED_MARKER: &str = "MERGE_BLOCKED::";
+
+pub fn merge_refusal(kind: &str, message: &str) -> String {
+    format!("{MERGE_BLOCKED_MARKER}{kind}::{}", message.trim())
+}
+
+/// What kind of "no" a host's refusal to merge is, read from its status and its own words:
+/// `"stale"` · `"conflicts"` · `"behind"` · `"checks"` · `"approvals"` · `"method"` · `"draft"` ·
+/// `"blocked"` · `"other"`.
+///
+/// Words before codes, because the codes are overloaded: GitHub answers 405 both for "has
+/// conflicts" and for "a required review is missing", and only the message tells them apart. The
+/// order matters too — "Base branch was modified" mentions neither checks nor reviews but is a stale
+/// read, and must not fall through to the 405 catch-all; Azure's "policies that are not approved"
+/// is a policy block, not a missing review.
+pub fn classify_merge_refusal(status: u16, message: &str) -> &'static str {
+    let m = message.to_lowercase();
+    if m.contains("was modified") || m.contains("sha does not match") || m.contains("sha mismatch") || status == 409 {
+        "stale"
+    } else if m.contains("conflict") || m.contains("cannot be merged") || status == 406 {
+        "conflicts"
+    } else if m.contains("out of date") || m.contains("need_rebase") || m.contains("needs to be rebased") {
+        "behind"
+    } else if m.contains("status check") || m.contains("required check") || m.contains("pipeline") || m.contains("build") {
+        "checks"
+    } else if m.contains("polic") {
+        "blocked"
+    } else if m.contains("review") || m.contains("approv") {
+        "approvals"
+    } else if m.contains("not allowed") && (m.contains("merge") || m.contains("squash") || m.contains("rebase")) {
+        "method"
+    } else if m.contains("draft") || m.contains("work in progress") {
+        "draft"
+    } else if m.contains("not mergeable") || status == 405 {
+        "blocked"
+    } else {
+        "other"
+    }
+}
+
 #[derive(Deserialize)]
 pub(crate) struct ListResponse<T> {
     pub(crate) value: Vec<T>,
@@ -218,10 +388,20 @@ struct RawProjectRef {
 #[derive(Deserialize)]
 struct RawRepoRef {
     name: String,
+    /// The repository's GUID. The PR endpoints take a name wherever they take this, but the branch
+    /// policy configurations do not.
+    #[serde(default)]
+    id: String,
     /// Azure includes the owning team project on the repository it returns with a pull request.
     /// That's the only way to recover the project's *name* from a link that carries its GUID.
     #[serde(default)]
     project: Option<RawProjectRef>,
+}
+
+#[derive(Deserialize)]
+struct RawCommitRef {
+    #[serde(rename = "commitId", default)]
+    commit_id: String,
 }
 
 #[derive(Deserialize)]
@@ -253,6 +433,15 @@ struct RawPullRequest {
     /// Present on a single-PR read; the list endpoint omits it, hence the default.
     #[serde(default)]
     reviewers: Vec<RawReviewer>,
+    /// The source branch's head as of the PR's last update — the commit a completion must name, so
+    /// that a push landing between reading the PR and completing it is refused rather than merged
+    /// unseen. Also the head the checks are about.
+    #[serde(rename = "lastMergeSourceCommit", default)]
+    last_merge_source_commit: Option<RawCommitRef>,
+    /// Azure's test merge: `succeeded` · `conflicts` · `rejectedByPolicy` · `queued` · `failure` ·
+    /// `notSet`.
+    #[serde(rename = "mergeStatus", default)]
+    merge_status: Option<String>,
 }
 
 fn strip_ref(r: &str) -> String {
@@ -305,24 +494,71 @@ fn map_pull_request(org_enc: &str, project_enc: &str, pr: RawPullRequest) -> Pul
     }
 }
 
-pub async fn list_pull_requests(
+/// One page of the repository's pull requests, newest first.
+///
+/// Azure pages by `$top`/`$skip` and sends no "next" link, so one row more than a page is asked for:
+/// whether it came back is whether another page exists, known rather than guessed from a full page.
+/// Its `status` filter takes one value, so `Closed` asks for `all` and drops the active ones — see
+/// [`PrListScope::admits`].
+pub async fn list_pull_requests_page(
     org: &str,
     project: &str,
     repo_id: &str,
+    scope: PrListScope,
+    page: u32,
     pat: &str,
-) -> Result<Vec<PullRequestSummary>, String> {
+) -> Result<PrPage, String> {
     let org_enc = encode_segment(&normalize_org(org));
     let project_enc = encode_segment(project);
+    let page = page.max(1);
+    let status = match scope {
+        PrListScope::Open => "active",
+        PrListScope::Closed | PrListScope::All => "all",
+    };
     let url = format!(
-        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{repo_id}/pullrequests\
-         ?searchCriteria.status=all&api-version={API_VERSION}"
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{}/pullrequests\
+         ?searchCriteria.status={status}&$top={}&$skip={}&api-version={API_VERSION}",
+        encode_segment(repo_id),
+        PR_PAGE_SIZE + 1,
+        (page - 1) * PR_PAGE_SIZE,
     );
     let parsed: ListResponse<RawPullRequest> = get_json(&url, pat).await?;
-    Ok(parsed
-        .value
+    Ok(page_of(parsed.value, scope, page, |pr| map_pull_request(&org_enc, &project_enc, pr)))
+}
+
+/// A page out of the `PR_PAGE_SIZE + 1` rows asked for — see [`list_pull_requests_page`].
+fn page_of(
+    raw: Vec<RawPullRequest>,
+    scope: PrListScope,
+    page: u32,
+    map: impl Fn(RawPullRequest) -> PullRequestSummary,
+) -> PrPage {
+    let has_more = raw.len() > PR_PAGE_SIZE as usize;
+    let items = raw
         .into_iter()
-        .map(|pr| map_pull_request(&org_enc, &project_enc, pr))
-        .collect())
+        .take(PR_PAGE_SIZE as usize)
+        .map(map)
+        .filter(|pr| scope.admits(&pr.status))
+        .collect();
+    PrPage { items, page, has_more }
+}
+
+/// One pull request as Azure sends it. `project` and `repo_id` may each be a name or a GUID.
+async fn fetch_raw_pull_request(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    pat: &str,
+) -> Result<RawPullRequest, String> {
+    let org_enc = encode_segment(&normalize_org(org));
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{}/_apis/git/repositories/{}/pullRequests/{pr_id}\
+         ?api-version={API_VERSION}",
+        encode_segment(project),
+        encode_segment(repo_id)
+    );
+    get_json(&url, pat).await
 }
 
 /// A single pull request plus the **names** Azure reports for the project and repository that own
@@ -335,9 +571,9 @@ pub struct AdoPullRequest {
     pub repo_name: String,
 }
 
-/// Fetches a single pull request by id. Unlike [`list_pull_requests`] this reaches a PR no
-/// matter how far down the list it is, which is what a pasted link needs. `project` and `repo_id`
-/// may each be a name or a GUID — Azure's Git REST API accepts either.
+/// Fetches a single pull request by id. Unlike [`list_pull_requests_page`] this reaches a PR no
+/// matter how far down the list it is — what a pasted link needs, and what a review needs too.
+/// `project` and `repo_id` may each be a name or a GUID — Azure's Git REST API accepts either.
 pub async fn get_pull_request(
     org: &str,
     project: &str,
@@ -346,13 +582,7 @@ pub async fn get_pull_request(
     pat: &str,
 ) -> Result<AdoPullRequest, String> {
     let org_enc = encode_segment(&normalize_org(org));
-    let url = format!(
-        "https://dev.azure.com/{org_enc}/{}/_apis/git/repositories/{}/pullRequests/{pr_id}\
-         ?api-version={API_VERSION}",
-        encode_segment(project),
-        encode_segment(repo_id)
-    );
-    let raw: RawPullRequest = get_json(&url, pat).await?;
+    let raw = fetch_raw_pull_request(org, project, repo_id, pr_id, pat).await?;
     let repo_name = raw.repository.name.clone();
     let project_name = raw
         .repository
@@ -1104,14 +1334,7 @@ pub async fn viewer_decision(
     pat: &str,
 ) -> Result<String, String> {
     let user_id = authenticated_user_id(org, pat).await?;
-    let org_enc = encode_segment(&normalize_org(org));
-    let url = format!(
-        "https://dev.azure.com/{org_enc}/{}/_apis/git/repositories/{}/pullRequests/{pr_id}\
-         ?api-version={API_VERSION}",
-        encode_segment(project),
-        encode_segment(repo_id)
-    );
-    let pr: RawPullRequest = get_json(&url, pat).await?;
+    let pr = fetch_raw_pull_request(org, project, repo_id, pr_id, pat).await?;
     let vote = pr
         .reviewers
         .iter()
@@ -1154,6 +1377,443 @@ pub async fn abandon_pull_request(
         return Err(format!("Azure DevOps returned {status}: {body}"));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Completing (merging)
+// ---------------------------------------------------------------------------
+
+/// Azure's "Limit merge types" branch policy — the one place a repository says which strategies a
+/// completion may use.
+const LIMIT_MERGE_TYPES_POLICY: &str = "fa4e907d-c16b-4a4c-9dfa-4916e5d171ab";
+
+/// Every strategy Azure has, in the order its own completion dialog lists them.
+const AZURE_METHODS: [&str; 4] = ["merge", "squash", "rebase", "rebase_merge"];
+
+/// Azure's name for one of [`MergeOptions::methods`].
+fn azure_merge_strategy(method: &str) -> Option<&'static str> {
+    match method {
+        "merge" => Some("noFastForward"),
+        "squash" => Some("squash"),
+        "rebase" => Some("rebase"),
+        "rebase_merge" => Some("rebaseMerge"),
+        _ => None,
+    }
+}
+
+/// Azure's error body is `{"message": …, "typeKey": …}`; the message is the part worth showing.
+fn azure_error_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+        .unwrap_or_else(|| body.chars().take(300).collect())
+}
+
+#[derive(Deserialize)]
+struct RawPolicyType {
+    #[serde(default)]
+    id: String,
+    #[serde(rename = "displayName", default)]
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+struct RawPolicyConfiguration {
+    #[serde(rename = "isEnabled", default)]
+    is_enabled: bool,
+    #[serde(rename = "isBlocking", default)]
+    is_blocking: bool,
+    #[serde(rename = "type", default)]
+    kind: Option<RawPolicyType>,
+    #[serde(default)]
+    settings: serde_json::Value,
+}
+
+/// The strategies the "Limit merge types" policies on a branch leave open, or `None` when no such
+/// policy is enabled there — every strategy is then allowed, which is known rather than assumed.
+///
+/// Two policies on one branch (a repository-wide one and a branch one) both have to allow a strategy
+/// for a completion to use it. A policy written before the four switches existed carries only the
+/// old `useSquashMerge`, which meant "squash, and nothing else".
+fn allowed_by_merge_type_policies(configs: &[RawPolicyConfiguration]) -> Option<Vec<String>> {
+    let limiting: Vec<&RawPolicyConfiguration> = configs
+        .iter()
+        .filter(|c| {
+            c.is_enabled && c.kind.as_ref().is_some_and(|k| k.id.eq_ignore_ascii_case(LIMIT_MERGE_TYPES_POLICY))
+        })
+        .collect();
+    if limiting.is_empty() {
+        return None;
+    }
+    const SWITCHES: [(&str, &str); 4] = [
+        ("merge", "allowNoFastForward"),
+        ("squash", "allowSquash"),
+        ("rebase", "allowRebase"),
+        ("rebase_merge", "allowRebaseMerge"),
+    ];
+    let allows = |c: &RawPolicyConfiguration, method: &str, key: &str| {
+        if SWITCHES.iter().any(|(_, k)| c.settings.get(k).is_some()) {
+            c.settings.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+        } else {
+            let squash_only = c.settings.get("useSquashMerge").and_then(|v| v.as_bool()).unwrap_or(false);
+            !squash_only || method == "squash"
+        }
+    };
+    Some(
+        SWITCHES
+            .iter()
+            .filter(|(method, key)| limiting.iter().all(|c| allows(c, method, key)))
+            .map(|(method, _)| method.to_string())
+            .collect(),
+    )
+}
+
+/// What Azure says about completing the pull request right now. Its `mergeStatus` is the test merge
+/// only — conflicts or not; the policies that can still block completion are the checks list's to
+/// show (see [`pr_checks`]).
+fn azure_readiness(status: &str, is_draft: bool, merge_status: Option<&str>) -> &'static str {
+    if status != "active" {
+        return "closed";
+    }
+    if is_draft {
+        return "draft";
+    }
+    match merge_status.unwrap_or_default() {
+        "succeeded" => "clean",
+        "conflicts" => "conflicts",
+        "rejectedByPolicy" => "blocked",
+        _ => "unknown",
+    }
+}
+
+/// The branch policies configured on `ref_name` of a repository, which Azure only answers by GUID.
+async fn branch_policies(
+    org: &str,
+    project: &str,
+    repo_guid: &str,
+    ref_name: &str,
+    pat: &str,
+) -> Result<Vec<RawPolicyConfiguration>, String> {
+    let url = format!(
+        "https://dev.azure.com/{}/{}/_apis/git/policy/configurations?repositoryId={}&refName={}\
+         &policyType={LIMIT_MERGE_TYPES_POLICY}&api-version={API_VERSION}",
+        encode_segment(&normalize_org(org)),
+        encode_segment(project),
+        encode_segment(repo_guid),
+        encode_segment(ref_name),
+    );
+    let parsed: ListResponse<RawPolicyConfiguration> = get_json(&url, pat).await?;
+    Ok(parsed.value)
+}
+
+/// How this pull request can be completed: the strategies the target branch's policies allow, and
+/// whether Azure's test merge found conflicts.
+pub async fn merge_options(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    pat: &str,
+) -> Result<MergeOptions, String> {
+    let pr = fetch_raw_pull_request(org, project, repo_id, pr_id, pat).await?;
+    let limited = if pr.repository.id.is_empty() {
+        Err(())
+    } else {
+        branch_policies(org, project, &pr.repository.id, &pr.target_ref_name, pat)
+            .await
+            .map(|configs| allowed_by_merge_type_policies(&configs))
+            .map_err(|_| ())
+    };
+    let everything = || AZURE_METHODS.iter().map(|m| m.to_string()).collect::<Vec<_>>();
+    let (methods, methods_known) = match limited {
+        Ok(None) => (everything(), true),
+        Ok(Some(allowed)) if !allowed.is_empty() => (allowed, true),
+        // Unreadable, or a policy that allows nothing at all: offer everything and let Azure say no.
+        _ => (everything(), false),
+    };
+    Ok(MergeOptions {
+        default_method: methods.first().cloned(),
+        methods,
+        methods_known,
+        squash: None,
+        can_delete_source_branch: true,
+        delete_source_branch_default: false,
+        // Azure's own completion dialog has it on.
+        transition_work_items: Some(true),
+        readiness: azure_readiness(&pr.status, pr.is_draft, pr.merge_status.as_deref()).to_string(),
+        readiness_detail: pr.merge_status.clone(),
+    })
+}
+
+/// A completion that Azure accepted.
+pub struct Completion {
+    pub summary: PullRequestSummary,
+    /// True once Azure reports the pull request completed. Completion runs in the background there,
+    /// so a `false` means requested and still merging — not refused, which is an `Err`.
+    pub merged: bool,
+}
+
+/// Completes (merges) the pull request.
+///
+/// `lastMergeSourceCommit` is required and is what keeps this honest: it names the head the user
+/// looked at, so a push landing in between is refused as stale rather than merged unseen. Branch
+/// policies are never bypassed from here.
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_pull_request(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    method: &str,
+    delete_source_branch: bool,
+    transition_work_items: bool,
+    pat: &str,
+) -> Result<Completion, String> {
+    let strategy = azure_merge_strategy(method).ok_or_else(|| format!("unknown merge strategy: {method}"))?;
+    let pr = fetch_raw_pull_request(org, project, repo_id, pr_id, pat).await?;
+    if pr.status != "active" {
+        return Err(merge_refusal("other", "This pull request is no longer active"));
+    }
+    let head = pr
+        .last_merge_source_commit
+        .as_ref()
+        .map(|c| c.commit_id.clone())
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| "Azure DevOps didn't report the pull request's head commit".to_string())?;
+
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{}/pullRequests/{pr_id}\
+         ?api-version={API_VERSION}",
+        encode_segment(repo_id)
+    );
+    let body = serde_json::json!({
+        "status": "completed",
+        "lastMergeSourceCommit": { "commitId": head },
+        "completionOptions": {
+            "mergeStrategy": strategy,
+            "deleteSourceBranch": delete_source_branch,
+            "transitionWorkItems": transition_work_items,
+            "bypassPolicy": false,
+        },
+    });
+    let res = client()
+        .patch(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let message = azure_error_message(&res.text().await.unwrap_or_default());
+        return Err(merge_refusal(classify_merge_refusal(status.as_u16(), &message), &message));
+    }
+    let mut latest: RawPullRequest =
+        res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
+
+    // The answer to the PATCH is usually still `active`, with the merge queued behind it. A few short
+    // re-reads settle whether it went through or ran into a conflict; past that it is reported as
+    // requested, which is exactly what it is.
+    for _ in 0..4 {
+        if latest.status == "completed" || latest.merge_status.as_deref() == Some("conflicts") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        latest = fetch_raw_pull_request(org, project, repo_id, pr_id, pat).await?;
+    }
+    if latest.status != "completed" && latest.merge_status.as_deref() == Some("conflicts") {
+        return Err(merge_refusal("conflicts", "Azure DevOps found conflicts while merging"));
+    }
+    let merged = latest.status == "completed";
+    Ok(Completion { summary: map_pull_request(&org_enc, &project_enc, latest), merged })
+}
+
+// ---------------------------------------------------------------------------
+// Checks
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawStatusContext {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    genre: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawPrStatus {
+    #[serde(default)]
+    id: i64,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    context: Option<RawStatusContext>,
+    #[serde(rename = "targetUrl", default)]
+    target_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawPolicyEvaluation {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    configuration: Option<RawPolicyConfiguration>,
+    /// Free-form per policy type — a build policy puts its `buildId` here.
+    #[serde(default)]
+    context: Option<serde_json::Value>,
+}
+
+/// The build id in an Azure build results address (`…/_build/results?buildId=123`) — the id the
+/// Pipelines tab knows the run by.
+fn build_id_in(url: &str) -> Option<String> {
+    let at = url.find("buildId=")? + "buildId=".len();
+    let digits: String = url[at..].chars().take_while(|c| c.is_ascii_digit()).collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+fn status_state(state: &str) -> &'static str {
+    use crate::ci::status;
+    match state {
+        "succeeded" => status::SUCCESS,
+        "failed" | "error" => status::FAILED,
+        "pending" => status::RUNNING,
+        "notApplicable" => status::SKIPPED,
+        _ => status::QUEUED,
+    }
+}
+
+fn policy_state(state: &str) -> &'static str {
+    use crate::ci::status;
+    match state {
+        "approved" => status::SUCCESS,
+        "rejected" | "broken" => status::FAILED,
+        "running" => status::RUNNING,
+        "notApplicable" => status::SKIPPED,
+        _ => status::QUEUED,
+    }
+}
+
+/// Branch-policy evaluations as checks, blocking ones first. `results_url` turns a build id into
+/// the address of its results page.
+fn map_policy_evaluations(evaluations: Vec<RawPolicyEvaluation>, results_url: impl Fn(&str) -> String) -> Vec<PrCheck> {
+    let mut checks: Vec<PrCheck> = evaluations
+        .into_iter()
+        .filter_map(|evaluation| {
+            let config = evaluation.configuration?;
+            if !config.is_enabled {
+                return None;
+            }
+            let type_name = config.kind.as_ref().map(|k| k.display_name.clone()).unwrap_or_default();
+            let context = evaluation.context.unwrap_or(serde_json::Value::Null);
+            let text = |value: &serde_json::Value, key: &str| {
+                value.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+            };
+            let build_id = context.get("buildId").and_then(|v| v.as_i64()).map(|id| id.to_string());
+            let name = text(&config.settings, "displayName")
+                .or_else(|| text(&context, "buildDefinitionName"))
+                .unwrap_or_else(|| if type_name.is_empty() { "Policy".to_string() } else { type_name.clone() });
+            Some(PrCheck {
+                kind: "policy".to_string(),
+                description: (!type_name.is_empty() && type_name != name).then_some(type_name),
+                state: policy_state(&evaluation.status).to_string(),
+                raw_state: evaluation.status,
+                url: build_id.as_deref().map(&results_url),
+                pipeline_run_id: build_id,
+                required: Some(config.is_blocking),
+                name,
+            })
+        })
+        .collect();
+    // Stable, so the host's own order survives within each half.
+    checks.sort_by_key(|c| c.required != Some(true));
+    checks
+}
+
+/// PR statuses as checks. Azure keeps every status ever posted, one per iteration, so only the
+/// newest of each (genre, name) is the current one.
+fn map_statuses(statuses: Vec<RawPrStatus>) -> Vec<PrCheck> {
+    let mut latest: Vec<RawPrStatus> = Vec::new();
+    for status in statuses {
+        let key = |s: &RawPrStatus| {
+            s.context.as_ref().map(|c| (c.genre.clone().unwrap_or_default(), c.name.clone())).unwrap_or_default()
+        };
+        match latest.iter_mut().find(|kept| key(kept) == key(&status)) {
+            Some(kept) if kept.id < status.id => *kept = status,
+            Some(_) => {}
+            None => latest.push(status),
+        }
+    }
+    latest
+        .into_iter()
+        .map(|status| {
+            let (genre, name) =
+                status.context.map(|c| (c.genre.filter(|g| !g.is_empty()), c.name)).unwrap_or_default();
+            let url = status.target_url.filter(|u| !u.trim().is_empty());
+            PrCheck {
+                kind: "status".to_string(),
+                name: match genre {
+                    Some(genre) => format!("{genre}/{name}"),
+                    None => name,
+                },
+                state: status_state(&status.state).to_string(),
+                raw_state: status.state,
+                description: status.description.filter(|d| !d.trim().is_empty()),
+                pipeline_run_id: url.as_deref().and_then(build_id_in),
+                url,
+                required: None,
+            }
+        })
+        .collect()
+}
+
+/// The checks on a pull request: its branch-policy evaluations (what can block completion, with
+/// "required" known) and the statuses posted to it (builds and external services). A build that is
+/// both — a build policy posts a status too — is listed once, as the policy.
+pub async fn pr_checks(org: &str, project: &str, repo_id: &str, pr_id: i64, pat: &str) -> Result<PrChecks, String> {
+    let pr = fetch_raw_pull_request(org, project, repo_id, pr_id, pat).await?;
+    let project_guid = pr.repository.project.as_ref().map(|p| p.id.clone()).unwrap_or_default();
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let statuses_url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{}/pullRequests/{pr_id}/statuses\
+         ?api-version={API_VERSION}",
+        encode_segment(repo_id)
+    );
+    let statuses = get_json::<ListResponse<RawPrStatus>>(&statuses_url, pat);
+    let policies = async {
+        if project_guid.is_empty() {
+            return Ok(Vec::new());
+        }
+        let artifact = format!("vstfs:///CodeReview/CodeReviewId/{project_guid}/{pr_id}");
+        let url = format!(
+            "https://dev.azure.com/{org_enc}/{project_enc}/_apis/policy/evaluations?artifactId={}\
+             &api-version={PREVIEW_API_VERSION}.1",
+            encode_segment(&artifact)
+        );
+        get_json::<ListResponse<RawPolicyEvaluation>>(&url, pat).await.map(|list| list.value)
+    };
+    let (statuses, policies) = futures_util::join!(statuses, policies);
+    // Either half alone is still worth showing; only both failing is a failure.
+    if let (Err(e), Err(_)) = (&statuses, &policies) {
+        return Err(e.clone());
+    }
+    let results_url = |build: &str| format!("https://dev.azure.com/{org_enc}/{project_enc}/_build/results?buildId={build}");
+    let mut checks = map_policy_evaluations(policies.unwrap_or_default(), results_url);
+    let covered: std::collections::HashSet<String> =
+        checks.iter().filter_map(|c| c.pipeline_run_id.clone()).collect();
+    checks.extend(
+        map_statuses(statuses.map(|list| list.value).unwrap_or_default())
+            .into_iter()
+            .filter(|c| c.pipeline_run_id.as_ref().is_none_or(|id| !covered.contains(id))),
+    );
+    Ok(PrChecks {
+        head_sha: pr.last_merge_source_commit.map(|c| c.commit_id).filter(|c| !c.is_empty()),
+        checks,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1286,5 +1946,194 @@ mod tests {
         assert!(added.contains("+hola"), "{added}");
         let deleted = unified_patch("viejo.txt", b"adios\n", b"").expect("a patch");
         assert!(deleted.contains("-adios"), "{deleted}");
+    }
+
+    /// A pull request as `GET …/pullrequests` answers it, trimmed to the fields read here.
+    fn raw_pr(id: i64, status: &str, draft: bool) -> RawPullRequest {
+        serde_json::from_value(serde_json::json!({
+            "pullRequestId": id,
+            "title": format!("PR {id}"),
+            "status": status,
+            "isDraft": draft,
+            "sourceRefName": "refs/heads/feature/login",
+            "targetRefName": "refs/heads/main",
+            "createdBy": { "displayName": "Ana Example" },
+            "creationDate": "2026-09-01T10:00:00Z",
+            "repository": { "id": "3a1f0c7e", "name": "example-repo", "project": { "id": "9b2d", "name": "Example Project" } },
+            "lastMergeSourceCommit": { "commitId": "abc123" },
+            "mergeStatus": "succeeded"
+        }))
+        .expect("a pull request")
+    }
+
+    #[test]
+    fn a_pull_request_maps_onto_the_shared_summary() {
+        let pr = map_pull_request("example-org", "Example%20Project", raw_pr(42, "active", false));
+        assert_eq!(pr.id, 42);
+        assert_eq!(pr.status, "open");
+        assert_eq!(pr.source_branch, "feature/login");
+        assert_eq!(pr.target_branch, "main");
+        assert_eq!(pr.author, "Ana Example");
+        assert_eq!(pr.provider, "azure");
+        assert_eq!(pr.url, "https://dev.azure.com/example-org/Example%20Project/_git/example-repo/pullrequest/42");
+        assert_eq!(map_pull_request("o", "p", raw_pr(1, "active", true)).status, "draft");
+        assert_eq!(map_pull_request("o", "p", raw_pr(1, "completed", false)).status, "merged");
+        assert_eq!(map_pull_request("o", "p", raw_pr(1, "abandoned", false)).status, "closed");
+    }
+
+    /// One row more than a page is asked for; its presence is the "there is more" answer, and it is
+    /// never shown on this page.
+    #[test]
+    fn a_page_knows_whether_another_follows() {
+        let full: Vec<RawPullRequest> = (0..=PR_PAGE_SIZE as i64).map(|i| raw_pr(i, "active", false)).collect();
+        let page = page_of(full, PrListScope::Open, 1, |pr| map_pull_request("o", "p", pr));
+        assert!(page.has_more);
+        assert_eq!(page.items.len(), PR_PAGE_SIZE as usize);
+
+        let short = vec![raw_pr(1, "active", false)];
+        assert!(!page_of(short, PrListScope::Open, 3, |pr| map_pull_request("o", "p", pr)).has_more);
+    }
+
+    /// Azure's status filter takes one value, so "merged or closed" is asked as everything and the
+    /// active ones are dropped here.
+    #[test]
+    fn a_closed_page_drops_what_is_still_open() {
+        let mixed = vec![raw_pr(3, "active", false), raw_pr(2, "completed", false), raw_pr(1, "abandoned", false)];
+        let page = page_of(mixed, PrListScope::Closed, 1, |pr| map_pull_request("o", "p", pr));
+        let ids: Vec<i64> = page.items.iter().map(|pr| pr.id).collect();
+        assert_eq!(ids, vec![2, 1]);
+    }
+
+    #[test]
+    fn list_scopes_parse_with_open_as_the_default() {
+        assert_eq!(PrListScope::parse(None), PrListScope::Open);
+        assert_eq!(PrListScope::parse(Some("bogus")), PrListScope::Open);
+        assert_eq!(PrListScope::parse(Some("closed")), PrListScope::Closed);
+        assert_eq!(PrListScope::parse(Some("all")), PrListScope::All);
+        assert!(PrListScope::Open.admits("draft"));
+        assert!(!PrListScope::Open.admits("merged"));
+        assert!(PrListScope::Closed.admits("merged"));
+    }
+
+    fn policy(settings: serde_json::Value, enabled: bool) -> RawPolicyConfiguration {
+        serde_json::from_value(serde_json::json!({
+            "isEnabled": enabled,
+            "isBlocking": true,
+            "type": { "id": LIMIT_MERGE_TYPES_POLICY, "displayName": "Require a merge strategy" },
+            "settings": settings
+        }))
+        .expect("a policy")
+    }
+
+    #[test]
+    fn merge_type_policies_limit_the_strategies() {
+        assert_eq!(allowed_by_merge_type_policies(&[]), None, "no policy: everything, and known");
+        let squash_or_rebase = policy(
+            serde_json::json!({ "allowNoFastForward": false, "allowSquash": true, "allowRebase": true, "allowRebaseMerge": false }),
+            true,
+        );
+        assert_eq!(
+            allowed_by_merge_type_policies(&[squash_or_rebase]),
+            Some(vec!["squash".to_string(), "rebase".to_string()])
+        );
+        // Both policies on a branch have to allow a strategy.
+        let squash_only = policy(serde_json::json!({ "allowSquash": true }), true);
+        let squash_or_rebase = policy(serde_json::json!({ "allowSquash": true, "allowRebase": true }), true);
+        assert_eq!(allowed_by_merge_type_policies(&[squash_only, squash_or_rebase]), Some(vec!["squash".to_string()]));
+        // The switch from before the four existed.
+        let legacy = policy(serde_json::json!({ "useSquashMerge": true }), true);
+        assert_eq!(allowed_by_merge_type_policies(&[legacy]), Some(vec!["squash".to_string()]));
+        // A disabled policy limits nothing.
+        let off = policy(serde_json::json!({ "allowSquash": true }), false);
+        assert_eq!(allowed_by_merge_type_policies(&[off]), None);
+    }
+
+    #[test]
+    fn readiness_reads_the_test_merge() {
+        assert_eq!(azure_readiness("active", false, Some("succeeded")), "clean");
+        assert_eq!(azure_readiness("active", false, Some("conflicts")), "conflicts");
+        assert_eq!(azure_readiness("active", false, Some("rejectedByPolicy")), "blocked");
+        assert_eq!(azure_readiness("active", true, Some("succeeded")), "draft");
+        assert_eq!(azure_readiness("completed", false, None), "closed");
+        assert_eq!(azure_readiness("active", false, Some("queued")), "unknown");
+        assert_eq!(azure_merge_strategy("merge"), Some("noFastForward"));
+        assert_eq!(azure_merge_strategy("rebase_merge"), Some("rebaseMerge"));
+        assert_eq!(azure_merge_strategy("ff"), None);
+    }
+
+    #[test]
+    fn refusals_are_classified_by_what_they_say() {
+        assert_eq!(classify_merge_refusal(405, "Pull Request is not mergeable"), "blocked");
+        assert_eq!(classify_merge_refusal(405, "Required status check \"ci\" is expected."), "checks");
+        assert_eq!(
+            classify_merge_refusal(405, "At least 1 approving review is required by reviewers with write access."),
+            "approvals"
+        );
+        assert_eq!(classify_merge_refusal(405, "Base branch was modified. Review and try the merge again."), "stale");
+        assert_eq!(classify_merge_refusal(409, "Head branch was modified. Review and try the merge again."), "stale");
+        assert_eq!(classify_merge_refusal(405, "Merge commits are not allowed on this repository."), "method");
+        assert_eq!(classify_merge_refusal(406, "Branch cannot be merged"), "conflicts");
+        assert_eq!(
+            classify_merge_refusal(400, "The pull request cannot be completed because it has policies that are not approved."),
+            "blocked"
+        );
+        assert_eq!(classify_merge_refusal(422, "something else"), "other");
+        assert_eq!(merge_refusal("checks", " ci is red "), "MERGE_BLOCKED::checks::ci is red");
+    }
+
+    #[test]
+    fn a_build_id_is_read_out_of_a_results_address() {
+        assert_eq!(
+            build_id_in("https://dev.azure.com/example-org/Example/_build/results?buildId=1234&view=results"),
+            Some("1234".to_string())
+        );
+        assert_eq!(build_id_in("https://example.com/status/7"), None);
+    }
+
+    /// Azure keeps one status per iteration; only the newest of each context is current.
+    #[test]
+    fn statuses_keep_only_the_newest_per_context() {
+        let statuses: Vec<RawPrStatus> = serde_json::from_value(serde_json::json!([
+            { "id": 1, "state": "failed", "context": { "name": "build", "genre": "continuous-integration" },
+              "targetUrl": "https://dev.azure.com/example-org/Example/_build/results?buildId=10" },
+            { "id": 3, "state": "succeeded", "context": { "name": "build", "genre": "continuous-integration" },
+              "targetUrl": "https://dev.azure.com/example-org/Example/_build/results?buildId=11" },
+            { "id": 2, "state": "pending", "context": { "name": "sonar" }, "description": "Analyzing" }
+        ]))
+        .expect("statuses");
+        let checks = map_statuses(statuses);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name, "continuous-integration/build");
+        assert_eq!(checks[0].state, crate::ci::status::SUCCESS);
+        assert_eq!(checks[0].pipeline_run_id.as_deref(), Some("11"));
+        assert_eq!(checks[1].name, "sonar");
+        assert_eq!(checks[1].state, crate::ci::status::RUNNING);
+        assert_eq!(checks[1].description.as_deref(), Some("Analyzing"));
+    }
+
+    #[test]
+    fn policy_evaluations_become_checks_blocking_first() {
+        let evaluations: Vec<RawPolicyEvaluation> = serde_json::from_value(serde_json::json!([
+            { "status": "approved",
+              "configuration": { "isEnabled": true, "isBlocking": false,
+                "type": { "id": "x", "displayName": "Comment requirements" }, "settings": {} } },
+            { "status": "rejected",
+              "configuration": { "isEnabled": true, "isBlocking": true,
+                "type": { "id": "y", "displayName": "Build" }, "settings": { "displayName": null } },
+              "context": { "buildId": 77, "buildDefinitionName": "example-ci" } },
+            { "status": "running",
+              "configuration": { "isEnabled": false, "isBlocking": true, "type": { "id": "z", "displayName": "Off" } } }
+        ]))
+        .expect("evaluations");
+        let checks = map_policy_evaluations(evaluations, |id| format!("https://example.invalid/build/{id}"));
+        assert_eq!(checks.len(), 2, "a disabled policy is not a check");
+        assert_eq!(checks[0].name, "example-ci");
+        assert_eq!(checks[0].required, Some(true));
+        assert_eq!(checks[0].state, crate::ci::status::FAILED);
+        assert_eq!(checks[0].pipeline_run_id.as_deref(), Some("77"));
+        assert_eq!(checks[0].url.as_deref(), Some("https://example.invalid/build/77"));
+        assert_eq!(checks[0].description.as_deref(), Some("Build"));
+        assert_eq!(checks[1].name, "Comment requirements");
+        assert_eq!(checks[1].description, None, "the type is not repeated under its own name");
     }
 }

@@ -69,7 +69,13 @@ pub struct IrisSession {
 }
 
 impl IrisSession {
-    pub async fn open(config: &DbConnectionConfig, database: Option<&str>) -> Result<Self, String> {
+    /// `tag` keeps this session's slot in the bridge apart from another of the same connection and
+    /// namespace — a console's, or a job's. See `Session::open_tagged`.
+    pub async fn open(
+        config: &DbConnectionConfig,
+        database: Option<&str>,
+        tag: &str,
+    ) -> Result<Self, String> {
         let mut config = config.clone();
         config.resolve_password();
 
@@ -85,7 +91,7 @@ impl IrisSession {
             });
 
         let bridge = jvm::bridge().await?;
-        let session_id = format!("{}#{namespace}", config.id);
+        let session_id = format!("{}#{namespace}{tag}", config.id);
         let (properties, ignored_options) = driver_properties(&config);
 
         let mut request = Map::new();
@@ -181,6 +187,14 @@ impl IrisSession {
         Ok(self.rows(sql).await?.first().and_then(|row| row.first().cloned()).flatten())
     }
 
+    /// Turns the JDBC connection's autocommit off or back on — how a transaction spanning several
+    /// statements is held open over the bridge (see `IrisBridge.autocommit`).
+    pub async fn set_autocommit(&self, enabled: bool) -> Result<(), String> {
+        let mut request = Map::new();
+        request.insert("enabled".into(), Value::from(enabled));
+        self.bridge.call("autocommit", &self.session_id, request).await.map(|_| ())
+    }
+
     /// Asks the server to abandon whatever this session is running.
     pub async fn cancel_running(&self) {
         let _ = self.bridge.call("cancel", &self.session_id, Map::new()).await;
@@ -190,7 +204,7 @@ impl IrisSession {
         let started = std::time::Instant::now();
         let mut results = Vec::new();
         for statement in split_statements(sql, Some(DIALECT)) {
-            if let Err(refused) = read_only_guard(&statement, self.read_only) {
+            if let Err(refused) = read_only_guard(&statement, self.read_only, DIALECT) {
                 results.push(DbStatementResult::failed(&statement, refused));
                 break;
             }
@@ -787,23 +801,11 @@ impl IrisSession {
             .map(|edit| sqlgen::edit_statement(node, DIALECT, edit))
             .collect::<Result<Vec<String>, String>>()?;
 
-        let mut request = Map::new();
-        request.insert("statements".into(), Value::from(statements.clone()));
-        request.insert("transactional".into(), Value::from(true));
+        // Each UPDATE and DELETE must affect exactly one row, or the bridge rolls the batch back —
+        // see `edit_expects_one_row`.
+        let request = jvm::edit_batch_request(&statements, edits);
         let answer = self.bridge.call("batch", &self.session_id, request).await?;
-
-        let applied = answer.get("applied").and_then(Value::as_u64).unwrap_or(0) as u32;
-        let error = answer.get("error").and_then(Value::as_str).map(|message| {
-            match answer.get("failedStatement").and_then(Value::as_str) {
-                Some(statement) if !statement.is_empty() => format!("{message}\n\n{statement}"),
-                _ => message.to_string(),
-            }
-        });
-        Ok(DbEditResult {
-            applied,
-            statements,
-            error,
-        })
+        Ok(jvm::edit_batch_result(&answer, statements))
     }
 
     pub async fn object_ddl(&self, node: &DbNodeRef) -> Result<String, String> {

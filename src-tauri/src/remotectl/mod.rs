@@ -4,6 +4,7 @@
 //!
 //! A small HTTP + WebSocket server, off by default, that lets a paired phone or tablet call a
 //! fixed list of commands (`dispatch.rs`) and watch the events the desktop watches (`bridge.rs`).
+//! Over TLS unless its own switch says otherwise, with a certificate minted per install (`tls.rs`).
 //!
 //! # What it is not
 //!
@@ -34,6 +35,7 @@ pub mod auth;
 pub mod bridge;
 pub mod dispatch;
 pub mod server;
+pub mod tls;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -49,6 +51,17 @@ use crate::db::{queries, Db};
 pub const SETTING_ENABLED: &str = "remotectl_enabled";
 /// `app_settings` key: the TCP port to bind.
 pub const SETTING_PORT: &str = "remotectl_port";
+
+/// `app_settings` key: whether the server speaks HTTPS (see `tls.rs`).
+///
+/// **On unless it says `0`**, and that covers the installs that never wrote it — including every one
+/// already paired over plain HTTP. They are the ones with a token crossing the network in the clear
+/// today, and turning TLS on costs them nothing that has to be redone: the device tokens are
+/// unchanged, and a phone that opens the old `http://` address is carried across to `https://` with
+/// its pairing (`tls::HANDOFF_PAGE`). What it costs everybody is one certificate warning, once, per
+/// phone. The switch exists for the network that cannot take even that — a phone whose browser
+/// refuses self-signed certificates outright.
+pub const SETTING_TLS: &str = "remotectl_tls";
 
 /// `app_settings` key: whether a paired device may open and drive a shell.
 ///
@@ -136,6 +149,10 @@ pub enum Control {
 /// A running server, held only so it can be stopped.
 struct Running {
     port: u16,
+    /// The fingerprint of the certificate this listener presents, or `None` when it is plain HTTP.
+    /// Recorded per listener rather than read from the setting, so the status names what is actually
+    /// answering on the port — the setting may have changed since.
+    tls: Option<String>,
     /// Dropping this is what shuts axum down; see [`server::serve`].
     shutdown: Option<oneshot::Sender<()>>,
     /// Cancelled when *this* listener goes away, and the reason `stop()` actually severs sockets.
@@ -180,6 +197,11 @@ pub struct RemoteCtl {
     reaps: Mutex<HashMap<String, u64>>,
     /// The source of those stamps. Monotonic for the process; only equality is ever asked of it.
     reap_stamps: AtomicU64,
+    /// The answers to recent mutating calls, by idempotency key — what makes a retried request one
+    /// action instead of two. See [`dispatch::Replays`].
+    pub replays: dispatch::Replays,
+    /// The desktop's notification centre, as its main window last published it. See [`Notice`].
+    notices: Mutex<Vec<Notice>>,
 }
 
 impl Default for RemoteCtl {
@@ -195,6 +217,8 @@ impl Default for RemoteCtl {
             generation: AtomicU64::new(0),
             reaps: Mutex::new(HashMap::new()),
             reap_stamps: AtomicU64::new(0),
+            replays: dispatch::Replays::default(),
+            notices: Mutex::new(Vec::new()),
         }
     }
 }
@@ -207,6 +231,16 @@ impl RemoteCtl {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|r| r.port)
+    }
+
+    /// The fingerprint of the certificate the running listener presents — `None` when the server is
+    /// off, and when it is on over plain HTTP.
+    pub fn tls_fingerprint(&self) -> Option<String> {
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|r| r.tls.clone())
     }
 
     /// The cancellation handle of the listener that is up right now, or `None` when none is.
@@ -226,7 +260,13 @@ impl RemoteCtl {
     /// sockets, which the dropped shutdown sender alone cannot reach. This is the path a port
     /// change takes (`server::start` calls it after rebinding), and without the cancel the phones
     /// would go on streaming from a listener the user believes they moved.
-    fn set_running(&self, port: u16, shutdown: oneshot::Sender<()>, cancel: CancellationToken) {
+    fn set_running(
+        &self,
+        port: u16,
+        shutdown: oneshot::Sender<()>,
+        cancel: CancellationToken,
+        tls: Option<String>,
+    ) {
         let mut slot = self.running.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mut old) = slot.take() {
             old.cancel.cancel();
@@ -238,6 +278,7 @@ impl RemoteCtl {
         self.generation.fetch_add(1, Ordering::SeqCst);
         *slot = Some(Running {
             port,
+            tls,
             shutdown: Some(shutdown),
             cancel,
         });
@@ -346,6 +387,107 @@ impl RemoteCtl {
             .get(device_id)
             == Some(&stamp)
     }
+
+    /// The notification centre as the desktop last published it, newest first.
+    pub fn notices(&self) -> Vec<Notice> {
+        self.notices.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Replaces the published list, answering whether it changed — so an identical republish (the
+    /// panel marking entries seen, a language switch that renders the same text) wakes no phone.
+    pub fn publish_notices(&self, mut notices: Vec<Notice>) -> bool {
+        notices.truncate(MAX_NOTICES);
+        for notice in &mut notices {
+            notice.clamp();
+        }
+        let mut slot = self.notices.lock().unwrap_or_else(|e| e.into_inner());
+        if *slot == notices {
+            return false;
+        }
+        *slot = notices;
+        true
+    }
+}
+
+/// How many entries the phone's copy of the notification centre keeps — the desktop's own cap.
+const MAX_NOTICES: usize = 100;
+
+/// One entry of the desktop's notification centre, as a phone is shown it.
+///
+/// # Why the desktop publishes it rather than the phone asking a store
+///
+/// The notification centre is not a table. It is session state in the main window's webview
+/// (`notificationStore.ts`), deliberately never persisted, so there is nothing on this side a
+/// command could read. The main window publishes the list whenever it changes and this keeps the
+/// last copy, in memory, for as long as the process runs — the same lifetime the panel itself has.
+///
+/// Already **rendered**, in the desktop's language: the entries are stored as translation keys and
+/// the phone has its own, much smaller, string table (`src/mobile/i18n.ts`) that knows none of them.
+/// A line in the desk's language beats a key nobody can read.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Notice {
+    pub id: String,
+    /// The menu it came from, as the desktop labels it ("Pipelines", "Agents").
+    pub source: String,
+    pub title: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// `success`, `error` or `info`.
+    pub status: String,
+    /// Milliseconds since the epoch, as the webview stamps it.
+    pub finished_at: i64,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+impl Notice {
+    /// Every field is text from the webview, and it is held for the life of the process and handed
+    /// to phones: clamped here rather than trusted, like a device's name at pairing.
+    fn clamp(&mut self) {
+        fn cut(text: &mut String, max: usize) {
+            if text.chars().count() > max {
+                *text = text.chars().take(max).collect();
+            }
+        }
+        cut(&mut self.id, 64);
+        cut(&mut self.source, 64);
+        cut(&mut self.title, 300);
+        if let Some(detail) = self.detail.as_mut() {
+            cut(detail, 300);
+        }
+        cut(&mut self.status, 16);
+        if let Some(workspace) = self.workspace_id.as_mut() {
+            cut(workspace, 64);
+        }
+    }
+}
+
+/// This machine's address on the network the default route goes out of.
+///
+/// # Why a UDP socket for something that sends nothing
+///
+/// The standard library cannot enumerate interfaces, and the answer wanted is not "every address this
+/// machine has" — a laptop has half a dozen, most of them loopback, VPN or a Docker bridge, and
+/// showing the user a list to guess from is worse than showing nothing.
+///
+/// What is wanted is the one address a device *on the same network* would reach us at, and that is
+/// exactly the source address the OS would pick for outbound traffic. `connect` on a UDP socket asks
+/// the routing table that question and puts the answer in `local_addr` — with no packet sent, no name
+/// resolved and no reachability implied. The peer is a well-known address chosen only because it is
+/// off-link, so the route lookup lands on the real interface; the machine works fine offline,
+/// because nothing is ever transmitted.
+///
+/// Here rather than in the settings command because two things need it: the address the panel shows,
+/// and the certificate `tls.rs` mints, which names it.
+pub fn lan_address() -> Option<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?.ip();
+    if addr.is_loopback() || addr.is_unspecified() {
+        return None;
+    }
+    Some(addr)
 }
 
 /// One live socket's entry in [`RemoteCtl::connected`], released by dropping it.
@@ -464,6 +606,8 @@ pub struct Config {
     /// See [`SETTING_ALLOW_TERMINAL`]. Independent of `enabled`: turning the server off leaves this
     /// as the user set it, so turning it back on does not silently re-grant shells they revoked.
     pub allow_terminal: bool,
+    /// See [`SETTING_TLS`].
+    pub tls: bool,
 }
 
 /// Whether a paired device may open a shell right now.
@@ -509,7 +653,13 @@ pub fn read_config(db: &Db) -> Config {
         .flatten()
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
-    Config { enabled, port, allow_terminal }
+    // The opposite default from the two switches above: only an explicit "off" turns it off.
+    let tls = queries::get_setting(&conn, SETTING_TLS)
+        .ok()
+        .flatten()
+        .map(|v| !(v == "0" || v == "false"))
+        .unwrap_or(true);
+    Config { enabled, port, allow_terminal, tls }
 }
 
 /// Brings the server up if the stored configuration says it should be, at launch.
@@ -601,6 +751,47 @@ mod tests {
         assert!(!state.is_connected("phone"));
         // And a device that comes and goes all day must not leave a row behind each time.
         assert!(state.connected.lock().unwrap().is_empty());
+    }
+
+    /// HTTPS unless somebody turned it off — for a fresh install and for one that was paired over
+    /// plain HTTP before the setting existed alike. See [`SETTING_TLS`].
+    #[test]
+    fn tls_is_on_until_explicitly_turned_off() {
+        let db = db();
+        assert!(read_config(&db).tls, "an unset setting must mean HTTPS");
+        {
+            let conn = db.0.lock().unwrap();
+            queries::set_setting(&conn, SETTING_TLS, "0").unwrap();
+        }
+        assert!(!read_config(&db).tls);
+        {
+            let conn = db.0.lock().unwrap();
+            queries::set_setting(&conn, SETTING_TLS, "1").unwrap();
+        }
+        assert!(read_config(&db).tls);
+    }
+
+    /// The phone's copy of the notification centre: capped like the panel, clamped because it is
+    /// text from a webview, and an identical republish reported as no change.
+    #[test]
+    fn the_published_notices_are_capped_clamped_and_deduplicated() {
+        let state = RemoteCtl::default();
+        let notice = |id: usize| Notice {
+            id: format!("n{id}"),
+            source: "Pipelines".into(),
+            title: "x".repeat(1000),
+            detail: None,
+            status: "success".into(),
+            finished_at: id as i64,
+            workspace_id: None,
+        };
+        assert!(state.publish_notices((0..150).map(notice).collect()));
+        let kept = state.notices();
+        assert_eq!(kept.len(), MAX_NOTICES);
+        assert_eq!(kept[0].title.chars().count(), 300);
+        assert!(!state.publish_notices((0..150).map(notice).collect()), "nothing changed");
+        assert!(state.publish_notices(Vec::new()));
+        assert!(state.notices().is_empty());
     }
 
     /// A port that cannot be a real one falls back rather than refusing to start. See `read_config`.

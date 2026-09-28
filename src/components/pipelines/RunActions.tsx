@@ -14,16 +14,29 @@
  *   "run the whole thing again" verb, so only one button appears.
  * - **Azure** has neither. A build is queued from its *definition*, so re-running means queuing a
  *   new build on the same branch and commit — a new build number, which the label says.
+ * - **Bitbucket**'s API has neither either: a re-run is a new pipeline on the same target, and its
+ *   label says so the way Azure's does. It has no artifacts endpoint, so there is no artifacts link.
  */
 
 import { useState } from "react";
-import { ExternalLink, RefreshCw, RotateCcw, Square } from "lucide-react";
+import { ExternalLink, Package, RefreshCw, RotateCcw, Square } from "lucide-react";
 import { cancelPipeline, openExternalUrl, rerunPipeline } from "../../lib/tauri/commands";
 import { confirmAction } from "../../state/confirmStore";
 import { useCiStore } from "../../state/ciStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
+import { ArtifactsModal } from "./ArtifactsModal";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import type { PipelineRun } from "../../types/domain";
+
+/** What "run it again" is called on each host, and what it asks first. Two hosts start a *new* run
+ *  and say so; a lookup rather than a ternary, so a fifth provider is a type error, not Azure's copy. */
+const RERUN_COPY: Record<PipelineRun["provider"], { label: TranslationKey; confirm: TranslationKey }> = {
+  github: { label: "pipelines.rerun", confirm: "pipelines.rerunConfirm" },
+  gitlab: { label: "pipelines.rerun", confirm: "pipelines.rerunConfirm" },
+  azure: { label: "pipelines.requeue", confirm: "pipelines.requeueConfirm" },
+  bitbucket: { label: "pipelines.requeueBitbucket", confirm: "pipelines.requeueConfirmBitbucket" },
+};
 
 /** Which re-run verbs a provider actually has. See the header. */
 function rerunOptions(provider: string): { all: boolean; failed: boolean } {
@@ -33,6 +46,9 @@ function rerunOptions(provider: string): { all: boolean; failed: boolean } {
     case "gitlab":
       // `retry` already means "the failed ones", so offering both would be the same button twice.
       return { all: false, failed: true };
+    case "bitbucket":
+      // A new pipeline on the same target — the only "again" its API has.
+      return { all: true, failed: false };
     default:
       // Azure: a re-queue of the definition. Whole run only, and the label says it is a new build.
       return { all: true, failed: false };
@@ -42,12 +58,14 @@ function rerunOptions(provider: string): { all: boolean; failed: boolean } {
 export function RunActions({ projectId, run }: { projectId: string; run: PipelineRun }) {
   const t = useT();
   const [busy, setBusy] = useState<"rerun" | "failed" | "cancel" | null>(null);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
   const load = useCiStore((s) => s.load);
   const selectRun = useCiStore((s) => s.selectRun);
 
   const live = run.status === "running" || run.status === "queued";
   const options = rerunOptions(run.provider);
-  const azure = run.provider === "azure";
+  const rerunCopy = RERUN_COPY[run.provider];
+  const hasArtifacts = run.provider !== "bitbucket";
 
   const act = async (
     kind: "rerun" | "failed" | "cancel",
@@ -62,7 +80,9 @@ export function RunActions({ projectId, run }: { projectId: string; run: Pipelin
       // is looking at. A quiet reload rather than a spinner over the whole screen — `watch` will
       // keep polling from here, because the run is live again.
       await load(projectId, { quiet: true });
-      await selectRun(projectId, run).catch(() => {});
+      // Forced: the cached detail is of the run *before* the action, and for a finished run that
+      // was just re-run under the same id it would otherwise be trusted as final.
+      await selectRun(projectId, run, { refresh: true }).catch(() => {});
     } catch (e) {
       pushErrorToast(String(e));
     } finally {
@@ -113,11 +133,11 @@ export function RunActions({ projectId, run }: { projectId: string; run: Pipelin
       {options.all &&
         button(
           "rerun",
-          azure ? t("pipelines.requeue") : t("pipelines.rerun"),
+          t(rerunCopy.label),
           RefreshCw,
           () =>
             void (async () => {
-              const message = azure ? t("pipelines.requeueConfirm") : t("pipelines.rerunConfirm");
+              const message = t(rerunCopy.confirm);
               if (!(await confirmAction(message, false, t("pipelines.rerun")))) return;
               await act("rerun", () => rerunPipeline(projectId, run.id, false), t("pipelines.rerunDone"));
             })(),
@@ -137,6 +157,19 @@ export function RunActions({ projectId, run }: { projectId: string; run: Pipelin
         )}
 
       <span className="min-w-0 flex-1" />
+
+      {/* Not a verb on the run, so it sits with the link rather than with re-run and cancel. */}
+      {hasArtifacts && (
+        <button
+          type="button"
+          onClick={() => setArtifactsOpen(true)}
+          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
+        >
+          <Package size={11} />
+          {t("pipelines.artifacts")}
+        </button>
+      )}
+      {artifactsOpen && <ArtifactsModal projectId={projectId} run={run} onClose={() => setArtifactsOpen(false)} />}
 
       {run.web_url && (
         <button

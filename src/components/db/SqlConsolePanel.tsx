@@ -3,6 +3,7 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import {
   AlertTriangle,
+  AlignLeft,
   ArrowUp,
   Braces,
   Check,
@@ -20,12 +21,15 @@ import {
   Save,
   Square,
   Table2,
+  Undo2,
   Waypoints,
   X,
 } from "lucide-react";
+import { Tooltip } from "../common/Tooltip";
 import { AiSparkles } from "../common/AiGlyph";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { installSqlCompletions } from "../../lib/db/sqlCompletion";
+import { formatLanguage, formatSql } from "../../lib/db/sqlFormat";
 import { firstStatement, type ConsoleLanguage } from "../../lib/db/statements";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
@@ -39,6 +43,7 @@ import { ScopePicker } from "./ScopePicker";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
 import {
   nodeKey,
+  transactionKey,
   useDbStore,
   type DbAiTurn,
   type DbConsoleAi,
@@ -49,7 +54,7 @@ import { useDbModalStore } from "../../state/dbModalStore";
 import { useDbObjectDragStore } from "../../state/dbObjectDragStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useThemeStore } from "../../state/themeStore";
-import { useToastStore } from "../../state/toastStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { RunEngineChip } from "../ai/AiRunLog";
@@ -123,8 +128,15 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
   const children = useDbStore((s) => s.children);
   const loadingNodes = useDbStore((s) => s.loadingNodes);
   const nodeErrors = useDbStore((s) => s.nodeErrors);
+  const transaction = useDbStore((s) => s.transactions[transactionKey(tab)] ?? "none");
   const store = useDbStore.getState();
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
+
+  // A console shown again after its last run asks where its session stands: another console on the
+  // same database, a disconnect or an auto-reconnect can all have changed it meanwhile.
+  useEffect(() => {
+    void useDbStore.getState().refreshTransaction(tab.id);
+  }, [tab.id, tab.connectionId, tab.database]);
 
   const engine = connection ? engineInfo(connection.kind) : null;
   const isSql = engine?.sql ?? true;
@@ -341,13 +353,40 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
    * That is the same trap `RequestBuilder`'s `actionsRef` exists for, and the same fix: the
    * registration is stable, the ref is not, and the command reads the ref at the moment it fires.
    */
-  const commandsRef = useRef<{ run: (mode: "one" | "all") => void; save: () => void }>({
+  /**
+   * Lays out the selection — or the whole console — in the connection's dialect, as one undoable
+   * edit. Text the formatter can't read (a MySQL `DELIMITER` script, say) is left exactly as it was
+   * and the reason is shown, rather than half-formatted.
+   */
+  const format = async () => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    const kind = useDbStore.getState().connections.find((c) => c.id === tab.connectionId)?.kind;
+    if (!editor || !model || !kind || !formatLanguage(kind)) return;
+    const selection = editor.getSelection();
+    const range = selection && !selection.isEmpty() ? selection : model.getFullModelRange();
+    const text = model.getValueInRange(range);
+    if (!text.trim()) return;
+    try {
+      const formatted = await formatSql(text, kind);
+      if (formatted === text) return;
+      editor.pushUndoStop();
+      editor.executeEdits("cf-db-format", [{ range, text: formatted, forceMoveMarkers: true }]);
+      editor.pushUndoStop();
+    } catch (e) {
+      pushErrorToast(t("db.formatFailed", { reason: String(e) }));
+    }
+  };
+
+  const commandsRef = useRef<{ run: (mode: "one" | "all") => void; save: () => void; format: () => void }>({
     run,
     save: () => {},
+    format: () => {},
   });
   commandsRef.current = {
     run,
     save: () => void useDbStore.getState().saveConsole(tab.id),
+    format: () => void format(),
   };
 
   const handleMount: OnMount = (editor, monaco) => {
@@ -359,6 +398,10 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
       commandsRef.current.run("all"),
     );
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => commandsRef.current.save());
+    // ⇧⌥F is Monaco's own "Format Document", which has no SQL formatter behind it to call.
+    editor.addCommand(monaco.KeyMod.Shift | monaco.KeyMod.Alt | monaco.KeyCode.KeyF, () =>
+      commandsRef.current.format(),
+    );
   };
 
   /**
@@ -459,6 +502,14 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
         </span>
 
         <div className="ml-auto flex items-center gap-1">
+          {transaction !== "none" && (
+            <TransactionChip
+              state={transaction}
+              busy={tab.running}
+              onCommit={() => void store.endTransaction(tab.id, "commit")}
+              onRollback={() => void store.endTransaction(tab.id, "rollback")}
+            />
+          )}
           {tab.running ? (
             <button
               onClick={() => void store.cancelRun(tab.id)}
@@ -491,6 +542,11 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
           >
             <span className="text-[10.5px] font-bold">EX</span>
           </ToolbarButton>
+          {isSql && (
+            <ToolbarButton onClick={() => void format()} title={t("db.format")}>
+              <AlignLeft size={13} />
+            </ToolbarButton>
+          )}
           <ToolbarButton
             onClick={() => store.toggleConsoleAi(tab.id)}
             title={tab.ai?.running ? t("db.aiThinking") : t("db.aiHint")}
@@ -1074,6 +1130,19 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
     onClick: () => void navigator.clipboard.writeText(formatResult(scoped, "csv")),
     separated: false,
   });
+  // The whole result, not the rows the limit let through: the statement runs again on this
+  // console's session and every row goes straight to the file. Only for a result that has columns —
+  // and the backend refuses a statement that would write, since exporting runs it a second time.
+  if (active.columns.length > 0 && !active.error) {
+    (["csv", "json"] as const).forEach((format, index) =>
+      exportItems.push({
+        label: t("db.exportAllAs", { format: format.toUpperCase() }),
+        icon: Download,
+        separated: index === 0,
+        onClick: () => void useDbStore.getState().exportAll(tab.id, format),
+      }),
+    );
+  }
 
   const openRecords = () => {
     const indexes = chosen.length > 0 ? chosen : active.rows.map((_, index) => index);
@@ -1316,4 +1385,50 @@ function Messages({ messages }: { messages: string[] }) {
  * tab strip, the data grid's toolbar and the generated `SELECT` all name an object the same way. */
 export function nodeLabel(node: DbNodeRef): string {
   return node.schema ? `${node.schema}.${node.name ?? ""}` : (node.name ?? "");
+}
+
+/**
+ * The console's session is inside a transaction — said where the Run button is, because that is
+ * where the next statement is about to join it.
+ *
+ * Its own session now (see `DbLane`), so what is open here stays open until this console ends it:
+ * the grid's Apply no longer commits it by accident, and an aborted one no longer blocks the rest of
+ * the workspace. Aborted offers Rollback alone — Postgres answers a COMMIT there with a rollback
+ * anyway, and a button labelled Commit that rolls back is a lie.
+ */
+function TransactionChip({
+  state,
+  busy,
+  onCommit,
+  onRollback,
+}: {
+  state: "open" | "aborted";
+  busy: boolean;
+  onCommit: () => void;
+  onRollback: () => void;
+}) {
+  const t = useT();
+  const aborted = state === "aborted";
+  const tone = aborted ? "var(--cf-danger)" : "var(--cf-warning)";
+  return (
+    <span
+      className="mr-1 flex items-center gap-0.5 rounded-md border px-1 py-[1px]"
+      style={{ borderColor: `color-mix(in oklab, ${tone} 45%, transparent)` }}
+    >
+      <Tooltip label={aborted ? t("db.txAborted") : t("db.txOpen")} description={aborted ? t("db.txAbortedHint") : t("db.txOpenHint")}>
+        <span className="flex items-center gap-1 px-0.5 text-[11px] font-medium" style={{ color: tone }}>
+          {aborted ? <AlertTriangle size={11} /> : <Layers size={11} />}
+          {aborted ? t("db.txAborted") : t("db.txOpen")}
+        </span>
+      </Tooltip>
+      {!aborted && (
+        <ToolbarButton onClick={onCommit} disabled={busy} title={t("db.txCommit")}>
+          <Check size={12} />
+        </ToolbarButton>
+      )}
+      <ToolbarButton onClick={onRollback} disabled={busy} title={t("db.txRollback")}>
+        <Undo2 size={12} />
+      </ToolbarButton>
+    </span>
+  );
 }

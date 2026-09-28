@@ -134,6 +134,9 @@ async fn spawn(config: &DbConnectionConfig) -> Result<Tunnel, String> {
         }
         if let Ok(Some(status)) = child.try_wait() {
             let said = complaint(&mut stderr).await;
+            if let Some(explained) = host_key_failure(config, host, &said) {
+                return Err(explained);
+            }
             return Err(format!(
                 "The SSH tunnel to {destination} closed immediately ({status}).{said}"
             ));
@@ -147,6 +150,32 @@ async fn spawn(config: &DbConnectionConfig) -> Result<Tunnel, String> {
             ));
         }
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// The two failures that are about the host's *key* rather than the connection, each with the
+/// sentence that says what to do.
+///
+/// An unknown key starts with [`crate::known_hosts::HOST_KEY_UNKNOWN`] — the frontend matches it to
+/// offer the trust dialog, which is the fix: `BatchMode=yes` had nobody to ask the first-connection
+/// question. A *changed* key is the case that must not be clicked through, so it only explains.
+fn host_key_failure(config: &DbConnectionConfig, host: &str, said: &str) -> Option<String> {
+    use crate::known_hosts::{host_key_problem, known_hosts_pattern, HostKeyProblem};
+    let port = if config.ssh_port == 0 { 22 } else { config.ssh_port };
+    match host_key_problem(said)? {
+        HostKeyProblem::Unknown => Some(format!(
+            "{}: {host}:{port} isn't in your known_hosts file, so ssh refused to connect. Check its \
+             key and trust it to continue.{said}",
+            crate::known_hosts::HOST_KEY_UNKNOWN
+        )),
+        HostKeyProblem::Changed => Some(format!(
+            "{}: {host} presented a different key from the one known_hosts has for it. That is what \
+             an intercepted connection looks like, so nothing was sent. If the server really was \
+             rebuilt, confirm its new key with whoever runs it, then remove the old entry with \
+             `ssh-keygen -R '{}'` and connect again.{said}",
+            crate::known_hosts::HOST_KEY_CHANGED,
+            known_hosts_pattern(host, port, None)
+        )),
     }
 }
 

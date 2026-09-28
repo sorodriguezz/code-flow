@@ -1,10 +1,33 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
+import { systemLocale } from "../lib/tauri/windows";
 import { loadLanguage, translations, type Language, type TranslationKey } from "../lib/i18n/translations";
 import { watchSettings } from "../lib/settingsSync";
 
 const KEY = "app_language";
+
+/**
+ * The language a locale asks for: Spanish for any `es*` (`es`, `es-CL`, `es-419`…), English for
+ * everything else — the two this app speaks. `tray::speaks_spanish` is the same rule in Rust, so the
+ * tray and the macOS menu agree with the window from the first launch.
+ */
+export function languageFromLocale(locale: string | null | undefined): Language {
+  return locale?.trim().toLowerCase().startsWith("es") ? "es" : "en";
+}
+
+/** The system's locale: the backend's reading (what the OS is set to), then the webview's own. */
+async function osLocale(): Promise<string | null> {
+  const fromSystem = await systemLocale().catch(() => null);
+  if (fromSystem) return fromSystem;
+  return typeof navigator !== "undefined" ? (navigator.language ?? null) : null;
+}
+
+/** `<html lang>`, kept to the language on screen — screen readers pick their voice from it, and the
+ *  entries hard-code `en` for the frame before this runs. */
+function markDocument(language: Language): void {
+  if (typeof document !== "undefined") document.documentElement.lang = language;
+}
 
 interface LanguageState {
   language: Language;
@@ -17,17 +40,23 @@ export const useLanguageStore = create<LanguageState>((set) => ({
 
   init: async () => {
     const stored = await getSetting(KEY).catch(() => null);
-    if (stored !== "en" && stored !== "es") return;
+    // Nothing chosen yet — a first run, or an install from before the choice was offered: the
+    // system's language, not English. Not written down: it stays "whatever the system speaks" until
+    // the user picks one in Settings.
+    const language: Language =
+      stored === "en" || stored === "es" ? stored : languageFromLocale(await osLocale());
     // Before the flip, never after. Only English is compiled in (see `translations.ts`); flipping
     // first would let `useT`'s memoised closure be rebuilt against a dictionary that is still
     // empty, and every label in the app would render in English and then swap a tick later.
-    await loadLanguage(stored);
-    set({ language: stored });
+    await loadLanguage(language);
+    set({ language });
+    markDocument(language);
   },
 
   setLanguage: async (language) => {
     await loadLanguage(language);
     set({ language });
+    markDocument(language);
     await setSetting(KEY, language);
   },
 }));

@@ -9,7 +9,6 @@
 //! becomes a [`StreamMessage`].
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -25,7 +24,9 @@ use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tokio_tungstenite::tungstenite::Bytes;
-use tokio_tungstenite::{connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    client_async_tls_with_config, connect_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream,
+};
 
 use super::{
     with_connection, ApiRegistry, Connection, NetworkOptions, StreamMessage, StreamStatusEvent,
@@ -180,8 +181,12 @@ async fn pump(
 // Shared with socketio.rs
 // ---------------------------------------------------------------------------
 
-/// Opens the socket, applying the caller's headers, subprotocols, TLS policy and handshake
+/// Opens the socket, applying the caller's headers, subprotocols, TLS policy, proxy and handshake
 /// timeout. Socket.IO reuses this with an empty subprotocol list.
+///
+/// The TLS policy is the one HTTP applies — the extra CA bundle, the client certificate (PEM,
+/// encrypted key or PKCS#12, see `tls`) and the verification switch — and a configured proxy is
+/// tunnelled through with `CONNECT`, which is how a WebSocket crosses an HTTP proxy at all.
 pub(super) async fn dial(
     url: &str,
     headers: &[(String, String)],
@@ -194,24 +199,32 @@ pub(super) async fn dial(
     let (host, port) = {
         let uri = request.uri();
         let default = if uri.scheme_str() == Some("wss") { 443 } else { 80 };
-        (uri.host().unwrap_or("").to_string(), Some(uri.port_u16().unwrap_or(default)))
+        (uri.host().unwrap_or("").to_string(), uri.port_u16().unwrap_or(default))
     };
-    let connector = tls_connector(options.verify_ssl)?;
-    let handshake = connect_async_tls_with_config(request, None, false, connector);
+    let connector = super::tls::rustls_config(options)?.map(Connector::Rustls);
+    let proxy = options.proxy_url.trim().to_string();
 
     // tungstenite reports a failed connect as a bare "IO error"; the OS's sentence is one level
     // down, and an unreachable host should read the same way here as it does over HTTP.
     let describe = |e: &dyn std::error::Error| {
-        crate::api::describe_transport_error(&format!("WebSocket to {url}"), &host, port, e)
+        crate::api::describe_transport_error(&format!("WebSocket to {url}"), &host, Some(port), e)
+    };
+    let handshake = async {
+        if proxy.is_empty() {
+            connect_async_tls_with_config(request, None, false, connector).await.map_err(|e| describe(&e))
+        } else {
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            let tunnel = super::tls::connect_via_proxy(&proxy, host, port).await?;
+            client_async_tls_with_config(request, tunnel, None, connector).await.map_err(|e| describe(&e))
+        }
     };
 
     let (stream, _response) = if options.timeout_ms == 0 {
-        handshake.await.map_err(|e| describe(&e))?
+        handshake.await?
     } else {
         tokio::time::timeout(Duration::from_millis(options.timeout_ms), handshake)
             .await
-            .map_err(|_| format!("Handshake timed out after {}ms", options.timeout_ms))?
-            .map_err(|e| describe(&e))?
+            .map_err(|_| format!("Handshake timed out after {}ms", options.timeout_ms))??
     };
     Ok(stream)
 }
@@ -314,74 +327,6 @@ pub(super) fn normalize_scheme(url: &str) -> String {
         format!("ws://{}", &trimmed[trimmed.len() - rest.len()..])
     } else {
         trimmed.to_string()
-    }
-}
-
-/// `None` keeps tokio-tungstenite's default connector (system roots).
-fn tls_connector(verify_ssl: bool) -> Result<Option<Connector>, String> {
-    if verify_ssl {
-        return Ok(None);
-    }
-    let provider = rustls::crypto::CryptoProvider::get_default()
-        .cloned()
-        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
-    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert(provider)))
-        .with_no_client_auth();
-    Ok(Some(Connector::Rustls(Arc::new(config))))
-}
-
-/// Reachable only when the request explicitly turned verification off — the point of that toggle
-/// is talking to a staging box with a self-signed certificate. Signature checking stays intact so
-/// the handshake still fails on a genuinely broken peer rather than on a name mismatch alone.
-#[derive(Debug)]
-struct AcceptAnyServerCert(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
     }
 }
 

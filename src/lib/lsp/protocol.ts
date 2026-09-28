@@ -1,5 +1,6 @@
 import type * as monaco from "monaco-editor";
 import { modelPathForId } from "../editorModel";
+import type { Problem } from "../../state/problemsStore";
 
 /**
  * LSP's shapes, and the arithmetic that turns them into Monaco's.
@@ -104,9 +105,24 @@ export interface LspSignatureHelp {
   activeParameter?: number;
 }
 
+/** One file's edits inside a `documentChanges` list. */
+export interface LspTextDocumentEdit {
+  textDocument: { uri: string; version?: number | null };
+  edits: LspTextEdit[];
+}
+
+/**
+ * A file created, renamed or deleted inside a `documentChanges` list. `client_capabilities` does not
+ * declare `resourceOperations`, so a server should never send one — typed so the edit plan can
+ * recognise one and refuse it rather than mistake it for a text edit.
+ */
+export interface LspResourceOperation {
+  kind: "create" | "rename" | "delete";
+}
+
 export interface LspWorkspaceEdit {
   changes?: Record<string, LspTextEdit[]>;
-  documentChanges?: { textDocument: { uri: string; version?: number | null }; edits: LspTextEdit[] }[];
+  documentChanges?: (LspTextDocumentEdit | LspResourceOperation)[];
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +186,16 @@ export function modelUriFor(
   repoPath: string,
   uri: string,
 ): monaco.Uri | null {
+  const relPath = relPathFromFileUri(repoPath, uri);
+  return relPath === null ? null : monacoApi.Uri.parse(modelPathForId(projectId, relPath));
+}
+
+/**
+ * The same question without Monaco: the repo-relative path a server's `file://` URI names, or
+ * `null` for anything outside the repository. What a rename's edit plan and the Problems panel key
+ * files by — both have to place files that have no model at all.
+ */
+export function relPathFromFileUri(repoPath: string, uri: string): string | null {
   if (!uri.startsWith("file://")) return null;
   const root = repoPath.replace(/\\/g, "/").replace(/\/+$/, "");
   let decoded: string;
@@ -181,7 +207,7 @@ export function modelUriFor(
   // A drive-letter path arrives as `/C:/repo/…`; the leading slash is the URI's, not the path's.
   const normalized = /^\/[A-Za-z]:\//.test(decoded) ? decoded.slice(1) : decoded;
   if (!normalized.startsWith(`${root}/`)) return null;
-  return monacoApi.Uri.parse(modelPathForId(projectId, normalized.slice(root.length + 1)));
+  return normalized.slice(root.length + 1) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +230,45 @@ const COMPLETION_KIND: (keyof typeof monaco.languages.CompletionItemKind)[] = [
 export function toMonacoCompletionKind(monacoApi: typeof monaco, kind: number | undefined): number {
   const name = COMPLETION_KIND[kind ?? 1] ?? "Text";
   return monacoApi.languages.CompletionItemKind[name];
+}
+
+/**
+ * A server's diagnostics as rows of the Problems panel.
+ *
+ * Hints (severity 4) are left out — they are the editor's faded "unused" marks and "you could" nudges,
+ * and a Problems list that counts them buries the errors the way VS Code's does not. `source` falls
+ * back to the server's catalogue id, so a row still says who reported it when the server did not.
+ */
+export function toProblems(diagnostics: LspDiagnostic[], fallbackSource: string): Problem[] {
+  const severity = (value: number | undefined): Problem["severity"] | null => {
+    switch (value) {
+      case 2:
+        return "warning";
+      case 3:
+        return "info";
+      case 4:
+        return null;
+      default:
+        return "error";
+    }
+  };
+  return diagnostics.flatMap((diagnostic) => {
+    const level = severity(diagnostic.severity);
+    if (!level || !diagnostic.range) return [];
+    const range = toMonacoRange(diagnostic.range);
+    return [
+      {
+        line: range.startLineNumber,
+        column: range.startColumn,
+        endLine: range.endLineNumber,
+        endColumn: range.endColumn,
+        severity: level,
+        message: diagnostic.message,
+        code: diagnostic.code === undefined ? undefined : String(diagnostic.code),
+        source: diagnostic.source ?? fallbackSource,
+      },
+    ];
+  });
 }
 
 /** LSP severity (1 error … 4 hint) as a Monaco `MarkerSeverity`. Absent means error, per the spec. */

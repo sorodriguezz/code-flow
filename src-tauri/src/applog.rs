@@ -189,9 +189,298 @@ fn write(level: &str, message: &str) {
     let _ = file.flush();
 }
 
+// ===================== what the webviews report =====================
+
+/// How many frontend errors reach the file per [`FRONTEND_WINDOW`]. A render loop that throws on
+/// every frame would otherwise write thousands of identical lines a second and rotate away the one
+/// line worth reading — the first.
+const FRONTEND_BUDGET: u32 = 30;
+const FRONTEND_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// The same message again within this long is counted, not written.
+const FRONTEND_REPEAT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Longest message and longest stack written for one error. A stack is useful for its first frames.
+const MESSAGE_MAX: usize = 500;
+const DETAIL_MAX: usize = 2000;
+
+#[derive(Default)]
+struct FrontendBudget {
+    window_start: Option<std::time::Instant>,
+    written: u32,
+    dropped: u32,
+    last: Option<(String, std::time::Instant)>,
+}
+
+impl FrontendBudget {
+    /// Whether this message may be written now, and — when a window just ended with messages
+    /// dropped — how many, so the log says so once instead of going quiet without a trace.
+    fn admit(&mut self, key: &str, now: std::time::Instant) -> (bool, Option<u32>) {
+        let mut dropped_report = None;
+        match self.window_start {
+            Some(start) if now.duration_since(start) < FRONTEND_WINDOW => {}
+            _ => {
+                if self.dropped > 0 {
+                    dropped_report = Some(self.dropped);
+                }
+                self.window_start = Some(now);
+                self.written = 0;
+                self.dropped = 0;
+            }
+        }
+        if let Some((last, at)) = &self.last {
+            if last == key && now.duration_since(*at) < FRONTEND_REPEAT {
+                self.dropped += 1;
+                return (false, dropped_report);
+            }
+        }
+        if self.written >= FRONTEND_BUDGET {
+            self.dropped += 1;
+            return (false, dropped_report);
+        }
+        self.written += 1;
+        self.last = Some((key.to_string(), now));
+        (true, dropped_report)
+    }
+}
+
+static FRONTEND: OnceLock<Mutex<FrontendBudget>> = OnceLock::new();
+
+/// Cuts `text` to at most `max` characters, on a character boundary, marking the cut.
+fn truncate(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    }
+}
+
+/// Takes the obvious secrets out of a line before it reaches the file.
+///
+/// An error message is written by whatever threw it, and some of those carry what they were given:
+/// a clone URL with the token in it, an `Authorization` header in a failed request, a connection
+/// string. The log is meant to be pasted into an issue, so it must not be the place those end up.
+/// Deliberately broad — a false positive costs a `***` in a log line.
+pub(crate) fn scrub(text: &str) -> String {
+    static PATTERNS: OnceLock<Vec<(regex::Regex, &'static str)>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            // `https://user:token@host` — credentials in a URL.
+            (r"(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", "${1}***@"),
+            // `Bearer abc…`, `Basic abc…`
+            (r"(?i)\b(bearer|basic|token)\s+[a-z0-9._~+/=-]{8,}", "$1 ***"),
+            // `password=…`, `api_key: …`, `"secret":"…"` and friends.
+            (
+                r#"(?i)\b(pass(word|wd)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|authorization|auth|pat|client[_-]?secret)(["']?\s*[:=]\s*["']?)[^\s"'&,;]+"#,
+                "$1$3***",
+            ),
+            // Provider token shapes that can appear on their own.
+            (r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{16,}|xox[abpr]-[A-Za-z0-9-]{10,})", "***"),
+        ]
+        .into_iter()
+        .filter_map(|(pattern, replacement)| regex::Regex::new(pattern).ok().map(|re| (re, replacement)))
+        .collect()
+    });
+    let mut out = text.to_string();
+    for (re, replacement) in patterns {
+        out = re.replace_all(&out, *replacement).into_owned();
+    }
+    out
+}
+
+/// One line for one frontend error: scrubbed, cut to size, newlines folded so a stack stays one
+/// entry in a line-oriented file.
+fn frontend_line(window: &str, kind: &str, message: &str, detail: Option<&str>) -> String {
+    let flat = |text: &str| text.split(['\r', '\n']).map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" | ");
+    let mut line = format!(
+        "frontend[{window}] {}: {}",
+        truncate(kind, 40),
+        scrub(&truncate(&flat(message), MESSAGE_MAX))
+    );
+    if let Some(detail) = detail.filter(|d| !d.trim().is_empty()) {
+        line.push_str(" — ");
+        line.push_str(&scrub(&truncate(&flat(detail), DETAIL_MAX)));
+    }
+    line
+}
+
+/// A frontend error, into the same file as everything else.
+///
+/// Before this the webviews' errors went to `console.error` and nowhere else — a render that threw
+/// on a user's machine left nothing in the log they could send. Called by the global `error` /
+/// `unhandledrejection` handlers and by `ErrorBoundary` (see `lib/errorReporting.ts`). Rate-limited
+/// and scrubbed here, where no caller can forget to.
+#[tauri::command]
+pub fn log_frontend_error(webview: tauri::Webview, kind: String, message: String, detail: Option<String>) {
+    let budget = FRONTEND.get_or_init(|| Mutex::new(FrontendBudget::default()));
+    let (admit, dropped) = {
+        let mut state = budget.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        admit_key(&mut state, &kind, &message)
+    };
+    if let Some(n) = dropped {
+        warn(&format!("frontend: {n} further error(s) not written (rate limit)"));
+    }
+    if admit {
+        error(&frontend_line(webview.label(), &kind, &message, detail.as_deref()));
+    }
+}
+
+fn admit_key(state: &mut FrontendBudget, kind: &str, message: &str) -> (bool, Option<u32>) {
+    state.admit(&format!("{kind}\u{0}{message}"), std::time::Instant::now())
+}
+
+/// The last `n` lines of the log, read from the end of the file rather than all of it.
+pub(crate) fn tail(n: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = crate::paths::logs_dir().join("codeflow.log");
+    let Ok(mut file) = File::open(&path) else { return Vec::new() };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    // Two hundred lines are rarely more than 40 KB; 256 KB leaves room for long ones.
+    let from = len.saturating_sub(256 * 1024);
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    let _ = file.read_to_end(&mut bytes);
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<&str> = text.lines().collect();
+    // Started mid-file: the first line is probably a fragment.
+    if from > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    let skip = lines.len().saturating_sub(n);
+    lines[skip..].iter().map(|line| line.to_string()).collect()
+}
+
+/// What Settings › About shows, and the head of a copied diagnosis.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDiagnostics {
+    pub version: String,
+    pub os: String,
+    pub os_version: String,
+    pub arch: String,
+    pub locale: Option<String>,
+    pub state_dir: String,
+    pub logs_dir: String,
+}
+
+#[tauri::command]
+pub fn app_diagnostics(app: tauri::AppHandle) -> AppDiagnostics {
+    AppDiagnostics {
+        version: app.package_info().version.to_string(),
+        os: tauri_plugin_os::type_().to_string(),
+        os_version: tauri_plugin_os::version().to_string(),
+        arch: tauri_plugin_os::arch().to_string(),
+        locale: tauri_plugin_os::locale(),
+        state_dir: crate::paths::state_dir().to_string_lossy().into_owned(),
+        logs_dir: crate::paths::logs_dir().to_string_lossy().into_owned(),
+    }
+}
+
+/// How many log lines a copied diagnosis carries.
+const REPORT_LINES: usize = 200;
+
+/// The text "Copy diagnostics" puts on the clipboard: the build and the machine, then the log's
+/// last lines — scrubbed again on the way out, and with the home directory written as `~`, so what
+/// gets pasted into a public issue names no account.
+#[tauri::command]
+pub fn diagnostics_report(app: tauri::AppHandle) -> String {
+    let facts = app_diagnostics(app);
+    let home = dirs::home_dir().map(|h| h.to_string_lossy().into_owned());
+    let private = |text: &str| {
+        let text = scrub(text);
+        match &home {
+            Some(home) if !home.is_empty() => text.replace(home.as_str(), "~"),
+            _ => text,
+        }
+    };
+    let mut report = format!(
+        "CodeFlow {}\n{} {} ({})\nlocale: {}\nstate: {}\n\n--- last {} log lines ---\n",
+        facts.version,
+        facts.os,
+        facts.os_version,
+        facts.arch,
+        facts.locale.as_deref().unwrap_or("?"),
+        private(&facts.state_dir),
+        REPORT_LINES,
+    );
+    for line in tail(REPORT_LINES) {
+        report.push_str(&private(&line));
+        report.push('\n');
+    }
+    report
+}
+
+/// The third-party notices, compiled into the binary and shown in Settings › About.
+///
+/// MIT, Apache-2.0, MPL-2.0 and the OFL all ask for their notice to travel *with* the software.
+/// A file in the repository travels with the source, not with the installer. `include_str!` puts
+/// the generated `THIRD-PARTY-NOTICES.md` inside every build, so a copy goes wherever the app goes.
+/// And a build whose notices file has gone missing fails to compile instead of shipping without it.
+/// Regenerate with `pnpm notices`; CI's `notices:check` keeps it from going stale.
+#[tauri::command]
+pub fn third_party_notices() -> &'static str {
+    include_str!("../../THIRD-PARTY-NOTICES.md")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The notices are the generated file itself, not a stub, and include the components with
+    /// obligations of their own.
+    #[test]
+    fn the_third_party_notices_are_compiled_in() {
+        let notices = third_party_notices();
+        assert!(notices.starts_with("# Third-party notices"), "unexpected header");
+        for component in ["libgit2", "noVNC", "draw.io"] {
+            assert!(notices.contains(component), "{component} missing from the notices");
+        }
+    }
+
+    /// What the log must never hold, whatever an error message carried in.
+    #[test]
+    fn secrets_are_scrubbed_before_they_are_written() {
+        let line = scrub("clone failed: https://me:ghp_abcdefghijklmnopqrstuvwx@github.com/o/r.git");
+        assert!(!line.contains("ghp_"), "{line}");
+        assert!(line.contains("https://***@github.com/o/r.git"), "{line}");
+
+        let header = scrub("Authorization: Bearer abc.def.ghi-123");
+        assert!(!header.contains("abc.def"), "{header}");
+        assert!(!scrub("request failed with password=hunter22&x=1").contains("hunter22"));
+        assert!(!scrub(r#"{"api_key":"sk-live-1234567890abcdef"}"#).contains("1234567890"));
+        assert!(!scrub("token glpat-abcdefghijklmnop1234 was refused").contains("glpat-"));
+        // Ordinary words survive.
+        assert_eq!(scrub("TypeError: x is undefined"), "TypeError: x is undefined");
+    }
+
+    /// A render loop throwing every frame writes a budget's worth, then counts the rest once.
+    #[test]
+    fn a_burst_of_errors_is_budgeted_and_repeats_are_counted() {
+        let mut budget = FrontendBudget::default();
+        let start = std::time::Instant::now();
+        // The same message twice in a row: the second is a repeat.
+        assert_eq!(budget.admit("a", start), (true, None));
+        assert_eq!(budget.admit("a", start), (false, None));
+        // Distinct messages up to the budget.
+        for i in 1..FRONTEND_BUDGET {
+            assert!(budget.admit(&format!("m{i}"), start).0);
+        }
+        assert!(!budget.admit("over", start).0, "past the budget nothing is written");
+        // The next window says how many were dropped, once.
+        let later = start + FRONTEND_WINDOW;
+        assert_eq!(budget.admit("fresh", later), (true, Some(2)));
+        assert_eq!(budget.admit("fresh2", later), (true, None));
+    }
+
+    #[test]
+    fn one_error_is_one_bounded_line() {
+        let long = "x".repeat(MESSAGE_MAX + 50);
+        let line = frontend_line("main", "error", &long, Some("at a\n  at b\n"));
+        assert!(!line.contains('\n'));
+        assert!(line.contains("at a | at b"));
+        assert!(line.chars().count() < MESSAGE_MAX + 100);
+        assert_eq!(truncate("héllo", 2), "hé…");
+        assert_eq!(truncate("hi", 5), "hi");
+    }
 
     /// The property everything else here is subordinate to: no call can fail, at any point in the
     /// lifecycle. Written as one test over the uninitialised state because that is the window that

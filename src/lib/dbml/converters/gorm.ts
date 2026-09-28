@@ -4,13 +4,37 @@ import {
   baseType,
   codeName,
   codegenRefs,
+  defaultOf,
+  findingLines,
   incoming,
+  isComposite,
+  isKeyColumn,
   lengthOf,
   NOTHING_TO_CONVERT,
   outgoing,
   pascal,
   precisionOf,
+  type DefaultValue,
 } from "./shared";
+
+/**
+ * A default as a GORM tag value. GORM passes a value with parentheses through as SQL and quotes the
+ * rest itself for string fields, so both kinds go in bare; what has to be escaped is the tag syntax
+ * — `;` separates settings and `"` ends the tag.
+ */
+function gormDefault(value: DefaultValue): string {
+  const text =
+    value.kind === "expression"
+      ? value.sql
+      : value.kind === "string"
+        ? value.value
+        : value.kind === "number"
+          ? value.text
+          : value.kind === "boolean"
+            ? String(value.value)
+            : "null";
+  return text.replace(/[;"\\]/g, "\\$&");
+}
 
 function goType(type: string, nullable: boolean): string {
   const base = baseType(type);
@@ -46,7 +70,7 @@ export function toGorm(schema: DbmlSchema): string {
     table.fields.some((field) => ["json", "jsonb"].includes(baseType(field.type))),
   );
 
-  const lines: string[] = [banner("GORM models"), "package models", "", "import ("];
+  const lines: string[] = [banner("GORM models"), ...findingLines(schema), "package models", "", "import ("];
   if (usesTime) lines.push('\t"time"');
   if (usesTime && usesJson) lines.push("");
   if (usesJson) lines.push('\t"gorm.io/datatypes"');
@@ -63,7 +87,8 @@ export function toGorm(schema: DbmlSchema): string {
     for (const field of table.fields) {
       const nullable = !field.notNull && !field.pk;
       const tags = [`column:${field.name}`];
-      if (field.pk) tags.push("primaryKey");
+      // On each column of a composite key: GORM reads several `primaryKey` tags as one key.
+      if (isKeyColumn(table, field)) tags.push("primaryKey");
       if (field.increment) tags.push("autoIncrement");
       const base = baseType(field.type);
       const length = lengthOf(field.type);
@@ -74,9 +99,8 @@ export function toGorm(schema: DbmlSchema): string {
       }
       if (field.notNull && !field.pk) tags.push("not null");
       if (field.unique && !field.pk) tags.push("uniqueIndex");
-      if (field.default !== null && !field.increment) {
-        tags.push(`default:${field.default.replace(/^'|'$/g, "").replace(/^`|`$/g, "")}`);
-      }
+      const value = field.increment ? null : defaultOf(field);
+      if (value) tags.push(`default:${gormDefault(value)}`);
       lines.push(
         `\t${pad(pascal(field.name))}${goType(field.type, nullable)}\t\`gorm:"${tags.join(";")}"\``,
       );
@@ -90,15 +114,20 @@ export function toGorm(schema: DbmlSchema): string {
     if (out.length > 0 || back.length > 0 || many.length > 0) lines.push("");
     for (const ref of out) {
       const target = pascal(codeName(ref.pkTable));
+      // A composite key is the same tag with comma-separated fields, which GORM reads in order.
       lines.push(
-        `\t${pad(target)}${target}\t\`gorm:"foreignKey:${pascal(ref.fkField)};references:${pascal(ref.pkField)}"\``,
+        `\t${pad(target)}${target}\t\`gorm:"foreignKey:${ref.fkFields.map(pascal).join(",")};references:${ref.pkFields.map(pascal).join(",")}"\``,
       );
     }
     for (const ref of back) {
       const source = pascal(codeName(ref.fkTable));
       const name = ref.kind === "one-to-one" ? source : `${source}s`;
       const type = ref.kind === "one-to-one" ? source : `[]${source}`;
-      lines.push(`\t${pad(name)}${type}\t\`gorm:"foreignKey:${pascal(ref.fkField)}"\``);
+      // The referenced columns are only implied when they are this table's single key.
+      const references = isComposite(ref) ? `;references:${ref.pkFields.map(pascal).join(",")}` : "";
+      lines.push(
+        `\t${pad(name)}${type}\t\`gorm:"foreignKey:${ref.fkFields.map(pascal).join(",")}${references}"\``,
+      );
     }
     for (const ref of many) {
       const other = pascal(codeName(ref.fkTable.id === table.id ? ref.pkTable : ref.fkTable));

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
+import { isOwnOrigin, onStateInvalidate } from "../lib/tauri/events";
 import { WINDOW } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
 import type { NewProject, Project, Workspace } from "../types/domain";
@@ -184,11 +185,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   addWorkspace: async (name, icon, color) => {
     const ws = await api.createWorkspace(name, icon, color);
     set((s) => ({ workspaces: [...s.workspaces, ws] }));
+    announce();
     return ws;
   },
 
   removeWorkspace: async (id) => {
     await api.deleteWorkspace(id);
+    announce();
     set((s) => {
       const { [id]: _removed, ...restProjects } = s.projectsByWorkspace;
       const workspaces = s.workspaces.filter((w) => w.id !== id);
@@ -208,6 +211,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setWorkspaceColor: async (id, color) => {
     await api.updateWorkspaceColor(id, color);
     set((s) => ({ workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, color } : w)) }));
+    announce();
   },
 
   // Written first, then mirrored into state — the backend is what rejects a blank name, and
@@ -217,6 +221,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (!trimmed) return;
     await api.renameWorkspace(id, trimmed);
     set((s) => ({ workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, name: trimmed } : w)) }));
+    announce();
   },
 
   addProject: async (input) => {
@@ -229,6 +234,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       activeProjectId: project.id,
     }));
     void api.setSetting(windowKey(LAST_PROJECT_KEY), project.id);
+    announce();
     return project;
   },
 
@@ -240,6 +246,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const { useChainStore } = await import("./chainStore");
     await useChainStore.getState().abortForProject(id);
     await api.deleteProject(id);
+    announce();
     // *After* the delete, which is the only order that can work: the row is what triggers the
     // cascade — `agent_chains.project_id` is `ON DELETE CASCADE` — so a re-read issued beforehand
     // sees the chains that are about to disappear and files them as still waiting. That mattered
@@ -258,6 +265,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
 
   setProjectColor: async (id, workspaceId, color) => {
     await api.updateProjectColor(id, color);
+    announce();
     set((s) => ({
       projectsByWorkspace: {
         ...s.projectsByWorkspace,
@@ -286,6 +294,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   moveProject: async (id, fromWorkspaceId, toWorkspaceId) => {
     if (fromWorkspaceId === toWorkspaceId) return;
     await api.moveProjectToWorkspace(id, toWorkspaceId);
+    announce();
     set((s) => {
       const project = s.projectsByWorkspace[fromWorkspaceId]?.find((p) => p.id === id);
       if (!project) return s;
@@ -316,7 +325,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (next.every((p, at) => p.id === current[at].id)) return;
 
     set((s) => ({ projectsByWorkspace: { ...s.projectsByWorkspace, [workspaceId]: next } }));
-    await api.reorderProjects(workspaceId, next.map((p) => p.id)).catch((e: unknown) => {
+    await api.reorderProjects(workspaceId, next.map((p) => p.id)).then(announce, (e: unknown) => {
       pushErrorToast(String(e));
       // Back to what the database still holds — the optimistic list is now a lie.
       set((s) => ({ projectsByWorkspace: { ...s.projectsByWorkspace, [workspaceId]: current } }));
@@ -336,7 +345,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     if (next.every((w, at) => w.id === current[at].id)) return;
 
     set({ workspaces: next });
-    await api.reorderWorkspaces(next.map((w) => w.id)).catch((e: unknown) => {
+    await api.reorderWorkspaces(next.map((w) => w.id)).then(announce, (e: unknown) => {
       pushErrorToast(String(e));
       set({ workspaces: current });
     });
@@ -389,6 +398,79 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return null;
   },
 }));
+
+/**
+ * Tells the other windows that the workspace list, or the repositories in one, changed here.
+ *
+ * Every window holds its own copy of both, loaded once — so a workspace created or renamed in the
+ * main window never reached a detached window's picker, and a repository removed here stayed listed
+ * there. The frame carries this window's own origin (`WINDOW_ORIGIN`), which is what lets each
+ * window skip only its own echo; see [`refreshWorkspacesFromElsewhere`] for the other end.
+ */
+function announce(): void {
+  api.notifyStateChange("workspaces");
+}
+
+/**
+ * Re-reads the workspace list and every repository list this window has loaded, after another
+ * window changed them. What was active stays active when it still exists; a workspace deleted
+ * elsewhere moves this window where it would open (its own last choice, then the main window's,
+ * then the first), and a repository removed elsewhere leaves nothing selected — the same state
+ * removing it here leaves.
+ */
+export async function refreshWorkspacesFromElsewhere(): Promise<void> {
+  let workspaces: Workspace[];
+  try {
+    workspaces = await api.listWorkspaces();
+  } catch {
+    return;
+  }
+  const known = new Set(workspaces.map((w) => w.id));
+  const loaded = Object.keys(useWorkspaceStore.getState().projectsByWorkspace).filter((id) => known.has(id));
+  const lists = await Promise.all(
+    loaded.map((id) =>
+      api
+        .listProjects(id)
+        .then((projects) => [id, projects] as const)
+        .catch(() => null),
+    ),
+  );
+
+  // Merged into the state as it is *now*, not as it was before the reads: this window may have
+  // loaded another workspace's list meanwhile, and a list that failed to re-read keeps the one it
+  // had rather than vanishing. Only a workspace that no longer exists loses its list.
+  useWorkspaceStore.setState((s) => {
+    const projectsByWorkspace: Record<string, Project[]> = {};
+    for (const [id, list] of Object.entries(s.projectsByWorkspace)) if (known.has(id)) projectsByWorkspace[id] = list;
+    for (const entry of lists) if (entry) projectsByWorkspace[entry[0]] = entry[1];
+    const current = s.activeWorkspaceId ? projectsByWorkspace[s.activeWorkspaceId] : undefined;
+    const projectGone = s.activeProjectId !== null && current !== undefined && !current.some((p) => p.id === s.activeProjectId);
+    return { workspaces, projectsByWorkspace, ...(projectGone ? { activeProjectId: null } : {}) };
+  });
+
+  const { activeWorkspaceId } = useWorkspaceStore.getState();
+  const activeGone = activeWorkspaceId !== null && !known.has(activeWorkspaceId);
+
+  if (activeGone && workspaces.length > 0) {
+    const target =
+      firstKnown(workspaces, [await setting(windowKey(LAST_WORKSPACE_KEY)), await setting(LAST_WORKSPACE_KEY)]) ??
+      workspaces[0];
+    // A repository window's workspace is derived from its repository, never recorded — see
+    // `RepoWindow`. Its repository went with the workspace, so it will say so wherever it lands.
+    if (WINDOW.satellite?.kind === "repo") void useWorkspaceStore.getState().followWorkspace(target.id);
+    else useWorkspaceStore.getState().setActiveWorkspace(target.id);
+  } else if (activeGone) {
+    useWorkspaceStore.setState({ activeWorkspaceId: null, activeProjectId: null });
+  }
+}
+
+// Listened for at module scope, like every workspace-scoped rule — so it runs in whichever window
+// loaded this store, satellites included. Outside Tauri `listen` rejects, and there is nothing to
+// hear anyway.
+void onStateInvalidate((event) => {
+  if (event.domain !== "workspaces" || isOwnOrigin(event.origin)) return;
+  void refreshWorkspacesFromElsewhere();
+}).catch(() => {});
 
 /** A stable empty list. A selector that builds `[]` on the fly hands back a new reference on every
  * call, and `useSyncExternalStore` reads a new reference as "the store changed" — which re-renders,

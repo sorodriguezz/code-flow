@@ -9,16 +9,34 @@
 //! ever, by anyone.
 //!
 //! So the table is written as an explicit `match` with one arm per command, and **not** as a
-//! lookup into the app's real command registry. That is a deliberate refusal of convenience: 550
-//! commands are registered in `lib.rs`, and a design where the network could name any of them
+//! lookup into the app's real command registry. That is a deliberate refusal of convenience: over
+//! 900 commands are registered in `lib.rs`, and a design where the network could name any of them
 //! would be one `generate_handler!` edit away from exposing the next one somebody adds.
+//!
+//! The `match` is also fenced by [`ALLOWED`], checked before it runs. Two lists for one fact is
+//! normally a hole waiting for the edit that updates one of them — here it is the opposite, because
+//! a command has to be in *both* to be reachable: forgetting either one refuses it. What the pair
+//! buys is a list a test can read without an `AppHandle` — see `nothing_destructive_is_reachable`,
+//! which pins the commands that must never appear in it.
+//!
+//! ## What is behind a switch of its own
+//!
+//! * The terminal (`open_terminal`, `write_terminal`, `resize_terminal`, `read_terminal`,
+//!   `list_terminals`, `list_shell_profiles`). A PTY is an arbitrary shell, and there is no subset of
+//!   "run a command" that is safe to hand to a bearer token on a home network — so these are in the
+//!   table, but each one answers `NotAllowed` until the user turns on
+//!   [`crate::remotectl::SETTING_ALLOW_TERMINAL`], which is off by default and re-read on every call
+//!   ([`require_terminal`]). `close_terminal` is the one exception, for the reason its arm gives.
 //!
 //! ## What is deliberately absent, and why
 //!
-//! * `terminal_*` — a PTY is an arbitrary shell. There is no subset of "run a command" that is
-//!   safe to hand to a bearer token on a home network.
+//! * Everything that destroys work: `discard_*`, `reset_to_commit`, `delete_branch`,
+//!   `git_push_force_with_lease`, `stash_drop`, `amend_commit` and every other history rewrite —
+//!   see the git section of the table.
 //! * `fs_*` writes, `delete_*` of anything on disk — a phone screen is the worst possible place to
 //!   confirm a destructive path, and the app has no undo for most of them.
+//! * `keyvault_*` — the user's own passwords. Nothing about driving a machine from a phone needs
+//!   one, and a stolen device token must not be a way into the keyring.
 //! * `secrets_*`, and every `*_connections` command — these read and write the OS keychain. The
 //!   phone never needs a credential; it needs the *result* of using one.
 //! * `db_*` and `remote_*` — database sessions and SSH hosts carry other people's credentials and
@@ -35,9 +53,15 @@
 //! phone — see `bridge.rs`. Read-only arms return `Invalidate::None` and the desktop hears nothing,
 //! which is correct: nothing changed.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
 use tauri::{AppHandle, Manager};
+use tokio::sync::watch;
 
 use crate::commands;
 use crate::db::Db;
@@ -61,9 +85,17 @@ pub enum Invalidate {
     Reviews,
     /// Chat conversations and their turns.
     Chat,
-    // No `Workspaces` variant, and that is not an oversight: every workspace and project command
-    // in the table above is read-only, because creating or moving one names a path on a disk the
-    // phone cannot see. Add it the day a mutating arm needs it.
+    /// The workspace list and the repositories in each — created, renamed, recoloured, reordered,
+    /// removed. Emitted only by the desktop's own windows (`notify_state_change`): every workspace
+    /// and project command in the table above is read-only, because creating or moving one names a
+    /// path on a disk the phone cannot see. It exists because the *windows* needed it: each holds
+    /// its own copy of the list, loaded once, so a workspace created in the main window never
+    /// appeared in a detached window's picker.
+    Workspaces,
+    /// The desktop's notification centre, republished by its main window whenever it changes (see
+    /// `remotectl_publish_notifications`). Never raised by a phone's call: a phone can read that list
+    /// and nothing else — marking, clearing and following entries stay at the desk.
+    Notifications,
     //
     // No `Terminal` variant either, for a different reason: terminal state does not live in a
     // store that goes stale. Output arrives as `terminal:output` events, which both clients are
@@ -131,6 +163,17 @@ pub fn announce_for(cmd: &str) -> Announce {
         "send_chat_message" => Some("remote.action.chat"),
         "open_terminal" => Some("remote.action.terminalOpened"),
         "close_terminal" => Some("remote.action.terminalClosed"),
+        // Work set aside coming back into the tree under somebody's editor.
+        "stash_apply" => Some("remote.action.stashApplied"),
+        "stash_pop" => Some("remote.action.stashPopped"),
+        // Both act on a host's pipeline under the user's name, like the pull-request actions above.
+        "rerun_pipeline" => Some("remote.action.pipelineRerun"),
+        "cancel_pipeline" => Some("remote.action.pipelineCancelled"),
+        // A process started or stopped on this machine from somewhere else — a dev server the person
+        // at the desk is using can go away under them, and they should be told why.
+        "services_start" => Some("remote.action.servicesStarted"),
+        "services_stop" => Some("remote.action.servicesStopped"),
+        "services_restart" => Some("remote.action.servicesRestarted"),
         // Staging is left out on purpose: it is what somebody does a dozen times while composing
         // one commit, and the commit is the event. Announcing both means the interesting line
         // arrives already buried.
@@ -147,6 +190,8 @@ impl Invalidate {
             Invalidate::Tasks => Some("tasks"),
             Invalidate::Reviews => Some("reviews"),
             Invalidate::Chat => Some("chat"),
+            Invalidate::Workspaces => Some("workspaces"),
+            Invalidate::Notifications => Some("notifications"),
         }
     }
 
@@ -167,6 +212,8 @@ impl Invalidate {
             "tasks" => Some(Invalidate::Tasks),
             "reviews" => Some(Invalidate::Reviews),
             "chat" => Some(Invalidate::Chat),
+            "workspaces" => Some(Invalidate::Workspaces),
+            "notifications" => Some(Invalidate::Notifications),
             _ => None,
         }
     }
@@ -282,10 +329,11 @@ fn last_active(app: &AppHandle, key: &str) -> Option<String> {
 
 /// The gate in front of every terminal arm.
 ///
-/// Answers [`DispatchError::NotAllowed`] — the same refusal an unknown command gets, which the
-/// server turns into the same 401 a bad token gets. That is deliberate: to a client, "terminals are
-/// switched off here" and "no such command" are indistinguishable, so probing for the switch tells
-/// an attacker nothing about whether it exists to be flipped.
+/// Answers [`DispatchError::NotAllowed`] — the same refusal an unknown command gets: a 403, which
+/// the client reports and does not mistake for a revoked token (see `server::rpc` for why it is no
+/// longer the 401 a bad token gets). To a client, "terminals are switched off here" and "no such
+/// command" are indistinguishable, so probing for the switch tells an attacker nothing about whether
+/// it exists to be flipped.
 ///
 /// The setting is read from the database on every call rather than cached, so revoking terminal
 /// access takes effect on the next request with nothing to restart. See
@@ -339,6 +387,112 @@ fn ok_with<T: serde::Serialize>(value: T, inv: Invalidate) -> Result<(Value, Inv
         .map_err(|e| DispatchError::from(e.to_string()))
 }
 
+/// Every command a phone may name — the fence in front of the table in [`dispatch`].
+///
+/// A command must be here **and** have an arm below to be reachable; see the module docs for why two
+/// lists for one fact make a hole harder, not easier. Grouped as the table is.
+pub const ALLOWED: &[&str] = &[
+    // Bootstrap, workspaces and projects — read only.
+    "remote_bootstrap",
+    "list_workspaces",
+    "list_projects",
+    "get_project",
+    "watch_project",
+    // Git — read.
+    "get_status",
+    "list_commits",
+    "list_unpushed_commits",
+    "list_branches",
+    "list_stashes",
+    "get_working_diff",
+    "get_staged_diff",
+    "get_file_diff",
+    "get_commit_diff",
+    // Git — finishing work already on the disk.
+    "stage_file",
+    "stage_all",
+    "unstage_file",
+    "unstage_all",
+    "commit",
+    "checkout_local_branch",
+    "checkout_remote_tracking",
+    "create_branch",
+    "git_fetch",
+    "git_pull",
+    "git_push",
+    "stash_apply",
+    "stash_pop",
+    // Agent chains, tasks and runs.
+    "list_agent_chains",
+    "get_chain_detail",
+    "list_workspace_chain_steps",
+    "approve_chain_gate",
+    "skip_chain_step",
+    "retry_chain_step",
+    "resume_chain",
+    "abort_chain",
+    "list_agent_tasks",
+    "get_agent_task",
+    "set_agent_task_pinned",
+    "cancel_ai_run",
+    "list_active_runs",
+    // Meters and history.
+    "ai_usage_stats",
+    "ai_quota_status",
+    "list_job_history",
+    "get_job_result",
+    "list_workspace_activity",
+    // The pre-commit pass.
+    "scan_staged_secrets",
+    "analyze_working_changes",
+    // Pull requests and acting on a review.
+    "list_pull_requests",
+    "pr_review_decision",
+    "list_pr_comment_threads",
+    "review_pull_request",
+    "list_review_runs",
+    "get_review_run",
+    "act_on_pull_request",
+    "post_pr_review_comment",
+    "discard_pr_finding",
+    "resolve_pr_comment_thread",
+    // Pipelines.
+    "pipeline_availability",
+    "list_pipeline_runs",
+    "pipeline_run_detail",
+    "rerun_pipeline",
+    "cancel_pipeline",
+    // Services.
+    "list_services",
+    "services_runtime",
+    "services_start",
+    "services_stop",
+    "services_restart",
+    // Chat.
+    "send_chat_message",
+    "list_chat_conversations",
+    "get_chat_conversation",
+    // The notification centre — read only.
+    "list_notifications",
+    // Terminals — every one but `close_terminal` behind `SETTING_ALLOW_TERMINAL`.
+    "list_shell_profiles",
+    "list_terminals",
+    "read_terminal",
+    "open_terminal",
+    "write_terminal",
+    "resize_terminal",
+    "close_terminal",
+];
+
+/// Whether a phone may name `cmd` at all. See [`ALLOWED`].
+pub fn is_allowed(cmd: &str) -> bool {
+    ALLOWED.contains(&cmd)
+}
+
+/// What a stash action answers when the list moved under the phone: a code the client turns into
+/// its own sentence, not a message for a person. See the stash arm.
+pub const STASH_MOVED: &str = "stash_moved";
+
 /// Runs one allowed command.
 ///
 /// Deliberately takes `&AppHandle` rather than the individual states: several arms need the handle
@@ -355,6 +509,9 @@ pub async fn dispatch(
     cmd: &str,
     args: &Value,
 ) -> Result<(Value, Invalidate), DispatchError> {
+    if !is_allowed(cmd) {
+        return Err(DispatchError::NotAllowed);
+    }
     match cmd {
         // ---------------------------------------------------------------
         // Bootstrap
@@ -1024,8 +1181,250 @@ pub async fn dispatch(
             )?)
         }
 
+        // ---------------------------------------------------------------
+        // Stash — bringing work back, and nothing that throws it away
+        // ---------------------------------------------------------------
+        //
+        // `stash_drop` stays out for the reason `discard_*` does. Popping is in: git drops the entry
+        // only once its changes are back in the tree — a pop that conflicts leaves the stash where it
+        // was — so nothing is lost that is not now on disk, where every other write here lands.
+        //
+        // `oid` is a precondition, like a gate's `stepId`. `stash@{2}` is a position, and the list a
+        // phone is holding can be minutes old: a stash pushed at the desk since then moves every index
+        // by one, and the tap that meant "that one" would apply its neighbour.
+        "stash_apply" | "stash_pop" => {
+            let repo_path: String = arg(args, "repoPath")?;
+            let index: usize = arg(args, "index")?;
+            let oid: String = arg(args, "oid")?;
+            let listed = commands::git_ops::list_stashes(repo_path.clone())?;
+            if listed.get(index).map(|stash| stash.oid.as_str()) != Some(oid.as_str()) {
+                return Err(DispatchError::from(STASH_MOVED.to_string()));
+            }
+            if cmd == "stash_pop" {
+                commands::git_ops::stash_pop(repo_path, index)?;
+            } else {
+                commands::git_ops::stash_apply(repo_path, index)?;
+            }
+            ok_with(true, Invalidate::Repo)
+        }
+
+        // ---------------------------------------------------------------
+        // Pipelines — a repository's runs, and the two verbs on one
+        // ---------------------------------------------------------------
+        //
+        // The Pipelines tab's own reads and two of its writes, against the host the project is
+        // already linked to, with the token already on this machine: the phone names a project and a
+        // run and nothing else. Starting a run from scratch, answering a deployment gate and
+        // downloading artifacts stay at the desk — a new run with inputs is a decision about what to
+        // ship, and an artifact is a file a phone has nowhere useful to put.
+        //
+        // `Invalidate::None` for the two writes: what changed is on the host, which the Pipelines tab
+        // polls, and not in any row this machine holds. Announced all the same — see `announce_for`.
+        "pipeline_availability" => ok(commands::ci_cmd::pipeline_availability(
+            app.state::<Db>(),
+            arg(args, "projectId")?,
+        )
+        .await?),
+        "list_pipeline_runs" => ok(commands::ci_cmd::list_pipeline_runs(
+            app.state::<Db>(),
+            arg(args, "projectId")?,
+            opt(args, "branch")?,
+            // Clamped like `list_commits`: a screenful, well under the desktop's ceiling, because every
+            // run past it is another request against a rate-limited host.
+            opt::<usize>(args, "limit")?.unwrap_or(30).clamp(1, 50),
+        )
+        .await?),
+        "pipeline_run_detail" => ok(commands::ci_cmd::pipeline_run_detail(
+            app.state::<Db>(),
+            arg(args, "projectId")?,
+            arg(args, "runId")?,
+        )
+        .await?),
+        "rerun_pipeline" => ok(commands::ci_cmd::rerun_pipeline(
+            app.state::<Db>(),
+            arg(args, "projectId")?,
+            arg(args, "runId")?,
+            opt(args, "failedOnly")?.unwrap_or(false),
+        )
+        .await?),
+        "cancel_pipeline" => ok(commands::ci_cmd::cancel_pipeline(
+            app.state::<Db>(),
+            arg(args, "projectId")?,
+            arg(args, "runId")?,
+        )
+        .await?),
+
+        // ---------------------------------------------------------------
+        // Services — what is running, and the panel's three verbs
+        // ---------------------------------------------------------------
+        //
+        // Starting a service runs a command line, which is the terminal's risk in a smaller shape —
+        // but only one the user wrote at the desk, in the service's definition. The phone names ids;
+        // what they run, where and with which environment is fixed by definitions this table cannot
+        // create or edit. The supervisor resolves `ids` against the named workspace's own services,
+        // so an id from anywhere else starts nothing.
+        //
+        // `Invalidate::None`: the supervisor emits `services:runtime` for every change, which the
+        // desktop already listens to and `bridge.rs` forwards to the phones.
+        "list_services" => ok(commands::services_cmd::list_services(
+            app.state::<Db>(),
+            arg(args, "workspaceId")?,
+        )?),
+        "services_runtime" => ok(commands::services_cmd::services_runtime(app.clone())),
+        "services_start" => {
+            commands::services_cmd::services_start(app.clone(), arg(args, "workspaceId")?, arg(args, "ids")?)?;
+            ok(true)
+        }
+        "services_stop" => {
+            commands::services_cmd::services_stop(app.clone(), arg(args, "ids")?).await?;
+            ok(true)
+        }
+        "services_restart" => {
+            commands::services_cmd::services_restart(app.clone(), arg(args, "workspaceId")?, arg(args, "ids")?)
+                .await?;
+            ok(true)
+        }
+
+        // ---------------------------------------------------------------
+        // The notification centre — read only
+        // ---------------------------------------------------------------
+        //
+        // The list the desktop's main window last published (`RemoteCtl::publish_notices`).
+        // Following an entry, marking it seen and clearing the list stay at the desk: they act on the
+        // desk's own panel, which is not the phone's to rearrange.
+        "list_notifications" => ok(app.state::<crate::remotectl::RemoteCtl>().notices()),
+
         _ => Err(DispatchError::NotAllowed),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Replays — the same request twice is one action
+// ---------------------------------------------------------------------------
+
+/// How long the answer to a keyed call is kept for a retry to find.
+///
+/// Long enough for the slowest thing a phone can ask for: a review or a chat turn runs an engine for
+/// minutes, and a retry of one arriving after its answer was dropped would run it all again.
+pub const REPLAY_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// How many answers are kept at most. Past it the oldest *settled* ones go first; a call still
+/// running is never dropped, because its retry is exactly what this exists for.
+const REPLAY_CAPACITY: usize = 256;
+
+/// What one call answered: the status and the body, exactly as the first request got them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Answer {
+    pub status: u16,
+    pub body: Value,
+}
+
+impl Answer {
+    pub fn new(status: u16, body: Value) -> Self {
+        Self { status, body }
+    }
+}
+
+/// What [`Replays::claim`] decided about a keyed request.
+pub enum Claim {
+    /// The first time this key was seen: run the call and send its answer here. Held by whatever
+    /// runs the call rather than by the request, so the call finishes — and is remembered — even
+    /// when the phone that asked has gone.
+    Fresh(watch::Sender<Option<Answer>>),
+    /// Seen before: the first request's answer arrives here, now or when that call finishes.
+    Replay(watch::Receiver<Option<Answer>>),
+    /// The same key naming a different request — a client bug, refused rather than guessed at.
+    Mismatch,
+}
+
+struct Replay {
+    /// [`request_fingerprint`] of what the key was first used for.
+    request: String,
+    answer: watch::Receiver<Option<Answer>>,
+    claimed: Instant,
+}
+
+/// The answers to recent keyed calls, by device and idempotency key.
+///
+/// # What it closes
+///
+/// A phone's network is the worst kind for a request/response protocol: a request reaches the
+/// desktop, runs, and its *answer* is lost on the way back — the lift, the handover to cellular. The
+/// client then does what clients do and asks again, and without this the desktop did it again: two
+/// commits, two pushes, the same review comment twice under the user's name on somebody else's pull
+/// request.
+///
+/// So a mutating call carries a key the client mints once per intent and reuses on every retry of it
+/// (`transport.ts`). The first request with a key runs the call; every later one gets that call's
+/// answer — waiting for it if it is still running. Per device, so two phones can never collide.
+#[derive(Default)]
+pub struct Replays {
+    entries: Mutex<HashMap<(String, String), Replay>>,
+}
+
+impl Replays {
+    pub fn claim(&self, device: &str, key: &str, request: &str, now: Instant) -> Claim {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        prune(&mut entries, now);
+        let id = (device.to_string(), key.to_string());
+        if let Some(entry) = entries.get(&id) {
+            return if entry.request == request {
+                Claim::Replay(entry.answer.clone())
+            } else {
+                Claim::Mismatch
+            };
+        }
+        let (sender, answer) = watch::channel(None);
+        entries.insert(id, Replay { request: request.to_string(), answer, claimed: now });
+        Claim::Fresh(sender)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.lock().unwrap().len()
+    }
+}
+
+/// Whether a call's answer is in — or can never come, because whatever ran it is gone.
+fn settled(entry: &Replay) -> bool {
+    entry.answer.borrow().is_some() || entry.answer.has_changed().is_err()
+}
+
+fn prune(entries: &mut HashMap<(String, String), Replay>, now: Instant) {
+    entries.retain(|_, entry| !(settled(entry) && now.duration_since(entry.claimed) > REPLAY_WINDOW));
+    if entries.len() < REPLAY_CAPACITY {
+        return;
+    }
+    let mut oldest: Vec<((String, String), Instant)> = entries
+        .iter()
+        .filter(|(_, entry)| settled(entry))
+        .map(|(id, entry)| (id.clone(), entry.claimed))
+        .collect();
+    oldest.sort_by_key(|(_, claimed)| *claimed);
+    let excess = entries.len() + 1 - REPLAY_CAPACITY;
+    for (id, _) in oldest.into_iter().take(excess) {
+        entries.remove(&id);
+    }
+}
+
+/// What a key was first used for: the command and its arguments, hashed. A retry sends the very
+/// same body, so the same key with anything else in it is not a retry.
+pub fn request_fingerprint(cmd: &str, args: &Value) -> String {
+    hex::encode(Sha256::digest(format!("{cmd}\n{args}").as_bytes()))
+}
+
+/// The answer a claimed request is owed — its own call's, or the first request's.
+pub async fn answer_of(mut answer: watch::Receiver<Option<Answer>>) -> Answer {
+    match answer.wait_for(Option::is_some).await {
+        Ok(settled) => (*settled).clone().unwrap_or_else(unfinished),
+        Err(_) => unfinished(),
+    }
+}
+
+/// What a request gets when the call it is waiting on died without answering. Not retried: whether
+/// it did anything before it died is exactly what nobody knows.
+fn unfinished() -> Answer {
+    Answer::new(500, json!({ "ok": false, "error": "the call did not finish" }))
 }
 
 #[cfg(test)]
@@ -1074,6 +1473,8 @@ mod tests {
             Invalidate::Tasks,
             Invalidate::Reviews,
             Invalidate::Chat,
+            Invalidate::Workspaces,
+            Invalidate::Notifications,
         ] {
             let key = inv.key().expect("a real domain always names itself");
             assert_eq!(Invalidate::from_key(key), Some(inv));
@@ -1091,5 +1492,241 @@ mod tests {
         for inv in [Invalidate::Repo, Invalidate::Chains, Invalidate::Tasks] {
             assert!(inv.as_payload().is_some());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The allowlist
+    // -----------------------------------------------------------------------
+
+    /// Real commands (each one is registered in `lib.rs` — checked below, so a typo here cannot make
+    /// this pass by naming nothing) that destroy work, read or write a credential, reach past this
+    /// machine, or administer the install. None of them may ever be nameable from a phone.
+    const NEVER_REACHABLE: &[&str] = &[
+        // Work and history.
+        "reset_to_commit",
+        "discard_all_changes",
+        "discard_file_changes",
+        "discard_hunk",
+        "discard_lines",
+        "delete_branch",
+        "git_delete_remote_branch",
+        "git_delete_remote_tag",
+        "git_push_force_with_lease",
+        "stash_drop",
+        "stash_save",
+        "rename_stash",
+        "amend_commit",
+        "revert_commit",
+        "cherry_pick_commit",
+        "restore_reflog_entry",
+        "restore_ai_checkpoint",
+        "remove_worktree",
+        "bisect_reset",
+        // The disk.
+        "delete_path",
+        "move_path",
+        "rename_path",
+        "write_file_text",
+        "write_file_bytes",
+        "sandbox_wipe",
+        "git_clone",
+        // Configured work.
+        "delete_project",
+        "delete_workspace",
+        "delete_service",
+        "services_free_port",
+        "set_setting",
+        // Credentials and the keyring.
+        "get_github_token",
+        "get_gitlab_token",
+        "get_ado_pat",
+        "set_github_token",
+        "remote_get_password",
+        "db_set_password",
+        "supabase_share_token",
+        "keyvault_get_item",
+        "keyvault_read_blob",
+        "keyvault_load_tree",
+        "keyvault_export",
+        "keyvault_reset",
+        "keyvault_purge_item",
+        "keyvault_empty_trash",
+        "notes_empty_trash",
+        // Other people's machines.
+        "db_execute",
+        // The install.
+        "reset_app_data",
+        "quit_app",
+        "quit_app_confirmed",
+        "backup_run_now",
+        "backup_export_to_file",
+        "backup_restore_file",
+        "backup_set_passphrase",
+        // Administering this very feature, which is a thing you do at the machine.
+        "remotectl_set_enabled",
+        "remotectl_set_tls",
+        "remotectl_set_allow_terminal",
+        "remotectl_start_pairing",
+        "remotectl_revoke_all",
+        "remotectl_publish_notifications",
+        "notify_state_change",
+    ];
+
+    /// The guarantee this file exists for, pinned: none of the above is reachable, whatever the table
+    /// grows into. Adding one of them to [`ALLOWED`] fails here, loudly, before it ships.
+    #[test]
+    fn nothing_destructive_is_reachable() {
+        let registered = include_str!("../lib.rs");
+        for cmd in NEVER_REACHABLE {
+            assert!(
+                registered.contains(&format!("::{cmd},")),
+                "`{cmd}` is not a registered command any more — update this list rather than let it pass by naming nothing"
+            );
+            assert!(!is_allowed(cmd), "`{cmd}` must never be reachable from a phone");
+        }
+    }
+
+    /// The `match` arms of [`dispatch`], read out of this file.
+    fn dispatch_arms(source: &str) -> Vec<String> {
+        let start = source.find("pub async fn dispatch(").expect("the dispatch function");
+        let end = start + source[start..].find("        _ => Err(DispatchError::NotAllowed)").expect("its fallback arm");
+        source[start..end]
+            .lines()
+            .filter(|line| line.starts_with("        \"") && line.contains(" =>"))
+            .flat_map(|line| {
+                line.split(" =>").next().unwrap_or_default().split('|').map(|name| name.trim().trim_matches('"').to_string()).collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The text of one arm, from its pattern to the next arm's.
+    fn arm_body<'a>(source: &'a str, name: &str) -> &'a str {
+        let start = source.find("pub async fn dispatch(").unwrap();
+        let region = &source[start..];
+        let at = region.find(&format!("\n        \"{name}\" =>")).unwrap_or_else(|| panic!("no arm for `{name}`")) + 1;
+        let rest = &region[at..];
+        let next = rest[1..].find("\n        \"").or_else(|| rest[1..].find("\n        _ =>")).map(|i| i + 1).unwrap_or(rest.len());
+        &rest[..next]
+    }
+
+    /// The list and the table agree. A name with no arm would fall through to a refusal, and an arm
+    /// with no name would be dead code dressed up as a feature — both are safe, and both are mistakes
+    /// worth hearing about.
+    #[test]
+    fn the_fence_and_the_table_name_the_same_commands() {
+        let arms = dispatch_arms(include_str!("dispatch.rs"));
+        assert!(arms.len() > 50, "the arm scanner found {} arms — has the layout changed?", arms.len());
+        for arm in &arms {
+            assert!(is_allowed(arm), "`{arm}` has an arm but is not in ALLOWED, so it can never run");
+        }
+        for name in ALLOWED {
+            assert!(arms.iter().any(|arm| arm == name), "`{name}` is allowed but has no arm");
+        }
+        let mut unique = ALLOWED.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), ALLOWED.len(), "a command is listed twice");
+    }
+
+    /// A shell is only ever one switch away, and that switch is off by default
+    /// (`remotectl::tests::terminals_are_denied_until_explicitly_granted`). Every terminal arm but
+    /// teardown asks for it — see the module docs, and `close_terminal` for why that one does not.
+    #[test]
+    fn every_shell_arm_but_teardown_asks_for_the_switch() {
+        let source = include_str!("dispatch.rs");
+        for name in ["list_shell_profiles", "list_terminals", "read_terminal", "open_terminal", "write_terminal", "resize_terminal"] {
+            assert!(arm_body(source, name).contains("require_terminal(app)?"), "`{name}` must be behind the shell switch");
+        }
+        assert!(!arm_body(source, "close_terminal").contains("require_terminal(app)?"));
+        // And pushing never forces: the one flag `git_push` reads is the upstream.
+        assert!(!arm_body(source, "git_push").contains("\"force"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Replays
+    // -----------------------------------------------------------------------
+
+    fn answered(status: u16) -> Option<Answer> {
+        Some(Answer::new(status, json!({ "ok": status == 200 })))
+    }
+
+    /// A retry — while the first request is still running, or after it answered — gets the first
+    /// request's answer and runs nothing.
+    #[tokio::test]
+    async fn a_retry_gets_the_first_answer_instead_of_running_again() {
+        let replays = Replays::default();
+        let now = Instant::now();
+        let Claim::Fresh(sender) = replays.claim("phone", "k1", "commit", now) else {
+            panic!("the first request with a key runs");
+        };
+        let Claim::Replay(waiting) = replays.claim("phone", "k1", "commit", now) else {
+            panic!("a retry while it runs must wait, not run a second time");
+        };
+        sender.send(answered(200)).unwrap();
+        assert_eq!(answer_of(waiting).await.status, 200);
+
+        let Claim::Replay(later) = replays.claim("phone", "k1", "commit", now + Duration::from_secs(60)) else {
+            panic!("a retry after it answered gets the answer");
+        };
+        assert_eq!(answer_of(later).await, answered(200).unwrap());
+    }
+
+    /// Keys are per device and per intent: a second phone, or a new key, is a new request.
+    #[test]
+    fn another_device_or_another_key_is_a_new_request() {
+        let replays = Replays::default();
+        let now = Instant::now();
+        assert!(matches!(replays.claim("phone", "k1", "commit", now), Claim::Fresh(_)));
+        assert!(matches!(replays.claim("tablet", "k1", "commit", now), Claim::Fresh(_)));
+        assert!(matches!(replays.claim("phone", "k2", "commit", now), Claim::Fresh(_)));
+    }
+
+    /// The same key on a different body is not a retry of anything.
+    #[test]
+    fn a_key_reused_for_another_request_is_refused() {
+        let replays = Replays::default();
+        let now = Instant::now();
+        let _running = replays.claim("phone", "k1", &request_fingerprint("commit", &json!({ "message": "a" })), now);
+        let other = request_fingerprint("commit", &json!({ "message": "b" }));
+        assert!(matches!(replays.claim("phone", "k1", &other, now), Claim::Mismatch));
+    }
+
+    /// Settled answers expire; a call still running never does, however long it takes.
+    #[test]
+    fn answers_expire_but_a_running_call_is_never_forgotten() {
+        let replays = Replays::default();
+        let now = Instant::now();
+        let Claim::Fresh(done) = replays.claim("phone", "done", "x", now) else { panic!() };
+        done.send(answered(200)).unwrap();
+        let Claim::Fresh(_running) = replays.claim("phone", "running", "x", now) else { panic!() };
+
+        let later = now + REPLAY_WINDOW + Duration::from_secs(1);
+        assert!(matches!(replays.claim("phone", "done", "x", later), Claim::Fresh(_)), "expired");
+        assert!(matches!(replays.claim("phone", "running", "x", later), Claim::Replay(_)), "still running");
+    }
+
+    /// A call whose runner vanished — a panic — answers that it did not finish, rather than hanging
+    /// the request or running the call a second time.
+    #[tokio::test]
+    async fn a_call_that_died_says_so() {
+        let replays = Replays::default();
+        let now = Instant::now();
+        let Claim::Fresh(sender) = replays.claim("phone", "k", "x", now) else { panic!() };
+        let Claim::Replay(waiting) = replays.claim("phone", "k", "x", now) else { panic!() };
+        drop(sender);
+        assert_eq!(answer_of(waiting).await.status, 500);
+    }
+
+    /// Bounded: a phone firing keyed calls all day cannot grow this without limit.
+    #[test]
+    fn the_cache_is_bounded() {
+        let replays = Replays::default();
+        let now = Instant::now();
+        for index in 0..(REPLAY_CAPACITY * 2) {
+            if let Claim::Fresh(sender) = replays.claim("phone", &format!("k{index}"), "x", now) {
+                sender.send(answered(200)).unwrap();
+            }
+        }
+        assert!(replays.len() <= REPLAY_CAPACITY);
     }
 }

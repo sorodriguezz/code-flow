@@ -35,6 +35,7 @@ import {
   Glasses,
   ListChecks,
   Network,
+  NotebookPen,
   Route,
   ScanSearch,
   Rows3,
@@ -57,6 +58,7 @@ import {
   setSetting,
   setWorkspacePrompt,
 } from "./tauri/commands";
+import { defaultNotebookTemplate } from "./tauri/notebookCommands";
 
 export interface PromptDef {
   /** Stable id, unique across both scopes — used as the React key and the expand target. */
@@ -155,6 +157,17 @@ export const AI_PROMPTS: PromptDef[] = [
     scope: "global",
     key: "sample_rows_template",
     contract: { test: /tables/i, warningKey: "prompts.contractRows" },
+  },
+  // The notebook's AI actions — generate, explain, fix, document a cell. One text for the four: the
+  // action itself travels in the request (`jupyter::assist`), so the standing rules live here.
+  {
+    id: "notebook_template",
+    task: "notebook",
+    labelKey: "prompts.notebook",
+    hintKey: "prompts.notebookHint",
+    icon: NotebookPen,
+    scope: "global",
+    key: "notebook_template",
   },
   // Read by the CI failure analyser since it shipped, and until now editable from nowhere at all.
   {
@@ -378,6 +391,8 @@ export async function loadPromptDefault(prompt: PromptDef): Promise<string> {
       return defaultPipelineTemplate().catch(() => "");
     case "sample_rows_template":
       return defaultSampleRowsTemplate().catch(() => "");
+    case "notebook_template":
+      return defaultNotebookTemplate().catch(() => "");
     default:
       return "";
   }

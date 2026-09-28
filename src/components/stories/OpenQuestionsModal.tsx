@@ -93,6 +93,8 @@ export function OpenQuestionsModal({
   };
 
   const saveAndRegenerate = async () => {
+    // Before anything is written or closed: a "no" keeps the dialog and the answers typed into it.
+    if (!(await useStoriesStore.getState().confirmRegenerate(batchId))) return;
     setBusy(true);
     try {
       await useStoriesStore.getState().setAnswers(batchId, sheet());

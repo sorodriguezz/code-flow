@@ -5,6 +5,7 @@ import { SnippetsSettings } from "./SnippetsSettings";
 import { LanguageServersSettings } from "./LanguageServersSettings";
 import { IconRulesSettings } from "./IconRulesSettings";
 import { CsvSettings } from "./CsvSettings";
+import { FormattingSettings } from "./FormattingSettings";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
 import { SettingsRail, useSectionTab } from "./settingsNav";
 import { tabsFor } from "../../lib/settingsCatalog";
@@ -64,6 +65,7 @@ export function EditorSettings() {
             {tab === "languageServers" && <LanguageServersSettings />}
             {tab === "icons" && <IconRulesSettings />}
             {tab === "csv" && <CsvSettings />}
+            {tab === "format" && <FormattingSettings />}
           </Panel>
         </div>
       </div>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from "react";
-import { Info } from "lucide-react";
+import { Hand, Info } from "lucide-react";
 import { readFileText } from "../../lib/tauri/commands";
 import {
   buildGraph,
@@ -22,6 +22,7 @@ import { Segmented } from "../common/Segmented";
 import { Skeleton } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
 import { StatusGlyph } from "./RunList";
+import { gateHolds, isHeld, type GateHolds } from "./gates";
 import { STATUS_TOKEN, at, elapsed, formatDuration, statusOf } from "./pipelineStatus";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type {
@@ -145,14 +146,33 @@ function useStageDeps(
   return key ? (stagesByRun[key] ?? null) : null;
 }
 
+/**
+ * The mark on a card that is held at a gate — the same hand the run list and the gate strip use,
+ * so the three places a gate shows read as one fact.
+ */
+function HeldMark({ size = 11 }: { size?: number }) {
+  const t = useT();
+  return (
+    <span title={t("pipelines.heldHint")} className="inline-flex shrink-0">
+      <Hand size={size} aria-label={t("pipelines.heldHint")} className="text-[var(--cf-warning)]" />
+    </span>
+  );
+}
+
+/** Border of a card held at a gate: amber, like the gate strip above the drawing. */
+const HELD_BORDER = "border-[color-mix(in_oklab,var(--cf-warning)_60%,var(--cf-border))]";
+
 function JobCard({
   job,
   selected,
+  held,
   now,
   onSelect,
 }: {
   job: PipelineJob;
   selected: boolean;
+  /** Waiting at a gate — see `gates.ts`. */
+  held: boolean;
   now: number;
   onSelect: () => void;
 }) {
@@ -169,11 +189,14 @@ function JobCard({
       className={`relative flex shrink-0 items-center gap-2 rounded-[7px] border px-2 text-left transition-colors ${
         selected
           ? "border-[color-mix(in_oklab,var(--cf-accent)_55%,transparent)] bg-[var(--cf-accent-soft)] shadow-[0_0_0_1px_color-mix(in_oklab,var(--cf-accent)_32%,transparent)]"
-          : "border-[var(--cf-border)] bg-[var(--cf-surface)] hover:border-[color-mix(in_oklab,var(--cf-accent)_40%,var(--cf-border))]"
-      } ${pending ? "border-dashed opacity-60" : ""}`}
+          : held
+            ? `${HELD_BORDER} bg-[var(--cf-surface)]`
+            : "border-[var(--cf-border)] bg-[var(--cf-surface)] hover:border-[color-mix(in_oklab,var(--cf-accent)_40%,var(--cf-border))]"
+      } ${pending && !held ? "border-dashed opacity-60" : ""}`}
     >
       <StatusGlyph status={job.status} size={13} />
       <span className="min-w-0 flex-1 truncate text-[12px] font-medium">{job.name}</span>
+      {held && <HeldMark />}
       <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
         {formatDuration(took)}
       </span>
@@ -378,7 +401,7 @@ function Connectors({
  * arrows behind them are drawn from the same two functions and a layout the SVG has to *measure*
  * is a layout the SVG gets wrong for one frame after every resize.
  */
-function JobColumns({ graph, now }: { graph: PipelineGraph; now: number }) {
+function JobColumns({ graph, holds, now }: { graph: PipelineGraph; holds: GateHolds; now: number }) {
   const selection = useCiStore((s) => s.selection);
   const selectJob = useCiStore((s) => s.selectJob);
   const t = useT();
@@ -442,6 +465,7 @@ function JobColumns({ graph, now }: { graph: PipelineGraph; now: number }) {
                 job={job}
                 now={now}
                 selected={selection?.jobId === job.id}
+                held={isHeld(job, holds)}
                 onSelect={() => void selectJob(job.id)}
               />
             </div>
@@ -682,11 +706,13 @@ function summarise(
 function StageJobRow({
   job,
   selected,
+  held,
   now,
   onSelect,
 }: {
   job: PipelineJob;
   selected: boolean;
+  held: boolean;
   now: number;
   onSelect: () => void;
 }) {
@@ -702,10 +728,11 @@ function StageJobRow({
         selected
           ? "bg-[var(--cf-accent-soft)] shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-accent)_40%,transparent)]"
           : "hover:bg-[var(--cf-hover)]"
-      } ${pending ? "opacity-55" : ""}`}
+      } ${pending && !held ? "opacity-55" : ""}`}
     >
       <StatusGlyph status={job.status} size={12} />
       <span className="min-w-0 flex-1 truncate text-[11px]">{job.name}</span>
+      {held && <HeldMark />}
       <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
         {pending ? "" : formatDuration(took)}
       </span>
@@ -726,6 +753,7 @@ function StageCard({
   left,
   top,
   selectedId,
+  holds,
   now,
   onSelect,
 }: {
@@ -734,11 +762,18 @@ function StageCard({
   left: number;
   top: number;
   selectedId: string | null | undefined;
+  holds: GateHolds;
   now: number;
   onSelect: (jobId: string) => void;
 }) {
   const t = useT();
   const took = elapsed(summary.startedAt, summary.finishedAt, now);
+  // The stage itself (Azure names the stage an approval holds), its stand-in while it has no jobs,
+  // or any job inside it that a gate names (GitHub, GitLab).
+  const held =
+    (summary.stageId !== null && holds.stages.has(summary.stageId)) ||
+    (summary.placeholder !== null && isHeld(summary.placeholder, holds)) ||
+    summary.jobs.some((job) => isHeld(job, holds));
   const total = summary.jobs.length;
   const progress =
     total === 0
@@ -753,7 +788,7 @@ function StageCard({
     <div
       style={{ left, top, width: STAGE_W, height: stageHeight(total) }}
       className={`absolute flex flex-col overflow-hidden rounded-[10px] border bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${
-        STAGE_BORDER[summary.status]
+        held ? HELD_BORDER : STAGE_BORDER[summary.status]
       } ${summary.status === "skipped" ? "opacity-[0.72]" : ""}`}
     >
       <div
@@ -772,6 +807,7 @@ function StageCard({
           <span title={name} className="min-w-0 flex-1 truncate text-[12px] font-semibold">
             {name}
           </span>
+          {held && <HeldMark size={12} />}
           {/* Measured, not assumed. Two jobs listed under one stage are not two jobs that ran
               together — a stage's jobs can depend on each other — so this only appears when their
               intervals genuinely overlapped, and the tooltip says that is what it means.
@@ -828,6 +864,7 @@ function StageCard({
               job={job}
               now={now}
               selected={selectedId === job.id}
+              held={isHeld(job, holds)}
               onSelect={() => onSelect(job.id)}
             />
           ))
@@ -1135,7 +1172,7 @@ function boardEdges(
  * would be claiming a dependency nobody reported. Between stages there is something to claim —
  * see [`buildStageBoard`].
  */
-function StageBoard({ board, now }: { board: StageBoardModel; now: number }) {
+function StageBoard({ board, holds, now }: { board: StageBoardModel; holds: GateHolds; now: number }) {
   const selection = useCiStore((s) => s.selection);
   const selectJob = useCiStore((s) => s.selectJob);
 
@@ -1158,6 +1195,7 @@ function StageBoard({ board, now }: { board: StageBoardModel; now: number }) {
           left={stage.left}
           top={stage.top}
           selectedId={selection?.jobId}
+          holds={holds}
           now={now}
           onSelect={(jobId) => void selectJob(jobId)}
         />
@@ -1174,7 +1212,7 @@ function StageBoard({ board, now }: { board: StageBoardModel; now: number }) {
  * whenever the columns had to be guessed, and the useful one whenever the question is "what is
  * making this slow" rather than "what depends on what".
  */
-function Waterfall({ detail, now }: { detail: PipelineRunDetail; now: number }) {
+function Waterfall({ detail, holds, now }: { detail: PipelineRunDetail; holds: GateHolds; now: number }) {
   const selection = useCiStore((s) => s.selection);
   const selectJob = useCiStore((s) => s.selectJob);
   const t = useT();
@@ -1212,6 +1250,7 @@ function Waterfall({ detail, now }: { detail: PipelineRunDetail; now: number }) 
             <span className="flex w-[152px] shrink-0 items-center gap-1.5 overflow-hidden pl-1.5">
               <StatusGlyph status={job.status} size={12} />
               <span className="truncate text-[11px]">{job.name}</span>
+              {isHeld(job, holds) && <HeldMark />}
             </span>
             <span className="relative h-full flex-1">
               {jobStart === null ? (
@@ -1302,6 +1341,7 @@ export function RunGraph({
   const t = useT();
   const needs = useWorkflowNeeds(projectId, localPath, detail);
   const declaredStages = useStageDeps(projectId, localPath, detail);
+  const holds = useMemo(() => gateHolds(detail?.gates), [detail]);
 
   // Built once and handed down rather than rebuilt inside each drawing, which is what the two used
   // to do.
@@ -1396,13 +1436,13 @@ export function RunGraph({
         ) : detail.jobs.length === 0 ? (
           <p className="text-[12px] text-[var(--cf-text-muted)]">{t("pipelines.noJobs")}</p>
         ) : mode !== "graph" ? (
-          <Waterfall detail={detail} now={now} />
+          <Waterfall detail={detail} holds={holds} now={now} />
         ) : board ? (
           /* The provider named its stages, so the drawing is made of stages — the same shape the
              host's own run page uses, because that is the shape the reader arrived with. */
-          <StageBoard board={board} now={now} />
+          <StageBoard board={board} holds={holds} now={now} />
         ) : graph ? (
-          <JobColumns graph={graph} now={now} />
+          <JobColumns graph={graph} holds={holds} now={now} />
         ) : null}
       </div>
     </>

@@ -159,10 +159,40 @@ pub fn update_host(conn: &Connection, row: &RemoteHostRow) -> rusqlite::Result<(
 /// Its live forwards go too, for the plainer reason that a listening port whose host no longer
 /// exists is a port nothing can close.
 pub fn delete_host(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    let _ = crate::secrets::delete_secret(&crate::remotes::password_key(id));
-    crate::remotes::forward::close_host(id);
+    forget_hosts(&[id.to_string()]);
     conn.execute("DELETE FROM remote_hosts WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+/// Every host id in a workspace — what deleting the workspace has to forget credentials for.
+///
+/// Read *before* the delete by [`crate::db::queries::delete_workspace`], because the cascade that
+/// removes the rows is also what removes the only record of which keychain entries were theirs.
+pub fn host_ids(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT id FROM remote_hosts WHERE workspace_id = ?1")?;
+    let ids = stmt.query_map(params![workspace_id], |row| row.get(0))?;
+    ids.collect()
+}
+
+/// What the app keeps *outside* the database for hosts that are gone: the password or key
+/// passphrase in the keychain, and any forward still listening for them.
+///
+/// Best-effort, like the keychain half of [`delete_host`] always was: the rows are what the user
+/// asked to remove, and a keychain that refuses must not put them back. Called after the rows are
+/// gone, never before — a delete that failed must not have taken the credentials with it.
+pub fn forget_hosts(ids: &[String]) {
+    forget_hosts_with(ids, |key| {
+        let _ = crate::secrets::delete_secret(key);
+    });
+}
+
+/// [`forget_hosts`] with the keychain call handed in, so a test can see exactly which entries a
+/// workspace delete would remove without touching the developer's real keychain.
+fn forget_hosts_with(ids: &[String], mut forget: impl FnMut(&str)) {
+    for id in ids {
+        forget(&crate::remotes::password_key(id));
+        crate::remotes::forward::close_host(id);
+    }
 }
 
 pub fn duplicate_host(conn: &Connection, id: &str) -> rusqlite::Result<RemoteHostRow> {
@@ -576,6 +606,35 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM remote_snippets", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// The keychain entries are keyed by host id and nothing in them names a workspace, so the only
+    /// record of which were a workspace's is its rows — read before the cascade removes them.
+    #[test]
+    fn deleting_a_workspace_forgets_exactly_its_own_hosts_credentials() {
+        let conn = db();
+        conn.execute(
+            "INSERT INTO workspaces (id, name, created_at, sort_order) VALUES ('w2', 'Other', 't', 1)",
+            [],
+        )
+        .unwrap();
+        let a = create_host(&conn, "w1", "a", "", "{}", "").unwrap();
+        let b = create_host(&conn, "w1", "b", "", "{}", "").unwrap();
+        let kept = create_host(&conn, "w2", "c", "", "{}", "").unwrap();
+
+        let mut ids = host_ids(&conn, "w1").unwrap();
+        ids.sort();
+        let mut expected = vec![a.id.clone(), b.id.clone()];
+        expected.sort();
+        assert_eq!(ids, expected);
+
+        let mut forgotten = Vec::new();
+        forget_hosts_with(&ids, |key| forgotten.push(key.to_string()));
+        forgotten.sort();
+        let mut keys: Vec<String> = expected.iter().map(|id| crate::remotes::password_key(id)).collect();
+        keys.sort();
+        assert_eq!(forgotten, keys);
+        assert!(!forgotten.contains(&crate::remotes::password_key(&kept.id)), "another workspace's host is untouched");
     }
 
     #[test]

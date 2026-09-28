@@ -558,6 +558,13 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Res
 /// only discovers skills relative to its working directory), and removes any of our **disabled**
 /// skills that a previous sync left there. Only ever touches folders named after skills we manage —
 /// never the user's own unmanaged `.claude/skills` entries.
+///
+/// Every folder it copies in is also listed in the checkout's git exclude file, one line per skill
+/// (see [`crate::git_exclude`]). Without that a synced skill appeared in Changes as an untracked
+/// file after every AI run, one "stage all" away from being committed into the user's branch. Per
+/// skill and anchored at the root, not the whole `.claude/skills/`: a skill the user writes there
+/// themselves has to stay visible to be committed, and one the team already tracks is untouched by
+/// an exclusion either way.
 pub fn sync_skills_into_project(skills: &[WorkspaceSkill], workspace_id: &str, project_path: &str) -> Result<(), String> {
     let dest_root = Path::new(project_path).join(".claude").join("skills");
     for skill in skills.iter().filter(|s| !s.enabled) {
@@ -579,6 +586,10 @@ pub fn sync_skills_into_project(skills: &[WorkspaceSkill], workspace_id: &str, p
         if !enabled.contains(name.to_string_lossy().as_ref()) {
             continue;
         }
+        let _ = crate::git_exclude::exclude(
+            Path::new(project_path),
+            &format!("/.claude/skills/{}/", crate::git_exclude::literal(&name.to_string_lossy())),
+        );
         copy_dir_recursive(&entry.path(), &dest_root.join(name)).map_err(|e| e.to_string())?;
     }
     Ok(())

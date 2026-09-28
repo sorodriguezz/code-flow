@@ -104,6 +104,11 @@ jobs:
 
       - run: pnpm exec tsc --noEmit
 
+      # The same frontend suite `check.yml` runs on pull requests: seconds on Ubuntu, no Rust
+      # toolchain, and the only gate that exercises the stores and pure logic before a build
+      # is paid for.
+      - run: pnpm exec vitest run
+
   # The single writer of the release object, so that the two builds below can run at the same time.
   #
   # This job exists because the matrix used to be `max-parallel: 1`, and the reason it was is worth

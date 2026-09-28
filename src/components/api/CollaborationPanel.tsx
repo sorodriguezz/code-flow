@@ -241,7 +241,13 @@ export function CollaborationPanel() {
     try {
       const check = await supabaseCheck(url);
       const ready = check.reachable && check.schema_installed;
-      await saveProject(url, { ready, checkedAt: new Date().toISOString() });
+      // Still works — an older copy of the script syncs as before — but it cannot hold rotation to
+      // the host alone, so the row asks for the script to be run again rather than going red.
+      await saveProject(url, {
+        ready,
+        checkedAt: new Date().toISOString(),
+        schemaOutdated: ready && check.schema_outdated,
+      });
       if (!silent && ready) pushToast(t("api.collab.checkPassed"), "success");
       return ready;
     } catch (e) {
@@ -292,9 +298,11 @@ export function CollaborationPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connections.length, keyFingerprint]);
 
-  const copySql = async () => {
+  /** For a row, the script for that project — which also records this machine as the owner of the
+   *  collections it already shares there, so re-running it cannot leave them up for grabs. */
+  const copySql = async (url?: string) => {
     try {
-      await navigator.clipboard.writeText(await supabaseInstallSql());
+      await navigator.clipboard.writeText(await supabaseInstallSql(url));
       pushToast(t("api.collab.sqlCopied"), "success");
     } catch (e) {
       pushErrorToast(String(e));
@@ -381,7 +389,7 @@ export function CollaborationPanel() {
                   onCheck={(silent) => verify(connection.url, silent)}
                   onConnect={(url, key) => connect(url, key)}
                   onForget={() => forgetProject(connection.url)}
-                  onCopySql={copySql}
+                  onCopySql={() => copySql(connection.url)}
                 />
               ))}
             </div>
@@ -390,7 +398,7 @@ export function CollaborationPanel() {
               <NewConnection
                 taken={connections.map((connection) => projectHost(connection.url))}
                 onConnect={connect}
-                onCopySql={copySql}
+                onCopySql={() => copySql()}
                 onDone={() => setAdding(false)}
               />
             ) : (
@@ -652,6 +660,10 @@ function ConnectionRow({
           </Status>
         ) : !connection.hasKey ? (
           <Status tone="warning">{t("api.collab.noKey")}</Status>
+        ) : connection.ready && connection.schemaOutdated ? (
+          <Tooltip label={t("api.collab.schemaOutdatedHint")}>
+            <Status tone="warning">{t("api.collab.schemaOutdated")}</Status>
+          </Tooltip>
         ) : connection.ready ? (
           <Status tone="success">
             {checkedAgo

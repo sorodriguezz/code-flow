@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::ado;
+use crate::bitbucket;
 use crate::commands::review_pipeline;
 use crate::ai;
 use crate::commands::claude_cmd::{load_ai_config_as, load_ai_config_in, AiTask};
@@ -18,7 +19,7 @@ use crate::secrets;
 
 /// Which VCS host a project's PR features talk to, resolved from whichever set of link columns
 /// is populated. A project links to at most one host; the order below is the tie-break if more
-/// than one set were somehow written — GitHub, then GitLab, then Azure — and the same order is
+/// than one set were somehow written — GitHub, then GitLab, then Bitbucket, then Azure — and the same order is
 /// asserted by the "already linked" guards in [`resolve_pr_link`], so a project carrying two
 /// providers' columns can never be routed at one host here and matched at another there.
 /// This is the single dispatch point the shared PR commands (list / review / comment) branch
@@ -31,6 +32,9 @@ pub(crate) enum LinkedRepo {
     /// One path field rather than an owner/repo pair: GitLab groups nest, so
     /// `acme/backend/services/auth` is an ordinary project with nothing to split off the front.
     GitLab { host: String, project: String },
+    /// No host: Bitbucket Cloud is bitbucket.org and nothing else. The workspace picks the
+    /// credential, the slug the repository.
+    Bitbucket { workspace: String, repo: String },
 }
 
 pub(crate) fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
@@ -41,6 +45,13 @@ pub(crate) fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
     if let Some(path) = project.gitlab_project.clone().filter(|p| !p.trim().is_empty()) {
         let host = project.gitlab_host.clone().unwrap_or_else(|| gitlab::GITLAB_COM.to_string());
         return Ok(LinkedRepo::GitLab { host, project: path });
+    }
+    // Both halves non-blank, like GitLab's path: a workspace alone names no repository.
+    if let (Some(workspace), Some(repo)) = (
+        project.bitbucket_workspace.clone().filter(|w| !w.trim().is_empty()),
+        project.bitbucket_repo.clone().filter(|r| !r.trim().is_empty()),
+    ) {
+        return Ok(LinkedRepo::Bitbucket { workspace, repo });
     }
     if let (Some(org), Some(ado_project), Some(repo_id)) =
         (project.ado_org.clone(), project.ado_project.clone(), project.ado_repo_id.clone())
@@ -64,6 +75,8 @@ fn repo_key(link: &LinkedRepo) -> String {
         // only ever compared for equality, never parsed back apart. The `gitlab:` prefix is what
         // stops a GitLab project inheriting a same-named GitHub one's findings.
         LinkedRepo::GitLab { host, project } => format!("gitlab:{host}/{project}").to_lowercase(),
+        // No host in it: there is one Bitbucket Cloud.
+        LinkedRepo::Bitbucket { workspace, repo } => format!("bitbucket:{workspace}/{repo}").to_lowercase(),
         LinkedRepo::Azure { org, project, repo_id } => {
             format!("azure:{org}/{project}/{repo_id}").to_lowercase()
         }
@@ -88,6 +101,17 @@ pub(crate) fn github_token(host: &str) -> Result<String, String> {
 pub(crate) fn gitlab_token(host: &str) -> Result<String, String> {
     secrets::get_secret(&secrets::gitlab_token_key(host))?
         .ok_or_else(|| format!("No GitLab token saved for \"{host}\" — connect it in Settings first"))
+}
+
+/// The credential saved for a Bitbucket workspace — an API token with its e-mail, or an access
+/// token. See `bitbucket::BitbucketAuth` for why both halves live in the one keychain entry.
+pub(crate) fn bitbucket_auth(workspace: &str) -> Result<bitbucket::BitbucketAuth, String> {
+    let raw = secrets::get_secret(&secrets::bitbucket_token_key(workspace))?.ok_or_else(|| {
+        format!("No Bitbucket credential saved for workspace \"{workspace}\" — connect it in Settings first")
+    })?;
+    bitbucket::BitbucketAuth::from_secret(&raw).ok_or_else(|| {
+        format!("The Bitbucket credential saved for \"{workspace}\" is unreadable — connect the workspace again in Settings")
+    })
 }
 
 /// The `[{"host": …}]` shape both `github_connections` and `gitlab_connections` are stored in.
@@ -130,6 +154,23 @@ fn github_connected_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
 
 fn gitlab_connected_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
     connected_hosts(db, "gitlab_connections")
+}
+
+/// The Bitbucket workspaces with a saved credential, from `bitbucket_connections`
+/// (`[{"workspace": …}]`) — the same keychain-free stand-in [`connected_hosts`] explains.
+pub(crate) fn bitbucket_connected_workspaces(db: &State<'_, Db>) -> Result<Vec<String>, String> {
+    #[derive(Deserialize)]
+    struct ConnectionWorkspace {
+        workspace: String,
+    }
+    let raw = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_setting(&conn, "bitbucket_connections").map_err(|e| e.to_string())?
+    };
+    let Some(raw) = raw else { return Ok(Vec::new()) };
+    Ok(serde_json::from_str::<Vec<ConnectionWorkspace>>(&raw)
+        .map(|conns| conns.into_iter().map(|c| bitbucket::normalize_workspace(&c.workspace)).collect())
+        .unwrap_or_default())
 }
 
 pub(crate) fn ado_connected_orgs(db: &State<'_, Db>) -> Result<Vec<String>, String> {
@@ -186,9 +227,10 @@ pub enum AutoLinkResult {
     /// saved — linked automatically, no user action needed.
     Linked { project: Project },
     /// Detected a supported remote, but no token is saved for it yet. `provider` is
-    /// "azure" | "github" | "gitlab"; `identifier` is what the hint names it by — the org
-    /// (Azure), the owner (GitHub), or the host (GitLab, whose tokens are per-instance and whose
-    /// nested group path has no single "owner" segment to point at).
+    /// "azure" | "github" | "gitlab" | "bitbucket"; `identifier` is what the hint names it by — the
+    /// org (Azure), the owner (GitHub), the host (GitLab, whose tokens are per-instance and whose
+    /// nested group path has no single "owner" segment to point at), or the workspace (Bitbucket,
+    /// whose credentials are per workspace).
     NeedsToken { provider: String, identifier: String },
     /// The remote isn't a recognized host (or there's no remote at all) — falls back to
     /// manual linking.
@@ -224,6 +266,7 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
     let connected_github_hosts = github_connected_hosts(&db)?;
     let connected_gitlab_hosts = gitlab_connected_hosts(&db)?;
     let connected_ado_orgs = ado_connected_orgs(&db)?;
+    let connected_bitbucket_workspaces = bitbucket_connected_workspaces(&db)?;
     let known_github_hosts = detectable_hosts(github::GITHUB_COM, &connected_github_hosts);
     let known_gitlab_hosts = detectable_hosts(gitlab::GITLAB_COM, &connected_gitlab_hosts);
 
@@ -261,6 +304,23 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
                 // The host, not the group: a GitLab token authenticates against the whole
                 // instance, so that is what the hint has to tell the user to connect.
                 needs_token = Some(AutoLinkResult::NeedsToken { provider: "gitlab".to_string(), identifier: detected.host });
+            }
+        } else if let Some(detected) = bitbucket::detect_from_remote_url(url) {
+            // No allowlist to consult: bitbucket.org is recognisable on its own, and the workspace
+            // decides whether there is a credential for it.
+            if connected_bitbucket_workspaces.iter().any(|w| w.eq_ignore_ascii_case(&detected.workspace)) {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                queries::link_project_bitbucket(&conn, &project_id, &detected.workspace, &detected.repo)
+                    .map_err(|e| e.to_string())?;
+                let linked = queries::get_project(&conn, &project_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Project not found".to_string())?;
+                return Ok(AutoLinkResult::Linked { project: linked });
+            } else if needs_token.is_none() {
+                needs_token = Some(AutoLinkResult::NeedsToken {
+                    provider: "bitbucket".to_string(),
+                    identifier: detected.workspace,
+                });
             }
         } else if let Some(detected) = ado::detect_from_remote_url(url) {
             // The *connected* spelling is what gets written, not the one in the remote URL. They
@@ -384,6 +444,9 @@ fn repo_web_url(db: &State<'_, Db>, project_id: &str) -> Result<Option<String>, 
         if let Some(d) = gitlab::detect_from_remote_url(&remote.url, &known_gitlab_hosts) {
             return Ok(Some(format!("https://{}/{}", d.host, d.project)));
         }
+        if let Some(d) = bitbucket::detect_from_remote_url(&remote.url) {
+            return Ok(Some(bitbucket::web_repo_url(&d.workspace, &d.repo)));
+        }
         if let Some(d) = ado::detect_from_remote_url(&remote.url) {
             return Ok(Some(format!(
                 "https://dev.azure.com/{}/{}/_git/{}",
@@ -424,26 +487,90 @@ pub(crate) fn load_project(db: &State<'_, Db>, project_id: &str) -> Result<crate
         .ok_or_else(|| "Project not found".to_string())
 }
 
+/// One page of a linked repository's pull requests, from whichever host it lives on.
+async fn fetch_pr_page(link: &LinkedRepo, scope: ado::PrListScope, page: u32) -> Result<ado::PrPage, String> {
+    match link {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(org)?;
+            ado::list_pull_requests_page(org, ado_project, repo_id, scope, page, &pat).await
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(host)?;
+            github::list_pull_requests_page(host, owner, repo, scope, page, &token).await
+        }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(host)?;
+            gitlab::list_merge_requests_page(host, path, scope, page, &token).await
+        }
+        LinkedRepo::Bitbucket { workspace, repo } => {
+            let auth = bitbucket_auth(workspace)?;
+            bitbucket::list_pull_requests_page(workspace, repo, scope, page, &auth).await
+        }
+    }
+}
+
+/// One pull request of a linked repository, read directly by number — however old it is and
+/// whatever its state. Never looked up inside a list: a list is one page, and an open pull request
+/// a few weeks old is routinely not on the first one.
+async fn fetch_linked_pull_request(link: &LinkedRepo, pr_id: i64) -> Result<ado::PullRequestSummary, String> {
+    match link {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(org)?;
+            Ok(ado::get_pull_request(org, ado_project, repo_id, pr_id, &pat).await?.summary)
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(host)?;
+            github::get_pull_request(host, owner, repo, pr_id, &token).await
+        }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(host)?;
+            gitlab::get_merge_request(host, path, pr_id, &token).await
+        }
+        LinkedRepo::Bitbucket { workspace, repo } => {
+            let auth = bitbucket_auth(workspace)?;
+            bitbucket::get_pull_request(workspace, repo, pr_id, &auth).await
+        }
+    }
+}
+
+/// The first page of the repository's **open** pull requests.
+///
+/// Kept, with its signature, for the phone, which calls it by name (`remotectl::dispatch`). It used
+/// to be the first hundred of every state; the desktop pages through any scope with
+/// [`list_pull_requests_page`].
 #[tauri::command]
 pub async fn list_pull_requests(
     db: State<'_, Db>,
     project_id: String,
 ) -> Result<Vec<ado::PullRequestSummary>, String> {
     let project = load_project(&db, &project_id)?;
-    match linked_repo(&project)? {
-        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
-            let pat = pat_for_org(&org)?;
-            ado::list_pull_requests(&org, &ado_project, &repo_id, &pat).await
-        }
-        LinkedRepo::GitHub { host, owner, repo } => {
-            let token = github_token(&host)?;
-            github::list_pull_requests(&host, &owner, &repo, &token).await
-        }
-        LinkedRepo::GitLab { host, project: path } => {
-            let token = gitlab_token(&host)?;
-            gitlab::list_merge_requests(&host, &path, &token).await
-        }
-    }
+    Ok(fetch_pr_page(&linked_repo(&project)?, ado::PrListScope::Open, 1).await?.items)
+}
+
+/// One page of the repository's pull requests: `scope` is `"open"` (the default), `"closed"`
+/// (merged and closed) or `"all"`; `page` is 1-based.
+#[tauri::command]
+pub async fn list_pull_requests_page(
+    db: State<'_, Db>,
+    project_id: String,
+    scope: Option<String>,
+    page: Option<u32>,
+) -> Result<ado::PrPage, String> {
+    let project = load_project(&db, &project_id)?;
+    let link = linked_repo(&project)?;
+    fetch_pr_page(&link, ado::PrListScope::parse(scope.as_deref()), page.unwrap_or(1)).await
+}
+
+/// One pull request, read directly from its host — what opens a PR that isn't on the loaded page
+/// (an Activity row, a notification, a closed one) and what refreshes one on screen.
+#[tauri::command]
+pub async fn get_pull_request(
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+) -> Result<ado::PullRequestSummary, String> {
+    let project = load_project(&db, &project_id)?;
+    fetch_linked_pull_request(&linked_repo(&project)?, pr_id).await
 }
 
 /// What a pasted pull-request link turned out to be. The point of the whole flow is that a link
@@ -627,6 +754,54 @@ pub async fn resolve_pr_link(db: State<'_, Db>, url: String) -> Result<PrLinkRes
                 },
             })
         }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
+            let Some(raw) = secrets::get_secret(&secrets::bitbucket_token_key(&workspace))? else {
+                return Ok(PrLinkResolution::NeedsToken {
+                    provider: "bitbucket".to_string(),
+                    identifier: workspace,
+                });
+            };
+            let auth = bitbucket::BitbucketAuth::from_secret(&raw).ok_or_else(|| {
+                format!("The Bitbucket credential saved for \"{workspace}\" is unreadable — connect the workspace again in Settings")
+            })?;
+            let pr = bitbucket::get_pull_request(&workspace, &repo, number, &auth).await?;
+            let found = find_project_for_link(
+                &db,
+                &projects,
+                |p| {
+                    same_opt(&p.bitbucket_workspace, &workspace)
+                        && same_opt(&p.bitbucket_repo, &repo)
+                        // GitHub and GitLab outrank Bitbucket in `linked_repo`; a project carrying
+                        // either one's columns too would dispatch there. The remote pass repairs it.
+                        && !(p.github_owner.is_some() && p.github_repo.is_some())
+                        && p.gitlab_project.is_none()
+                        && p.bitbucket_repo.is_none()
+                },
+                |remote_url| {
+                    bitbucket::detect_from_remote_url(remote_url)
+                        .map(|d| same(&d.workspace, &workspace) && same(&d.repo, &repo))
+                        .unwrap_or(false)
+                },
+                |conn, project_id| {
+                    queries::link_project_bitbucket(conn, project_id, &workspace, &repo)
+                        .map_err(|e| e.to_string())
+                },
+            )?;
+            Ok(match found {
+                Some(project) => PrLinkResolution::Ready {
+                    project_id: project.id,
+                    workspace_id: project.workspace_id,
+                    project_name: project.name,
+                    pr,
+                },
+                None => PrLinkResolution::NoLocalRepo {
+                    provider: "bitbucket".to_string(),
+                    repo_label: format!("{workspace}/{repo}"),
+                    clone_url: format!("{}.git", bitbucket::web_repo_url(&workspace, &repo)),
+                    pr,
+                },
+            })
+        }
         crate::pr_link::PrLinkTarget::Azure { org, project: ado_project, repo, number } => {
             // The organisation as it was *connected*, when it is one of them. A pasted link carries
             // whatever spelling the URL had — `parse_azure` even lowercases a `*.visualstudio.com`
@@ -710,6 +885,8 @@ fn link_credentials(
     let credential = match &target {
         crate::pr_link::PrLinkTarget::GitHub { host, .. } => github_token(host)?,
         crate::pr_link::PrLinkTarget::GitLab { host, .. } => gitlab_token(host)?,
+        // The whole credential as the keychain holds it; `link_host` reads it back.
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, .. } => bitbucket_auth(workspace)?.to_secret(),
         crate::pr_link::PrLinkTarget::Azure { org, .. } => pat_for_org(org)?,
     };
     Ok((target, credential))
@@ -731,6 +908,9 @@ fn link_repo_coords(target: &crate::pr_link::PrLinkTarget, canonical: Option<(&s
         // the same reason it doesn't on GitHub.
         crate::pr_link::PrLinkTarget::GitLab { host, project, .. } => {
             (project.clone(), format!("https://{host}/{project}.git"))
+        }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, .. } => {
+            (format!("{workspace}/{repo}"), format!("{}.git", bitbucket::web_repo_url(workspace, repo)))
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, .. } => {
             let (project, repo) = canonical.unwrap_or((project, repo));
@@ -771,6 +951,13 @@ async fn fetch_pr_and_diff(
         crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
             let pr = gitlab::get_merge_request(host, project, *number, credential).await?;
             let diff = gitlab::merge_request_diff(host, project, *number, credential).await?;
+            let (repo_label, clone_url) = link_repo_coords(target, None);
+            Ok(LinkPr { pr, diff, repo_label, clone_url })
+        }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
+            let auth = bitbucket_link_auth(credential);
+            let pr = bitbucket::get_pull_request(workspace, repo, *number, &auth).await?;
+            let diff = bitbucket::pull_request_diff(workspace, repo, *number, &auth).await?;
             let (repo_label, clone_url) = link_repo_coords(target, None);
             Ok(LinkPr { pr, diff, repo_label, clone_url })
         }
@@ -843,6 +1030,9 @@ fn link_review_workspace(
         }
         crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
             slugify(&format!("gitlab-{host}-{project}-{number}"))
+        }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
+            slugify(&format!("bitbucket-{workspace}-{repo}-{number}"))
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             slugify(&format!("azure-{org}-{project}-{repo}-{number}"))
@@ -935,6 +1125,11 @@ pub async fn review_pr_from_link(
         crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
             gitlab::list_pr_comment_threads(host, project, *number, &credential).await.unwrap_or_default()
         }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
+            bitbucket::list_pr_comment_threads(workspace, repo, *number, &bitbucket_link_auth(&credential))
+                .await
+                .unwrap_or_default()
+        }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             ado::list_pr_comment_threads(org, project, repo, *number, &credential).await.unwrap_or_default()
         }
@@ -1001,6 +1196,9 @@ pub async fn pr_link_pull_request(db: State<'_, Db>, url: String) -> Result<ado:
         crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
             gitlab::get_merge_request(host, project, *number, &credential).await
         }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
+            bitbucket::get_pull_request(workspace, repo, *number, &bitbucket_link_auth(&credential)).await
+        }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             Ok(ado::get_pull_request(org, project, repo, *number, &credential).await?.summary)
         }
@@ -1018,6 +1216,9 @@ pub async fn pr_link_comment_threads(db: State<'_, Db>, url: String) -> Result<V
         }
         crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
             gitlab::list_pr_comment_threads(host, project, *number, &credential).await
+        }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
+            bitbucket::list_pr_comment_threads(workspace, repo, *number, &bitbucket_link_auth(&credential)).await
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             ado::list_pr_comment_threads(org, project, repo, *number, &credential).await
@@ -1037,20 +1238,7 @@ pub async fn pr_link_resolve_comment_thread(
     wont_fix: bool,
 ) -> Result<ThreadCloseOutcome, String> {
     let (target, credential) = link_credentials(&db, &url)?;
-    let (host, pr_id) = match &target {
-        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => (
-            ThreadHost::GitHub { host, owner, repo, token: &credential },
-            *number,
-        ),
-        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => (
-            ThreadHost::GitLab { host, project, token: &credential },
-            *number,
-        ),
-        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => (
-            ThreadHost::Azure { org, project, repo, pat: &credential },
-            *number,
-        ),
-    };
+    let (host, pr_id) = link_host(&target, &credential);
     reply_and_close_thread(host, pr_id, thread_id, body.as_deref(), wont_fix).await
 }
 
@@ -1065,6 +1253,9 @@ pub async fn pr_link_decision(db: State<'_, Db>, url: String) -> Result<String, 
         }
         crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
             gitlab::viewer_decision(host, project, *number, &credential).await
+        }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
+            bitbucket::viewer_decision(workspace, repo, *number, &bitbucket_link_auth(&credential)).await
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             ado::viewer_decision(org, project, repo, *number, &credential).await
@@ -1115,6 +1306,11 @@ pub async fn act_on_pr_link(
             }?;
             (gitlab::get_merge_request(host, project, *number, &credential).await?, None)
         }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
+            let auth = bitbucket_link_auth(&credential);
+            bitbucket_decide(workspace, repo, *number, &action, &comment, &auth).await?;
+            (bitbucket::get_pull_request(workspace, repo, *number, &auth).await?, None)
+        }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             match action.as_str() {
                 "approve" => ado::set_reviewer_vote(org, project, repo, *number, 10, &credential).await,
@@ -1154,9 +1350,10 @@ pub async fn act_on_pr_link(
 
 /// Posts the selected findings of a repo-less review onto the pull request, addressed by link.
 ///
-/// Unlike [`post_pr_review_comment`] there is no saved run to reconcile against — a review with
-/// no project has nowhere to keep its memory — so every finding opens a fresh thread instead of
-/// continuing the one it opened last time. Every item is attempted even if one fails.
+/// Unlike [`publish_pr_review`] there is no saved run to reconcile against — a review with no
+/// project has nowhere to keep its memory — so every finding opens a fresh thread instead of
+/// continuing the one it opened last time. Every item is attempted even if one fails, and the
+/// outcome says which landed (the panel keeps those out of a retry).
 #[tauri::command]
 pub async fn post_pr_link_review_comment(
     db: State<'_, Db>,
@@ -1164,99 +1361,11 @@ pub async fn post_pr_link_review_comment(
     items: Vec<PostFindingItem>,
     post_summary: bool,
     summary: Option<String>,
-) -> Result<(), String> {
+) -> Result<PublishOutcome, String> {
     let (target, credential) = link_credentials(&db, &url)?;
-    let mut failures: Vec<String> = Vec::new();
-
-    match &target {
-        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
-            for (i, item) in items.iter().enumerate() {
-                // The anchored form reads the merge request's diff refs itself, and falls back to a
-                // plain note when the location can't be anchored — same shape as the GitHub arm.
-                let posted = match &item.location {
-                    Some(loc) => gitlab::post_pr_comment_anchored(
-                        host, project, *number, &item.content, &loc.file, loc.start_line, loc.end_line, &credential,
-                    )
-                    .await
-                    .map(|_| ()),
-                    None => gitlab::post_pr_comment(host, project, *number, &item.content, &credential)
-                        .await
-                        .map(|_| ()),
-                };
-                if let Err(e) = posted {
-                    failures.push(format!("#{}: {e}", i + 1));
-                }
-            }
-            if post_summary {
-                if let Some(text) = &summary {
-                    if let Err(e) = gitlab::post_pr_comment(host, project, *number, text, &credential).await {
-                        failures.push(format!("summary: {e}"));
-                    }
-                }
-            }
-        }
-        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
-            let head_sha = if items.iter().any(|it| it.location.is_some()) {
-                github::head_sha_for(host, owner, repo, *number, &credential).await.ok()
-            } else {
-                None
-            };
-            for (i, item) in items.iter().enumerate() {
-                let posted = match (&item.location, &head_sha) {
-                    (Some(loc), Some(sha)) => github::post_pr_comment_anchored(
-                        host, owner, repo, *number, &item.content, &loc.file, loc.start_line, loc.end_line, sha,
-                        &credential,
-                    )
-                    .await
-                    .map(|_| ()),
-                    _ => github::post_pr_comment(host, owner, repo, *number, &item.content, &credential)
-                        .await
-                        .map(|_| ()),
-                };
-                if let Err(e) = posted {
-                    failures.push(format!("#{}: {e}", i + 1));
-                }
-            }
-            if post_summary {
-                if let Some(s) = &summary {
-                    if let Err(e) = github::post_pr_comment(host, owner, repo, *number, s, &credential).await {
-                        failures.push(format!("summary: {e}"));
-                    }
-                }
-            }
-        }
-        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
-            // The link may carry GUIDs; the thread endpoints take either, so they're used as-is.
-            for (i, item) in items.iter().enumerate() {
-                let posted = match &item.location {
-                    Some(loc) => ado::post_pr_comment_anchored(
-                        org, project, repo, *number, &item.content, &loc.file, loc.start_line, loc.end_line,
-                        &credential,
-                    )
-                    .await
-                    .map(|_| ()),
-                    None => ado::post_pr_comment(org, project, repo, *number, &item.content, &credential)
-                        .await
-                        .map(|_| ()),
-                };
-                if let Err(e) = posted {
-                    failures.push(format!("#{}: {e}", i + 1));
-                }
-            }
-            if post_summary {
-                if let Some(s) = &summary {
-                    if let Err(e) = ado::post_pr_comment(org, project, repo, *number, s, &credential).await {
-                        failures.push(format!("summary: {e}"));
-                    }
-                }
-            }
-        }
-    }
-
-    if !failures.is_empty() {
-        return Err(format!("{} comment(s) failed to post — {}", failures.len(), failures.join("; ")));
-    }
-    Ok(())
+    let (host, number) = link_host(&target, &credential);
+    // The link may carry GUIDs on Azure; the thread endpoints take either, so they're used as-is.
+    Ok(publish_to_host(&host, number, &items, &mut [], None, post_summary, summary.as_deref()).await)
 }
 
 /// A drafted PR title + body, produced by the AI from the branch diff. The frontend fills the
@@ -1381,6 +1490,13 @@ pub async fn create_pull_request(
             )
             .await
         }
+        LinkedRepo::Bitbucket { workspace, repo } => {
+            let auth = bitbucket_auth(&workspace)?;
+            bitbucket::create_pull_request(
+                &workspace, &repo, &title, &description, &source_branch, &target_branch, draft, &auth,
+            )
+            .await
+        }
     }
 }
 
@@ -1428,20 +1544,27 @@ pub async fn list_pr_comment_threads(
             let token = gitlab_token(&host)?;
             gitlab::list_pr_comment_threads(&host, &path, pr_id, &token).await
         }
+        LinkedRepo::Bitbucket { workspace, repo } => {
+            let auth = bitbucket_auth(&workspace)?;
+            bitbucket::list_pr_comment_threads(&workspace, &repo, pr_id, &auth).await
+        }
     }
 }
 
 /// Azure DevOps' thread status for "this was fixed" — what its own **Resolve** button sets.
 const THREAD_FIXED: i32 = 2;
 
-/// One host's coordinates for acting on a single comment thread, with the credential already
-/// resolved. Exists so [`reply_and_close_thread`] is written once and both callers — the
-/// project-backed command and its link-only twin, which reach their credentials by different
+/// One host's coordinates for acting on a pull request — its threads, a publish, a merge, its checks
+/// — with the credential already resolved. Exists so each of those is written once and both callers
+/// — the project-backed command and its link-only twin, which reach their credentials by different
 /// routes — share the same behaviour instead of two drifting copies.
 enum ThreadHost<'a> {
     Azure { org: &'a str, project: &'a str, repo: &'a str, pat: &'a str },
     GitHub { host: &'a str, owner: &'a str, repo: &'a str, token: &'a str },
     GitLab { host: &'a str, project: &'a str, token: &'a str },
+    /// The credential owned rather than borrowed: it is read back from the one keychain string the
+    /// other hosts' tokens travel as, see [`bitbucket_link_auth`].
+    Bitbucket { workspace: &'a str, repo: &'a str, auth: bitbucket::BitbucketAuth },
 }
 
 /// What closing a conversation from CodeFlow actually managed to do.
@@ -1510,6 +1633,16 @@ async fn reply_and_close_thread(
                     gitlab::post_pr_comment(host, project, pr_id, text, token).await?;
                 }
             }
+            ThreadHost::Bitbucket { workspace, repo, auth } => {
+                // A reply names its parent; should Bitbucket refuse it (the thread was deleted),
+                // the words still reach the pull request as a comment of their own.
+                if bitbucket::reply_pr_comment(workspace, repo, pr_id, thread_id, text, auth)
+                    .await
+                    .is_err()
+                {
+                    bitbucket::post_pr_comment(workspace, repo, pr_id, text, auth).await?;
+                }
+            }
         }
         replied = true;
     }
@@ -1526,6 +1659,11 @@ async fn reply_and_close_thread(
         // refusal comes back in the outcome rather than being swallowed as a silent success.
         ThreadHost::GitLab { host, project, token } => {
             gitlab::resolve_discussion_for_note(host, project, pr_id, thread_id, token).await
+        }
+        // Resolved from the thread's root, which is what `thread_id` is; Bitbucket has one resolved
+        // state, so `wont_fix` only shapes the reply, as on GitHub and GitLab.
+        ThreadHost::Bitbucket { workspace, repo, auth } => {
+            bitbucket::resolve_comment_thread(workspace, repo, pr_id, thread_id, auth).await
         }
     };
 
@@ -1572,6 +1710,11 @@ pub async fn resolve_pr_comment_thread(
         LinkedRepo::GitLab { host, project: path } => {
             let token = gitlab_token(&host)?;
             let target = ThreadHost::GitLab { host: &host, project: &path, token: &token };
+            reply_and_close_thread(target, pr_id, thread_id, body.as_deref(), wont_fix).await
+        }
+        LinkedRepo::Bitbucket { workspace, repo } => {
+            let auth = bitbucket_auth(&workspace)?;
+            let target = ThreadHost::Bitbucket { workspace: &workspace, repo: &repo, auth };
             reply_and_close_thread(target, pr_id, thread_id, body.as_deref(), wont_fix).await
         }
     }
@@ -1729,6 +1872,11 @@ pub async fn discard_pr_finding(
                 gitlab::reply_pr_comment(host, path, pr_id, thread_id, &cuerpo, &token).await?;
                 gitlab::resolve_discussion_for_note(host, path, pr_id, thread_id, &token).await
             }
+            LinkedRepo::Bitbucket { workspace, repo } => {
+                let auth = bitbucket_auth(workspace)?;
+                bitbucket::reply_pr_comment(workspace, repo, pr_id, thread_id, &cuerpo, &auth).await?;
+                bitbucket::resolve_comment_thread(workspace, repo, pr_id, thread_id, &auth).await
+            }
         }
     }
     .await;
@@ -1787,24 +1935,10 @@ pub async fn review_pull_request(
     };
     let blocking = crate::review::contract::blocking_severities(&engine_config);
 
-    let prs = match &link {
-        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
-            let pat = pat_for_org(org)?;
-            ado::list_pull_requests(org, ado_project, repo_id, &pat).await?
-        }
-        LinkedRepo::GitHub { host, owner, repo } => {
-            let token = github_token(host)?;
-            github::list_pull_requests(host, owner, repo, &token).await?
-        }
-        LinkedRepo::GitLab { host, project: path } => {
-            let token = gitlab_token(host)?;
-            gitlab::list_merge_requests(host, path, &token).await?
-        }
-    };
-    let pr = prs
-        .into_iter()
-        .find(|p| p.id == pr_id)
-        .ok_or_else(|| "Pull request not found".to_string())?;
+    // Read directly by number. It used to be looked up inside one page of the list — the newest
+    // hundred of every state — so an open pull request old enough to have scrolled off it failed
+    // with "Pull request not found" and could not be reviewed at all.
+    let pr = fetch_linked_pull_request(&link, pr_id).await?;
 
     // Best-effort — if the fetch fails (offline, auth hiccup) we still try to diff
     // against whatever refs are already local rather than blocking the review outright.
@@ -1835,7 +1969,8 @@ pub async fn review_pull_request(
                 Err(_) => pr.source_branch.clone(),
             }
         }
-        LinkedRepo::Azure { .. } => pr.source_branch.clone(),
+        // Neither publishes a ref for a pull request's head, so the source branch it is.
+        LinkedRepo::Azure { .. } | LinkedRepo::Bitbucket { .. } => pr.source_branch.clone(),
     };
 
     // The head commit this review will run against, when this PR was last reviewed, and what that
@@ -1896,6 +2031,15 @@ pub async fn review_pull_request(
                 // The username, which is exactly what GitLab puts in a note's `author.username` —
                 // the comparison `comments_since` makes to tell our own comments from a reviewer's.
                 gitlab::get_authenticated_user(host, &token).await.ok(),
+            ),
+            Err(_) => (Vec::new(), None),
+        },
+        LinkedRepo::Bitbucket { workspace, repo } => match bitbucket_auth(workspace) {
+            Ok(auth) => (
+                bitbucket::list_pr_comment_threads(workspace, repo, pr_id, &auth).await.unwrap_or_default(),
+                // The display name, which is what a comment's author carries. An access token has
+                // no account to name, which only costs `comments_since` its precision.
+                bitbucket::get_authenticated_user(&auth).await.ok().map(|u| u.display_name).filter(|n| !n.is_empty()),
             ),
             Err(_) => (Vec::new(), None),
         },
@@ -2254,17 +2398,19 @@ fn finalize_review(
         (first, None)
     };
 
-    // Carry the reconciled identity back onto the full findings, by the same key reconciliation
-    // matched on. A finding with no counterpart in the memory cannot happen (every one was
-    // projected into it), but if it ever did, leaving it as it came is better than dropping it.
-    for finding in findings.iter_mut() {
-        let key = finding.identity();
-        let Some(stored) = remembered
-            .iter()
-            .find(|m| mem::finding_identity(m.archivo.as_deref(), &m.categoria) == key)
-        else {
-            continue;
-        };
+    // Carry the reconciled identity back onto the full findings — **by position**: `reconcile`
+    // returns `current[i]` as its `merged[i]`, and on a first review the memory *is* the projection,
+    // in order. It used to be by file + category, which two findings of one category in one file
+    // share: both came out as the first one's `F-NNN`, and the second's comment was stored against
+    // the other's id.
+    //
+    // The comment body each finding would be published as is rendered in the same pass, stored
+    // alongside it. Here rather than in `to_memory` because only now are the ids the reconciled ones,
+    // and the id is in the heading. The `remembered` entries past `findings.len()` were carried
+    // forward from an earlier run — not re-rendered, so they keep whatever body they were stored with
+    // (empty, for a run written before this existed).
+    debug_assert!(remembered.len() >= findings.len(), "reconciliation keeps every current finding");
+    for (finding, stored) in findings.iter_mut().zip(remembered.iter_mut()) {
         finding.id = stored.id.clone();
         finding.estado = stored.estado.clone();
         finding.thread_id = stored.thread_id;
@@ -2272,22 +2418,9 @@ fn finalize_review(
         finding.resuelto_en_iter = stored.resuelto_en_iter;
         finding.motivo_descarte = stored.motivo_descarte.clone();
         finding.delta = stored.delta.clone();
+        stored.comentario_md = render::comment_markdown(finding);
     }
     crate::review::merge::sort(&mut findings);
-
-    // The comment body each finding would be published as, stored alongside it.
-    //
-    // Here rather than in `to_memory` because only now are the ids the reconciled ones, and the id
-    // is in the heading. Keyed the same way the carry-back above is, so a finding and its comment
-    // cannot end up describing different defects. A `remembered` entry with no counterpart in
-    // `findings` is one carried forward from an earlier run — it was not re-rendered, so it keeps
-    // whatever body it was stored with (empty, for a run written before this existed).
-    for stored in remembered.iter_mut() {
-        let key = mem::finding_identity(stored.archivo.as_deref(), &stored.categoria);
-        if let Some(finding) = findings.iter().find(|f| f.identity() == key) {
-            stored.comentario_md = render::comment_markdown(finding);
-        }
-    }
 
     let plan = &outcome.plan;
     let body = render::review_markdown(
@@ -2371,11 +2504,15 @@ pub struct CommentLocation {
     pub end_line: i64,
 }
 
-/// One human-selected finding to post. Identity (`file` + `category`) matches it back to the stored
-/// run finding so its thread is reused across re-reviews.
+/// One human-selected finding to post, matched back to its stored finding so its thread is reused
+/// across re-reviews — by `id` (see `review_memory::match_publish_item`), with `file` + `category`
+/// as the fallback for a client that sends none.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PostFindingItem {
+    /// The finding's `F-NNN`. Optional on the wire: the phone predates it.
+    #[serde(default)]
+    pub id: Option<String>,
     pub file: Option<String>,
     pub category: String,
     /// Full comment markdown, used when opening a new thread.
@@ -2383,13 +2520,142 @@ pub struct PostFindingItem {
     pub location: Option<CommentLocation>,
 }
 
+impl PostFindingItem {
+    fn key(&self) -> crate::review_memory::PublishKey<'_> {
+        crate::review_memory::PublishKey {
+            id: self.id.as_deref(),
+            file: self.file.as_deref().or(self.location.as_ref().map(|l| l.file.as_str())),
+            category: &self.category,
+            lines: self.location.as_ref().map(|l| {
+                let start = l.start_line.max(0) as u32;
+                (start, (l.end_line.max(0) as u32).max(start))
+            }),
+        }
+    }
+}
+
+/// What happened to one item of a publish.
+#[derive(Debug, Serialize)]
+pub struct PublishedItem {
+    /// The finding it was about, as stored (or as the item named it, when nothing stored matched).
+    pub id: Option<String>,
+    /// `opened` (a new thread) · `fallback` (a general comment naming the line — the host refused the
+    /// line itself) · `replied` ("sigue presente" on its thread) · `resolved` (a reply and the thread
+    /// closed) · `skipped` (already published in this iteration) · `failed`.
+    pub status: String,
+    pub error: Option<String>,
+}
+
+/// What a publish actually did, item by item. It used to be all or nothing — one failed comment made
+/// the whole call an error, and the panel said nothing had been posted while the threads that *had*
+/// been opened sat on the pull request (and in the memory).
+#[derive(Debug, Default, Serialize)]
+pub struct PublishOutcome {
+    pub items: Vec<PublishedItem>,
+    /// `None` when no summary was asked for.
+    pub summary_posted: Option<bool>,
+    pub summary_error: Option<String>,
+}
+
+impl PublishOutcome {
+    /// The all-or-nothing answer, for the callers that only know "worked / didn't" — the phone. It
+    /// still says what did land, so a partial publish never reads as nothing posted.
+    pub fn into_legacy(self) -> Result<(), String> {
+        let mut failures: Vec<String> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.status == "failed")
+            .map(|(n, item)| format!("#{}: {}", n + 1, item.error.clone().unwrap_or_default()))
+            .collect();
+        if let Some(error) = &self.summary_error {
+            failures.push(format!("summary: {error}"));
+        }
+        if failures.is_empty() {
+            return Ok(());
+        }
+        let posted = self.items.iter().filter(|item| !matches!(item.status.as_str(), "failed" | "skipped")).count();
+        Err(format!(
+            "{} comment(s) failed to post ({posted} posted) — {}",
+            failures.len(),
+            failures.join("; ")
+        ))
+    }
+}
+
+/// The body of a finding's comment when the host refused to anchor it to its line: the same comment,
+/// posted on the conversation, saying which line it is about — the location is the one thing the
+/// anchoring would have carried and the text doesn't.
+fn general_fallback_body(content: &str, location: &CommentLocation) -> String {
+    let lines = if location.end_line > location.start_line {
+        format!("{}-{}", location.start_line, location.end_line)
+    } else {
+        location.start_line.to_string()
+    };
+    format!(
+        "📍 `{}:{lines}` _(fuera del diff del pull request: publicado como comentario general)_\n\n{content}",
+        location.file.trim_start_matches('/')
+    )
+}
+
+/// The note a re-publish leaves on a finding's existing thread. On a general comment (which GitHub
+/// cannot reply to) it is a comment of its own, so it names the finding it is about.
+fn follow_up_text(azure: bool, resolved: bool, iter: usize, today: &str, finding: Option<&str>) -> String {
+    let about = finding.map(|id| format!("**{id}** — ")).unwrap_or_default();
+    match (azure, resolved) {
+        (true, true) => format!("✔️ _{about}Resuelto en la iteración {iter} — {today}. Marcado como fixed._"),
+        (true, false) => format!("➡️ _{about}Sigue presente en la iteración {iter} — {today}._"),
+        (false, true) => format!("✔️ {about}Resuelto en la iteración {iter} — {today}."),
+        (false, false) => format!("➡️ {about}Sigue presente en la iteración {iter} — {today}."),
+    }
+}
+
+/// Whether a finding was already written to in this iteration — opened, replied on or closed — so a
+/// second publish of the same run says nothing about it twice.
+fn already_published(finding: &crate::review_memory::MemoryFinding, iter: Option<usize>) -> bool {
+    iter.is_some() && finding.publicado_en_iter == iter
+}
+
+/// Records on the stored finding what a publish did to it: the thread it opened (and whether that is
+/// a general comment), and the iteration it was written in.
+fn record_published(
+    finding: &mut crate::review_memory::MemoryFinding,
+    iter: Option<usize>,
+    opened: Option<(i64, bool)>,
+) {
+    if let Some((thread, general)) = opened {
+        finding.thread_id = Some(thread);
+        finding.hilo_general = general;
+        if finding.estado == "abierto" {
+            finding.estado = "posteado".to_string();
+        }
+    }
+    finding.publicado_en_iter = iter;
+}
+
 /// Posts the human-selected findings to the PR, reconciling against what was already posted so a
 /// finding keeps ONE thread for the PR's whole life ("un hallazgo = un thread"): no thread yet →
 /// open a new (anchored) one; already posted and still present → a follow-up reply; now resolved →
-/// a reply plus its thread marked resolved/fixed. New thread ids are written back onto the run so a
-/// later re-post continues the same threads instead of duplicating. Works on both Azure DevOps
-/// (threads) and GitHub (review-comment replies + GraphQL thread resolve). Optionally posts a
-/// summary comment. Every item is attempted even if one fails.
+/// a reply plus its thread marked resolved/fixed. Thread ids are written back onto the run — every
+/// one that landed, even when others failed — so a later re-post continues the same threads instead
+/// of duplicating. Optionally posts a summary comment. Every item is attempted even if one fails,
+/// and the outcome says, item by item, what happened.
+#[tauri::command]
+pub async fn publish_pr_review(
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+    run_id: String,
+    items: Vec<PostFindingItem>,
+    post_summary: bool,
+    summary: Option<String>,
+) -> Result<PublishOutcome, String> {
+    publish_project_review(&db, &project_id, pr_id, &run_id, &items, post_summary, summary.as_deref()).await
+}
+
+/// [`publish_pr_review`] with the older all-or-nothing answer — kept, with its signature, for the
+/// phone, which calls it by name (`remotectl::dispatch`). A partial publish is an error here, one
+/// that says what did land.
 #[tauri::command]
 pub async fn post_pr_review_comment(
     db: State<'_, Db>,
@@ -2400,186 +2666,298 @@ pub async fn post_pr_review_comment(
     post_summary: bool,
     summary: Option<String>,
 ) -> Result<(), String> {
-    use crate::review_memory::finding_identity;
-    let project = load_project(&db, &project_id)?;
+    publish_project_review(&db, &project_id, pr_id, &run_id, &items, post_summary, summary.as_deref())
+        .await?
+        .into_legacy()
+}
+
+async fn publish_project_review(
+    db: &State<'_, Db>,
+    project_id: &str,
+    pr_id: i64,
+    run_id: &str,
+    items: &[PostFindingItem],
+    post_summary: bool,
+    summary: Option<&str>,
+) -> Result<PublishOutcome, String> {
+    let project = load_project(db, project_id)?;
     let link = linked_repo(&project)?;
 
     // Stored findings are the source of truth for existing thread ids / state.
-    let (mut findings, iter): (Vec<crate::review_memory::MemoryFinding>, i64) = {
+    let (mut findings, iter): (Vec<crate::review_memory::MemoryFinding>, usize) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        match queries::get_review_run(&conn, &run_id).map_err(|e| e.to_string())? {
-            Some(r) => (serde_json::from_str(&r.findings).unwrap_or_default(), r.iter),
+        match queries::get_review_run(&conn, run_id).map_err(|e| e.to_string())? {
+            Some(r) => (serde_json::from_str(&r.findings).unwrap_or_default(), r.iter.max(1) as usize),
             None => (Vec::new(), 1),
         }
     };
-    let index_of = |findings: &[crate::review_memory::MemoryFinding], item: &PostFindingItem| {
-        let key = finding_identity(item.file.as_deref(), &item.category);
-        findings
-            .iter()
-            .position(|f| finding_identity(f.archivo.as_deref(), &f.categoria) == key)
-    };
 
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let mut failures = Vec::new();
+    let credential = link_credential(&link)?;
+    let host = linked_host(&link, &credential);
+    let outcome = publish_to_host(&host, pr_id, items, &mut findings, Some(iter), post_summary, summary).await;
 
-    match &link {
-        LinkedRepo::GitLab { host, project: path } => {
-            let token = gitlab_token(host)?;
-            for (i, item) in items.iter().enumerate() {
-                let idx = index_of(&findings, item);
-                // The *note* id of the discussion this finding already owns, if it has one — the
-                // integer `MemoryFinding.thread_id` records, from which the client looks the
-                // discussion back up. See `gitlab::discussion_of_note`.
-                let note = idx.and_then(|k| findings[k].thread_id);
-                let resolved = idx.map(|k| findings[k].estado == "resuelto").unwrap_or(false);
-                let outcome = match note {
-                    None => match &item.location {
-                        Some(loc) => gitlab::post_pr_comment_anchored(
-                            host, path, pr_id, &item.content, &loc.file, loc.start_line, loc.end_line, &token,
-                        )
-                        .await
-                        .map(Some),
-                        None => gitlab::post_pr_comment(host, path, pr_id, &item.content, &token).await.map(Some),
-                    },
-                    Some(nid) => {
-                        let text = if resolved {
-                            format!("✔️ Resuelto en la iteración {iter} — {today}.")
-                        } else {
-                            format!("➡️ Sigue presente en la iteración {iter} — {today}.")
-                        };
-                        let r = gitlab::reply_pr_comment(host, path, pr_id, nid, &text, &token).await;
-                        if r.is_ok() && resolved {
-                            let _ = gitlab::resolve_discussion_for_note(host, path, pr_id, nid, &token).await;
-                        }
-                        r.map(|_| None)
-                    }
-                };
-                apply_post_outcome(&mut findings, idx, outcome, i, &mut failures);
-            }
-            if post_summary {
-                if let Some(text) = &summary {
-                    if let Err(e) = gitlab::post_pr_comment(host, path, pr_id, text, &token).await {
-                        failures.push(format!("summary: {e}"));
-                    }
-                }
-            }
-        }
-        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
-            let pat = pat_for_org(org)?;
-            for (i, item) in items.iter().enumerate() {
-                let idx = index_of(&findings, item);
-                let thread = idx.and_then(|k| findings[k].thread_id);
-                let resolved = idx.map(|k| findings[k].estado == "resuelto").unwrap_or(false);
-                let outcome = match thread {
-                    None => match &item.location {
-                        Some(loc) => ado::post_pr_comment_anchored(org, ado_project, repo_id, pr_id, &item.content, &loc.file, loc.start_line, loc.end_line, &pat)
-                            .await
-                            .map(Some),
-                        None => ado::post_pr_comment(org, ado_project, repo_id, pr_id, &item.content, &pat).await.map(Some),
-                    },
-                    Some(tid) => {
-                        let text = if resolved {
-                            format!("✔️ _Resuelto en la iteración {iter} — {today}. Marcado como fixed._")
-                        } else {
-                            format!("➡️ _Sigue presente en la iteración {iter} — {today}._")
-                        };
-                        let r = ado::reply_pr_thread(org, ado_project, repo_id, pr_id, tid, &text, &pat).await;
-                        if r.is_ok() && resolved {
-                            let _ =
-                                ado::set_pr_thread_status(org, ado_project, repo_id, pr_id, tid, THREAD_FIXED, &pat)
-                                    .await;
-                        }
-                        r.map(|_| None)
-                    }
-                };
-                apply_post_outcome(&mut findings, idx, outcome, i, &mut failures);
-            }
-            if post_summary {
-                if let Some(s) = &summary {
-                    if let Err(e) = ado::post_pr_comment(org, ado_project, repo_id, pr_id, s, &pat).await {
-                        failures.push(format!("summary: {e}"));
-                    }
-                }
-            }
-        }
-        LinkedRepo::GitHub { host, owner, repo } => {
-            let token = github_token(host)?;
-            let head_sha = if items.iter().any(|it| it.location.is_some()) {
-                github::head_sha_for(host, owner, repo, pr_id, &token).await.ok()
-            } else {
-                None
-            };
-            for (i, item) in items.iter().enumerate() {
-                let idx = index_of(&findings, item);
-                let comment = idx.and_then(|k| findings[k].thread_id);
-                let resolved = idx.map(|k| findings[k].estado == "resuelto").unwrap_or(false);
-                let outcome = match comment {
-                    None => match (&item.location, &head_sha) {
-                        (Some(loc), Some(sha)) => github::post_pr_comment_anchored(host, owner, repo, pr_id, &item.content, &loc.file, loc.start_line, loc.end_line, sha, &token)
-                            .await
-                            .map(Some),
-                        _ => github::post_pr_comment(host, owner, repo, pr_id, &item.content, &token).await.map(Some),
-                    },
-                    Some(cid) => {
-                        let text = if resolved {
-                            format!("✔️ Resuelto en la iteración {iter} — {today}.")
-                        } else {
-                            format!("➡️ Sigue presente en la iteración {iter} — {today}.")
-                        };
-                        let r = github::reply_pr_review_comment(host, owner, repo, pr_id, cid, &text, &token).await;
-                        if r.is_ok() && resolved {
-                            let _ = github::resolve_review_thread_for_comment(host, owner, repo, pr_id, cid, &token).await;
-                        }
-                        r.map(|_| None)
-                    }
-                };
-                apply_post_outcome(&mut findings, idx, outcome, i, &mut failures);
-            }
-            if post_summary {
-                if let Some(s) = &summary {
-                    if let Err(e) = github::post_pr_comment(host, owner, repo, pr_id, s, &token).await {
-                        failures.push(format!("summary: {e}"));
-                    }
-                }
-            }
-        }
-    }
-
-    // Write back the thread ids / states we just changed.
+    // Write back the thread ids / states just changed — before anything else can fail: a thread that
+    // exists on the pull request and not in the memory is how the next publish opens a duplicate.
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let json = serde_json::to_string(&findings).unwrap_or_else(|_| "[]".to_string());
-        let _ = queries::set_review_run_findings(&conn, &run_id, &json);
+        let _ = queries::set_review_run_findings(&conn, run_id, &json);
     }
-
-    if !failures.is_empty() {
-        return Err(format!("{} comment(s) failed to post — {}", failures.len(), failures.join("; ")));
-    }
-    Ok(())
+    Ok(outcome)
 }
 
-/// Applies the result of posting one item to the stored finding: `Ok(Some(id))` means a new thread
-/// was opened (record its id + mark posted); `Ok(None)` means a reply on an existing thread (no id
-/// change); `Err` is collected. Keeps the per-provider loops small.
-fn apply_post_outcome(
+/// The credential a linked repository's host takes.
+fn link_credential(link: &LinkedRepo) -> Result<String, String> {
+    match link {
+        LinkedRepo::Azure { org, .. } => pat_for_org(org),
+        LinkedRepo::GitHub { host, .. } => github_token(host),
+        LinkedRepo::GitLab { host, .. } => gitlab_token(host),
+        // The whole credential as one string, so it can travel where the others' tokens do.
+        LinkedRepo::Bitbucket { workspace, .. } => bitbucket_auth(workspace).map(|auth| auth.to_secret()),
+    }
+}
+
+/// A Bitbucket credential back out of the string [`link_credential`] and [`link_credentials`] carry
+/// it as. That string is always `BitbucketAuth::to_secret`'s, so this cannot fail in practice; a
+/// value that somehow isn't is read as a bare access token, the reading `from_secret` gives one.
+fn bitbucket_link_auth(credential: &str) -> bitbucket::BitbucketAuth {
+    bitbucket::BitbucketAuth::from_secret(credential)
+        .unwrap_or_else(|| bitbucket::BitbucketAuth::AccessToken { token: credential.to_string() })
+}
+
+/// A linked repository as the host operations below address it.
+fn linked_host<'a>(link: &'a LinkedRepo, credential: &'a str) -> ThreadHost<'a> {
+    match link {
+        LinkedRepo::Azure { org, project, repo_id } => ThreadHost::Azure { org, project, repo: repo_id, pat: credential },
+        LinkedRepo::GitHub { host, owner, repo } => ThreadHost::GitHub { host, owner, repo, token: credential },
+        LinkedRepo::GitLab { host, project } => ThreadHost::GitLab { host, project, token: credential },
+        LinkedRepo::Bitbucket { workspace, repo } => {
+            ThreadHost::Bitbucket { workspace, repo, auth: bitbucket_link_auth(credential) }
+        }
+    }
+}
+
+/// A pasted link's pull request as the host operations below address it, with its number.
+fn link_host<'a>(target: &'a crate::pr_link::PrLinkTarget, credential: &'a str) -> (ThreadHost<'a>, i64) {
+    match target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            (ThreadHost::GitHub { host, owner, repo, token: credential }, *number)
+        }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            (ThreadHost::GitLab { host, project, token: credential }, *number)
+        }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
+            (ThreadHost::Bitbucket { workspace, repo, auth: bitbucket_link_auth(credential) }, *number)
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            (ThreadHost::Azure { org, project, repo, pat: credential }, *number)
+        }
+    }
+}
+
+impl ThreadHost<'_> {
+    /// Opens a thread anchored to a file and line; returns its id. On GitHub the head commit it is
+    /// anchored to has to be supplied (`github_head`).
+    async fn open_anchored(
+        &self,
+        pr_id: i64,
+        content: &str,
+        loc: &CommentLocation,
+        github_head: Option<&str>,
+    ) -> Result<i64, String> {
+        match self {
+            ThreadHost::Azure { org, project, repo, pat } => {
+                ado::post_pr_comment_anchored(org, project, repo, pr_id, content, &loc.file, loc.start_line, loc.end_line, pat)
+                    .await
+            }
+            ThreadHost::GitHub { host, owner, repo, token } => {
+                let sha = github_head.ok_or_else(|| "GitHub didn't report a head commit for this pull request".to_string())?;
+                github::post_pr_comment_anchored(host, owner, repo, pr_id, content, &loc.file, loc.start_line, loc.end_line, sha, token)
+                    .await
+            }
+            ThreadHost::GitLab { host, project, token } => {
+                gitlab::post_pr_comment_anchored(host, project, pr_id, content, &loc.file, loc.start_line, loc.end_line, token)
+                    .await
+            }
+            ThreadHost::Bitbucket { workspace, repo, auth } => {
+                bitbucket::post_pr_comment_anchored(workspace, repo, pr_id, content, &loc.file, loc.start_line, loc.end_line, auth)
+                    .await
+            }
+        }
+    }
+
+    /// Whether an anchoring failure means "not on that line" — worth retrying as a general comment —
+    /// rather than a failure of the request itself. Azure anchors to any line, so never there.
+    fn refused_the_line(&self, error: &str) -> bool {
+        match self {
+            ThreadHost::Azure { .. } => false,
+            ThreadHost::GitHub { .. } => github::is_unanchorable(error),
+            ThreadHost::GitLab { .. } => gitlab::is_unanchorable(error),
+            ThreadHost::Bitbucket { .. } => bitbucket::is_unanchorable(error),
+        }
+    }
+
+    /// Posts a comment on the conversation, not on any line; returns its id.
+    async fn open_general(&self, pr_id: i64, content: &str) -> Result<i64, String> {
+        match self {
+            ThreadHost::Azure { org, project, repo, pat } => ado::post_pr_comment(org, project, repo, pr_id, content, pat).await,
+            ThreadHost::GitHub { host, owner, repo, token } => github::post_pr_comment(host, owner, repo, pr_id, content, token).await,
+            ThreadHost::GitLab { host, project, token } => gitlab::post_pr_comment(host, project, pr_id, content, token).await,
+            ThreadHost::Bitbucket { workspace, repo, auth } => bitbucket::post_pr_comment(workspace, repo, pr_id, content, auth).await,
+        }
+    }
+
+    /// Adds `text` to an existing thread. A GitHub general comment has no reply chain, so there it is
+    /// a new comment — which is also the fallback when a reply is refused, rather than losing it.
+    async fn follow_up(&self, pr_id: i64, thread: i64, text: &str, general: bool) -> Result<(), String> {
+        match self {
+            ThreadHost::Azure { org, project, repo, pat } => ado::reply_pr_thread(org, project, repo, pr_id, thread, text, pat).await,
+            ThreadHost::GitHub { host, owner, repo, token } => {
+                if !general && github::reply_pr_review_comment(host, owner, repo, pr_id, thread, text, token).await.is_ok() {
+                    return Ok(());
+                }
+                github::post_pr_comment(host, owner, repo, pr_id, text, token).await.map(|_| ())
+            }
+            ThreadHost::GitLab { host, project, token } => {
+                if gitlab::reply_pr_comment(host, project, pr_id, thread, text, token).await.is_ok() {
+                    return Ok(());
+                }
+                gitlab::post_pr_comment(host, project, pr_id, text, token).await.map(|_| ())
+            }
+            // Every Bitbucket comment can be replied to, general or inline — the fallback is only for
+            // a thread that has gone.
+            ThreadHost::Bitbucket { workspace, repo, auth } => {
+                if bitbucket::reply_pr_comment(workspace, repo, pr_id, thread, text, auth).await.is_ok() {
+                    return Ok(());
+                }
+                bitbucket::post_pr_comment(workspace, repo, pr_id, text, auth).await.map(|_| ())
+            }
+        }
+    }
+
+    /// Closes a thread as fixed.
+    async fn close_as_fixed(&self, pr_id: i64, thread: i64) -> Result<(), String> {
+        match self {
+            ThreadHost::Azure { org, project, repo, pat } => {
+                ado::set_pr_thread_status(org, project, repo, pr_id, thread, THREAD_FIXED, pat).await
+            }
+            ThreadHost::GitHub { host, owner, repo, token } => {
+                github::resolve_review_thread_for_comment(host, owner, repo, pr_id, thread, token).await
+            }
+            ThreadHost::GitLab { host, project, token } => {
+                gitlab::resolve_discussion_for_note(host, project, pr_id, thread, token).await
+            }
+            ThreadHost::Bitbucket { workspace, repo, auth } => {
+                bitbucket::resolve_comment_thread(workspace, repo, pr_id, thread, auth).await
+            }
+        }
+    }
+}
+
+/// Publishes `items` (and the summary) on one host, updating `findings` — the run's memory, empty
+/// for a review reached by link — as it goes. `iter` is the run's iteration, `None` without memory.
+async fn publish_to_host(
+    host: &ThreadHost<'_>,
+    pr_id: i64,
+    items: &[PostFindingItem],
     findings: &mut [crate::review_memory::MemoryFinding],
-    idx: Option<usize>,
-    outcome: Result<Option<i64>, String>,
-    i: usize,
-    failures: &mut Vec<String>,
-) {
-    match outcome {
-        Ok(Some(new_thread)) => {
-            if let Some(k) = idx {
-                findings[k].thread_id = Some(new_thread);
-                if findings[k].estado == "abierto" {
-                    findings[k].estado = "posteado".to_string();
+    iter: Option<usize>,
+    post_summary: bool,
+    summary: Option<&str>,
+) -> PublishOutcome {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let azure = matches!(host, ThreadHost::Azure { .. });
+    // GitHub anchors a comment to a commit, read fresh once per publish. Without it every anchored
+    // item goes out as a general comment naming its line, which beats not going out at all.
+    let github_head = match host {
+        ThreadHost::GitHub { host: gh, owner, repo, token } if items.iter().any(|item| item.location.is_some()) => {
+            github::head_sha_for(gh, owner, repo, pr_id, token).await.ok()
+        }
+        _ => None,
+    };
+
+    let mut claimed = vec![false; findings.len()];
+    let mut outcome = PublishOutcome::default();
+    for item in items {
+        let idx = crate::review_memory::match_publish_item(findings, &item.key(), &claimed);
+        if let Some(k) = idx {
+            claimed[k] = true;
+        }
+        let id = idx.map(|k| findings[k].id.clone()).or_else(|| item.id.clone());
+        if idx.is_some_and(|k| already_published(&findings[k], iter)) {
+            outcome.items.push(PublishedItem { id, status: "skipped".to_string(), error: None });
+            continue;
+        }
+
+        let existing = idx.and_then(|k| findings[k].thread_id.map(|thread| (thread, findings[k].hilo_general)));
+        let (status, result) = match existing {
+            None => {
+                let opened = match &item.location {
+                    Some(loc) if !(matches!(host, ThreadHost::GitHub { .. }) && github_head.is_none()) => {
+                        match host.open_anchored(pr_id, &item.content, loc, github_head.as_deref()).await {
+                            Ok(thread) => Ok((thread, false, "opened")),
+                            Err(e) if host.refused_the_line(&e) => host
+                                .open_general(pr_id, &general_fallback_body(&item.content, loc))
+                                .await
+                                .map(|thread| (thread, true, "fallback")),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Some(loc) => host
+                        .open_general(pr_id, &general_fallback_body(&item.content, loc))
+                        .await
+                        .map(|thread| (thread, true, "fallback")),
+                    None => host.open_general(pr_id, &item.content).await.map(|thread| (thread, true, "opened")),
+                };
+                match opened {
+                    Ok((thread, general, status)) => {
+                        if let Some(k) = idx {
+                            record_published(&mut findings[k], iter, Some((thread, general)));
+                        }
+                        (status, Ok(()))
+                    }
+                    Err(e) => ("failed", Err(e)),
+                }
+            }
+            Some((thread, general)) => {
+                let k = idx.expect("a thread comes from a stored finding");
+                let resolved = findings[k].estado == "resuelto";
+                let about = (general && !azure).then_some(findings[k].id.as_str());
+                let text = follow_up_text(azure, resolved, iter.unwrap_or(1), &today, about);
+                match host.follow_up(pr_id, thread, &text, general).await {
+                    Ok(()) => {
+                        record_published(&mut findings[k], iter, None);
+                        // Azure closes any thread; GitHub and GitLab cannot resolve a general comment.
+                        if resolved && (azure || !general) {
+                            // The reply stands either way; a thread the host won't close stays open,
+                            // and the outcome says so rather than reporting it closed.
+                            match host.close_as_fixed(pr_id, thread).await {
+                                Ok(()) => ("resolved", Ok(())),
+                                Err(e) => ("replied", Err(e)),
+                            }
+                        } else {
+                            ("replied", Ok(()))
+                        }
+                    }
+                    Err(e) => ("failed", Err(e)),
+                }
+            }
+        };
+        outcome.items.push(PublishedItem { id, status: status.to_string(), error: result.err() });
+    }
+
+    if post_summary {
+        if let Some(text) = summary {
+            match host.open_general(pr_id, text).await {
+                Ok(_) => outcome.summary_posted = Some(true),
+                Err(e) => {
+                    outcome.summary_posted = Some(false);
+                    outcome.summary_error = Some(e);
                 }
             }
         }
-        Ok(None) => {}
-        Err(e) => failures.push(format!("#{}: {e}", i + 1)),
     }
+    outcome
 }
 
 /// The decision the signed-in user has already recorded on a pull request — `"approved"` |
@@ -2601,6 +2979,32 @@ pub async fn pr_review_decision(db: State<'_, Db>, project_id: String, pr_id: i6
             let token = gitlab_token(&host)?;
             gitlab::viewer_decision(&host, &path, pr_id, &token).await
         }
+        LinkedRepo::Bitbucket { workspace, repo } => {
+            let auth = bitbucket_auth(&workspace)?;
+            bitbucket::viewer_decision(&workspace, &repo, pr_id, &auth).await
+        }
+    }
+}
+
+/// A decision on a Bitbucket pull request — the one mapping both `act_on_pull_request` and its
+/// link-only twin use, so the two cannot drift: approve, request changes (with the same default
+/// comment GitHub's review gets when none is typed), or decline, which is Bitbucket's close.
+async fn bitbucket_decide(
+    workspace: &str,
+    repo: &str,
+    pr_id: i64,
+    action: &str,
+    comment: &str,
+    auth: &bitbucket::BitbucketAuth,
+) -> Result<(), String> {
+    match action {
+        "approve" => bitbucket::submit_pr_review(workspace, repo, pr_id, "APPROVE", comment, auth).await,
+        "request_changes" => {
+            let text = if comment.trim().is_empty() { "Cambios solicitados desde CodeFlow." } else { comment };
+            bitbucket::submit_pr_review(workspace, repo, pr_id, "REQUEST_CHANGES", text, auth).await
+        }
+        "close" => bitbucket::decline_pull_request(workspace, repo, pr_id, auth).await,
+        other => Err(format!("unknown PR action: {other}")),
     }
 }
 
@@ -2681,6 +3085,11 @@ pub async fn act_on_pull_request(
             }?;
             gitlab::get_merge_request(host, path, pr_id, &token).await?
         }
+        LinkedRepo::Bitbucket { workspace, repo } => {
+            let auth = bitbucket_auth(workspace)?;
+            bitbucket_decide(workspace, repo, pr_id, &action, &comment, &auth).await?;
+            bitbucket::get_pull_request(workspace, repo, pr_id, &auth).await?
+        }
     };
 
     let job_id = uuid::Uuid::new_v4().to_string();
@@ -2703,6 +3112,229 @@ pub async fn act_on_pull_request(
     };
 
     Ok(PrActionOutcome { pr, activity })
+}
+
+
+// ---------------------------------------------------------------------------
+// Merging and checks
+// ---------------------------------------------------------------------------
+
+/// How the user asked for a pull request to be merged.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MergeChoice {
+    /// One of `MergeOptions::methods`.
+    pub method: String,
+    #[serde(default)]
+    pub delete_source_branch: bool,
+    /// GitLab only; `None` leaves it to the project.
+    #[serde(default)]
+    pub squash: Option<bool>,
+    /// Azure DevOps only.
+    #[serde(default)]
+    pub transition_work_items: Option<bool>,
+}
+
+/// A merge the host accepted, before it is filed anywhere.
+struct HostMerge {
+    pr: ado::PullRequestSummary,
+    /// False on Azure while a completion it accepted is still merging — requested, not refused.
+    merged: bool,
+    warning: Option<String>,
+}
+
+/// What a merge left behind: the pull request as the host now reports it, whether it is merged yet,
+/// anything that half-worked (a branch that couldn't be deleted), and the Activity row it was filed
+/// under.
+#[derive(Serialize)]
+pub struct PrMergeOutcome {
+    pub pr: ado::PullRequestSummary,
+    pub merged: bool,
+    pub warning: Option<String>,
+    pub activity: crate::db::models::JobHistoryEntry,
+}
+
+/// The same, for a pull request reached by link — its Activity row belongs to the workspace.
+#[derive(Serialize)]
+pub struct PrLinkMergeOutcome {
+    pub pr: ado::PullRequestSummary,
+    pub merged: bool,
+    pub warning: Option<String>,
+    pub activity: crate::db::models::WorkspaceActivityEntry,
+}
+
+async fn merge_options_on(host: &ThreadHost<'_>, pr_id: i64) -> Result<ado::MergeOptions, String> {
+    match host {
+        ThreadHost::Azure { org, project, repo, pat } => ado::merge_options(org, project, repo, pr_id, pat).await,
+        ThreadHost::GitHub { host, owner, repo, token } => github::merge_options(host, owner, repo, pr_id, token).await,
+        ThreadHost::GitLab { host, project, token } => gitlab::merge_options(host, project, pr_id, token).await,
+        ThreadHost::Bitbucket { workspace, repo, auth } => bitbucket::merge_options(workspace, repo, pr_id, auth).await,
+    }
+}
+
+/// Merges on the host. A refusal comes back as `ado::MERGE_BLOCKED_MARKER` + its kind, which the
+/// panel turns into a sentence about what to do.
+async fn merge_on(host: &ThreadHost<'_>, pr_id: i64, choice: &MergeChoice) -> Result<HostMerge, String> {
+    match host {
+        ThreadHost::Azure { org, project, repo, pat } => {
+            let done = ado::complete_pull_request(
+                org,
+                project,
+                repo,
+                pr_id,
+                &choice.method,
+                choice.delete_source_branch,
+                choice.transition_work_items.unwrap_or(true),
+                pat,
+            )
+            .await?;
+            Ok(HostMerge { pr: done.summary, merged: done.merged, warning: None })
+        }
+        ThreadHost::GitHub { host, owner, repo, token } => {
+            let done =
+                github::merge_pull_request(host, owner, repo, pr_id, &choice.method, choice.delete_source_branch, token)
+                    .await?;
+            Ok(HostMerge { merged: done.summary.status == "merged", pr: done.summary, warning: done.warning })
+        }
+        ThreadHost::GitLab { host, project, token } => {
+            let done =
+                gitlab::merge_merge_request(host, project, pr_id, choice.squash, choice.delete_source_branch, token).await?;
+            Ok(HostMerge { pr: done.summary, merged: done.merged, warning: None })
+        }
+        ThreadHost::Bitbucket { workspace, repo, auth } => {
+            let done =
+                bitbucket::merge_pull_request(workspace, repo, pr_id, &choice.method, choice.delete_source_branch, auth)
+                    .await?;
+            Ok(HostMerge { pr: done.summary, merged: done.merged, warning: None })
+        }
+    }
+}
+
+async fn checks_on(host: &ThreadHost<'_>, pr_id: i64) -> Result<ado::PrChecks, String> {
+    match host {
+        ThreadHost::Azure { org, project, repo, pat } => ado::pr_checks(org, project, repo, pr_id, pat).await,
+        ThreadHost::GitHub { host, owner, repo, token } => github::pr_checks(host, owner, repo, pr_id, token).await,
+        ThreadHost::GitLab { host, project, token } => gitlab::pr_checks(host, project, pr_id, token).await,
+        ThreadHost::Bitbucket { workspace, repo, auth } => bitbucket::pr_checks(workspace, repo, pr_id, auth).await,
+    }
+}
+
+/// The meta a merge's Activity row carries — the decision rows' shape plus how it was merged.
+fn merge_activity_meta(pr: &ado::PullRequestSummary, choice: &MergeChoice, merged: bool) -> serde_json::Value {
+    serde_json::json!({
+        "prId": pr.id,
+        "prTitle": pr.title,
+        "action": "merge",
+        "method": choice.method,
+        "deleteSourceBranch": choice.delete_source_branch,
+        // Azure completes in the background: the row says "requested" until the host says merged.
+        "queued": !merged,
+    })
+}
+
+/// How a pull request can be merged from here: the methods its host and repository allow, the
+/// branch and squash switches, and what the host says about merging it right now. Read when the user
+/// opens the merge step, never before — it is two requests nobody needs until then.
+#[tauri::command]
+pub async fn pr_merge_options(db: State<'_, Db>, project_id: String, pr_id: i64) -> Result<ado::MergeOptions, String> {
+    let project = load_project(&db, &project_id)?;
+    let link = linked_repo(&project)?;
+    let credential = link_credential(&link)?;
+    merge_options_on(&linked_host(&link, &credential), pr_id).await
+}
+
+/// Merges (on Azure DevOps: completes) a pull request and files it in Activity like any decision.
+#[tauri::command]
+pub async fn merge_pull_request(
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+    choice: MergeChoice,
+) -> Result<PrMergeOutcome, String> {
+    let project = load_project(&db, &project_id)?;
+    let link = linked_repo(&project)?;
+    let credential = link_credential(&link)?;
+    let done = merge_on(&linked_host(&link, &credential), pr_id, &choice).await?;
+
+    let label = format!("#{} {}", done.pr.id, done.pr.title);
+    let meta = merge_activity_meta(&done.pr, &choice, done.merged).to_string();
+    let activity = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::add_job_history(
+            &conn,
+            &uuid::Uuid::new_v4().to_string(),
+            &project_id,
+            "pr-action",
+            &label,
+            "done",
+            Some(&done.pr.url),
+            None,
+            &meta,
+        )
+        .map_err(|e| e.to_string())?
+    };
+    Ok(PrMergeOutcome { pr: done.pr, merged: done.merged, warning: done.warning, activity })
+}
+
+/// [`pr_merge_options`] for a pull request reached by link.
+#[tauri::command]
+pub async fn pr_link_merge_options(db: State<'_, Db>, url: String) -> Result<ado::MergeOptions, String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    let (host, number) = link_host(&target, &credential);
+    merge_options_on(&host, number).await
+}
+
+/// [`merge_pull_request`] for a pull request reached by link — filed in the workspace's Activity.
+#[tauri::command]
+pub async fn merge_pr_link(
+    db: State<'_, Db>,
+    url: String,
+    workspace_id: String,
+    choice: MergeChoice,
+) -> Result<PrLinkMergeOutcome, String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    let (host, number) = link_host(&target, &credential);
+    let done = merge_on(&host, number, &choice).await?;
+
+    // Azure hands back canonical names on the pull request's own URL only, so the label uses the
+    // coordinates the link carried — the same thing every other row of this session shows.
+    let (repo_label, clone_url) = link_repo_coords(&target, None);
+    let label = link_activity_label(&done.pr, &repo_label);
+    let meta = link_activity_meta(&url, &done.pr, &repo_label, &clone_url, merge_activity_meta(&done.pr, &choice, done.merged));
+    let activity = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::add_workspace_activity(
+            &conn,
+            &uuid::Uuid::new_v4().to_string(),
+            &workspace_id,
+            "pr-action",
+            &label,
+            "done",
+            Some(&done.pr.url),
+            None,
+            &meta,
+        )
+        .map_err(|e| e.to_string())?
+    };
+    Ok(PrLinkMergeOutcome { pr: done.pr, merged: done.merged, warning: done.warning, activity })
+}
+
+/// The checks on a pull request's head commit — GitHub check runs and statuses, GitLab's head
+/// pipeline and its jobs, Azure's PR statuses and branch-policy evaluations — in one shape.
+#[tauri::command]
+pub async fn pr_checks(db: State<'_, Db>, project_id: String, pr_id: i64) -> Result<ado::PrChecks, String> {
+    let project = load_project(&db, &project_id)?;
+    let link = linked_repo(&project)?;
+    let credential = link_credential(&link)?;
+    checks_on(&linked_host(&link, &credential), pr_id).await
+}
+
+/// [`pr_checks`] for a pull request reached by link.
+#[tauri::command]
+pub async fn pr_link_checks(db: State<'_, Db>, url: String) -> Result<ado::PrChecks, String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    let (host, number) = link_host(&target, &credential);
+    checks_on(&host, number).await
 }
 
 #[cfg(test)]
@@ -2796,5 +3428,171 @@ mod tests {
     fn an_unreadable_timestamp_does_not_trigger_a_review() {
         let threads = [thread(1, &[("Ana", "ayer por la tarde")])];
         assert_eq!(comments_since(&threads, Some("2026-07-31T10:00:00Z"), &ids(&[]), None), 0);
+    }
+
+    fn stored(id: &str, estado: &str, thread: Option<i64>) -> crate::review_memory::MemoryFinding {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "severity": "critical", "tipo": "Bug", "categoria": "npe", "subtitulo": "s",
+            "archivo": "src/a.ts", "lineas": "10", "confianza": 80, "estado": estado,
+            "thread_id": thread, "introducido_en_iter": 1
+        }))
+        .expect("a stored finding")
+    }
+
+    /// The phone sends items without an id; they still deserialize, and match by file and line.
+    #[test]
+    fn an_item_without_an_id_still_reads_and_keys_on_its_location() {
+        let item: PostFindingItem = serde_json::from_value(serde_json::json!({
+            "file": null, "category": "npe", "content": "…",
+            "location": { "file": "src/a.ts", "startLine": 480, "endLine": 470 }
+        }))
+        .expect("an item");
+        let key = item.key();
+        assert_eq!(key.id, None);
+        assert_eq!(key.file, Some("src/a.ts"), "the location's file stands in for a missing one");
+        assert_eq!(key.lines, Some((480, 480)), "a range written backwards is one line, not a negative span");
+    }
+
+    /// A line the host refused still reaches the pull request — as a general comment that says which
+    /// line it is about.
+    #[test]
+    fn the_general_fallback_names_the_line() {
+        let loc = CommentLocation { file: "/src/a.ts".into(), start_line: 42, end_line: 50 };
+        let body = general_fallback_body("### 🚨 [Bug] npe · F-003", &loc);
+        assert!(body.starts_with("📍 `src/a.ts:42-50`"), "{body}");
+        assert!(body.ends_with("### 🚨 [Bug] npe · F-003"));
+        let single = CommentLocation { file: "a.ts".into(), start_line: 7, end_line: 7 };
+        assert!(general_fallback_body("x", &single).starts_with("📍 `a.ts:7`"));
+    }
+
+    #[test]
+    fn a_follow_up_on_a_general_comment_names_its_finding() {
+        assert_eq!(follow_up_text(false, false, 3, "2026-09-28", None), "➡️ Sigue presente en la iteración 3 — 2026-09-28.");
+        assert_eq!(
+            follow_up_text(false, true, 3, "2026-09-28", Some("F-004")),
+            "✔️ **F-004** — Resuelto en la iteración 3 — 2026-09-28."
+        );
+        assert!(follow_up_text(true, true, 2, "d", None).contains("Marcado como fixed"));
+    }
+
+    /// The re-publish bug: a finding opened seconds ago in this iteration must not get a "sigue
+    /// presente" reply on its own brand-new thread when the user publishes again.
+    #[test]
+    fn what_was_published_in_this_iteration_is_not_published_again() {
+        let mut finding = stored("F-001", "abierto", None);
+        assert!(!already_published(&finding, Some(2)));
+        record_published(&mut finding, Some(2), Some((77, false)));
+        assert_eq!(finding.thread_id, Some(77));
+        assert_eq!(finding.estado, "posteado");
+        assert!(already_published(&finding, Some(2)));
+        assert!(!already_published(&finding, Some(3)), "the next iteration may speak again");
+        assert!(!already_published(&finding, None), "a link review has no memory to consult");
+
+        // A general comment is remembered as one, so a later follow-up doesn't try to reply to it.
+        let mut general = stored("F-002", "abierto", None);
+        record_published(&mut general, Some(1), Some((9, true)));
+        assert!(general.hilo_general);
+        // A reply keeps the thread and the state, and only moves the publish mark.
+        let mut resolved = stored("F-003", "resuelto", Some(5));
+        record_published(&mut resolved, Some(4), None);
+        assert_eq!((resolved.thread_id, resolved.estado.as_str(), resolved.publicado_en_iter), (Some(5), "resuelto", Some(4)));
+    }
+
+    /// The phone's all-or-nothing answer still says what landed.
+    #[test]
+    fn the_legacy_answer_reports_a_partial_publish_honestly() {
+        let item = |status: &str, error: Option<&str>| PublishedItem {
+            id: None,
+            status: status.to_string(),
+            error: error.map(str::to_string),
+        };
+        let clean = PublishOutcome { items: vec![item("opened", None), item("skipped", None)], ..Default::default() };
+        assert!(clean.into_legacy().is_ok());
+
+        let partial = PublishOutcome {
+            items: vec![item("opened", None), item("failed", Some("GitHub returned 500")), item("fallback", None)],
+            summary_posted: Some(false),
+            summary_error: Some("timeout".into()),
+        };
+        let error = partial.into_legacy().unwrap_err();
+        assert_eq!(error, "2 comment(s) failed to post (2 posted) — #2: GitHub returned 500; summary: timeout");
+    }
+
+    fn project_with(columns: &[(&str, &str)]) -> Project {
+        let get = |name: &str| columns.iter().find(|(key, _)| *key == name).map(|(_, value)| value.to_string());
+        Project {
+            id: "p".into(),
+            workspace_id: "w".into(),
+            name: "example-repo".into(),
+            local_path: "/tmp/example-repo".into(),
+            remote_url: None,
+            color: "#fff".into(),
+            icon: "folder".into(),
+            ado_org: get("ado_org"),
+            ado_project: get("ado_project"),
+            ado_repo_id: get("ado_repo_id"),
+            github_owner: get("github_owner"),
+            github_repo: get("github_repo"),
+            github_host: get("github_host"),
+            gitlab_project: get("gitlab_project"),
+            gitlab_host: get("gitlab_host"),
+            sort_order: 0,
+            created_at: String::new(),
+            bitbucket_workspace: get("bitbucket_workspace"),
+            bitbucket_repo: get("bitbucket_repo"),
+        }
+    }
+
+    /// Bitbucket sits between GitLab and Azure in the precedence — the order `linkedProvider` in the
+    /// frontend mirrors and the "already linked" guards of `resolve_pr_link` assume.
+    #[test]
+    fn a_bitbucket_link_ranks_after_gitlab_and_before_azure() {
+        let bitbucket = [("bitbucket_workspace", "example-workspace"), ("bitbucket_repo", "example-repo")];
+        match linked_repo(&project_with(&bitbucket)).unwrap() {
+            LinkedRepo::Bitbucket { workspace, repo } => assert_eq!((workspace.as_str(), repo.as_str()), ("example-workspace", "example-repo")),
+            _ => panic!("expected Bitbucket"),
+        }
+        let with_azure = [bitbucket[0], bitbucket[1], ("ado_org", "o"), ("ado_project", "p"), ("ado_repo_id", "r")];
+        assert!(matches!(linked_repo(&project_with(&with_azure)).unwrap(), LinkedRepo::Bitbucket { .. }));
+        let with_gitlab = [bitbucket[0], bitbucket[1], ("gitlab_project", "group/app")];
+        assert!(matches!(linked_repo(&project_with(&with_gitlab)).unwrap(), LinkedRepo::GitLab { .. }));
+        // A workspace alone names no repository.
+        let half = [("bitbucket_workspace", "example-workspace"), ("bitbucket_repo", "  ")];
+        assert!(linked_repo(&project_with(&half)).is_err());
+    }
+
+    #[test]
+    fn a_bitbucket_repository_has_its_own_memory_key() {
+        let project = project_with(&[("bitbucket_workspace", "Example-Workspace"), ("bitbucket_repo", "Example-Repo")]);
+        assert_eq!(project_repo_key(&project).as_deref(), Some("bitbucket:example-workspace/example-repo"));
+    }
+
+    /// The credential travels as the keychain's string between `link_credential` and `linked_host`;
+    /// both kinds have to come out the other side as they went in.
+    #[test]
+    fn a_bitbucket_credential_survives_the_trip_through_a_string() {
+        let api = bitbucket::BitbucketAuth::ApiToken { email: "dev@example.test".into(), token: "placeholder".into() };
+        assert_eq!(bitbucket_link_auth(&api.to_secret()), api);
+        let access = bitbucket::BitbucketAuth::AccessToken { token: "placeholder".into() };
+        assert_eq!(bitbucket_link_auth(&access.to_secret()), access);
+    }
+
+    /// Nothing in the publish mapping may ever route two items to one finding.
+    #[test]
+    fn two_items_of_one_kind_land_on_two_findings() {
+        let findings = vec![stored("F-001", "abierto", None), stored("F-002", "abierto", None)];
+        let items: Vec<PostFindingItem> = serde_json::from_value(serde_json::json!([
+            { "id": "F-002", "file": "src/a.ts", "category": "npe", "content": "b", "location": null },
+            { "id": "F-001", "file": "src/a.ts", "category": "npe", "content": "a", "location": null }
+        ]))
+        .unwrap();
+        let mut claimed = vec![false; findings.len()];
+        let mut landed = Vec::new();
+        for item in &items {
+            let k = crate::review_memory::match_publish_item(&findings, &item.key(), &claimed).unwrap();
+            claimed[k] = true;
+            landed.push(findings[k].id.clone());
+        }
+        assert_eq!(landed, vec!["F-002", "F-001"]);
     }
 }

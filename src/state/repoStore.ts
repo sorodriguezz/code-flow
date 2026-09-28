@@ -3,15 +3,30 @@ import * as api from "../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { notify } from "./notificationStore";
 import { confirmAction, confirmFlow } from "./confirmStore";
+import { promptAction } from "./promptStore";
+import { useGitDialogStore } from "./gitDialogStore";
+import { reportCommitFailure } from "./gitOutputStore";
 import { useLanguageStore } from "./languageStore";
+import { useUiStore } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { translations, type TranslationKey } from "../lib/i18n/translations";
+import {
+  describeGitError,
+  GIT_ERROR,
+  hasTag,
+  looksLikeGitUrl,
+  operationLabel,
+  stoppedOperation,
+} from "../lib/gitErrors";
+import * as gitApi from "../lib/tauri/gitCommands";
+import type { LineSelection } from "../lib/tauri/gitCommands";
 import type {
   BranchInfo,
   CommitInfo,
   ConflictFile,
   FileDiffInfo,
   HunkRef,
+  OperationKind,
   RemoteInfo,
   RepoStatusInfo,
   StashInfo,
@@ -110,7 +125,18 @@ interface RepoState {
    * have to go on every row or on none of them.
    */
   remoteOpBranch: string | null;
-  merging: boolean;
+  /**
+   * The operation git has half done — a merge, revert, cherry-pick or rebase stopped for the user —
+   * or `null`. With `conflicts`, what decides whether the conflicts banner is on screen: it used to
+   * key off a merge alone, so a conflicted revert, cherry-pick or rebase left the repository stuck
+   * with nothing on screen saying so.
+   */
+  operation: OperationKind | null;
+  /** Continue/abort go through the git CLI — a rebase, or a sequence started from a terminal. */
+  operationSequenced: boolean;
+  /** The message git prepared for the operation's commit — what Continue offers to commit with. */
+  operationMessage: string | null;
+  /** Unresolved paths, read from the index whatever the state — see `operation`. */
   conflicts: ConflictFile[];
   commitsLoading: boolean;
   /** True from the moment a repo is selected until every piece of its sidebar data
@@ -137,8 +163,11 @@ interface RepoState {
   mergeBranch: (branchName: string) => Promise<import("../types/domain").MergeOutcome | null>;
   resolveConflict: (relPath: string, side: "ours" | "theirs") => Promise<void>;
   markConflictResolved: (relPath: string) => Promise<void>;
-  completeMerge: (message: string) => Promise<void>;
-  abortMerge: () => Promise<void>;
+  /** The banner's Continue for whatever `operation` is: commits a merge, revert or cherry-pick with
+   * `message`, or has git continue a rebase. */
+  continueOperation: (message?: string) => Promise<void>;
+  /** The banner's Abort — only the paths the operation wrote go back. Confirmed here. */
+  abortOperation: () => Promise<void>;
 
   stageFile: (filePath: string) => Promise<void>;
   unstageFile: (filePath: string) => Promise<void>;
@@ -159,7 +188,20 @@ interface RepoState {
   stageHunk: (hunk: HunkRef) => Promise<void>;
   unstageHunk: (hunk: HunkRef) => Promise<void>;
   discardHunk: (hunk: HunkRef) => Promise<void>;
-  commitChanges: (message: string) => Promise<void>;
+  /**
+   * The same three verbs for a selection of lines — the Changes screen's gutter. Unlike the hunk
+   * verbs these need no context number: the backend recomputes at zero context and finds each line
+   * by its sign, number and text (see `git/lines.rs`). Discard is confirmed by the caller, which knows
+   * how many lines it is about to throw away.
+   */
+  stageLines: (selection: LineSelection) => Promise<boolean>;
+  unstageLines: (selection: LineSelection) => Promise<boolean>;
+  discardLines: (selection: LineSelection) => Promise<boolean>;
+  /**
+   * Resolves whether the commit landed — the message box is only cleared when it did. A commit that
+   * failed for want of a name and email opens the identity form and retries once it is filled in.
+   */
+  commitChanges: (message: string) => Promise<boolean>;
 
   checkoutBranch: (name: string) => Promise<void>;
   checkoutDetached: (refname: string) => Promise<void>;
@@ -173,6 +215,10 @@ interface RepoState {
   deleteBranch: (name: string, isRemote: boolean) => Promise<void>;
   setBranchLocked: (name: string, locked: boolean) => Promise<void>;
   setRemoteUrl: (name: string, url: string) => Promise<void>;
+  /** Resolves whether the remote was added. */
+  addRemote: (name: string, url: string) => Promise<boolean>;
+  /** Confirmed here: the remote-tracking branches go with it. */
+  removeRemote: (name: string) => Promise<void>;
   undoCommit: (commitId: string) => Promise<void>;
 
   stashSave: (message?: string, includeUntracked?: boolean) => Promise<void>;
@@ -181,7 +227,11 @@ interface RepoState {
   stashDrop: (index: number) => Promise<void>;
   renameStash: (index: number, newMessage: string) => Promise<void>;
 
-  fetch: () => Promise<void>;
+  /**
+   * `auto` is the auto-fetch timer's fetch: a failure is reported once and then kept quiet until a
+   * fetch works again — see `autoFetchFailing`.
+   */
+  fetch: (options?: { auto?: boolean }) => Promise<void>;
   /**
    * The same fetch, run because the user moved around rather than because they asked for one.
    *
@@ -381,50 +431,14 @@ export const LIST_DIFF_CONTEXT_LINES = 3;
 
 /** Set by the Rust side on the one checkout failure that has a way out — see
  * `CHECKOUT_CONFLICT_PREFIX` in `src-tauri/src/git/branch.rs`. */
-const CHECKOUT_CONFLICT_PREFIX = "CHECKOUT_CONFLICT: ";
-
-/** Set by the Rust side when a locked branch is what refused the operation — see
- * `BRANCH_LOCKED_PREFIX` in `src-tauri/src/git/branch.rs`. */
-const BRANCH_LOCKED_PREFIX = "BRANCH_LOCKED: ";
-
-/** Set by the Rust side when a per-branch fetch or pull was aimed at a branch that tracks nothing
- * — see `NO_UPSTREAM_PREFIX` in `src-tauri/src/git/branch.rs`. */
-const NO_UPSTREAM_PREFIX = "NO_UPSTREAM: ";
-
-/**
- * The three refusals a per-hunk action can come back with — see `src-tauri/src/git/hunk.rs`.
- *
- * All three mean *nothing was written*, which is why they are worth naming separately from a plain
- * error string: the sentence the user needs is "and your file is untouched", and each of the three
- * gets there differently. `HUNK_STALE` is a race the user retries out of (the panel was drawn, the
- * file moved, the fingerprint no longer matches). `HUNK_APPLY_FAILED` is libgit2 declining, which is
- * not retryable and routes them to the whole-file buttons instead. `HUNK_UNSUPPORTED` carries a
- * shape the peek is not supposed to offer a button for at all — an untracked or deleted file, a
- * binary one — so it is deliberately *not* translated: reaching it is a bug in the gating, and the
- * raw tail (`untracked`, `binary`, `3 deltas for one path`) is what makes that bug findable.
- */
-const HUNK_STALE_PREFIX = "HUNK_STALE: ";
-const HUNK_APPLY_FAILED_PREFIX = "HUNK_APPLY_FAILED: ";
+const CHECKOUT_CONFLICT_PREFIX = GIT_ERROR.checkoutConflict;
 
 /** Turns the tagged errors the git layer raises into something worth reading. Every store action
  * reports through here, so a lock refusal explains itself no matter which route hit it — the
- * status bar's push button, a keyboard shortcut, or the sidebar's merge action. */
+ * status bar's push button, a keyboard shortcut, or the sidebar's merge action. The mapping itself
+ * lives in `lib/gitErrors`, where it is tested and where the graph's own actions reach it too. */
 function describeError(e: unknown): string {
-  const raw = String(e);
-  const locked = raw.indexOf(BRANCH_LOCKED_PREFIX);
-  if (locked !== -1) {
-    return translate("branch.lockedBlocked", { name: raw.slice(locked + BRANCH_LOCKED_PREFIX.length).trim() });
-  }
-  const noUpstream = raw.indexOf(NO_UPSTREAM_PREFIX);
-  if (noUpstream !== -1) {
-    return translate("branch.noUpstream", { name: raw.slice(noUpstream + NO_UPSTREAM_PREFIX.length).trim() });
-  }
-  // The tail of these two is a path or a libgit2 message, and neither adds anything to the sentence:
-  // the peek is already sitting on the file in question, and "corrupt patch at line 4" is a fact
-  // about a patch the user never saw. The replacement says what happened to their work instead.
-  if (raw.includes(HUNK_STALE_PREFIX)) return translate("peek.stale");
-  if (raw.includes(HUNK_APPLY_FAILED_PREFIX)) return translate("peek.applyFailed");
-  return raw.replace(CHECKOUT_CONFLICT_PREFIX, "");
+  return describeGitError(e, translate);
 }
 
 /** The branch a merge/stash would land on, named the way the confirmation should say it. */
@@ -526,6 +540,147 @@ async function confirmStashAction(
   });
 }
 
+/**
+ * Repositories whose fetch has failed and already said so.
+ *
+ * The auto-fetch timer runs every interval whether or not the network is there, and a laptop on a
+ * train used to get the same "could not reach the remote" toast — and the same entry in the bell —
+ * every thirty seconds. Now the first failure is reported and the timer's later ones are not, until
+ * a fetch (of any kind) gets through again and clears the entry. A fetch the user asked for always
+ * reports: they are looking for the answer.
+ *
+ * Per repository, because a remote whose credentials expired is a different fact from the network
+ * being down, and switching to a repository that also fails is worth one sentence of its own.
+ */
+const autoFetchFailing = new Set<string>();
+
+/**
+ * After a run that left the repository mid-operation — a pull that stopped on conflicts, a rebase
+ * that did: reload so the conflicts banner appears, go to Changes where it is drawn, and say why in
+ * one line. An error toast would have been the wrong register; nothing failed, there is work to do.
+ */
+async function landOnConflicts(get: () => RepoState, kind: OperationKind): Promise<void> {
+  await get()
+    .refreshAll()
+    .catch((e: unknown) => pushErrorToast(describeError(e)));
+  useUiStore.getState().setActiveView("changes");
+  useToastStore
+    .getState()
+    .pushToast(translate("conflicts.stoppedToast", { operation: operationLabel(kind, translate) }), "info");
+}
+
+type PullOutcome = "pulled" | "failed" | "cancelled" | "conflicts";
+
+/**
+ * A pull, and the three things it can come back with that are not a plain failure.
+ *
+ * - **Diverged.** git ≥ 2.33 will not pull a branch that has commits of its own until it is told
+ *   whether to merge or rebase, and says so in a paragraph of `hint:` lines nobody could act on from
+ *   here. So the user is asked — merge, rebase or fast-forward only, optionally remembered for the
+ *   repository — and the pull is run again with that answer.
+ * - **Stopped on conflicts** (from either answer): the banner takes over — see `landOnConflicts`.
+ * - **Anything else** is reported as before.
+ *
+ * `run` is the pull as the caller aims it (HEAD, or a named branch — which for HEAD is the same
+ * pull); the retry with a mode only ever concerns HEAD, since that is the only branch git pulls
+ * rather than fast-forwards.
+ */
+async function runPull(
+  set: (partial: Partial<RepoState>) => void,
+  get: () => RepoState,
+  repoPath: string,
+  run: () => Promise<void>,
+  refresh: () => Promise<void>,
+): Promise<PullOutcome> {
+  set({ busy: true, error: null });
+  try {
+    try {
+      await run();
+    } catch (e) {
+      if (!hasTag(e, GIT_ERROR.pullDiverged)) throw e;
+      const head = get().branches.find((b) => b.is_head);
+      const branch = head?.name ?? get().status?.current_branch ?? "HEAD";
+      const choice = await useGitDialogStore.getState().askPullChoice(branch, head?.upstream ?? "");
+      if (!choice) return "cancelled";
+      await api.gitPullWith(repoPath, choice.mode, choice.remember);
+    }
+    await refresh();
+    return "pulled";
+  } catch (e) {
+    const stopped = stoppedOperation(e);
+    if (stopped) {
+      await landOnConflicts(get, stopped);
+      return "conflicts";
+    }
+    const message = describeError(e);
+    set({ error: message });
+    pushErrorToast(message);
+    return "failed";
+  } finally {
+    set({ busy: false });
+  }
+}
+
+type PushOutcome = "pushed" | "failed" | "cancelled";
+
+/**
+ * A push, and the two refusals it can answer instead of just reporting.
+ *
+ * - **No remote at all**, when publishing: the repository was never connected to anything, so the
+ *   user is asked for a URL, it is added as `origin`, and the publish goes ahead.
+ * - **Rejected as not a fast-forward**: the branch was rewritten (an amend of a pushed commit) or the
+ *   remote has commits this one does not. Offered a force push — only ever *with lease*, behind a
+ *   danger confirmation that names the branch and the remote. The lease is what refuses if somebody
+ *   pushed commits the user has not pulled, so the answer to "the remote moved" is never to erase it.
+ */
+async function runPush(
+  set: (partial: Partial<RepoState>) => void,
+  get: () => RepoState,
+  repoPath: string,
+  setUpstream: boolean,
+): Promise<PushOutcome> {
+  set({ busy: true, error: null });
+  try {
+    try {
+      await api.gitPush(repoPath, setUpstream);
+    } catch (e) {
+      if (setUpstream && hasTag(e, GIT_ERROR.noRemote)) {
+        const url = await promptAction(translate("publish.remotePrompt"), {
+          placeholder: "https://example.com/owner/repo.git",
+          confirmLabel: translate("publish.remoteConfirm"),
+          validate: (value) => (looksLikeGitUrl(value) ? null : translate("remote.urlInvalid")),
+        });
+        if (!url) return "cancelled";
+        await api.addRemote(repoPath, "origin", url);
+        await get().refreshRemotes();
+        await api.gitPush(repoPath, true);
+      } else if (hasTag(e, GIT_ERROR.pushRejected)) {
+        const head = get().branches.find((b) => b.is_head);
+        const branch = head?.name ?? get().status?.current_branch ?? "HEAD";
+        const remote = head?.upstream ?? get().remotes[0]?.name ?? "origin";
+        const force = await confirmAction(
+          translate("push.forceConfirmMessage", { branch, remote }),
+          true,
+          translate("push.forceConfirm"),
+        );
+        if (!force) return "cancelled";
+        await api.gitPushForceWithLease(repoPath);
+      } else {
+        throw e;
+      }
+    }
+    await Promise.all([get().refreshBranches(), get().refreshUnpushedCommits()]);
+    return "pushed";
+  } catch (e) {
+    const message = describeError(e);
+    set({ error: message });
+    pushErrorToast(message);
+    return "failed";
+  } finally {
+    set({ busy: false });
+  }
+}
+
 export const useRepoStore = create<RepoState>((set, get) => ({
   repoPath: null,
   status: null,
@@ -550,7 +705,9 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   checkingOutBranch: null,
   remoteOp: null,
   remoteOpBranch: null,
-  merging: false,
+  operation: null,
+  operationSequenced: false,
+  operationMessage: null,
   conflicts: [],
   commitsLoading: false,
   projectLoading: false,
@@ -573,7 +730,9 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       selectedCommitPath: null,
       commitFileDiff: null,
       commitFileDiffLoading: false,
-      merging: false,
+      operation: null,
+      operationSequenced: false,
+      operationMessage: null,
       conflicts: [],
     });
     if (path) {
@@ -725,9 +884,16 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   refreshMergeState: async () => {
     const { repoPath } = get();
     if (!repoPath) return;
-    const merging = await api.isMerging(repoPath);
-    const conflicts = merging ? await api.listConflicts(repoPath) : [];
-    set({ merging, conflicts });
+    // Conflicts are read whatever the state — see `operation`. One call for all four fields, so the
+    // banner never draws a revert's title over a merge's message.
+    const state = await api.getOperationState(repoPath);
+    if (get().repoPath !== repoPath) return;
+    set({
+      operation: state.kind,
+      operationSequenced: state.sequenced,
+      operationMessage: state.message,
+      conflicts: state.conflicts.map((path) => ({ path })),
+    });
   },
 
   mergeBranch: async (branchName) => {
@@ -774,20 +940,47 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     });
   },
 
-  completeMerge: async (message) => {
+  continueOperation: async (message) => {
     const { repoPath } = get();
     if (!repoPath) return;
-    await guarded(set, async () => {
-      await api.completeMerge(repoPath, message);
-      await get().refreshAll();
-    });
+    set({ busy: true, error: null });
+    try {
+      try {
+        await api.continueOperation(repoPath, message);
+      } catch (e) {
+        if (!hasTag(e, GIT_ERROR.identityMissing)) throw e;
+        // The same missing name a commit can hit — this is a commit too.
+        if (!(await useGitDialogStore.getState().askIdentity())) return;
+        await api.continueOperation(repoPath, message);
+      }
+    } catch (e) {
+      // A rebase that continued into the next conflicting commit stopped again: not a failure, and
+      // the banner is already where the user is looking.
+      if (stoppedOperation(e)) {
+        useToastStore.getState().pushToast(describeError(e), "info");
+      } else {
+        const text = describeError(e);
+        set({ error: text });
+        if (!reportCommitFailure(e)) pushErrorToast(text);
+      }
+    } finally {
+      set({ busy: false });
+    }
+    // Either way: a continue that failed half-way (a rebase) has still moved things.
+    await get().refreshAll().catch((e: unknown) => pushErrorToast(describeError(e)));
   },
 
-  abortMerge: async () => {
-    const { repoPath } = get();
-    if (!repoPath) return;
+  abortOperation: async () => {
+    const { repoPath, operation } = get();
+    if (!repoPath || !operation) return;
+    const confirmed = await confirmAction(
+      translate("conflicts.abortOperationConfirm", { operation: operationLabel(operation, translate) }),
+      true,
+      translate("conflicts.abort"),
+    );
+    if (!confirmed) return;
     await guarded(set, async () => {
-      await api.abortMerge(repoPath);
+      await api.abortOperation(repoPath);
       await get().refreshAll();
     });
   },
@@ -939,13 +1132,67 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     });
   },
 
+  // The line verbs, on the same `guarded` + `refreshStatus` shape as the hunk ones — the refresh is
+  // what re-draws the pane without the lines that moved. They resolve whether the write happened, so
+  // the pane can clear its selection only when there is nothing left to act on.
+  stageLines: async (selection) => {
+    const { repoPath } = get();
+    if (!repoPath) return false;
+    return guarded(set, async () => {
+      await gitApi.stageLines(repoPath, selection);
+      await get().refreshStatus();
+    });
+  },
+
+  unstageLines: async (selection) => {
+    const { repoPath } = get();
+    if (!repoPath) return false;
+    return guarded(set, async () => {
+      await gitApi.unstageLines(repoPath, selection);
+      await get().refreshStatus();
+    });
+  },
+
+  discardLines: async (selection) => {
+    const { repoPath } = get();
+    if (!repoPath) return false;
+    return guarded(set, async () => {
+      await gitApi.discardLines(repoPath, selection);
+      await get().refreshStatus();
+    });
+  },
+
   commitChanges: async (message) => {
     const { repoPath } = get();
-    if (!repoPath) return;
-    await guarded(set, async () => {
-      await api.commitChanges(repoPath, message);
+    if (!repoPath) return false;
+    // Not `guarded`: that swallows the outcome, and the caller clears the message box on it — a
+    // commit that failed used to take the message down with it.
+    let committed = false;
+    set({ busy: true, error: null });
+    try {
+      try {
+        await api.commitChanges(repoPath, message);
+      } catch (e) {
+        if (!hasTag(e, GIT_ERROR.identityMissing)) throw e;
+        // git has no name or email to sign with. Ask for them — the message is still in the box —
+        // and retry once they are saved, instead of showing libgit2's sentence about a config key.
+        if (!(await useGitDialogStore.getState().askIdentity())) return false;
+        await api.commitChanges(repoPath, message);
+      }
+      committed = true;
       await get().refreshAll();
-    });
+      return true;
+    } catch (e) {
+      const text = describeError(e);
+      set({ error: text });
+      // A hook that refused, or `git commit` failing, has more to say than a toast holds — the dialog
+      // shows all of it, and the message stays in the box for the retry.
+      if (!reportCommitFailure(e)) pushErrorToast(text);
+      // A refresh that failed after the commit landed still means the commit landed.
+      return committed;
+    } finally {
+      set({ busy: false });
+    }
   },
 
   checkoutBranch: async (name) => {
@@ -1028,12 +1275,23 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   deleteBranch: async (name, isRemote) => {
     const { repoPath } = get();
     if (!repoPath) return;
+    // Counted before asking, because the number *is* the question. The delete itself is always
+    // `-D`, so this is the only place "not fully merged" gets said: commits that neither HEAD nor
+    // the branch's upstream has, which go with the branch. A count that cannot be read falls back to
+    // the ordinary note rather than blocking the delete.
+    const unmerged = isRemote ? 0 : await api.branchUnmergedCount(repoPath, name).catch(() => 0);
+    const note =
+      unmerged === 0
+        ? translate("confirm.deleteBranchNote")
+        : unmerged === 1
+          ? translate("confirm.deleteBranchUnmergedNoteOne")
+          : translate("confirm.deleteBranchUnmergedNote", { n: String(unmerged) });
     const confirmed = await confirmFlow({
       flow: {
         kind: "branch-delete",
         source: name,
         target: translate("confirm.deleteBranchTarget"),
-        note: translate("confirm.deleteBranchNote"),
+        note,
       },
       message: translate("confirm.deleteBranchTitle", { name }),
       confirmLabel: translate("confirm.deleteBranchConfirm"),
@@ -1061,6 +1319,31 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     await guarded(set, async () => {
       await api.setRemoteUrl(repoPath, name, url);
       await get().refreshRemotes();
+    });
+  },
+
+  addRemote: async (name, url) => {
+    const { repoPath } = get();
+    if (!repoPath) return false;
+    return guarded(set, async () => {
+      await api.addRemote(repoPath, name, url);
+      await get().refreshRemotes();
+    });
+  },
+
+  removeRemote: async (name) => {
+    const { repoPath } = get();
+    if (!repoPath) return;
+    const confirmed = await confirmAction(
+      translate("sidebar.removeRemoteConfirm", { name }),
+      true,
+      translate("sidebar.removeRemote"),
+    );
+    if (!confirmed) return;
+    await guarded(set, async () => {
+      await api.removeRemote(repoPath, name);
+      // Its remote-tracking branches went with it, and every upstream that pointed at it.
+      await Promise.all([get().refreshRemotes(), get().refreshBranches()]);
     });
   },
 
@@ -1126,7 +1409,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     });
   },
 
-  fetch: async () => {
+  fetch: async (options) => {
     const { repoPath, remoteOp } = get();
     if (!repoPath || remoteOp) return;
     set({ remoteOp: "fetch" });
@@ -1137,10 +1420,15 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const workspaceId = repoWorkspaceId(get());
     try {
       await api.gitFetch(repoPath);
+      autoFetchFailing.delete(repoPath);
       await get().refreshBranches();
       notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail: where, workspaceId });
     } catch (e) {
-      const message = String(e);
+      // The timer's fetch says it once — see `autoFetchFailing`.
+      const alreadyReported = autoFetchFailing.has(repoPath);
+      autoFetchFailing.add(repoPath);
+      if (options?.auto && alreadyReported) return;
+      const message = describeError(e);
       set({ error: message });
       pushErrorToast(message);
       notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail: where, workspaceId });
@@ -1194,6 +1482,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       if (get().remotes.length === 0) await get().refreshRemotes();
       if (get().remotes.length === 0 || get().repoPath !== repoPath) return;
       await api.gitFetch(repoPath);
+      // The remote answered: the next timed failure is news again.
+      autoFetchFailing.delete(repoPath);
       // Switching repository is one of the things that *starts* a background fetch, so landing
       // back here for a repo the user has already left is ordinary rather than exceptional —
       // and `refreshBranches` reads whatever `repoPath` is now, which would file the new
@@ -1219,17 +1509,19 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const where = notificationDetail(get());
     const workspaceId = repoWorkspaceId(get());
     try {
-      const ok = await guarded(set, async () => {
-        await api.gitPull(repoPath);
-        await get().refreshAll();
-      });
-      notify({
-        source: "git",
-        titleKey: ok ? "notifications.gitPulled" : "notifications.gitPullFailed",
-        status: ok ? "success" : "error",
-        detail: where,
-        workspaceId,
-      });
+      const outcome = await runPull(set, get, repoPath, () => api.gitPull(repoPath), () => get().refreshAll());
+      // A cancelled choice and a stop on conflicts are not a finished pull, nor a failed one — the
+      // dialog and the banner already said what happened.
+      if (outcome === "pulled" || outcome === "failed") {
+        const ok = outcome === "pulled";
+        notify({
+          source: "git",
+          titleKey: ok ? "notifications.gitPulled" : "notifications.gitPullFailed",
+          status: ok ? "success" : "error",
+          detail: where,
+          workspaceId,
+        });
+      }
     } finally {
       set({ remoteOp: null });
     }
@@ -1265,20 +1557,25 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const detail = branchNotificationDetail(get(), name);
     const workspaceId = repoWorkspaceId(get());
     try {
-      const ok = await guarded(set, async () => {
-        await api.gitPullBranch(repoPath, name);
+      const outcome = await runPull(
+        set,
+        get,
+        repoPath,
+        () => api.gitPullBranch(repoPath, name),
         // Pulling the branch you are standing on rewrites the working tree, so everything the
         // screen shows is stale. Any other branch only moved a ref: the list is the whole change.
-        if (isHead) await get().refreshAll();
-        else await get().refreshBranches();
-      });
-      notify({
-        source: "git",
-        titleKey: ok ? "notifications.gitPulled" : "notifications.gitPullFailed",
-        status: ok ? "success" : "error",
-        detail,
-        workspaceId,
-      });
+        () => (isHead ? get().refreshAll() : get().refreshBranches()),
+      );
+      if (outcome === "pulled" || outcome === "failed") {
+        const ok = outcome === "pulled";
+        notify({
+          source: "git",
+          titleKey: ok ? "notifications.gitPulled" : "notifications.gitPullFailed",
+          status: ok ? "success" : "error",
+          detail,
+          workspaceId,
+        });
+      }
     } finally {
       set({ remoteOp: null, remoteOpBranch: null });
     }
@@ -1291,10 +1588,10 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const where = notificationDetail(get());
     const workspaceId = repoWorkspaceId(get());
     try {
-      const ok = await guarded(set, async () => {
-        await api.gitPush(repoPath, setUpstream);
-        await Promise.all([get().refreshBranches(), get().refreshUnpushedCommits()]);
-      });
+      const outcome = await runPush(set, get, repoPath, setUpstream);
+      // Declining the URL or the force push is the user's answer, not a failure worth filing.
+      if (outcome === "cancelled") return;
+      const ok = outcome === "pushed";
       // Publishing a branch and pushing to one it already tracks are different enough events that
       // the notification names them differently — the first created something upstream.
       notify({

@@ -126,6 +126,12 @@ pub(crate) enum AiTask {
     /// answer, and filling it is fifteen tables of data — a long, cheap, repetitive job that a team
     /// routinely wants pointed somewhere other than the one that has to get a model right.
     SampleRows,
+    /// The notebook's per-cell actions — generate, explain, fix an error, document. Text-only: the
+    /// cells go to the engine on stdin and a cell's worth of code (or prose) comes back, shown as a
+    /// diff to accept, so it routes anywhere, a local model included. Its own route rather than
+    /// [`AiTask::Inline`]'s: a notebook is analysis more often than application code, and which
+    /// engine explains a traceback is not the one a team picks for a quick rewrite.
+    Notebook,
 }
 
 impl AiTask {
@@ -135,7 +141,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 17] = [
+    pub(crate) const ALL: [AiTask; 18] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -153,6 +159,7 @@ impl AiTask {
         AiTask::Diagram,
         AiTask::Pipeline,
         AiTask::SampleRows,
+        AiTask::Notebook,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -177,6 +184,7 @@ impl AiTask {
             AiTask::Diagram => "diagram",
             AiTask::Pipeline => "pipeline",
             AiTask::SampleRows => "sample_rows",
+            AiTask::Notebook => "notebook",
         }
     }
 }
@@ -394,6 +402,31 @@ pub fn cancel_ai_run(run_id: String) -> bool {
     ai_runs::cancel(&run_id)
 }
 
+/// The providers whose read-only mode is a limit their CLI **enforces** — see
+/// `ai::AiEngine::enforces_read_only`.
+///
+/// Asked of the engines rather than listed in the frontend, so the promise on screen ("it can only
+/// answer in text", "writes nothing") comes from the same code that builds the command line. Where
+/// a provider is missing from this list the UI says plainly that "text only" is a request. Fixed
+/// for a build, so a window asks once.
+/// Classifies the error an AI run failed with — quota, sign-in, missing CLI, provider outage, or
+/// anything else — with the provider's own words and, for a quota, when it resets. See
+/// `ai::classify_failure`; this is the frontend's door to the same function, so the chain executor
+/// and the banners decide on one classifier rather than a copy of it.
+#[tauri::command]
+pub fn ai_classify_failure(error: String) -> ai::AiFailure {
+    ai::classify_failure(&error)
+}
+
+#[tauri::command]
+pub fn ai_read_only_engines() -> Vec<String> {
+    ["claude", "gemini", "codex", "grok", "opencode", "cline"]
+        .into_iter()
+        .filter(|id| ai::engine_for(id).enforces_read_only())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Lists the models a provider's CLI reports as actually available (e.g. `opencode models`), so the
 /// Settings model picker shows the real set instead of a hardcoded guess. `provider` is the tab the
 /// user is looking at; it defaults to the active provider when omitted. Returns an empty list for
@@ -525,10 +558,6 @@ pub fn default_sample_rows_template() -> String {
     ai::DEFAULT_ROWS_PROMPT.to_string()
 }
 
-/// Scans whatever's currently sitting in the working directory (the "Changes" list —
-/// unstaged + untracked, not what's already staged) for bugs/vulnerabilities before the
-/// user commits it. Folds in the same workspace-level context/instructions/skills/MCPs as
-/// a PR review, just pointed at the local diff instead of a pull request.
 /// Snapshots the working tree before an AI action that can write to it, so the run is undoable.
 /// Best-effort by design: a repo that can't be snapshotted (no HEAD yet, an unreadable index)
 /// must not block the action the user actually asked for — they just don't get the undo button.
@@ -550,10 +579,18 @@ fn checkpoint_after(repo_path: &str, checkpoint: Option<String>) {
     }
 }
 
-/// What [`analyze_working_changes`] fails with when the working tree holds nothing it would read
-/// (its diff is index → working tree, so unstaged and untracked changes only). A prefix the frontend
-/// matches, the same way it matches `ai_locks::BUSY_MARKER`.
+/// What [`analyze_working_changes`] fails with when there is nothing uncommitted to read — HEAD and
+/// the working tree agree, staged or not. A prefix the frontend matches, the same way it matches
+/// `ai_locks::BUSY_MARKER`.
 pub const NOTHING_TO_ANALYZE_MARKER: &str = "NOTHING_TO_ANALYZE::";
+
+/// Scans everything not yet committed — staged, unstaged and untracked alike (HEAD → working tree)
+/// — for bugs and vulnerabilities before the user commits it. Folds in the same workspace-level
+/// context/instructions/skills/MCPs as a PR review, just pointed at the local diff instead of a pull
+/// request.
+///
+/// It used to read index → working tree only, so the moment right before a commit — everything
+/// staged — was exactly when it had nothing to analyze.
 
 #[tauri::command]
 pub async fn analyze_working_changes(
@@ -604,7 +641,7 @@ pub async fn analyze_working_changes(
     // block the analysis itself.
     let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
 
-    let diff_files = git::diff::get_working_diff(&project.local_path)?;
+    let diff_files = git::diff::get_uncommitted_diff(&project.local_path, None)?;
     // An empty diff used to go to the engine anyway, which answered about nothing and left a red row
     // in the history. The buttons that start an analysis are off when there is nothing to read; this
     // is for a tree that emptied between the click and here — a commit from a terminal, a phone.
@@ -696,10 +733,10 @@ pub async fn resolve_finding_with_ai(
 
 /// Drops a resume token that was minted by a *different* engine than the one about to run.
 ///
-/// Session tokens aren't portable across providers. Most engines now hand back a real id, and each
-/// namespaces it differently (a Claude UUID, an opencode `ses_…`, a Codex rollout UUID); Gemini/agy
-/// is the exception and still hands back a fixed "continue your last run" sentinel, because its CLI
-/// won't tell a headless caller the conversation id. Replaying any of them into a *different* engine
+/// Session tokens aren't portable across providers. Every engine that resumes now hands back a real
+/// id, and each namespaces it differently (a Claude UUID, an opencode `ses_…`, a Codex rollout
+/// UUID, an agy conversation id); agy falls back to a fixed "continue your last run" sentinel only
+/// when its CLI printed no id. Replaying any of them into a *different* engine
 /// either fails outright (`claude --resume ses_abc`) or — worse — silently continues something
 /// unrelated, answering with the wrong context. Returning `None` makes the turn open a fresh engine
 /// session, which also re-sends the project context.
@@ -777,8 +814,16 @@ pub async fn send_chat_message(
     let _repo_lease = ai_locks::acquire(&project.local_path)
         .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
 
-    let (contexts, skills, config, session_id) = {
+    let (contexts, skills, config, session_id, analysis) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
+        // A story's analysis pass promises to write nothing until the user has approved the plan,
+        // and that promise used to be a sentence in its instruction: it ran here like any panel
+        // turn, with edits auto-approved. The step's phase is read from the step the claim bound
+        // to this run id, so a webview cannot talk its way out of it. See `chat_with_repo`.
+        let analysis = run_id
+            .as_deref()
+            .and_then(|id| queries::running_story_step_phase(&conn, id).ok().flatten())
+            .is_some_and(|phase| phase == "analyze");
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         // An active agent runs on its own provider + model — and its own account, when it names
@@ -809,7 +854,7 @@ pub async fn send_chat_message(
             &config.provider,
             config.account_id(),
         );
-        (contexts, skills, config, (session_id, account_changed))
+        (contexts, skills, config, (session_id, account_changed), analysis)
     };
     let (session_id, account_changed) = session_id;
 
@@ -830,7 +875,9 @@ pub async fn send_chat_message(
     // not the surrounding DB reads or IPC.
     let started = std::time::Instant::now();
     // The chat runs with edits auto-approved (see `chat_with_repo`), so it can and does touch
-    // files — it gets the same undo protection as an explicit "fix with AI".
+    // files — it gets the same undo protection as an explicit "fix with AI". A story's analysis
+    // pass keeps it too: on an engine that cannot enforce read-only, the checkpoint is what is left
+    // if the model writes anyway.
     let checkpoint = checkpoint_before(&project.local_path, "chat");
     // The reply as it is written, for the panel that asked (Claude alone produces it; every other
     // engine ignores the sink). Keyed by run: the panel matches fragments on the run id it minted.
@@ -849,6 +896,7 @@ pub async fn send_chat_message(
             &config.tools,
             &project.local_path,
             stream_deltas,
+            analysis,
         )
         .await
     })
@@ -985,6 +1033,21 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
         conn
+    }
+
+    /// The three engines whose read-only mode their CLI enforces, and only those — the list the UI
+    /// uses to decide between promising "text only" and saying it is a request.
+    #[test]
+    fn only_engines_that_enforce_read_only_are_reported() {
+        assert_eq!(ai_read_only_engines(), vec!["claude", "codex", "grok"]);
+    }
+
+    /// The command is the classifier itself, not a second copy of it.
+    #[test]
+    fn the_classifier_command_answers_like_the_classifier() {
+        let failure = ai_classify_failure("QUOTA_EXCEEDED::You've hit your weekly limit · resets Mon 9am".into());
+        assert_eq!(failure.kind, ai::AiFailureKind::Quota);
+        assert_eq!(failure.resets.as_deref(), Some("Mon 9am"));
     }
 
     /// A fresh install routes everything to Claude without any setting being written, so the panel

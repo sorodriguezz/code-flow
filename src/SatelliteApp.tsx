@@ -27,7 +27,9 @@ import { useWindowStore } from "./state/windowStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useShortcutsStore } from "./state/shortcutsStore";
 import { useAiProviderStore } from "./state/aiProviderStore";
-import { getProject } from "./lib/tauri/commands";
+import { getProject, startWatching, stopWatching } from "./lib/tauri/commands";
+import { followRepoChanges } from "./lib/repoRefresh";
+import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectionsStore";
 import { WINDOW } from "./lib/windowIdentity";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { useRemoteActionShortcuts } from "./lib/useGlobalShortcuts";
@@ -50,16 +52,15 @@ import { pushErrorToast } from "./state/toastStore";
  *
  * # What it follows
  *
- * The workspace the **main window** is showing, always. That answers the question this design was
- * argued over: an app window still displaying the collections of a workspace the user has left is
- * the one behaviour ruled out, because it is the one where what is on screen is quietly about
- * something else. The main window broadcasts every switch (`lib/windowBus`), and a window opened
- * later picks up the same answer from the setting the main window keeps current.
+ * **Nothing — it holds its own workspace.** An app window opens on the workspace of the window it
+ * was opened from and from then on shows whatever its own title-bar picker is pointed at; it does
+ * not move when the main window does (see `useSatelliteBoot`). A **repository** window's workspace
+ * is its repository's, derived rather than chosen (see `RepoWindow`); if the repository is removed,
+ * the window says so and waits rather than closing.
  *
- * A **repository** window is the case that needs more than "follow": a repository lives in exactly
- * one workspace, so when the main window moves elsewhere there is nothing here to show. It says so
- * and waits, rather than closing — closing would take a window off the desk for a trip to another
- * workspace and back — and comes back on its own.
+ * What does cross the boundary: the workspace list itself (a workspace created, renamed or deleted
+ * elsewhere — `workspaceStore`'s `workspaces` listener), settings (`settingsSync`), and, for a
+ * repository window, the repository changing on disk — its own watcher (`RepoWindow`).
  */
 
 const ApiView = lazy(() => import("./components/api/ApiView").then((m) => ({ default: m.ApiView })));
@@ -107,7 +108,8 @@ const APP_VIEWS: Record<string, { view: MainView; workspace?: ApiWorkspace; rend
 };
 
 /** The four tabs a repository window carries — the same set, and the same order, as the main
- *  window's tab bar. Pipelines is conditional there and conditional here for the same reason. */
+ *  window's tab bar. Pipelines is conditional there and conditional here for the same reason (see
+ *  `RepoWindow`, which filters it with the main window's `pipelinesAvailable`). */
 const REPO_TABS: { id: MainView; labelKey: "tabbar.graph" | "tabbar.changes" | "tabbar.editor" | "tabbar.pipelines"; render: () => ReactElement }[] = [
   { id: "graph", labelKey: "tabbar.graph", render: () => <GraphView /> },
   { id: "changes", labelKey: "tabbar.changes", render: () => <ChangesPanel /> },
@@ -140,6 +142,8 @@ function useSatelliteBoot(): boolean {
         // rectangle tracking the main window's does.
         startWindowBoundsTracking(),
         useWindowStore.getState().init(),
+        // Whether the repository's Pipelines tab exists — the main window's rule, read here too.
+        useVcsConnectionsStore.getState().refresh(),
         // Lands on the workspace of the window it was opened from — see `workspaceStore`'s
         // `opener`. So a window detached while main sits on "Tienda" opens on "Tienda", and from
         // then on it holds whatever *it* is pointed at.
@@ -170,9 +174,10 @@ function useSatelliteBoot(): boolean {
    * string, not on the bus — and a tray restore brings it back to the one it recorded. That happens
    * once, at boot, and is why the `workspace` bus message has no listener left at all.
    *
-   * The one thing that must still cross the boundary is a workspace that has stopped existing: a
-   * window left pointing at a deleted one would list rows nothing owns. `state:invalidate` already
-   * carries the deletion, so nothing is needed here beyond not listening.
+   * The one thing that must still cross the boundary is the workspace list: a workspace created or
+   * renamed elsewhere belongs in this window's picker, and a window left pointing at a deleted one
+   * would list rows nothing owns. `state:invalidate`'s `workspaces` frame carries both, and
+   * `workspaceStore` answers it at module scope — in this window as in every other.
    */
 
   return ready;
@@ -270,6 +275,31 @@ function RepoWindow({ projectId }: { projectId: string }) {
     void setRepoPath(project.local_path);
   }, [project, setActiveProject, setRepoPath]);
 
+  // Watches the repository this window holds, the way the main window watches its active one. It
+  // never did: `start_watching` was called from `App` alone, so an edit made anywhere but here — an
+  // agent, a terminal, a phone — never reached this window's Changes, graph or editor. The claim is
+  // this window's own (the backend derives it from the window's label), so the main window leaving
+  // the same repository cannot stop it, and the backend releases it if the window is destroyed.
+  const repoPath = project?.local_path ?? null;
+  useEffect(() => {
+    if (!repoPath) return;
+    void startWatching(repoPath).catch((e: unknown) => pushErrorToast(String(e)));
+    const stopFollowing = followRepoChanges(() => repoPath);
+    return () => {
+      stopFollowing();
+      void stopWatching(repoPath).catch(() => {});
+    };
+  }, [repoPath]);
+
+  // The main window's rule for the Pipelines tab: only for a repository linked to a connected host.
+  // This window drew it for every repository, where it opened on an error.
+  const connections = useVcsConnectionsStore();
+  const pipelinesOpen = pipelinesAvailable(project, connections);
+  const tabs = pipelinesOpen ? REPO_TABS : REPO_TABS.filter(({ id }) => id !== "pipelines");
+  useEffect(() => {
+    if (tab === "pipelines" && !pipelinesOpen) setTab("graph");
+  }, [tab, pipelinesOpen]);
+
   /**
    * A repository window's workspace is **its repository's**, not a choice.
    *
@@ -322,7 +352,7 @@ function RepoWindow({ projectId }: { projectId: string }) {
       {/* On the frame, above the sheet, in the main window's tab recipe: the same lifted sheet marks
           the open tab in both windows. */}
       <div className="-mt-1 flex shrink-0 items-center gap-0.5">
-        {REPO_TABS.map(({ id, labelKey }) => (
+        {tabs.map(({ id, labelKey }) => (
           <button
             key={id}
             onClick={() => setTab(id)}

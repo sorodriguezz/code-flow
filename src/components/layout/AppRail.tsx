@@ -400,9 +400,30 @@ export function AppRail() {
                 ) : undefined
               }
             >
+            {/* The app's button and its "open in a window" corner are siblings in one box. The
+                corner used to be a `span role="button"` *inside* the app's button — an interactive
+                element nested in another, which HTML does not allow and which left the corner's
+                name unannounced (a screen reader only reads the outer button). The box carries what
+                moves both together: the reorder slot and the drag transform. */}
+            <div
+              data-reorder={key}
+              // Only while a drag is on: an idle rail is six boxes with no transform at all, rather
+              // than six `translateY(0)`s each generating a containing block for nothing.
+              style={
+                drag
+                  ? { transform: `translateY(${offset}px)${lifted ? " scale(1.12)" : ""}` }
+                  : undefined
+              }
+              className={`relative h-9 w-9 shrink-0 ${
+                // The lifted icon is pinned to the pointer, so it must not ease anywhere; its
+                // neighbours are the ones sliding out of the way, so they must. Dropping the
+                // transform transition on the way out is what keeps the icons still in the frame
+                // where the preview becomes the order.
+                lifted ? "z-10" : drag ? "transition-transform duration-150 ease-out" : ""
+              }`}
+            >
             <button
               type="button"
-              data-reorder={key}
               onPointerDown={(e) => reorder.beginHold(e, index, key)}
               onClick={() => {
                 if (reorder.swallowsClick()) return;
@@ -410,22 +431,12 @@ export function AppRail() {
               }}
               aria-current={isActive ? "page" : undefined}
               aria-label={detachedTo ? `${name} — ${t("windows.inOtherWindow")}` : name}
-              // Only while a drag is on: an idle rail is six buttons with no transform at all,
-              // rather than six `translateY(0)`s each generating a containing block for nothing.
-              style={
-                drag
-                  ? { transform: `translateY(${offset}px)${lifted ? " scale(1.12)" : ""}` }
-                  : undefined
-              }
               className={`relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg ${
-                // The lifted icon is pinned to the pointer, so it must not ease anywhere; its
-                // neighbours are the ones sliding out of the way, so they must. Idle, the only
-                // thing that moves is colour — and dropping the transform transition on the way out
-                // is what keeps the icons still in the frame where the preview becomes the order.
+                // Idle, the only thing that moves is colour.
                 lifted
-                  ? "z-10 cursor-grabbing shadow-lg ring-1 ring-[var(--cf-accent)]"
+                  ? "cursor-grabbing shadow-lg ring-1 ring-[var(--cf-accent)]"
                   : drag
-                    ? "transition-transform duration-150 ease-out"
+                    ? ""
                     : "transition-colors"
               } ${
                 isActive
@@ -471,34 +482,10 @@ export function AppRail() {
                   Once the app is out, the same corner becomes a *statement* — a plain arrow, not a
                   button — because there is nothing left to ask for: the button underneath it is
                   already the way to that window. */}
-              {detachedTo ? (
+              {detachedTo && (
                 <span
                   aria-hidden
                   className="pointer-events-none absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-[3px] border border-[var(--cf-accent)]/55 bg-[var(--cf-surface)] text-[var(--cf-accent)]"
-                >
-                  <ArrowUpRight size={9} />
-                </span>
-              ) : (
-                <span
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`${name} — ${t("windows.openInWindow")}`}
-                  title={t("windows.openInWindow")}
-                  // The rail's own gesture is a *hold*, and this sits inside the surface that
-                  // starts one — so both events have to be stopped, or aiming at the corner would
-                  // pick the icon up instead.
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void sendOut(app);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key !== "Enter" && e.key !== " ") return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    void sendOut(app);
-                  }}
-                  className="absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-[3px] border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] focus-visible:opacity-100 group-hover/rail:opacity-70"
                 >
                   <ArrowUpRight size={9} />
                 </span>
@@ -521,6 +508,21 @@ export function AppRail() {
                 </span>
               )}
             </button>
+            {!detachedTo && (
+              <button
+                type="button"
+                aria-label={`${name} — ${t("windows.openInWindow")}`}
+                title={t("windows.openInWindow")}
+                // The rail's own gesture is a *hold*, and this sits on the surface that starts one —
+                // stopped so aiming at the corner never picks the icon up instead.
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={() => void sendOut(app)}
+                className="absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-[3px] border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] focus-visible:opacity-100 group-hover/rail:opacity-70"
+              >
+                <ArrowUpRight size={9} />
+              </button>
+            )}
+            </div>
             </Tooltip>
           );
         })}

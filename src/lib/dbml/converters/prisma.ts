@@ -5,10 +5,15 @@ import {
   camel,
   codeName,
   codegenRefs,
+  compositeKey,
+  defaultOf,
   fieldOf,
+  findingLines,
+  isNowExpression,
   isOptional,
   NOTHING_TO_CONVERT,
   pascal,
+  relationStem,
   type CodegenRef,
 } from "./shared";
 
@@ -65,7 +70,7 @@ export function toPrisma(schema: DbmlSchema): string {
     if (ref.kind === "many-to-many") return null;
     const key = [ref.fkTable.id, ref.pkTable.id].sort().join("|");
     if ((pairs.get(key) ?? 0) < 2) return null;
-    return `${pascal(codeName(ref.fkTable))}${pascal(codeName(ref.pkTable))}_${pascal(accessor(ref.fkField))}`;
+    return `${pascal(codeName(ref.fkTable))}${pascal(codeName(ref.pkTable))}_${pascal(accessor(relationStem(ref)))}`;
   };
 
   const relations = new Map<string, RelationField[]>(schema.tables.map((table) => [table.id, []]));
@@ -75,8 +80,11 @@ export function toPrisma(schema: DbmlSchema): string {
     const relationName = nameOf(ref);
     // Missing only when the document is mid-edit, and an optional relation is the forgiving
     // guess: Prisma rejects a required relation whose key can be null, never the other way round.
-    const key = fieldOf(ref.fkTable, ref.fkField);
-    const optional = key ? isOptional(key) : true;
+    // A composite key is optional when any of its columns is.
+    const optional = ref.fkFields.some((name) => {
+      const key = fieldOf(ref.fkTable, name);
+      return key ? isOptional(key, ref.fkTable) : true;
+    });
 
     if (ref.kind === "many-to-many") {
       push(ref.fkTable, {
@@ -97,12 +105,12 @@ export function toPrisma(schema: DbmlSchema): string {
     }
 
     push(ref.fkTable, {
-      name: accessor(ref.fkField) || camel(ref.pkTable.name),
+      name: accessor(relationStem(ref)) || camel(ref.pkTable.name),
       type: pascal(codeName(ref.pkTable)),
       array: false,
       optional,
-      fkFields: [ref.fkField],
-      refFields: [ref.pkField],
+      fkFields: ref.fkFields,
+      refFields: ref.pkFields,
       relationName,
     });
     push(ref.pkTable, {
@@ -118,6 +126,7 @@ export function toPrisma(schema: DbmlSchema): string {
   const out: string[] = [
     banner("Prisma schema"),
     "",
+    ...findingLines(schema),
     "generator client {",
     '  provider = "prisma-client-js"',
     "}",
@@ -138,6 +147,8 @@ export function toPrisma(schema: DbmlSchema): string {
   for (const table of schema.tables) {
     out.push(`model ${pascal(codeName(table))} {`);
     const used = new Set(table.fields.map((field) => field.name));
+    // A key over several columns is `@@id([…])` on the model; `@id` on each is a schema error.
+    const composite = compositeKey(table);
 
     for (const field of table.fields) {
       const base = baseType(field.type);
@@ -145,16 +156,30 @@ export function toPrisma(schema: DbmlSchema): string {
       const type = asEnum ? pascal(asEnum.name) : (PRISMA_TYPE[base] ?? "String");
 
       const attributes: string[] = [];
-      if (field.pk) attributes.push("@id");
+      if (field.pk && !composite) attributes.push("@id");
       if (field.increment || base === "serial" || base === "bigserial") {
         attributes.push("@default(autoincrement())");
       } else if (base === "uuid" && field.pk) {
         attributes.push("@default(uuid())");
-      } else if (field.default !== null) {
-        const value = field.default.trim();
-        if (/^`?(now\(\)|current_timestamp)`?$/i.test(value)) attributes.push("@default(now())");
-        else if (/^`.*`$/.test(value)) attributes.push(`@default(dbgenerated("${value.slice(1, -1)}"))`);
-        else attributes.push(`@default(${value})`);
+      } else {
+        const value = defaultOf(field);
+        if (value?.kind === "expression") {
+          attributes.push(
+            isNowExpression(value.sql)
+              ? "@default(now())"
+              : `@default(dbgenerated(${JSON.stringify(value.sql)}))`,
+          );
+        } else if (value?.kind === "string") {
+          // An enum's default is one of its members, written bare; any other string is a Prisma
+          // string literal, which takes double quotes — `@default('user')` does not parse.
+          attributes.push(asEnum ? `@default(${value.value})` : `@default(${JSON.stringify(value.value)})`);
+        } else if (value?.kind === "number") {
+          attributes.push(`@default(${value.text})`);
+        } else if (value?.kind === "boolean") {
+          attributes.push(`@default(${value.value})`);
+        }
+        // `null` needs no attribute: an optional field already defaults to it, and Prisma has no
+        // `@default(null)`.
       }
       if (field.unique && !field.pk) attributes.push("@unique");
 
@@ -166,7 +191,7 @@ export function toPrisma(schema: DbmlSchema): string {
       if (base === "timestamptz") attributes.push("@db.Timestamptz(6)");
 
       const suffix = attributes.length > 0 ? `  ${attributes.join(" ")}` : "";
-      out.push(`  ${field.name.padEnd(22)} ${type}${isOptional(field) ? "?" : ""}${suffix}`);
+      out.push(`  ${field.name.padEnd(22)} ${type}${isOptional(field, table) ? "?" : ""}${suffix}`);
     }
 
     const related = relations.get(table.id) ?? [];
@@ -192,7 +217,9 @@ export function toPrisma(schema: DbmlSchema): string {
       out.push(`  ${name.padEnd(22)} ${type}${attribute}`);
     }
 
-    out.push("", `  @@map("${table.name}")`, "}", "");
+    out.push("");
+    if (composite) out.push(`  @@id([${composite.join(", ")}])`);
+    out.push(`  @@map("${table.name}")`, "}", "");
   }
 
   return out.join("\n").trimEnd() + "\n";

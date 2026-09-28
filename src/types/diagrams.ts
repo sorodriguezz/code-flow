@@ -87,6 +87,26 @@ export interface DiagramSync {
   row: DiagramRow | null;
   /** Empty when the working tree was read. Otherwise the reason, already a sentence. */
   file_error: string;
+  /** The version of the file that was read — what the next save is checked against. `null` for an
+   *  unlinked diagram, or when the file could not be read. */
+  version: DiagramFileVersion | null;
+}
+
+/**
+ * What a linked diagram knew about its file's bytes when it last read or wrote them — the same
+ * three facts as the editor's `DiskVersion` (`fsops::DiskVersion`), which is what the backend's
+ * checked write compares. Declared here, structurally, so this module stays free of the IPC layer.
+ */
+export interface DiagramFileVersion {
+  mtime_ms: number;
+  size: number;
+  hash: string;
+}
+
+/** What a save answers: the row, and the version of the file it wrote for a linked diagram. */
+export interface DiagramSaved {
+  meta: DiagramMetaRow | null;
+  version: DiagramFileVersion | null;
 }
 
 /**

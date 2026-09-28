@@ -217,17 +217,27 @@ export function detectFormat(text: string): ImportFormat | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
   if (looksLikeCurl(trimmed)) return "curl";
+  if (looksLikeBru(trimmed)) return "bruno";
 
   const doc = parseJsonSafe(trimmed);
   if (!isObj(doc)) {
     // A YAML spec is still recognizably OpenAPI; `importAny` explains why it can't read it.
     if (/^\s*(?:openapi|swagger)\s*:\s*["']?\d/m.test(trimmed)) return "openapi";
+    if (/^\s*type\s*:\s*["']?(?:collection|spec|environment)\.insomnia\.rest\/5/m.test(trimmed)) return "insomnia";
     return null;
   }
 
   if (str(doc.format) === "codeflow-api") return "codeflow";
   if (isObj(doc.log) && Array.isArray(doc.log.entries)) return "har";
   if (str(doc._type) === "export" && Array.isArray(doc.resources)) return "insomnia";
+  if (str(doc.type).includes("insomnia.rest/5")) return "insomnia";
+  if (
+    isObj(doc.brunoConfig) ||
+    (Array.isArray(doc.items) &&
+      objs(doc.items).some((item) => ["http-request", "graphql-request", "folder"].includes(str(item.type))))
+  ) {
+    return "bruno";
+  }
   if (typeof doc.openapi === "string" || typeof doc.swagger === "string") return "openapi";
 
   const info = isObj(doc.info) ? doc.info : null;
@@ -238,6 +248,11 @@ export function detectFormat(text: string): ImportFormat | null {
   if (info && Array.isArray(doc.item)) return "postman";
   if (info && isObj(doc.paths)) return "openapi";
   return null;
+}
+
+/** A `.bru` request file: a `meta` block and an HTTP method block, each opening a line. */
+function looksLikeBru(text: string): boolean {
+  return /^meta\s*\{\s*$/m.test(text) && /^(?:get|post|put|delete|patch|options|head|connect|trace)\s*\{\s*$/m.test(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,9 +315,16 @@ async function runImport(
   if (format === "curl") return importCurl(text, warnings);
   if (format === null) {
     warnings.push(
-      "Unrecognized format — expected a Postman, OpenAPI/Swagger, HAR, Insomnia or CodeFlow export, or a cURL command.",
+      "Unrecognized format — expected a Postman, OpenAPI/Swagger, HAR, Insomnia, Bruno or CodeFlow export, or a cURL command.",
     );
     return empty("codeflow");
+  }
+  // One `.bru` file, pasted or opened on its own. It is neither JSON nor YAML, so it never reaches
+  // the document parser below.
+  if (format === "bruno" && looksLikeBru(text.trim())) {
+    const single = importBrunoFolder([{ path: "request.bru", text }]);
+    warnings.push(...single.warnings);
+    return { ...single, warnings };
   }
 
   const doc = await parseDocument(text);
@@ -321,6 +343,8 @@ async function runImport(
         return importHar(doc, warnings);
       case "insomnia":
         return importInsomnia(doc, warnings);
+      case "bruno":
+        return importBrunoJson(doc, warnings);
       case "codeflow":
         return importNative(doc, warnings);
     }
@@ -2389,7 +2413,96 @@ function insomniaBody(spec: ApiRequestSpec, node: unknown): void {
   spec.body.rawLanguage = languageFor(mime, text);
 }
 
+/**
+ * Insomnia writes a variable as Nunjucks over the environment object: `{{ _.baseUrl }}`. CodeFlow's
+ * are `{{baseUrl}}`, so without this every imported URL kept a reference nothing could resolve.
+ * Tags (`{% uuid %}`, `{% response … %}`) have no counterpart and stay as written.
+ */
+function insomniaTemplate(text: string): string {
+  return text.replace(/\{\{\s*_\.([A-Za-z0-9_$][\w$.-]*)\s*\}\}/g, "{{$1}}");
+}
+
+/** `insomniaTemplate` over every string of a value, scripts excepted — they're JavaScript. */
+function insomniaTemplates<T>(value: T, key = ""): T {
+  if (typeof value === "string") {
+    return (key === "preScript" || key === "postScript" ? value : insomniaTemplate(value)) as unknown as T;
+  }
+  if (Array.isArray(value)) return value.map((item) => insomniaTemplates(item)) as unknown as T;
+  if (isObj(value)) {
+    const out: Json = {};
+    for (const [name, item] of Object.entries(value)) out[name] = insomniaTemplates(item, name);
+    return out as T;
+  }
+  return value;
+}
+
+function insomniaHeaders(v: unknown): KeyValue[] {
+  return objs(v).map((h) =>
+    kv(str(h.name), str(h.value), { description: str(h.description), enabled: h.disabled !== true }),
+  );
+}
+
+/** Folder headers apply to every request beneath them; a CodeFlow folder has none of its own, so
+ * they are copied down, the request's own winning on a clash. */
+function withInheritedHeaders(own: KeyValue[], inherited: KeyValue[]): KeyValue[] {
+  const names = new Set(own.map((h) => h.key.toLowerCase()));
+  return [
+    ...inherited.filter((h) => !names.has(h.key.toLowerCase())).map((h) => ({ ...h, id: crypto.randomUUID() })),
+    ...own,
+  ];
+}
+
+/** The request shape v4 and v5 share, read from either one's field names. */
+function insomniaRequest(
+  input: {
+    name: string;
+    method: unknown;
+    url: unknown;
+    parameters: unknown;
+    headers: unknown;
+    pathParameters: unknown;
+    description: unknown;
+    preScript: unknown;
+    postScript: unknown;
+    authentication: unknown;
+    body: unknown;
+    followRedirects: boolean | null;
+    protocol: ApiProtocol;
+    inheritedHeaders: KeyValue[];
+  },
+  warnings: string[],
+): ImportedItem {
+  const spec = defaultRequestSpec(input.protocol);
+  spec.method = (str(input.method) || "GET").toUpperCase();
+  const split = splitQuery(str(input.url));
+  spec.url = split.url;
+  spec.params = [
+    ...split.params,
+    ...objs(input.parameters).map((p) =>
+      kv(str(p.name), str(p.value), { description: str(p.description), enabled: p.disabled !== true }),
+    ),
+  ];
+  spec.headers = withInheritedHeaders(insomniaHeaders(input.headers), input.inheritedHeaders);
+  spec.pathVars = objs(input.pathParameters).map((p) => kv(str(p.name), str(p.value)));
+  spec.description = str(input.description);
+  spec.preScript = str(input.preScript);
+  spec.postScript = str(input.postScript);
+  spec.auth = insomniaAuth(input.authentication, warnings) ?? defaultAuth("inherit");
+  insomniaBody(spec, input.body);
+  if (input.followRedirects !== null) spec.settings.followRedirects = input.followRedirects;
+  return requestItem(input.name || nameFromUrl(spec.method, spec.url), insomniaTemplates(spec));
+}
+
+function insomniaVariables(data: unknown): ApiVariable[] {
+  if (!isObj(data)) return [];
+  return Object.entries(data).map(([key, value]) =>
+    variable(key, insomniaTemplate(typeof value === "string" ? value : JSON.stringify(value))),
+  );
+}
+
 function importInsomnia(doc: Json, warnings: string[]): ImportResult {
+  if (str(doc.type).includes("insomnia.rest/5")) return importInsomniaV5(doc, warnings);
+
   const resources = objs(doc.resources);
   const sortKey = (r: Json) => num(r.metaSortKey, 0);
   const byParent = new Map<string, Json[]>();
@@ -2403,10 +2516,7 @@ function importInsomnia(doc: Json, warnings: string[]): ImportResult {
       continue;
     }
     if (type === "environment") {
-      const data = isObj(resource.data) ? resource.data : {};
-      const variables = Object.entries(data).map(([key, value]) =>
-        variable(key, typeof value === "string" ? value : JSON.stringify(value)),
-      );
+      const variables = insomniaVariables(resource.data);
       if (variables.length) {
         environments.push({ name: str(resource.name) || "Environment", variables });
       }
@@ -2419,7 +2529,7 @@ function importInsomnia(doc: Json, warnings: string[]): ImportResult {
     byParent.set(parent, bucket);
   }
 
-  const build = (parentId: string, depth: number): ImportedItem[] => {
+  const build = (parentId: string, depth: number, inherited: KeyValue[]): ImportedItem[] => {
     if (depth > 32) return [];
     const children = (byParent.get(parentId) ?? []).slice().sort((a, b) => sortKey(a) - sortKey(b));
     return children.map((resource): ImportedItem => {
@@ -2428,39 +2538,31 @@ function importInsomnia(doc: Json, warnings: string[]): ImportResult {
           kind: "folder",
           name: str(resource.name) || "Folder",
           description: str(resource.description),
-          auth: insomniaAuth(resource.authentication, warnings),
+          auth: insomniaTemplates(insomniaAuth(resource.authentication, warnings)),
           preScript: str(resource.preRequestScript),
           postScript: str(resource.afterResponseScript),
-          items: build(str(resource._id), depth + 1),
+          items: build(str(resource._id), depth + 1, [...inherited, ...insomniaHeaders(resource.headers)]),
         };
       }
-      const spec = defaultRequestSpec("http");
-      spec.method = (str(resource.method) || "GET").toUpperCase();
-      const split = splitQuery(str(resource.url));
-      spec.url = split.url;
-      spec.params = [
-        ...split.params,
-        ...objs(resource.parameters).map((p) =>
-          kv(str(p.name), str(p.value), {
-            description: str(p.description),
-            enabled: p.disabled !== true,
-          }),
-        ),
-      ];
-      spec.headers = objs(resource.headers).map((h) =>
-        kv(str(h.name), str(h.value), {
-          description: str(h.description),
-          enabled: h.disabled !== true,
-        }),
+      return insomniaRequest(
+        {
+          name: str(resource.name),
+          method: resource.method,
+          url: resource.url,
+          parameters: resource.parameters,
+          headers: resource.headers,
+          pathParameters: resource.pathParameters,
+          description: resource.description,
+          preScript: resource.preRequestScript,
+          postScript: resource.afterResponseScript,
+          authentication: resource.authentication,
+          body: resource.body,
+          followRedirects: resource.settingFollowRedirects === "off" ? false : null,
+          protocol: "http",
+          inheritedHeaders: inherited,
+        },
+        warnings,
       );
-      spec.pathVars = objs(resource.pathParameters).map((p) => kv(str(p.name), str(p.value)));
-      spec.description = str(resource.description);
-      spec.preScript = str(resource.preRequestScript);
-      spec.postScript = str(resource.afterResponseScript);
-      spec.auth = insomniaAuth(resource.authentication, warnings) ?? defaultAuth("inherit");
-      insomniaBody(spec, resource.body);
-      if (resource.settingFollowRedirects === "off") spec.settings.followRedirects = false;
-      return requestItem(str(resource.name) || nameFromUrl(spec.method, spec.url), spec);
     });
   };
 
@@ -2468,7 +2570,7 @@ function importInsomnia(doc: Json, warnings: string[]): ImportResult {
   for (const workspace of workspaces) {
     const collection = emptyCollection(str(workspace.name) || "Insomnia import");
     collection.description = str(workspace.description);
-    collection.items = build(str(workspace._id), 0);
+    collection.items = build(str(workspace._id), 0, []);
     if (collection.items.length) collections.push(collection);
   }
 
@@ -2486,7 +2588,7 @@ function importInsomnia(doc: Json, warnings: string[]): ImportResult {
   );
   if (!collections.length && orphans.length) {
     const collection = emptyCollection("Insomnia import");
-    for (const orphan of orphans) collection.items.push(...build(str(orphan.parentId), 0));
+    for (const orphan of orphans) collection.items.push(...build(str(orphan.parentId), 0, []));
     if (collection.items.length) collections.push(collection);
   }
 
@@ -2494,6 +2596,796 @@ function importInsomnia(doc: Json, warnings: string[]): ImportResult {
     warnings.push("The Insomnia export contains no requests.");
   }
   return { format: "insomnia", collections, environments, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// Insomnia v5
+// ---------------------------------------------------------------------------
+
+/**
+ * Insomnia 10+'s export: YAML, `type: collection.insomnia.rest/5.0`, the tree nested in
+ * `collection` (a folder is a node with `children`) instead of v4's flat `resources` list linked by
+ * `parentId`. A design document (`spec.insomnia.rest/5.0`) carries the same `collection` beside its
+ * API description, and an environment export (`environment.insomnia.rest/5.0`) only environments.
+ */
+function importInsomniaV5(doc: Json, warnings: string[]): ImportResult {
+  const kind = str(doc.type);
+  const meta = isObj(doc.meta) ? doc.meta : {};
+  const environments = insomniaV5Environments(doc.environments);
+
+  const collection = emptyCollection(str(doc.name) || "Insomnia import");
+  collection.description = str(meta.description);
+  collection.items = insomniaV5Items(objs(doc.collection), [], warnings, 0);
+  if (kind.startsWith("spec.") && isObj(doc.spec)) {
+    warnings.push("The design document's API description was not imported — only its requests.");
+  }
+
+  const collections = collection.items.length ? [collection] : [];
+  if (!collections.length && !environments.length) warnings.push("The Insomnia export contains no requests.");
+  return { format: "insomnia", collections, environments, warnings };
+}
+
+function insomniaV5Items(nodes: Json[], inherited: KeyValue[], warnings: string[], depth: number): ImportedItem[] {
+  if (depth > 32) return [];
+  const sortKey = (node: Json) => num(isObj(node.meta) ? node.meta.sortKey : undefined, 0);
+  return nodes
+    .slice()
+    .sort((a, b) => sortKey(a) - sortKey(b))
+    .flatMap((node): ImportedItem[] => {
+      const meta = isObj(node.meta) ? node.meta : {};
+      const scripts = isObj(node.scripts) ? node.scripts : {};
+      const name = str(node.name);
+      if (Array.isArray(node.children)) {
+        if (isObj(node.environment) && Object.keys(node.environment).length > 0) {
+          warnings.push(`Folder variables aren't supported ("${name}"); they were not imported.`);
+        }
+        return [
+          {
+            kind: "folder",
+            name: name || "Folder",
+            description: str(meta.description),
+            auth: insomniaTemplates(insomniaAuth(node.authentication, warnings)),
+            preScript: str(scripts.preRequest),
+            postScript: str(scripts.afterResponse),
+            items: insomniaV5Items(
+              objs(node.children),
+              [...inherited, ...insomniaHeaders(node.headers)],
+              warnings,
+              depth + 1,
+            ),
+          },
+        ];
+      }
+      const id = str(meta.id);
+      if (id.startsWith("greq_") || "protoMethodName" in node) {
+        warnings.push(`gRPC request "${name}" can't be imported from Insomnia; recreate it from its .proto.`);
+        return [];
+      }
+      if (node.url === undefined) return [];
+      const settings = isObj(node.settings) ? node.settings : {};
+      return [
+        insomniaRequest(
+          {
+            name,
+            method: node.method,
+            url: node.url,
+            parameters: node.parameters,
+            headers: node.headers,
+            pathParameters: node.pathParameters,
+            description: meta.description,
+            preScript: scripts.preRequest,
+            postScript: scripts.afterResponse,
+            authentication: node.authentication,
+            body: node.body,
+            followRedirects:
+              settings.followRedirects === "off" ? false : settings.followRedirects === "on" ? true : null,
+            protocol: id.startsWith("ws-req_") ? "websocket" : "http",
+            inheritedHeaders: inherited,
+          },
+          warnings,
+        ),
+      ];
+    });
+}
+
+/** Sub-environments inherit from the base one in Insomnia; here each arrives with the base merged
+ * under it, so picking one gives the same values it had there. */
+function insomniaV5Environments(v: unknown): { name: string; variables: ApiVariable[] }[] {
+  if (!isObj(v)) return [];
+  const base = isObj(v.data) ? v.data : {};
+  const subs = objs(v.subEnvironments);
+  if (subs.length === 0) {
+    const variables = insomniaVariables(base);
+    return variables.length ? [{ name: str(v.name) || "Base Environment", variables }] : [];
+  }
+  return subs.map((sub) => ({
+    name: str(sub.name) || "Environment",
+    variables: insomniaVariables({ ...base, ...(isObj(sub.data) ? sub.data : {}) }),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Bruno
+// ---------------------------------------------------------------------------
+
+/** One block of a `.bru` file: `name { key: value }`, a text block, or `name [ a, b ]`. */
+export type BruBlock =
+  | { kind: "dict"; entries: BruEntry[] }
+  | { kind: "text"; text: string }
+  | { kind: "list"; items: string[] };
+
+interface BruEntry {
+  key: string;
+  value: string;
+  enabled: boolean;
+}
+
+/** Blocks whose body is text rather than `key: value` lines. */
+const BRU_TEXT_BLOCK =
+  /^(?:body(?::(?:json|text|xml|sparql|graphql(?::vars)?))?|script:(?:pre-request|post-response)|tests|docs)$/;
+
+const BRU_METHODS = ["get", "post", "put", "delete", "patch", "options", "head", "connect", "trace"];
+
+/** The fence Bruno puts around a multi-line value. */
+const BRU_FENCE = "'".repeat(3);
+
+/** Content lines are written two spaces in; take exactly that back off, so indentation inside a
+ * JSON body or a script survives. */
+function bruDedent(lines: string[], by = 2): string {
+  const prefix = " ".repeat(by);
+  const text = lines.map((line) => (line.startsWith(prefix) ? line.slice(by) : line.trimStart())).join("\n");
+  return text.replace(/\n+$/, "");
+}
+
+/**
+ * Bruno's `.bru` markup. A block opens with `name {` (or `name [`) at the start of a line and
+ * closes at a line that is exactly `}` (`]`) — content is always indented, which is what lets a
+ * JSON body's own braces sit inside one.
+ */
+export function parseBru(text: string): Map<string, BruBlock> {
+  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const blocks = new Map<string, BruBlock>();
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const inline = /^([A-Za-z][\w:.-]*)\s*\[(.*)\]\s*$/.exec(line);
+    if (inline) {
+      blocks.set(inline[1], { kind: "list", items: bruListItems([inline[2]]) });
+      i += 1;
+      continue;
+    }
+    const open = /^([A-Za-z][\w:.-]*)\s*([{[])\s*$/.exec(line);
+    if (!open) {
+      i += 1;
+      continue;
+    }
+    const [, name, bracket] = open;
+    const close = bracket === "{" ? "}" : "]";
+    let end = i + 1;
+    while (end < lines.length && lines[end].trimEnd() !== close) end += 1;
+    const body = lines.slice(i + 1, end);
+    if (bracket === "[") blocks.set(name, { kind: "list", items: bruListItems(body) });
+    else if (BRU_TEXT_BLOCK.test(name)) blocks.set(name, { kind: "text", text: bruDedent(body) });
+    else blocks.set(name, { kind: "dict", entries: bruDictEntries(body) });
+    i = end + 1;
+  }
+  return blocks;
+}
+
+function bruListItems(lines: string[]): string[] {
+  return lines
+    .flatMap((line) => line.split(","))
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+}
+
+function bruDictEntries(lines: string[]): BruEntry[] {
+  const entries: BruEntry[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    let rest = lines[i].trim();
+    if (rest === "") continue;
+    const enabled = !rest.startsWith("~");
+    if (!enabled) rest = rest.slice(1);
+    let key: string;
+    let value: string;
+    if (rest.startsWith('"')) {
+      // A quoted key may hold a colon of its own.
+      const closing = rest.indexOf('"', 1);
+      key = rest.slice(1, closing < 0 ? rest.length : closing);
+      const after = closing < 0 ? "" : rest.slice(closing + 1);
+      value = after.replace(/^\s*:\s?/, "");
+    } else {
+      const colon = rest.indexOf(":");
+      if (colon < 0) continue;
+      key = rest.slice(0, colon).trim();
+      value = rest.slice(colon + 1).trim();
+    }
+    if (value === BRU_FENCE) {
+      // A multi-line value, fenced and indented one more level than its key.
+      const start = i + 1;
+      let end = start;
+      while (end < lines.length && lines[end].trim() !== BRU_FENCE) end += 1;
+      value = bruDedent(lines.slice(start, end), 4);
+      i = end;
+    }
+    entries.push({ key, value: value.trim(), enabled });
+  }
+  return entries;
+}
+
+function bruDict(blocks: Map<string, BruBlock>, name: string): BruEntry[] {
+  const block = blocks.get(name);
+  return block?.kind === "dict" ? block.entries : [];
+}
+
+function bruText(blocks: Map<string, BruBlock>, name: string): string {
+  const block = blocks.get(name);
+  return block?.kind === "text" ? block.text : "";
+}
+
+function bruList(blocks: Map<string, BruBlock>, name: string): string[] {
+  const block = blocks.get(name);
+  return block?.kind === "list" ? block.items : [];
+}
+
+function bruField(blocks: Map<string, BruBlock>, block: string, key: string): string {
+  return bruDict(blocks, block).find((entry) => entry.key === key)?.value ?? "";
+}
+
+/** `@file(a.png|b.png) @contentType(image/png)` → the first path. */
+function bruFilePath(value: string): string {
+  const match = /@file\(([^)]*)\)/.exec(value);
+  return match ? (match[1].split("|")[0] ?? "").trim() : value;
+}
+
+/**
+ * Bruno's auth, from either the `.bru` fields (`access_token_url`) or the JSON export's
+ * (`accessTokenUrl`) — `pick` tries each spelling.
+ */
+function brunoAuth(mode: string, fields: Record<string, unknown>, warnings: string[]): AuthConfig {
+  const pick = (...names: string[]) => {
+    for (const name of names) {
+      const value = fields[name];
+      if (value !== undefined && value !== null) return str(value);
+    }
+    return "";
+  };
+  switch (mode) {
+    case "":
+    case "inherit":
+      return defaultAuth("inherit");
+    case "none":
+      return defaultAuth("none");
+    case "basic": {
+      const auth = defaultAuth("basic");
+      auth.basic = { username: pick("username"), password: pick("password") };
+      return auth;
+    }
+    case "digest": {
+      const auth = defaultAuth("digest");
+      auth.digest = { username: pick("username"), password: pick("password") };
+      return auth;
+    }
+    case "bearer": {
+      const auth = defaultAuth("bearer");
+      auth.bearer = { token: pick("token") };
+      return auth;
+    }
+    case "apikey": {
+      const auth = defaultAuth("apikey");
+      auth.apikey = {
+        key: pick("key"),
+        value: pick("value"),
+        addTo: pick("placement") === "queryparams" ? "query" : "header",
+      };
+      return auth;
+    }
+    case "awsv4": {
+      const auth = defaultAuth("awsv4");
+      auth.awsv4 = {
+        accessKey: pick("accessKeyId"),
+        secretKey: pick("secretAccessKey"),
+        sessionToken: pick("sessionToken"),
+        region: pick("region"),
+        service: pick("service"),
+      };
+      return auth;
+    }
+    case "oauth2": {
+      const auth = defaultAuth("oauth2");
+      const grant = pick("grant_type", "grantType");
+      const pkce = pick("pkce") === "true";
+      const grantType: OAuth2GrantType =
+        grant === "authorization_code"
+          ? pkce
+            ? "authorization_code_pkce"
+            : "authorization_code"
+          : grant === "password" || grant === "implicit"
+            ? grant
+            : "client_credentials";
+      auth.oauth2 = {
+        ...auth.oauth2,
+        grantType,
+        authUrl: pick("authorization_url", "authorizationUrl"),
+        accessTokenUrl: pick("access_token_url", "accessTokenUrl"),
+        clientId: pick("client_id", "clientId"),
+        clientSecret: pick("client_secret", "clientSecret"),
+        scope: pick("scope"),
+        state: pick("state"),
+        username: pick("username"),
+        password: pick("password"),
+        redirectUri: pick("callback_url", "callbackUrl") || auth.oauth2.redirectUri,
+        clientAuth: pick("credentials_placement", "credentialsPlacement") === "body" ? "body" : "header",
+        headerPrefix: pick("token_header_prefix", "tokenHeaderPrefix") || "Bearer",
+        addTo: pick("token_placement", "tokenPlacement") === "url" ? "query" : "header",
+      };
+      return auth;
+    }
+    default:
+      warnings.push(`Bruno auth mode "${mode}" isn't supported; the request was left with no auth.`);
+      return defaultAuth("none");
+  }
+}
+
+/** A `.bru` file's auth: the mode, then the block holding that mode's fields. */
+function bruAuth(blocks: Map<string, BruBlock>, mode: string, warnings: string[]): AuthConfig {
+  const fields: Record<string, unknown> = {};
+  for (const entry of bruDict(blocks, `auth:${mode}`)) fields[entry.key] = entry.value;
+  return brunoAuth(mode, fields, warnings);
+}
+
+function bruKeyValues(entries: BruEntry[]): KeyValue[] {
+  return entries.map((entry) => kv(entry.key, entry.value, { enabled: entry.enabled }));
+}
+
+/** Post-response script and tests both run after the response here; Bruno keeps them apart. */
+function joinScripts(...parts: string[]): string {
+  return parts.filter((part) => part.trim() !== "").join("\n\n");
+}
+
+const BRUNO_SCRIPT_WARNING =
+  "Bruno scripts and tests use Bruno's own API (bru, req, res). They were imported as written; port them to pm.* before running them.";
+
+interface BrunoRequestInput {
+  name: string;
+  type: string;
+  method: string;
+  url: string;
+  /** `null` when the source had no query table, so the URL's own query is used instead. */
+  query: KeyValue[] | null;
+  pathVars: KeyValue[];
+  headers: KeyValue[];
+  auth: AuthConfig;
+  bodyMode: string;
+  body: {
+    json: string;
+    text: string;
+    xml: string;
+    formUrlEncoded: KeyValue[];
+    multipart: KeyValue[];
+    graphqlQuery: string;
+    graphqlVariables: string;
+    file: string;
+  };
+  preScript: string;
+  postScript: string;
+  docs: string;
+}
+
+function brunoRequest(input: BrunoRequestInput, inherited: KeyValue[]): ImportedItem {
+  const graphql = input.type === "graphql" || input.bodyMode === "graphql";
+  const spec = defaultRequestSpec(graphql ? "graphql" : "http");
+  spec.method = (input.method || "GET").toUpperCase();
+  const split = splitQuery(input.url);
+  spec.url = split.url;
+  spec.params = input.query ?? split.params;
+  spec.pathVars = input.pathVars;
+  spec.headers = withInheritedHeaders(input.headers, inherited);
+  spec.auth = input.auth;
+  spec.preScript = input.preScript;
+  spec.postScript = input.postScript;
+  spec.description = input.docs;
+  const body = input.body;
+  switch (input.bodyMode) {
+    case "json":
+      spec.body.mode = "raw";
+      spec.body.raw = body.json;
+      spec.body.rawLanguage = "json";
+      break;
+    case "xml":
+      spec.body.mode = "raw";
+      spec.body.raw = body.xml;
+      spec.body.rawLanguage = "xml";
+      break;
+    case "text":
+      spec.body.mode = "raw";
+      spec.body.raw = body.text;
+      spec.body.rawLanguage = "text";
+      break;
+    case "formUrlEncoded":
+    case "form-urlencoded":
+      spec.body.mode = "urlencoded";
+      spec.body.urlencoded = body.formUrlEncoded;
+      break;
+    case "multipartForm":
+    case "multipart-form":
+      spec.body.mode = "formdata";
+      spec.body.formdata = body.multipart;
+      break;
+    case "graphql":
+      spec.body.mode = "graphql";
+      spec.body.graphql = { query: body.graphqlQuery, variables: body.graphqlVariables, operationName: "" };
+      break;
+    case "file":
+      spec.body.mode = "binary";
+      spec.body.binaryPath = body.file;
+      break;
+    default:
+      break;
+  }
+  return requestItem(input.name || nameFromUrl(spec.method, spec.url), spec);
+}
+
+/** Folders by `seq` then name, ahead of requests by `seq` — Bruno's own sidebar order. */
+function sortBruno<T extends { folder: boolean; seq: number; name: string }>(entries: T[]): T[] {
+  return entries.slice().sort((a, b) => {
+    if (a.folder !== b.folder) return a.folder ? -1 : 1;
+    return a.seq - b.seq || a.name.localeCompare(b.name);
+  });
+}
+
+/** What a Bruno request can carry that has no place here — said, not dropped silently. */
+function noteBrunoExtras(name: string, hasVars: boolean, hasAssertions: boolean, warnings: string[]): void {
+  if (hasVars) warnings.push(`Request variables on "${name}" aren't supported; they were not imported.`);
+  if (hasAssertions) {
+    warnings.push(`Assertions on "${name}" were not imported; write them as pm.test in its tests.`);
+  }
+}
+
+// ----- the JSON export -----
+
+function brunoJsonKeyValues(v: unknown): KeyValue[] {
+  return objs(v).map((row) =>
+    kv(str(row.name), str(row.value), { enabled: row.enabled !== false, description: str(row.description) }),
+  );
+}
+
+function brunoJsonAuth(v: unknown, warnings: string[]): AuthConfig | null {
+  if (!isObj(v)) return null;
+  const mode = str(v.mode);
+  const fields = isObj(v[mode]) ? (v[mode] as Json) : {};
+  return brunoAuth(mode, fields, warnings);
+}
+
+function brunoJsonScripts(request: Json): { pre: string; post: string } {
+  const script = isObj(request.script) ? request.script : {};
+  return { pre: str(script.req), post: joinScripts(str(script.res), str(request.tests)) };
+}
+
+function brunoJsonItems(
+  nodes: Json[],
+  inherited: KeyValue[],
+  warnings: string[],
+  depth: number,
+  seen: { scripts: boolean },
+): ImportedItem[] {
+  if (depth > 32) return [];
+  const entries = nodes.map((node) => ({
+    node,
+    folder: str(node.type) === "folder",
+    seq: num(node.seq ?? (isObj(node.root) && isObj(node.root.meta) ? node.root.meta.seq : undefined), 0),
+    name: str(node.name),
+  }));
+  return sortBruno(entries).flatMap(({ node, folder, name }): ImportedItem[] => {
+    if (folder) {
+      const root = isObj(node.root) ? node.root : {};
+      const request = isObj(root.request) ? root.request : {};
+      const scripts = brunoJsonScripts(request);
+      if (scripts.pre || scripts.post) seen.scripts = true;
+      return [
+        {
+          kind: "folder",
+          name: name || "Folder",
+          description: str(root.docs),
+          auth: brunoJsonAuth(request.auth, warnings),
+          preScript: scripts.pre,
+          postScript: scripts.post,
+          items: brunoJsonItems(
+            objs(node.items),
+            [...inherited, ...brunoJsonKeyValues(request.headers)],
+            warnings,
+            depth + 1,
+            seen,
+          ),
+        },
+      ];
+    }
+    const type = str(node.type);
+    if (type !== "http-request" && type !== "graphql-request") {
+      warnings.push(`Bruno ${type || "item"} "${name}" can't be imported.`);
+      return [];
+    }
+    const request = isObj(node.request) ? node.request : {};
+    const params = objs(request.params);
+    const body = isObj(request.body) ? request.body : {};
+    const graphql = isObj(body.graphql) ? body.graphql : {};
+    const files = objs(body.file);
+    const scripts = brunoJsonScripts(request);
+    if (scripts.pre || scripts.post) seen.scripts = true;
+    const vars = isObj(request.vars) ? request.vars : {};
+    noteBrunoExtras(
+      name,
+      objs(vars.req).length > 0 || objs(vars.res).length > 0,
+      objs(request.assertions).length > 0,
+      warnings,
+    );
+    return [
+      brunoRequest(
+        {
+          name,
+          type: type === "graphql-request" ? "graphql" : "http",
+          method: str(request.method),
+          url: str(request.url),
+          query: brunoJsonKeyValues(params.filter((p) => str(p.type) !== "path")),
+          pathVars: brunoJsonKeyValues(params.filter((p) => str(p.type) === "path")),
+          headers: brunoJsonKeyValues(request.headers),
+          auth: brunoJsonAuth(request.auth, warnings) ?? defaultAuth("inherit"),
+          bodyMode: str(body.mode),
+          body: {
+            json: str(body.json),
+            text: str(body.text),
+            xml: str(body.xml),
+            formUrlEncoded: brunoJsonKeyValues(body.formUrlEncoded),
+            multipart: objs(body.multipartForm).map((row) => {
+              const file = str(row.type) === "file";
+              const value = Array.isArray(row.value) ? str(row.value[0]) : str(row.value);
+              return kv(str(row.name), file ? "" : value, {
+                enabled: row.enabled !== false,
+                type: file ? "file" : "text",
+                src: file ? value : "",
+              });
+            }),
+            graphqlQuery: str(graphql.query),
+            graphqlVariables: str(graphql.variables),
+            file: str((files.find((f) => f.selected !== false) ?? {}).filePath),
+          },
+          preScript: scripts.pre,
+          postScript: scripts.post,
+          docs: str(request.docs),
+        },
+        inherited,
+      ),
+    ];
+  });
+}
+
+/** Bruno's "Export collection" JSON: the whole tree in one document, environments included. */
+function importBrunoJson(doc: Json, warnings: string[]): ImportResult {
+  const root = isObj(doc.root) ? doc.root : {};
+  const request = isObj(root.request) ? root.request : {};
+  const config = isObj(doc.brunoConfig) ? doc.brunoConfig : {};
+  const collection = emptyCollection(str(doc.name) || str(config.name) || "Bruno import");
+  collection.description = str(root.docs);
+  const auth = brunoJsonAuth(request.auth, warnings);
+  // The top of the chain has nothing above it to inherit from.
+  collection.auth = auth?.type === "inherit" ? null : auth;
+  const scripts = brunoJsonScripts(request);
+  collection.preScript = scripts.pre;
+  collection.postScript = scripts.post;
+  const vars = isObj(request.vars) ? request.vars : {};
+  collection.variables = objs(vars.req).map((row) =>
+    variable(str(row.name), str(row.value), { enabled: row.enabled !== false }),
+  );
+  const seen = { scripts: scripts.pre !== "" || scripts.post !== "" };
+  collection.items = brunoJsonItems(objs(doc.items), brunoJsonKeyValues(request.headers), warnings, 0, seen);
+  if (seen.scripts) warnings.push(BRUNO_SCRIPT_WARNING);
+
+  const environments = objs(doc.environments).map((env) => ({
+    name: str(env.name) || "Environment",
+    variables: objs(env.variables).map((row) =>
+      variable(str(row.name), str(row.value), { enabled: row.enabled !== false, secret: row.secret === true }),
+    ),
+  }));
+  return { format: "bruno", collections: [collection], environments, warnings };
+}
+
+// ----- a folder of .bru files -----
+
+function bruRequestFrom(
+  blocks: Map<string, BruBlock>,
+  fallbackName: string,
+  warnings: string[],
+): { item: ImportedItem | null; seq: number; scripts: boolean } {
+  const type = bruField(blocks, "meta", "type") || "http";
+  const name = bruField(blocks, "meta", "name") || fallbackName;
+  const seq = num(bruField(blocks, "meta", "seq"), 0);
+  if (type !== "http" && type !== "graphql") {
+    warnings.push(`Bruno ${type} request "${name}" can't be imported.`);
+    return { item: null, seq, scripts: false };
+  }
+  const method = BRU_METHODS.find((candidate) => blocks.has(candidate));
+  if (!method) return { item: null, seq, scripts: false };
+  const query = blocks.has("params:query")
+    ? bruDict(blocks, "params:query")
+    : blocks.has("query")
+      ? bruDict(blocks, "query")
+      : null;
+  const preScript = bruText(blocks, "script:pre-request");
+  const postScript = joinScripts(bruText(blocks, "script:post-response"), bruText(blocks, "tests"));
+  noteBrunoExtras(
+    name,
+    bruDict(blocks, "vars:pre-request").length > 0 || bruDict(blocks, "vars:post-response").length > 0,
+    bruDict(blocks, "assert").length > 0,
+    warnings,
+  );
+  const item = brunoRequest(
+    {
+      name,
+      type,
+      method,
+      url: bruField(blocks, method, "url"),
+      query: query === null ? null : bruKeyValues(query),
+      pathVars: bruKeyValues(bruDict(blocks, "params:path")),
+      headers: bruKeyValues(bruDict(blocks, "headers")),
+      auth: bruAuth(blocks, bruField(blocks, method, "auth"), warnings),
+      bodyMode: bruField(blocks, method, "body"),
+      body: {
+        json: bruText(blocks, "body:json"),
+        text: bruText(blocks, "body:text"),
+        xml: bruText(blocks, "body:xml"),
+        formUrlEncoded: bruKeyValues(bruDict(blocks, "body:form-urlencoded")),
+        multipart: bruDict(blocks, "body:multipart-form").map((entry) => {
+          const file = entry.value.startsWith("@file(");
+          return kv(entry.key, file ? "" : entry.value, {
+            enabled: entry.enabled,
+            type: file ? "file" : "text",
+            src: file ? bruFilePath(entry.value) : "",
+          });
+        }),
+        graphqlQuery: bruText(blocks, "body:graphql"),
+        graphqlVariables: bruText(blocks, "body:graphql:vars"),
+        file: bruFilePath(bruDict(blocks, "body:file").find((entry) => entry.enabled)?.value ?? ""),
+      },
+      preScript,
+      postScript,
+      docs: bruText(blocks, "docs"),
+    },
+    [],
+  );
+  return { item, seq, scripts: preScript !== "" || postScript !== "" };
+}
+
+/** A folder's (or the collection's) own settings: `folder.bru` / `collection.bru`. */
+function bruSettings(blocks: Map<string, BruBlock> | undefined, warnings: string[]) {
+  if (!blocks) {
+    return { auth: null, pre: "", post: "", docs: "", headers: [] as KeyValue[], seq: 0, name: "" };
+  }
+  const mode = bruField(blocks, "auth", "mode");
+  return {
+    auth: mode === "" ? null : bruAuth(blocks, mode, warnings),
+    pre: bruText(blocks, "script:pre-request"),
+    post: joinScripts(bruText(blocks, "script:post-response"), bruText(blocks, "tests")),
+    docs: bruText(blocks, "docs"),
+    headers: bruKeyValues(bruDict(blocks, "headers")),
+    seq: num(bruField(blocks, "meta", "seq"), 0),
+    name: bruField(blocks, "meta", "name"),
+  };
+}
+
+function parentDir(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash < 0 ? "" : path.slice(0, slash);
+}
+
+/**
+ * A Bruno collection as it lives on disk: a folder of `.bru` files, one per request, with
+ * `bruno.json` naming it, `collection.bru` holding its collection-wide settings, a `folder.bru` in
+ * any subfolder that has some, and `environments/*.bru`. A single `.bru` pasted or dropped on its
+ * own arrives here too, as a one-request collection.
+ *
+ * Paths are relative to the collection folder and `/`-separated (see `api_read_collection_dir`).
+ */
+export function importBrunoFolder(files: { path: string; text: string }[], folderName = ""): ImportResult {
+  const warnings: string[] = [];
+  const config = parseJsonSafe(files.find((file) => file.path === "bruno.json")?.text ?? "");
+  const byDir = new Map<string, { path: string; blocks: Map<string, BruBlock> }[]>();
+  const environments: { name: string; variables: ApiVariable[] }[] = [];
+  const folderBlocks = new Map<string, Map<string, BruBlock>>();
+  let collectionBlocks: Map<string, BruBlock> | undefined;
+
+  for (const file of files) {
+    if (!file.path.endsWith(".bru")) continue;
+    const blocks = parseBru(file.text);
+    const dir = parentDir(file.path);
+    const base = file.path.slice(file.path.lastIndexOf("/") + 1);
+    if (dir === "" && base === "collection.bru") {
+      collectionBlocks = blocks;
+    } else if (base === "folder.bru") {
+      folderBlocks.set(dir, blocks);
+    } else if (dir === "environments") {
+      const secret = new Set(bruList(blocks, "vars:secret"));
+      const plain = bruDict(blocks, "vars");
+      environments.push({
+        name: base.replace(/\.bru$/, ""),
+        variables: [
+          ...plain.map((entry) =>
+            variable(entry.key, entry.value, { enabled: entry.enabled, secret: secret.has(entry.key) }),
+          ),
+          // Bruno keeps a secret's value out of the file, so only its name arrives.
+          ...[...secret]
+            .filter((key) => !plain.some((entry) => entry.key === key))
+            .map((key) => variable(key, "", { secret: true })),
+        ],
+      });
+    } else {
+      const bucket = byDir.get(dir) ?? [];
+      bucket.push({ path: file.path, blocks });
+      byDir.set(dir, bucket);
+    }
+  }
+
+  const root = bruSettings(collectionBlocks, warnings);
+  const collection = emptyCollection((isObj(config) ? str(config.name) : "") || folderName || "Bruno import");
+  collection.description = root.docs;
+  collection.auth = root.auth?.type === "inherit" ? null : root.auth;
+  collection.preScript = root.pre;
+  collection.postScript = root.post;
+  if (collectionBlocks) {
+    collection.variables = bruDict(collectionBlocks, "vars:pre-request").map((entry) =>
+      variable(entry.key, entry.value, { enabled: entry.enabled }),
+    );
+  }
+  let scripts = root.pre !== "" || root.post !== "";
+
+  // Every directory holding a request, or a `folder.bru`, is a folder — and so is each one above it.
+  const dirs = new Set<string>();
+  for (const dir of [...byDir.keys(), ...folderBlocks.keys()]) {
+    for (let at = dir; at !== ""; at = parentDir(at)) dirs.add(at);
+  }
+
+  const build = (dir: string, inherited: KeyValue[], depth: number): ImportedItem[] => {
+    if (depth > 32) return [];
+    const entries: { folder: boolean; seq: number; name: string; item: ImportedItem }[] = [];
+    for (const child of dirs) {
+      if (parentDir(child) !== dir) continue;
+      const settings = bruSettings(folderBlocks.get(child), warnings);
+      if (settings.pre !== "" || settings.post !== "") scripts = true;
+      const name = settings.name || child.slice(child.lastIndexOf("/") + 1);
+      entries.push({
+        folder: true,
+        seq: settings.seq,
+        name,
+        item: {
+          kind: "folder",
+          name,
+          description: settings.docs,
+          auth: settings.auth,
+          preScript: settings.pre,
+          postScript: settings.post,
+          items: build(child, [...inherited, ...settings.headers], depth + 1),
+        },
+      });
+    }
+    for (const file of byDir.get(dir) ?? []) {
+      const fallback = file.path.slice(file.path.lastIndexOf("/") + 1).replace(/\.bru$/, "");
+      const request = bruRequestFrom(file.blocks, fallback, warnings);
+      if (!request.item || request.item.kind !== "request") continue;
+      if (request.scripts) scripts = true;
+      request.item.spec.headers = withInheritedHeaders(request.item.spec.headers, inherited);
+      entries.push({ folder: false, seq: request.seq, name: request.item.name, item: request.item });
+    }
+    return sortBruno(entries).map((entry) => entry.item);
+  };
+
+  collection.items = build("", root.headers, 0);
+  if (scripts) warnings.push(BRUNO_SCRIPT_WARNING);
+  if (collection.items.length === 0 && environments.length === 0) warnings.push("No Bruno requests were found.");
+  return {
+    format: "bruno",
+    collections: collection.items.length > 0 ? [collection] : [],
+    environments,
+    warnings: [...new Set(warnings)],
+  };
 }
 
 // ---------------------------------------------------------------------------

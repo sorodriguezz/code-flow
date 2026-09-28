@@ -11,11 +11,16 @@
 //! it has). Nothing in this file looks at one without the other; [`bucket_status`] is the only
 //! place the pair is interpreted.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
+use serde_json::{json, Value};
 
 use super::http;
 use super::{
-    status, JobLog, PipelineJob, PipelineRun, PipelineRunDetail, PROVIDER_GITHUB,
+    artifact_file_name, gate_kind, input_as_text, status, JobLog, PipelineArtifact,
+    PipelineDefinition, PipelineGate, PipelineJob, PipelineLaunchContext, PipelineRun,
+    PipelineRunDetail, StartedPipeline, PROVIDER_GITHUB,
 };
 use crate::github::{api_root, bearer, API_VERSION, GITHUB_COM};
 
@@ -148,11 +153,13 @@ struct RawJob {
     html_url: Option<String>,
 }
 
-/// **There is deliberately no `steps` here any more.** [`PipelineJob`] has no step level —
-/// `ci::mod` states why: GitLab has no steps at all and Azure hangs the log off a timeline record
-/// rather than off a job — and the one thing that used to read them, an inference from skipped
-/// steps, is gone. See [`has_soft_failures`]. Deserializing a field nothing reads would be a
-/// promise this module does not keep, and the jobs endpoint sends a step array per job.
+// **There is deliberately no `steps` on `RawJob` any more.** `PipelineJob` has no step level —
+// `ci::mod` states why: GitLab has no steps at all and Azure hangs the log off a timeline record
+// rather than off a job — and the one thing that used to read them, an inference from skipped
+// steps, is gone. See `has_soft_failures`. Deserializing a field nothing reads would be a promise
+// this module does not keep, and the jobs endpoint sends a step array per job.
+//
+// (A plain comment, not `///`: floating here, a doc comment attached itself to `bucket_status`.)
 
 // ---------------------------------------------------------------------------
 // Status
@@ -327,6 +334,10 @@ fn map_run(host: &str, owner: &str, repo: &str, raw: RawRun) -> PipelineRun {
     let raw_word = raw_status(&raw.status, raw.conclusion.as_deref());
     let name = run_name(&raw);
     let id = raw.id.to_string();
+    // `waiting` is GitHub's word for exactly one thing on a run: a job is held at an environment's
+    // protection rules — required reviewers or a wait timer. It is in the list response, so the row
+    // can say so without opening the run.
+    let gated = raw.status == "waiting";
 
     // GitHub publishes no `completed_at` on a workflow run — only on its jobs. `updated_at` is the
     // closest thing, and it is *only* the finish time once the run is `completed`: on a live run it
@@ -366,6 +377,7 @@ fn map_run(host: &str, owner: &str, repo: &str, raw: RawRun) -> PipelineRun {
         // `needs:` to lay the jobs out in columns. Nothing in the backend parses it — handing over
         // the path costs one string and avoids both an extra request and a YAML dependency.
         definition_path: non_empty(raw.path),
+        gated,
     }
 }
 
@@ -476,6 +488,14 @@ pub async fn run_detail(
         http::get_json::<RawJobsPage>(request(&jobs_url, token), http::Provider::GitHub),
     )?;
 
+    // The jobs held at an environment, by id — worked out before the jobs are consumed below.
+    let waiting: Vec<String> = raw_jobs
+        .jobs
+        .iter()
+        .filter(|job| job.status == "waiting")
+        .map(|job| job.id.to_string())
+        .collect();
+
     let mut run = map_run(host, owner, repo, raw_run);
     refine_run_status(&mut run, &raw_jobs.jobs);
 
@@ -485,9 +505,26 @@ pub async fn run_detail(
         .map(|job| map_job(host, owner, repo, &run.id, job))
         .collect();
 
+    // Asked for only when something is actually waiting: it is a third request, and this function
+    // runs on every poll while the run is live. Best-effort, and deliberately not `?` — a token
+    // that can read runs but not deployments still gets its run drawn, flagged as waiting, with
+    // the "open on GitHub" link to answer it from.
+    let gates = if run.gated || !waiting.is_empty() {
+        let url = format!("{root}/repos/{owner}/{repo}/actions/runs/{id}/pending_deployments");
+        match http::get_json::<Vec<RawPendingDeployment>>(request(&url, token), http::Provider::GitHub)
+            .await
+        {
+            Ok(pending) => map_pending_deployments(&run.id, &run.web_url, &waiting, pending),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    run.gated = run.gated || !gates.is_empty();
+
     // GitHub has no stage concept at all: the graph's columns are read out of the workflow's
     // `needs:` on the frontend, and there is nothing here to describe them with.
-    Ok(PipelineRunDetail { run, jobs, stages: Vec::new() })
+    Ok(PipelineRunDetail { run, jobs, stages: Vec::new(), gates })
 }
 
 /// One job's log.
@@ -739,6 +776,7 @@ mod tests {
             finished_at: None,
             web_url: String::new(),
             definition_path: None,
+            gated: false,
         };
 
         refine_run_status(&mut run, &[job(Some("success"))]);
@@ -872,4 +910,600 @@ pub async fn cancel(host: &str, owner: &str, repo: &str, run_id: &str, token: &s
     let id = encode(run_id);
     let url = format!("{root}/repos/{owner}/{repo}/actions/runs/{id}/cancel");
     http::send_write(post(&url, token), http::Provider::GitHub).await
+}
+
+/// A POST with a JSON body and the three headers every call here carries. [`post`] is the bodiless
+/// one, and pins `Content-Length: 0`, which a body would contradict.
+fn post_json(url: &str, token: &str, body: &Value) -> reqwest::RequestBuilder {
+    http::client()
+        .post(url)
+        .header("Authorization", bearer(token))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", API_VERSION)
+        .json(body)
+}
+
+// ---------------------------------------------------------------------------
+// Starting a run by hand: `workflow_dispatch`
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawWorkflowsPage {
+    #[serde(default)]
+    workflows: Vec<RawWorkflow>,
+}
+
+#[derive(Deserialize)]
+struct RawWorkflow {
+    id: u64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    path: String,
+    /// `active`, `deleted`, `disabled_fork`, `disabled_inactivity` or `disabled_manually`.
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    html_url: String,
+}
+
+#[derive(Deserialize)]
+struct RawRepository {
+    #[serde(default)]
+    default_branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawEnvironmentsPage {
+    #[serde(default)]
+    environments: Vec<RawEnvironment>,
+}
+
+#[derive(Deserialize)]
+struct RawEnvironment {
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    name: String,
+}
+
+/// What a dispatch answers on github.com: `200` with the run it started. An Enterprise Server from
+/// before GitHub began returning it answers `204` and no body, and this is never built.
+#[derive(Deserialize)]
+struct RawDispatched {
+    workflow_run_id: u64,
+    #[serde(default)]
+    html_url: Option<String>,
+}
+
+/// The workflows a person could start by hand, as far as the API can tell.
+///
+/// The API cannot tell the part that matters most: whether a workflow declares
+/// `workflow_dispatch` at all. That is written in the file, which the frontend parses — out of the
+/// working copy first, and out of [`definition_file`] when the working copy doesn't have it — and
+/// filters on. What is dropped here is only what could never be dispatched, whatever the file says:
+///
+/// * anything not `active`. GitHub refuses a dispatch to a disabled workflow outright;
+/// * anything outside `.github/workflows/`. GitHub lists its own generated workflows here too —
+///   `dynamic/github-code-scanning/codeql`, Dependabot's updates — which have no file in the
+///   repository to read inputs from and no dispatch trigger to find.
+fn map_workflows(raw: Vec<RawWorkflow>) -> Vec<PipelineDefinition> {
+    let mut definitions: Vec<PipelineDefinition> = raw
+        .into_iter()
+        .filter(|workflow| workflow.state == "active")
+        .filter(|workflow| workflow.path.starts_with(".github/workflows/"))
+        .map(|workflow| {
+            let name = match workflow.name.trim() {
+                "" => workflow.path.rsplit('/').next().unwrap_or(&workflow.path).to_string(),
+                name => name.to_string(),
+            };
+            PipelineDefinition {
+                provider: PROVIDER_GITHUB.to_string(),
+                id: workflow.id.to_string(),
+                name,
+                path: Some(workflow.path),
+                variables: Vec::new(),
+                web_url: workflow.html_url,
+            }
+        })
+        .collect();
+    definitions.sort_by_key(|definition| definition.name.to_lowercase());
+    definitions
+}
+
+/// What the "Run pipeline" dialog opens with: the workflows, the default branch, the environments.
+///
+/// Three requests at once, and only the first may fail the dialog. The default branch and the
+/// environments are conveniences — the ref picker falls back to the checked-out branch, an
+/// environment input to a text field — and a fine-grained token scoped to Actions alone may not be
+/// allowed to read either.
+pub async fn launch_context(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    token: &str,
+) -> Result<PipelineLaunchContext, String> {
+    let root = api_root(host);
+    let workflows_url = format!("{root}/repos/{owner}/{repo}/actions/workflows?per_page=100");
+    let repository_url = format!("{root}/repos/{owner}/{repo}");
+    let environments_url = format!("{root}/repos/{owner}/{repo}/environments?per_page=100");
+
+    let (workflows, repository, environments) = tokio::join!(
+        http::get_json::<RawWorkflowsPage>(request(&workflows_url, token), http::Provider::GitHub),
+        http::get_json::<RawRepository>(request(&repository_url, token), http::Provider::GitHub),
+        http::get_json::<RawEnvironmentsPage>(request(&environments_url, token), http::Provider::GitHub),
+    );
+
+    let mut environment_names: Vec<String> = environments
+        .map(|page| page.environments.into_iter().map(|environment| environment.name).collect())
+        .unwrap_or_default();
+    environment_names.retain(|name| !name.trim().is_empty());
+    environment_names.sort_by_key(|name| name.to_lowercase());
+
+    Ok(PipelineLaunchContext {
+        provider: PROVIDER_GITHUB.to_string(),
+        definitions: map_workflows(workflows?.workflows),
+        default_branch: repository.ok().and_then(|repository| non_empty(repository.default_branch)),
+        environments: environment_names,
+    })
+}
+
+/// A workflow file as GitHub has it at `reference` — the fallback for a working copy that doesn't
+/// have it.
+///
+/// Asked for with the raw media type, so the answer is the file itself rather than a JSON envelope
+/// with the text base64-encoded inside it. Each path segment is encoded on its own: the slashes
+/// between them are the path, and `%2F` there would name a file that doesn't exist.
+pub async fn definition_file(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    reference: Option<&str>,
+    token: &str,
+) -> Result<Option<String>, String> {
+    let segments: Vec<String> = path.split('/').map(crate::ado::encode_segment).collect();
+    let mut url = format!("{}/repos/{owner}/{repo}/contents/{}", api_root(host), segments.join("/"));
+    if let Some(reference) = reference.map(str::trim).filter(|value| !value.is_empty()) {
+        url.push_str(&format!("?ref={}", encode(reference)));
+    }
+    let request = http::client()
+        .get(&url)
+        .header("Authorization", bearer(token))
+        .header("Accept", "application/vnd.github.raw+json")
+        .header("X-GitHub-Api-Version", API_VERSION);
+    http::get_text(request, http::Provider::GitHub, http::MAX_DEFINITION_BYTES).await
+}
+
+/// The body a dispatch takes: the ref as the user gave it — GitHub accepts a branch or a tag, short
+/// or full — and every input as text.
+///
+/// Text, including for `type: boolean` and `type: number` inputs, because that is what the
+/// workflow receives either way (`github.event.inputs` is all strings) and what GitHub's own form
+/// sends.
+fn dispatch_body(reference: &str, inputs: &BTreeMap<String, Value>) -> Value {
+    let inputs: serde_json::Map<String, Value> = inputs
+        .iter()
+        .map(|(key, value)| (key.clone(), Value::String(input_as_text(value))))
+        .collect();
+    json!({ "ref": reference.trim(), "inputs": inputs })
+}
+
+/// Starts a workflow by hand.
+///
+/// github.com answers with the id of the run it started, which is what lets the dialog open it
+/// straight away. An older Enterprise Server answers `204` and nothing else — the run exists, but
+/// nothing says which one it is — and the frontend then finds it on the list the way a person
+/// would: the newest `workflow_dispatch` run of that workflow on that ref.
+pub async fn dispatch(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    workflow_id: &str,
+    reference: &str,
+    inputs: &BTreeMap<String, Value>,
+    token: &str,
+) -> Result<StartedPipeline, String> {
+    let url = format!(
+        "{}/repos/{owner}/{repo}/actions/workflows/{}/dispatches",
+        api_root(host),
+        encode(workflow_id.trim())
+    );
+    let body = dispatch_body(reference, inputs);
+    let receipt =
+        http::send_write_for::<RawDispatched>(post_json(&url, token, &body), http::Provider::GitHub)
+            .await?;
+    Ok(match receipt {
+        Some(receipt) => StartedPipeline {
+            run_id: Some(receipt.workflow_run_id.to_string()),
+            web_url: non_empty(receipt.html_url),
+        },
+        None => StartedPipeline::default(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Environments waiting for review
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawPendingDeployment {
+    environment: RawEnvironment,
+    /// Minutes the environment makes every deployment wait, reviewers or not.
+    #[serde(default)]
+    wait_timer: i64,
+    #[serde(default)]
+    wait_timer_started_at: Option<String>,
+    #[serde(default)]
+    current_user_can_approve: bool,
+    #[serde(default)]
+    reviewers: Vec<RawReviewer>,
+}
+
+#[derive(Deserialize)]
+struct RawReviewer {
+    #[serde(default)]
+    reviewer: Option<RawReviewerIdentity>,
+}
+
+/// A user (`login`) or a team (`name`) — the endpoint mixes both in one array, told apart by a
+/// `type` field this doesn't need: either way the reader wants the name.
+#[derive(Deserialize)]
+struct RawReviewerIdentity {
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// The environments a run is held at, as gates.
+///
+/// **Which job is waiting on which environment is not something GitHub says.** The pending
+/// deployments name environments; the jobs endpoint marks jobs `waiting`; nothing joins the two.
+/// So every waiting job is listed under every pending environment — which is exact in the
+/// overwhelmingly common case of one environment and one job, and in any other case marks the
+/// right jobs as waiting without claiming to know on what.
+///
+/// An environment with a wait timer and no reviewers is a [`gate_kind::CHECK`]: it opens by
+/// itself when the timer runs out, and there is nobody to ask.
+fn map_pending_deployments(
+    run_id: &str,
+    run_url: &str,
+    waiting_jobs: &[String],
+    raw: Vec<RawPendingDeployment>,
+) -> Vec<PipelineGate> {
+    raw.into_iter()
+        .filter(|pending| pending.environment.id > 0)
+        .map(|pending| {
+            let reviewers: Vec<String> = pending
+                .reviewers
+                .into_iter()
+                .filter_map(|reviewer| reviewer.reviewer)
+                .filter_map(|identity| non_empty(identity.login).or_else(|| non_empty(identity.name)))
+                .collect();
+            let timer_only = reviewers.is_empty() && pending.wait_timer > 0;
+            PipelineGate {
+                provider: PROVIDER_GITHUB.to_string(),
+                run_id: run_id.to_string(),
+                id: pending.environment.id.to_string(),
+                kind: if timer_only { gate_kind::CHECK } else { gate_kind::APPROVAL }.to_string(),
+                name: match pending.environment.name.trim() {
+                    "" => "environment".to_string(),
+                    name => name.to_string(),
+                },
+                stage_id: None,
+                job_ids: waiting_jobs.to_vec(),
+                can_act: Some(pending.current_user_can_approve && !timer_only),
+                reviewers,
+                instructions: None,
+                since: non_empty(pending.wait_timer_started_at),
+                // The run's page is where GitHub puts its own "Review deployments" button.
+                web_url: run_url.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// The body of a review: one environment, a verdict, and the comment GitHub requires.
+fn review_body(environment_id: &str, approve: bool, comment: &str) -> Result<Value, String> {
+    let id: u64 = environment_id
+        .trim()
+        .parse()
+        .map_err(|_| format!("“{environment_id}” isn't a GitHub environment id"))?;
+    Ok(json!({
+        "environment_ids": [id],
+        "state": if approve { "approved" } else { "rejected" },
+        "comment": comment.trim(),
+    }))
+}
+
+/// Approves or rejects one environment a run is waiting on.
+#[allow(clippy::too_many_arguments)]
+pub async fn review_deployment(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    run_id: &str,
+    environment_id: &str,
+    approve: bool,
+    comment: &str,
+    token: &str,
+) -> Result<(), String> {
+    let body = review_body(environment_id, approve, comment)?;
+    let url = format!(
+        "{}/repos/{owner}/{repo}/actions/runs/{}/pending_deployments",
+        api_root(host),
+        encode(run_id)
+    );
+    http::send_write(post_json(&url, token, &body), http::Provider::GitHub).await
+}
+
+// ---------------------------------------------------------------------------
+// Artifacts
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct RawArtifactsPage {
+    #[serde(default)]
+    artifacts: Vec<RawArtifact>,
+}
+
+#[derive(Deserialize)]
+struct RawArtifact {
+    id: u64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    size_in_bytes: Option<u64>,
+    #[serde(default)]
+    expired: bool,
+    #[serde(default)]
+    expires_at: Option<String>,
+}
+
+fn map_artifacts(run_id: &str, raw: Vec<RawArtifact>) -> Vec<PipelineArtifact> {
+    raw.into_iter()
+        .map(|artifact| PipelineArtifact {
+            provider: PROVIDER_GITHUB.to_string(),
+            run_id: run_id.to_string(),
+            id: artifact.id.to_string(),
+            file_name: artifact_file_name(&artifact.name),
+            name: artifact.name,
+            size_bytes: artifact.size_in_bytes,
+            expires_at: non_empty(artifact.expires_at),
+            expired: artifact.expired,
+            // A workflow artifact belongs to the run; the API doesn't say which job uploaded it.
+            job_name: None,
+        })
+        .collect()
+}
+
+/// A run's artifacts. One page of 100, the endpoint's maximum — a run that uploads more than that
+/// is a matrix no list in a dialog is going to make readable.
+pub async fn list_artifacts(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    run_id: &str,
+    token: &str,
+) -> Result<Vec<PipelineArtifact>, String> {
+    let url = format!(
+        "{}/repos/{owner}/{repo}/actions/runs/{}/artifacts?per_page=100",
+        api_root(host),
+        encode(run_id)
+    );
+    let page: RawArtifactsPage = http::get_json(request(&url, token), http::Provider::GitHub).await?;
+    Ok(map_artifacts(run_id, page.artifacts))
+}
+
+/// The request that downloads one artifact, zipped the way GitHub stores it.
+///
+/// The endpoint answers `302` to a signed blob-storage URL on another host — the same shape as the
+/// job log, and followed the same way: see [`job_log`] for why the `Authorization` header being
+/// dropped on that hop is exactly what has to happen. Built from the id alone rather than from the
+/// listing's `archive_download_url`, so a URL can't be handed in from outside and have a token sent
+/// to it.
+pub fn artifact_download(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    artifact_id: &str,
+    token: &str,
+) -> Result<reqwest::RequestBuilder, String> {
+    let id: u64 = artifact_id
+        .trim()
+        .parse()
+        .map_err(|_| format!("“{artifact_id}” isn't a GitHub artifact id"))?;
+    let url = format!("{}/repos/{owner}/{repo}/actions/artifacts/{id}/zip", api_root(host));
+    Ok(http::download_client()
+        .get(&url)
+        .header("Authorization", bearer(token))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", API_VERSION))
+}
+
+#[cfg(test)]
+mod launch_tests {
+    //! Fixtures below are the response shapes GitHub's REST reference documents for each endpoint,
+    //! trimmed to the fields that are read, with placeholder owners and repositories.
+    use super::*;
+
+    #[test]
+    fn only_active_workflows_with_a_file_in_the_repository_can_be_dispatched() {
+        let page: RawWorkflowsPage = serde_json::from_str(
+            r#"{"total_count":4,"workflows":[
+              {"id":161335,"node_id":"MDg6V29ya2Zsb3cxNjEzMzU=","name":"Release","path":".github/workflows/release.yml",
+               "state":"active","created_at":"2026-01-10T14:59:22Z","updated_at":"2026-02-11T14:59:22Z",
+               "url":"https://api.github.com/repos/example-org/example-repo/actions/workflows/161335",
+               "html_url":"https://github.com/example-org/example-repo/blob/main/.github/workflows/release.yml",
+               "badge_url":"https://github.com/example-org/example-repo/workflows/Release/badge.svg"},
+              {"id":161336,"name":"","path":".github/workflows/ci.yml","state":"active","html_url":""},
+              {"id":161337,"name":"Old","path":".github/workflows/old.yml","state":"disabled_manually","html_url":""},
+              {"id":161338,"name":"CodeQL","path":"dynamic/github-code-scanning/codeql","state":"active","html_url":""}
+            ]}"#,
+        )
+        .expect("workflows page");
+
+        let definitions = map_workflows(page.workflows);
+        let named: Vec<(&str, &str)> =
+            definitions.iter().map(|d| (d.id.as_str(), d.name.as_str())).collect();
+        // Sorted by name; the nameless one is named after its file; disabled and generated ones gone.
+        assert_eq!(named, vec![("161336", "ci.yml"), ("161335", "Release")]);
+        assert_eq!(definitions[1].path.as_deref(), Some(".github/workflows/release.yml"));
+        assert_eq!(definitions[1].provider, PROVIDER_GITHUB);
+        assert!(definitions[1].variables.is_empty());
+    }
+
+    /// Every input reaches GitHub as text, whatever the form typed it as.
+    #[test]
+    fn a_dispatch_sends_the_ref_and_every_input_as_text() {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("dry_run".to_string(), json!(true));
+        inputs.insert("replicas".to_string(), json!(3));
+        inputs.insert("target".to_string(), json!("staging"));
+        let body = dispatch_body(" release/2.0 ", &inputs);
+        assert_eq!(
+            body,
+            json!({"ref":"release/2.0","inputs":{"dry_run":"true","replicas":"3","target":"staging"}})
+        );
+        // No inputs is still an object, never a missing key or a null.
+        assert_eq!(dispatch_body("main", &BTreeMap::new()), json!({"ref":"main","inputs":{}}));
+    }
+
+    #[test]
+    fn a_dispatch_receipt_names_the_run_it_started() {
+        let receipt: RawDispatched = serde_json::from_str(
+            r#"{"workflow_run_id":30433642,
+                "run_url":"https://api.github.com/repos/example-org/example-repo/actions/runs/30433642",
+                "html_url":"https://github.com/example-org/example-repo/actions/runs/30433642"}"#,
+        )
+        .expect("receipt");
+        assert_eq!(receipt.workflow_run_id, 30433642);
+        assert_eq!(
+            receipt.html_url.as_deref(),
+            Some("https://github.com/example-org/example-repo/actions/runs/30433642")
+        );
+    }
+
+    #[test]
+    fn a_pending_environment_becomes_an_approval_gate_on_the_waiting_jobs() {
+        let pending: Vec<RawPendingDeployment> = serde_json::from_str(
+            r#"[
+              {"environment":{"id":161088068,"node_id":"MDExOkVudmlyb25tZW50MTYxMDg4MDY4","name":"production",
+                 "url":"https://api.github.com/repos/example-org/example-repo/environments/production",
+                 "html_url":"https://github.com/example-org/example-repo/deployments/activity_log?environments_filter=production"},
+               "wait_timer":30,"wait_timer_started_at":"2026-09-01T22:00:40Z","current_user_can_approve":true,
+               "reviewers":[
+                 {"type":"User","reviewer":{"login":"octocat","id":1,"type":"User","site_admin":false}},
+                 {"type":"Team","reviewer":{"id":1,"name":"Release Managers","slug":"release-managers"}}
+               ]},
+              {"environment":{"id":161088069,"name":"staging"},"wait_timer":10,"current_user_can_approve":false,
+               "reviewers":[]}
+            ]"#,
+        )
+        .expect("pending deployments");
+
+        let run_url = "https://github.com/example-org/example-repo/actions/runs/7";
+        let gates = map_pending_deployments("7", run_url, &["99".to_string()], pending);
+
+        assert_eq!(gates.len(), 2);
+        let production = &gates[0];
+        assert_eq!(production.id, "161088068");
+        assert_eq!(production.kind, gate_kind::APPROVAL);
+        assert_eq!(production.name, "production");
+        assert_eq!(production.job_ids, vec!["99".to_string()]);
+        assert_eq!(production.can_act, Some(true));
+        assert_eq!(production.reviewers, vec!["octocat".to_string(), "Release Managers".to_string()]);
+        assert_eq!(production.since.as_deref(), Some("2026-09-01T22:00:40Z"));
+        assert_eq!(production.web_url, run_url);
+
+        // A timer and nobody to ask: it opens by itself, so it is a check, and nothing can act on it.
+        assert_eq!(gates[1].kind, gate_kind::CHECK);
+        assert_eq!(gates[1].can_act, Some(false));
+    }
+
+    #[test]
+    fn a_review_names_one_environment_a_verdict_and_the_comment() {
+        assert_eq!(
+            review_body("161088068", true, "  ship it ").unwrap(),
+            json!({"environment_ids":[161088068],"state":"approved","comment":"ship it"})
+        );
+        assert_eq!(
+            review_body("161088068", false, "not today").unwrap()["state"],
+            json!("rejected")
+        );
+        // The id comes back from the frontend; anything that isn't a number never reaches a URL.
+        assert!(review_body("production", true, "x").is_err());
+    }
+
+    #[test]
+    fn artifacts_keep_their_size_and_their_expiry() {
+        let page: RawArtifactsPage = serde_json::from_str(
+            r#"{"total_count":2,"artifacts":[
+              {"id":11,"node_id":"MDg6QXJ0aWZhY3QxMQ==","name":"dist/web","size_in_bytes":556,
+               "url":"https://api.github.com/repos/example-org/example-repo/actions/artifacts/11",
+               "archive_download_url":"https://api.github.com/repos/example-org/example-repo/actions/artifacts/11/zip",
+               "expired":false,"created_at":"2026-01-10T14:59:22Z","expires_at":"2026-03-21T14:59:22Z",
+               "updated_at":"2026-02-21T14:59:22Z",
+               "digest":"sha256:cfc3236bdad15b5898bca8408945c9e19e1917da8704adc20eaa618444290a8c",
+               "workflow_run":{"id":7,"repository_id":1296269,"head_repository_id":1296269,"head_branch":"main",
+                 "head_sha":"328faa0536e6fef19753d9d91dc96a9931694ce3"}},
+              {"id":13,"name":"coverage","size_in_bytes":1024,"expired":true,"expires_at":"2026-01-01T00:00:00Z"}
+            ]}"#,
+        )
+        .expect("artifacts page");
+
+        let artifacts = map_artifacts("7", page.artifacts);
+        assert_eq!(artifacts[0].id, "11");
+        assert_eq!(artifacts[0].name, "dist/web");
+        // The slash would be a folder to the save dialog.
+        assert_eq!(artifacts[0].file_name, "dist_web.zip");
+        assert_eq!(artifacts[0].size_bytes, Some(556));
+        assert_eq!(artifacts[0].expires_at.as_deref(), Some("2026-03-21T14:59:22Z"));
+        assert!(!artifacts[0].expired);
+        assert!(artifacts[1].expired);
+        assert_eq!(artifacts[1].run_id, "7");
+    }
+
+    /// The download is built from the id alone, never from a URL handed in from outside.
+    #[test]
+    fn an_artifact_download_is_addressed_by_id_only() {
+        let request = artifact_download("github.com", "example-org", "example-repo", "11", "t")
+            .expect("request")
+            .build()
+            .expect("built");
+        assert_eq!(
+            request.url().as_str(),
+            "https://api.github.com/repos/example-org/example-repo/actions/artifacts/11/zip"
+        );
+        assert!(artifact_download("github.com", "o", "r", "https://example.test/x", "t").is_err());
+    }
+
+    /// `waiting` is the one run status that means a person is being waited on — and it is in the
+    /// list response, so the row can say so without being opened.
+    #[test]
+    fn a_waiting_run_is_gated_and_nothing_else_is() {
+        let make = |status: &str| RawRun {
+            id: 7,
+            name: Some("Deploy".to_string()),
+            display_title: None,
+            run_number: None,
+            status: status.to_string(),
+            conclusion: None,
+            head_branch: None,
+            head_sha: String::new(),
+            event: None,
+            created_at: String::new(),
+            run_started_at: None,
+            updated_at: None,
+            html_url: String::new(),
+            path: None,
+            actor: None,
+            head_commit: None,
+        };
+        assert!(map_run("github.com", "o", "r", make("waiting")).gated);
+        for other in ["queued", "in_progress", "requested", "pending", "completed"] {
+            assert!(!map_run("github.com", "o", "r", make(other)).gated, "{other}");
+        }
+    }
 }

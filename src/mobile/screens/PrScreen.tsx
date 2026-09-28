@@ -11,6 +11,8 @@ import { sinceIso } from "../time";
 import { toastError, toastSuccess } from "../toast";
 import { RootBar } from "../ui/RootBar";
 import { Screen } from "../ui/Screen";
+import { Segmented } from "../ui/Segmented";
+import { PipelinesView } from "./PipelinesScreen";
 import { Button, IconButton } from "../ui/Button";
 import { Card, Divider, Row, Section } from "../ui/List";
 import { Badge, EmptyState, ErrorState, SkeletonList } from "../ui/Feedback";
@@ -56,9 +58,8 @@ const PR_STATUS: Record<PullRequestSummary["status"], { label: string; tone: "ac
  */
 async function copyUrl(url: string) {
   try {
-    // `navigator.clipboard` needs a secure context and this page is plain HTTP on a LAN, so the
-    // legacy path is not a fallback here — it is the one that runs. Kept in this order anyway for
-    // the tablet somebody has behind a TLS proxy.
+    // `navigator.clipboard` needs a secure context. Over the desktop's HTTPS it is there; with that
+    // switch off the page is plain HTTP on a LAN, and the legacy path below is the one that runs.
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(url);
     } else {
@@ -95,6 +96,9 @@ export function PrScreen() {
    *  a repository can legitimately have pull requests and no reviews, or the other way round. */
   const [runsFailure, setRunsFailure] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState<number | null>(null);
+  /** Pull requests or pipelines: two views of one host, so one tab behind a segmented control — the
+   *  Agents tab's arrangement, and for the same reason: five tabs is what a phone's bar can hold. */
+  const [view, setView] = useState<"prs" | "pipelines">("prs");
 
   const reload = useCallback(async () => {
     if (!projectId) return;
@@ -150,8 +154,28 @@ export function PrScreen() {
     );
   }
 
+  const bar = (
+    <RootBar
+      title={t("nav.prs")}
+      below={
+        <div className="px-3 pb-2">
+          <Segmented
+            value={view}
+            onChange={setView}
+            options={[
+              { id: "prs", label: t("pr.tabPrs") },
+              { id: "pipelines", label: t("pipelines.tab") },
+            ]}
+          />
+        </div>
+      }
+    />
+  );
+
+  if (view === "pipelines") return <PipelinesView bar={bar} projectId={projectId} />;
+
   return (
-    <Screen bar={<RootBar title={t("nav.prs")} />} onRefresh={reload}>
+    <Screen bar={bar} onRefresh={reload}>
       <Section title={t("pr.open")}>
         {loading ? (
           <SkeletonList rows={2} />

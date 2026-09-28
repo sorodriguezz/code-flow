@@ -9,7 +9,8 @@ import { tabsOfProject, useAiPanelStore, type LinkPrSession } from "./aiPanelSto
 import { translations } from "../lib/i18n/translations";
 import * as prTarget from "../lib/prTarget";
 import { targetKey, targetPrKey, type PrTarget } from "../lib/prTarget";
-import type { PrDecision, PullRequestSummary } from "../types/domain";
+import { parseMergeRefusal } from "../lib/prOutcomes";
+import type { MergeChoice, PrDecision, PrListScope, PublishOutcome, PullRequestSummary } from "../types/domain";
 import type { PrAction, PostFindingItem } from "../lib/tauri/commands";
 
 export type { LinkPrSession };
@@ -91,8 +92,43 @@ function writePr(state: PrState, target: PrTarget, pr: PullRequestSummary): Part
   };
 }
 
+/** Where a paged list stands: the last page read, whether the host has another, and whether one is
+ * on its way. One per scope, because open and finished pull requests page independently. */
+export interface PrListPage {
+  page: number;
+  hasMore: boolean;
+  loading: boolean;
+  error?: string;
+}
+
+/** `list` with `incoming` in it: a pull request already there is replaced by the host's newer copy,
+ * a new one is added. Never duplicated — a PR merged between two page reads moves from the open
+ * scope's pages to the closed scope's, and would otherwise be listed twice. */
+function mergePrs(list: PullRequestSummary[], incoming: PullRequestSummary[]): PullRequestSummary[] {
+  const byId = new Map(incoming.map((pr) => [pr.id, pr]));
+  const kept = list.map((pr) => byId.get(pr.id) ?? pr);
+  const known = new Set(list.map((pr) => pr.id));
+  return [...kept, ...incoming.filter((pr) => !known.has(pr.id))];
+}
+
+/** A merge refusal as one sentence: what to do about it, then the host's own words. */
+function mergeErrorText(error: unknown): string {
+  const refusal = parseMergeRefusal(error);
+  if (!refusal) return String(error);
+  const reason = translate(`pr.mergeRefused.${refusal.kind}` as keyof typeof translations.en);
+  return refusal.message ? `${reason} — ${refusal.message}` : reason;
+}
+
 interface PrState {
   prsByProject: Record<string, PullRequestSummary[]>;
+  /**
+   * How far each scope of a project's list has been read. The list used to be one request for the
+   * newest hundred of *every* state — a busy repository fills that with merged history in a week,
+   * and an open pull request only a little older could be neither seen nor reviewed. Open pull
+   * requests are now what loads by default; merged and closed ones load when asked for, and both
+   * page on ("load more").
+   */
+  prPagesByProject: Record<string, Partial<Record<Exclude<PrListScope, "all">, PrListPage>>>;
   loadingProjectId: string | null;
   loadErrorByProject: Record<string, string>;
 
@@ -121,21 +157,28 @@ interface PrState {
    */
   prActionBusy: Record<string, PrAction>;
 
+  /** Re-reads the first page of the project's **open** pull requests, and forgets how far the
+   * finished ones had been read (a group showing them reloads them itself). */
   loadPullRequests: (projectId: string) => Promise<void>;
+  /** Reads the next page of `scope` and adds it to the list. */
+  loadMorePullRequests: (projectId: string, scope: Exclude<PrListScope, "all">) => Promise<void>;
+  /** Reads the first page of `scope` if it hasn't been read yet — what unfolding the merged or
+   * closed group does. */
+  ensurePrScope: (projectId: string, scope: Exclude<PrListScope, "all">) => Promise<void>;
   /**
-   * One PR of a project, fetching the project's list first if it isn't loaded yet.
+   * One PR of a project: the loaded list's copy when it has one, otherwise read directly from the
+   * host by number.
    *
    * For the callers that reach a pull request *without* going through the sidebar list — an
-   * Activity row reopening a review taken days ago is the one that matters. Those used to be able
-   * to assume the list was already in memory, because the sidebar loaded it on sight; it now waits
-   * to be asked (see `PullRequestsSection`), so a row clicked before the section was ever unfolded
-   * would find nothing and silently do nothing.
+   * Activity row reopening a review taken days ago is the one that matters. That PR is routinely
+   * not on the list at all: the list is a page of *open* pull requests, and the review may be of one
+   * merged since, or older than the page. So it is never looked up in the list alone.
    *
    * Returns `null` for both "the host says there is no such pull request" and "the host wouldn't
    * answer" — this deliberately doesn't distinguish them, because no caller acts differently: the
    * right response to either is to leave the screen as it is rather than navigate somewhere empty.
    * Don't build a "this pull request was deleted" message on it; the answer may just be that the
-   * network was down. The reason, when there is one, is in `loadErrorByProject`.
+   * network was down.
    */
   ensureProjectPr: (projectId: string, prId: number) => Promise<PullRequestSummary | null>;
   setReviewLevel: (level: ReviewLevel) => void;
@@ -151,7 +194,11 @@ interface PrState {
   /** One comment thread per finding (anchored to its file/line when known) plus an optional
    * summary thread. On a project target these are reconciled against the saved run (`runId`) so a
    * finding keeps one thread across re-reviews; a link target has no saved run, so each finding
-   * opens a fresh thread. `items` are the human-selected findings. */
+   * opens a fresh thread. `items` are the human-selected findings.
+   *
+   * Resolves with what happened item by item, including when some failed — what landed is on the
+   * pull request either way, and the caller says exactly that. Rejects only when nothing could be
+   * attempted (no token, no host). */
   postReview: (
     target: PrTarget,
     prId: number,
@@ -159,7 +206,17 @@ interface PrState {
     items: PostFindingItem[],
     postSummary: boolean,
     summary: string | null,
-  ) => Promise<void>;
+  ) => Promise<PublishOutcome>;
+  /** For a review reached by link, which findings of a run are already on the pull request — it has
+   * no memory to hold their threads, so this is what keeps a retry from posting them twice. Keyed by
+   * [`postedKey`]. Lost on restart, like the session itself. */
+  postedFindingsByRun: Record<string, string[]>;
+  /** A merge in flight, keyed by [`targetPrKey`]. */
+  mergingByPr: Record<string, boolean>;
+  /** Merges (on Azure DevOps: completes) the PR, files it in Activity and settles every copy of the
+   * PR onto the host's answer. Resolves `true` when the host accepted it; a refusal is said in a
+   * toast in words the user can act on ("it has conflicts", "a required check hasn't passed"). */
+  mergePr: (target: PrTarget, prId: number, choice: MergeChoice) => Promise<boolean>;
   /** What the signed-in user has already decided on a PR, keyed by target + PR id. Read from
    * the host, so an approval given on the website locks the buttons here too. */
   decisionByPr: Record<string, PrDecision>;
@@ -207,19 +264,29 @@ interface PrState {
 
 export const usePrStore = create<PrState>((set, get) => ({
   prsByProject: {},
+  prPagesByProject: {},
   loadingProjectId: null,
   loadErrorByProject: {},
 
   reviewLevel: "completo",
   postingByPr: {},
   postedByPr: {},
+  postedFindingsByRun: {},
+  mergingByPr: {},
   prActionBusy: {},
 
   loadPullRequests: async (projectId) => {
     set((s) => ({ loadingProjectId: projectId, loadErrorByProject: { ...s.loadErrorByProject, [projectId]: "" } }));
     try {
-      const prs = await api.listPullRequests(projectId);
-      set((s) => ({ prsByProject: { ...s.prsByProject, [projectId]: prs } }));
+      const first = await api.listPullRequestsPage(projectId, "open", 1);
+      const prs = first.items;
+      set((s) => ({
+        prsByProject: { ...s.prsByProject, [projectId]: prs },
+        prPagesByProject: {
+          ...s.prPagesByProject,
+          [projectId]: { open: { page: first.page, hasMore: first.has_more, loading: false } },
+        },
+      }));
       // The tabs showing this repository's pull requests get the host's fresh copy too — a title
       // edited on the website, a PR merged meanwhile.
       for (const tab of tabsOfProject(projectId)) {
@@ -237,11 +304,37 @@ export const usePrStore = create<PrState>((set, get) => ({
   ensureProjectPr: async (projectId, prId) => {
     const cached = get().prsByProject[projectId]?.find((p) => p.id === prId);
     if (cached) return cached;
-    // Only ever one round trip: `loadPullRequests` swallows its own failures into
-    // `loadErrorByProject`, so a host that won't answer leaves the list absent rather than
-    // throwing, and the lookup below simply comes up empty.
-    await get().loadPullRequests(projectId);
-    return get().prsByProject[projectId]?.find((p) => p.id === prId) ?? null;
+    try {
+      return await api.getPullRequest(projectId, prId);
+    } catch {
+      return null;
+    }
+  },
+
+  loadMorePullRequests: async (projectId, scope) => {
+    const current = get().prPagesByProject[projectId]?.[scope];
+    if (current?.loading || (current && !current.hasMore)) return;
+    const page = (current?.page ?? 0) + 1;
+    const mark = (patch: Partial<PrListPage>) =>
+      set((s) => {
+        const pages = s.prPagesByProject[projectId] ?? {};
+        const was = pages[scope] ?? { page: 0, hasMore: true, loading: false };
+        return { prPagesByProject: { ...s.prPagesByProject, [projectId]: { ...pages, [scope]: { ...was, ...patch } } } };
+      });
+    mark({ loading: true, error: undefined });
+    try {
+      const next = await api.listPullRequestsPage(projectId, scope, page);
+      set((s) => ({ prsByProject: { ...s.prsByProject, [projectId]: mergePrs(s.prsByProject[projectId] ?? [], next.items) } }));
+      mark({ page: next.page, hasMore: next.has_more, loading: false });
+    } catch (e) {
+      // The page stays where it was, so asking again retries the same one.
+      mark({ loading: false, error: String(e) });
+    }
+  },
+
+  ensurePrScope: async (projectId, scope) => {
+    if (get().prPagesByProject[projectId]?.[scope]) return;
+    await get().loadMorePullRequests(projectId, scope);
   },
 
   setReviewLevel: (level) => set({ reviewLevel: level }),
@@ -272,9 +365,22 @@ export const usePrStore = create<PrState>((set, get) => ({
     const key = targetPrKey(target, prId);
     set((s) => ({ postingByPr: { ...s.postingByPr, [key]: true } }));
     try {
-      await prTarget.postFindings(target, prId, runId, items, postSummary, summary);
-      // Per run, not per PR: a re-review is new findings, and they have not been published yet.
-      set((s) => ({ postedByPr: { ...s.postedByPr, [postedKey(key, runId)]: true } }));
+      const outcome = await prTarget.postFindings(target, prId, runId, items, postSummary, summary);
+      const failed = outcome.items.some((item) => item.status === "failed") || Boolean(outcome.summary_error);
+      const landed = outcome.items
+        .filter((item) => item.status !== "failed" && item.status !== "skipped" && item.id)
+        .map((item) => item.id as string);
+      const runKey = postedKey(key, runId);
+      set((s) => ({
+        // Per run, not per PR: a re-review is new findings, and they have not been published yet.
+        // Only a publish where everything landed settles the run; a partial one leaves the rest to do.
+        postedByPr: failed ? s.postedByPr : { ...s.postedByPr, [runKey]: true },
+        postedFindingsByRun: {
+          ...s.postedFindingsByRun,
+          [runKey]: [...new Set([...(s.postedFindingsByRun[runKey] ?? []), ...landed])],
+        },
+      }));
+      return outcome;
     } catch (e) {
       pushErrorToast(String(e));
       throw e;
@@ -350,7 +456,8 @@ export const usePrStore = create<PrState>((set, get) => ({
       // host and cannot be taken back, so a comment that fails is a warning, not a failed action.
       if (note) {
         try {
-          await prTarget.postFindings(target, prId, note.runId, [], true, note.body);
+          const posted = await prTarget.postFindings(target, prId, note.runId, [], true, note.body);
+          if (posted.summary_error) throw new Error(posted.summary_error);
           useToastStore.getState().pushToast(translate("pr.decisionCommentPosted"), "success");
         } catch (e) {
           pushErrorToast(translate("pr.decisionCommentFailed", { error: String(e) }));
@@ -373,6 +480,34 @@ export const usePrStore = create<PrState>((set, get) => ({
         if (s.prActionBusy[busyKey] !== action) return {};
         const { [busyKey]: _settled, ...rest } = s.prActionBusy;
         return { prActionBusy: rest };
+      });
+    }
+  },
+
+  mergePr: async (target, prId, choice) => {
+    const key = targetKey(target);
+    const busyKey = targetPrKey(target, prId);
+    // Captured before the host call, for the reason `actOnPr` gives: the watchlist row this settles
+    // belongs to the workspace the merge was started in.
+    const watchWorkspaceId = watchWorkspace(target);
+    set((s) => ({ mergingByPr: { ...s.mergingByPr, [busyKey]: true } }));
+    try {
+      const { pr, merged, warning, activity } = await prTarget.merge(target, prId, choice);
+      set((s) => writePr(s, target, pr));
+      useAiPanelStore.getState().updatePr(target, pr);
+      useJobsStore.getState().record(key, activity);
+      useToastStore.getState().pushToast(translate(merged ? "pr.mergedToast" : "pr.mergeQueued"), "success");
+      if (warning) pushErrorToast(translate("pr.mergeWarning", { error: warning }));
+      usePrWatchStore.getState().reconcile(watchWorkspaceId, busyKey, pr, get().decisionByPr[busyKey] ?? "none");
+      if (target.kind === "project") void get().loadPullRequests(target.projectId);
+      return true;
+    } catch (e) {
+      pushErrorToast(mergeErrorText(e));
+      return false;
+    } finally {
+      set((s) => {
+        const { [busyKey]: _done, ...rest } = s.mergingByPr;
+        return { mergingByPr: rest };
       });
     }
   },

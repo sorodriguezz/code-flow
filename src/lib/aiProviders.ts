@@ -112,10 +112,12 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     available: true,
     defaultBinary: "agy",
     streamsTokens: false,
-    // Resumes, but not the one you asked for: `agy` hands a headless caller the fixed `agy-last`
-    // sentinel and continues from whatever it ran last. See `resumeIsAmbiguous`.
+    // Resumes *this* conversation: since agy 1.1.10 the run reports its conversation id and the
+    // next turn passes it to `--conversation` (see `gemini.rs`). It used to be the fixed `agy-last`
+    // sentinel and "whatever it ran last", which is what `resumeIsAmbiguous` warned about; the
+    // sentinel now survives only for a CLI that printed no id, too rare to warn every chat about.
     resumesSessions: true,
-    resumeIsAmbiguous: true,
+    resumeIsAmbiguous: false,
     // `agy` ships `--disable-slash-commands`, which only makes sense if expansion is on by default
     // in `-p` mode.
     headlessSlashCommands: true,

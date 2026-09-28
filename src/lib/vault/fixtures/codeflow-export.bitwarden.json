@@ -1,0 +1,118 @@
+{
+  "encrypted": false,
+  "folders": [
+    {
+      "id": "f-work",
+      "name": "Trabajo"
+    },
+    {
+      "id": "f-db",
+      "name": "Trabajo/Bases"
+    }
+  ],
+  "items": [
+    {
+      "id": "i-login",
+      "organizationId": null,
+      "folderId": "f-work",
+      "type": 1,
+      "reprompt": 0,
+      "name": "Correo, del equipo",
+      "notes": "línea 1\nlínea 2",
+      "favorite": true,
+      "fields": [
+        {
+          "name": "PIN",
+          "value": "1234",
+          "type": 1,
+          "linkedId": null
+        }
+      ],
+      "collectionIds": null,
+      "login": {
+        "uris": [
+          {
+            "match": null,
+            "uri": "https://mail.example.test"
+          }
+        ],
+        "username": "ana@example.test",
+        "password": "p\"ss,word",
+        "totp": "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"
+      }
+    },
+    {
+      "id": "i-db",
+      "organizationId": null,
+      "folderId": "f-db",
+      "type": 1,
+      "reprompt": 0,
+      "name": "Prod",
+      "notes": null,
+      "favorite": false,
+      "fields": [
+        {
+          "name": "engine",
+          "value": "postgres",
+          "type": 0,
+          "linkedId": null
+        },
+        {
+          "name": "host",
+          "value": "db.example.test",
+          "type": 0,
+          "linkedId": null
+        }
+      ],
+      "collectionIds": null,
+      "login": {
+        "uris": [],
+        "username": "app",
+        "password": "s3cret",
+        "totp": null
+      }
+    },
+    {
+      "id": "i-card",
+      "organizationId": null,
+      "folderId": null,
+      "type": 3,
+      "reprompt": 0,
+      "name": "Visa",
+      "notes": null,
+      "favorite": false,
+      "fields": [],
+      "collectionIds": null,
+      "card": {
+        "cardholderName": "Ana Pérez",
+        "brand": null,
+        "number": "4111111111111111",
+        "expMonth": "08",
+        "expYear": "29",
+        "code": "123"
+      }
+    },
+    {
+      "id": "i-key",
+      "organizationId": null,
+      "folderId": null,
+      "type": 2,
+      "reprompt": 0,
+      "name": "API",
+      "notes": "rotar en enero",
+      "favorite": false,
+      "fields": [
+        {
+          "name": "apiKey",
+          "value": "sk-test-123",
+          "type": 1,
+          "linkedId": null
+        }
+      ],
+      "collectionIds": null,
+      "secureNote": {
+        "type": 0
+      }
+    }
+  ]
+}

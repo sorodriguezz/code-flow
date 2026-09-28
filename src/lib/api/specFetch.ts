@@ -130,10 +130,12 @@ function networkOptions(settings: ApiSettings, url: string): NetworkOptions {
     keep_auth_on_redirect: false,
     proxy_url: settings.proxyEnabled ? settings.proxyUrl : "",
     client_cert_path: cert?.certPath ?? "",
+    client_key_path: cert?.keyPath ?? "",
     client_cert_password: cert?.passphrase ?? "",
     ca_cert_path: settings.caCertPath,
     cookies: [],
     max_response_bytes: settings.maxResponseBytes,
+    stream: false,
   };
 }
 

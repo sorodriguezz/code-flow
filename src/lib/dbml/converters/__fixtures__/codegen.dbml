@@ -1,0 +1,72 @@
+// The one schema every generator's snapshot is taken over. Each block is here for a bug the
+// generators had: an inline one-to-one they oriented backwards, a composite key they cut to its
+// first column, expression defaults they printed with DBML's backticks or turned into strings.
+
+Enum order_status {
+  pending
+  shipped [note: 'left the warehouse']
+}
+
+Table users {
+  id integer [pk, increment]
+  email varchar(255) [not null, unique, note: 'login name']
+  role varchar [default: 'member']
+  karma integer [default: 0]
+  active boolean [default: true]
+  created_at timestamp [default: `now()`]
+  Note: 'Everyone who can sign in'
+}
+
+// One-to-one written inline: the parser hands this back target-first.
+Table profiles {
+  id integer [pk, increment]
+  user_id integer [unique, ref: - users.id]
+  bio text [default: 'it\'s me']
+}
+
+// One-to-one written standalone, parent first.
+Table passports {
+  id integer [pk]
+  owner_id integer [unique, not null]
+  number varchar(20)
+}
+
+Ref: users.id - passports.owner_id
+
+Table shops {
+  id integer [pk]
+  name varchar
+}
+
+Table orders {
+  shop_id integer [not null]
+  number integer [not null]
+  status order_status [default: 'pending']
+  placed_at timestamp [default: `now()`]
+  code uuid [default: `gen_random_uuid()`]
+  total decimal(10,2) [default: 0.5]
+  slug varchar [default: `lower(md5(random()::text))`]
+  indexes {
+    (shop_id, number) [pk]
+  }
+}
+
+Ref: orders.shop_id > shops.id
+
+// A composite reference.
+Table order_lines {
+  id integer [pk, increment]
+  shop_id integer [not null]
+  order_number integer [not null]
+  quantity integer [default: 1]
+}
+
+Ref: order_lines.(shop_id, order_number) > orders.(shop_id, number)
+
+// A one-to-one the schema cannot orient: both ends are primary keys.
+Table user_settings {
+  user_id integer [pk]
+  theme varchar [default: 'dark']
+}
+
+Ref: user_settings.user_id - users.id

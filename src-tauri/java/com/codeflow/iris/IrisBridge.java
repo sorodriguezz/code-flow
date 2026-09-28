@@ -138,6 +138,7 @@ public final class IrisBridge {
                     session.worker.execute(() -> reply(id, () -> switch (op) {
                         case "exec" -> exec(session, request);
                         case "batch" -> batch(session, request);
+                        case "autocommit" -> autocommit(session, request);
                         case "close" -> close(sessionId);
                         default -> throw new IllegalArgumentException(
                                 "'" + op + "' is not something this bridge knows how to do.");
@@ -343,6 +344,16 @@ public final class IrisBridge {
         } catch (SQLException ignored) {
             // Already finished, or the link is gone — either way there is nothing to stop.
         }
+        // An abandoned transaction is rolled back, never left to the driver: what `close()` does
+        // with one is implementation-defined, and Oracle's thin driver commits it. A cancelled
+        // import closing its session must not keep half the file.
+        try {
+            if (!session.conn.getAutoCommit()) {
+                session.conn.rollback();
+            }
+        } catch (SQLException ignored) {
+            // The link is gone, and the server rolls back what it had on its own.
+        }
         try {
             session.conn.close();
         } catch (SQLException ignored) {
@@ -412,6 +423,11 @@ public final class IrisBridge {
     private static String batch(Session session, Map<String, Object> request) throws Exception {
         List<Object> statements = Json.asList(request.get("statements"));
         boolean transactional = Json.asBoolean(request.get("transactional"), true);
+        // How many rows each statement must affect, or -1 for "don't check". The data editor's
+        // UPDATE and DELETE each name one row; touching none means the row changed under it, and
+        // touching several means it could not be told apart from its twins — either way the batch
+        // must not commit.
+        List<Object> expected = Json.asList(request.get("expect"));
 
         boolean restoreAutoCommit = false;
         if (transactional && session.conn.getAutoCommit()) {
@@ -422,15 +438,28 @@ public final class IrisBridge {
         int applied = 0;
         String failure = null;
         String failedStatement = null;
+        int mismatchIndex = -1;
+        int mismatchAffected = 0;
         try {
-            for (Object entry : statements) {
-                String sql = Json.asString(entry, "");
+            for (int index = 0; index < statements.size(); index++) {
+                String sql = Json.asString(statements.get(index), "");
                 if (sql.isBlank()) {
                     continue;
                 }
                 try (Statement statement = session.conn.createStatement()) {
                     session.running.set(statement);
                     statement.execute(sql);
+                    long want = index < expected.size() ? Json.asLong(expected.get(index), -1) : -1;
+                    if (want >= 0) {
+                        int affected = statement.getUpdateCount();
+                        if (affected != want) {
+                            mismatchIndex = index;
+                            mismatchAffected = affected;
+                            failure = "affected " + affected + " rows instead of " + want;
+                            failedStatement = sql;
+                            break;
+                        }
+                    }
                     applied++;
                 } catch (SQLException e) {
                     failure = describe(e);
@@ -468,8 +497,24 @@ public final class IrisBridge {
             sb.append(",\"failedStatement\":");
             Json.string(sb, failedStatement == null ? "" : failedStatement);
         }
+        if (mismatchIndex >= 0) {
+            sb.append(",\"mismatchIndex\":").append(mismatchIndex);
+            sb.append(",\"affected\":").append(mismatchAffected);
+        }
         sb.append('}');
         return sb.toString();
+    }
+
+    /**
+     * Turns the connection's autocommit off or back on — how a multi-statement transaction is held
+     * open over this bridge, since IRIS and Oracle have no `BEGIN` that JDBC's autocommit respects.
+     * Turning it back on commits whatever is pending, as JDBC specifies, so callers end their
+     * transaction with an explicit COMMIT or ROLLBACK first.
+     */
+    private static String autocommit(Session session, Map<String, Object> request) throws Exception {
+        boolean enabled = Json.asBoolean(request.get("enabled"), true);
+        session.conn.setAutoCommit(enabled);
+        return "{\"autocommit\":" + enabled + "}";
     }
 
     private static void writeResultSet(StringBuilder sb, ResultSet rs, int maxRows)

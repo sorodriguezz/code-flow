@@ -174,3 +174,36 @@ export const keyvaultAudit = () => invoke<VaultAuditRow[]>("keyvault_audit");
  *  and caps the size — unlike `apiReadTextFile`, which has no cap. */
 export const keyvaultReadImportFile = (path: string) =>
   invoke<string>("keyvault_read_import_file", { path });
+
+/** `codeflow` is the encrypted, re-importable `.cfkeyring`; the other two are plain text. */
+export type VaultExportFormat = "codeflow" | "bitwarden-json" | "bitwarden-csv";
+
+/** What an export wrote — and, for a Bitwarden file, what it could not carry. */
+export interface VaultExportSummary {
+  folders: number;
+  items: number;
+  attachments: number;
+  left_out: { attachments: number; tagged: number; flattened: number } | null;
+}
+
+/**
+ * Writes the whole keyring to `path` (from a save dialog). The master password is asked again for
+ * every format; `passphrase` seals the `codeflow` one. Nothing plaintext comes back — the backend
+ * writes the file itself. See `keyvault::export`.
+ */
+export const keyvaultExport = (
+  path: string,
+  format: VaultExportFormat,
+  masterPassword: string,
+  passphrase: string | null,
+) => invoke<VaultExportSummary>("keyvault_export", { path, format, masterPassword, passphrase });
+
+export interface VaultRestoreCounts {
+  folders: number;
+  items: number;
+  attachments: number;
+}
+
+/** Restores a `.cfkeyring` into the open vault, every entry added as a new one. */
+export const keyvaultImportExport = (path: string, passphrase: string) =>
+  invoke<VaultRestoreCounts>("keyvault_import_export", { path, passphrase });

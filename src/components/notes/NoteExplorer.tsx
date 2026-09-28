@@ -4,7 +4,10 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  FileCode2,
   FilePlus2,
+  FileText,
+  FileUp,
   BookPlus,
   LayoutTemplate,
   Palette,
@@ -23,6 +26,7 @@ import { ICON_BUTTON, TagPill } from "./notesChrome";
 import { TREE_COLORS } from "../../lib/swatchColors";
 import { scopeMenuItems } from "../../lib/scopeMenu";
 import { buildBookTree, descendantIds, flattenTree } from "../../lib/notes/tree";
+import { exportNotes, importMarkdownFiles, notebookForExport } from "../../lib/notes/exportActions";
 import type { NoteTreeRow as NoteTreeRowData } from "../../types/notes";
 import type { RowScope } from "../../types/domain";
 import { tagCounts, tagHue } from "../../lib/notes/tags";
@@ -85,6 +89,7 @@ export function NoteExplorer() {
   const togglePinned = useNotesStore((s) => s.togglePinned);
   const dropNote = useNotesStore((s) => s.dropNote);
   const dropBook = useNotesStore((s) => s.dropBook);
+  const trashOpen = useNotesStore((s) => s.trashOpen);
 
   const drag = useNotesDragStore((s) => s.drag);
   const over = useNotesDragStore((s) => s.over);
@@ -492,6 +497,22 @@ export function NoteExplorer() {
           },
         },
         {
+          label: t("notes.importMarkdown"),
+          icon: FileUp,
+          onClick: () => void importMarkdownFiles(bookId),
+        },
+        {
+          label: t("notes.exportHtml"),
+          icon: FileCode2,
+          separated: true,
+          onClick: () => void notebookForExport(bookId).then((all) => exportNotes("html", all, name)),
+        },
+        {
+          label: t("notes.exportPdf"),
+          icon: FileText,
+          onClick: () => void notebookForExport(bookId).then((all) => exportNotes("pdf", all, name)),
+        },
+        {
           label: t("notes.rename"),
           icon: Pencil,
           separated: true,
@@ -548,10 +569,10 @@ export function NoteExplorer() {
               (note) => note.book_id && descendantIds(books, bookId).has(note.book_id),
             ).length;
             void confirmAction(
-              // The message says the count, because this deletes the writing too and the number is
-              // the whole difference between an ordinary confirmation and one worth reading. Taken
-              // from `notes` rather than from the filtered list: what a search happens to be hiding
-              // is still going to be deleted.
+              // The message says the count, because the writing moves to the trash too and the
+              // number is the whole difference between an ordinary confirmation and one worth
+              // reading. Taken from `notes` rather than from the filtered list: what a search happens
+              // to be hiding is still going to move.
               inside > 0
                 ? t("notes.deleteBookWithNotes", { name, count: inside })
                 : t("notes.deleteBookConfirm", { name }),
@@ -566,7 +587,7 @@ export function NoteExplorer() {
   );
 
   const noteMenu = useCallback(
-    (noteId: string, title: string, pinned: boolean): MenuItem[] => [
+    (noteId: string, pinned: boolean): MenuItem[] => [
       {
         label: pinned ? t("notes.unpin") : t("notes.pin"),
         icon: pinned ? PinOff : Pin,
@@ -578,20 +599,15 @@ export function NoteExplorer() {
         onClick: () => void duplicateNote(noteId),
       },
       {
-        label: t("notes.delete"),
+        // No confirmation: it lands in the trash, which is where it is undone.
+        label: t("notes.moveToTrash"),
         icon: Trash2,
         danger: true,
         separated: true,
-        onClick: () => {
-          void confirmAction(
-            t("notes.deleteNoteConfirm", { name: title || untitled }),
-            true,
-            t("notes.delete"),
-          ).then((ok) => ok && void deleteNote(noteId));
-        },
+        onClick: () => void deleteNote(noteId),
       },
     ],
-    [t, togglePinned, duplicateNote, deleteNote, untitled],
+    [t, togglePinned, duplicateNote, deleteNote],
   );
 
   /** One handler for both kinds, stable, so `NoteTreeRow`'s `memo` holds — see its comment. */
@@ -605,7 +621,7 @@ export function NoteExplorer() {
         items:
           row.kind === "book"
             ? bookMenu(event, row.book.id, row.book.name, row.book.scope)
-            : noteMenu(row.note.id, row.note.title, row.note.pinned),
+            : noteMenu(row.note.id, row.note.pinned),
       });
     },
     [bookMenu, noteMenu],
@@ -683,6 +699,29 @@ export function NoteExplorer() {
             data-tour="notes-new"
           >
             <FilePlus2 size={13} />
+          </button>
+          <button
+            type="button"
+            className={ICON_BUTTON}
+            title={t("notes.importMarkdownHint")}
+            aria-label={t("notes.importMarkdown")}
+            onClick={() => void importMarkdownFiles(null)}
+          >
+            <FileUp size={13} />
+          </button>
+          <button
+            type="button"
+            className={`${ICON_BUTTON} ${trashOpen ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : ""}`}
+            title={t("notes.trash")}
+            aria-label={t("notes.trash")}
+            aria-pressed={trashOpen}
+            onClick={() => {
+              const state = useNotesStore.getState();
+              if (state.trashOpen) state.closeTrash();
+              else void state.openTrash();
+            }}
+          >
+            <Trash2 size={13} />
           </button>
         </div>
 

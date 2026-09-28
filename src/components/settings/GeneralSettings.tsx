@@ -1,4 +1,7 @@
 import { useEffect, useState } from "react";
+import { Checkbox } from "../common/Checkbox";
+import { AboutPane } from "./AboutSettings";
+import { autostartEnabled, setAutostart } from "../../lib/tauri/windows";
 import { FolderOpen, GraduationCap, Loader2, LogOut, Trash2 } from "lucide-react";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { Segmented } from "../common/Segmented";
@@ -7,12 +10,12 @@ import { APP_TOURS, type TourId } from "../../lib/tour/steps";
 import { tourLength, useTourStore } from "../../state/tourStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import type { Language } from "../../lib/i18n/translations";
-import { deleteLegacyData, quitApp, resetAppData, revealInFileManager } from "../../lib/tauri/commands";
+import { deleteLegacyData, getSetting, quitApp, resetAppData, revealInFileManager, setSetting } from "../../lib/tauri/commands";
 import { confirmAction } from "../../state/confirmStore";
 import { useDataDirsStore } from "../../state/dataDirsStore";
 import { useToastStore } from "../../state/toastStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
-import { useWindowStore } from "../../state/windowStore";
+import { countedSatellites, useWindowStore } from "../../state/windowStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 // Shared with the backup panel, which formats the same kind of number for the same reason.
@@ -34,6 +37,69 @@ const WINDOW_LIMITS = [0, 1, 2, 3, 4, 5, 6, 8];
  *  under the pointer. Quieter than a red slab for buttons that still ask for confirmation. */
 const DANGER_OUTLINE = "shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--cf-danger)_35%,transparent)]";
 
+/** `tray::CLOSE_BEHAVIOR_KEY` — what the main window's close button does. */
+const CLOSE_BEHAVIOR_KEY = "close_behavior";
+type CloseBehavior = "tray" | "quit";
+
+/**
+ * What closing the window does, and whether the app starts with the session.
+ *
+ * The close button used to hide to the tray with no way to choose otherwise, and launch-at-login was
+ * registered in the backend with nothing that could switch it on. Both are read back from where they
+ * live — the setting, and the system's own login items — rather than remembered here.
+ */
+function CloseAndLaunch() {
+  const t = useT();
+  const pushToast = useToastStore((s) => s.pushToast);
+  const [behavior, setBehavior] = useState<CloseBehavior>("tray");
+  // `null` until the system answers, or when it cannot: the box is disabled rather than guessed.
+  const [launch, setLaunch] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    void getSetting(CLOSE_BEHAVIOR_KEY)
+      .then((value) => setBehavior(value === "quit" ? "quit" : "tray"))
+      .catch(() => {});
+    void autostartEnabled()
+      .then(setLaunch)
+      .catch(() => setLaunch(null));
+  }, []);
+
+  return (
+    <div className="mb-4 space-y-3">
+      <div>
+        <p className="mb-1.5 text-[12px] text-[var(--cf-text-muted)]" title={t("settings.closeBehaviorHint")}>
+          {t("settings.closeBehavior")}
+        </p>
+        <Segmented
+          options={[
+            { value: "tray" as const, label: t("settings.closeToTray") },
+            { value: "quit" as const, label: t("settings.closeQuits") },
+          ]}
+          value={behavior}
+          onChange={(value) => {
+            setBehavior(value);
+            void setSetting(CLOSE_BEHAVIOR_KEY, value).catch((e: unknown) => pushToast(String(e)));
+          }}
+          layoutId="cf-set-close-behavior"
+          ariaLabel={t("settings.closeBehavior")}
+        />
+      </div>
+      <label className="flex w-fit cursor-pointer items-center gap-2 text-[13px] text-[var(--cf-text)]">
+        <Checkbox
+          checked={launch === true}
+          disabled={launch === null}
+          onChange={(on) => {
+            void setAutostart(on)
+              .then(setLaunch)
+              .catch((e: unknown) => pushToast(t("settings.launchAtLoginFailed", { reason: String(e) })));
+          }}
+        />
+        {t("settings.launchAtLogin")}
+      </label>
+    </div>
+  );
+}
+
 export function GeneralSettings() {
   const t = useT();
   const language = useLanguageStore((s) => s.language);
@@ -54,7 +120,9 @@ export function GeneralSettings() {
   const refreshLayout = useDataDirsStore((s) => s.refresh);
   const satelliteLimit = usePreferencesStore((s) => s.satelliteLimit);
   const setSatelliteLimit = usePreferencesStore((s) => s.setSatelliteLimit);
-  const openWindows = useWindowStore((s) => s.satellites.length);
+  // Not the hotkey ask box: it is hidden between uses, never counted against the limit, and a
+  // number here that included it described a window nobody could see.
+  const openWindows = useWindowStore((s) => countedSatellites(s.satellites));
   const [deleting, setDeleting] = useState(false);
   const pushToast = useToastStore((s) => s.pushToast);
   const dataPath = layout?.stateDir ?? "…";
@@ -187,6 +255,7 @@ export function GeneralSettings() {
           {tab === "data" && (
             <>
               <PaneBlock title={t("settings.appLifecycle")} hint={t("settings.appLifecycleHint")}>
+                <CloseAndLaunch />
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
@@ -290,6 +359,8 @@ export function GeneralSettings() {
               </PaneBlock>
             </>
           )}
+
+          {tab === "about" && <AboutPane />}
         </>
       )}
     </RailSection>

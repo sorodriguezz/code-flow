@@ -16,6 +16,7 @@ import {
   currentProjectId,
   currentRepoPath,
   forgetSession,
+  languagesServedWith,
   lspKnows,
   sessionsForLanguage,
   onSessionsChanged,
@@ -27,12 +28,14 @@ import {
 } from "../../lib/lsp/client";
 import {
   modelUriFor,
+  relPathFromFileUri,
   toLspPosition,
   toMarkdown,
   toMonacoCompletionKind,
   toMonacoRange,
   toMonacoSeverity,
   toMonacoSymbolKind,
+  toProblems,
   type LspCompletionItem,
   type LspCompletionList,
   type LspDiagnostic,
@@ -44,6 +47,9 @@ import {
   type LspTextEdit,
   type LspWorkspaceEdit,
 } from "../../lib/lsp/protocol";
+import { planLspEdit } from "../../lib/workspaceEdit";
+import { reportSoon, useProblemsStore } from "../../state/problemsStore";
+import { applyRename } from "./renameFlow";
 
 /**
  * Real language intelligence for everything that isn't TypeScript, from the project's own servers.
@@ -282,65 +288,16 @@ function installProviders(monaco: Monaco): void {
     ) => {
       const file = fileOf(model);
       if (!file) return [];
-      const answers = await askAll<unknown>(file.language, "textDocument/references", {
-        ...at(file.uri, position),
-        context: { includeDeclaration: context.includeDeclaration },
-      });
+      const answers = await askAll<unknown>(
+        file.language,
+        "textDocument/references",
+        { ...at(file.uri, position), context: { includeDeclaration: context.includeDeclaration } },
+        "referencesProvider",
+      );
       // Monaco cancels this the moment the caret moves or the next keystroke supersedes the
       // request; converting an answer nobody will read is work for nothing.
       if (token.isCancellationRequested) return [];
       return toLocations(answers);
-    },
-  });
-
-  /**
-   * Rename across the project — the one feature whose absence was actively dangerous.
-   *
-   * Monaco's own rename is per-model, so renaming a symbol used in nine files renamed it in the one
-   * on screen and left the other eight compiling against a name that no longer exists. This asks the
-   * server, which knows all nine.
-   *
-   * Only the first server that answers is used, deliberately. Two servers on one language (Pyright
-   * and Ruff both hold Python) would each return a full edit set, and applying both would write
-   * every change twice.
-   */
-  monaco.languages.registerRenameProvider(CLAIMED_LANGUAGES, {
-    provideRenameEdits: async (
-      model: MonacoEditorNS.ITextModel,
-      position: Position,
-      newName: string,
-      token: CancellationToken,
-    ) => {
-      const file = fileOf(model);
-      const projectId = currentProjectId();
-      const repoPath = currentRepoPath();
-      if (!file || !projectId || !repoPath) return { edits: [] };
-      const [answer] = await askAll<LspWorkspaceEdit>(file.language, "textDocument/rename", {
-        ...at(file.uri, position),
-        newName,
-      });
-      // Monaco cancels this the moment the caret moves or the next keystroke supersedes the
-      // request; converting an answer nobody will read is work for nothing.
-      if (token.isCancellationRequested) return { edits: [] };
-      if (!answer) return { edits: [] };
-      const byFile: [string, LspTextEdit[]][] = answer.documentChanges
-        ? answer.documentChanges.map((change) => [change.textDocument.uri, change.edits])
-        : Object.entries(answer.changes ?? {});
-      const edits: languages.IWorkspaceTextEdit[] = [];
-      for (const [uri, changes] of byFile) {
-        const resource = modelUriFor(monaco, projectId, repoPath, uri);
-        // A rename that reaches outside the repository is dropped rather than applied blind: there
-        // is no tab for it, so the user would have no way to see or undo what was written.
-        if (!resource) continue;
-        for (const change of changes) {
-          edits.push({
-            resource,
-            versionId: undefined,
-            textEdit: { range: toMonacoRange(change.range), text: change.newText },
-          });
-        }
-      }
-      return { edits };
     },
   });
 
@@ -409,23 +366,122 @@ function installProviders(monaco: Monaco): void {
     },
   });
 
-  monaco.languages.registerDocumentFormattingEditProvider(CLAIMED_LANGUAGES, {
-    provideDocumentFormattingEdits: async (
-      model: MonacoEditorNS.ITextModel,
-      options: languages.FormattingOptions,
-      token: CancellationToken,
-    ) => {
+  installCapabilityScoped(monaco);
+}
+
+/**
+ * Rename and formatting — the two providers Monaco does not merge — registered only for the
+ * languages a running server actually declared them for, and re-registered whenever the set of
+ * running servers changes.
+ *
+ * Hover, completion and references are merged from every provider, so one registered for a language
+ * nothing serves costs a call that answers empty. These two are not: Monaco picks a single formatter
+ * and takes the first rename that answers. Registered for everything in the catalogue, the LSP
+ * formatter was *the* formatter for TypeScript, CSS and HTML — Tailwind claims those and formats
+ * none of them — so ⇧⌥F formatted nothing; and a rename that no server could answer returned "no
+ * edits", which stopped Monaco before it reached tsserver's.
+ */
+let capabilityScopedInstalled = false;
+
+function installCapabilityScoped(monaco: Monaco): void {
+  if (capabilityScopedInstalled) return;
+  capabilityScopedInstalled = true;
+
+  /**
+   * Rename across the project — the one feature whose absence was actively dangerous.
+   *
+   * Monaco's own rename is per-model, so renaming a symbol used in nine files renamed it in the one
+   * on screen and left the other eight compiling against a name that no longer exists. This asks the
+   * server, which knows all nine — and applies the answer itself (`renameFlow`): Monaco's standalone
+   * bulk edit refuses any file without a model, which is every file that is not open.
+   *
+   * Only the first server that answers is used, deliberately. Two servers on one language (Pyright
+   * and Ruff both hold Python) would each return a full edit set, and applying both would write
+   * every change twice. No answer is `null`, never "no edits", so Monaco can still ask the next.
+   */
+  const renameProvider: languages.RenameProvider = {
+    provideRenameEdits: async (model, position, newName, token) => {
+      const file = fileOf(model);
+      const repoPath = currentRepoPath();
+      if (!file || !repoPath) return null;
+      const [answer] = await askAll<LspWorkspaceEdit>(
+        file.language,
+        "textDocument/rename",
+        { ...at(file.uri, position), newName },
+        "renameProvider",
+      );
+      // The buffer moved while the server worked: its positions describe text that is gone.
+      if (token.isCancellationRequested) return { edits: [] };
+      if (!answer) return null;
+      await applyRename(planLspEdit(answer, (uri) => relPathFromFileUri(repoPath, uri)), repoPath, newName);
+      return { edits: [] };
+    },
+  };
+
+  const formattingProvider: languages.DocumentFormattingEditProvider = {
+    provideDocumentFormattingEdits: async (model, options, token) => {
       const file = fileOf(model);
       if (!file) return [];
-      const [answer] = await askAll<LspTextEdit[]>(file.language, "textDocument/formatting", {
-        textDocument: { uri: file.uri },
-        options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
-      });
+      const [answer] = await askAll<LspTextEdit[]>(
+        file.language,
+        "textDocument/formatting",
+        {
+          textDocument: { uri: file.uri },
+          options: { tabSize: options.tabSize, insertSpaces: options.insertSpaces },
+        },
+        "documentFormattingProvider",
+      );
       // Monaco cancels this the moment the caret moves or the next keystroke supersedes the
       // request; converting an answer nobody will read is work for nothing.
       if (token.isCancellationRequested) return [];
       return (answer ?? []).map((edit) => ({ range: toMonacoRange(edit.range), text: edit.newText }));
     },
+  };
+
+  const registered: Record<"rename" | "format", { languages: string; disposable: IDisposable } | null> = {
+    rename: null,
+    format: null,
+  };
+  const scope = (slot: "rename" | "format", capability: string, register: (languages: string[]) => IDisposable) => {
+    const languages = languagesServedWith(capability);
+    const key = languages.join(",");
+    if (registered[slot]?.languages === key) return;
+    registered[slot]?.disposable.dispose();
+    registered[slot] = languages.length > 0 ? { languages: key, disposable: register(languages) } : null;
+  };
+  const refresh = () => {
+    scope("rename", "renameProvider", (ids) => monaco.languages.registerRenameProvider(ids, renameProvider));
+    scope("format", "documentFormattingProvider", (ids) =>
+      monaco.languages.registerDocumentFormattingEditProvider(ids, formattingProvider),
+    );
+  };
+  refresh();
+  onSessionsChanged(refresh);
+}
+
+/**
+ * Every reference to the symbol at `position`, from the servers that declared references, as
+ * repo-relative locations — for the results panel, which has to list files nobody has open (Monaco's
+ * own peek can only preview a file that has a model). `null` when no server can answer for this file,
+ * which is the caller's cue to say so rather than show an empty list as if there were none.
+ */
+export async function lspReferences(
+  model: MonacoEditorNS.ITextModel,
+  position: Position,
+): Promise<{ path: string; range: import("monaco-editor").IRange }[] | null> {
+  const file = fileOf(model);
+  const repoPath = currentRepoPath();
+  if (!file || !repoPath) return null;
+  if (!sessionsForLanguage(file.language).some((session) => session.capabilities?.referencesProvider)) return null;
+  const answers = await askAll<unknown>(
+    file.language,
+    "textDocument/references",
+    { ...at(file.uri, position), context: { includeDeclaration: true } },
+    "referencesProvider",
+  );
+  return answers.flatMap(locationsOf).flatMap((hit) => {
+    const path = relPathFromFileUri(repoPath, hit.uri);
+    return path ? [{ path, range: toMonacoRange(hit.range) }] : [];
   });
 }
 
@@ -507,6 +563,17 @@ function installDiagnostics(monaco: Monaco): void {
     const projectId = currentProjectId();
     const repoPath = currentRepoPath();
     if (!projectId || !repoPath) return;
+    // Into the Problems panel first, and for every file — open or not. A server that checks the
+    // whole workspace (rust-analyzer after `cargo check`, gopls per package) reports files nobody
+    // has open, and those have no model below to carry a marker.
+    const relPath = relPathFromFileUri(repoPath, event.uri);
+    if (relPath) {
+      reportSoon(
+        `lsp:${event.session_id}`,
+        relPath,
+        toProblems(event.diagnostics as LspDiagnostic[], event.session_id.slice(projectId.length + 1)),
+      );
+    }
     const uri = modelUriFor(monaco, projectId, repoPath, event.uri);
     if (!uri) return;
     const model = monaco.editor.getModel(uri);
@@ -527,7 +594,11 @@ function installDiagnostics(monaco: Monaco): void {
     );
   });
 
-  void onLspExited((event) => forgetSession(event.session_id));
+  void onLspExited((event) => {
+    forgetSession(event.session_id);
+    // A server that is gone vouches for nothing it said.
+    useProblemsStore.getState().forget(`lsp:${event.session_id}`);
+  });
 }
 
 interface Options {

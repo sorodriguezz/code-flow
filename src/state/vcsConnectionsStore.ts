@@ -1,8 +1,10 @@
 import { create } from "zustand";
 import { loadAdoConnectionsFromSettings } from "../lib/adoConnections";
+import { loadBitbucketConnections } from "../lib/bitbucketConnections";
 import { loadGithubConnections } from "../lib/githubConnections";
 import { loadGitlabConnections } from "../lib/gitlabConnections";
 import { linkedHost, linkedProvider } from "../lib/linkedProvider";
+import { watchSettings } from "../lib/settingsSync";
 import type { Project } from "../types/domain";
 
 /**
@@ -33,6 +35,8 @@ interface VcsConnectionsState {
   github: string[];
   /** Connected GitLab hosts — gitlab.com and/or self-managed. */
   gitlab: string[];
+  /** Connected Bitbucket workspaces — Bitbucket Cloud has one host, so the workspace is the key. */
+  bitbucket: string[];
   /** False until the first load resolves. Consumers that gate UI on it should treat it as
    *  "nothing is connected yet" rather than guessing, so a tab never appears and then vanishes. */
   loaded: boolean;
@@ -46,30 +50,40 @@ export const useVcsConnectionsStore = create<VcsConnectionsState>((set) => ({
   ado: [],
   github: [],
   gitlab: [],
+  bitbucket: [],
   loaded: false,
 
   refresh: async () => {
     // Settled rather than sequential: one provider's list failing to parse must not cost the
     // other two, since each gates a different repository's tab.
-    const [ado, github, gitlab] = await Promise.all([
+    const [ado, github, gitlab, bitbucket] = await Promise.all([
       loadAdoConnectionsFromSettings().catch(() => []),
       loadGithubConnections().catch(() => []),
       loadGitlabConnections().catch(() => []),
+      loadBitbucketConnections().catch(() => []),
     ]);
     set({
       ado: ado.map((c) => c.org),
       github: github.map((c) => c.host),
       gitlab: gitlab.map((c) => c.host),
+      bitbucket: bitbucket.map((c) => c.workspace),
       loaded: true,
     });
   },
 }));
+
+// A host connected or removed in Settings — the main window — reaches a detached repository window,
+// whose Pipelines tab is decided by these lists too. See `settingsSync`.
+watchSettings(["ado_connections", "github_connections", "gitlab_connections", "bitbucket_connections"], () =>
+  useVcsConnectionsStore.getState().refresh(),
+);
 
 /** The connection lists as a plain value, for the pure helpers below. */
 export interface VcsConnections {
   ado: string[];
   github: string[];
   gitlab: string[];
+  bitbucket: string[];
 }
 
 /**
@@ -86,8 +100,13 @@ export function isLinkedHostConnected(
   const provider = linkedProvider(project);
   const host = linkedHost(project);
   if (!provider || !host) return false;
-  const list =
-    provider === "github" ? connections.github : provider === "gitlab" ? connections.gitlab : connections.ado;
+  const lists: Record<NonNullable<typeof provider>, string[]> = {
+    github: connections.github,
+    gitlab: connections.gitlab,
+    bitbucket: connections.bitbucket,
+    azure: connections.ado,
+  };
+  const list = lists[provider];
   const needle = host.toLowerCase();
   return list.some((entry) => entry.toLowerCase() === needle);
 }

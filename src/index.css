@@ -2728,6 +2728,25 @@ body.cf-dragging * {
   background: var(--cf-danger);
 }
 
+/* A breakpoint with a condition keeps its dot and gains a centre, the way VS Code marks one; a
+   logpoint is a diamond, because it never stops anything; one switched off is the same shape, hollow.
+   Ordered so "off" wins over the other two — a disabled logpoint is a hollow diamond. */
+.cf-breakpoint-conditional::before {
+  background: radial-gradient(circle, var(--cf-surface) 0 2px, var(--cf-danger) 2.5px);
+}
+
+.cf-breakpoint-log::before {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.cf-breakpoint-disabled::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px color-mix(in oklab, var(--cf-danger) 70%, transparent);
+}
+
 /* The run arrow beside a script in a `package.json`.
  *
  * Lives in the lines-decorations lane — between the line number and the code — rather than in the

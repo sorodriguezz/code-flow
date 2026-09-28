@@ -9,6 +9,7 @@ import {
   Save,
   Send,
   ShieldAlert,
+  Square,
   X,
 } from "lucide-react";
 import { Select } from "../common/Select";
@@ -39,7 +40,11 @@ import { StreamPanel } from "./StreamPanel";
 import { GrpcPanel } from "./GrpcPanel";
 import { registerTabActions, type TabActions } from "./tabActions";
 import { buildImplicitHeaders, resolveRequest, sendResolved } from "../../lib/api/send";
-import { runPostResponseScript, runPreRequestScript, type SandboxScopes } from "../../lib/api/sandbox";
+import type { SandboxScopes } from "../../lib/api/sandbox";
+import { chainScripts, folderChain, runScriptChain, type ChainOwner } from "../../lib/api/scriptChain";
+import { gateScripts, type GateResult, type ScriptRef } from "../../lib/api/scriptTrust";
+import { provisionalResponse, streamOf, watchStream } from "../../lib/api/liveStream";
+import { askScriptTrust } from "./ScriptTrustModal";
 import { looksLikeCurl, parseCurl } from "../../lib/api/importers";
 import { PROTOCOL_NAMES, switchProtocol } from "../../lib/api/protocol";
 import { apiCancelHttp, apiSaveFile } from "../../lib/tauri/apiCommands";
@@ -57,6 +62,7 @@ import type {
   ApiResponse,
   ApiRequestSpec,
   ConsoleLine,
+  HttpResponse,
   KeyValue,
   ParsedCookie,
   ResolvedRequest,
@@ -280,6 +286,9 @@ function forHistory(response: ApiResponse): ApiResponse {
     ...response,
     body_text: response.body_text.slice(0, HISTORY_BODY_LIMIT),
     body_base64: null,
+    // An event stream's list can run to thousands of entries; the raw body above already holds
+    // them, capped, which is all a replay needs.
+    stream: undefined,
   };
 }
 
@@ -340,6 +349,8 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
   const environments = useApiStore((s) => s.environments);
   const activeEnvironmentId = useApiStore((s) => s.activeEnvironmentId);
   const sending = useApiRuntimeStore((s) => s.sending[tabId] ?? false);
+  // A response still arriving: the send button's Cancel becomes Stop, which keeps what came.
+  const streamingLive = useApiRuntimeStore((s) => s.responses[tabId]?.stream?.live ?? false);
   const responseHeight = useLayoutStore((s) => s.sizes.apiResponseHeight);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
@@ -571,6 +582,42 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
     const trackId = newId("send");
     runtime.setSendTrack(tabId, trackId);
     runtime.setSending(tabId, true);
+
+    const releaseSlot = () => {
+      const runtimeNow = useApiRuntimeStore.getState();
+      runtimeNow.setSending(tabId, false);
+      // Only disarm the slot if it is still *this* send's. Without the guard, a send that finishes
+      // after the user has already started another one on the same tab would leave Cancel with
+      // nothing to fire at.
+      if (runtimeNow.sendTracks[tabId] === trackId) runtimeNow.setSendTrack(tabId, null);
+    };
+
+    // Every script this send would run, collection → folders → request, checked by the trust gate
+    // before any of them — or the request itself — goes anywhere. The arrays checked are the arrays
+    // run, so nothing can change between the question and the execution.
+    const owner: ChainOwner = {
+      collection: store.collections.find((item) => item.id === current.collectionId) ?? null,
+      folders: folderChain(store.folders, current.folderId),
+      request: {
+        name: current.name || t("api.untitledRequest"),
+        preScript: current.draft.preScript,
+        postScript: current.draft.postScript,
+      },
+    };
+    const preScripts = chainScripts(owner, "pre");
+    const postScripts = chainScripts(owner, "post");
+    let gate: GateResult | null;
+    try {
+      gate = await gateScripts([...preScripts, ...postScripts], (untrusted) => askScriptTrust(untrusted, "send"));
+    } catch (e) {
+      pushErrorToast(String(e));
+      gate = null;
+    }
+    // Cancelled: nothing was sent, so the previous response stays on screen.
+    if (gate === null) {
+      releaseSlot();
+      return;
+    }
     runtime.setResponse(tabId, null);
 
     const before: SandboxScopes = store.variableContext(current.collectionId);
@@ -580,47 +627,84 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
     const startedAt = Date.now();
     let request: ResolvedRequest | null = null;
 
-    const scriptError = (error: string): ConsoleLine => ({
+    const scriptPlace = (ref: ScriptRef) =>
+      `${ref.owner} · ${t(ref.phase === "pre" ? "api.entity.preRequest" : "api.entity.postResponse")}`;
+    const scriptError = ({ ref, error }: { ref: ScriptRef; error: string }): ConsoleLine => ({
       level: "error",
-      text: t("api.scripts.error", { error }),
+      text: t("api.scripts.error", { where: scriptPlace(ref), error }),
       at: Date.now(),
     });
 
+    if (gate.skipped.length > 0) {
+      consoleLines.push({
+        level: "warn",
+        text: t("api.trust.skipped", { n: gate.skipped.length }),
+        at: Date.now(),
+      });
+    }
+
     try {
+      // A missing or nearly-expired OAuth 2 token is refreshed first when a refresh token allows,
+      // and the chain is read again after it: the refresh has just rewritten wherever the auth lives.
+      const refreshError = await store.refreshExpiredOAuth2({ tabId }, scopes);
+      if (refreshError !== null) {
+        consoleLines.push({
+          level: "warn",
+          text: t("api.auth.refreshFailed", { error: refreshError }),
+          at: Date.now(),
+        });
+      }
       request = await resolveRequest(
         current.draft,
         scopes,
-        store.authChainForTab(tabId),
+        useApiStore.getState().authChainForTab(tabId),
         store.settings,
         store.cookies,
       );
 
-      if (current.draft.preScript.trim() !== "") {
-        // The pre-request script mutates `request` in place — that is how `pm.request.headers.add`
-        // reaches the wire — so this must run against the object that is about to be sent.
-        const pre = await runPreRequestScript(current.draft.preScript, { request, scopes });
-        scopes = pre.scopes;
-        consoleLines.push(...pre.console);
-        tests.push(...pre.tests);
-        if (pre.error) consoleLines.push(scriptError(pre.error));
-      }
+      // The pre-request scripts mutate `request` in place — that is how `pm.request.headers.add`
+      // reaches the wire — so they must run against the object that is about to be sent.
+      const pre = await runScriptChain(preScripts.filter(gate.allows), { request, scopes });
+      scopes = pre.scopes;
+      consoleLines.push(...pre.console);
+      tests.push(...pre.tests);
+      consoleLines.push(...pre.errors.map(scriptError));
 
-      const http = await sendResolved(request, trackId);
+      // A streamed response is shown while it arrives. The watcher is armed before the send, so
+      // the head can't land before anything is listening for it.
+      const sentRequest = request;
+      const watcher = await watchStream(trackId, (state) => {
+        const provisional = provisionalResponse(state, sentRequest, startedAt);
+        // Only while this send still owns the tab: a late publish must not cover a newer send.
+        if (provisional && useApiRuntimeStore.getState().sendTracks[tabId] === trackId) {
+          useApiRuntimeStore.getState().setResponse(tabId, provisional);
+        }
+      });
+      let http: HttpResponse;
+      try {
+        http = await sendResolved(request, trackId);
+      } catch (e) {
+        watcher.stop();
+        throw e;
+      }
+      const live = watcher.stop();
       let response: ApiResponse = {
         ...http,
         tests: [...tests],
         consoleLines: [...consoleLines],
         visualizer: null,
         error: null,
+        ...(live.head !== null ? { stream: streamOf(live, false) } : {}),
       };
 
-      if (current.draft.postScript.trim() !== "") {
-        const post = await runPostResponseScript(current.draft.postScript, { request, response, scopes });
+      const runnablePost = postScripts.filter(gate.allows);
+      if (runnablePost.length > 0) {
+        const post = await runScriptChain(runnablePost, { request, response, scopes });
         scopes = post.scopes;
         response = {
           ...response,
           tests: [...tests, ...post.tests],
-          consoleLines: [...consoleLines, ...post.console, ...(post.error ? [scriptError(post.error)] : [])],
+          consoleLines: [...consoleLines, ...post.console, ...post.errors.map(scriptError)],
           visualizer: post.visualizer,
         };
       }
@@ -642,12 +726,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
       useApiRuntimeStore.getState().setResponse(tabId, response);
       await recordHistory(response, request);
     } finally {
-      const runtimeNow = useApiRuntimeStore.getState();
-      runtimeNow.setSending(tabId, false);
-      // Only disarm the slot if it is still *this* send's. Without the guard, a send that finishes
-      // after the user has already started another one on the same tab would leave Cancel with
-      // nothing to fire at.
-      if (runtimeNow.sendTracks[tabId] === trackId) runtimeNow.setSendTrack(tabId, null);
+      releaseSlot();
     }
   };
 
@@ -1058,8 +1137,8 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                     className: "hover:text-[var(--cf-danger)]",
                   })}
                 >
-                  <X size={14} />
-                  {t("api.cancel")}
+                  {streamingLive ? <Square size={13} /> : <X size={14} />}
+                  {streamingLive ? t("api.stop") : t("api.cancel")}
                 </button>
               ) : (
                 <>

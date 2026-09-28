@@ -24,6 +24,46 @@ pub fn set_identity(name: &str, email: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Marks the one signature failure the UI can fix on the spot: git has no name or email to write
+/// into the commit. The frontend keys off this prefix to open a two-field form instead of showing
+/// libgit2's "config value 'user.name' was not found" — same contract as `CHECKOUT_CONFLICT_PREFIX`.
+pub const IDENTITY_MISSING_PREFIX: &str = "IDENTITY_MISSING: ";
+
+/// `repo.signature()`, with a missing identity turned into [`IDENTITY_MISSING_PREFIX`].
+///
+/// Two shapes of "missing": the key is absent (`NotFound`), or it is set to an empty string, which
+/// libgit2 only notices when it builds the signature and reports as a parse failure.
+pub fn repo_signature(repo: &git2::Repository) -> Result<git2::Signature<'static>, String> {
+    repo.signature().map(|s| s.to_owned()).map_err(|e| {
+        if e.code() == git2::ErrorCode::NotFound || e.message().contains("empty name or email") {
+            format!("{IDENTITY_MISSING_PREFIX}{}", e.message())
+        } else {
+            e.message().to_string()
+        }
+    })
+}
+
+/// Writes a name and email into one repository's own `.git/config` — the "only this repository"
+/// half of the form a failed commit opens.
+///
+/// Deliberately *not* stamped with [`OWNER_KEY`]: a person typed these for this repository, so a
+/// workspace identity must treat them as hand-set and leave them alone, exactly as it would a
+/// `git config user.email` run in a terminal.
+pub fn set_repo_identity(repo_path: &str, name: &str, email: &str) -> Result<(), String> {
+    let (name, email) = (name.trim(), email.trim());
+    if name.is_empty() || email.is_empty() {
+        return Err("name and email are both required".to_string());
+    }
+    let repo = git2::Repository::open(repo_path).map_err(|e| e.message().to_string())?;
+    let mut config = repo
+        .config()
+        .and_then(|c| c.open_level(git2::ConfigLevel::Local))
+        .map_err(|e| e.message().to_string())?;
+    config.set_str("user.name", name).map_err(|e| e.message().to_string())?;
+    config.set_str("user.email", email).map_err(|e| e.message().to_string())?;
+    Ok(())
+}
+
 /// The config key that records *who* wrote a repository's local identity.
 ///
 /// Without it this feature cannot tell its own writes apart from a person's. Somebody who set

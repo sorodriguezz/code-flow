@@ -8,6 +8,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { isEnginePause } from "../../lib/chainPause";
 import type { AgentChain, ChainStatus, ChainStepStatus } from "../../types/domain";
 
 /**
@@ -56,6 +57,11 @@ export function chainRollup(
     return { ...base, ...CHAIN_STATUS.running, spinner: true };
   }
   if (chain.status === "gated") return { ...base, ...CHAIN_STATUS.gated };
+  // Parked on its engine (quota, sign-in, missing CLI): waiting on the user just as a gate is, so it
+  // is drawn in the colour that says so rather than the grey of a pause the user chose.
+  if (chain.status === "paused" && isEnginePause(chain.last_reason)) {
+    return { ...base, ...CHAIN_STATUS.paused, color: "text-[var(--cf-warning)]" };
+  }
   // Deliberately louder than the chain's own status: a failed step that a later retry stepped over
   // still cost someone a working tree, and it is the thing worth going back to.
   if (steps.some((step) => step.status === "error")) {
@@ -96,6 +102,9 @@ const REASON_KEYS = new Set<string>([
   "chain.emptyOutput",
   "chain.stopped",
   "chain.timedOut",
+  "chain.pausedQuota",
+  "chain.pausedAuth",
+  "chain.pausedCliMissing",
   "chain.noSteps",
   "chain.tooManySteps",
 ]);

@@ -11,6 +11,7 @@ import { Segmented } from "../ui/Segmented";
 import { Card, Divider, Row, Section } from "../ui/List";
 import { Badge, EmptyState } from "../ui/Feedback";
 import { RunsView } from "./RunsScreen";
+import { ServicesView } from "./ServicesScreen";
 import type { AgentChain, ChainStatus } from "../../types/domain";
 
 /**
@@ -21,10 +22,12 @@ import type { AgentChain, ChainStatus } from "../../types/domain";
  * finishing when you get back to the desk. Everything else in this client is convenience; this is
  * the part that changes an outcome.
  *
- * # Two views, one control
+ * # Three views, one control
  *
  * Chains and live runs are two views of one thing — a chain *is* what most runs belong to — so they
  * share a tab behind a segmented control rather than taking two of the five slots in the tab bar.
+ * Services joined them as the third: the other thing running on the machine for this workspace, and
+ * the other list somebody checks from a phone to see whether what they left going is still up.
  * The control now disappears when a chain is open, because it belongs to the list level: it used to
  * stay, with "Cadenas" drawn as selected while the chain *list* was nowhere on screen and tapping it
  * did nothing at all.
@@ -166,7 +169,12 @@ export function AgentsScreen() {
   const chains = useMobileStore((s) => s.chains);
   const refreshAll = useMobileStore((s) => s.refreshAll);
   const liveRuns = useMobileStore((s) => Object.values(s.logs).filter((l) => !l.finished).length);
-  const [view, setView] = useState<"chains" | "runs">("chains");
+  // The number that needs somebody: a service that fell over. Running ones are the ordinary state and
+  // would put a badge on the tab forever.
+  const failedServices = useMobileStore(
+    (s) => s.services.filter((service) => s.serviceRuntime[service.id]?.status === "failed").length,
+  );
+  const [view, setView] = useState<"chains" | "runs" | "services">("chains");
   const waiting = chains.filter((c) => c.status === "gated").length;
 
   return (
@@ -183,6 +191,7 @@ export function AgentsScreen() {
                 options={[
                   { id: "chains", label: t("agents.chains"), badge: waiting },
                   { id: "runs", label: t("agents.runs"), badge: liveRuns },
+                  { id: "services", label: t("agents.services"), badge: failedServices },
                 ]}
               />
             </div>
@@ -190,7 +199,7 @@ export function AgentsScreen() {
         />
       }
     >
-      {view === "chains" ? <ChainsView chains={chains} /> : <RunsView />}
+      {view === "chains" ? <ChainsView chains={chains} /> : view === "runs" ? <RunsView /> : <ServicesView />}
     </Screen>
   );
 }

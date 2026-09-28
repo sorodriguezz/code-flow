@@ -5,6 +5,7 @@ import type {
   StreamStatusEvent as ApiStreamStatusEvent,
 } from "../../types/api";
 import type { StackFrame } from "./commands";
+import { WINDOW } from "../windowIdentity";
 
 export const onGitProgress = (handler: (event: GitProgressEvent) => void) =>
   listen<GitProgressEvent>("git:progress", (e) => handler(e.payload));
@@ -77,6 +78,18 @@ export const onRepoFsChanged = (handler: (event: { repo_path: string }) => void)
  */
 export const DESKTOP_ORIGIN = "desktop";
 
+/**
+ * The `origin` this window's own changes carry — `window_origin` in `remotectl/bridge.rs`.
+ *
+ * The main window keeps [`DESKTOP_ORIGIN`]; a satellite is `desktop:<label>`. Every desktop window
+ * used to stamp the same "desktop", so the main window took a detached window's change for its own
+ * echo and dropped it.
+ */
+export const WINDOW_ORIGIN = WINDOW.main ? DESKTOP_ORIGIN : `${DESKTOP_ORIGIN}:${WINDOW.label}`;
+
+/** Whether a `state:invalidate` frame is this window's own change coming back. */
+export const isOwnOrigin = (origin: string | undefined) => origin === WINDOW_ORIGIN;
+
 /** Which slice of in-memory state somebody else just made stale, and who made it so. */
 export interface StateInvalidateEvent {
   /** Absent when the action changed nothing that any store holds — opening a terminal, say. The
@@ -85,7 +98,7 @@ export interface StateInvalidateEvent {
    *  `remote` is the odd one out and has no `Invalidate` variant behind it: it is not "your copy of
    *  something is stale", it is a *setting* being pushed to the phones on the channel they are
    *  already reading. This window ignores it — it changed the setting, so it has the answer. */
-  domain?: "repo" | "chains" | "tasks" | "reviews" | "chat" | "remote";
+  domain?: "repo" | "chains" | "tasks" | "reviews" | "chat" | "workspaces" | "remote";
   /** Who caused it: a remote device's id, or [`DESKTOP_ORIGIN`] for this window's own changes.
    *  Present so each client can ignore the echo of its own action. */
   origin?: string;
@@ -275,6 +288,8 @@ export interface DebugPausedEvent {
   /** `breakpoint`, `step`, `exception`… */
   reason: string;
   frames: StackFrame[];
+  /** The exception's message, for a stop on one. */
+  description: string | null;
 }
 
 /** The program stopped: at a breakpoint, after a step, or on an exception. */

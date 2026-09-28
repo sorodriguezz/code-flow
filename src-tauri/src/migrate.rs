@@ -1,8 +1,9 @@
 //! Moves the app's state out of the single pre-v1.19 directory and into the three roots
 //! [`crate::paths`] now defines.
 //!
-//! Runs from `run()`, before `db::init()` opens anything and before `shell_env` spawns a thread —
-//! the one window in the process's life where nothing else is touching either directory.
+//! Runs from `run()`, before the Tauri builder exists — so before `boot_guard::open` opens the
+//! database in `setup` — and before `shell_env` spawns a thread: the one window in the process's life
+//! where nothing else is touching either directory.
 //!
 //! # What it will not do
 //!
@@ -408,9 +409,10 @@ fn copy_everything(source: &Path, state: &Path, manifest_path: &Path) -> Result<
         let to = state.join(name);
         applog::info(&format!("layout: copying {}", from.to_string_lossy()));
         // Anything already written is deleted before the error leaves this function. A partial
-        // `codeflow.db` left in the state root is not inert: `db::init` would open it, the schema
-        // parse would return `SQLITE_CORRUPT`, and the panic would land before any window exists —
-        // making the recovery screen that reports *this* error unreachable, forever.
+        // `codeflow.db` left in the state root is not inert: the first launch that vouches for the
+        // root hands it to `boot_guard::open`, the schema parse returns `SQLITE_CORRUPT`, and the user
+        // is offered the database-recovery dialog for a file that was never their database — instead
+        // of the screen that reports *this* error.
         if let Err(e) = copy_any(&from, &to) {
             discard(&planned);
             return Err(e);
@@ -569,7 +571,8 @@ fn open_with_retry(db: &Path) -> Result<Connection, String> {
 
 /// The three rows whose value was a path into the old layout, or whose meaning changed with it.
 ///
-/// Done here, on the connection that is already open and verified, rather than after `db::init()`.
+/// Done here, on the connection that is already open and verified, rather than after
+/// `boot_guard::open` has opened the database in `setup`.
 /// The alternative is a "did the migration just happen" flag threaded through startup and read by a
 /// second pass, which is a second thing to get wrong for no gain.
 fn rewrite_rows(conn: &Connection) -> Result<(), String> {
@@ -1131,10 +1134,10 @@ mod tests {
 
     /// A failed copy must not leave a partial database behind.
     ///
-    /// Not tidiness: `db::init` would open it, the schema parse would return `SQLITE_CORRUPT`, and
-    /// the `expect` in `run()` would panic before any window exists — on that launch and every one
-    /// after it, because nothing would ever remove the file. The recovery screen that reports the
-    /// failure would be unreachable forever.
+    /// Not tidiness: once anything vouches for the root, `boot_guard::open` opens it, the schema parse
+    /// returns `SQLITE_CORRUPT`, and the launch lands on the database-recovery dialog — blaming a
+    /// corrupt database for what was a failed copy, on that launch and every one after it, because
+    /// nothing would ever remove the file. The screen that reports the real failure is never reached.
     #[test]
     fn a_failed_copy_leaves_no_partial_database_behind() {
         let f = Fixture::new("partial").with_database();

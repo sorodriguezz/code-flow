@@ -10,6 +10,7 @@ import {
   Copy,
   CopyPlus,
   Download,
+  FileUp,
   Loader2,
   Pencil,
   Plus,
@@ -51,6 +52,7 @@ import {
   displayCell,
   displayDocument,
   hasPrimaryKey,
+  parseSpec,
   pendingCount,
   useDbStore,
   type DbDataTab,
@@ -142,6 +144,8 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   const kept = useRef<Set<number>>(new Set());
 
   const engine = connection ? engineInfo(connection.kind) : null;
+  /** Read-only connections get no import: it writes, and the backend would refuse it anyway. */
+  const readOnly = connection ? parseSpec(connection)?.read_only ?? false : false;
   /**
    * Whether a record here *is* a document — which is what the editing actions ask.
    *
@@ -768,12 +772,21 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
     return [...items, ...rows];
   };
 
-  const exportItems = (rows: number[]): MenuItem[] =>
-    (["csv", "tsv", "json", "sql", "markdown"] as ExportFormat[]).map((format) => ({
+  const exportItems = (rows: number[]): MenuItem[] => [
+    ...(["csv", "tsv", "json", "sql", "markdown"] as ExportFormat[]).map((format) => ({
       label: t("db.exportAs", { format: format.toUpperCase() }),
       icon: Download,
       onClick: () => void exportRows(format, rows),
-    }));
+    })),
+    // Every row under this filter and sort — not the page on screen — read by the backend straight
+    // into the file, so a table far bigger than a grid can hold still exports whole.
+    ...(["csv", "json"] as const).map((format, index) => ({
+      label: t("db.exportAllAs", { format: format.toUpperCase() }),
+      icon: Download,
+      separated: index === 0,
+      onClick: () => void store.exportAll(tab.id, format),
+    })),
+  ];
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -837,6 +850,18 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           >
             <Plus size={15} />
           </ToolbarButton>
+          {/* SQL tables only, and not on a read-only connection — the import writes. */}
+          {engine?.sql && !readOnly && tab.node.kind === "table" && (
+            <ToolbarButton
+              size="sm"
+              onClick={() =>
+                openModal({ kind: "importCsv", connectionId: tab.connectionId, node: tab.node, tabId: tab.id })
+              }
+              title={t("db.importCsv")}
+            >
+              <FileUp size={15} />
+            </ToolbarButton>
+          )}
 
           <ToolbarSeparator />
 

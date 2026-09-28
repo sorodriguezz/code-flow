@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useDialog } from "../../lib/useFocusTrap";
 import { ChevronRight, Cloud, Download, GitBranch, GitBranchPlus, Loader2, Lock, RefreshCw, Search, X } from "lucide-react";
 import { iconButtonClass } from "../common/Button";
 import { useRepoStore } from "../../state/repoStore";
@@ -69,11 +70,20 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
+  // Tab stays in the list, and Escape closes it from anywhere in it — not only from the search box,
+  // which was the one place it used to work.
+  const panelRef = useRef<HTMLDivElement>(null);
+  useDialog(panelRef, true, onClose);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
+        aria-label={t("branchModal.search")}
+        // ⌘⇧B closes it again — the one app chord that may run over it.
+        data-shortcut-owner="branch.switcher"
         // Every row here is a branch name and nothing else, so the width is the number of
         // characters you can tell apart — narrower, `feature/…` rows all truncate to the same text.
         className="flex max-h-[70vh] w-[560px] max-w-[90vw] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow-modal)]"
@@ -85,7 +95,6 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
             autoFocus
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.key === "Escape" && onClose()}
             placeholder={t("branchModal.search")}
             className="min-w-0 flex-1 bg-transparent text-[15px] outline-none placeholder:text-[var(--cf-text-faint)]"
           />

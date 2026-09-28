@@ -109,11 +109,14 @@ impl AiEngine for CodexEngine {
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
         }
-        // Read-only unless the flow may write (chat / fix). `workspace-write` is the documented
-        // successor to the deprecated `--full-auto`, and stays scoped to the repo rather than the
-        // whole machine — `danger-full-access` is deliberately never used.
-        cmd.arg("--sandbox")
-            .arg(if inv.auto_approve_edits { "workspace-write" } else { "read-only" });
+        // Read-only unless the flow may write (chat / fix) — and always for a run marked read-only,
+        // whatever else it says. `workspace-write` is the documented successor to the deprecated
+        // `--full-auto`, and stays scoped to the repo rather than the whole machine —
+        // `danger-full-access` is deliberately never used. The sandbox is the operating system's
+        // (Seatbelt, Landlock), which is why this engine's read-only is a guarantee rather than a
+        // request: see [`AiEngine::enforces_read_only`].
+        let writes = inv.auto_approve_edits && !inv.read_only;
+        cmd.arg("--sandbox").arg(if writes { "workspace-write" } else { "read-only" });
         // Headless runs can't answer an approval prompt — without this the agent can stop and wait
         // forever. Set through `-c` rather than `--ask-for-approval`, which `codex exec` dropped
         // (it errors with "unexpected argument" on 0.145+); the config key works on every version.
@@ -185,6 +188,18 @@ impl AiEngine for CodexEngine {
 
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
         interpret_output(success, status_label, stdout, stderr)
+    }
+
+    /// `--sandbox read-only`, enforced by the operating system — verified against `codex exec
+    /// --help` on 0.155.0.
+    fn enforces_read_only(&self) -> bool {
+        true
+    }
+
+    /// A turn that failed after working still closes with `turn.completed` (or reports usage on the
+    /// way to failing), and that is what it spent.
+    fn reported_usage(&self, stdout: &str, _stderr: &str) -> Option<AiUsage> {
+        parse_events(stdout).and_then(|events| events.usage)
     }
 
     fn cached_models(&self) -> Option<Vec<String>> {
@@ -600,6 +615,28 @@ mod tests {
     fn a_plan_limit_message_gets_the_marker() {
         let err = interpret_output(false, "exit status: 1", "", "You've hit your usage limit").unwrap_err();
         assert!(err.starts_with(QUOTA_MARKER), "got {err}");
+    }
+
+    /// Read-only wins over an edit approval: the sandbox is what the guarantee rests on.
+    #[test]
+    fn a_read_only_run_keeps_the_read_only_sandbox() {
+        let mut inv = AiInvocation::new("¿qué hace esto?", "");
+        inv.auto_approve_edits = true;
+        inv.read_only = true;
+        let args: Vec<String> = CodexEngine
+            .build_command("codex", &inv)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|pair| pair == ["--sandbox", "read-only"]), "{args:?}");
+    }
+
+    #[test]
+    fn a_failed_turn_still_reports_what_it_spent() {
+        let usage = CodexEngine.reported_usage(EVENTS, "").expect("turn.completed carries usage");
+        assert_eq!(usage.output_tokens, 30);
+        assert!(CodexEngine.reported_usage("not json", "").is_none());
     }
 
     #[test]

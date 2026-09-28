@@ -44,7 +44,7 @@
 //! synced into whichever repository is about to be worked on — and for the same reason.
 //!
 //! Writing inside somebody's repository earns an obligation, which [`exclude_from_git`] discharges:
-//! the folder is registered in `.git/info/exclude` the first time it is created. That file rather
+//! the folder is registered in git's `info/exclude` the first time it is created. That file rather
 //! than `.gitignore` because `.gitignore` is the user's, is tracked, and would turn "CodeFlow ran a
 //! chain" into a diff on their branch.
 
@@ -183,24 +183,12 @@ pub fn forget(chain_id: &str, repos: &[String]) {
 
 /// Keeps `.codeflow/` out of `git status` without touching a tracked file.
 ///
-/// Appends once and only once. Read-then-append rather than "always append" because this runs on
-/// every note: without the check, a ten-step chain would leave ten identical lines in a file the
-/// user might one day open.
+/// Through [`crate::git_exclude`], which finds the exclude file git actually reads — the old
+/// version assumed `.git` was a directory, so in a linked worktree (where it is a file) it quietly
+/// did nothing and the whole memory folder showed up in Changes. Idempotent there, which matters
+/// because this runs on every note a chain files.
 fn exclude_from_git(repo_path: &str) {
-    let info = Path::new(repo_path).join(".git").join("info");
-    // No `.git/info` means this is not a normal working clone (a bare repo, a path that stopped
-    // being a repository). Nothing to exclude from, and creating the directory would be inventing
-    // git plumbing in someone else's folder.
-    if !info.is_dir() {
-        return;
-    }
-    let exclude = info.join("exclude");
-    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
-    if current.lines().any(|line| line.trim() == EXCLUDE_LINE) {
-        return;
-    }
-    let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
-    let _ = std::fs::write(&exclude, format!("{current}{separator}{EXCLUDE_LINE}\n"));
+    let _ = crate::git_exclude::exclude(Path::new(repo_path), EXCLUDE_LINE);
 }
 
 #[cfg(test)]
@@ -237,6 +225,8 @@ mod tests {
     fn the_git_exclude_line_is_written_once_however_many_notes_are_filed() {
         let repo = std::env::temp_dir().join(format!("cf-mem-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(repo.join(".git").join("info")).unwrap();
+        // The smallest thing `git_exclude` accepts as a git directory.
+        std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
         let path = repo.to_string_lossy().to_string();
         let chain = format!("chain-{}", uuid::Uuid::new_v4());
         let repos = vec![path.clone()];

@@ -626,16 +626,26 @@ impl SqliteSession {
             .map(|edit| sqlgen::edit_statement(node, DIALECT, edit))
             .collect::<Result<Vec<String>, String>>()?;
         let batch = statements.clone();
+        let one_row: Vec<bool> = edits.iter().map(super::edit_expects_one_row).collect();
         let (applied, error) = self
             .with_conn(move |conn| {
                 if let Err(e) = conn.execute_batch("BEGIN") {
                     return Ok((0, Some(e.to_string())));
                 }
                 let mut applied = 0u32;
-                for statement in &batch {
-                    if let Err(e) = conn.execute(statement, []) {
-                        let _ = conn.execute_batch("ROLLBACK");
-                        return Ok((0, Some(format!("{e}\n\n{statement}"))));
+                let total = batch.len();
+                for (index, statement) in batch.iter().enumerate() {
+                    match conn.execute(statement, []) {
+                        Err(e) => {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Ok((0, Some(format!("{e}\n\n{statement}"))));
+                        }
+                        Ok(affected) if one_row[index] && affected != 1 => {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            let refusal = super::wrong_row_count(index + 1, total, affected as u64, statement);
+                            return Ok((0, Some(refusal)));
+                        }
+                        Ok(_) => {}
                     }
                     applied += 1;
                 }
@@ -993,6 +1003,39 @@ mod tests {
             .apply_edits(&table("orders"), &[DbRowEdit { kind: DbRowEditKind::Delete, values: vec![], keys: vec![], document: None }])
             .await;
         assert!(refused.is_err());
+    }
+
+    /// Apply refuses an edit that didn't touch exactly the one row it named — two identical rows in a
+    /// table without a key, or a row deleted since the page was read — and rolls the whole batch back.
+    #[tokio::test]
+    async fn apply_rolls_back_an_edit_that_touches_other_than_one_row() {
+        let (_dir, path) = fixture();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE tags (label TEXT); INSERT INTO tags VALUES ('a'), ('a'), ('b');").unwrap();
+        }
+        let session = SqliteSession::open(&config(&path, false), None).await.unwrap();
+        let cell = |column: &str, value: &str| DbCell { column: column.into(), value: Some(value.into()), type_name: String::new() };
+        let rename_b = DbRowEdit { kind: DbRowEditKind::Update, values: vec![cell("label", "c")], keys: vec![cell("label", "b")], document: None };
+        let rename_a = DbRowEdit { kind: DbRowEditKind::Update, values: vec![cell("label", "z")], keys: vec![cell("label", "a")], document: None };
+
+        // The first edit is fine on its own; the second matches two rows, so neither is kept.
+        let outcome = session.apply_edits(&table("tags"), &[rename_b.clone(), rename_a]).await.unwrap();
+        let error = outcome.error.expect("refused");
+        assert!(error.contains("change 2 of 2") && error.contains("affected 2 rows"), "{error}");
+        let labels = session.execute("SELECT label FROM tags ORDER BY label", &ctx()).await.unwrap();
+        let labels: Vec<_> = labels.results[0].rows.iter().map(|row| row[0].clone().unwrap()).collect();
+        assert_eq!(labels, vec!["a", "a", "b"], "the batch was rolled back whole");
+
+        // A row that is gone matches nothing.
+        let gone = DbRowEdit { kind: DbRowEditKind::Delete, values: vec![], keys: vec![cell("label", "nope")], document: None };
+        let error = session.apply_edits(&table("tags"), &[gone]).await.unwrap().error.expect("refused");
+        assert!(error.contains("affected 0 rows"), "{error}");
+
+        // One row, one match: applied.
+        let outcome = session.apply_edits(&table("tags"), &[rename_b]).await.unwrap();
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(outcome.applied, 1);
     }
 
     #[tokio::test]

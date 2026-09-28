@@ -83,6 +83,8 @@ export interface TabView {
   deselected?: Record<string, boolean>;
   includeSummary?: boolean;
   commentOnDecide?: boolean;
+  /** The pull request's CI checks unfolded under its header. */
+  checksOpen?: boolean;
   /** A past run pinned for reading (`null`/absent = the latest). */
   runId?: string | null;
   /** The finding shown in the detail column of the wide layout. */

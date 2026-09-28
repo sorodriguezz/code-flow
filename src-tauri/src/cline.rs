@@ -40,7 +40,11 @@
 //! One caveat, stated because it is a real hole rather than a theoretical one: plan mode offers the
 //! model a `switch_to_act_mode` tool, and a headless run treats the switch as approved. A model
 //! that decides mid-review to start editing therefore can, so the mode is a strong default and not
-//! a sandbox. The flows that must not write also never *ask* for changes.
+//! a sandbox. The flows that must not write also never *ask* for changes — and since this is the
+//! state of things, [`AiEngine::enforces_read_only`] stays false for Cline and the UI says "text
+//! only" is a request here. Plan mode *without* the auto-approval (or without the switch) would
+//! close it, but no Cline is installed where this was last revised to read its `--help` from, and
+//! an unverified flag is refused by this CLI outright — so it waits for a machine that has one.
 //!
 //! The text-in/text-out operations pass no working directory at all, and they get plan mode as
 //! well — measured, not assumed: act mode answers them more cleanly when it answers in one shot,
@@ -132,7 +136,7 @@ impl AiEngine for ClineEngine {
         // act mode does instead is not: the same brief, six runs, went to seven iterations with five
         // `editor` calls and a file written to disk. Plan mode cannot do that — the editor tools are
         // unavailable to it — so it stays, and the answer is unwrapped on our side.
-        if !inv.auto_approve_edits {
+        if !inv.auto_approve_edits || inv.read_only {
             cmd.arg("--plan");
         }
         cmd.arg("--auto-approve").arg("true");
@@ -142,14 +146,15 @@ impl AiEngine for ClineEngine {
         // to be started from. An empty scratch directory says the truth instead: this operation has
         // no repository. If one cannot be made, the invocation's own (absent) directory is left to
         // the CLI rather than failing the run over a temp directory.
-        match (inv.cwd, scratch_dir()) {
-            (Some(dir), _) => {
+        match inv.cwd {
+            Some(dir) => {
                 cmd.arg("--cwd").arg(dir);
             }
-            (None, Some(scratch)) => {
-                cmd.arg("--cwd").arg(scratch);
+            None => {
+                if let Some(scratch) = scratch_dir(inv) {
+                    cmd.arg("--cwd").arg(scratch);
+                }
             }
-            (None, None) => {}
         }
 
         // Models are addressed as `provider/model` (see [`split_model`]); a bare id leaves the
@@ -163,7 +168,7 @@ impl AiEngine for ClineEngine {
         }
         // The prompt is positional and goes last, after every flag — the order a live run was
         // verified with. Exactly one argument: a second one is read as a mistyped subcommand.
-        cmd.arg(prompt_argument(&brief(inv)));
+        cmd.arg(prompt_argument(inv, &brief(inv)));
         cmd
     }
 
@@ -178,6 +183,12 @@ impl AiEngine for ClineEngine {
 
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
         interpret_output(success, status_label, stdout, stderr)
+    }
+
+    /// A run that ended in `error` still closes with its `run_result`, and that carries the usage
+    /// of every iteration it did get through.
+    fn reported_usage(&self, stdout: &str, _stderr: &str) -> Option<AiUsage> {
+        parse_run_result(stdout).as_ref().and_then(usage_of)
     }
 
     /// A turn that came back with nothing in it is worth asking again.
@@ -257,13 +268,13 @@ fn needs_file_handoff(brief: &str) -> bool {
 /// The single positional argument to pass: the brief itself where that works, and a one-line
 /// pointer to a temp file where it doesn't.
 ///
-/// A failed temp write falls back to the inline brief. That is the *worse* of the two paths on the
+/// A failed write falls back to the inline brief. That is the *worse* of the two paths on the
 /// platform that needed the file — but a run that is likely to fail beats one that certainly does.
-fn prompt_argument(brief: &str) -> String {
+fn prompt_argument(inv: &AiInvocation, brief: &str) -> String {
     if !needs_file_handoff(brief) {
         return brief.to_string();
     }
-    match write_brief_file(brief) {
+    match inv.prompt_files.write("cline", "md", brief) {
         Some(path) => format!("{FILE_POINTER}{}", path.to_string_lossy()),
         None => brief.to_string(),
     }
@@ -273,18 +284,11 @@ fn prompt_argument(brief: &str) -> String {
 ///
 /// Fresh per run rather than one shared scratch: two operations running at once would otherwise
 /// share a working directory, and a file one of them wrote would be sitting there for the other to
-/// find. Left for the OS to reap, like the brief files above; it is an empty directory.
-fn scratch_dir() -> Option<std::path::PathBuf> {
-    let path = std::env::temp_dir().join(format!("codeflow-cline-scratch-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&path).ok().map(|_| path)
-}
-
-/// Writes the brief where the model can read it. Uniquely named per run; not cleaned up, matching
-/// `opencode.rs` — a temp file whose deletion raced the child reading it would be worse than one
-/// the OS reaps later.
-fn write_brief_file(content: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::temp_dir().join(format!("codeflow-cline-{}.md", uuid::Uuid::new_v4()));
-    std::fs::write(&path, content).ok().map(|_| path)
+/// find. Private, and deleted when the run is over along with anything the run left in it — see
+/// `crate::ai_prompt_files`, which is also where the brief file above goes. Deleted only once the
+/// process has exited, so neither can be pulled out from under a model still reading it.
+fn scratch_dir(inv: &AiInvocation) -> Option<std::path::PathBuf> {
+    inv.prompt_files.dir("cline-scratch")
 }
 
 // ---------------------------------------------------------------------------
@@ -914,6 +918,25 @@ mod tests {
         let args = args_of(&inv);
         assert!(!args.contains(&"--plan".to_string()), "got {args:?}");
         assert!(args.windows(2).any(|pair| pair == ["--cwd", "/repo"]), "got {args:?}");
+    }
+
+    /// Read-only wins over an edit approval: plan mode, whatever else the invocation says. Still not
+    /// a guarantee — see the module docs — which the engine says for itself.
+    #[test]
+    fn a_read_only_run_is_always_planned() {
+        let mut inv = AiInvocation::new("¿qué hace esto?", "");
+        inv.cwd = Some("/repo");
+        inv.auto_approve_edits = true;
+        inv.read_only = true;
+        assert!(args_of(&inv).contains(&"--plan".to_string()));
+        assert!(!ClineEngine.enforces_read_only());
+    }
+
+    #[test]
+    fn a_failed_run_still_reports_what_it_spent() {
+        let usage = ClineEngine.reported_usage(COMPLETED, "").expect("run_result carries usage");
+        assert_eq!(usage.input_tokens, 4368);
+        assert!(ClineEngine.reported_usage("", "").is_none());
     }
 
     /// A described diagram has no repository. It must still be given a directory — without one the

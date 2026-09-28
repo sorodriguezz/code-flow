@@ -60,6 +60,22 @@ pub struct MemoryFinding {
     /// filled in with a substitute, because a comment nobody wrote is not a comment.
     #[serde(default)]
     pub comentario_md: String,
+    /// The iteration whose publish last wrote to this finding's thread — opened it, replied "sigue
+    /// presente" on it, or closed it as fixed.
+    ///
+    /// What stops a second publish of the same review from talking twice. A publish that half-failed
+    /// is retried by selecting again, and without this every finding that *did* land the first time
+    /// would get a "sigue presente" reply on the thread it had opened seconds earlier — the reply
+    /// meant for a later iteration, posted about the current one. Carried forward by reconciliation,
+    /// so the next iteration (a different number) may publish again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publicado_en_iter: Option<usize>,
+    /// True when the finding's thread is a plain pull-request comment rather than one anchored to a
+    /// line — it had no location, or the host refused the line (GitHub answers 422 for a line outside
+    /// the diff). GitHub cannot reply to or resolve such a comment, so a follow-up there is a new
+    /// comment naming the finding instead of a reply that is certain to fail.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hilo_general: bool,
 }
 
 fn default_estado() -> String {
@@ -146,11 +162,15 @@ pub struct ReviewMeta {
     pub workers: usize,
 }
 
-/// Identity of a finding across runs — the same defect keeps this key even as line numbers drift,
-/// so a persisted finding is recognized on re-review. File + category is stable enough in practice;
-/// falls back to the subtitle when there's no location.
-/// The identity key from a raw file + category — shared by reconciliation and by the posting flow
-/// (to match a comment back to its stored finding and reuse its thread).
+/// The *kind* of defect a finding is, across runs: file + category, falling back to the subtitle
+/// when there is neither. Line numbers are deliberately not in it — they drift the moment anything
+/// above the defect changes, and the same defect must still be recognised in the next iteration.
+///
+/// That also makes it **not an identity**: one file can hold two defects of one category (a null
+/// dereference at line 12 and another at 480), and the dedupe rightly keeps both. The identity of a
+/// finding is its stable `F-NNN` id; this key only narrows down which earlier finding a new one can
+/// be (see [`pair_up`], which settles the rest by line) and is the fallback for a publish that names
+/// no id (see [`match_publish_item`]).
 pub fn finding_identity(archivo: Option<&str>, categoria: &str) -> String {
     let file = archivo.unwrap_or_default().trim_start_matches('/').to_lowercase();
     let cat = categoria.to_lowercase();
@@ -176,15 +196,72 @@ fn max_id_num(findings: &[MemoryFinding]) -> usize {
         .unwrap_or(0)
 }
 
-/// Reconciles a fresh parse (`current`) against the previous run (`prev`) and returns the full,
-/// merged finding set for this run plus the delta counts.
+/// A `lineas` value ("42", "42-50", "42-50, 80") as the first and last line it names. `None` when
+/// nothing in it reads as a number — such a finding has no position to compare.
+pub fn line_span(lineas: Option<&str>) -> Option<(u32, u32)> {
+    let numbers: Vec<u32> = lineas?
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|n| n.parse::<u32>().ok())
+        .collect();
+    Some((*numbers.iter().min()?, *numbers.iter().max()?))
+}
+
+/// How far apart two spans are: `0` when they overlap, otherwise the gap between them. A side with no
+/// position is as far as anything can be — still a candidate, only the least likely one.
+fn span_distance(a: Option<(u32, u32)>, b: Option<(u32, u32)>) -> u32 {
+    match (a, b) {
+        (Some((a_lo, a_hi)), Some((b_lo, b_hi))) => {
+            if a_lo <= b_hi && b_lo <= a_hi {
+                0
+            } else if a_hi < b_lo {
+                b_lo - a_hi
+            } else {
+                a_lo - b_hi
+            }
+        }
+        _ => u32::MAX,
+    }
+}
+
+/// Which earlier finding each current one continues — `result[i]` is the index into `prev` that
+/// `current[i]` takes over, if any. **One to one**: no two current findings ever continue the same
+/// earlier one.
 ///
-/// Rules (mirroring WF-PR-REVIEWER `re-review.md`): a current finding matching an active prev one
-/// **persists** (keeps its stable id, `estado`, `thread_id`, `introducido_en_iter`); one matching
-/// a human-discarded prev keeps that mark; an unmatched current one is **new**. A prev active
-/// finding with no match this run is **resolved** (carried forward, thread kept). Findings already
-/// resolved/discarded are always carried forward untouched — they're never deleted, which is what
-/// gives the PR its cumulative traceability.
+/// It used to be "the first earlier finding with the same file and category", which collapsed two
+/// same-category findings in one file onto one id: both inherited it, the second earlier finding
+/// matched nothing and silently vanished from the memory, and publishing then sent the second
+/// defect's comment into the first one's thread as a "sigue presente" reply.
+///
+/// Candidates must share [`finding_identity`]; among them the nearest by line wins, taken globally
+/// rather than in reading order — every candidate pair is ranked and the closest pairs are settled
+/// first, so a finding that happens to be listed first cannot take the earlier finding that sits
+/// right next to another one. Ties prefer an earlier finding that is still live over one already
+/// `resuelto`, then the order the model reported them in.
+fn pair_up(prev: &[MemoryFinding], current: &[MemoryFinding]) -> Vec<Option<usize>> {
+    let mut pairs: Vec<(u32, bool, usize, usize)> = Vec::new();
+    for (i, cur) in current.iter().enumerate() {
+        let key = identity(cur);
+        let here = line_span(cur.lineas.as_deref());
+        for (j, p) in prev.iter().enumerate() {
+            if identity(p) == key {
+                let distance = span_distance(here, line_span(p.lineas.as_deref()));
+                pairs.push((distance, p.estado == "resuelto", i, j));
+            }
+        }
+    }
+    pairs.sort_unstable();
+
+    let mut of_current: Vec<Option<usize>> = vec![None; current.len()];
+    let mut taken = vec![false; prev.len()];
+    for (_, _, i, j) in pairs {
+        if of_current[i].is_none() && !taken[j] {
+            of_current[i] = Some(j);
+            taken[j] = true;
+        }
+    }
+    of_current
+}
+
 /// True when `finding_file` is (a suffix-tolerant match of) one of `changed`. File paths differ
 /// between the review markdown (repo-relative) and git (also repo-relative, sometimes with a
 /// leading slash), so compare normalized and allow either to be a suffix of the other.
@@ -197,11 +274,28 @@ fn file_in_changed(finding_file: &str, changed: &[String]) -> bool {
     })
 }
 
-/// Reconciles a fresh parse against the previous run. `changed_files`, when provided (an efficient
-/// re-review), is the set of files that changed since the last run: a previous active finding on a
-/// file that did NOT change auto-persists (its code wasn't touched), rather than looking resolved
-/// just because this run didn't re-surface it. `None` means a full review, where any unmatched
-/// active finding is treated as resolved.
+/// Reconciles a fresh parse (`current`) against the previous run (`prev`) and returns the full,
+/// merged finding set for this run plus the delta counts.
+///
+/// Rules (mirroring WF-PR-REVIEWER `re-review.md`): a current finding that continues an active prev
+/// one (see [`pair_up`]) **persists** (keeps its stable id, `estado`, `thread_id`,
+/// `introducido_en_iter`); one continuing a human-discarded prev keeps that mark; an unmatched
+/// current one is **new**. A prev active finding nothing continues is **resolved** (carried forward,
+/// thread kept). Findings already resolved/discarded are always carried forward untouched — they're
+/// never deleted, which is what gives the PR its cumulative traceability.
+///
+/// `changed_files`, when provided (an efficient re-review), is the set of files that changed since
+/// the last run: a previous active finding on a file that did NOT change auto-persists (its code
+/// wasn't touched), rather than looking resolved just because this run didn't re-surface it. `None`
+/// means a full review, where any unmatched active finding is treated as resolved.
+///
+/// **The result is positional**: `merged[i]` is `current[i]` for every `i < current.len()`, and
+/// the carried-forward history follows. The caller carries ids back onto the full findings by that
+/// position — by key it could not, since two findings may share one (see [`finding_identity`]).
+///
+/// Ids come out unique even from a memory that has duplicates in it — which runs saved before the
+/// matching was one to one do. The first holder keeps the id; any later one is renumbered, thread
+/// and all, rather than left sharing it.
 pub fn reconcile(
     prev: &[MemoryFinding],
     current: &[MemoryFinding],
@@ -210,62 +304,70 @@ pub fn reconcile(
 ) -> (Vec<MemoryFinding>, ReviewDelta) {
     let iter_actual = prev_iter + 1;
     let mut next_id = max_id_num(prev).max(max_id_num(current)) + 1;
+    let mut fresh_id = || {
+        let id = format!("F-{next_id:03}");
+        next_id += 1;
+        id
+    };
 
-    let mut merged: Vec<MemoryFinding> = Vec::new();
-    let mut matched_prev: Vec<String> = Vec::new();
+    let pairs = pair_up(prev, current);
+    // Earlier findings whose identity lives on in a current one — the ones not carried forward.
+    let mut continued = vec![false; prev.len()];
+    let mut used_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut merged: Vec<MemoryFinding> = Vec::with_capacity(current.len() + prev.len());
     let (mut nuevos, mut persisten, mut resueltos) = (0, 0, 0);
 
-    for cur in current {
-        let key = identity(cur);
-        let prev_match = prev.iter().find(|p| identity(p) == key);
-        match prev_match {
-            // Reappeared after being resolved → treat as a brand-new finding (new id/iter).
-            Some(p) if p.estado == "resuelto" => {
-                let mut f = cur.clone();
-                f.id = format!("F-{next_id:03}");
-                next_id += 1;
+    for (i, cur) in current.iter().enumerate() {
+        let mut f = cur.clone();
+        match pairs[i] {
+            // Reappeared after being resolved → a brand-new finding (new id/iter). The resolved one
+            // stays in the history, carried forward below as it was.
+            Some(j) if prev[j].estado == "resuelto" => {
+                f.id = fresh_id();
                 f.estado = "abierto".to_string();
                 f.introducido_en_iter = iter_actual;
                 f.delta = Some("nuevo".to_string());
                 nuevos += 1;
-                merged.push(f);
             }
             // Still present and previously seen (active or human-discarded) → persists.
-            Some(p) => {
-                let mut f = cur.clone();
-                f.id = p.id.clone();
+            Some(j) => {
+                let p = &prev[j];
+                continued[j] = true;
+                f.id = if used_ids.contains(&p.id) { fresh_id() } else { p.id.clone() };
                 f.estado = p.estado.clone();
                 f.thread_id = p.thread_id;
+                f.hilo_general = p.hilo_general;
+                f.publicado_en_iter = p.publicado_en_iter;
                 f.introducido_en_iter = if p.introducido_en_iter == 0 { prev_iter.max(1) } else { p.introducido_en_iter };
                 f.motivo_descarte = p.motivo_descarte.clone();
                 f.delta = Some("persiste".to_string());
                 if f.is_active() {
                     persisten += 1;
                 }
-                matched_prev.push(key);
-                merged.push(f);
             }
             // Never seen before → new.
             None => {
-                let mut f = cur.clone();
-                f.id = format!("F-{next_id:03}");
-                next_id += 1;
+                f.id = fresh_id();
                 f.estado = "abierto".to_string();
                 f.introducido_en_iter = iter_actual;
                 f.delta = Some("nuevo".to_string());
                 nuevos += 1;
-                merged.push(f);
             }
         }
+        used_ids.insert(f.id.clone());
+        merged.push(f);
     }
 
-    // Carry forward every prev finding not matched above.
-    for p in prev {
-        let key = identity(p);
-        if matched_prev.contains(&key) || merged.iter().any(|m| m.id == p.id) {
+    // Carry forward every prev finding nothing above continued.
+    for (j, p) in prev.iter().enumerate() {
+        if continued[j] {
             continue;
         }
         let mut f = p.clone();
+        if used_ids.contains(&f.id) {
+            f.id = fresh_id();
+        }
+        used_ids.insert(f.id.clone());
         if p.is_active() {
             // On an efficient re-review, a finding whose file wasn't touched can't have been fixed —
             // its code wasn't re-analyzed, so auto-persist instead of declaring it resolved.
@@ -292,6 +394,46 @@ pub fn reconcile(
     }
 
     (merged, ReviewDelta { iter_previa: prev_iter, iter_actual, nuevos, persisten, resueltos })
+}
+
+/// One item of a publish, as much of it as matching it to its stored finding needs.
+#[derive(Debug, Clone, Copy)]
+pub struct PublishKey<'a> {
+    /// The finding's `F-NNN`, when the client sent it. The desktop always does; the phone predates it.
+    pub id: Option<&'a str>,
+    pub file: Option<&'a str>,
+    pub category: &'a str,
+    /// The lines the item's location names, for telling apart two same-category findings in a file.
+    pub lines: Option<(u32, u32)>,
+}
+
+/// Which stored finding a published item is about — the one whose thread it opens, replies on or
+/// closes. `claimed` marks the findings earlier items of the same publish already took, so no two
+/// items ever write to one finding.
+///
+/// **By id first**, because the id is the finding's identity: it is what the report shows, what the
+/// memory stores and what the comment's own heading says. Matching on file + category instead is how
+/// the second of two same-category findings in one file used to be posted as a "sigue presente"
+/// reply in the first one's thread, its own text never reaching the pull request.
+///
+/// The fallback — same [`finding_identity`], nearest by line, first unclaimed — is for an item that
+/// names no id (the phone sends none) and for one whose id is already claimed in this publish, which
+/// is what a report saved before ids were unique looks like: two findings under one `F-001`, the
+/// second of which is really the memory's `F-002`.
+pub fn match_publish_item(findings: &[MemoryFinding], item: &PublishKey, claimed: &[bool]) -> Option<usize> {
+    let free = |k: usize| !claimed.get(k).copied().unwrap_or(false);
+    if let Some(id) = item.id.map(str::trim).filter(|id| !id.is_empty()) {
+        if let Some(k) = findings.iter().enumerate().position(|(k, f)| free(k) && f.id == id) {
+            return Some(k);
+        }
+    }
+    let key = finding_identity(item.file, item.category);
+    findings
+        .iter()
+        .enumerate()
+        .filter(|(k, f)| free(*k) && finding_identity(f.archivo.as_deref(), &f.categoria) == key)
+        .min_by_key(|(k, f)| (span_distance(item.lines, line_span(f.lineas.as_deref())), *k))
+        .map(|(k, _)| k)
 }
 
 /// A false positive the human has already ruled on, kept at the **repository** level instead of
@@ -602,7 +744,252 @@ mod tests {
             motivo_descarte: Some("no aplica aquí".into()),
             delta: None,
             comentario_md: String::new(),
+            publicado_en_iter: None,
+            hilo_general: false,
         }
+    }
+
+    /// A finding as a fresh review reports it: no memory of its own yet.
+    fn reported(categoria: &str, archivo: &str, lineas: &str) -> MemoryFinding {
+        MemoryFinding {
+            estado: "abierto".into(),
+            archivo: Some(archivo.into()),
+            lineas: Some(lineas.into()),
+            motivo_descarte: None,
+            introducido_en_iter: 0,
+            ..finding("", "abierto", categoria)
+        }
+    }
+
+    /// A finding as a previous run left it in the memory.
+    fn remembered(id: &str, estado: &str, categoria: &str, archivo: &str, lineas: &str, thread: Option<i64>) -> MemoryFinding {
+        MemoryFinding {
+            thread_id: thread,
+            archivo: Some(archivo.into()),
+            lineas: Some(lineas.into()),
+            motivo_descarte: None,
+            ..finding(id, estado, categoria)
+        }
+    }
+
+    fn ids(findings: &[MemoryFinding]) -> Vec<&str> {
+        findings.iter().map(|f| f.id.as_str()).collect()
+    }
+
+    #[test]
+    fn a_first_reappearance_keeps_its_id_thread_and_iteration() {
+        let prev = vec![remembered("F-001", "posteado", "npe", "src/a.ts", "40-45", Some(77))];
+        let current = vec![reported("npe", "src/a.ts", "42-47")];
+        let (merged, delta) = reconcile(&prev, &current, 1, None);
+        assert_eq!(ids(&merged), vec!["F-001"]);
+        assert_eq!(merged[0].thread_id, Some(77));
+        assert_eq!(merged[0].estado, "posteado");
+        assert_eq!(merged[0].introducido_en_iter, 1);
+        assert_eq!(merged[0].delta.as_deref(), Some("persiste"));
+        assert_eq!((delta.nuevos, delta.persisten, delta.resueltos), (0, 1, 0));
+    }
+
+    /// The collision this matching exists for: two defects of one category in one file. Each keeps
+    /// its own id and its own thread, and neither swallows the other.
+    #[test]
+    fn two_same_category_findings_in_one_file_keep_their_own_ids() {
+        let prev = vec![
+            remembered("F-001", "posteado", "npe", "src/a.ts", "10", Some(1)),
+            remembered("F-002", "posteado", "npe", "src/a.ts", "480-482", Some(2)),
+        ];
+        // Reported in the other order, and both shifted by an insertion above them.
+        let current = vec![reported("npe", "src/a.ts", "495-497"), reported("npe", "src/a.ts", "25")];
+        let (merged, delta) = reconcile(&prev, &current, 1, None);
+        assert_eq!(merged.len(), 2, "nothing carried forward: both continued");
+        assert_eq!((merged[0].id.as_str(), merged[0].thread_id), ("F-002", Some(2)));
+        assert_eq!((merged[1].id.as_str(), merged[1].thread_id), ("F-001", Some(1)));
+        assert_eq!((delta.nuevos, delta.persisten, delta.resueltos), (0, 2, 0));
+    }
+
+    /// Settled by nearness across all pairs, not in reading order: the first current finding must not
+    /// take the earlier finding that sits right beside the second.
+    #[test]
+    fn pairs_are_settled_closest_first() {
+        let prev = vec![
+            remembered("F-001", "posteado", "npe", "a.ts", "50", Some(1)),
+            remembered("F-002", "posteado", "npe", "a.ts", "500", Some(2)),
+        ];
+        let current = vec![reported("npe", "a.ts", "300"), reported("npe", "a.ts", "495")];
+        let (merged, _) = reconcile(&prev, &current, 1, None);
+        assert_eq!(ids(&merged), vec!["F-001", "F-002"]);
+    }
+
+    /// One of two same-category findings fixed: the other persists and the fixed one is resolved with
+    /// its thread kept for the "resuelto" reply — it used to vanish from the memory instead.
+    #[test]
+    fn the_one_that_is_gone_is_resolved_not_lost() {
+        let prev = vec![
+            remembered("F-001", "posteado", "npe", "a.ts", "10", Some(1)),
+            remembered("F-002", "posteado", "npe", "a.ts", "480", Some(2)),
+        ];
+        let current = vec![reported("npe", "a.ts", "478-481")];
+        let (merged, delta) = reconcile(&prev, &current, 2, None);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].id, "F-002");
+        let gone = &merged[1];
+        assert_eq!((gone.id.as_str(), gone.estado.as_str(), gone.thread_id), ("F-001", "resuelto", Some(1)));
+        assert_eq!(gone.resuelto_en_iter, Some(3));
+        assert_eq!((delta.nuevos, delta.persisten, delta.resueltos), (0, 1, 1));
+    }
+
+    #[test]
+    fn a_new_finding_gets_the_next_free_id() {
+        let prev = vec![remembered("F-004", "posteado", "npe", "a.ts", "10", Some(1))];
+        let current = vec![reported("npe", "a.ts", "10"), reported("sql-injection", "db.ts", "3")];
+        let (merged, delta) = reconcile(&prev, &current, 1, None);
+        assert_eq!(ids(&merged), vec!["F-004", "F-005"]);
+        assert_eq!(merged[1].introducido_en_iter, 2);
+        assert_eq!(merged[1].delta.as_deref(), Some("nuevo"));
+        assert_eq!(delta.nuevos, 1);
+    }
+
+    /// Reappearing after being fixed is a new finding; the fixed one stays in the history as it was.
+    #[test]
+    fn a_resolved_finding_that_comes_back_is_new_and_the_history_stays() {
+        let prev = vec![MemoryFinding {
+            resuelto_en_iter: Some(2),
+            ..remembered("F-001", "resuelto", "npe", "a.ts", "10", Some(9))
+        }];
+        let current = vec![reported("npe", "a.ts", "10")];
+        let (merged, delta) = reconcile(&prev, &current, 2, None);
+        assert_eq!(ids(&merged), vec!["F-002", "F-001"]);
+        assert_eq!(merged[0].thread_id, None, "a new finding opens its own thread");
+        assert_eq!(merged[1].estado, "resuelto");
+        assert_eq!(delta.nuevos, 1);
+    }
+
+    /// A human ruling survives the next run: a discarded finding the model reports again keeps its
+    /// mark and its reason, and does not count as open.
+    #[test]
+    fn a_discarded_finding_keeps_its_ruling() {
+        let prev = vec![MemoryFinding {
+            motivo_descarte: Some("es intencional".into()),
+            ..remembered("F-003", "falso_positivo", "npe", "a.ts", "10", None)
+        }];
+        let (merged, delta) = reconcile(&prev, &[reported("npe", "a.ts", "11")], 1, None);
+        assert_eq!(merged[0].id, "F-003");
+        assert_eq!(merged[0].estado, "falso_positivo");
+        assert_eq!(merged[0].motivo_descarte.as_deref(), Some("es intencional"));
+        assert_eq!(delta.persisten, 0);
+    }
+
+    /// An efficient re-review only re-reads changed files: a finding on a file nobody touched cannot
+    /// have been fixed, whatever this run said about it.
+    #[test]
+    fn a_finding_on_an_untouched_file_persists_on_a_delta_review() {
+        let prev = vec![
+            remembered("F-001", "posteado", "npe", "src/untouched.ts", "10", Some(1)),
+            remembered("F-002", "posteado", "npe", "src/changed.ts", "10", Some(2)),
+        ];
+        let changed = vec!["src/changed.ts".to_string()];
+        let (merged, delta) = reconcile(&prev, &[], 1, Some(&changed));
+        assert_eq!(merged[0].estado, "posteado");
+        assert_eq!(merged[1].estado, "resuelto");
+        assert_eq!((delta.persisten, delta.resueltos), (1, 1));
+    }
+
+    /// The result is positional — `merged[i]` is `current[i]` — which is what lets the caller carry
+    /// ids back onto the full findings when two of them share a file and a category.
+    #[test]
+    fn the_merged_set_starts_with_the_current_findings_in_order() {
+        let prev = vec![remembered("F-001", "posteado", "b", "b.ts", "1", Some(1))];
+        let current = vec![reported("a", "a.ts", "1"), reported("b", "b.ts", "1"), reported("a", "a.ts", "90")];
+        let (merged, _) = reconcile(&prev, &current, 1, None);
+        for (i, cur) in current.iter().enumerate() {
+            assert_eq!(merged[i].categoria, cur.categoria);
+            assert_eq!(merged[i].lineas, cur.lineas);
+        }
+        let unique: std::collections::HashSet<&str> = merged.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(unique.len(), merged.len(), "no two findings share an id");
+    }
+
+    /// Runs saved before the matching was one to one can hold one id twice. The first holder keeps it;
+    /// the other is renumbered rather than left sharing it forever.
+    #[test]
+    fn duplicate_ids_left_by_older_runs_are_repaired() {
+        let prev = vec![
+            remembered("F-001", "posteado", "npe", "a.ts", "10", Some(1)),
+            remembered("F-001", "posteado", "npe", "a.ts", "480", Some(2)),
+        ];
+        let current = vec![reported("npe", "a.ts", "10"), reported("npe", "a.ts", "480")];
+        let (merged, _) = reconcile(&prev, &current, 1, None);
+        assert_eq!(ids(&merged), vec!["F-001", "F-002"]);
+        assert_eq!(merged[1].thread_id, Some(2), "renumbered, thread and all");
+    }
+
+    /// What was published in an earlier iteration may be published again in this one.
+    #[test]
+    fn publish_marks_travel_with_the_finding() {
+        let prev = vec![MemoryFinding {
+            publicado_en_iter: Some(1),
+            hilo_general: true,
+            ..remembered("F-001", "posteado", "npe", "a.ts", "10", Some(5))
+        }];
+        let (merged, _) = reconcile(&prev, &[reported("npe", "a.ts", "10")], 1, None);
+        assert_eq!(merged[0].publicado_en_iter, Some(1));
+        assert!(merged[0].hilo_general);
+    }
+
+    #[test]
+    fn line_spans_read_every_shape_the_model_writes() {
+        assert_eq!(line_span(Some("42")), Some((42, 42)));
+        assert_eq!(line_span(Some("42-50")), Some((42, 50)));
+        assert_eq!(line_span(Some("L42–L50, 80")), Some((42, 80)));
+        assert_eq!(line_span(Some("—")), None);
+        assert_eq!(line_span(None), None);
+    }
+
+    fn key<'a>(id: Option<&'a str>, file: Option<&'a str>, category: &'a str, lines: Option<(u32, u32)>) -> PublishKey<'a> {
+        PublishKey { id, file, category, lines }
+    }
+
+    /// The publish bug: both items used to land on the first finding of the pair.
+    #[test]
+    fn a_publish_item_is_matched_by_its_id() {
+        let findings = vec![
+            remembered("F-001", "abierto", "npe", "a.ts", "10", None),
+            remembered("F-002", "abierto", "npe", "a.ts", "480", None),
+        ];
+        let none = vec![false; 2];
+        assert_eq!(match_publish_item(&findings, &key(Some("F-002"), Some("a.ts"), "npe", Some((480, 480))), &none), Some(1));
+        // The id wins even when the location didn't parse into a file — which used to match nothing
+        // and open a fresh thread on every publish.
+        assert_eq!(match_publish_item(&findings, &key(Some("F-001"), None, "npe", None), &none), Some(0));
+    }
+
+    /// No id on the wire (the phone): file + category, nearest by line, and never twice.
+    #[test]
+    fn an_item_without_an_id_falls_back_to_file_category_and_line() {
+        let findings = vec![
+            remembered("F-001", "abierto", "npe", "a.ts", "10", None),
+            remembered("F-002", "abierto", "npe", "a.ts", "480", None),
+        ];
+        let mut claimed = vec![false; 2];
+        let far = key(None, Some("a.ts"), "npe", Some((480, 481)));
+        assert_eq!(match_publish_item(&findings, &far, &claimed), Some(1));
+        claimed[1] = true;
+        assert_eq!(match_publish_item(&findings, &far, &claimed), Some(0), "the claimed one is skipped");
+        claimed[0] = true;
+        assert_eq!(match_publish_item(&findings, &far, &claimed), None);
+        assert_eq!(match_publish_item(&findings, &key(None, Some("b.ts"), "npe", None), &[false, false]), None);
+    }
+
+    /// A report saved before ids were unique shows one id twice. The second item, finding that id
+    /// taken, lands on the other finding of its kind instead of on the first one's thread.
+    #[test]
+    fn a_duplicate_id_in_an_old_report_falls_through_to_the_other_finding() {
+        let findings = vec![
+            remembered("F-001", "abierto", "npe", "a.ts", "10", None),
+            remembered("F-002", "abierto", "npe", "a.ts", "480", None),
+        ];
+        let claimed = vec![true, false];
+        let second = key(Some("F-001"), Some("a.ts"), "npe", Some((480, 480)));
+        assert_eq!(match_publish_item(&findings, &second, &claimed), Some(1));
     }
 
     #[test]

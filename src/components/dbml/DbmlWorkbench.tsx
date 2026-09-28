@@ -224,6 +224,12 @@ export function DbmlWorkbench({
   /** Which tool drawer is open, or `null`. One at a time — they are alternatives, not panes. */
   const [tool, setTool] = useState<Tool | null>(null);
   const [toolsAt, setToolsAt] = useState<DOMRect | null>(null);
+  // "Compare" in the changed-on-disk question opens Comparar here; the panel then loads the file
+  // and clears the request (see `DbmlDiffPanel`).
+  const compareRequested = useDiagramsStore((s) => s.compareRequest?.diagramId === diagramId);
+  useEffect(() => {
+    if (compareRequested) setTool("diff");
+  }, [compareRequested]);
   /**
    * What the Datos pill says, read straight from the sandbox store.
    *
@@ -2061,6 +2067,7 @@ export function DbmlWorkbench({
               <div className="min-h-0 flex-1" hidden={tool !== "diff"}>
                 {parser ? (
                   <DbmlDiffPanel
+                    diagramId={diagramId}
                     schema={schema}
                     parse={parser.parseDbml}
                     onClose={() => setTool(null)}

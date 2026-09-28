@@ -5,12 +5,45 @@ import {
   camel,
   codeName,
   codegenRefs,
+  compositeKey,
+  defaultOf,
+  findingLines,
   incoming,
+  isComposite,
+  isKeyColumn,
   lengthOf,
   NOTHING_TO_CONVERT,
   outgoing,
   pascal,
+  relationStem,
+  type CodegenRef,
 } from "./shared";
+import { sqlDefault } from "./sql";
+
+/** The field a relation is held in: `author_id` → `author`. */
+function property(ref: CodegenRef): string {
+  return camel(relationStem(ref).replace(/_(id|fk|key)$/i, "")) || camel(ref.pkTable.name);
+}
+
+/**
+ * The join annotation: one `@JoinColumn`, or `@JoinColumns` for a composite key. `readOnly` when a
+ * column of the join is also an `@Id` field: JPA refuses a column mapped writable twice, so the
+ * relation reads it and the key writes it.
+ */
+function joinAnnotation(ref: CodegenRef, readOnly: boolean): string[] {
+  const extra = readOnly ? ", insertable = false, updatable = false" : "";
+  if (!isComposite(ref)) {
+    return [`    @JoinColumn(name = "${ref.fkFields[0]}", referencedColumnName = "${ref.pkFields[0]}"${extra})`];
+  }
+  return [
+    "    @JoinColumns({",
+    ...ref.fkFields.map(
+      (name, at) =>
+        `        @JoinColumn(name = "${name}", referencedColumnName = "${ref.pkFields[at]}"${extra})${at < ref.fkFields.length - 1 ? "," : ""}`,
+    ),
+    "    })",
+  ];
+}
 
 function javaType(type: string, notNull: boolean, pk: boolean): string {
   switch (baseType(type)) {
@@ -66,17 +99,25 @@ export function toJpa(schema: DbmlSchema): string {
 
     const out = outgoing(refs, table);
     const back = incoming(refs, table);
-    const mapped = new Set(out.filter((ref) => ref.kind !== "many-to-many").map((ref) => ref.fkField));
+    const mapped = new Set(
+      out.filter((ref) => ref.kind !== "many-to-many").flatMap((ref) => ref.fkFields),
+    );
+    const composite = compositeKey(table);
+    const keyFields: string[] = [];
 
     for (const field of table.fields) {
-      const type = javaType(field.type, field.notNull, field.pk);
+      const key = isKeyColumn(table, field);
+      const type = javaType(field.type, field.notNull, key);
       for (const entry of importsFor(field.type)) imports.add(entry);
 
-      if (field.pk) {
+      // A key column is always its own `@Id` field, even when a relation also joins on it — see
+      // `joinAnnotation`'s `readOnly`.
+      if (key) {
         body.push("    @Id");
         if (field.increment) body.push("    @GeneratedValue(strategy = GenerationType.IDENTITY)");
         body.push(`    @Column(name = "${field.name}")`);
         body.push(`    private ${type} ${camel(field.name)};`, "");
+        keyFields.push(`        private ${type} ${camel(field.name)};`);
         continue;
       }
       if (mapped.has(field.name)) continue;
@@ -89,7 +130,10 @@ export function toJpa(schema: DbmlSchema): string {
       if (length && (base === "varchar" || base === "char")) attributes.push(`length = ${length}`);
       if (base === "text") attributes.push('columnDefinition = "TEXT"');
       body.push(`    @Column(${attributes.join(", ")})`);
-      if (field.default !== null) body.push(`    // default: ${field.default}`);
+      // JPA has no portable way to declare a default, so it is noted rather than dropped — written
+      // as the SQL it is, not with DBML's backticks.
+      const value = defaultOf(field);
+      if (value) body.push(`    // default: ${sqlDefault(value, "postgresql")}`);
       body.push(`    private ${type} ${camel(field.name)};`, "");
     }
 
@@ -100,20 +144,28 @@ export function toJpa(schema: DbmlSchema): string {
         body.push("    @ManyToMany");
         body.push("    @JoinTable(");
         body.push(`        name = "${table.name}_${ref.pkTable.name}",`);
-        body.push(`        joinColumns = @JoinColumn(name = "${ref.fkField}"),`);
-        body.push(`        inverseJoinColumns = @JoinColumn(name = "${ref.pkField}")`);
+        body.push(`        joinColumns = @JoinColumn(name = "${ref.fkFields[0]}"),`);
+        body.push(`        inverseJoinColumns = @JoinColumn(name = "${ref.pkFields[0]}")`);
         body.push("    )");
         body.push(`    private List<${target}> ${camel(ref.pkTable.name)}List;`, "");
         continue;
       }
       body.push(`    @${ref.kind === "one-to-one" ? "OneToOne" : "ManyToOne"}(fetch = FetchType.LAZY)`);
-      body.push(`    @JoinColumn(name = "${ref.fkField}", referencedColumnName = "${ref.pkField}")`);
-      body.push(`    private ${target} ${camel(ref.fkField.replace(/_(id|fk|key)$/i, "")) || camel(ref.pkTable.name)};`, "");
+      body.push(
+        ...joinAnnotation(
+          ref,
+          ref.fkFields.some((name) => {
+            const field = table.fields.find((entry) => entry.name === name);
+            return field !== undefined && isKeyColumn(table, field);
+          }),
+        ),
+      );
+      body.push(`    private ${target} ${property(ref)};`, "");
     }
 
     for (const ref of back) {
       const source = pascal(codeName(ref.fkTable));
-      const owner = camel(ref.fkField.replace(/_(id|fk|key)$/i, "")) || camel(table.name);
+      const owner = property(ref);
       if (ref.kind === "many-to-many") {
         imports.add("java.util.List");
         body.push(`    @ManyToMany(mappedBy = "${camel(table.name)}List")`);
@@ -128,6 +180,16 @@ export function toJpa(schema: DbmlSchema): string {
       }
     }
 
+    // JPA declares a key over several columns as a class of its own, named by `@IdClass`.
+    if (composite) {
+      body.push(
+        "",
+        "    /** The composite key, as `@IdClass` requires. Give it equals() and hashCode() over every field. */",
+        "    public static class Key implements Serializable {",
+        ...keyFields,
+        "    }",
+      );
+    }
     while (body.length > 0 && body[body.length - 1] === "") body.pop();
 
     return [
@@ -140,6 +202,7 @@ export function toJpa(schema: DbmlSchema): string {
       table.schema === "public"
         ? `@Table(name = "${table.name}")`
         : `@Table(name = "${table.name}", schema = "${table.schema}")`,
+      ...(composite ? [`@IdClass(${cls}.Key.class)`] : []),
       `public class ${cls} implements Serializable {`,
       "",
       ...body,
@@ -149,5 +212,9 @@ export function toJpa(schema: DbmlSchema): string {
     ].join("\n");
   });
 
-  return [banner("JPA entities"), "", classes.join(`\n\n// ${"─".repeat(64)}\n\n`)].join("\n") + "\n";
+  return (
+    [banner("JPA entities"), "", ...findingLines(schema), classes.join(`\n\n// ${"─".repeat(64)}\n\n`)].join(
+      "\n",
+    ) + "\n"
+  );
 }

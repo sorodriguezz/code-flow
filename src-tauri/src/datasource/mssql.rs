@@ -264,7 +264,7 @@ impl MssqlSession {
 
         let mut results = Vec::new();
         for statement in tsql_batches(sql) {
-            if let Err(refused) = read_only_guard(&statement, self.read_only) {
+            if let Err(refused) = read_only_guard(&statement, self.read_only, DIALECT) {
                 results.push(DbStatementResult::failed(&statement, refused));
                 break;
             }
@@ -943,6 +943,70 @@ impl MssqlSession {
         Ok(result)
     }
 
+    /// The first result set of one batch, handed to `sink` row by row — the "export everything"
+    /// path. TDS will not abandon a stream half-read, so a failure part-way poisons the session
+    /// (see [`Self::poison`]) instead of leaving tokens for the next statement to misread.
+    pub async fn stream_rows(
+        &self,
+        sql: &str,
+        ctx: &DbExecContext,
+        sink: &mut dyn super::export::RowSink,
+    ) -> Result<(), String> {
+        if let Some(database) = ctx.database.as_deref().filter(|d| !d.is_empty()) {
+            let _ = self.run_silent(&format!("USE {}", quote_ident(database, DIALECT))).await;
+        }
+        let statement = tsql_batches(sql)
+            .into_iter()
+            .next()
+            .ok_or_else(|| "There is no statement to export.".to_string())?;
+        let mut client = self.client.lock().await;
+        let outcome = async {
+            let stream = client.simple_query(statement.clone()).await.map_err(|e| self.note(e))?;
+            let mut stream = Box::pin(stream);
+            // Only the first result set: a batch that returns several has no single table to write.
+            let mut sets = 0usize;
+            while let Some(item) = stream.try_next().await.map_err(|e| self.note(e))? {
+                if let Some(metadata) = item.as_metadata() {
+                    sets += 1;
+                    if sets == 1 {
+                        let columns: Vec<DbColumn> = metadata
+                            .columns()
+                            .iter()
+                            .map(|column| DbColumn::new(column.name(), format!("{:?}", column.column_type())))
+                            .collect();
+                        sink.columns(&columns)?;
+                    }
+                    continue;
+                }
+                if sets != 1 {
+                    continue;
+                }
+                if let Some(row) = item.as_row() {
+                    let values: Vec<Option<String>> = row.cells().map(|(_, data)| format_cell(data)).collect();
+                    sink.row(&values)?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if outcome.is_err() {
+            self.poison();
+        }
+        outcome
+    }
+
+    /// Every row of a table under the grid's filter and sort, streamed.
+    pub async fn export_table(
+        &self,
+        request: &DbTableDataRequest,
+        sink: &mut dyn super::export::RowSink,
+    ) -> Result<(), String> {
+        self.use_database(&request.node).await?;
+        let sql = sqlgen::select_all(&request.node, DIALECT, &request.filter, &request.sort)?;
+        let ctx = DbExecContext { database: None, schema: None, max_rows: 0 };
+        self.stream_rows(&sql, &ctx, sink).await
+    }
+
     pub async fn row_count(&self, node: &DbNodeRef, filter: &str) -> Result<i64, String> {
         self.use_database(node).await?;
         let sql = sqlgen::count_rows(node, DIALECT, filter)?;
@@ -965,14 +1029,39 @@ impl MssqlSession {
 
         self.run_silent("BEGIN TRANSACTION").await?;
         let mut applied = 0u32;
-        for statement in &statements {
-            if let Err(error) = self.run_silent(statement).await {
-                let _ = self.run_silent("ROLLBACK").await;
-                return Ok(DbEditResult {
-                    applied: 0,
-                    statements: statements.clone(),
-                    error: Some(format!("{error}\n\n{statement}")),
-                });
+        let total = statements.len();
+        for (index, (statement, edit)) in statements.iter().zip(edits).enumerate() {
+            // `@@ROWCOUNT` in the same batch rather than the TDS done-token count: a session under
+            // `SET NOCOUNT ON` (a startup script, a server default) reports no count at all, and
+            // "no count" must not read as "no row".
+            let checked = format!("{statement};\nSELECT @@ROWCOUNT");
+            let results = match self.run_statement(&checked, None).await {
+                Ok(results) => results,
+                Err(error) => {
+                    let _ = self.run_silent("ROLLBACK").await;
+                    return Ok(DbEditResult {
+                        applied: 0,
+                        statements: statements.clone(),
+                        error: Some(format!("{error}\n\n{statement}")),
+                    });
+                }
+            };
+            if super::edit_expects_one_row(edit) {
+                let affected = results
+                    .iter()
+                    .find(|result| !result.columns.is_empty())
+                    .and_then(|result| result.rows.first())
+                    .map(|row| cell(row, 0))
+                    .and_then(|count| count.trim().parse::<u64>().ok())
+                    .unwrap_or(0);
+                if affected != 1 {
+                    let _ = self.run_silent("ROLLBACK").await;
+                    return Ok(DbEditResult {
+                        applied: 0,
+                        statements: statements.clone(),
+                        error: Some(super::wrong_row_count(index + 1, total, affected, statement)),
+                    });
+                }
             }
             applied += 1;
         }
@@ -1192,12 +1281,20 @@ fn tds_config(
         // An ADO.NET connection string ("Server=…;Database=…;User Id=…") is what a .NET shop has
         // on hand, and tiberius parses both it and the JDBC form.
         let trimmed = config.url.trim();
-        if trimmed.starts_with("jdbc:") {
+        let mut tds = if trimmed.starts_with("jdbc:") {
             Config::from_jdbc_string(trimmed)
         } else {
             Config::from_ado_string(trimmed)
         }
-        .map_err(|e| format!("That connection string couldn't be parsed: {e}"))?
+        .map_err(|e| format!("That connection string couldn't be parsed: {e}"))?;
+        // A saved connection string no longer carries its password — saving lifts it into the
+        // keychain (`connectionSecrets.ts` on the frontend) — so it is added back here, for the
+        // login the string names. tiberius has no fallback of its own: without this a string with
+        // no `Password=` signs in with an empty one.
+        if let Some((user, password)) = lifted_login(config) {
+            tds.authentication(AuthMethod::sql_server(user, password));
+        }
+        tds
     };
 
     let target = database.filter(|d| !d.is_empty()).unwrap_or(config.database.as_str());
@@ -1247,6 +1344,101 @@ fn tds_config(
     Ok(tds)
 }
 
+/// What an ADO.NET or JDBC connection string says about signing in.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConnectionStringLogin {
+    user: Option<String>,
+    has_password: bool,
+    integrated: bool,
+}
+
+/// Reads the login out of a connection string, with the keys and quoting tiberius itself accepts:
+/// `;`-separated `key=value` pairs, keys case-insensitive, values optionally in `"…"`, `'…'` or
+/// `{…}`. A JDBC string's first segment is the server and is skipped.
+fn connection_string_login(text: &str) -> ConnectionStringLogin {
+    let jdbc = text.to_ascii_lowercase().starts_with("jdbc:");
+    let mut pairs: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let c = chars[index];
+        if let Some(close) = quote {
+            current.push(c);
+            if c == close {
+                if close != '}' && chars.get(index + 1) == Some(&close) {
+                    current.push(close);
+                    index += 1;
+                } else {
+                    quote = None;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        match c {
+            ';' => pairs.push(std::mem::take(&mut current)),
+            '"' | '\'' if current.split_once('=').is_some_and(|(_, value)| value.trim().is_empty()) => {
+                quote = Some(c);
+                current.push(c);
+            }
+            '{' => {
+                quote = Some('}');
+                current.push(c);
+            }
+            _ => current.push(c),
+        }
+        index += 1;
+    }
+    pairs.push(current);
+
+    let mut login = ConnectionStringLogin::default();
+    for (position, pair) in pairs.iter().enumerate() {
+        if jdbc && position == 0 {
+            continue;
+        }
+        let Some((key, value)) = pair.split_once('=') else { continue };
+        let key = key.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+        let value = unquote_value(value);
+        match key.as_str() {
+            "uid" | "username" | "user" | "user id" if !value.is_empty() => login.user = Some(value),
+            "password" | "pwd" => login.has_password = !value.is_empty(),
+            "integratedsecurity" | "integrated security" => {
+                login.integrated = matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "sspi")
+            }
+            _ => {}
+        }
+    }
+    login
+}
+
+/// The login to add to a connection string that doesn't carry its own password: the user the string
+/// names (or the form's), with the keychain's password. `None` when the string brings a password,
+/// signs in with Windows authentication, or there is no stored password to add.
+fn lifted_login(config: &DbConnectionConfig) -> Option<(String, String)> {
+    let login = connection_string_login(config.url.trim());
+    if login.has_password || login.integrated || config.password.is_empty() {
+        return None;
+    }
+    Some((login.user.unwrap_or_else(|| config.user.clone()), config.password.clone()))
+}
+
+/// A connection-string value without its quotes or braces.
+fn unquote_value(raw: &str) -> String {
+    let value = raw.trim();
+    for quote in ['"', '\''] {
+        if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
+            let doubled: String = [quote, quote].iter().collect();
+            return value[1..value.len() - 1].replace(&doubled, &quote.to_string());
+        }
+    }
+    if value.len() >= 2 && value.starts_with('{') && value.ends_with('}') {
+        return value[1..value.len() - 1].to_string();
+    }
+    value.to_string()
+}
+
 /// tiberius wraps a server error in `Error::Server(TokenError)`, whose `Display` is the bare
 /// message. The number and line are what make an error findable in a long script.
 fn tds_error(error: tiberius::error::Error) -> String {
@@ -1281,6 +1473,48 @@ mod tests {
     #[test]
     fn without_go_the_buffer_splits_on_semicolons() {
         assert_eq!(tsql_batches("SELECT 1; SELECT 2").len(), 2);
+    }
+
+    /// The login a connection string names — which is who the keychain's password is for once the
+    /// string itself no longer carries one.
+    #[test]
+    fn a_connection_string_says_who_signs_in_and_whether_it_brought_a_password() {
+        let ado = connection_string_login("Server=db.example.com,1433;Database=app;User Id=sa;Encrypt=true");
+        assert_eq!(ado, ConnectionStringLogin { user: Some("sa".into()), has_password: false, integrated: false });
+
+        let with = connection_string_login("Server=h;UID=app;Pwd=\"a;b\";Database=x");
+        assert_eq!(with.user.as_deref(), Some("app"));
+        assert!(with.has_password);
+
+        let jdbc = connection_string_login("jdbc:sqlserver://db.example.com:1433;user=sa;password={p;w}");
+        assert_eq!(jdbc.user.as_deref(), Some("sa"));
+        assert!(jdbc.has_password);
+
+        let integrated = connection_string_login("Server=h;Integrated Security=SSPI");
+        assert!(integrated.integrated);
+        assert_eq!(integrated.user, None);
+    }
+
+    /// The keychain's password reaches a string that had it lifted out, and never overrides one
+    /// that still carries its own.
+    #[test]
+    fn a_lifted_password_is_added_back_at_connect_time() {
+        let mut config = crate::datasource::tests_support::config(DbKind::Sqlserver);
+        config.url = "Server=db.example.com,1433;Database=app;User Id=sa".into();
+        config.password = "from-keychain".into();
+        assert_eq!(lifted_login(&config), Some(("sa".to_string(), "from-keychain".to_string())));
+        assert!(tds_config(&config, None, None).is_ok());
+
+        // A string that still brings its own keeps it.
+        config.url = "Server=db.example.com;User Id=sa;Password=inline".into();
+        assert_eq!(lifted_login(&config), None);
+        // No login in the string: the form's user is who the password is for.
+        config.url = "Server=db.example.com".into();
+        config.user = "app".into();
+        assert_eq!(lifted_login(&config), Some(("app".to_string(), "from-keychain".to_string())));
+        // Nothing stored, nothing added.
+        config.password = String::new();
+        assert_eq!(lifted_login(&config), None);
     }
 
     #[test]

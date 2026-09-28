@@ -1,17 +1,21 @@
 import { create } from "zustand";
 import {
   REPO_BUSY_MARKER,
+  WIKI_CONFLICT_MARKER,
   createDocPage,
   deleteDocPage,
   generateDocPage,
+  getDocPage,
   importWikiPage,
   isRepoBusy,
   listDocPages,
   publishDocPage,
+  reloadDocPageFromWiki,
   setDocPageContent,
   setDocPageTarget,
   setDocPageTitle,
 } from "../lib/tauri/commands";
+import { chooseAction } from "./confirmStore";
 import { parseClaudeError } from "../lib/claudeError";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
@@ -74,12 +78,12 @@ interface DocsState {
    * Every document of the workspace, **body included**.
    *
    * `list_doc_pages` projects the whole row, so opening this view holds the full markdown of every
-   * document at once when the list only ever renders titles, scope and status. Making it lazy is a
-   * backend change and not a frontend one: it needs `list_doc_pages` to stop selecting `content`
-   * *and* a `get_doc_page` command to fetch one body on `select`. Rust has the query
-   * (`queries::get_doc_page`) but it is not registered in `lib.rs`, so there is nothing to invoke
-   * yet — dropping `content` from the list today would blank the editor, `publish` and the
-   * `save` short-circuit that compares the draft against it.
+   * document at once when the list only ever renders titles, scope and status. Making it lazy needs
+   * `list_doc_pages` to stop selecting `content`, and `select` to fetch one body through
+   * `getDocPage` (the `get_doc_page` command, registered and already used here to re-read the one
+   * row a failed generation touched). Only the first half is missing — but dropping `content` from
+   * the list today would blank the editor, `publish` and the `save` short-circuit that compares the
+   * draft against it.
    *
    * And a hydrate-after-select would not be enough on its own, which is the part that is easy to
    * get wrong: `WikiView` renders `bodyOf(page, draft)` — i.e. `page.content` — straight into
@@ -183,7 +187,14 @@ interface DocsState {
    *  and, more to the point, the workspace the selection lives in. */
   generate: (docId: string) => Promise<void>;
   stop: (docId: string) => Promise<void>;
-  publish: () => Promise<void>;
+  /**
+   * Publishes the open document — only over the wiki page version it was read from. When the page
+   * changed since (`WIKI_CONFLICT_MARKER`), the user picks: keep editing, reload the page as the wiki
+   * holds it now (their local edits go), or overwrite it (`overwrite`, the second call).
+   */
+  publish: (options?: { overwrite?: boolean }) => Promise<void>;
+  /** Replaces a document's body with the wiki's current page — the "reload" answer to a conflict. */
+  reloadFromWiki: (docId: string) => Promise<void>;
 }
 
 export const useDocsStore = create<DocsState>((set, get) => ({
@@ -529,9 +540,22 @@ export const useDocsStore = create<DocsState>((set, get) => ({
       // arriving after the user moved on repopulated the wiki with workspace A's documents while
       // every other pane in the app said B. Nothing here may steer the store — it only refreshes
       // the list it started from, and only while that is still the list on screen.
+      //
+      // The one row the run touched, by id — not the whole list: nothing else changed, and a list
+      // re-read is the full markdown of every document of the workspace again.
       if (get().workspaceId === runWorkspaceId) {
-        const pages = await listDocPages(runWorkspaceId).catch(() => null);
-        if (pages) set((state) => (state.workspaceId === runWorkspaceId ? { pages } : {}));
+        const row = await getDocPage(docId).catch(() => undefined);
+        if (row !== undefined) {
+          set((state) =>
+            state.workspaceId !== runWorkspaceId
+              ? {}
+              : {
+                  pages: row
+                    ? state.pages.map((p) => (p.id === docId ? row : p))
+                    : state.pages.filter((p) => p.id !== docId),
+                },
+          );
+        }
       }
     } finally {
       useAiRunStore.getState().finish(runId);
@@ -551,7 +575,7 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     if (run) await useAiRunStore.getState().cancel(run.runId);
   },
 
-  publish: async () => {
+  publish: async (options) => {
     // What travels to the wiki is the stored body, read back in Rust from the row — so an unsaved
     // draft has to land first, or the user watches their newest paragraph not arrive. A save that
     // failed already said so; publishing the older text over it would be the wrong repair.
@@ -561,8 +585,9 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     if (!page || s.publishing) return;
     if (s.draft !== null && s.draft !== page.content) return;
     set({ publishing: true });
+    let conflict = false;
     try {
-      const published = await publishDocPage(page.id);
+      const published = await publishDocPage(page.id, options?.overwrite ?? false);
       set((state) => ({
         pages: state.pages.map((p) =>
           p.id === page.id
@@ -574,9 +599,45 @@ export const useDocsStore = create<DocsState>((set, get) => ({
         .getState()
         .pushToast(translate(published.updated ? "docs.updatedOnWiki" : "docs.createdOnWiki"), "success");
     } catch (e: unknown) {
-      pushErrorToast(String(e));
+      conflict = String(e).includes(WIKI_CONFLICT_MARKER);
+      if (!conflict) pushErrorToast(String(e));
     } finally {
       set({ publishing: false });
+    }
+    if (!conflict) return;
+
+    // Somebody changed the page since this document was read from it (or it was already there when
+    // this one was never read from it at all). Nothing was written; the user decides what happens
+    // to their edit and to theirs. "Keep editing" is first because it is the one that loses nothing.
+    const choice = await chooseAction({
+      message: translate("docs.publishConflict"),
+      choices: [
+        { id: "keep", label: translate("docs.conflictKeepEditing"), variant: "primary" },
+        { id: "reload", label: translate("docs.conflictReload"), variant: "secondary" },
+        { id: "overwrite", label: translate("docs.conflictOverwrite"), variant: "danger" },
+      ],
+      danger: true,
+    });
+    if (choice === "overwrite") await get().publish({ overwrite: true });
+    else if (choice === "reload") await get().reloadFromWiki(page.id);
+  },
+
+  reloadFromWiki: async (docId) => {
+    const workspaceId = get().workspaceId;
+    try {
+      const row = await reloadDocPageFromWiki(docId);
+      set((state) =>
+        state.workspaceId !== workspaceId
+          ? {}
+          : {
+              pages: state.pages.map((p) => (p.id === docId ? row : p)),
+              // The unsaved copy of the text just replaced goes with it — that was the choice.
+              draft: state.selectedId === docId ? null : state.draft,
+            },
+      );
+      useToastStore.getState().pushToast(translate("docs.reloadedFromWiki"), "success");
+    } catch (e: unknown) {
+      pushErrorToast(String(e));
     }
   },
 }));

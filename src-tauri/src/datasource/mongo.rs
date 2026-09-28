@@ -754,6 +754,27 @@ impl MongoSession {
                             return Ok(DbEditResult { applied, statements, error: Some(error) });
                         }
                     }
+                    // `n` is what the filter *matched* (at most one: every edit is `limit: 1` /
+                    // `multi: false`). Zero means the document changed or went away since the page
+                    // was read. There is no transaction to undo the edits before it — a standalone
+                    // server has none — so they stay, and the message says how many.
+                    let matched = answer
+                        .get_i32("n")
+                        .map(i64::from)
+                        .or_else(|_| answer.get_i64("n"))
+                        .unwrap_or(0);
+                    if edits.get(index).is_some_and(super::edit_expects_one_row) && matched == 0 {
+                        let error = format!(
+                            "Change {} of {} matched no document: it was changed or deleted in \
+                             another session after the page was loaded. Reload and make it again. \
+                             {applied} earlier change(s) were saved — MongoDB applies each on its \
+                             own.\n\n{}",
+                            index + 1,
+                            statements.len(),
+                            statements.get(index).cloned().unwrap_or_default()
+                        );
+                        return Ok(DbEditResult { applied, statements, error: Some(error) });
+                    }
                     applied += 1;
                 }
                 Err(error) => {
@@ -1112,6 +1133,14 @@ struct Plan {
     writes: bool,
 }
 
+/// Whether any expression in a console buffer would write — or can't be read well enough to be sure
+/// it doesn't. For "export everything", which runs the statement a second time.
+pub fn statement_writes(input: &str) -> bool {
+    split_mongo_statements(input)
+        .iter()
+        .any(|statement| plan_command(statement, None).map(|plan| plan.writes).unwrap_or(true))
+}
+
 /// Splits a console buffer into expressions.
 ///
 /// On `;` where one is written, and otherwise on a blank line: a Mongo console has no statement
@@ -1144,7 +1173,7 @@ fn plan_command(statement: &str, limit: Option<usize>) -> Result<Plan, String> {
         return Ok(Plan {
             cursor: command.contains_key("cursor")
                 || matches!(name.as_str(), "find" | "aggregate" | "listCollections" | "listIndexes"),
-            writes: is_write_command(&name),
+            writes: command_writes(&command),
             command,
         });
     }
@@ -1175,7 +1204,7 @@ fn plan_command(statement: &str, limit: Option<usize>) -> Result<Plan, String> {
                 Ok(Plan {
                     cursor: command.contains_key("cursor")
                         || matches!(name.as_str(), "find" | "aggregate" | "listIndexes"),
-                    writes: is_write_command(&name),
+                    writes: command_writes(&command),
                     command,
                 })
             }
@@ -1196,6 +1225,10 @@ fn plan_command(statement: &str, limit: Option<usize>) -> Result<Plan, String> {
             _ => Ok(Document::new()),
         }
     };
+    // Whether an argument was written at all. `argument` reads a missing one as `{}` — right for a
+    // projection or an options document, and exactly wrong for the filter of a write, where `{}`
+    // means every document in the collection.
+    let given = |index: usize| arguments.get(index).is_some_and(|text| !text.trim().is_empty());
 
     match operation.as_str() {
         "find" | "findOne" => {
@@ -1236,6 +1269,8 @@ fn plan_command(statement: &str, limit: Option<usize>) -> Result<Plan, String> {
         }
         "aggregate" => {
             let pipeline = parse_relaxed_array(first_argument(&arguments.join(","))?)?;
+            // `$out` and `$merge` write the pipeline's result into a collection.
+            let writes = pipeline_writes(&pipeline);
             Ok(Plan {
                 command: doc! {
                     "aggregate": &collection,
@@ -1243,7 +1278,7 @@ fn plan_command(statement: &str, limit: Option<usize>) -> Result<Plan, String> {
                     "cursor": { "batchSize": limit.unwrap_or(1000) as i64 },
                 },
                 cursor: true,
-                writes: false,
+                writes,
             })
         }
         "countDocuments" | "count" => Ok(Plan {
@@ -1277,30 +1312,78 @@ fn plan_command(statement: &str, limit: Option<usize>) -> Result<Plan, String> {
                 writes: true,
             })
         }
-        "updateOne" | "updateMany" | "replaceOne" => Ok(Plan {
-            command: doc! {
-                "update": &collection,
-                "updates": [doc! {
-                    "q": argument(0)?,
-                    "u": argument(1)?,
-                    "multi": operation == "updateMany",
-                    "upsert": argument(2)?.get_bool("upsert").unwrap_or(false),
-                }],
-            },
-            cursor: false,
-            writes: true,
-        }),
-        "deleteOne" | "deleteMany" | "remove" => Ok(Plan {
-            command: doc! {
-                "delete": &collection,
-                "deletes": [doc! {
-                    "q": argument(0)?,
-                    "limit": if operation == "deleteMany" { 0 } else { 1 },
-                }],
-            },
-            cursor: false,
-            writes: true,
-        }),
+        "updateOne" | "updateMany" | "replaceOne" => {
+            if !given(0) {
+                return Err(missing_filter(&operation));
+            }
+            let update = update_argument(&operation, arguments.get(1))?;
+            Ok(Plan {
+                command: doc! {
+                    "update": &collection,
+                    "updates": [doc! {
+                        "q": argument(0)?,
+                        "u": update,
+                        "multi": operation == "updateMany",
+                        "upsert": argument(2)?.get_bool("upsert").unwrap_or(false),
+                    }],
+                },
+                cursor: false,
+                writes: true,
+            })
+        }
+        "deleteOne" | "deleteMany" | "remove" => {
+            if !given(0) {
+                return Err(missing_filter(&operation));
+            }
+            // `remove(filter)` is the shell's older spelling of `deleteMany` — it removes every
+            // match unless told `justOne`. Reading it as `deleteOne` removed one row of a batch the
+            // user meant to clear and reported success.
+            let just_one = match operation.as_str() {
+                "deleteOne" => true,
+                "deleteMany" => false,
+                _ => remove_just_one(arguments.get(1))?,
+            };
+            Ok(Plan {
+                command: doc! {
+                    "delete": &collection,
+                    "deletes": [doc! {
+                        "q": argument(0)?,
+                        "limit": if just_one { 1 } else { 0 },
+                    }],
+                },
+                cursor: false,
+                writes: true,
+            })
+        }
+        "findOneAndDelete" | "findOneAndUpdate" | "findOneAndReplace" => {
+            if !given(0) {
+                return Err(missing_filter(&operation));
+            }
+            let deleting = operation == "findOneAndDelete";
+            let options = argument(if deleting { 1 } else { 2 })?;
+            let mut command = doc! { "findAndModify": &collection, "query": argument(0)? };
+            if deleting {
+                command.insert("remove", true);
+            } else {
+                command.insert("update", update_argument(&operation, arguments.get(1))?);
+            }
+            if let Ok(sort) = options.get_document("sort") {
+                command.insert("sort", sort.clone());
+            }
+            if let Ok(projection) = options.get_document("projection") {
+                command.insert("fields", projection.clone());
+            }
+            if options.get_bool("upsert").unwrap_or(false) {
+                command.insert("upsert", true);
+            }
+            // The shell's two spellings of "give me the document as it is after the change".
+            let after = options.get_str("returnDocument").is_ok_and(|value| value == "after")
+                || options.get_bool("returnNewDocument").unwrap_or(false);
+            if after {
+                command.insert("new", true);
+            }
+            Ok(Plan { command, cursor: false, writes: true })
+        }
         "drop" => Ok(Plan { command: doc! { "drop": &collection }, cursor: false, writes: true }),
         "getIndexes" | "listIndexes" => Ok(Plan {
             command: doc! { "listIndexes": &collection },
@@ -1335,21 +1418,109 @@ fn shell_help(statement: &str) -> String {
     )
 }
 
-fn is_write_command(name: &str) -> bool {
-    matches!(
-        name,
-        "insert"
-            | "update"
-            | "delete"
-            | "findAndModify"
-            | "drop"
-            | "dropDatabase"
-            | "create"
-            | "createIndexes"
-            | "dropIndexes"
-            | "renameCollection"
-            | "bulkWrite"
+/// The commands that only read.
+///
+/// An allowlist rather than a list of writes, because under read-only the failure worth avoiding is
+/// the command nobody thought of: `applyOps`, `renameCollection`, `collMod`, `createUser`, a verb a
+/// later server adds. The list used to be the other way round and was eleven names long.
+const READ_COMMANDS: &[&str] = &[
+    "find", "aggregate", "count", "distinct", "mapReduce", "getMore", "killCursors", "explain",
+    "listCollections", "listIndexes", "listDatabases", "listSearchIndexes", "dbStats", "collStats",
+    "dataSize", "buildInfo", "serverStatus", "hostInfo", "ping", "hello", "isMaster", "ismaster",
+    "connectionStatus", "whatsmyuri", "currentOp", "getLog", "getParameter", "getCmdLineOpts",
+    "listCommands", "usersInfo", "rolesInfo", "validate", "top", "dbHash", "replSetGetStatus",
+    "replSetGetConfig", "getDefaultRWConcern", "connPoolStats", "lockInfo", "features",
+];
+
+/// Whether a command document modifies anything — checked against the connection's read-only flag.
+fn command_writes(command: &Document) -> bool {
+    let Some(name) = command.keys().next() else { return false };
+    if !READ_COMMANDS.contains(&name.as_str()) {
+        return true;
+    }
+    match name.as_str() {
+        "aggregate" => command
+            .get_array("pipeline")
+            .map(|stages| {
+                pipeline_writes(
+                    &stages.iter().filter_map(|stage| stage.as_document().cloned()).collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or(false),
+        // Anything but `out: {inline: 1}` writes the result into a collection.
+        "mapReduce" => match command.get("out") {
+            None => false,
+            Some(Bson::Document(out)) => !out.contains_key("inline"),
+            Some(_) => true,
+        },
+        // `explain` plans a write without performing it, whatever the verbosity.
+        _ => false,
+    }
+}
+
+/// A pipeline with a `$out` or `$merge` stage writes its result into a collection.
+fn pipeline_writes(pipeline: &[Document]) -> bool {
+    pipeline.iter().any(|stage| stage.contains_key("$out") || stage.contains_key("$merge"))
+}
+
+/// What a write without a filter is refused with. mongosh refuses the same calls; this driver used
+/// to read the missing filter as `{}` and quietly emptied the collection.
+fn missing_filter(operation: &str) -> String {
+    format!(
+        "`{operation}()` needs a filter as its first argument. Pass `{{}}` explicitly to target \
+         every document."
     )
+}
+
+/// The second argument of an update or a replacement: required, and of the right kind.
+///
+/// `updateOne`/`updateMany` take operators (`{$set: …}`) or a pipeline; `replaceOne` takes a whole
+/// document with no operators in it. The server would otherwise read an operator-free "update" as a
+/// replacement — every field the user didn't name, gone — which is why mongosh refuses the mix-up
+/// and so does this.
+fn update_argument(operation: &str, text: Option<&String>) -> Result<Bson, String> {
+    let replacing = operation.ends_with("Replace") || operation == "replaceOne";
+    let Some(text) = text.filter(|text| !text.trim().is_empty()) else {
+        return Err(if replacing {
+            format!("`{operation}()` needs the replacement document as its second argument.")
+        } else {
+            format!("`{operation}()` needs an update (`{{$set: …}}`) or a pipeline as its second argument.")
+        });
+    };
+    if text.trim_start().starts_with('[') {
+        if replacing {
+            return Err(format!("`{operation}()` replaces with a document, not a pipeline."));
+        }
+        let pipeline = parse_relaxed_array(text)?;
+        return Ok(Bson::Array(pipeline.into_iter().map(Bson::Document).collect()));
+    }
+    let document = parse_relaxed_document(text)?;
+    let operators = document.keys().filter(|key| key.starts_with('$')).count();
+    if replacing && operators > 0 {
+        return Err(format!(
+            "`{operation}()` takes a whole document; update operators like `$set` belong to \
+             `updateOne()`."
+        ));
+    }
+    if !replacing && (document.is_empty() || operators != document.len()) {
+        return Err(format!(
+            "`{operation}()` needs update operators (`{{$set: …}}`). A document without them would \
+             replace the whole document — use `replaceOne()` if that is what you mean."
+        ));
+    }
+    Ok(Bson::Document(document))
+}
+
+/// `remove(filter, justOne)` — `true`, or `{justOne: true}` — as the shell spells it.
+fn remove_just_one(argument: Option<&String>) -> Result<bool, String> {
+    let Some(text) = argument.map(|text| text.trim()).filter(|text| !text.is_empty()) else {
+        return Ok(false);
+    };
+    match text {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Ok(parse_relaxed_document(text)?.get_bool("justOne").unwrap_or(false)),
+    }
 }
 
 fn index_name(keys: &Document) -> String {
@@ -2363,6 +2534,107 @@ mod tests {
         for statement in ["db.users.find({})", "db.users.countDocuments({})", "show collections"] {
             assert!(!plan_command(statement, None).unwrap().writes, "{statement}");
         }
+    }
+
+    /// Read-only allows what is known to read and nothing else — the command no list anticipated is
+    /// the one that gets through a denylist.
+    #[test]
+    fn read_only_trusts_only_the_commands_known_to_read() {
+        for statement in [
+            "{applyOps: []}",
+            "{renameCollection: 'app.a', to: 'app.b'}",
+            "{collMod: 'users', validator: {}}",
+            "{createUser: 'x', pwd: 'y', roles: []}",
+            "{aggregate: 'users', pipeline: [{$match: {}}, {$out: 'copy'}], cursor: {}}",
+            "db.users.aggregate([{$merge: {into: 'copy'}}])",
+            "{mapReduce: 'users', map: 'f', reduce: 'g', out: 'totals'}",
+            "db.runCommand({dropDatabase: 1})",
+            "db.users.findOneAndDelete({a: 1})",
+        ] {
+            assert!(plan_command(statement, None).unwrap().writes, "{statement}");
+        }
+        for statement in [
+            "{ping: 1}",
+            "db.runCommand({buildInfo: 1})",
+            "db.users.aggregate([{$match: {a: 1}}, {$group: {_id: '$b'}}])",
+            "{mapReduce: 'users', map: 'f', reduce: 'g', out: {inline: 1}}",
+            "{explain: {delete: 'users', deletes: [{q: {}, limit: 0}]}}",
+        ] {
+            assert!(!plan_command(statement, None).unwrap().writes, "{statement}");
+        }
+    }
+
+    /// The regression: `deleteMany()` with no filter emptied the collection, because a missing
+    /// argument was read as `{}`. mongosh refuses it; so does this, and `{}` still works when it is
+    /// written out.
+    #[test]
+    fn a_write_without_a_filter_is_refused() {
+        for statement in [
+            "db.users.deleteMany()",
+            "db.users.deleteOne()",
+            "db.users.remove()",
+            "db.users.updateMany()",
+            "db.users.updateOne( )",
+            "db.users.replaceOne()",
+            "db.users.findOneAndDelete()",
+            "db.users.findOneAndUpdate()",
+            "db.users.findOneAndReplace()",
+        ] {
+            let refused = plan_command(statement, None).err().unwrap_or_else(|| panic!("{statement}"));
+            assert!(refused.contains("`{}`"), "{statement}: {refused}");
+        }
+        let everything = plan_command("db.users.deleteMany({})", None).unwrap();
+        let delete = everything.command.get_array("deletes").unwrap()[0].as_document().unwrap().clone();
+        assert!(delete.get_document("q").unwrap().is_empty());
+        assert_eq!(delete.get_i32("limit").unwrap(), 0);
+    }
+
+    /// `remove(filter)` removes every match, as it always has in the shell — not one of them.
+    #[test]
+    fn remove_deletes_every_match_unless_told_just_one() {
+        let limit = |statement: &str| {
+            let plan = plan_command(statement, None).unwrap();
+            plan.command.get_array("deletes").unwrap()[0].as_document().unwrap().get_i32("limit").unwrap()
+        };
+        assert_eq!(limit("db.users.remove({status: 'old'})"), 0);
+        assert_eq!(limit("db.users.remove({status: 'old'}, true)"), 1);
+        assert_eq!(limit("db.users.remove({status: 'old'}, {justOne: true})"), 1);
+        assert_eq!(limit("db.users.remove({status: 'old'}, false)"), 0);
+        assert_eq!(limit("db.users.deleteOne({status: 'old'})"), 1);
+    }
+
+    /// An update needs operators and a replacement must not have them — the mix-up is how a whole
+    /// document gets replaced by the one field somebody meant to set.
+    #[test]
+    fn updates_and_replacements_keep_their_own_shape() {
+        assert!(plan_command("db.users.updateMany({a: 1})", None).is_err());
+        assert!(plan_command("db.users.updateOne({a: 1}, {name: 'x'})", None).is_err());
+        assert!(plan_command("db.users.updateOne({a: 1}, {})", None).is_err());
+        assert!(plan_command("db.users.replaceOne({a: 1}, {$set: {name: 'x'}})", None).is_err());
+        assert!(plan_command("db.users.replaceOne({a: 1}, {name: 'x'})", None).is_ok());
+        let pipeline = plan_command("db.users.updateOne({a: 1}, [{$set: {b: 1}}])", None).unwrap();
+        let update = pipeline.command.get_array("updates").unwrap()[0].as_document().unwrap().clone();
+        assert!(matches!(update.get("u"), Some(Bson::Array(_))));
+        let multi = plan_command("db.users.updateMany({}, {$set: {a: 1}})", None).unwrap();
+        let update = multi.command.get_array("updates").unwrap()[0].as_document().unwrap().clone();
+        assert!(update.get_bool("multi").unwrap());
+    }
+
+    /// The `findOneAnd…` family becomes `findAndModify`, with the shell's options translated.
+    #[test]
+    fn find_one_and_modify_becomes_find_and_modify() {
+        let plan = plan_command(
+            "db.users.findOneAndUpdate({a: 1}, {$inc: {n: 1}}, {returnDocument: 'after', upsert: true, sort: {n: -1}})",
+            None,
+        )
+        .unwrap();
+        assert!(plan.writes);
+        assert_eq!(plan.command.keys().next().unwrap(), "findAndModify");
+        assert!(plan.command.get_bool("new").unwrap());
+        assert!(plan.command.get_bool("upsert").unwrap());
+        assert!(plan.command.get_document("sort").is_ok());
+        let removal = plan_command("db.users.findOneAndDelete({a: 1})", None).unwrap();
+        assert!(removal.command.get_bool("remove").unwrap());
     }
 
     #[test]

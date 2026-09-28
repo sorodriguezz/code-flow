@@ -30,30 +30,22 @@ pub struct RemoteStatus {
     /// Whether paired devices may open a shell. Its own switch, independent of `enabled` — see
     /// [`crate::remotectl::SETTING_ALLOW_TERMINAL`].
     pub allow_terminal: bool,
+    /// Whether the server is set to speak HTTPS — what the next start will do. See
+    /// [`crate::remotectl::SETTING_TLS`].
+    pub tls: bool,
+    /// The SHA-256 of the certificate the running server presents, for the pairing pane to show
+    /// beside the address. `None` while the server is off, and while it is on over plain HTTP.
+    pub fingerprint: Option<String>,
 }
 
-/// This machine's address on the network the default route goes out of.
-///
-/// # Why a UDP socket for something that sends nothing
-///
-/// The standard library cannot enumerate interfaces, and the answer we want is not "every address
-/// this machine has" — a laptop has half a dozen, most of them loopback, VPN or a Docker bridge,
-/// and showing the user a list to guess from is worse than showing nothing.
-///
-/// What we want is the one address a device *on the same network* would reach us at, and that is
-/// exactly the source address the OS would pick for outbound traffic. `connect` on a UDP socket
-/// asks the routing table that question and puts the answer in `local_addr` — with no packet sent,
-/// no name resolved and no reachability implied. The peer is a well-known address chosen only
-/// because it is off-link, so the route lookup lands on the real interface; the machine works fine
-/// offline, because nothing is ever transmitted.
-fn lan_address() -> Option<String> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    let addr = socket.local_addr().ok()?.ip();
-    if addr.is_loopback() || addr.is_unspecified() {
-        return None;
+/// The address to type into a phone: the scheme the listener actually speaks, this machine's LAN
+/// address, the port.
+fn phone_url(ip: std::net::IpAddr, port: u16, tls: bool) -> String {
+    let scheme = if tls { "https" } else { "http" };
+    match ip {
+        std::net::IpAddr::V6(v6) => format!("{scheme}://[{v6}]:{port}"),
+        std::net::IpAddr::V4(v4) => format!("{scheme}://{v4}:{port}"),
     }
-    Some(addr.to_string())
 }
 
 #[tauri::command]
@@ -64,17 +56,62 @@ pub fn remotectl_status(app: AppHandle, db: State<Db>) -> RemoteStatus {
     // The bound port, not the configured one: after changing the port without restarting, the URL
     // has to be the one that currently answers.
     let port = active.unwrap_or(config.port);
+    // The same for the scheme: what the running listener speaks, which is what the QR has to say.
+    let fingerprint = state.tls_fingerprint();
     RemoteStatus {
         enabled: config.enabled,
         running: active.is_some(),
         port,
         url: active
             .is_some()
-            .then(lan_address)
+            .then(remotectl::lan_address)
             .flatten()
-            .map(|ip| format!("http://{ip}:{port}")),
+            .map(|ip| phone_url(ip, port, fingerprint.is_some())),
         pairing: state.pairing.is_open(),
         allow_terminal: config.allow_terminal,
+        tls: config.tls,
+        fingerprint,
+    }
+}
+
+/// Turns HTTPS on or off, restarting a running server on the same port so the change is live.
+///
+/// Paired devices keep their tokens either way — nothing about a pairing depends on the transport.
+/// What changes for a phone is the address: turning HTTPS on sends one that opens the old `http://`
+/// address to the secure one with its pairing (`tls::HANDOFF_PAGE`); turning it off means reopening
+/// the `http://` address, where a phone paired over plain HTTP before still holds its token.
+#[tauri::command]
+pub async fn remotectl_set_tls(app: AppHandle, enabled: bool) -> Result<RemoteStatus, String> {
+    {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::set_setting(&conn, remotectl::SETTING_TLS, if enabled { "1" } else { "0" })
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(port) = app.state::<RemoteCtl>().active_port() {
+        remotectl::server::start(&app, port).await?;
+    }
+    let db = app.state::<Db>();
+    Ok(remotectl_status(app.clone(), db))
+}
+
+/// The main window's notification centre, handed over whole whenever it changes, for paired phones
+/// to read (`list_notifications` in the allowlist). See [`remotectl::Notice`] for why the desktop
+/// pushes it rather than a phone asking a store.
+///
+/// Only the main window's list is taken: it is the one the bell belongs to, and a satellite
+/// publishing its own would replace the real list with a window's partial copy.
+#[tauri::command]
+pub fn remotectl_publish_notifications(
+    app: AppHandle,
+    webview: tauri::Webview,
+    items: Vec<remotectl::Notice>,
+) {
+    if webview.label() != "main" {
+        return;
+    }
+    if app.state::<RemoteCtl>().publish_notices(items) {
+        bridge::emit_desktop_change(&app, webview.label(), Invalidate::Notifications, None, None);
     }
 }
 
@@ -88,15 +125,19 @@ pub fn remotectl_status(app: AppHandle, db: State<Db>) -> RemoteStatus {
 /// An unknown domain is refused rather than dropped. This is called from a dozen places in the
 /// stores, and a typo that quietly emits nothing is a sync bug that presents as a network problem —
 /// the phone simply stays stale, with nothing anywhere saying why.
+///
+/// The frame is stamped with the calling window (`bridge::window_origin`), so each window skips its
+/// own echo and hears every other window's changes.
 #[tauri::command]
 pub fn notify_state_change(
     app: AppHandle,
+    webview: tauri::Webview,
     domain: String,
     project_id: Option<String>,
     conversation_id: Option<String>,
 ) -> Result<(), String> {
     let inv = Invalidate::from_key(&domain).ok_or_else(|| format!("dominio desconocido: {domain}"))?;
-    bridge::emit_desktop_change(&app, inv, project_id.as_deref(), conversation_id.as_deref());
+    bridge::emit_desktop_change(&app, webview.label(), inv, project_id.as_deref(), conversation_id.as_deref());
     Ok(())
 }
 
@@ -312,4 +353,19 @@ pub fn remotectl_forget_all_revoked(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     auth::forget_all_revoked(&conn)?;
     devices(&app, &conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The QR names the scheme the listener speaks — an `http://` address in front of a TLS listener
+    /// is a phone that opens the handoff page instead of the app.
+    #[test]
+    fn the_address_names_the_scheme_the_listener_speaks() {
+        let ip: std::net::IpAddr = "192.168.1.20".parse().unwrap();
+        assert_eq!(phone_url(ip, 8787, true), "https://192.168.1.20:8787");
+        assert_eq!(phone_url(ip, 8787, false), "http://192.168.1.20:8787");
+        assert_eq!(phone_url("fe80::1".parse().unwrap(), 8787, true), "https://[fe80::1]:8787");
+    }
 }

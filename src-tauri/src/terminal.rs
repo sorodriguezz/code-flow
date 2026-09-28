@@ -8,6 +8,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use uuid::Uuid;
 
+use crate::services::ports::{ProcId, ProcessTable};
 use crate::shell_profiles::ShellProfile;
 
 /// How much of a session's output is kept.
@@ -627,10 +628,123 @@ pub fn close_terminal(registry: &TerminalRegistry, id: &str) -> Result<(), Strin
         let mut sessions = registry.0.lock().map_err(|e| e.to_string())?;
         sessions.remove(id)
     };
-    if let Some(mut session) = session {
-        let _ = session.child.kill();
+    if let Some(session) = session {
+        end_session(session);
     }
     Ok(())
+}
+
+/// Ends a session's process **and everything it started**.
+///
+/// `child.kill()` alone reaches the shell and nothing else — a hang-up to it, then a kill. A shell's
+/// commands are not in its process group (job control gives every command a group of its own), so
+/// a dev server started from the tab (`pnpm dev` → `node` → `vite`) was reparented and carried on
+/// holding its port after its tab was gone; a background job, or anything that ignores the hang-up,
+/// survived even the SIGHUP the kernel sends when a terminal goes away.
+///
+/// The tree is read *before* the root is killed — afterwards nothing links the children to it any
+/// more — then the root goes the way it always went, and whatever of the tree outlives it is ended
+/// on a thread of its own: politely, then not. Each process is named by pid *and* start time, so a
+/// pid reused in the meantime is never signalled (see [`ProcId`]).
+fn end_session(mut session: TerminalSession) {
+    let root = session.child.process_id();
+    let tree = root
+        .map(|pid| {
+            let mut table = ProcessTable::new();
+            table.refresh();
+            table.tree(pid)
+        })
+        .unwrap_or_default();
+    // `taskkill /T` walks the tree from a live root, so it goes first; the kill below is then the
+    // handle work ConPTY needs either way.
+    #[cfg(windows)]
+    if let Some(pid) = root {
+        let _ = crate::proc::std_command("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = session.child.kill();
+    let descendants: Vec<ProcId> = tree.into_iter().skip(1).collect();
+    if !descendants.is_empty() {
+        std::thread::spawn(move || end_leftovers(&descendants));
+    }
+}
+
+/// Whatever of a closed session's tree outlived its shell: terminated, given half a second, killed.
+fn end_leftovers(tree: &[ProcId]) {
+    let mut table = ProcessTable::new();
+    table.refresh();
+    let alive: Vec<ProcId> = tree.iter().copied().filter(|id| table.is_alive(*id)).collect();
+    if alive.is_empty() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        // The group as well as the process: a job leads one, and anything it started after the
+        // tree was read is still in it.
+        for id in &alive {
+            crate::services::ports::signal(id.pid, libc::SIGTERM, true);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        table.refresh();
+        for id in alive.iter().filter(|id| table.is_alive(**id)) {
+            crate::services::ports::signal(id.pid, libc::SIGKILL, true);
+        }
+    }
+    #[cfg(windows)]
+    for id in &alive {
+        let _ = crate::proc::std_command("taskkill")
+            .args(["/PID", &id.pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// What is running in the foreground of session `id`, when it is something other than the shell
+/// itself — the name "close anyway?" asks about. `None` for a shell sitting at its prompt, and for a
+/// session that is gone.
+///
+/// On Unix the terminal knows: its foreground process group is the job the shell handed it, and it
+/// is the shell's own group exactly when the prompt is showing. Windows has no such thing, so there
+/// a shell with any child process counts as busy.
+pub fn foreground_process(registry: &TerminalRegistry, id: &str) -> Option<String> {
+    let (shell, foreground) = {
+        let sessions = registry.0.lock().ok()?;
+        let session = sessions.get(id)?;
+        let shell = session.child.process_id()?;
+        #[cfg(unix)]
+        let foreground = session.master.process_group_leader().map(|pid| pid as u32);
+        #[cfg(not(unix))]
+        let foreground: Option<u32> = None;
+        (shell, foreground)
+    };
+    let mut table = ProcessTable::new();
+    table.refresh();
+    busy_with(shell, foreground, |pid| table.name(pid), |pid| table.tree(pid).into_iter().map(|p| p.pid).collect())
+}
+
+/// [`foreground_process`]'s decision, apart from the OS so it can be tested. `children` lists a
+/// process's tree, itself first.
+fn busy_with(
+    shell: u32,
+    foreground: Option<u32>,
+    name: impl Fn(u32) -> Option<String>,
+    children: impl Fn(u32) -> Vec<u32>,
+) -> Option<String> {
+    if cfg!(unix) {
+        let group = foreground.filter(|group| *group != shell)?;
+        // A job that has already gone between the two reads still ran: say so without a name.
+        return Some(name(group).unwrap_or_default());
+    }
+    // The console host ConPTY starts belongs to the terminal, not to anything the user ran.
+    children(shell)
+        .into_iter()
+        .skip(1)
+        .filter_map(|pid| name(pid))
+        .find(|name| !name.eq_ignore_ascii_case("conhost.exe") && !name.eq_ignore_ascii_case("OpenConsole.exe"))
 }
 
 /// Every recorded session's output that has changed since the last call, as `(row id, transcript)`.
@@ -724,18 +838,19 @@ pub fn list_owned(registry: &TerminalRegistry, owner: Option<&str>) -> Vec<Termi
 /// because somebody put their phone down would be the same class of bug as an effect cleanup doing
 /// it.
 pub fn close_owned(registry: &TerminalRegistry, owner: &str) -> usize {
-    let Ok(mut sessions) = registry.0.lock() else { return 0 };
-    let doomed: Vec<String> = sessions
-        .iter()
-        .filter(|(_, session)| session.origin.owner.as_deref() == Some(owner))
-        .map(|(id, _)| id.clone())
-        .collect();
-    for id in &doomed {
-        if let Some(mut session) = sessions.remove(id) {
-            let _ = session.child.kill();
-        }
-    }
-    doomed.len()
+    let doomed: Vec<TerminalSession> = {
+        let Ok(mut sessions) = registry.0.lock() else { return 0 };
+        let ids: Vec<String> = sessions
+            .iter()
+            .filter(|(_, session)| session.origin.owner.as_deref() == Some(owner))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.iter().filter_map(|id| sessions.remove(id)).collect()
+    };
+    // Outside the lock, for the reason `close_terminal` gives.
+    let count = doomed.len();
+    doomed.into_iter().for_each(end_session);
+    count
 }
 
 /// Kills every shell opened by *any* device. The switch being turned off, and the server being
@@ -803,11 +918,10 @@ pub fn close_recorded(registry: &TerminalRegistry, keys: &[String]) -> usize {
         })
         .map(|(id, _)| id.clone())
         .collect();
-    for id in &doomed {
-        if let Some(mut session) = sessions.remove(id) {
-            let _ = session.child.kill();
-        }
-    }
+    let ended: Vec<TerminalSession> = doomed.iter().filter_map(|id| sessions.remove(id)).collect();
+    // Outside the lock, for the reason `close_terminal` gives.
+    drop(sessions);
+    ended.into_iter().for_each(end_session);
     doomed.len()
 }
 
@@ -900,6 +1014,81 @@ mod tests {
         assert!(recorded.buf.len() <= TRANSCRIPT_LIMIT, "kept {} bytes", recorded.buf.len());
         assert!(recorded.buf.starts_with('x'), "the survivor starts at a line, not mid-line");
         assert!(recorded.buf.ends_with('\n'));
+    }
+
+    /// The foreground job is what "close anyway?" names; a shell at its prompt is not busy.
+    #[test]
+    fn a_terminal_is_busy_with_whatever_is_in_its_foreground() {
+        let names = |pid: u32| match pid {
+            10 => Some("zsh".to_string()),
+            20 => Some("node".to_string()),
+            _ => None,
+        };
+        let tree = |pid: u32| if pid == 10 { vec![10, 20] } else { vec![pid] };
+        if cfg!(unix) {
+            assert_eq!(busy_with(10, Some(10), names, tree), None);
+            assert_eq!(busy_with(10, Some(20), names, tree).as_deref(), Some("node"));
+            assert_eq!(busy_with(10, Some(30), names, tree).as_deref(), Some(""));
+            assert_eq!(busy_with(10, None, names, tree), None);
+        } else {
+            assert_eq!(busy_with(10, None, names, tree).as_deref(), Some("node"));
+            assert_eq!(busy_with(10, None, names, |pid| vec![pid]), None);
+        }
+    }
+
+    /// A real shell in a real pty: while a command runs it is the foreground, and closing the tab
+    /// ends it *and* a background job that ignores the hang-up — which `child.kill()` alone left
+    /// running.
+    #[cfg(unix)]
+    #[test]
+    fn closing_a_tab_ends_everything_it_started() {
+        use tauri::Manager;
+        let app = tauri::test::mock_app();
+        app.manage(TerminalRegistry::default());
+        let registry = app.state::<TerminalRegistry>();
+        let id = open_pty(
+            app.handle().clone(),
+            &registry,
+            "/bin/sh",
+            &["-i".to_string()],
+            None,
+            None,
+            Origin { cwd: String::new(), profile: "sh".into(), owner: None },
+            PtyHooks::default(),
+        )
+        .unwrap();
+        let shell = pid_of(&registry, &id).unwrap();
+        write_terminal(&registry, &id, "(trap '' HUP; exec sleep 47) &\n").unwrap();
+        write_terminal(&registry, &id, "sleep 48\n").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut busy = None;
+        while busy.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            busy = foreground_process(&registry, &id);
+        }
+        assert_eq!(busy.as_deref(), Some("sleep"));
+
+        let mut table = ProcessTable::new();
+        table.refresh();
+        let sleeps: Vec<ProcId> = table
+            .tree(shell)
+            .into_iter()
+            .filter(|p| table.name(p.pid).as_deref() == Some("sleep"))
+            .collect();
+        assert_eq!(sleeps.len(), 2, "both sleeps started under the shell");
+
+        close_terminal(&registry, &id).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            table.refresh();
+            let alive: Vec<&ProcId> = sleeps.iter().filter(|p| table.is_alive(**p)).collect();
+            if alive.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "still running after the tab closed: {alive:?}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// One line longer than the whole allowance — a progress bar rewriting itself, a minified

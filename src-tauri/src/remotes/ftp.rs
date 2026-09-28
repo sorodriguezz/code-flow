@@ -21,40 +21,121 @@
 //! machine-readable answer and is tried first; `LIST` is the fallback, parsed heuristically. A line
 //! neither one can parse is skipped rather than failed on — one unreadable entry must not cost the
 //! user the other two hundred.
+//!
+//! **A held control connection goes stale in the one way FTP is famous for**: the server closes it
+//! after a few idle minutes and says `421` to nobody. So a connection unused for a minute is asked a
+//! `NOOP` before it is trusted, and a `421` or a dead socket drops it — see [`super::pool`].
 
-use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use suppaftp::list::{File as FtpFile, ListParser};
 use suppaftp::tokio::{AsyncRustlsConnector, AsyncRustlsFtpStream};
 use suppaftp::types::FileType as TransferType;
-use suppaftp::{FtpError, Mode};
+use suppaftp::{FtpError, Mode, Status};
 use tokio::sync::Mutex;
 
-use super::files::{join, mode_string, plan_upload, pump, sort_entries, Planned, RemoteFile, RemoteListing};
+use super::files::{
+    discard_partial_local, join, mode_string, new_parents, plan_upload, pump, sort_entries, Planned,
+    RemoteFile, RemoteListing, TRANSFER_CANCELLED,
+};
+use super::pool::{local, step, Outcome, Pool, Retry};
 use super::{RemoteHostSpec, RemoteKind};
 
+/// One host's control connection.
+///
 /// Every operation takes `&mut` — FTP is a command/response protocol on one socket, and two
 /// interleaved commands would read each other's replies. The `Mutex` is what makes "one session per
 /// host" mean "one command at a time" as well.
-type Sessions = Mutex<HashMap<String, Arc<Mutex<AsyncRustlsFtpStream>>>>;
-
-fn sessions() -> &'static Sessions {
-    static SESSIONS: std::sync::OnceLock<Sessions> = std::sync::OnceLock::new();
-    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+struct Session {
+    stream: Mutex<AsyncRustlsFtpStream>,
+    /// When the connection last carried a command. See [`IDLE_PROBE`].
+    used: std::sync::Mutex<Instant>,
 }
 
-/// The session for this host, opening one if there isn't a live one.
-async fn session(
-    host_id: &str,
-    spec: &RemoteHostSpec,
-) -> Result<Arc<Mutex<AsyncRustlsFtpStream>>, String> {
-    if let Some(existing) = sessions().lock().await.get(host_id).cloned() {
-        return Ok(existing);
+impl Session {
+    fn touch(&self) {
+        if let Ok(mut used) = self.used.lock() {
+            *used = Instant::now();
+        }
     }
-    let opened = Arc::new(Mutex::new(connect(host_id, spec).await?));
-    sessions().lock().await.insert(host_id.to_string(), opened.clone());
-    Ok(opened)
+
+    fn idle(&self) -> Duration {
+        self.used.lock().map(|used| used.elapsed()).unwrap_or(Duration::MAX)
+    }
+}
+
+/// How long a control connection may sit unused before it is asked whether it is still there.
+///
+/// FTP servers close idle control connections — vsftpd after five minutes, many far sooner — and
+/// say so with a `421` nobody reads until the next command. Past this, a `NOOP` goes first, so the
+/// command the user actually asked for is sent on a connection known to be alive rather than being
+/// the one that discovers it is not.
+const IDLE_PROBE: Duration = Duration::from_secs(60);
+
+fn pool() -> &'static Pool<Session> {
+    static POOL: std::sync::OnceLock<Pool<Session>> = std::sync::OnceLock::new();
+    POOL.get_or_init(Pool::default)
+}
+
+/// Runs `op` on this host's control connection, opening one if there isn't a live one. See
+/// [`super::pool`] for what happens when it has died.
+async fn with_session<T, F, FF>(host_id: &str, spec: &RemoteHostSpec, retry: Retry, op: F) -> Result<T, String>
+where
+    F: Fn(Arc<Session>) -> FF,
+    FF: Future<Output = Outcome<T>>,
+{
+    pool()
+        .run(
+            host_id,
+            || async move {
+                let stream = connect(host_id, spec).await?;
+                Ok(Session { stream: Mutex::new(stream), used: std::sync::Mutex::new(Instant::now()) })
+            },
+            |session| async move { alive(&session).await },
+            retry,
+            |session| {
+                session.touch();
+                op(session)
+            },
+        )
+        .await
+}
+
+async fn alive(session: &Session) -> bool {
+    if session.idle() < IDLE_PROBE {
+        return true;
+    }
+    let answered = session.stream.lock().await.noop().await.is_ok();
+    if answered {
+        session.touch();
+    }
+    answered
+}
+
+/// Whether an FTP error means the control connection is gone.
+///
+/// The server refusing something — `550` no such file, `553` not allowed — is the server
+/// answering, and the connection is fine. A socket error or TLS failure is not; nor is `421`, the
+/// server saying it is closing the connection (an idle timeout, a restart). A reply that does not
+/// parse, or a data connection the client still thinks is open, means client and server no longer
+/// agree on where they are in the conversation — a connection that would answer every later command
+/// with the previous command's reply.
+fn lost(error: &FtpError) -> bool {
+    match error {
+        FtpError::ConnectionError(_)
+        | FtpError::SecureError(_)
+        | FtpError::BadResponse
+        | FtpError::DataConnectionAlreadyOpen => true,
+        FtpError::UnexpectedResponse(response) => response.status == Status::NotAvailable,
+        _ => false,
+    }
+}
+
+/// One FTP command, sorted into the three ways it can end.
+fn attempt<T>(operation: &str, result: Result<T, FtpError>) -> Outcome<T> {
+    Outcome::of(result, lost, |error| explain(operation, error))
 }
 
 async fn connect(host_id: &str, spec: &RemoteHostSpec) -> Result<AsyncRustlsFtpStream, String> {
@@ -154,28 +235,24 @@ fn connector(spec: &RemoteHostSpec) -> Result<AsyncRustlsConnector, String> {
     Ok(AsyncRustlsConnector::from(tokio_rustls::TlsConnector::from(Arc::new(config))))
 }
 
-/// Closes a host's file session. Idempotent — what disconnecting and deleting both call.
+/// Closes a host's file session. Idempotent — what disconnecting, deleting and editing all call.
 ///
 /// `QUIT` is not sent: it needs the lock and a round trip on a socket that may already be dead,
 /// and dropping the stream closes the connection either way. A server notices a closed control
 /// connection perfectly well.
 pub async fn close(host_id: &str) {
-    sessions().lock().await.remove(host_id);
+    pool().close(host_id).await;
 }
 
 /// Every host currently holding a control socket, for [`super::hold`] to report.
-///
-/// The entry existing is not proof the server has kept its side — nothing here probes liveness (see
-/// [`session`]) — but it is exactly the case where disconnecting is worth offering: this process is
-/// holding a socket open either way.
 pub async fn open_hosts() -> Vec<String> {
-    sessions().lock().await.keys().cloned().collect()
+    pool().hosts().await
 }
 
 /// Drops every host's control socket — the exit path's. See [`super::forward::close_all`] for why a
 /// `static` map needs an explicit drain at all.
 pub async fn close_all() {
-    sessions().lock().await.clear();
+    pool().close_all().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,14 +266,14 @@ pub async fn list(
     spec: &RemoteHostSpec,
     path: &str,
 ) -> Result<RemoteListing, String> {
-    let session = session(host_id, spec).await?;
-    let mut stream = session.lock().await;
-
-    let resolved = resolve(&mut stream, path).await?;
-    let mut entries = read_dir(&mut stream, &resolved).await?;
-    sort_entries(&mut entries);
-
-    Ok(RemoteListing { path: resolved, entries, ..Default::default() })
+    with_session(host_id, spec, Retry::Once, |session| async move {
+        let mut stream = session.stream.lock().await;
+        let resolved = step!(resolve(&mut stream, path).await);
+        let mut entries = step!(read_dir(&mut stream, &resolved).await);
+        sort_entries(&mut entries);
+        Outcome::Done(RemoteListing { path: resolved, entries, ..Default::default() })
+    })
+    .await
 }
 
 /// One file or one whole directory, from the far side to here.
@@ -208,36 +285,64 @@ pub async fn download(
     remote_path: &str,
     local_path: &str,
 ) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut stream = session.lock().await;
+    let files = with_session(host_id, spec, Retry::Once, |session| async move {
+        let mut stream = session.stream.lock().await;
+        plan_download(&mut stream, remote_path, local_path).await
+    })
+    .await?;
+    let files = &files;
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut stream = session.stream.lock().await;
+        let total: u64 = files.iter().map(|file| file.size).sum();
+        let mut done = 0u64;
 
-    let files = plan_download(&mut stream, remote_path, local_path).await?;
-    let total: u64 = files.iter().map(|file| file.size).sum();
-    let mut done = 0u64;
-
-    for (index, file) in files.iter().enumerate() {
-        if let Some(parent) = std::path::Path::new(&file.local).parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("Couldn't create {}: {e}", parent.display()))?;
+        for (index, file) in files.iter().enumerate() {
+            if let Some(parent) = std::path::Path::new(&file.local).parent() {
+                step!(local(
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| format!("Couldn't create {}: {e}", parent.display()))
+                ));
+            }
+            // The local file first: once `RETR` has opened a data connection, failing here would
+            // leave it open and the control connection a reply behind.
+            let mut target = step!(local(
+                tokio::fs::File::create(&file.local)
+                    .await
+                    .map_err(|e| format!("Couldn't write {}: {e}", file.local))
+            ));
+            let mut source = match stream.retr_as_stream(&file.remote).await {
+                Ok(source) => source,
+                Err(error) => {
+                    drop(target);
+                    let _ = tokio::fs::remove_file(&file.local).await;
+                    return attempt(&format!("open {}", file.remote), Err(error));
+                }
+            };
+            let copied =
+                pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
+                    .await;
+            if let Err(error) = copied {
+                drop(target);
+                discard_partial_local(&file.local, &error).await;
+                // `ABOR`, so the server stops sending and says so on the control connection — which
+                // is read here, leaving the next command to read its own reply. A connection that
+                // could not be brought back in step is dropped instead.
+                let in_step = stream.abort(source).await.is_ok();
+                return if error == TRANSFER_CANCELLED && in_step {
+                    Outcome::Failed(error)
+                } else {
+                    Outcome::Lost(error)
+                };
+            }
+            // Mandatory, not tidiness: the server sends its final reply only once the data
+            // connection closes, and skipping this leaves that reply unread in front of the next
+            // command's.
+            step!(attempt(&format!("finish {}", file.remote), stream.finalize_retr_stream(source).await));
         }
-        let mut source = stream
-            .retr_as_stream(&file.remote)
-            .await
-            .map_err(|e| explain(&format!("open {}", file.remote), e))?;
-        let mut target = tokio::fs::File::create(&file.local)
-            .await
-            .map_err(|e| format!("Couldn't write {}: {e}", file.local))?;
-        pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
-            .await?;
-        // Mandatory, not tidiness: the server sends its final reply only once the data connection
-        // closes, and skipping this leaves that reply unread in front of the next command's.
-        stream
-            .finalize_retr_stream(source)
-            .await
-            .map_err(|e| explain(&format!("finish {}", file.remote), e))?;
-    }
-    Ok(())
+        Outcome::Done(())
+    })
+    .await
 }
 
 /// One file or one whole directory, from here to the far side.
@@ -249,44 +354,60 @@ pub async fn upload(
     local_path: &str,
     remote_path: &str,
 ) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut stream = session.lock().await;
-
     let files = plan_upload(local_path, remote_path)?;
-    let total: u64 = files.iter().map(|file| file.size).sum();
-    let mut done = 0u64;
+    let files = &files;
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut stream = session.stream.lock().await;
+        let total: u64 = files.iter().map(|file| file.size).sum();
+        let mut done = 0u64;
+        let mut made = std::collections::HashSet::new();
 
-    for (index, file) in files.iter().enumerate() {
-        // Created before the file that goes in it, and an existing directory is not an error — an
-        // interrupted transfer resumed by re-running it must not fail on its own leftovers.
-        if let Some((parent, _)) = file.remote.rsplit_once('/') {
-            if !parent.is_empty() {
-                let _ = stream.mkdir(parent).await;
+        for (index, file) in files.iter().enumerate() {
+            // Every missing directory between the transfer's root and this file, outermost first;
+            // an existing one is not an error — an interrupted transfer resumed by re-running it
+            // must not fail on its own leftovers.
+            for dir in new_parents(remote_path, &file.remote, &mut made) {
+                let _ = stream.mkdir(&dir).await;
             }
+            let mut source = step!(local(
+                tokio::fs::File::open(&file.local)
+                    .await
+                    .map_err(|e| format!("Couldn't read {}: {e}", file.local))
+            ));
+            let mut target = step!(attempt(&format!("create {}", file.remote), stream.put_with_stream(&file.remote).await));
+            let copied =
+                pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
+                    .await;
+            if let Err(error) = copied {
+                // Closing the data connection ends the upload where it stands; the server reports
+                // that on the control connection, and reading it keeps the next reply the next
+                // command's. A cancelled upload then leaves nothing behind — a file cut short under
+                // the real name is indistinguishable from a finished one.
+                return match stream.finalize_put_stream(target).await {
+                    Ok(()) => {
+                        if error == TRANSFER_CANCELLED {
+                            let _ = stream.rm(&file.remote).await;
+                        }
+                        Outcome::Failed(error)
+                    }
+                    Err(_) => Outcome::Lost(error),
+                };
+            }
+            // Same reason as the download side, plus one: this is what flushes and shuts the data
+            // socket, and without it a truncated upload would look like a finished one.
+            step!(attempt(&format!("finish {}", file.remote), stream.finalize_put_stream(target).await));
         }
-        let mut source = tokio::fs::File::open(&file.local)
-            .await
-            .map_err(|e| format!("Couldn't read {}: {e}", file.local))?;
-        let mut target = stream
-            .put_with_stream(&file.remote)
-            .await
-            .map_err(|e| explain(&format!("create {}", file.remote), e))?;
-        pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
-            .await?;
-        // Same reason as the download side, plus one: this is what flushes and shuts the data
-        // socket, and without it a truncated upload would look like a finished one.
-        stream
-            .finalize_put_stream(target)
-            .await
-            .map_err(|e| explain(&format!("finish {}", file.remote), e))?;
-    }
-    Ok(())
+        Outcome::Done(())
+    })
+    .await
 }
 
 pub async fn make_dir(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut stream = session.lock().await;
-    stream.mkdir(path).await.map_err(|e| explain(&format!("create {path}"), e))
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut stream = session.stream.lock().await;
+        attempt(&format!("create {path}"), stream.mkdir(path).await)
+    })
+    .await
 }
 
 /// Deletes a file or an empty directory. Not recursive, for the reason [`super::files::remove`]
@@ -297,13 +418,16 @@ pub async fn remove(
     path: &str,
     is_dir: bool,
 ) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut stream = session.lock().await;
-    if is_dir {
-        stream.rmdir(path).await.map_err(|e| explain(&format!("remove {path}"), e))
-    } else {
-        stream.rm(path).await.map_err(|e| explain(&format!("remove {path}"), e))
-    }
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut stream = session.stream.lock().await;
+        let operation = format!("remove {path}");
+        if is_dir {
+            attempt(&operation, stream.rmdir(path).await)
+        } else {
+            attempt(&operation, stream.rm(path).await)
+        }
+    })
+    .await
 }
 
 pub async fn rename(
@@ -312,9 +436,11 @@ pub async fn rename(
     from: &str,
     to: &str,
 ) -> Result<(), String> {
-    let session = session(host_id, spec).await?;
-    let mut stream = session.lock().await;
-    stream.rename(from, to).await.map_err(|e| explain(&format!("rename {from}"), e))
+    with_session(host_id, spec, Retry::Never, |session| async move {
+        let mut stream = session.stream.lock().await;
+        attempt(&format!("rename {from}"), stream.rename(from, to).await)
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -326,45 +452,49 @@ pub async fn rename(
 /// FTP has no `realpath`, so `CWD` then `PWD` *is* the canonicalization — and it validates the path
 /// on the way, since a `CWD` into something that isn't a directory fails. The moved working
 /// directory is not a side effect to undo: browsing is exactly what the caller is doing.
-async fn resolve(stream: &mut AsyncRustlsFtpStream, path: &str) -> Result<String, String> {
+async fn resolve(stream: &mut AsyncRustlsFtpStream, path: &str) -> Outcome<String> {
     let target = path.trim();
     if !target.is_empty() {
-        stream.cwd(target).await.map_err(|e| explain(&format!("open {target}"), e))?;
+        step!(attempt(&format!("open {target}"), stream.cwd(target).await));
     }
-    stream.pwd().await.map_err(|e| explain("read the current directory", e))
+    attempt("read the current directory", stream.pwd().await)
 }
 
 /// One directory's entries, absolute paths and all.
 ///
 /// `MLSD` first because it is specified and unambiguous; `LIST` after, because plenty of servers
 /// still don't implement `MLSD`. Both are parsed leniently — see the module header.
-async fn read_dir(
-    stream: &mut AsyncRustlsFtpStream,
-    dir: &str,
-) -> Result<Vec<RemoteFile>, String> {
-    if let Ok(lines) = stream.mlsd(Some(dir)).await {
-        return Ok(lines
-            .iter()
-            .filter_map(|line| ListParser::parse_mlsd(line).ok().map(|file| (file, line.as_str())))
-            // `.` and `..` come back as type=cdir/pdir and are already the breadcrumb's job.
-            .filter(|(file, _)| file.name() != "." && file.name() != "..")
-            .map(|(file, line)| entry(dir, &file, mlsd_permissions(&file, line)))
-            .collect());
+async fn read_dir(stream: &mut AsyncRustlsFtpStream, dir: &str) -> Outcome<Vec<RemoteFile>> {
+    match stream.mlsd(Some(dir)).await {
+        Ok(lines) => {
+            return Outcome::Done(
+                lines
+                    .iter()
+                    .filter_map(|line| ListParser::parse_mlsd(line).ok().map(|file| (file, line.as_str())))
+                    // `.` and `..` come back as type=cdir/pdir and are already the breadcrumb's job.
+                    .filter(|(file, _)| file.name() != "." && file.name() != "..")
+                    .map(|(file, line)| entry(dir, &file, mlsd_permissions(&file, line)))
+                    .collect(),
+            )
+        }
+        // No `MLSD` is a server that predates it; a connection that died answering it is not a
+        // reason to try `LIST` on the same dead socket.
+        Err(error) if lost(&error) => return Outcome::Lost(explain(&format!("read {dir}"), error)),
+        Err(_) => {}
     }
 
-    let lines = stream
-        .list(Some(dir))
-        .await
-        .map_err(|e| explain(&format!("read {dir}"), e))?;
-    Ok(lines
-        .iter()
-        .filter_map(|line| line.parse::<FtpFile>().ok())
-        .filter(|file| file.name() != "." && file.name() != "..")
-        .map(|file| {
-            let permissions = posix_permissions(&file);
-            entry(dir, &file, permissions)
-        })
-        .collect())
+    let lines = step!(attempt(&format!("read {dir}"), stream.list(Some(dir)).await));
+    Outcome::Done(
+        lines
+            .iter()
+            .filter_map(|line| line.parse::<FtpFile>().ok())
+            .filter(|file| file.name() != "." && file.name() != "..")
+            .map(|file| {
+                let permissions = posix_permissions(&file);
+                entry(dir, &file, permissions)
+            })
+            .collect(),
+    )
 }
 
 /// One parsed line as the frontend's entry shape.
@@ -436,26 +566,29 @@ async fn plan_download(
     stream: &mut AsyncRustlsFtpStream,
     remote_path: &str,
     local_path: &str,
-) -> Result<Vec<Planned>, String> {
+) -> Outcome<Vec<Planned>> {
     // Whether this is a directory, asked the only way FTP answers: try to enter it. Success also
     // hands back the absolute path, which is what the walk below needs.
-    let entered = stream.cwd(remote_path).await.is_ok();
-    if !entered {
-        let name = remote_path.rsplit('/').next().unwrap_or(remote_path).to_string();
-        let size = stream.size(remote_path).await.unwrap_or(0) as u64;
-        return Ok(vec![Planned {
-            remote: remote_path.to_string(),
-            local: local_path.to_string(),
-            name,
-            size,
-        }]);
+    match stream.cwd(remote_path).await {
+        Ok(()) => {}
+        Err(error) if lost(&error) => return Outcome::Lost(explain(&format!("open {remote_path}"), error)),
+        Err(_) => {
+            let name = remote_path.rsplit('/').next().unwrap_or(remote_path).to_string();
+            let size = stream.size(remote_path).await.unwrap_or(0) as u64;
+            return Outcome::Done(vec![Planned {
+                remote: remote_path.to_string(),
+                local: local_path.to_string(),
+                name,
+                size,
+            }]);
+        }
     }
-    let root = stream.pwd().await.map_err(|e| explain("read the current directory", e))?;
+    let root = step!(attempt("read the current directory", stream.pwd().await));
 
     let mut planned = Vec::new();
     let mut queue = vec![(root, local_path.to_string())];
     while let Some((dir, into)) = queue.pop() {
-        for file in read_dir(stream, &dir).await? {
+        for file in step!(read_dir(stream, &dir).await) {
             let local = format!("{into}{}{}", std::path::MAIN_SEPARATOR, file.name);
             if file.is_dir {
                 queue.push((file.path, local));
@@ -469,7 +602,7 @@ async fn plan_download(
             }
         }
     }
-    Ok(planned)
+    Outcome::Done(planned)
 }
 
 /// Puts the operation in front of the server's reply, so the message names what was being attempted
@@ -567,6 +700,18 @@ mod tests {
     fn an_unnamed_user_falls_back_to_anonymous_rather_than_sending_an_empty_one() {
         let (user, _) = credentials("host-2", &spec(RemoteKind::Ftp)).unwrap();
         assert_eq!(user, "anonymous");
+    }
+
+    /// A refusal is the server answering; a dead socket, a closing `421` or a conversation that has
+    /// lost its place is a connection to drop.
+    #[test]
+    fn only_a_connection_that_is_gone_is_dropped() {
+        let reply = |status| FtpError::UnexpectedResponse(suppaftp::types::Response { status, body: Vec::new() });
+        assert!(!lost(&reply(Status::FileUnavailable)), "550 is an answer");
+        assert!(lost(&reply(Status::NotAvailable)), "421 is the server hanging up");
+        assert!(lost(&FtpError::ConnectionError(std::io::Error::from(std::io::ErrorKind::BrokenPipe))));
+        assert!(lost(&FtpError::BadResponse));
+        assert!(lost(&FtpError::DataConnectionAlreadyOpen));
     }
 
     #[test]

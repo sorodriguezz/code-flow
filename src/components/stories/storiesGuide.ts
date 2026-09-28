@@ -76,9 +76,11 @@ Y como la sesión es una foto del momento en que la abriste: si alguien edita lo
 
 **Un bug guarda su texto en «Pasos para reproducir»**, no en la descripción — el formulario de bug de Azure no tiene caja de descripción. La revisión lee el campo correcto según el tipo.
 
-**Publicar un conjunto es solo de ida.** Crea work items nuevos; no actualiza los que ya existen. Una historia ya publicada queda marcada y no se vuelve a publicar.
+**Publicar un conjunto crea elementos nuevos**, en Azure Boards, Jira o monday; una historia ya publicada queda marcada y no se vuelve a crear. Si la editas después, **Actualizar en el tablero** (dentro de la tarjeta) le lleva los cambios — antes te muestra qué campos cambian contra lo que el tablero tiene *ahora*, incluido lo que otra persona haya editado allí.
 
-**Publicar una página de wiki sí sobrescribe.** Si la página existe, su contenido se reemplaza — salvo que alguien la haya editado desde que la leímos, en cuyo caso la escritura se rechaza en vez de pisar ese cambio.
+**Generar de nuevo borra las historias sin publicar**, también las que editaste o añadiste a mano; te pregunta antes y te dice cuántas son. Las publicadas se quedan.
+
+**Publicar una página de wiki sí sobrescribe.** Si la página existe, su contenido se reemplaza — salvo que alguien la haya editado desde que la importaste o la publicaste por última vez: entonces no se escribe nada y eliges **sobrescribirla**, **cargar la versión de la wiki** (descartando lo tuyo) o **seguir editando**.
 
 **El modelo se equivoca.** La evidencia con archivo y línea está para que la compruebes, no para que te fíes. Un veredicto sin evidencia citable es una opinión.`;
 
@@ -149,8 +151,10 @@ And since the session is a snapshot of the moment you opened it: if somebody edi
 
 **A bug keeps its prose in "Steps to reproduce"**, not in the description — Azure's bug form has no description box. The review reads the right field for the type.
 
-**Publishing a set is one-way.** It creates new work items; it does not update existing ones. A story that has been published is marked and will not be published twice.
+**Publishing a set creates new items**, on Azure Boards, Jira or monday; a story that has been published is marked and will not be created twice. If you edit it afterwards, **Update on the board** (inside the card) sends the changes — first showing which fields change against what the board holds *now*, including anything someone else edited there.
 
-**Publishing a wiki page does overwrite.** If the page exists its content is replaced — unless somebody edited it since we read it, in which case the write is refused rather than trampling that change.
+**Generating again deletes the unpublished stories**, including the ones you edited or added by hand; it asks first and says how many. Published ones stay.
+
+**Publishing a wiki page does overwrite.** If the page exists its content is replaced — unless somebody edited it since you imported or last published it: then nothing is written and you choose to **overwrite it**, **load the wiki's version** (discarding yours) or **keep editing**.
 
 **The model gets things wrong.** Evidence with file and line is there for you to check, not to trust. A verdict with no citable evidence is an opinion.`;

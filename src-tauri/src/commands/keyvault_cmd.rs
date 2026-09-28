@@ -27,6 +27,7 @@ use crate::db::models::{
 };
 use crate::db::Db;
 use crate::keyvault::crypto::{self, PasswordRecipe, VaultError};
+use crate::keyvault::export;
 use crate::keyvault::session::{VaultSession, LOCKED_EVENT};
 use crate::keyvault::{master_password_key, totp};
 use crate::secrets;
@@ -822,6 +823,112 @@ pub fn keyvault_read_import_file(path: String) -> Result<String, String> {
     std::io::Read::read_to_string(&mut entry, &mut text)
         .map_err(|_| "The export inside that .1pux is not valid UTF-8 text.".to_string())?;
     Ok(text)
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+/// What an export wrote, and — for a Bitwarden file — what it could not carry.
+#[derive(serde::Serialize)]
+pub struct VaultExportSummary {
+    pub folders: usize,
+    pub items: usize,
+    pub attachments: usize,
+    pub left_out: Option<export::LeftOut>,
+}
+
+/// Writes the whole keyring to `path` — the file the user just chose in a save dialog.
+///
+/// `format` is `codeflow` (sealed under `passphrase`, re-importable, attachments included) or
+/// `bitwarden-json` / `bitwarden-csv` (plain text, for another password manager). **Either way the
+/// master password is asked again**, and checked the one way this vault checks it — by unwrapping the
+/// data key (see `crypto`). An unlocked window is not the same thing as consent to put every
+/// password in a file: that is Bitwarden's rule for its own exports too.
+///
+/// The plaintext keyring is built here and never crosses the bridge; see `keyvault::export`.
+#[tauri::command]
+pub async fn keyvault_export(
+    app: AppHandle,
+    db: State<'_, Db>,
+    session: State<'_, VaultSession>,
+    path: String,
+    format: String,
+    master_password: String,
+    passphrase: Option<String>,
+) -> Result<VaultExportSummary, String> {
+    session.with_key(|_| ())?;
+    let stored = read_meta(&db)?;
+    let kdf = stored.kdf();
+    let nonce = stored.dek_nonce.clone();
+    let wrapped = stored.dek_wrapped.clone();
+    let attempt = password_for(&master_password);
+    let mut dek = blocking(move || crypto::unwrap_dek(&kdf, &nonce, &wrapped, &attempt))
+        .await?
+        .map_err(String::from)?;
+
+    let collected = {
+        let conn = db.0.lock().map_err(|e| e.to_string());
+        conn.and_then(|conn| export::collect(&conn, &dek))
+    };
+    zeroize::Zeroize::zeroize(&mut dek);
+    let keyring = collected?;
+
+    let summary = VaultExportSummary {
+        folders: keyring.folders.len(),
+        items: keyring.items.len(),
+        attachments: keyring.items.iter().map(|item| item.attachments.len()).sum(),
+        left_out: (format != "codeflow").then(|| export::left_out(&keyring)),
+    };
+    let mut bytes = match format.as_str() {
+        "codeflow" => {
+            let passphrase = passphrase.ok_or_else(|| crypto::CODE_TOO_SHORT.to_string())?;
+            let version = app.package_info().version.to_string();
+            blocking(move || export::seal(&keyring, &passphrase, &version)).await??
+        }
+        "bitwarden-json" => export::to_bitwarden_json(&keyring).into_bytes(),
+        "bitwarden-csv" => export::to_bitwarden_csv(&keyring).into_bytes(),
+        other => return Err(format!("unknown export format: {other}")),
+    };
+    let written = crate::fsops::write_file_bytes(&path, &bytes);
+    zeroize::Zeroize::zeroize(&mut bytes);
+    written?;
+
+    if let Ok(conn) = db.0.lock() {
+        queries::record_audit(&conn, "", "export");
+    }
+    Ok(summary)
+}
+
+/// Restores a `.cfkeyring` into the open vault: decrypted with `passphrase`, re-sealed under this
+/// vault's key, every entry added as a new one. All or nothing — one transaction — so a file that
+/// fails half-way leaves the vault as it was. See `export::restore`.
+#[tauri::command]
+pub async fn keyvault_import_export(
+    db: State<'_, Db>,
+    session: State<'_, VaultSession>,
+    path: String,
+    passphrase: String,
+) -> Result<export::RestoreCounts, String> {
+    session.with_key(|_| ())?;
+    let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() || meta.len() > MAX_IMPORT_BYTES {
+        return Err(format!("{path} is not a keyring export"));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    let keyring = blocking(move || export::open(&bytes, &passphrase))
+        .await?
+        .map_err(|e| e.to_string())?;
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let counts = session.with_key(|dek| -> Result<export::RestoreCounts, String> {
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let counts = export::restore(&tx, dek, &keyring)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(counts)
+    })??;
+    queries::record_audit(&conn, "", "import");
+    Ok(counts)
 }
 
 // ---------------------------------------------------------------------------

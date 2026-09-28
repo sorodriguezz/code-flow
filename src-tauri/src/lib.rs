@@ -5,12 +5,16 @@ mod api;
 mod appmenu;
 mod ai_locks;
 mod ai_accounts;
+mod ai_prompt_files;
 mod ai_quota;
 mod ai_runs;
 mod ai_usage;
 mod backup;
+/// Opening the database at startup without a panic, and the watchdog for a frontend that never loads.
+mod boot_guard;
 mod caveman;
 mod chain_memory;
+mod git_exclude;
 mod ci;
 mod boards;
 mod claude;
@@ -27,19 +31,24 @@ mod gemini;
 mod git;
 mod glass;
 mod grok;
+mod bitbucket;
 mod github;
 mod gitlab;
+mod jupyter;
 mod npm;
 mod localai;
 mod lsp;
 mod migrate;
+mod native_dialog;
 mod oauth;
 mod onedrive;
 mod opencode;
 mod paths;
 mod power;
 mod pr_link;
+mod prettier;
 mod proc;
+mod quit_guard;
 mod remote;
 mod sandbox;
 mod scaffold;
@@ -57,14 +66,19 @@ mod secrets;
 mod services;
 mod shell_env;
 mod shell_profiles;
+/// The one cleanup every way out of the app runs — the `Exit` event and a Windows update alike.
+mod shutdown;
 /// AWS request signing, shared by the API client and the Remote workspace's S3 transport.
 mod sigv4;
 mod supabase;
 mod sysload;
 mod keyvault;
+mod known_hosts;
 mod terminal;
 mod tsserver;
 mod tray;
+/// The update check that needs no webview: the tray's "Check for updates…" and the boot watchdog.
+mod updates;
 mod watcher;
 mod window_state;
 mod windows;
@@ -179,6 +193,34 @@ fn hide_to_background(window: &tauri::Window) {
     let _ = window.hide();
 }
 
+/// Puts the main window in the background — the close button's usual outcome (see
+/// `tray::close_action` for the other two).
+///
+/// The sequence the close handler used to run in line, moved here so the first-close notice's
+/// "keep it in the tray" answer (`tray::hide_main_to_tray`) does exactly what the button does.
+pub(crate) fn put_main_away(app: &tauri::AppHandle) {
+    let Some(main) = app.get_webview_window("main") else { return };
+    // The `Window` half, which is what the hiding needs: `Webview::window()`, reached through the
+    // same `as_ref()` view `tray::show_main_window` uses.
+    let webview: &tauri::Webview<_> = main.as_ref();
+    let window = webview.window();
+    // Said out loud before hiding. The webview keeps running, which is the whole point of hiding
+    // rather than exiting — but it also means anything that *dispatches* work on its own would keep
+    // launching engines with no window to show them in and no button to stop them with. An agent
+    // chain parks on this.
+    let _ = tauri::Emitter::emit(app, "app:background", ());
+    // Database sessions are not background work — they are a connection held open on somebody's
+    // server for a workspace that is now off screen. The ones nobody is using go back; a query still
+    // in flight holds its session and is left alone, and anything closed here reopens by itself on
+    // the next call, so being wrong costs one connect. Without this, closing the window looks like
+    // quitting and holds every session anyway, which is the worst of both.
+    app.state::<DbRegistry>().close_idle();
+    // Before the main window leaves the screen, not after: a satellite has no rail to reattach
+    // itself to, so one left alone is an app the user cannot navigate. See `windows::close_all`.
+    windows::close_all(app);
+    hide_to_background(&window);
+}
+
 /// Tells WebView2 how hard to hold on to its caches. Windows only; the enum has no counterpart on
 /// the other platforms and none of them need one.
 ///
@@ -244,9 +286,9 @@ pub fn run() {
         );
     }
 
-    // Then the reset, if one was requested on the previous launch. Must happen before `db::init()`
-    // opens the SQLite connection below — see `paths::reset_marker_path`'s doc comment for why the
-    // delete can't happen live.
+    // Then the reset, if one was requested on the previous launch. Must happen before
+    // `boot_guard::open` opens the SQLite connection in `setup` — see `paths::reset_marker_path`'s
+    // doc comment for why the delete can't happen live.
     //
     // Ahead of `import_login_path` rather than behind it, which it used to be: that call keeps a
     // cache file under the cache root and rewrites it from a background thread, so a wipe running
@@ -271,6 +313,11 @@ pub fn run() {
     // destructors kills the child and clears the note. See the comment block in `localai::engine`
     // for why this checks the executable path before it kills a pid.
     localai::engine::sweep_stale();
+
+    // And the prompt files a session that never ran its destructors left behind — every brief a
+    // killed run wrote for its CLI, diffs included. Only a dead process's are touched, which is
+    // what makes this safe before the single-instance check. See `ai_prompt_files`.
+    ai_prompt_files::sweep_stale();
 
     // Before anything can spawn a thread, and it has to be: this writes a process-wide environment
     // variable, which is only sound while this is still the only thread. Everything after it — the
@@ -340,22 +387,8 @@ pub fn run() {
         // than recomputed, because "did this launch migrate" is a fact about *this* launch and
         // asking again later would answer about a different one.
         .manage(layout_status.clone())
-        // The state root, unless the migration said it cannot vouch for it.
-        //
-        // `db::init()` used to run here unconditionally, and that made the whole recovery design
-        // unreachable: a copy that failed part-way leaves a truncated `codeflow.db`, opening it
-        // returns `SQLITE_CORRUPT` from the schema parse, and the `.expect()` panics *before*
-        // `.setup()` — so no window, no notice, no Retry button, on that launch and every one
-        // after it. A copy that failed before writing anything is worse in a quieter way: an empty
-        // database appears in the new root and the app comes up looking fresh and working.
-        //
-        // Both are answered by not putting a connection on that file at all until the layout is
-        // one this build is willing to write to. See `db::init_scratch`.
-        .manage(if layout_status.ok {
-            db::init().expect("failed to initialize CodeFlow database")
-        } else {
-            db::init_scratch().expect("failed to initialize a scratch database")
-        })
+        // The database is not managed here any more: `setup` opens it, first thing. See the note
+        // there for why.
         .manage(TerminalRegistry::default())
         // The Services supervisor. An `Arc` because its tasks outlive every command that starts
         // them: a dependency wait, a readiness gate and an autorestart backoff all hold it.
@@ -370,6 +403,8 @@ pub fn run() {
         // and same neighbourhood as `ApiRegistry` above; see `localai::LocalAiRegistry`.
         .manage(localai::LocalAiRegistry::default())
         .manage(tray::QuittingFlag::default())
+        // Whether a quit the user asked for is waiting on the unsaved-work question. See `quit_guard`.
+        .manage(quit_guard::QuitGuard::default())
         .manage(window_state::WindowTracker::default())
         .manage(remotectl::RemoteCtl::default())
         // Which app or repository is open in a window of its own. Managed rather than derived
@@ -382,6 +417,33 @@ pub fn run() {
         // both, and the first time that was forgotten the limit would be silently gone.
         .manage(sandbox::SandboxRegistry::default())
         .setup(|app| {
+            // The database, before anything else here reaches for it — and here, not at `.manage()`
+            // time where it used to be opened, for two reasons.
+            //
+            // It is the first point after the single-instance check: the plugin turns a second launch
+            // away while the app is being built, and a `.manage()` argument is evaluated before that.
+            // A second launch used to open the live database, run the migrations and "recover" the
+            // first instance's running work as interrupted before it was told to leave.
+            //
+            // And `setup` is where a failure can be answered. `db::init().expect(…)` panicked before
+            // any window existed on every launch whose database would not open or migrate — the same
+            // panic on every launch after it. Now a failure, or a database a newer build migrated,
+            // becomes a native dialog, and the launch runs on a scratch database meanwhile, with no
+            // window, tray or background work: `take_over` returns early for exactly that. When the
+            // layout migration could not vouch for the state root, no connection is put on it at all
+            // (`db::init_scratch`) and `DataDirsNotice` blocks the window, as before. See `boot_guard`.
+            boot_guard::open(app.handle());
+            // Before `take_over`, so no launch is without it: the cleanup for the exits that skip
+            // `RunEvent::Exit` — a Windows update installed from the frontend above all. See `shutdown`.
+            {
+                let handle = app.handle().clone();
+                shutdown::install_exit_hook(app.handle(), move || {
+                    shutdown::run_outside_runtime(|| shutdown::shutdown_cleanup(&handle));
+                });
+            }
+            if boot_guard::take_over(app.handle()) {
+                return Ok(());
+            }
             // The main window, built here from its own entry in `tauri.conf.json` (which says
             // `"create": false`) rather than by Tauri before `setup` runs — the one difference being
             // `enable_clipboard_access`, which that config has no field for. Without it WebView2 (and
@@ -420,6 +482,9 @@ pub fn run() {
             // back to where the last session left it does not happen in front of the user, and
             // this is what ends that — a `?` above it would leave the app running with no window.
             window_state::restore(app.handle());
+            // From here the frontend has ~30 s to say it rendered; a release whose window never comes
+            // up is then offered an update from Rust, since its own update check never ran.
+            boot_guard::arm_watchdog(app.handle());
             refresh_icon_cache_after_update(app.handle());
             // A row an earlier build left behind: it held the satellites open at the last quit, and
             // reopening them at launch turned out to be the wrong idea twice over. See
@@ -434,7 +499,7 @@ pub fn run() {
             // the settings field the accelerator was typed into, which is the one place there is
             // somebody to tell. The tray's "New quick ask" keeps the feature reachable meanwhile.
             {
-                let accelerator = app
+                let stored = app
                     .state::<db::Db>()
                     .0
                     .lock()
@@ -443,13 +508,15 @@ pub fn run() {
                         db::queries::get_setting(&conn, windows::QUICK_ASK_ACCELERATOR_KEY)
                             .ok()
                             .flatten()
-                    })
-                    .filter(|a| !a.trim().is_empty())
-                    .unwrap_or_else(|| windows::DEFAULT_QUICK_ASK_ACCELERATOR.to_string());
-                if let Err(e) =
-                    windows::register_quick_ask_shortcut(app.handle().clone(), accelerator)
-                {
-                    applog::info(&format!("window: quick-ask hotkey unavailable — {e}"));
+                    });
+                // `None` is the user having switched the hotkey off: bind nothing. An empty or
+                // missing row is "never chosen" and gets this platform's default.
+                if let Some(accelerator) = windows::resolve_quick_ask_accelerator(stored.as_deref()) {
+                    if let Err(e) =
+                        windows::register_quick_ask_shortcut(app.handle().clone(), accelerator)
+                    {
+                        applog::info(&format!("window: quick-ask hotkey unavailable — {e}"));
+                    }
                 }
             }
             // Delete every DBML scratch database whose diagram is gone. Covers the three ways a
@@ -473,6 +540,15 @@ pub fn run() {
                 if !known.is_empty() {
                     sandbox::sweep(&known);
                 }
+            }
+            // Notes trashed more than thirty days ago go for good, with their history, and so does
+            // any note or diagram history whose document is already gone. See
+            // `note_queries::purge_expired_trash` and `diagrams_cmd::sweep_orphan_versions`.
+            if let Ok(conn) = app.state::<db::Db>().0.lock() {
+                if let Err(e) = db::note_queries::purge_expired_trash(&conn, chrono::Utc::now()) {
+                    applog::info(&format!("notes: trash sweep failed — {e}"));
+                }
+                let _ = commands::diagrams_cmd::sweep_orphan_versions(&conn);
             }
             tray::setup(&app.handle())?;
             // The usage meter's way to the database. Set here because `setup` is the only place
@@ -567,23 +643,16 @@ pub fn run() {
                 window_state::save(app);
                 if !app.state::<tray::QuittingFlag>().is_quitting() {
                     api.prevent_close();
-                    // Said out loud before hiding. The webview keeps running, which is the whole
-                    // point of hiding rather than exiting — but it also means anything that
-                    // *dispatches* work on its own would keep launching engines with no window to
-                    // show them in and no button to stop them with. An agent chain parks on this.
-                    let _ = tauri::Emitter::emit(app, "app:background", ());
-                    // Database sessions are not background work — they are a connection held open on
-                    // somebody's server for a workspace that is now off screen. The ones nobody is
-                    // using go back; a query still in flight holds its session and is left alone, and
-                    // anything closed here reopens by itself on the next call, so being wrong costs
-                    // one connect. Without this, closing the window looks like quitting and holds
-                    // every session anyway, which is the worst of both.
-                    app.state::<DbRegistry>().close_idle();
-                    // Before the main window leaves the screen, not after: a satellite has no
-                    // sidebar to pick a workspace with and no rail to reattach itself to, so one
-                    // left alone is an app the user cannot navigate. See `windows::close_all`.
-                    windows::close_all(app);
-                    hide_to_background(window);
+                    // Into the background (the default), a real quit (the user's setting — asked
+                    // about unsaved work first, see `quit_guard`), or, the first time, a word from
+                    // the main window about where the app is going. See `tray::close_action`.
+                    match tray::close_action(app) {
+                        tray::CloseAction::Hide => put_main_away(app),
+                        tray::CloseAction::Quit => quit_guard::request_quit(app),
+                        tray::CloseAction::Notice => {
+                            let _ = tauri::Emitter::emit_to(app, "main", "app:close-notice", ());
+                        }
+                    }
                 }
             }
         })
@@ -593,6 +662,8 @@ pub fn run() {
             tsserver::ts_notify,
             tsserver::ts_status,
             tsserver::ts_stop,
+            commands::editor_cmd::format_with_prettier,
+            commands::editor_cmd::create_editor_checkpoint,
             npm::npm_package_versions,
             npm::npm_latest_versions,
             npm::npm_search,
@@ -604,7 +675,14 @@ pub fn run() {
             scaffold::scaffold_check_dest,
             scaffold::scaffold_write_files,
             scaffold::scaffold_run,
+            scaffold::scaffold_claim,
+            scaffold::scaffold_discard,
             commands::app_cmd::quit_app,
+            quit_guard::quit_guard_arm,
+            quit_guard::quit_guard_ack,
+            quit_guard::quit_guard_cancel,
+            quit_guard::quit_app_confirmed,
+            boot_guard::boot_ready,
             commands::app_cmd::check_requirements,
             commands::app_cmd::reset_app_data,
             commands::app_cmd::app_paths,
@@ -643,6 +721,17 @@ pub fn run() {
             windows::quick_ask_close,
             windows::show_main_window,
             windows::register_quick_ask_shortcut,
+            windows::unregister_quick_ask_shortcut,
+            tray::system_locale,
+            applog::log_frontend_error,
+            applog::app_diagnostics,
+            applog::diagnostics_report,
+            applog::third_party_notices,
+            tray::hide_main_to_tray,
+            tray::autostart_enabled,
+            tray::set_autostart,
+            windows::get_quick_ask_shortcut,
+            windows::set_window_unsaved,
             glass::set_window_glass,
             commands::chat_cmd::chat_create_conversation,
             commands::chat_cmd::chat_send,
@@ -720,6 +809,7 @@ pub fn run() {
             commands::services_cmd::service_log,
             commands::services_cmd::service_clear_log,
             commands::services_cmd::service_detect,
+            commands::services_cmd::service_env_files,
             commands::services_cmd::services_detect_workspace,
             commands::services_cmd::services_listening_ports,
             commands::services_cmd::services_free_port,
@@ -753,6 +843,7 @@ pub fn run() {
             commands::git_ops::list_branches,
             commands::git_ops::create_branch,
             commands::git_ops::delete_branch,
+            commands::git_ops::branch_unmerged_count,
             commands::git_ops::set_branch_locked,
             commands::git_ops::checkout_local_branch,
             commands::git_ops::checkout_detached,
@@ -794,8 +885,11 @@ pub fn run() {
             commands::secret_scan_cmd::scan_staged_secrets,
             commands::git_ops::list_remotes,
             commands::git_ops::set_remote_url,
+            commands::git_ops::add_remote,
+            commands::git_ops::remove_remote,
             commands::git_ops::get_git_identity,
             commands::git_ops::set_git_identity,
+            commands::git_ops::set_repo_git_identity,
             commands::git_ops::merge_branch,
             commands::git_ops::is_merging,
             commands::git_ops::list_conflicts,
@@ -803,17 +897,50 @@ pub fn run() {
             commands::git_ops::mark_conflict_resolved,
             commands::git_ops::complete_merge,
             commands::git_ops::abort_merge,
+            commands::git_ops::get_operation_state,
+            commands::git_ops::continue_operation,
+            commands::git_ops::abort_operation,
             commands::git_ops::git_clone,
             commands::git_ops::git_fetch,
             commands::git_ops::git_pull,
+            commands::git_ops::git_pull_with,
             commands::git_ops::git_fetch_branch,
             commands::git_ops::git_pull_branch,
             commands::git_ops::git_push,
             commands::git_ops::git_push_branch,
+            commands::git_ops::git_push_force_with_lease,
+            commands::git_ops::stage_lines,
+            commands::git_ops::unstage_lines,
+            commands::git_ops::discard_lines,
+            commands::git_ops::get_repo_features,
+            commands::git_ops::get_conflict_detail,
+            commands::git_ops::get_conflict_merge_text,
+            commands::git_ops::resolve_conflict_with_text,
+            commands::git_ops::resolve_conflict_deleted,
+            commands::git_ops::list_reflog,
+            commands::git_ops::get_undo_plan,
+            commands::git_ops::undo_last_operation,
+            commands::git_ops::restore_reflog_entry,
+            commands::git_ops::list_submodules,
+            commands::git_ops::git_submodule_update,
+            commands::git_ops::list_worktrees,
+            commands::git_ops::add_worktree,
+            commands::git_ops::remove_worktree,
+            commands::git_ops::prune_worktrees,
+            commands::git_ops::git_push_tag,
+            commands::git_ops::git_push_all_tags,
+            commands::git_ops::git_delete_remote_tag,
+            commands::git_ops::git_delete_remote_branch,
+            commands::git_ops::get_bisect_state,
+            commands::git_ops::bisect_start,
+            commands::git_ops::bisect_mark,
+            commands::git_ops::bisect_reset,
             commands::remotectl_cmd::remotectl_status,
             commands::remotectl_cmd::remotectl_set_enabled,
             commands::remotectl_cmd::remotectl_set_port,
             commands::remotectl_cmd::remotectl_set_allow_terminal,
+            commands::remotectl_cmd::remotectl_set_tls,
+            commands::remotectl_cmd::remotectl_publish_notifications,
             commands::remotectl_cmd::remotectl_start_pairing,
             commands::remotectl_cmd::remotectl_cancel_pairing,
             commands::remotectl_cmd::remotectl_list_devices,
@@ -871,6 +998,8 @@ pub fn run() {
             commands::agents_cmd::retry_chain_step,
             commands::agents_cmd::resume_chain,
             commands::agents_cmd::abort_chain,
+            commands::agents_cmd::set_chain_resume_at,
+            commands::agents_cmd::list_scheduled_resumes,
             commands::agents_cmd::delete_chain,
             commands::agents_cmd::harvest_chain_step,
             commands::agents_cmd::run_chain_step_check,
@@ -922,10 +1051,8 @@ pub fn run() {
             commands::secrets_cmd::get_gitlab_token,
             commands::secrets_cmd::delete_gitlab_token,
             commands::secrets_cmd::set_jira_token,
-            commands::secrets_cmd::get_jira_token,
             commands::secrets_cmd::delete_jira_token,
             commands::secrets_cmd::set_monday_token,
-            commands::secrets_cmd::get_monday_token,
             commands::secrets_cmd::delete_monday_token,
             commands::claude_cmd::generate_commit_message,
             commands::claude_cmd::draft_pr_comment_reply,
@@ -942,7 +1069,18 @@ pub fn run() {
             commands::claude_cmd::resolve_finding_with_ai,
             commands::claude_cmd::send_chat_message,
             commands::claude_cmd::cancel_ai_run,
+            commands::claude_cmd::ai_read_only_engines,
+            commands::claude_cmd::ai_classify_failure,
             commands::claude_cmd::inline_edit_with_ai,
+            commands::notebook_cmd::notebook_discover_kernels,
+            commands::notebook_cmd::notebook_kernel_start,
+            commands::notebook_cmd::notebook_kernel_execute,
+            commands::notebook_cmd::notebook_kernel_input,
+            commands::notebook_cmd::notebook_kernel_interrupt,
+            commands::notebook_cmd::notebook_kernel_restart,
+            commands::notebook_cmd::notebook_kernel_shutdown,
+            commands::notebook_cmd::notebook_ai,
+            commands::notebook_cmd::default_notebook_template,
             commands::checkpoint_cmd::list_ai_checkpoints,
             commands::checkpoint_cmd::ai_checkpoint_changed_paths,
             commands::checkpoint_cmd::restore_ai_checkpoint,
@@ -963,6 +1101,14 @@ pub fn run() {
             commands::ci_cmd::rerun_pipeline,
             commands::ci_cmd::cancel_pipeline,
             commands::ci_cmd::analyze_pipeline_failure,
+            commands::ci_cmd::pipeline_launch_context,
+            commands::ci_cmd::pipeline_definition_file,
+            commands::ci_cmd::start_pipeline,
+            commands::ci_cmd::review_pipeline_gate,
+            commands::ci_cmd::play_pipeline_job,
+            commands::ci_cmd::list_pipeline_artifacts,
+            commands::ci_cmd::download_pipeline_artifact,
+            commands::ci_cmd::cancel_pipeline_artifact_download,
             commands::ado_cmd::resolve_pr_link,
             commands::ado_cmd::review_pr_from_link,
             commands::ado_cmd::post_pr_link_review_comment,
@@ -981,6 +1127,15 @@ pub fn run() {
             commands::ado_cmd::post_pr_review_comment,
             commands::ado_cmd::act_on_pull_request,
             commands::ado_cmd::pr_review_decision,
+            commands::ado_cmd::list_pull_requests_page,
+            commands::ado_cmd::get_pull_request,
+            commands::ado_cmd::publish_pr_review,
+            commands::ado_cmd::pr_merge_options,
+            commands::ado_cmd::merge_pull_request,
+            commands::ado_cmd::pr_link_merge_options,
+            commands::ado_cmd::merge_pr_link,
+            commands::ado_cmd::pr_checks,
+            commands::ado_cmd::pr_link_checks,
             // ---- user stories (workspace-scoped: wiki in, Azure Boards out) ----
             commands::stories_cmd::ado_list_wikis,
             commands::stories_cmd::ado_list_wiki_pages,
@@ -989,6 +1144,9 @@ pub fn run() {
             commands::stories_cmd::ado_publish_wiki_page,
             commands::stories_cmd::list_doc_pages,
             commands::stories_cmd::get_doc_page,
+            commands::stories_cmd::reload_doc_page_from_wiki,
+            commands::stories_cmd::preview_story_board_update,
+            commands::stories_cmd::update_story_on_board,
             commands::stories_cmd::create_doc_page,
             commands::stories_cmd::import_wiki_page,
             commands::stories_cmd::set_doc_page_content,
@@ -1033,12 +1191,20 @@ pub fn run() {
             commands::github_cmd::github_authenticated_user,
             commands::gitlab_cmd::link_project_gitlab,
             commands::gitlab_cmd::gitlab_authenticated_user,
+            commands::bitbucket_cmd::link_project_bitbucket,
+            commands::bitbucket_cmd::bitbucket_verify_credential,
+            commands::bitbucket_cmd::bitbucket_check_workspace,
+            commands::bitbucket_cmd::set_bitbucket_credential,
+            commands::bitbucket_cmd::delete_bitbucket_credential,
             commands::fs_cmd::list_dir,
             commands::fs_cmd::list_repo_files,
             commands::fs_cmd::search_repo,
             commands::fs_cmd::replace_in_repo,
             commands::fs_cmd::read_file_text,
             commands::fs_cmd::write_file_text,
+            commands::fs_cmd::read_editor_file,
+            commands::fs_cmd::stat_editor_file,
+            commands::fs_cmd::write_editor_file,
             commands::fs_cmd::write_file_bytes,
             commands::fs_cmd::move_path,
             commands::fs_cmd::copy_into_repo,
@@ -1068,6 +1234,7 @@ pub fn run() {
             commands::terminal_cmd::write_terminal,
             commands::terminal_cmd::resize_terminal,
             commands::terminal_cmd::close_terminal,
+            commands::terminal_cmd::terminal_foreground,
             commands::terminal_cmd::list_workspace_terminals,
             commands::terminal_cmd::add_workspace_terminal,
             commands::terminal_cmd::resume_workspace_terminal,
@@ -1091,6 +1258,8 @@ pub fn run() {
             commands::remote_cmd::remote_delete_group,
             commands::remote_cmd::remote_set_password,
             commands::remote_cmd::remote_get_password,
+            commands::remote_cmd::remote_type_password,
+            commands::remote_cmd::remote_askpass_supported,
             commands::remote_cmd::remote_open_session,
             commands::remote_cmd::remote_open_draft_session,
             commands::remote_cmd::remote_open_forward,
@@ -1127,6 +1296,8 @@ pub fn run() {
             commands::remote_cmd::remote_remove_file,
             commands::remote_cmd::remote_rename_file,
             commands::remote_cmd::remote_close_files,
+            commands::remote_cmd::remote_cancel_transfer,
+            commands::remote_cmd::remote_paths_exist,
             commands::remote_cmd::remote_parse_ssh_command,
             commands::remote_cmd::remote_parse_azure_connection,
             commands::remote_cmd::remote_delete_container,
@@ -1139,6 +1310,7 @@ pub fn run() {
             commands::remote_cmd::remote_discover_azure,
             commands::remote_cmd::remote_check_cloud,
             commands::remote_cmd::remote_list_keys,
+            commands::remote_cmd::remote_generate_key,
             commands::remote_cmd::remote_ssh_config_path,
             commands::remote_cmd::remote_scan_ssh_config,
             commands::remote_cmd::remote_import_ssh_config,
@@ -1185,6 +1357,8 @@ pub fn run() {
             commands::keyvault_cmd::keyvault_totp_code,
             commands::keyvault_cmd::keyvault_audit,
             commands::keyvault_cmd::keyvault_read_import_file,
+            commands::keyvault_cmd::keyvault_export,
+            commands::keyvault_cmd::keyvault_import_export,
             commands::notes_cmd::notes_load_tree,
             commands::notes_cmd::notes_get_note,
             commands::notes_cmd::notes_create_note,
@@ -1193,6 +1367,13 @@ pub fn run() {
             commands::notes_cmd::notes_reorder_notes,
             commands::notes_cmd::notes_set_pinned,
             commands::notes_cmd::notes_delete_note,
+            commands::notes_cmd::notes_list_trash,
+            commands::notes_cmd::notes_restore_note,
+            commands::notes_cmd::notes_purge_note,
+            commands::notes_cmd::notes_empty_trash,
+            commands::notes_cmd::notes_count_links,
+            commands::notes_cmd::notes_rewrite_links,
+            commands::notes_cmd::notes_read_import,
             commands::notes_cmd::notes_duplicate_note,
             commands::notes_cmd::notes_create_book,
             commands::notes_cmd::notes_rename_book,
@@ -1251,9 +1432,13 @@ pub fn run() {
             commands::debug_cmd::debug_pause,
             commands::debug_cmd::debug_step,
             commands::debug_cmd::debug_set_breakpoints,
+            commands::debug_cmd::debug_set_exception_filters,
             commands::debug_cmd::debug_properties,
+            commands::debug_cmd::debug_scopes,
             commands::debug_cmd::debug_evaluate,
             commands::debug_cmd::debug_is_running,
+            commands::debug_cmd::debug_session,
+            commands::debug_cmd::debug_python,
             commands::localai_cmd::localai_state,
             commands::localai_cmd::localai_set_enabled,
             commands::localai_cmd::localai_set_model,
@@ -1313,6 +1498,12 @@ pub fn run() {
             commands::db_cmd::db_object_ddl,
             commands::db_cmd::db_cancel,
             commands::db_cmd::db_ai_assist,
+            commands::db_cmd::db_transaction_state,
+            commands::db_cmd::db_export_rows,
+            commands::db_cmd::db_csv_inspect,
+            commands::db_cmd::db_import_csv,
+            commands::ssh_cmd::ssh_scan_host_key,
+            commands::ssh_cmd::ssh_trust_host_key,
             commands::api_cmd::api_load_tree,
             commands::api_cmd::api_create_collection,
             commands::api_cmd::api_update_collection,
@@ -1344,9 +1535,18 @@ pub fn run() {
             commands::api_cmd::api_upsert_cookie,
             commands::api_cmd::api_delete_cookie,
             commands::api_cmd::api_clear_cookies,
+            commands::api_cmd::api_import_tree,
+            commands::api_cmd::api_script_trust_lookup,
+            commands::api_cmd::api_script_trust_record,
+            commands::api_cmd::api_seal_stored_secrets,
+            commands::api_cmd::api_load_open_tabs,
+            commands::api_cmd::api_save_open_tabs,
+            commands::api_cmd::api_load_settings,
+            commands::api_cmd::api_save_settings,
             commands::api_cmd::api_send_http,
             commands::api_cmd::api_send_http_tracked,
             commands::api_cmd::api_cancel_http,
+            commands::api_cmd::api_oauth_authorize,
             commands::api_cmd::api_read_file_base64,
             commands::api_cmd::api_ws_connect,
             commands::api_cmd::api_ws_send,
@@ -1363,6 +1563,7 @@ pub fn run() {
             commands::api_cmd::api_save_file,
             commands::api_cmd::api_save_binary_file,
             commands::api_cmd::api_read_text_file,
+            commands::api_cmd::api_read_collection_dir,
             commands::api_cmd::gdrive_status,
             commands::api_cmd::gdrive_set_client_secret,
             commands::api_cmd::gdrive_connect,
@@ -1397,6 +1598,13 @@ pub fn run() {
                 tray::show_main_window(_app_handle);
             }
 
+            // Whether the app ends at all: a quit the user asked for waits here while the main
+            // window asks about unsaved work. Its own block, apart from the `Exit` cleanup below —
+            // this one decides, that one tidies up once it is decided. See `quit_guard`.
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = &_event {
+                quit_guard::on_exit_requested(_app_handle, *code, api);
+            }
+
             // The last moment anything of ours runs. Every quit path — the tray's Quit, ⌘Q, the
             // window's close button once the quitting flag is set, `reset_app_data` — ends in
             // `AppHandle::exit`, which requests this event and then calls `std::process::exit`. No
@@ -1407,37 +1615,12 @@ pub fn run() {
             // port and an authenticated session on the bastion, reparented to init.
             //
             // Blocking is correct here: the point is to finish before the process does.
+            //
+            // The steps themselves are `shutdown::shutdown_cleanup`, one function run once, because
+            // this event is not the only way out: a Windows update install ends the process from
+            // inside the updater, which never raises it. See `shutdown`.
             if let tauri::RunEvent::Exit = _event {
-                // The quit paths that never touch the close handler: the tray's Quit, ⌘Q, the
-                // in-app quit. All three end in `AppHandle::exit`, which is here.
-                window_state::save(_app_handle);
-                // The last four seconds of every bench terminal's output, which the flusher's timer
-                // has not come round for. The shells themselves die with the process — that is what
-                // a pty is — so this is the whole of what "don't lose my work" can mean here, and
-                // it is the moment it has to happen.
-                commands::terminal_cmd::flush_transcripts(_app_handle);
-                // Services, stopped the way the Stop button stops them — Ctrl-C first — rather than
-                // by the process exiting under them. The difference is Compose: its Ctrl-C takes the
-                // containers down, and an app that simply exits leaves them running.
-                _app_handle
-                    .state::<std::sync::Arc<services::Supervisor>>()
-                    .shutdown(_app_handle, std::time::Duration::from_secs(8));
-                let registry = _app_handle.state::<DbRegistry>();
-                tauri::async_runtime::block_on(registry.close_all());
-                // The Remote workspace's own `static` maps, for the reason the comment above gives:
-                // `forward`'s registry and the two file-session maps hold children that
-                // `process::exit` walks straight past. Without this every quit leaves an `ssh -N`
-                // holding a forwarded port, and an `ssh -s … sftp` holding a channel on somebody
-                // else's machine, both reparented to init.
-                tauri::async_runtime::block_on(remotes::hold::release_all());
-                // And every language server, for exactly the reason above: each is a separate
-                // process holding an index of the repository, and a reparented `rust-analyzer`
-                // keeps several hundred megabytes that nothing is left to reap.
-                tauri::async_runtime::block_on(lsp::stop_all());
-                // Last, once everything above has actually finished: the marker's whole meaning is
-                // "the previous session did not get this far", so clearing it early would call a
-                // shutdown clean that a hang in any of the steps above could still spoil.
-                applog::mark_clean_exit();
+                shutdown::shutdown_cleanup(_app_handle);
             }
         });
 }

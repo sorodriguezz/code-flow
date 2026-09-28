@@ -10,6 +10,9 @@ import { startScrollFeedback } from "./lib/scrollFeedback";
 import { startExternalLinks } from "./lib/externalLinks";
 import { startContextMenuGuard } from "./lib/contextMenuGuard";
 import { startOverlayDragRegion } from "./lib/overlayDragRegion";
+// Uncaught errors and unhandled rejections into `codeflow.log` — until this they reached the
+// console and nowhere a user could send. See `lib/diagnostics.ts`.
+import { installErrorReporting } from "./lib/diagnostics";
 // The app's two faces, from the bundle rather than a CDN: Instrument Sans for the interface and
 // JetBrains Mono for code, hashes and paths. `@font-face` only — each subset (~30–40 KB) is read the
 // first time a glyph in its range is drawn, and never from the network. See `--font-sans` in
@@ -24,6 +27,7 @@ startScrollFeedback();
 startExternalLinks();
 startContextMenuGuard();
 startOverlayDragRegion();
+installErrorReporting();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

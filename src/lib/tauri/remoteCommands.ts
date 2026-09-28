@@ -39,12 +39,10 @@ import type {
  * parallel calls here would be two names for one thing, and the pty pane would need a branch to
  * pick between them.
  *
- * **`remoteGetPassword` exists, unlike its database counterpart.** The reason the database client
- * has no getter is that its password is only ever consumed by Rust at connect time, so a getter
- * would be pure exposure. Here the opposite is true: `ssh` deliberately refuses to accept a
- * password from any program, so the *only* way a saved one is useful is being shown to the person
- * typing it into the prompt. A vault the user copies from is the honest version of what every SSH
- * client that "saves passwords" without an agent is doing.
+ * **`remoteGetPassword` exists, unlike its database counterpart** — the host editor shows the
+ * saved value in its field. Nothing else reads it in the webview: a session has it typed into its
+ * prompt by `remoteTypePassword`, which reads and writes it in Rust, and a background `ssh` is
+ * handed it once through `SSH_ASKPASS` (`remotes::askpass`).
  */
 
 // ---------- inventory ----------
@@ -60,7 +58,9 @@ export const remoteCreateHost = (
   color: string,
 ) => invoke<RemoteHostRow>("remote_create_host", { workspaceId, name, groupName, spec, color });
 
-export const remoteUpdateHost = (row: RemoteHostRow) => invoke<void>("remote_update_host", { row });
+/** Resolves `true` when the edit changed how the host is reached — its held file session was then
+ *  closed, and an open browser should list again. */
+export const remoteUpdateHost = (row: RemoteHostRow) => invoke<boolean>("remote_update_host", { row });
 
 export const remoteDeleteHost = (id: string) => invoke<void>("remote_delete_host", { id });
 
@@ -93,6 +93,19 @@ export const remoteSetPassword = (id: string, password: string) =>
 
 export const remoteGetPassword = (id: string) =>
   invoke<string | null>("remote_get_password", { id });
+
+/**
+ * Types the host's saved password into one of its sessions, and Enter. Refuses with `NOT_ASKING`
+ * (`lib/remote/transfers`) unless the session's last line is a password prompt — at a shell prompt
+ * the same keys would run the password as a command — or `force` is set. The password never
+ * reaches the webview.
+ */
+export const remoteTypePassword = (hostId: string, sessionId: string, force = false) =>
+  invoke<void>("remote_type_password", { hostId, sessionId, force });
+
+/** Whether a background `ssh` here can be handed a saved password. Where it can't, an SFTP host has
+ *  no use for one. */
+export const remoteAskpassSupported = () => invoke<boolean>("remote_askpass_supported");
 
 // ---------- sessions ----------
 
@@ -295,6 +308,15 @@ export const remoteRenameFile = (hostId: string, from: string, to: string) =>
 
 export const remoteCloseFiles = (hostId: string) => invoke<void>("remote_close_files", { hostId });
 
+/** Asks a running transfer to stop; it rejects with `TRANSFER_CANCELLED` and removes the partial
+ *  file it was writing. */
+export const remoteCancelTransfer = (id: string) => invoke<void>("remote_cancel_transfer", { id });
+
+/** Which of `paths` already exist — on the host, or on this machine with `local`. Asked of the
+ *  service rather than of a listing on screen, which can be stale or one page of many. */
+export const remotePathsExist = (hostId: string, paths: string[], local: boolean) =>
+  invoke<boolean[]>("remote_paths_exist", { hostId, paths, local });
+
 // ---------- blob storage beyond the seven verbs ----------
 
 /**
@@ -341,9 +363,13 @@ export const remoteDiscoverAzure = (tenant: string) =>
 
 // ---------- ~/.ssh/config ----------
 
-/** The identities this machine already has. Read-only: CodeFlow owns no key store, so this is
- *  discovery of `~/.ssh` and the agent, never a vault of our own. See `remotes::keys`. */
+/** The identities this machine already has: discovery of `~/.ssh` and the agent. CodeFlow owns no
+ *  key store — see `remotes::keys`. */
 export const remoteListKeys = () => invoke<SshKey[]>("remote_list_keys");
+
+/** Makes an ed25519 key at `~/.ssh/<name>` with `ssh-keygen`. Refuses a name that exists. */
+export const remoteGenerateKey = (name: string, passphrase: string, comment: string) =>
+  invoke<SshKey>("remote_generate_key", { name, passphrase, comment });
 
 /** Spelled out rather than assumed: `~/.ssh/config` is not where it lives on Windows. */
 export const remoteSshConfigPath = () => invoke<string>("remote_ssh_config_path");

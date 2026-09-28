@@ -18,12 +18,18 @@ use crate::ai_runs;
 use crate::db::models::{
     NoteBookRow, NoteMeta, NoteRow, NoteSearchHit, NoteTemplateRow, NotesWorkspaceTree,
 };
+use crate::db::note_queries::NoteTrashRow;
 use crate::db::version_queries::{self, DocVersion};
 use crate::db::{note_queries, Db};
 
 /// Hits returned by one search. Well past what the panel can show, and the point of the cap is
 /// only that a one-character query on a large workspace can't turn into an unbounded transfer.
 const SEARCH_LIMIT: i64 = 100;
+
+/// The largest Markdown file "Import Markdown" reads, in bytes — mirrored in
+/// `lib/notes/importMarkdown.ts`. A long document is a few hundred kilobytes; a bound rather than
+/// none, because a mis-picked log file would otherwise land whole in a note and in every backup.
+const MAX_IMPORT_BYTES: u64 = 5 * 1024 * 1024;
 
 // ---------- load ----------
 
@@ -114,8 +120,8 @@ pub fn notes_delete_version(db: State<Db>, version_id: String) -> Result<(), Str
 
 /// Drops every version of one note, leaving the note itself alone.
 ///
-/// The same statement [`notes_delete_note`] runs on its way out, reached deliberately instead of as
-/// a side effect — "clear the history and keep working" is a thing people want, and it must not be
+/// What a purge from the trash does on the note's way out, reached deliberately instead of as a
+/// side effect — "clear the history and keep working" is a thing people want, and it must not be
 /// spelled "delete the note and undo it".
 #[tauri::command]
 pub fn notes_clear_versions(db: State<Db>, id: String) -> Result<(), String> {
@@ -153,17 +159,80 @@ pub fn notes_set_pinned(db: State<Db>, id: String, pinned: bool) -> Result<(), S
     note_queries::set_note_pinned(&conn, &id, pinned).map_err(|e| e.to_string())
 }
 
+/// Moves a note to the trash — with its history, which goes only when the note does. See
+/// [`note_queries::trash_note`] and the trash commands below.
 #[tauri::command]
 pub fn notes_delete_note(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    note_queries::delete_note(&conn, &id)
-        .map_err(|e| e.to_string())?;
-    // The note is gone for good, so its history has nothing left to be the history *of*. Deliberately
-    // not a foreign-key cascade — see `version_queries::delete_versions` on why the table is not
-    // wired to one — and best effort: a note that deleted cleanly must not report a failure because
-    // its snapshots did not.
-    let _ = version_queries::delete_versions(&conn, "note", &id);
+    note_queries::trash_note(&conn, &id).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ---------- trash ----------
+
+/// The trash this workspace sees: its own trashed notes and the global ones.
+#[tauri::command]
+pub fn notes_list_trash(db: State<Db>, workspace_id: String) -> Result<Vec<NoteTrashRow>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::list_trash(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// Takes a note out of the trash. `fallback_book_name` names the book made for it when its own book
+/// is gone and the workspace has none — translated, so it comes from the caller. `None` means there
+/// was no trashed note by that id (restored or emptied from another window).
+#[tauri::command]
+pub fn notes_restore_note(
+    db: State<Db>,
+    id: String,
+    fallback_book_name: String,
+) -> Result<Option<NoteMeta>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::restore_note(&conn, &id, fallback_book_name.trim()).map_err(|e| e.to_string())
+}
+
+/// Deletes one trashed note for good, history included.
+#[tauri::command]
+pub fn notes_purge_note(db: State<Db>, id: String) -> Result<bool, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::purge_note(&conn, &id).map_err(|e| e.to_string())
+}
+
+/// Empties the trash this workspace sees, for good. Answers with how many notes went.
+#[tauri::command]
+pub fn notes_empty_trash(db: State<Db>, workspace_id: String) -> Result<usize, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::empty_trash(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+// ---------- renaming ----------
+
+/// How many other notes link to `title` — asked before a rename rewrites anything, so the question
+/// can say how much it is about to change.
+#[tauri::command]
+pub fn notes_count_links(
+    db: State<Db>,
+    workspace_id: String,
+    title: String,
+    exclude_id: String,
+) -> Result<usize, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::count_linking_notes(&conn, &workspace_id, &title, &exclude_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Points every `[[old_title]]` in the workspace's other notes at `new_title`, in one transaction,
+/// and answers with the notes it rewrote. See [`note_queries::rewrite_links`].
+#[tauri::command]
+pub fn notes_rewrite_links(
+    db: State<Db>,
+    workspace_id: String,
+    old_title: String,
+    new_title: String,
+    exclude_id: String,
+) -> Result<Vec<NoteMeta>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::rewrite_links(&conn, &workspace_id, &old_title, &new_title, &exclude_id)
+        .map_err(|e| e.to_string())
 }
 
 /// `title` comes from the caller because "Copy of …" is a translated string — see
@@ -242,11 +311,11 @@ pub fn notes_reorder_books(db: State<Db>, ids: Vec<String>) -> Result<(), String
     note_queries::reorder_books(&conn, &ids).map_err(|e| e.to_string())
 }
 
-/// Removes the book, its subbooks **and every note inside them**.
+/// Removes the book and its subbooks, and moves **every note inside them to the trash**.
 ///
-/// Destructive, unlike every other call in this file, and deliberately so: a note has to belong to
-/// a book, so there is nowhere for the contents to survive. The count in the confirmation the UI
-/// shows first is what makes that an informed choice rather than a surprise.
+/// A note has to belong to a book, so the notes cannot stay where they were; the trash is where
+/// they survive, history included, until it is emptied. The count in the confirmation the UI shows
+/// first says how many are about to move. See [`note_queries::delete_book`].
 #[tauri::command]
 pub fn notes_delete_book(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -319,6 +388,27 @@ pub fn notes_backlinks(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     note_queries::backlinks(&conn, &workspace_id, &title, &exclude_id, SEARCH_LIMIT)
         .map_err(|e| e.to_string())
+}
+
+// ---------- import ----------
+
+/// Reads a Markdown file the user just picked in a dialog, for "Import Markdown".
+///
+/// Narrow on purpose, like `diagrams_read_import`: one file, a size cap, UTF-8 or nothing — a
+/// general "read any file" command would be a much larger capability to have added for this.
+#[tauri::command]
+pub fn notes_read_import(path: String) -> Result<String, String> {
+    let meta = std::fs::metadata(&path).map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path} is not a file"));
+    }
+    if meta.len() > MAX_IMPORT_BYTES {
+        return Err(format!(
+            "{path} is {} MB — too large for a note",
+            meta.len() / (1024 * 1024)
+        ));
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
 }
 
 // ---------- writing with AI ----------

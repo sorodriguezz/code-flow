@@ -31,6 +31,11 @@ pub struct Project {
     pub gitlab_host: Option<String>,
     pub sort_order: i64,
     pub created_at: String,
+    /// Bitbucket Cloud's coordinates: the workspace and the repository slug. No host column — there
+    /// is only bitbucket.org. Absent from `NewProject` on purpose: a project is linked to Bitbucket
+    /// after it exists (auto-link, a pasted link, the connect modal), never at creation.
+    pub bitbucket_workspace: Option<String>,
+    pub bitbucket_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +407,10 @@ pub struct AgentChain {
     /// Step runs started, ever. Bounded by `queries::MAX_CHAIN_DISPATCHES` — `step_count` stopped
     /// being the bound once a step could send the plan backwards.
     pub dispatches: i64,
+    /// When a chain paused on its engine (quota, sign-in, missing CLI) resumes by itself, in
+    /// seconds since the epoch — `0` when it waits for the user. Armed only by the user, cleared by
+    /// every transition and by a restart. See `queries::set_chain_resume_at`.
+    pub resume_at: i64,
     pub created_at: String,
     pub updated_at: String,
     /// `chain` for one a user authored step by step, `story` for one the story realizer built out
@@ -1474,6 +1483,10 @@ pub struct Service {
     /// by the editor — defaulted so a row sent from the form without it still deserializes.
     #[serde(default = "empty_json_array")]
     pub detected_ports: String,
+    /// JSON array of the env files loaded at every start, relative to the working folder, in order.
+    /// See `services::envfile`. Defaulted for the same reason as `detected_ports`.
+    #[serde(default = "empty_json_array")]
+    pub env_files: String,
 }
 
 fn empty_json_array() -> String {
@@ -1629,10 +1642,9 @@ pub struct ChatMessageRow {
     /// reopened turn has to read identically to a live one. Parsing it into a typed array here
     /// would mean re-implementing that filter in Rust and keeping the two in step forever.
     ///
-    /// `None` means *either* "this message has no trace" *or* "you asked for the list without
-    /// traces" — see [`super::chat_queries::list_messages`]. The distinction never matters to a
-    /// reader, because the only consumer of a trace re-fetches the conversation with `with_trace`
-    /// on before it can show one.
+    /// Read without traces ([`super::chat_queries::list_messages`] with `with_trace` off), this is
+    /// `Some("")` for a message that has one — present, not sent; fetched by id through
+    /// `queries::get_turn_trace` when its disclosure is opened — and `None` for one that has none.
     pub trace: Option<String>,
     /// Paths, relative to the conversation's working directory, of the files **this turn** left
     /// behind — a JSON array of strings, or `None` for the overwhelming majority of messages that

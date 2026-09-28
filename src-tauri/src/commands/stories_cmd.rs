@@ -221,7 +221,10 @@ pub async fn ado_publish_wiki_page(
     content: String,
 ) -> Result<azure::AdoWikiPageRef, String> {
     let pat = pat_for_org(&org)?;
-    azure::put_wiki_page(&org, &project, &wiki, &path, &content, &pat).await
+    // Nothing here holds a version of the page, so the write is the explicit "over whatever is
+    // there" — the same as before a document could remember one. Documents publish through
+    // `publish_doc_page`, which does.
+    azure::put_wiki_page(&org, &project, &wiki, &path, &content, &pat, azure::WikiWrite::Overwrite).await
 }
 
 // ---------- the board target ----------
@@ -1246,9 +1249,40 @@ pub async fn import_wiki_page(
         .map_err(|e| e.to_string())?;
     queries::set_doc_page_target(&conn, &page.id, &org, &project, &wiki_id, &wiki_name, &detail.path)
         .map_err(|e| e.to_string())?;
+    // The version this copy is of. It is what makes publishing back safe: the write names it, and a
+    // page somebody edited in the meantime refuses instead of losing their edit.
+    queries::set_doc_page_etag(&conn, &page.id, &detail.etag).map_err(|e| e.to_string())?;
     queries::get_doc_page(&conn, &page.id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "El documento importado desapareció al crearlo".to_string())
+}
+
+/// Replaces a document's body with the page as the wiki holds it now — the "reload" answer to a
+/// publish conflict. Local edits are discarded; the user chose that over overwriting the wiki.
+#[tauri::command]
+pub async fn reload_doc_page_from_wiki(
+    db: State<'_, Db>,
+    id: String,
+) -> Result<crate::db::models::DocPage, String> {
+    let page = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_doc_page(&conn, &id).map_err(|e| e.to_string())?
+    }
+    .ok_or_else(|| "Ese documento ya no existe".to_string())?;
+    if page.ado_org.trim().is_empty() || page.wiki_id.trim().is_empty() || page.page_path.trim().is_empty() {
+        return Err("Este documento no apunta a ninguna página del wiki".to_string());
+    }
+    let pat = pat_for_org(&page.ado_org)?;
+    let detail =
+        azure::get_wiki_page_detail(&page.ado_org, &page.ado_project, &page.wiki_id, &page.page_path, &pat)
+            .await?;
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_doc_page_content(&conn, &id, &detail.content, "ready", "").map_err(|e| e.to_string())?;
+    queries::set_doc_page_etag(&conn, &id, &detail.etag).map_err(|e| e.to_string())?;
+    queries::get_doc_page(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Ese documento ya no existe".to_string())
 }
 
 #[tauri::command]
@@ -1286,16 +1320,27 @@ pub fn delete_doc_page(db: State<Db>, id: String) -> Result<(), String> {
 }
 
 /// Publishes a document to its wiki and records that it landed.
+///
+/// **Only over the version it was read from**, unless `overwrite` says otherwise. A document
+/// imported from the wiki (or published before) remembers that page's version tag, and the write
+/// names it; one that never saw the page may only create it. Either way a page somebody else changed
+/// comes back as an `azure::WIKI_CONFLICT_MARKER` error, and the user picks: overwrite (this call
+/// again with `overwrite`), reload ([`reload_doc_page_from_wiki`]) or keep editing. The tag used to
+/// be read immediately before the write, which made the conditional PUT vouch for a version nobody
+/// here had seen — last writer wins, with a comment saying otherwise.
 #[tauri::command]
 pub async fn publish_doc_page(
     db: State<'_, Db>,
     id: String,
+    overwrite: Option<bool>,
 ) -> Result<azure::AdoWikiPageRef, String> {
-    let page = {
+    let (page, etag) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::get_doc_page(&conn, &id).map_err(|e| e.to_string())?
-    }
-    .ok_or_else(|| "Ese documento ya no existe".to_string())?;
+        let page = queries::get_doc_page(&conn, &id).map_err(|e| e.to_string())?;
+        let etag = queries::doc_page_etag(&conn, &id).map_err(|e| e.to_string())?;
+        (page, etag)
+    };
+    let page = page.ok_or_else(|| "Ese documento ya no existe".to_string())?;
 
     if page.ado_org.trim().is_empty()
         || page.ado_project.trim().is_empty()
@@ -1309,6 +1354,11 @@ pub async fn publish_doc_page(
     }
 
     let pat = pat_for_org(&page.ado_org)?;
+    let mode = match (overwrite.unwrap_or(false), etag.trim().is_empty()) {
+        (true, _) => azure::WikiWrite::Overwrite,
+        (false, false) => azure::WikiWrite::IfMatch(etag.trim()),
+        (false, true) => azure::WikiWrite::CreateOnly,
+    };
     let published = azure::put_wiki_page(
         &page.ado_org,
         &page.ado_project,
@@ -1316,11 +1366,13 @@ pub async fn publish_doc_page(
         &page.page_path,
         &page.content,
         &pat,
+        mode,
     )
     .await?;
 
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::mark_doc_page_published(&conn, &id, &published.url).map_err(|e| e.to_string())?;
+    queries::set_doc_page_etag(&conn, &id, &published.etag).map_err(|e| e.to_string())?;
     Ok(published)
 }
 
@@ -2768,6 +2820,122 @@ pub fn write_story_feature_file(
 /// What a publish did, story by story. The whole list comes back rather than only the successes so
 /// the view can re-render from one answer — including the rows that failed, which now carry their
 /// own reason.
+/// A published story and everything needed to reach its work item: the draft, the batch that says
+/// which board it went to, and the credential for that board.
+async fn published_story_target(
+    db: &State<'_, Db>,
+    story_id: &str,
+) -> Result<(StoryDraft, crate::db::models::StoryBatch, BoardProvider, BoardAuth), String> {
+    let (batch, story) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let batch_id: Option<String> = conn
+            .query_row("SELECT batch_id FROM story_drafts WHERE id = ?1", [story_id], |row| row.get(0))
+            .ok();
+        let detail = match batch_id {
+            Some(id) => queries::get_story_batch(&conn, &id).map_err(|e| e.to_string())?,
+            None => None,
+        }
+        .ok_or_else(|| "Esa historia ya no existe".to_string())?;
+        let story = detail
+            .stories
+            .into_iter()
+            .find(|s| s.id == story_id)
+            .ok_or_else(|| "Esa historia ya no existe".to_string())?;
+        (detail.batch, story)
+    };
+    if story.work_item_id <= 0 && story.work_item_key.trim().is_empty() {
+        return Err("Esta historia todavía no está publicada".to_string());
+    }
+    let provider = BoardProvider::parse(&batch.board_provider);
+    let auth = board_auth(db, provider, &batch.ado_org)?;
+    Ok((story, batch, provider, auth))
+}
+
+/// What "Actualizar en el tablero" would change on a published story's work item, against the item
+/// as the board holds it **now** — so an edit a colleague made there since shows up as something
+/// the update would overwrite, before anything is sent. Empty when the board already says the same.
+#[tauri::command]
+pub async fn preview_story_board_update(
+    db: State<'_, Db>,
+    story_id: String,
+) -> Result<Vec<boards::FieldChange>, String> {
+    let (story, batch, provider, auth) = published_story_target(&db, &story_id).await?;
+    let current =
+        boards::get_work_item(provider, &batch.ado_org, story.work_item_id, &story.work_item_key, &auth).await?;
+    let criteria: Vec<String> = serde_json::from_str(&story.acceptance_criteria).unwrap_or_default();
+    let content = boards::StoryContent {
+        title: &story.title,
+        narrative: &story.narrative,
+        description: &story.description,
+        acceptance_criteria: &criteria,
+        story_points: story.story_points,
+    };
+    Ok(boards::story_changes(&current, &content))
+}
+
+/// Writes a published story's current draft over its work item — title, narrative and description,
+/// acceptance criteria, estimate — on Azure Boards, Jira or monday alike.
+///
+/// Editing a published story used to change only the draft here, with a line saying so; the board
+/// kept the version that was published. This is the other half, and it is only ever run after the
+/// user has seen [`preview_story_board_update`]'s list. Priority, tags and the area/iteration are
+/// left as they are on the board: they are the team's to move once the item exists, and this is an
+/// update of what the story *says*, not of where it is filed.
+#[tauri::command]
+pub async fn update_story_on_board(db: State<'_, Db>, story_id: String) -> Result<(), String> {
+    let (story, batch, provider, auth) = published_story_target(&db, &story_id).await?;
+    if story.title.trim().is_empty() {
+        return Err("La historia no tiene título".to_string());
+    }
+    // Read first, for two facts only the item knows: which field its estimate lives in, and — on
+    // Azure — whether its type has an Acceptance Criteria field at all. A type without one (a
+    // Basic-process "Issue") got its criteria inside the description when it was created, and a
+    // patch naming the missing field would be refused outright.
+    let current =
+        boards::get_work_item(provider, &batch.ado_org, story.work_item_id, &story.work_item_key, &auth).await?;
+    let criteria_own_field = match provider {
+        BoardProvider::Azure => {
+            let project = if current.container_id.trim().is_empty() {
+                current.team_project.clone()
+            } else {
+                current.container_id.clone()
+            };
+            azure::work_item_type_fields(&batch.ado_org, &project, &current.work_item_type, &auth.secret)
+                .await
+                .map(|fields| fields.has("Microsoft.VSTS.Common.AcceptanceCriteria"))
+                // A probe that fails is not a reason to refuse the update: the field is there on
+                // every process template a story type comes from, and a wrong guess fails loudly.
+                .unwrap_or(true)
+        }
+        BoardProvider::Jira | BoardProvider::Monday => false,
+    };
+    let criteria: Vec<String> = serde_json::from_str(&story.acceptance_criteria).unwrap_or_default();
+    let content = boards::StoryContent {
+        title: &story.title,
+        narrative: &story.narrative,
+        description: &story.description,
+        acceptance_criteria: &criteria,
+        story_points: story.story_points,
+    };
+    let edit = boards::story_edit(provider, &content, criteria_own_field, &current.effort_field);
+    let container = if current.container_id.trim().is_empty() {
+        batch.ado_project.clone()
+    } else {
+        current.container_id.clone()
+    };
+    boards::update_work_item(
+        provider,
+        &batch.ado_org,
+        &container,
+        story.work_item_id,
+        &story.work_item_key,
+        &edit,
+        &auth,
+    )
+    .await?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StoryPublishOutcome {
     pub stories: Vec<StoryDraft>,

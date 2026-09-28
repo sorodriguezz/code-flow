@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * An analysis reads the unstaged and untracked changes and nothing else, so with none there is
- * nothing to start. It used to start anyway: the engine answered about an empty diff and the run was
- * filed as a failure — a red row for having clicked a button that should not have been on.
+ * An analysis reads everything not yet committed — staged, unstaged and untracked (HEAD → working
+ * tree) — so with none of it there is nothing to start. It used to start anyway: the engine answered
+ * about an empty diff and the run was filed as a failure — a red row for having clicked a button
+ * that should not have been on. And it used to read unstaged + untracked only, which turned every
+ * button off right after "stage all": the moment an analysis before committing is for.
  */
 
 let analyzeReply: () => Promise<unknown> = async () => "📈 CALIDAD: Fiabilidad=A";
@@ -21,13 +23,15 @@ const { useWorkspaceStore } = await import("../state/workspaceStore");
 
 const file = (path: string) => ({ path, status: "M" }) as never;
 
-function openRepo(changes: { staged?: number; unstaged?: number; untracked?: number }) {
+function openRepo(changes: { staged?: number; unstaged?: number; untracked?: number; both?: number }) {
   const many = (n = 0, prefix: string) => Array.from({ length: n }, (_, i) => file(`${prefix}${i}.ts`));
+  // `both`: files staged and then edited again — listed as staged *and* unstaged, one file.
+  const both = many(changes.both, "b");
   useRepoStore.setState({
     repoPath: "/work/web/",
     status: {
-      staged: many(changes.staged, "s"),
-      unstaged: many(changes.unstaged, "u"),
+      staged: [...many(changes.staged, "s"), ...both],
+      unstaged: [...many(changes.unstaged, "u"), ...both],
       untracked: many(changes.untracked, "n"),
       conflicted: [],
       current_branch: "main",
@@ -54,10 +58,17 @@ beforeEach(() => {
 });
 
 describe("changesToAnalyze", () => {
-  it("counts what the analysis reads — staged changes are not in its diff", () => {
+  it("counts what the analysis reads — staged changes included", () => {
     openRepo({ staged: 3 });
-    expect(changesToAnalyze("p-web")).toBe(0);
+    expect(changesToAnalyze("p-web")).toBe(3);
     openRepo({ staged: 3, unstaged: 1, untracked: 2 });
+    expect(changesToAnalyze("p-web")).toBe(6);
+    openRepo({});
+    expect(changesToAnalyze("p-web")).toBe(0);
+  });
+
+  it("counts a file staged and edited again once", () => {
+    openRepo({ both: 2, untracked: 1 });
     expect(changesToAnalyze("p-web")).toBe(3);
   });
 
@@ -69,7 +80,7 @@ describe("changesToAnalyze", () => {
 
 describe("startAnalysis", () => {
   it("starts nothing when there is nothing to analyze, and says why", () => {
-    openRepo({ staged: 2 });
+    openRepo({});
     expect(startAnalysis("p-web")).toBeNull();
     expect(useJobsStore.getState().byProject["p-web"] ?? []).toHaveLength(0);
     expect(useToastStore.getState().toasts.map((t) => t.type)).toEqual(["info"]);
@@ -79,6 +90,12 @@ describe("startAnalysis", () => {
     openRepo({ unstaged: 1 });
     const id = startAnalysis("p-web");
     expect(id).not.toBeNull();
+    await vi.waitFor(() => expect(useJobsStore.getState().byProject["p-web"]?.[0]?.status).toBe("done"));
+  });
+
+  it("starts right after staging everything — the moment before a commit", async () => {
+    openRepo({ staged: 2 });
+    expect(startAnalysis("p-web")).not.toBeNull();
     await vi.waitFor(() => expect(useJobsStore.getState().byProject["p-web"]?.[0]?.status).toBe("done"));
   });
 

@@ -11,6 +11,8 @@ import type {
   DbExecContext,
   DbExecuteResult,
   DbGroupRow,
+  DbLane,
+  DbTransactionState,
   DbNode,
   DbNodeRef,
   DbQueryHistoryEntry,
@@ -191,16 +193,27 @@ export const dbChildren = (connectionId: string, node: DbNodeRef) =>
 export const dbSchemaCatalog = (connectionId: string) =>
   invoke<DbSchemaGroup[]>("db_schema_catalog", { connectionId });
 
-/** `runId` is what `dbCancel` stops; generate a fresh one per run. */
+/** `runId` is what `dbCancel` stops; generate a fresh one per run. `lane` is `"console"` for what a
+ * console sends — its own session, where a transaction can stay open — and the app's own otherwise. */
 export const dbExecute = (
   connectionId: string,
   sql: string,
   ctx: DbExecContext,
   runId: string,
-) => invoke<DbExecuteResult>("db_execute", { connectionId, sql, ctx, runId });
+  lane: DbLane = "work",
+) => invoke<DbExecuteResult>("db_execute", { connectionId, sql, ctx, runId, lane });
 
-export const dbExplain = (connectionId: string, sql: string, ctx: DbExecContext, runId: string) =>
-  invoke<string>("db_explain", { connectionId, sql, ctx, runId });
+export const dbExplain = (
+  connectionId: string,
+  sql: string,
+  ctx: DbExecContext,
+  runId: string,
+  lane: DbLane = "work",
+) => invoke<string>("db_explain", { connectionId, sql, ctx, runId, lane });
+
+/** Whether a console's session is inside a transaction right now. */
+export const dbTransactionState = (connectionId: string, database: string | null) =>
+  invoke<DbTransactionState>("db_transaction_state", { connectionId, database });
 
 export const dbTableData = (connectionId: string, request: DbTableDataRequest, runId: string) =>
   invoke<DbStatementResult>("db_table_data", { connectionId, request, runId });
@@ -239,6 +252,69 @@ export const dbSchemaObjects = (connectionId: string, node: DbNodeRef, runId: st
   invoke<DbObjectInfo[]>("db_schema_objects", { connectionId, node, runId });
 
 export const dbCancel = (runId: string) => invoke<void>("db_cancel", { runId });
+
+/** Where an "export everything" reads from: a table under the grid's filter and sort, or one
+ * statement from a console (run again on the console's own session — so it has to be a read). */
+export type DbExportSource =
+  | { kind: "table"; request: DbTableDataRequest }
+  | { kind: "statement"; sql: string; ctx: DbExecContext };
+
+/**
+ * Writes every row — not the page on screen — to a file the user picks, straight from the driver.
+ * Progress arrives as `db:export-progress` events (`{ run_id, rows }`); `dbCancel(runId)` stops it
+ * and removes the partial file. `null` when the save dialog was dismissed.
+ */
+export const dbExportRows = (
+  connectionId: string,
+  source: DbExportSource,
+  format: "csv" | "json",
+  defaultName: string,
+  runId: string,
+) =>
+  invoke<{ path: string; rows: number } | null>("db_export_rows", {
+    connectionId,
+    source,
+    format,
+    defaultName,
+    runId,
+  });
+
+/** A CSV file's first rows, separator and header guess — for the import dialog. */
+export interface DbCsvPreview {
+  delimiter: string;
+  has_header: boolean;
+  first: (string | null)[];
+  rows: (string | null)[][];
+  columns: number;
+}
+
+export const dbCsvInspect = (path: string, delimiter: string | null, tableColumns: string[]) =>
+  invoke<DbCsvPreview>("db_csv_inspect", { path, delimiter, tableColumns });
+
+export interface DbImportRequest {
+  node: DbNodeRef;
+  path: string;
+  delimiter: string;
+  has_header: boolean;
+  /** Per CSV column, the table column it goes into; `null` leaves it out. */
+  mapping: (string | null)[];
+  /** The target columns' types, in `mapping`'s order. */
+  types: string[];
+  skip_errors: boolean;
+}
+
+export interface DbImportOutcome {
+  inserted: number;
+  failures: { line: number; error: string }[];
+  committed: boolean;
+  read: number;
+  failures_truncated: boolean;
+}
+
+/** Imports a CSV file into a table in one transaction. Progress arrives as `db:import-progress`
+ * events; `dbCancel(runId)` stops it and rolls everything back. */
+export const dbImportCsv = (connectionId: string, request: DbImportRequest, runId: string) =>
+  invoke<DbImportOutcome>("db_import_csv", { connectionId, request, runId });
 
 /**
  * Asks the console's AI assistant about the connected database.

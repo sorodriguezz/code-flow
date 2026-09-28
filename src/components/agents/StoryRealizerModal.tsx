@@ -9,6 +9,7 @@ import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { loadAdoConnections } from "../../lib/adoConnections";
 import { loadJiraConnections } from "../../lib/jiraConnections";
+import { useEnforcesReadOnly } from "../../lib/readOnlyEngines";
 import { boardGetWorkItem, boardParseItemRef, openExternalUrl } from "../../lib/tauri/commands";
 import { htmlToText, splitCriteriaHtml } from "../../lib/workItemHtml";
 import { isRunnableAgent, useAgentsStore } from "../../state/agentsStore";
@@ -100,6 +101,11 @@ export function StoryRealizerModal({
     return first ? [first] : [];
   });
   const [analystId, setAnalystId] = useState("");
+  // The analysis pass runs read-only on the backend's word (`claude_cmd::send_chat_message`), but
+  // whether that is enforced or only asked depends on the analyst's engine — so the promise under
+  // the picker names the engine that cannot keep it, rather than making it on its behalf.
+  const analystProvider = runnable.find((agent) => agent.id === analystId)?.provider ?? "";
+  const analystEnforced = useEnforcesReadOnly(analystProvider);
   const [implementerId, setImplementerId] = useState("");
   const [notes, setNotes] = useState("");
   const [agentProjectId, setAgentProjectId] = useState(() =>
@@ -312,7 +318,16 @@ export function StoryRealizerModal({
         </Field>
 
         <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.storyAnalyst")} hint={t("agents.storyAnalystHint")}>
+          <Field
+            label={t("agents.storyAnalyst")}
+            hint={
+              analystProvider && analystEnforced === false
+                ? `${t("agents.storyAnalystHint")} ${t("agents.storyAnalystNotEnforced", {
+                    provider: providerDisplayLabel(analystProvider, t),
+                  })}`
+                : t("agents.storyAnalystHint")
+            }
+          >
             <Select
               size="field"
               value={analystId}

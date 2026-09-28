@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { useDialog } from "../../lib/useFocusTrap";
 import { GitBranchPlus, Loader2, X } from "lucide-react";
 import { defaultCloneDir, findDuplicateProjects, gitClone } from "../../lib/tauri/commands";
 import type { DuplicateProject } from "../../lib/tauri/commands";
@@ -6,6 +7,7 @@ import { onGitProgress } from "../../lib/tauri/events";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { describeGitError } from "../../lib/gitErrors";
 import type { Project } from "../../types/domain";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import { buttonClass } from "../common/Button";
@@ -113,26 +115,38 @@ export function CloneRepoModal({
       onCloned?.(project);
       onClose();
     } catch (e) {
-      pushErrorToast(String(e));
+      // "No such repository", "the remote refused your credentials", "no network" — the clone's
+      // failures are the remote ones, and `describeGitError` turns each into what to do about it.
+      pushErrorToast(describeGitError(e, t));
     } finally {
       setCloning(false);
       void unlistenProgress();
     }
   };
 
+  // A dialog's keyboard contract: Tab stays inside, and Escape closes it while it is the top
+  // layer, and not while cloning. It had neither — Tab walked into the app behind the backdrop.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, true, cloning ? null : onClose);
+
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={cloning ? undefined : onClose}>
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
         className="w-[460px] rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="flex items-center gap-1.5 text-[15px] font-semibold">
+          <h3 id={titleId} className="flex items-center gap-1.5 text-[15px] font-semibold">
             <GitBranchPlus size={14} />
             {t("clone.title")}
           </h3>
           {!cloning && (
-            <button onClick={onClose} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
+            <button onClick={onClose} aria-label={t("common.close")} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
               <X size={15} />
             </button>
           )}

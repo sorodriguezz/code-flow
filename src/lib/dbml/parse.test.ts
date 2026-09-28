@@ -114,3 +114,57 @@ describe("a document that does not parse", () => {
     expect(schema.tables.map((table) => table.name)).toContain("users");
   });
 });
+
+describe("Records, while the document does not parse", () => {
+  /* The forgiving reader answers every keystroke that leaves the document broken, and it had never
+     heard of `Records`: a row's text was read as DBML. Each case below has a trailing table that the
+     real parser rejects, so the regex reader is the one drawing the canvas. */
+  const BROKEN_TAIL = "\n\nTable drafts {\n  id int [pk]\n  title varchar [\n}\n";
+
+  it("does not invent a table out of a row's text", () => {
+    const schema = parseDbml(
+      "Table users {\n  id int [pk]\n  site varchar\n}\n\nRecords users(id, site) {\n  1, 'table x {'\n  2, 'http://example.test/{a}'\n}" +
+        BROKEN_TAIL,
+    );
+    expect(schema.error).not.toBeNull();
+    expect(schema.tables.map((table) => table.id)).toEqual(["users", "drafts"]);
+    expect(schema.tables[0].fields.map((field) => field.name)).toEqual(["id", "site"]);
+  });
+
+  it("keeps a nested records block out of the table's columns", () => {
+    const schema = parseDbml(
+      "Table users {\n  id int [pk]\n  name varchar\n\n  records {\n    1, 'Ann'\n    2, 'a } b'\n  }\n}" +
+        BROKEN_TAIL,
+    );
+    expect(schema.error).not.toBeNull();
+    expect(schema.tables.map((table) => table.id)).toEqual(["users", "drafts"]);
+    expect(schema.tables[0].fields.map((field) => field.name)).toEqual(["id", "name"]);
+  });
+
+  it("does not read a Records header as a column of an unclosed table above it", () => {
+    const schema = parseDbml(
+      "Table users {\n  id int [pk]\n  name varchar\n\nRecords users(id, name) {\n  1, 'Ann'\n}\n\nTable posts {\n  id int [pk]\n  user_id int [ref: > users.id]\n}\n",
+    );
+    expect(schema.error).not.toBeNull();
+    const columns = schema.tables.flatMap((table) => table.fields.map((field) => field.name));
+    expect(columns).not.toContain("Records");
+    expect(schema.tables.map((table) => table.id)).toContain("posts");
+  });
+
+  it("treats a // inside a quoted string as text, not as a comment", () => {
+    const schema = parseDbml(
+      "Table links {\n  id int [pk]\n  url varchar [default: 'https://example.test']\n  kind varchar\n}" + BROKEN_TAIL,
+    );
+    const links = schema.tables[0];
+    expect(links.fields.find((field) => field.name === "url")?.default).toBe("'https://example.test'");
+    expect(links.fields.map((field) => field.name)).toEqual(["id", "url", "kind"]);
+  });
+
+  it("is still accepted whole by the real parser", () => {
+    const schema = parseDbml(
+      "Table users {\n  id int [pk]\n  name varchar\n}\n\nRecords users(id, name) {\n  1, 'Ann'\n}\n",
+    );
+    expect(schema.error).toBeNull();
+    expect(schema.tables).toHaveLength(1);
+  });
+});

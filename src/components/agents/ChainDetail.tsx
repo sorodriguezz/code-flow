@@ -7,6 +7,7 @@ import {
   GitCompare,
   Link2,
   Pause,
+  PauseCircle,
   Play,
   RotateCcw,
   SkipForward,
@@ -23,6 +24,7 @@ import { chainStatusOf, reasonText } from "./chainStatus";
 import { StoryPlanGate } from "./StoryPlanGate";
 import { AiRunLog } from "../ai/AiRunLog";
 import { buttonClass, iconButtonClass, type ButtonVariant } from "../common/Button";
+import { Checkbox } from "../common/Checkbox";
 import { chipClass, fieldClass, toolbarClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import { useAgentsStore } from "../../state/agentsStore";
@@ -31,10 +33,11 @@ import { useChainStore } from "../../state/chainStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
-import { openExternalUrl } from "../../lib/tauri/commands";
+import { aiClassifyFailure, openExternalUrl, type AiFailure } from "../../lib/tauri/commands";
+import { isEnginePause, resumeInstant } from "../../lib/chainPause";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import type { AgentChainStep, ChainRepo, ChainStepStatus } from "../../types/domain";
+import type { AgentChain, AgentChainStep, ChainRepo, ChainStepStatus } from "../../types/domain";
 
 /**
  * One chain, open: the plan, where it has got to, and the one decision it is waiting on.
@@ -81,6 +84,9 @@ export function ChainDetail({ chainId }: { chainId: string }) {
   const stepTotal = Math.max(steps.length, chain.step_count);
   const { icon: StatusIcon, color, labelKey } = chainStatusOf(chain);
   const reason = reasonText(chain.last_reason, t);
+  /** Parked because its engine could not run — see `EnginePause`, which says why in the provider's
+   * own words and is what this pane shows instead of the one-line reason. */
+  const enginePaused = chain.status === "paused" && isEnginePause(chain.last_reason);
   const store = useChainStore.getState();
   /** Whether the plan is standing still. Re-running anything while a turn is mid-flight would be
    * asking two agents for the same working copy — which is also the only state the backend's own
@@ -140,6 +146,22 @@ export function ChainDetail({ chainId }: { chainId: string }) {
         <span className="shrink-0 text-[12px] tabular-nums text-[var(--cf-text-faint)]">
           {t("agents.stepN", { n: chain.current_step + 1, total: chain.step_count })}
         </span>
+        {/* The one bound a looping plan runs into. Steps say where the plan is; this says how much
+            of its budget the loops and retries have spent — amber once it is three-quarters gone,
+            which is the moment a plan going round in circles is worth a look. */}
+        {chain.dispatches > 0 && (
+          <Tooltip label={t("agents.chainDispatchesHint", { max: MAX_CHAIN_DISPATCHES })}>
+            <span
+              className={`shrink-0 text-[12px] tabular-nums ${
+                chain.dispatches >= MAX_CHAIN_DISPATCHES * 0.75
+                  ? "text-[var(--cf-warning)]"
+                  : "text-[var(--cf-text-faint)]"
+              }`}
+            >
+              {t("agents.chainDispatches", { n: chain.dispatches, max: MAX_CHAIN_DISPATCHES })}
+            </span>
+          </Tooltip>
+        )}
         {/* One repository reads as its name; several read as a count, because the names would not
             fit — they are on the badge's tooltip instead, which is where you go when the question
             is "which working copies can this plan write to". */}
@@ -196,10 +218,14 @@ export function ChainDetail({ chainId }: { chainId: string }) {
         ))}
       </div>
 
-      {reason && (
-        <p className="shrink-0 border-b border-[var(--cf-border)] px-4 py-2 text-[12px] text-[var(--cf-text-muted)]">
-          {reason}
-        </p>
+      {enginePaused ? (
+        <EnginePause chain={chain} steps={steps} />
+      ) : (
+        reason && (
+          <p className="shrink-0 border-b border-[var(--cf-border)] px-4 py-2 text-[12px] text-[var(--cf-text-muted)]">
+            {reason}
+          </p>
+        )
       )}
 
       {/* No `space-y` any more: the gap between two steps is the rail, and a margin on top of it
@@ -236,6 +262,7 @@ export function ChainDetail({ chainId }: { chainId: string }) {
                   isGate={gated && step.id === waiting?.id}
                   showRepo={chain.repo_count > 1}
                   idle={idle}
+                  errorShownAbove={enginePaused && step.status === "pending"}
                 />
                 {next && (
                   <StepRail
@@ -330,7 +357,11 @@ export function ChainDetail({ chainId }: { chainId: string }) {
         )}
         {chain.status === "failed" && (
           <>
-            <Action primary icon={Play} label={t("agents.retryStep")} onClick={() => void store.retry(chainId)} />
+            {/* Not once the plan has spent its whole budget: that bound is the one thing a retry
+                cannot buy back, and a button that answers by failing again is a lie. */}
+            {chain.last_reason !== "chain.dispatchesExhausted" && (
+              <Action primary icon={Play} label={t("agents.retryStep")} onClick={() => void store.retry(chainId)} />
+            )}
             <Action icon={SkipForward} label={t("agents.skipStep")} onClick={() => void store.skip(chainId)} />
           </>
         )}
@@ -375,6 +406,83 @@ const SEG_CLASS: Record<ChainStepStatus, string> = {
 
 /** Mirrors `queries::MAX_STEP_ATTEMPTS`. Only ever displayed — the backend is what counts. */
 const MAX_STEP_ATTEMPTS = 3;
+
+/** Mirrors `queries::MAX_CHAIN_DISPATCHES`. Only ever displayed, like the one above. */
+const MAX_CHAIN_DISPATCHES = 128;
+
+/** Keeps a clock reading short when it is today: "21:00" rather than a date nobody needs. */
+function formatResume(at: number): string {
+  const when = new Date(at);
+  const today = new Date();
+  const sameDay = when.toDateString() === today.toDateString();
+  const options: Intl.DateTimeFormatOptions = sameDay
+    ? { hour: "2-digit", minute: "2-digit" }
+    : { weekday: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
+  return when.toLocaleString(undefined, options);
+}
+
+/**
+ * Why a plan parked on its engine — out of quota, signed out, no CLI — in the provider's own words,
+ * and when it can carry on.
+ *
+ * The words are the provider's, shown as they came (through `aiClassifyFailure`, which only takes the
+ * app's marker off): "resets 12am (America/Santiago)" is the most useful sentence in the whole
+ * failure, and a paraphrase would lose the part that matters. When that reset is a time this app can
+ * read exactly, it also offers to carry on by itself then — opt-in, only while the app stays open,
+ * and cancelled by any other move (see `setAutoResume`).
+ */
+function EnginePause({ chain, steps }: { chain: AgentChain; steps: AgentChainStep[] }) {
+  const t = useT();
+  // The step that bounced: the pause hands it back to `pending` with the error still on it.
+  const error =
+    steps.find((step) => step.status === "pending" && step.last_error !== "")?.last_error ??
+    steps.find((step) => step.step_index === chain.current_step)?.last_error ??
+    "";
+  const [failure, setFailure] = useState<AiFailure | null>(null);
+  useEffect(() => {
+    setFailure(null);
+    if (!error) return;
+    let alive = true;
+    void aiClassifyFailure(error)
+      .then((classified) => alive && setFailure(classified))
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [error]);
+
+  const armed = chain.resume_at > 0;
+  const offered = failure ? resumeInstant(failure, Date.now()) : null;
+  const at = armed ? chain.resume_at * 1000 : offered;
+
+  return (
+    <div className="shrink-0 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_8%,transparent)] px-4 py-2.5 text-[12px] leading-relaxed">
+      <p className="flex items-center gap-1.5 font-medium text-[var(--cf-warning)]">
+        <PauseCircle size={13} className="shrink-0" />
+        {reasonText(chain.last_reason, t)}
+      </p>
+      {failure?.message && (
+        <p className="mt-1 max-h-24 select-text overflow-auto whitespace-pre-wrap break-words text-[var(--cf-text-muted)]">
+          {failure.message}
+        </p>
+      )}
+      {failure?.resets && (
+        <p className="mt-0.5 text-[var(--cf-text-muted)]">{t("agents.chainResets", { when: failure.resets })}</p>
+      )}
+      {at !== null && (
+        <Tooltip label={t("agents.chainAutoResumeHint")}>
+          <label className="mt-1.5 flex w-fit cursor-pointer items-center gap-1.5 text-[var(--cf-text)]">
+            <Checkbox
+              checked={armed}
+              onChange={() => void useChainStore.getState().setAutoResume(chain.id, armed ? null : at)}
+            />
+            {t("agents.chainAutoResume", { time: formatResume(at) })}
+          </label>
+        </Tooltip>
+      )}
+    </div>
+  );
+}
 
 /**
  * The segment between two steps: the thing the feature is named after, drawn.
@@ -489,9 +597,13 @@ function StepRow({
   isGate,
   showRepo,
   idle,
+  errorShownAbove = false,
 }: {
   step: AgentChainStep;
   isGate: boolean;
+  /** The step's error is the one the engine-pause banner is already showing, cleanly — repeating it
+   * here would be the same words again, in red and with the app's marker still on them. */
+  errorShownAbove?: boolean;
   /** Whether the plan is standing still. Re-running from a step while another one is mid-turn would
    * be asking two agents for the same working copy. */
   idle: boolean;
@@ -660,7 +772,7 @@ function StepRow({
         </p>
       )}
 
-      {step.last_error && (
+      {step.last_error && !errorShownAbove && (
         <p className="mt-2 flex items-start gap-1.5 whitespace-pre-wrap break-words text-[12px] text-[var(--cf-danger)]">
           <TriangleAlert size={13} className="mt-[2px] shrink-0" />
           <span className="min-w-0">{reasonText(step.last_error, t)}</span>

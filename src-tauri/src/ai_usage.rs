@@ -36,6 +36,19 @@ pub fn attach(app: AppHandle) {
     let _ = APP.set(app);
 }
 
+/// One `app_settings` row, read through the same handle — for the few settings the run plumbing in
+/// `ai.rs` has to consult for itself (the watchdog's limit, the language its message is written in)
+/// without an argument threaded through every operation to carry them.
+///
+/// `None` before `setup` has attached the handle, which is every unit test: callers fall back to
+/// their defaults, exactly as for a setting nobody has written.
+pub(crate) fn setting(key: &str) -> Option<String> {
+    let app = APP.get()?;
+    let db = app.try_state::<Db>()?;
+    let conn = db.0.lock().ok()?;
+    queries::get_setting(&conn, key).ok().flatten()
+}
+
 /// Files one finished run's usage. Never fails and never blocks the caller.
 ///
 /// `task` is the feature that spent it — one of [`crate::ai::task`]'s constants.
@@ -160,5 +173,68 @@ pub fn bucket_minutes_for(window_hours: i64) -> i64 {
         h if h <= 48 => 60,
         h if h <= 24 * 8 => 60 * 6,
         _ => 60 * 24,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::AiUsage;
+    use rusqlite::Connection;
+
+    fn install() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn
+    }
+
+    fn usage(input: i64, output: i64, cost: Option<f64>) -> AiUsage {
+        AiUsage { input_tokens: input, output_tokens: output, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: cost }
+    }
+
+    /// Two to three dozen columns whatever the window, and never a narrower column for a wider one.
+    #[test]
+    fn columns_widen_with_the_window() {
+        let mut previous = 0;
+        for hours in [1, 5, 6, 7, 24, 48, 49, 24 * 8, 24 * 8 + 1, 24 * 30, 24 * 90] {
+            let minutes = bucket_minutes_for(hours);
+            assert!(minutes >= previous, "{hours}h got {minutes} min after {previous}");
+            let columns = hours * 60 / minutes;
+            assert!(columns <= 96, "{hours}h would draw {columns} columns");
+            previous = minutes;
+        }
+    }
+
+    /// A run that says nothing is not a run that cost nothing: an empty report adds no row, so the
+    /// screen does not count it as one.
+    #[test]
+    fn an_empty_report_is_not_a_row() {
+        let conn = install();
+        queries::record_ai_usage(&conn, "claude", "m", crate::ai::task::CHAT, None, &usage(0, 0, None)).unwrap();
+        let stats = queries::ai_usage_stats(&conn, 24, None).unwrap();
+        assert!(stats.providers.is_empty(), "{:?}", stats.providers);
+    }
+
+    /// What `ai::record_failed_usage` files for a failed or stopped run lands in the same totals as
+    /// an answered one — which is the point: the meter's job is what was spent, and a run that
+    /// failed after twelve tool calls spent it all.
+    #[test]
+    fn a_failed_runs_report_counts_like_any_other() {
+        let conn = install();
+        queries::record_ai_usage(&conn, "claude", "m", crate::ai::task::CHAT, None, &usage(100, 20, Some(0.5))).unwrap();
+        queries::record_ai_usage(&conn, "claude", "m", crate::ai::task::REVIEW_PR, None, &usage(300, 40, Some(1.5))).unwrap();
+        let stats = queries::ai_usage_stats(&conn, 24, None).unwrap();
+        let claude = stats.providers.iter().find(|p| p.provider == "claude").expect("claude row");
+        assert_eq!(claude.runs, 2);
+        assert_eq!(claude.input_tokens, 400);
+        assert_eq!(claude.output_tokens, 60);
+        assert!((claude.cost_usd - 2.0).abs() < 1e-9);
+        assert_eq!(stats.tasks.len(), 2, "each feature keeps its own line");
+    }
+
+    /// Before `setup` attaches the handle there is nothing to read, and that is "unset", not a panic.
+    #[test]
+    fn settings_read_as_unset_without_an_app() {
+        assert_eq!(setting(crate::ai_runs::IDLE_TIMEOUT_KEY), None);
     }
 }

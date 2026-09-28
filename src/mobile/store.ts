@@ -18,7 +18,7 @@
  */
 
 import { create } from "zustand";
-import { NotAllowed, rpc, Unpaired } from "./transport";
+import { NotAllowed, rpc, TimedOut, Unpaired } from "./transport";
 import { t } from "./i18n";
 import { toastError, toastSuccess } from "./toast";
 import { resetDepth } from "./nav";
@@ -44,6 +44,9 @@ async function read<T>(action: () => Promise<T>): Promise<Read<T>> {
     return { ok: true, value: await action() };
   } catch (e) {
     if (e instanceof Unpaired) return { ok: false, unpaired: true, error: "unpaired" };
+    // The sentence, not the wire token: "timed_out" is a value, and this string is drawn under a
+    // retry button for a person to read.
+    if (e instanceof TimedOut) return { ok: false, unpaired: false, error: t("error.timedOut") };
     return { ok: false, unpaired: false, error: String(e) };
   }
 }
@@ -154,9 +157,24 @@ import type {
   AgentChain,
   CommitInfo,
   Project,
+  RemoteNotice,
   RepoStatusInfo,
+  StashInfo,
   Workspace,
 } from "../types/domain";
+import type { ServiceRow, ServiceRuntime } from "../types/services";
+
+/** When this phone last opened the notification list — what "new" is measured against. Per device
+ *  on purpose: the desktop's own "seen" is the desk's, and reading the list here must not clear it. */
+const NOTICES_SEEN_KEY = "codeflow.remote.noticesSeen";
+
+function storedNoticesSeen(): number {
+  try {
+    return Number(localStorage.getItem(NOTICES_SEEN_KEY)) || 0;
+  } catch {
+    return 0;
+  }
+}
 
 /**
  * The groups a mutating command can be in flight for.
@@ -170,7 +188,7 @@ import type {
  * the branch screen shares `repo`. `review` and `chat` are apart from everything because they are
  * the two calls that hold the connection open for as long as an engine takes to answer.
  */
-export type BusyKey = "repo" | "analyze" | "chains" | "review" | "chat";
+export type BusyKey = "repo" | "analyze" | "chains" | "review" | "chat" | "pipelines" | "services";
 
 /** What one live run is printing, as the batches arrive. */
 export interface RunLog {
@@ -251,8 +269,27 @@ interface MobileState {
   unpushed: CommitInfo[];
   /** The last 30 commits. */
   commits: CommitInfo[];
+  /** The stash list, newest first — `stash@{0}` is `stashes[0]`. Read with the rest of the tree, so
+   *  the Repo tab can offer it only when there is something in it. */
+  stashes: StashInfo[];
 
   chains: AgentChain[];
+
+  /**
+   * The current workspace's services, as the desktop defines them — and, in `serviceRuntime`, what
+   * each one is doing. The runtime is every workspace's and is kept live by `services:runtime`
+   * frames, which the desktop's supervisor emits on every change; the definitions are re-read with
+   * the workspace. Both in the store, not the screen, because the Agents tab's badge counts them.
+   */
+  services: ServiceRow[];
+  serviceRuntime: Record<string, ServiceRuntime>;
+  servicesState: "loading" | "ready" | "error";
+  servicesError: string | null;
+
+  /** The desktop's notification centre, as its main window last published it. Newest first. */
+  notices: RemoteNotice[];
+  /** See [`NOTICES_SEEN_KEY`]. */
+  noticesSeenAt: number;
 
   logs: Record<string, RunLog>;
 
@@ -287,6 +324,12 @@ interface MobileState {
   setProject: (id: string) => Promise<void>;
   refreshRepo: () => Promise<void>;
   refreshChains: () => Promise<void>;
+  refreshServices: () => Promise<void>;
+  /** Folds one `services:runtime` frame in. */
+  applyServiceRuntime: (view: ServiceRuntime) => void;
+  refreshNotices: () => Promise<void>;
+  /** Everything in the list is now "seen", on this phone. */
+  markNoticesSeen: () => void;
   /** Everything the current scope can show, for pull-to-refresh. */
   refreshAll: () => Promise<void>;
   /**
@@ -324,13 +367,22 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   repoState: "loading",
   unpushed: [],
   commits: [],
+  stashes: [],
 
   chains: [],
+
+  services: [],
+  serviceRuntime: {},
+  servicesState: "loading",
+  servicesError: null,
+
+  notices: [],
+  noticesSeenAt: storedNoticesSeen(),
 
   logs: {},
   terminals: storedTerminals(),
 
-  busy: { repo: false, analyze: false, chains: false, review: false, chat: false },
+  busy: { repo: false, analyze: false, chains: false, review: false, chat: false, pipelines: false, services: false },
   error: null,
 
   /** The cold-start call. One round trip for what would otherwise be four — see `remote_bootstrap`
@@ -371,6 +423,8 @@ export const useMobileStore = create<MobileState>((set, get) => ({
         watchProject(projectId);
         void get().refreshRepo();
       }
+      void get().refreshServices();
+      void get().refreshNotices();
     } catch (e) {
       if (e instanceof Unpaired) set({ unpaired: true, ready: true });
       else set({ ready: true, error: String(e) });
@@ -434,7 +488,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       // *new* project the moment this lands, while `status` still holds the old one's rows — so for
       // the round trip until `refreshRepo` answers, the file list on screen belonged to repository A
       // and its checkboxes wrote to repository B.
-      ...(moved ? { status: null, commits: [], unpushed: [], repoState: "loading" as const } : {}),
+      ...(moved ? { status: null, commits: [], unpushed: [], stashes: [], repoState: "loading" as const } : {}),
     });
     // The project moved under the user while they were away, so anything open that named the old
     // one is about something that is no longer on screen.
@@ -445,6 +499,9 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     // this resync exists to close.
     watchProject(nextProject);
     void get().refreshRepo();
+    // Both lists were pushed to a socket nobody was holding while this phone was away.
+    void get().refreshServices();
+    void get().refreshNotices();
 
     const active = await read(() => rpc<string[]>("list_active_runs"));
     if (!active.ok) {
@@ -503,6 +560,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       // from this, so switching workspaces showed "3 sin enviar" belonging to a project that is no
       // longer selected, until `refreshRepo` resolved.
       unpushed: [],
+      stashes: [],
       chains: [],
       repoState: "loading",
       error: null,
@@ -538,11 +596,14 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       watchProject(projectId);
       void get().refreshRepo();
     }
+    // Service definitions are per workspace, and the ones on screen are the workspace just left.
+    set({ services: [], servicesState: "loading", servicesError: null });
+    void get().refreshServices();
   },
 
   setProject: async (id) => {
     resetDepth();
-    set({ projectId: id, status: null, commits: [], unpushed: [], repoState: "loading" });
+    set({ projectId: id, status: null, commits: [], unpushed: [], stashes: [], repoState: "loading" });
     rememberScope(get().workspaceId, id);
     // Before the read, not after: the watcher is what keeps this project live from here on, and the
     // desktop releases whatever this device was holding as part of taking the new claim.
@@ -557,13 +618,14 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       set({ repoState: "ready" });
       return;
     }
-    const [status, commits, unpushed] = await Promise.all([
+    const [status, commits, unpushed, stashes] = await Promise.all([
       read(() => rpc<RepoStatusInfo>("get_status", { repoPath })),
       read(() => rpc<CommitInfo[]>("list_commits", { repoPath, allRefs: false, limit: 30 })),
       read(() => rpc<CommitInfo[]>("list_unpushed_commits", { repoPath })),
+      read(() => rpc<StashInfo[]>("list_stashes", { repoPath })),
     ]);
     if (get().projectId !== projectId) return;
-    if (anyUnpaired(status, commits, unpushed)) {
+    if (anyUnpaired(status, commits, unpushed, stashes)) {
       set({ unpaired: true });
       return;
     }
@@ -580,6 +642,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       error: null,
       commits: commits.ok ? commits.value : get().commits,
       unpushed: unpushed.ok ? unpushed.value : get().unpushed,
+      stashes: stashes.ok ? stashes.value : get().stashes,
     });
   },
 
@@ -599,8 +662,63 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     set({ chains: chains.value, error: null });
   },
 
+  refreshServices: async () => {
+    const workspaceId = get().workspaceId;
+    if (!workspaceId) {
+      set({ services: [], servicesState: "ready", servicesError: null });
+      return;
+    }
+    const [list, runtime] = await Promise.all([
+      read(() => rpc<ServiceRow[]>("list_services", { workspaceId })),
+      read(() => rpc<ServiceRuntime[]>("services_runtime")),
+    ]);
+    if (get().workspaceId !== workspaceId) return;
+    if (anyUnpaired(list, runtime)) {
+      set({ unpaired: true });
+      return;
+    }
+    if (!list.ok) {
+      // The last list stays on screen, marked as stale, rather than being blanked into "no services".
+      set({ servicesState: "error", servicesError: list.error });
+      return;
+    }
+    set({
+      services: [...list.value].sort((a, b) => a.sort_order - b.sort_order),
+      servicesState: "ready",
+      servicesError: null,
+      ...(runtime.ok
+        ? { serviceRuntime: Object.fromEntries(runtime.value.map((view) => [view.id, view])) }
+        : {}),
+    });
+  },
+
+  applyServiceRuntime: (view) =>
+    set((s) => ({ serviceRuntime: { ...s.serviceRuntime, [view.id]: view } })),
+
+  refreshNotices: async () => {
+    const notices = await read(() => rpc<RemoteNotice[]>("list_notifications"));
+    if (!notices.ok) {
+      // Quietly kept: the bell is a convenience, and a dropped read must not blank it or raise an
+      // error over whatever screen is open.
+      if (notices.unpaired) set({ unpaired: true });
+      return;
+    }
+    set({ notices: notices.value });
+  },
+
+  markNoticesSeen: () => {
+    const newest = get().notices.reduce((max, notice) => Math.max(max, notice.finishedAt), 0);
+    if (newest <= get().noticesSeenAt) return;
+    set({ noticesSeenAt: newest });
+    try {
+      localStorage.setItem(NOTICES_SEEN_KEY, String(newest));
+    } catch {
+      /* private browsing; "new" then lasts until the page is reloaded */
+    }
+  },
+
   refreshAll: async () => {
-    await Promise.all([get().refreshRepo(), get().refreshChains()]);
+    await Promise.all([get().refreshRepo(), get().refreshChains(), get().refreshServices()]);
   },
 
   /**
@@ -626,6 +744,10 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     } catch (e) {
       if (e instanceof Unpaired) {
         set({ unpaired: true });
+      } else if (e instanceof TimedOut) {
+        // Not "it failed" — nobody knows whether it did. The retry is safe: it carries the same key,
+        // and the desktop answers a key it has seen with what the first attempt did.
+        toastError(t("error.timedOut"));
       } else if (e instanceof NotAllowed) {
         // `NotAllowed`'s message is the wire token `not_allowed` — a value, not a sentence. It
         // reaches a user only when this client is newer than the desktop and names a command the

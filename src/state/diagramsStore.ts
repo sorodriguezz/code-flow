@@ -42,6 +42,9 @@ import { descendantIds } from "../lib/diagrams/tree";
 // them is note-shaped except which file they were first needed in. Two implementations of "how a
 // tag is normalized" is how `deploy` and `Deploy` become different tags in different workspaces.
 import { parseTags, serializeTags } from "../lib/notes/tags";
+import { describePath, isChangedOnDisk } from "../lib/editorFiles";
+import { notifyUnsavedChanged, registerUnsavedProvider } from "../lib/unsavedWork";
+import { chooseAction } from "./confirmStore";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
 import { useAiRunStore } from "./aiRunStore";
@@ -52,6 +55,7 @@ import type { AiGraph } from "../lib/diagrams/aiLayout";
 import { isLinked } from "../types/diagrams";
 import type {
   Diagram,
+  DiagramFileVersion,
   DiagramFolderRow,
   DiagramFormat,
   DiagramGalleryView,
@@ -223,6 +227,24 @@ interface DiagramsState {
    */
   fileError: string;
   /**
+   * The version of each linked diagram's file as it was last read or written, by diagram id — what
+   * the next save is checked against (`diagrams_save_diagram`'s `expected`). `null` when the file
+   * could not be read; absent for a diagram never opened.
+   */
+  fileVersions: Record<string, DiagramFileVersion | null>;
+  /**
+   * The diagram whose file changed on disk under an unsaved edit, or `null`.
+   *
+   * Set when a save is refused with `changed-on-disk:`. The draft stays dirty and the row keeps the
+   * user's text; nothing more is written to the file until the user answers — reload from disk, or
+   * overwrite — through the question asked once, or later through the file chip. See
+   * `resolveFileConflict`.
+   */
+  fileConflict: string | null;
+  /** A request for the schema workbench to open Comparar against the file, or `null` — the
+   *  conflict question's "Compare". One-shot: the panel takes it and clears it. */
+  compareRequest: { diagramId: string; source: "disk" | "head" } | null;
+  /**
    * Pictures, by diagram id, for the cards currently drawn.
    *
    * A cache rather than part of `diagrams`: thumbnails are fetched for what is on screen, and
@@ -361,8 +383,17 @@ interface DiagramsState {
    *
    * Called from every path that could drop it — closing, switching workspace, hiding the window —
    * and a no-op when nothing is pending, so it costs nothing in the common case.
+   *
+   * `interactive: false` is a save nobody is watching (the quit's "save all"): a file that changed
+   * on disk is left as a failure to report, never a question. `force` writes the file over whatever
+   * is there — the answer "overwrite", given by the user.
    */
-  flush: () => Promise<void>;
+  flush: (options?: { interactive?: boolean; force?: boolean }) => Promise<void>;
+  /** The user's answer to "the file changed on disk": take the disk's copy (the unsaved edit goes),
+   *  or write the diagram over it. */
+  resolveFileConflict: (answer: "reload" | "overwrite") => Promise<void>;
+  requestCompare: (diagramId: string, source: "disk" | "head") => void;
+  clearCompareRequest: () => void;
   /** Fetches the pictures of `ids` that aren't already cached. */
   loadThumbnails: (ids: string[]) => Promise<void>;
 
@@ -539,6 +570,9 @@ function clearedWorkspaceState(): Partial<DiagramsState> {
     openingId: null,
     savedAt: null,
     fileError: "",
+    fileVersions: {},
+    fileConflict: null,
+    compareRequest: null,
     thumbnails: {},
     pendingLoad: null,
     undoGeneration: null,
@@ -581,6 +615,9 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   saving: false,
   savedAt: null,
   fileError: "",
+  fileVersions: {},
+  fileConflict: null,
+  compareRequest: null,
   thumbnails: {},
   pendingLoad: null,
   undoGeneration: null,
@@ -761,6 +798,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     if (get().openingId === id) return;
     // The outgoing diagram's edit, before this one replaces it.
     await get().flush();
+    if (!(await settledBeforeLeaving(get))) return;
 
     // `undoGeneration` goes with the diagram it was captured on. It holds a whole document — the
     // one *this* diagram had before its last generation — and `undoLastGeneration` writes it into
@@ -789,6 +827,12 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
       // The user may have clicked elsewhere while the document was in flight.
       if (get().openingId !== id) return;
       if (sync.file_error) set({ fileError: sync.file_error });
+      // What the next save is checked against — the file exactly as this read found it. A conflict
+      // left on this diagram is answered by this read: the draft is the disk's copy now.
+      set((state) => ({
+        fileVersions: { ...state.fileVersions, [id]: sync.version },
+        fileConflict: state.fileConflict === id ? null : state.fileConflict,
+      }));
       if (!row) {
         // Deleted from another window between the click and the fetch.
         set((state) => ({
@@ -824,6 +868,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
 
   closeDiagram: async () => {
     await get().flush();
+    if (!(await settledBeforeLeaving(get))) return;
     set({ activeId: null, draft: null, openingId: null, savedAt: null, fileError: "" });
   },
 
@@ -857,7 +902,10 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
       const current = get();
       const open = current.draft;
       if (current.activeId !== id || !open || open.id !== id || open.dirty) return;
-      set({ fileError: sync.file_error });
+      set((state) => ({
+        fileError: sync.file_error,
+        fileVersions: { ...state.fileVersions, [id]: sync.version },
+      }));
       const row = sync.row;
       if (!row || row.doc === open.doc) return;
       set((state) => ({
@@ -910,7 +958,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     scheduleSave(get);
   },
 
-  flush: async () => {
+  flush: async (options = {}) => {
+    const { interactive = true, force = false } = options;
     if (saveTimer) {
       clearTimeout(saveTimer);
       saveTimer = undefined;
@@ -919,10 +968,26 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     const draft = get().draft;
     if (!draft?.dirty) return;
 
+    let refused = false;
     pendingFlush = (async () => {
       set({ saving: true });
       try {
-        const row = await diagramsSaveDiagram(draft.id, draft.doc, draft.format, draft.thumbnail);
+        const saved = await diagramsSaveDiagram(
+          draft.id,
+          draft.doc,
+          draft.format,
+          draft.thumbnail,
+          get().fileVersions[draft.id] ?? null,
+          force,
+        );
+        const row = saved.meta;
+        if (saved.version) {
+          const version = saved.version;
+          set((state) => ({
+            fileVersions: { ...state.fileVersions, [draft.id]: version },
+            fileConflict: state.fileConflict === draft.id ? null : state.fileConflict,
+          }));
+        }
         if (!row) {
           // Deleted from another window while it was open.
           set((state) => ({
@@ -948,14 +1013,56 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
         // draft is deliberately left dirty either way, so the next edit (or the next `flush`) tries
         // again rather than the app quietly deciding a schema had been saved into a repository it
         // never reached.
-        pushErrorToast(String(error));
+        if (isChangedOnDisk(error)) {
+          // The file moved under the diagram — a pull, another editor. Asked once; until answered,
+          // the chip carries the same choice and later saves stay quiet about it.
+          refused = get().fileConflict !== draft.id;
+          set({ fileConflict: draft.id });
+        } else {
+          pushErrorToast(String(error));
+        }
       } finally {
         set({ saving: false });
         pendingFlush = null;
       }
     })();
-    return pendingFlush;
+    const run = pendingFlush;
+    await run;
+    // Outside the write, so the answer's own save ("overwrite") is not waiting on this one.
+    if (refused && interactive) void askFileConflict(get, draft.id);
   },
+
+  resolveFileConflict: async (answer) => {
+    const id = get().fileConflict;
+    const draft = get().draft;
+    if (!id || !draft || draft.id !== id) return;
+    if (pendingFlush) await pendingFlush;
+    if (answer === "overwrite") {
+      await get().flush({ force: true });
+      return;
+    }
+    // "Reload from disk": the unsaved edit is thrown away, on purpose — the disk's copy wins.
+    try {
+      set({ draft: { ...draft, dirty: false } });
+      const sync = await diagramsPullFile(id);
+      const current = get().draft;
+      if (!sync.row || current?.id !== id) return;
+      const row = sync.row;
+      set((state) => ({
+        draft: { ...current, doc: row.doc, dirty: false },
+        diagrams: state.diagrams.map((d) => (d.id === row.id ? toDiagram(row) : d)),
+        fileError: sync.file_error,
+        fileVersions: { ...state.fileVersions, [id]: sync.version },
+        fileConflict: null,
+        pendingLoad: row.format === FORMAT_MXGRAPH ? row.doc : null,
+      }));
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  requestCompare: (diagramId, source) => set({ compareRequest: { diagramId, source } }),
+  clearCompareRequest: () => set({ compareRequest: null }),
 
   loadThumbnails: async (ids) => {
     const wanted = ids.filter((id) => !requestedThumbnails.has(id));
@@ -1625,6 +1732,84 @@ void onRepoFsChanged(() => {
   const { activeId } = useDiagramsStore.getState();
   if (activeId) void useDiagramsStore.getState().syncFromDisk(activeId);
 }).catch(() => {});
+
+/**
+ * "The file changed on disk since you opened it": the editor's question, with the editor's words —
+ * compare (a schema only: Comparar against the file), take the disk's copy, or write over it.
+ * Cancel leaves both as they are; the file chip carries the same answers for later.
+ */
+async function askFileConflict(get: () => DiagramsState, id: string): Promise<void> {
+  const diagram = get().diagrams.find((d) => d.id === id);
+  const name = diagram?.origin_path ? describePath(diagram.origin_path).name : (diagram?.title ?? "");
+  const answer = await chooseAction({
+    message: translate("editor.diskConflict", { name }),
+    danger: true,
+    choices: [
+      ...(diagram?.format === FORMAT_DBML
+        ? [{ id: "compare", label: translate("editor.diskCompare"), variant: "primary" as const }]
+        : []),
+      { id: "reload", label: translate("editor.diskReload") },
+      { id: "overwrite", label: translate("editor.diskOverwrite"), variant: "danger" as const },
+    ],
+  });
+  // Answered after the user moved to another diagram: the answer can wait for the chip.
+  if (get().activeId !== id || get().fileConflict !== id) return;
+  if (answer === "compare") get().requestCompare(id, "disk");
+  else if (answer === "reload" || answer === "overwrite") await get().resolveFileConflict(answer);
+}
+
+/**
+ * Whether the open diagram may be left. A file conflict still waiting for its answer is asked about
+ * first, because leaving would lose the edit: the row holds it, but the next open reads the file and
+ * brings the row up to date with it (`diagramsPullFile`). Cancelled — or answered with Compare — the
+ * diagram stays open; reloaded or overwritten, the edit's fate was the user's choice.
+ */
+async function settledBeforeLeaving(get: () => DiagramsState): Promise<boolean> {
+  const { draft, fileConflict } = get();
+  if (!draft || fileConflict !== draft.id) return true;
+  await askFileConflict(get, draft.id);
+  return get().fileConflict !== draft.id;
+}
+
+/**
+ * What the open diagram holds that is not saved — asked by the quit guard (`lib/unsavedWork.ts`).
+ *
+ * The autosave waits `SAVE_DEBOUNCE_MS` after the last stroke, so a quit inside that window ended
+ * the process with the drawing's last change only in the editor. A write in flight counts too.
+ * `saveAll` is a non-interactive flush: a linked file that changed on disk is reported as not
+ * saved — which keeps the app open with the draft intact — rather than asked about inside the
+ * quit's own question.
+ */
+function unsavedDiagram(state: DiagramsState): { id: string; label: string } | null {
+  const { draft } = state;
+  if (!draft || !(draft.dirty || state.saving)) return null;
+  const title = state.diagrams.find((d) => d.id === draft.id)?.title;
+  return { id: draft.id, label: title?.trim() || translate("diagrams.untitled") };
+}
+
+registerUnsavedProvider({
+  id: "diagrams",
+  unsaved: () => {
+    const item = unsavedDiagram(useDiagramsStore.getState());
+    return item ? [{ label: item.label, detail: translate("diagrams.title") }] : [];
+  },
+  saveAll: async () => {
+    for (let pass = 0; pass < 3; pass++) {
+      await useDiagramsStore.getState().flush({ interactive: false });
+      if (!unsavedDiagram(useDiagramsStore.getState())) return [];
+    }
+    const left = unsavedDiagram(useDiagramsStore.getState());
+    return left ? [left.label] : [];
+  },
+  discard: () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = undefined;
+  },
+});
+
+useDiagramsStore.subscribe((state, previous) => {
+  if (unsavedDiagram(state)?.id !== unsavedDiagram(previous)?.id) notifyUnsavedChanged();
+});
 
 /**
  * The diagrams the list should show, filtered and ordered.

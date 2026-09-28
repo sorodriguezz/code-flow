@@ -5,6 +5,7 @@ import type { editor as MonacoEditorNS } from "monaco-editor";
 import { Code2, Plus, Search } from "lucide-react";
 import { monaco } from "../../lib/monacoSetup";
 import { SCRIPT_SNIPPETS } from "../../lib/api/sandbox";
+import { noteAuthoredScript } from "../../lib/api/scriptTrust";
 import { useApiStore } from "../../state/apiStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
@@ -196,7 +197,13 @@ export function ScriptEditor({
             value={value}
             theme={monacoTheme}
             onMount={onMount}
-            onChange={(next) => onChange(next ?? "")}
+            onChange={(next) => {
+              // Only the user's own edits reach this handler — typing, paste, undo, a snippet from
+              // the rail; a draft replaced from outside updates the model without firing it. That is
+              // what makes "written in this editor" a safe definition of trusted (see scriptTrust).
+              noteAuthoredScript(`${bufferKey}/${kind}`, next ?? "");
+              onChange(next ?? "");
+            }}
             options={{
             ...OVERFLOW_SAFE_OPTIONS,
               minimap: { enabled: false },

@@ -141,6 +141,13 @@ Read sections 1, 2 and 4: they tell you what you are allowed to do.
    components, and nothing in this Licence limits or modifies any right
    granted to You under them.
 
+   Those components are listed in THIRD-PARTY-NOTICES.md, in the root of the
+   Official Repository, together with their versions, their licences and
+   where to obtain them. That file also carries the notices some of those
+   licences require the Licensor to give You -- including, for the components
+   licensed under the MPL-2.0 and for the Java runtime bundled with the
+   Official Builds, where to obtain their source code at no charge.
+
 
 7. TERM AND TERMINATION
 

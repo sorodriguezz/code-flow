@@ -7,6 +7,9 @@ import { installInlineCompletion } from "./inlineCompletion";
 import { registerDbmlLanguage } from "./monacoDbml";
 import { registerObjectScript } from "./monacoObjectScript";
 import { registerCsvLanguages } from "./monacoCsv";
+import { registerTomlLanguage } from "./monacoToml";
+import { teachLangAttribute } from "./monacoSfc";
+import { installIsolatedTsFallback } from "./tsWorkerFallback";
 // Subpaths go through the package's own `exports` map (`./*` → `./esm/vs/*.js`), so these are
 // the mapped specifiers, not the on-disk paths.
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -73,6 +76,11 @@ loader.config({ monaco });
 const isolatedFileDiagnostics = { noSemanticValidation: true, noSyntaxValidation: false, noSuggestionDiagnostics: true };
 monaco.typescript.typescriptDefaults.setDiagnosticsOptions(isolatedFileDiagnostics);
 monaco.typescript.javascriptDefaults.setDiagnosticsOptions(isolatedFileDiagnostics);
+// The rest of what the same worker says about types — hovers, completions, definitions, references,
+// rename, signature help, quick fixes — answers only for files `tsserver` is not serving. Here, at
+// startup, because Monaco reads the configuration exactly once: when the first TypeScript model
+// activates the language. See `tsWorkerFallback`.
+installIsolatedTsFallback(monaco);
 
 // Every scheme is registered up front rather than on demand: `defineTheme` is cheap (it just
 // stores a rule list), and having them all present means switching themes — or mounting an
@@ -196,6 +204,26 @@ async function tokenizeDecorators() {
 
 void tokenizeDecorators();
 
+/**
+ * `<script lang="ts">` and `<style lang="scss">` coloured as what they say they are, for the `.vue`,
+ * `.svelte` and `.astro` files `monacoLanguage` opens as HTML. The same move as the decorators above
+ * — the grammar module is a singleton, mutated before (or re-registered after) Monaco compiles it —
+ * and the rules themselves are in `monacoSfc`, where they can be tested without a Monaco.
+ */
+async function teachComponentBlocks() {
+  const entry = monaco.languages
+    .getLanguages()
+    .find((language) => language.id === "html") as
+    | (monaco.languages.ILanguageExtensionPoint & {
+        loader?: () => Promise<{ language?: monaco.languages.IMonarchLanguage }>;
+      })
+    | undefined;
+  const language = (await entry?.loader?.())?.language;
+  if (language && teachLangAttribute(language)) monaco.languages.setMonarchTokensProvider("html", language);
+}
+
+void teachComponentBlocks();
+
 export { monaco };
 
 // ObjectScript, for `.cls` / `.mac` / `.int` / `.inc`. Registered *above* `installGoToDefinition`,
@@ -209,6 +237,9 @@ registerDbmlLanguage();
 // installers for the same reason as the two lines above: a plain-text file got snippets and
 // Ctrl/Cmd+click before it had a language of its own, and should keep both. See `monacoCsv.ts`.
 registerCsvLanguages();
+// `.toml`, which Monaco ships no grammar for. The id is registered here so the language list (and
+// the two installers below) know it; the grammar itself loads the first time a TOML file opens.
+registerTomlLanguage();
 
 // Ctrl/Cmd+click to jump to a definition. Registered here, once, because both halves of it (the
 // definition provider and the editor opener) are global to Monaco rather than per-instance —

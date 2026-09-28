@@ -7,6 +7,7 @@ import {
   generateStories,
   getStoryBatch,
   listStoryBatches,
+  previewStoryBoardUpdate,
   publishStories,
   renameStoryBatch,
   saveStoryDraft,
@@ -15,10 +16,13 @@ import {
   setStoryBatchTarget,
   setStoryBatchFeatureProject,
   setStoryBatchVerifyProjects,
+  updateStoryOnBoard,
   verifyStories,
   writeStoryFeatureFile,
 } from "../lib/tauri/commands";
 import { featureFileName, parseCriteria, toFeatureFile } from "../lib/gherkin";
+import { boardLabelKey } from "../lib/boardLabel";
+import { useConfirmStore } from "./confirmStore";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
@@ -223,6 +227,18 @@ interface StoriesState {
   /** How many stories come out is the documentation's business, not the caller's — see the
    *  "CUÁNTAS HISTORIAS" block in the prompt. There is deliberately no count to pass. */
   generate: (batchId: string, agent?: { provider: string; model: string }) => Promise<void>;
+  /**
+   * Asks before a regeneration deletes the set's unpublished stories, saying how many and which
+   * kinds (edited, added by hand, verified). `true` when there is nothing to lose or the user said
+   * yes. The Wiki asks the same question before its regeneration replaces a body.
+   */
+  confirmRegenerate: (batchId: string) => Promise<boolean>;
+  /**
+   * "Update on the board": shows what would change on a published story's item (against the item as
+   * it is now), and on a yes writes the draft over it. Editing a published story used to change
+   * only the draft.
+   */
+  updateOnBoard: (batchId: string, storyId: string) => Promise<void>;
   stop: (batchId: string) => Promise<void>;
   verify: (batchId: string, storyIds?: string[]) => Promise<void>;
   stopVerify: (batchId: string) => Promise<void>;
@@ -235,6 +251,36 @@ interface StoriesState {
   selectAll: (batchId: string, selected: boolean) => void;
   storiesFor: (batchId: string | null) => StoryDraft[];
   selectionFor: (batchId: string | null) => string[];
+}
+
+/**
+ * What "generate again" would throw away: every story of the set that is not on the board yet —
+ * including the ones the user edited and the ones they added by hand, which the backend's
+ * `replace_story_drafts` deletes along with the untouched proposals.
+ *
+ * `handAdded` is a story created after the set's last generation (or in a set never generated);
+ * `edited` is a generated one saved since it was written; `verified` carries verdicts against the
+ * code that go with it. Counted apart because they are different losses to the person reading the
+ * confirmation, and the untouched proposals are the only ones a regeneration really replaces.
+ */
+export function regenerationLoss(
+  batch: Pick<StoryBatch, "generated_at"> | null | undefined,
+  stories: StoryDraft[],
+): { deleted: number; edited: number; handAdded: number; verified: number } {
+  const generatedAt = Date.parse(batch?.generated_at ?? "");
+  const unpublished = stories.filter((story) => story.work_item_id === 0);
+  const handAdded = unpublished.filter(
+    (story) => !Number.isFinite(generatedAt) || Date.parse(story.created_at) > generatedAt,
+  );
+  const edited = unpublished.filter(
+    (story) => !handAdded.includes(story) && Date.parse(story.updated_at) > Date.parse(story.created_at),
+  );
+  return {
+    deleted: unpublished.length,
+    edited: edited.length,
+    handAdded: handAdded.length,
+    verified: unpublished.filter((story) => story.verified_at !== "").length,
+  };
 }
 
 /** Everything that isn't already published — the default selection, and the only thing a publish
@@ -483,6 +529,56 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     await useAiRunStore.getState().cancel(runId);
   },
 
+  confirmRegenerate: async (batchId) => {
+    const batch = get().batches.find((b) => b.id === batchId);
+    const loss = regenerationLoss(batch, get().storiesFor(batchId));
+    if (loss.deleted === 0) return true;
+    const items = [
+      loss.edited > 0 ? translate("stories.regenerateLossEdited", { n: loss.edited }) : "",
+      loss.handAdded > 0 ? translate("stories.regenerateLossHandAdded", { n: loss.handAdded }) : "",
+      loss.verified > 0 ? translate("stories.regenerateLossVerified", { n: loss.verified }) : "",
+    ].filter(Boolean);
+    return useConfirmStore.getState().ask({
+      message: translate("stories.regenerateConfirm", { n: loss.deleted }),
+      danger: true,
+      confirmLabel: translate("stories.regenerate"),
+      items: items.length > 0 ? items : undefined,
+    });
+  },
+
+  updateOnBoard: async (batchId, storyId) => {
+    const batch = get().batches.find((b) => b.id === batchId);
+    const story = get().storiesFor(batchId).find((s) => s.id === storyId);
+    if (!batch || !story || story.work_item_id === 0) return;
+    const board = translate(boardLabelKey(batch.board_provider));
+    const label = story.work_item_key || `#${story.work_item_id}`;
+    try {
+      const changes = await previewStoryBoardUpdate(storyId);
+      if (changes.length === 0) {
+        useToastStore.getState().pushToast(translate("stories.boardUpToDate", { board }), "success");
+        return;
+      }
+      const items = changes.map((change) =>
+        change.field === "title"
+          ? translate("stories.boardChangeTitle", { before: change.before, after: change.after })
+          : change.field === "estimate"
+            ? translate("stories.boardChangeEstimate", { before: change.before || "—", after: change.after })
+            : translate("stories.boardChangeContent"),
+      );
+      const ok = await useConfirmStore.getState().ask({
+        message: translate("stories.updateOnBoardConfirm", { id: label, board }),
+        danger: true,
+        confirmLabel: translate("stories.updateOnBoard"),
+        items,
+      });
+      if (!ok) return;
+      await updateStoryOnBoard(storyId);
+      useToastStore.getState().pushToast(translate("stories.boardUpdated", { id: label, board }), "success");
+    } catch (e: unknown) {
+      pushErrorToast(String(e));
+    }
+  },
+
   setAnswers: async (batchId, answers) => {
     const kept = answers
       .map((qa) => ({ question: qa.question.trim(), answer: qa.answer.trim() }))
@@ -668,9 +764,10 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
           }),
         );
       } else {
+        const board = translate(boardLabelKey(get().batches.find((b) => b.id === batchId)?.board_provider));
         useToastStore
           .getState()
-          .pushToast(translate("stories.publishedOk", { n: String(outcome.published) }), "success");
+          .pushToast(translate("stories.publishedOk", { n: String(outcome.published), board }), "success");
       }
     } catch (e: unknown) {
       pushErrorToast(String(e));

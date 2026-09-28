@@ -101,8 +101,13 @@ pub struct ReplaceOutcome {
     /// How many files were touched.
     pub files: usize,
     /// The snapshot taken before anything was written, so a repo-wide replace is undoable from
-    /// the same place an AI run is. `None` only if the snapshot itself failed.
+    /// the same place an AI run is. `None` only when nothing was written — a replace that cannot
+    /// take one writes nothing at all (see [`write_planned`]).
     pub checkpoint_id: Option<String>,
+    /// Files that matched and were left alone because they are not UTF-8, repo-relative. Rewriting
+    /// one means decoding it, and the only decoding that cannot fail — `from_utf8_lossy` — turns
+    /// every Latin-1 accent into U+FFFD, which the write would then make permanent.
+    pub skipped_not_utf8: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,7 +119,17 @@ pub struct SearchOutcome {
 }
 
 /// Depth-first walk of the working tree, yielding repo-relative file paths.
-fn walk(repo: &Repository, root: &Path, rel: &str, out: &mut Vec<String>, limit: usize) {
+///
+/// `canonical_root` is `root` with every link resolved, which is what a link's target is checked
+/// against — see the symlink branch below.
+fn walk(
+    repo: &Repository,
+    root: &Path,
+    canonical_root: &Path,
+    rel: &str,
+    out: &mut Vec<String>,
+    limit: usize,
+) {
     if out.len() >= limit {
         return;
     }
@@ -134,7 +149,21 @@ fn walk(repo: &Repository, root: &Path, rel: &str, out: &mut Vec<String>, limit:
             continue;
         }
         let child_rel = if rel.is_empty() { name } else { format!("{rel}/{name}") };
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let file_type = entry.file_type().ok();
+        let is_dir = file_type.is_some_and(|t| t.is_dir());
+        // A link is listed only as a file that stays inside the repository. Reading follows a link
+        // wherever it leads, and so does `replace_all`'s write: a link to a file out of the working
+        // tree was searched as if it were the project's and rewritten by a project-wide replace — a
+        // file outside the repository, with no checkpoint that covers it. A link to a folder was
+        // never walked (the entry type is the link's, not the folder's) and is left out rather than
+        // listed as a file nothing can open.
+        if file_type.is_some_and(|t| t.is_symlink()) {
+            let inside_file = std::fs::canonicalize(entry.path())
+                .is_ok_and(|target| target.starts_with(canonical_root) && target.is_file());
+            if !inside_file {
+                continue;
+            }
+        }
         // git wants a trailing slash to answer "is this *directory* ignored" for rules like
         // `build/`; without it a directory-only rule doesn't match and we'd descend anyway.
         let probe = if is_dir { format!("{child_rel}/") } else { child_rel.clone() };
@@ -142,11 +171,20 @@ fn walk(repo: &Repository, root: &Path, rel: &str, out: &mut Vec<String>, limit:
             continue;
         }
         if is_dir {
-            walk(repo, root, &child_rel, out, limit);
+            walk(repo, root, canonical_root, &child_rel, out, limit);
         } else {
             out.push(child_rel);
         }
     }
+}
+
+/// The working tree's files, as [`walk`] lists them — the one entry point the three callers share,
+/// so none of them can walk without the link check.
+fn walk_repo(repo: &Repository, root: &Path, limit: usize) -> Vec<String> {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut out = Vec::new();
+    walk(repo, root, &canonical_root, "", &mut out, limit);
+    out
 }
 
 /// Every non-ignored file in the repo, repo-relative, sorted.
@@ -156,14 +194,15 @@ pub fn list_files(repo_path: &str) -> Result<Vec<String>, String> {
         .workdir()
         .ok_or_else(|| "bare repository".to_string())?
         .to_path_buf();
-    let mut out = Vec::new();
-    walk(&repo, &root, "", &mut out, MAX_FILES);
-    Ok(out)
+    Ok(walk_repo(&repo, &root, MAX_FILES))
 }
 
 /// Whether a byte slice looks like binary content. A NUL byte is the same heuristic `grep` uses,
 /// and it's enough to keep images and compiled artifacts out of text search results.
-fn looks_binary(bytes: &[u8]) -> bool {
+///
+/// Also what the editor opens a file by (`fsops::read_editor_file`), so a file the search skips as
+/// binary is the same file the editor refuses to show as text.
+pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|b| *b == 0)
 }
 
@@ -197,8 +236,7 @@ pub fn search(
         .ok_or_else(|| "bare repository".to_string())?
         .to_path_buf();
 
-    let mut files = Vec::new();
-    walk(&repo, &root, "", &mut files, MAX_FILES);
+    let files = walk_repo(&repo, &root, MAX_FILES);
 
     let mut hits: Vec<SearchHit> = Vec::new();
     for rel in files {
@@ -244,6 +282,9 @@ fn read_text_file(path: &Path) -> Option<String> {
 /// A checkpoint is taken first: this writes to files the user may not even have open, and a
 /// project-wide replace with no undo is a trap. `$1`-style group references work when the query
 /// is a regex, the same as in the editors people are used to.
+///
+/// Only UTF-8 files are rewritten; one that matched in any other encoding is reported back in
+/// `skipped_not_utf8` and left byte for byte as it was.
 pub fn replace_all(
     repo_path: &str,
     query: &str,
@@ -253,7 +294,7 @@ pub fn replace_all(
 ) -> Result<ReplaceOutcome, String> {
     let query = query.trim();
     if query.is_empty() {
-        return Ok(ReplaceOutcome { replacements: 0, files: 0, checkpoint_id: None });
+        return Ok(ReplaceOutcome { replacements: 0, files: 0, checkpoint_id: None, skipped_not_utf8: Vec::new() });
     }
     let matcher = build_matcher(query, options)?;
     let include = build_globs(&options.include)?;
@@ -265,12 +306,15 @@ pub fn replace_all(
         .ok_or_else(|| "bare repository".to_string())?
         .to_path_buf();
 
-    let mut files = Vec::new();
-    walk(&repo, &root, "", &mut files, MAX_FILES);
+    let files = walk_repo(&repo, &root, MAX_FILES);
 
     // Every edit is computed before a single byte is written, so a file that fails to read
     // halfway through can't leave the tree half-replaced.
-    let mut planned: Vec<(String, String, usize)> = Vec::new();
+    let mut planned: Vec<PlannedWrite> = Vec::new();
+    let mut skipped_not_utf8 = Vec::new();
+    // One write per file on disk: a link inside the repository and the file it names are two paths
+    // in the walk and one set of bytes, and planning both would count every match twice.
+    let mut targets = std::collections::HashSet::new();
     for rel in files {
         if let Some(only) = only_path {
             if rel != only {
@@ -280,30 +324,95 @@ pub fn replace_all(
         if !passes_filters(&rel, &include, &exclude) {
             continue;
         }
-        let Some(text) = read_text_file(&root.join(&rel)) else { continue };
+        let path = root.join(&rel);
+        let text = match read_replaceable(&path) {
+            Replaceable::Text(text) => text,
+            // Reported only when it would have matched: a file the query never touches is not one
+            // the user expected changed, and listing every Latin-1 file in the tree is noise.
+            Replaceable::NotUtf8(lossy) => {
+                if matcher.is_match(&lossy) {
+                    skipped_not_utf8.push(rel);
+                }
+                continue;
+            }
+            Replaceable::Skip => continue,
+        };
         let count = matcher.find_iter(&text).count();
         if count == 0 {
             continue;
         }
         let replaced = matcher.replace_all(&text, replacement).into_owned();
-        if replaced != text {
-            planned.push((rel, replaced, count));
+        if replaced == text || !targets.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
+            continue;
         }
+        planned.push(PlannedWrite { rel, content: replaced, count });
     }
 
     if planned.is_empty() {
-        return Ok(ReplaceOutcome { replacements: 0, files: 0, checkpoint_id: None });
+        return Ok(ReplaceOutcome { replacements: 0, files: 0, checkpoint_id: None, skipped_not_utf8 });
     }
 
-    let checkpoint_id = crate::git::checkpoint::create(repo_path, "replace-all").ok();
+    let (replacements, written, checkpoint_id) = write_planned(&root, planned, || {
+        crate::git::checkpoint::create(repo_path, "replace-all")
+    })?;
+    Ok(ReplaceOutcome { replacements, files: written, checkpoint_id: Some(checkpoint_id), skipped_not_utf8 })
+}
+
+/// One file's rewrite, worked out before anything is written.
+struct PlannedWrite {
+    rel: String,
+    content: String,
+    count: usize,
+}
+
+/// A file as `replace_all` reads it — stricter than search, because what it reads goes back to disk.
+enum Replaceable {
+    Text(String),
+    /// Not UTF-8. Carries the lossy decoding, which is good enough to *match* against — to say the
+    /// file was passed over — and must never be what gets written.
+    NotUtf8(String),
+    /// Binary, too large, or unreadable: not a text file the search would have shown.
+    Skip,
+}
+
+fn read_replaceable(path: &Path) -> Replaceable {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.len() <= MAX_SEARCH_FILE_BYTES => {}
+        _ => return Replaceable::Skip,
+    }
+    let Ok(bytes) = std::fs::read(path) else { return Replaceable::Skip };
+    if looks_binary(&bytes) {
+        return Replaceable::Skip;
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => Replaceable::Text(text),
+        Err(e) => Replaceable::NotUtf8(String::from_utf8_lossy(e.as_bytes()).into_owned()),
+    }
+}
+
+/// Writes the planned rewrites, returning `(replacements, files, checkpoint id)`.
+///
+/// **No restore point, no write.** The checkpoint is what makes a project-wide replace undoable —
+/// the confirmation the user clicked through says so — and this used to carry on without one when
+/// taking it failed, rewriting files that then had no way back. Now that failure is the answer, and
+/// nothing on disk has changed when it is given.
+///
+/// `checkpoint` is a parameter so the refusal can be tested without breaking a real repository.
+fn write_planned(
+    root: &Path,
+    planned: Vec<PlannedWrite>,
+    checkpoint: impl FnOnce() -> Result<String, String>,
+) -> Result<(usize, usize, String), String> {
+    let checkpoint_id = checkpoint()
+        .map_err(|e| format!("could not create a restore point, so nothing was replaced: {e}"))?;
     let mut replacements = 0;
     let mut written = 0;
-    for (rel, content, count) in planned {
+    for PlannedWrite { rel, content, count } in planned {
         std::fs::write(root.join(&rel), content).map_err(|e| format!("{rel}: {e}"))?;
         replacements += count;
         written += 1;
     }
-    Ok(ReplaceOutcome { replacements, files: written, checkpoint_id })
+    Ok((replacements, written, checkpoint_id))
 }
 
 #[cfg(test)]
@@ -483,6 +592,69 @@ mod option_tests {
         assert_eq!(fs::read_to_string(dir.join("a.ts")).unwrap(), "call(2, 1);\n");
         // The file outside the scope is untouched.
         assert_eq!(fs::read_to_string(dir.join("b.ts")).unwrap(), "call(3, 4);\n");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A Latin-1 file is left byte for byte as it was — rewritten through a lossy decode, every
+    /// accent in it became U+FFFD — and it is named in the outcome, so the panel can say it was
+    /// passed over. One that would not have matched is not worth naming.
+    #[test]
+    fn replace_leaves_files_that_are_not_utf8_alone_and_says_so() {
+        let dir = repo(&[("utf8.txt", "old caf\u{e9}\n")]);
+        fs::write(dir.join("latin.txt"), b"old caf\xe9\n").unwrap();
+        fs::write(dir.join("quiet.txt"), b"nothing caf\xe9\n").unwrap();
+        let path = dir.to_str().unwrap();
+
+        let outcome = replace_all(path, "old", "new", &SearchOptions::default(), None).unwrap();
+        assert_eq!(outcome.files, 1);
+        assert_eq!(outcome.skipped_not_utf8, vec!["latin.txt"]);
+        assert_eq!(fs::read(dir.join("latin.txt")).unwrap(), b"old caf\xe9\n");
+        assert_eq!(fs::read_to_string(dir.join("utf8.txt")).unwrap(), "new caf\u{e9}\n");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Reading follows a link and so did the replace's write, so a link to a file outside the
+    /// working tree was searched and rewritten as the project's own. Now it is not walked at all,
+    /// while a link to a file inside is — and counts once with the file it names.
+    #[cfg(unix)]
+    #[test]
+    fn never_follows_a_link_out_of_the_repository() {
+        let outside = std::env::temp_dir().join(format!("cf-find-outside-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "needle outside\n").unwrap();
+        let dir = repo(&[("a.txt", "needle inside\n")]);
+        std::os::unix::fs::symlink(outside.join("secret.txt"), dir.join("out.txt")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("outdir")).unwrap();
+        std::os::unix::fs::symlink(dir.join("a.txt"), dir.join("alias.txt")).unwrap();
+        let path = dir.to_str().unwrap();
+
+        let files = list_files(path).unwrap();
+        assert_eq!(files, vec!["a.txt", "alias.txt"]);
+        let found = search(path, "needle", &SearchOptions::default(), 50).unwrap();
+        assert!(found.hits.iter().all(|hit| hit.path != "out.txt"));
+
+        let outcome = replace_all(path, "needle", "pin", &SearchOptions::default(), None).unwrap();
+        assert_eq!((outcome.files, outcome.replacements), (1, 1));
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "pin inside\n");
+        assert_eq!(fs::read_to_string(outside.join("secret.txt")).unwrap(), "needle outside\n");
+
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    /// The confirmation promises an undo; without a restore point there is none, so nothing is
+    /// written — not the first file, not any.
+    #[test]
+    fn nothing_is_written_without_a_restore_point() {
+        let dir = repo(&[("a.ts", "old\n"), ("b.ts", "old\n")]);
+        let planned = vec![
+            PlannedWrite { rel: "a.ts".into(), content: "new\n".into(), count: 1 },
+            PlannedWrite { rel: "b.ts".into(), content: "new\n".into(), count: 1 },
+        ];
+        let error = write_planned(&dir, planned, || Err("no space left on device".to_string())).unwrap_err();
+        assert!(error.contains("nothing was replaced"), "got {error}");
+        assert_eq!(fs::read_to_string(dir.join("a.ts")).unwrap(), "old\n");
+        assert_eq!(fs::read_to_string(dir.join("b.ts")).unwrap(), "old\n");
         fs::remove_dir_all(&dir).ok();
     }
 }

@@ -39,42 +39,61 @@ fn load(db: &State<'_, Db>, id: &str) -> Result<(RemoteHostRow, RemoteHostSpec),
     Ok((row, spec))
 }
 
-/// The spec a *session* should run, with the host's startup snippet folded in.
+/// The body of the host's "run on connect" snippet, if it has one that still exists.
 ///
-/// **Why the snippet becomes part of the remote command rather than being typed into the pty.**
-/// Writing it in after connecting means guessing when the far shell is ready to read it, and every
-/// guess is wrong somewhere — a slow login, a banner, a `.bashrc` that takes a second. Splicing it
-/// into the command `ssh` already carries makes it deterministic: the shell runs it because it was
-/// asked to, in the order it was asked.
+/// **Why the snippet travels in the remote command rather than being typed into the pty.** Writing
+/// it in after connecting means guessing when the far shell is ready to read it, and every guess is
+/// wrong somewhere — a slow login, a banner, a `.bashrc` that takes a second. Carrying it in the
+/// command `ssh` already sends makes it deterministic: the shell runs it because it was asked to, in
+/// the order it was asked — and then carries on into the login shell, or into the host's own
+/// `command`. How it is carried, intact, is [`remotes::session::remote_command`]'s business.
 ///
-/// It is appended to any `command` the host already has rather than replacing it, and the login
-/// shell is what follows, so a host with a startup snippet still lands you at a prompt.
-fn session_spec(db: &State<'_, Db>, id: &str) -> Result<RemoteHostSpec, String> {
-    let (_, mut spec) = load(db, id)?;
-    let snippet_id = spec.startup_snippet_id.trim().to_string();
+/// Its own function over a plain connection, so what the snippet resolves to can be tested against
+/// a real schema without a Tauri `State`.
+fn startup_script(conn: &rusqlite::Connection, spec: &RemoteHostSpec) -> Result<Option<String>, String> {
+    let snippet_id = spec.startup_snippet_id.trim();
     if snippet_id.is_empty() {
-        return Ok(spec);
+        return Ok(None);
     }
-
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let body = remote_queries::get_snippet(&conn, &snippet_id)
+    let body = remote_queries::get_snippet(conn, snippet_id)
         .map_err(|e| e.to_string())?
         .map(|snippet| snippet.body);
-    drop(conn);
-
     // A snippet that has been deleted since it was chosen is not an error worth refusing to
     // connect over — the session is what the user asked for, and the missing snippet is visible in
     // the host's own settings.
-    let Some(body) = body.filter(|body| !body.trim().is_empty()) else {
-        return Ok(spec);
-    };
-    let body = body.trim().replace('\n', "; ");
+    Ok(body.filter(|body| !body.trim().is_empty()))
+}
 
-    spec.command = match spec.command.trim() {
-        "" => body,
-        existing => format!("{body}; {existing}"),
+/// The spec a *session* should run, and its startup script.
+fn session_spec(db: &State<'_, Db>, id: &str) -> Result<(RemoteHostSpec, Option<String>), String> {
+    let (_, spec) = load(db, id)?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let script = startup_script(&conn, &spec)?;
+    Ok((spec, script))
+}
+
+/// Whether an edit changed how the host is *reached* — which is when a held file session is stale.
+///
+/// Compared on everything but what cannot matter to a connection: labels, notes, the shell's
+/// command and directory, the screen, the forwards list. A field added to the spec later counts as
+/// a connection setting until it is listed here, because keeping a session connected with the old
+/// settings is the failure being fixed, and dropping one that was fine only costs a reconnect.
+fn connection_changed(before: &str, after: &str) -> bool {
+    const COSMETIC: &[&str] =
+        &["tags", "notes", "os", "command", "directory", "startup_snippet_id", "screen", "forwards"];
+    let reach = |text: &str| -> Option<serde_json::Value> {
+        let spec: RemoteHostSpec = serde_json::from_str(text).ok()?;
+        let mut value = serde_json::to_value(spec).ok()?;
+        let object = value.as_object_mut()?;
+        for key in COSMETIC {
+            object.remove(*key);
+        }
+        Some(value)
     };
-    Ok(spec)
+    match (reach(before), reach(after)) {
+        (Some(before), Some(after)) => before != after,
+        _ => true,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -101,10 +120,24 @@ pub fn remote_create_host(
         .map_err(|e| e.to_string())
 }
 
+/// Saves a host. Returns whether the edit changed how it is reached — in which case its held file
+/// session, opened with the old settings, has been closed, and the browser should list again.
+///
+/// Closed here rather than by the caller because every writer of a host row comes through this
+/// command, and a session connected to the address a host *used* to have is wrong whoever edited it.
 #[tauri::command]
-pub fn remote_update_host(db: State<Db>, row: RemoteHostRow) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    remote_queries::update_host(&conn, &row).map_err(|e| e.to_string())
+pub async fn remote_update_host(db: State<'_, Db>, row: RemoteHostRow) -> Result<bool, String> {
+    let before = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let before = remote_queries::get_host(&conn, &row.id).map_err(|e| e.to_string())?;
+        remote_queries::update_host(&conn, &row).map_err(|e| e.to_string())?;
+        before
+    };
+    let changed = before.is_some_and(|before| connection_changed(&before.spec, &row.spec));
+    if changed {
+        remotes::files::close(&row.id).await;
+    }
+    Ok(changed)
 }
 
 #[tauri::command]
@@ -166,10 +199,10 @@ pub fn remote_delete_group(
 
 /// Saves (or clears, with an empty value) the host's password or key passphrase.
 ///
-/// Worth being clear about what this *is not*: `ssh` refuses to read a password from anywhere a
-/// program could supply it, deliberately, so nothing here can log the user in unattended. This is a
-/// vault entry the user copies from when the prompt appears — which is the honest version of what
-/// every SSH client that "saves passwords" without an agent is doing.
+/// `ssh` refuses to read a password from anywhere a program could supply it, deliberately, so this
+/// is not an unattended login. What uses it: a session types it into its own prompt on request
+/// ([`remote_type_password`]), a background `ssh` is handed it once through `SSH_ASKPASS`
+/// ([`remotes::askpass`]), and FTP/SMB log in with it directly.
 #[tauri::command]
 pub fn remote_set_password(id: String, password: String) -> Result<(), String> {
     let key = remotes::password_key(&id);
@@ -183,6 +216,27 @@ pub fn remote_set_password(id: String, password: String) -> Result<(), String> {
 #[tauri::command]
 pub fn remote_get_password(id: String) -> Result<Option<String>, String> {
     crate::secrets::get_secret(&remotes::password_key(&id))
+}
+
+/// Types the host's saved password into one of its sessions, and Enter — only at a prompt that is
+/// asking for one, unless `force`. The password is read and written here and never crosses into
+/// the webview; see [`remotes::session::type_password`].
+#[tauri::command]
+pub fn remote_type_password(
+    registry: State<TerminalRegistry>,
+    host_id: String,
+    session_id: String,
+    force: Option<bool>,
+) -> Result<(), String> {
+    remotes::session::type_password(&registry, &session_id, &host_id, force.unwrap_or(false))
+}
+
+/// Whether a background `ssh` on this machine can be handed a saved password. The host editor asks
+/// before offering a password to a kind whose only transport is a background `ssh` (SFTP): where the
+/// answer is no, that option could never work.
+#[tauri::command]
+pub async fn remote_askpass_supported() -> bool {
+    tokio::task::spawn_blocking(remotes::askpass::supported).await.unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,9 +307,10 @@ pub fn remote_open_session(
     id: String,
 ) -> Result<String, String> {
     let (row, _) = load(&db, &id)?;
-    let spec = session_spec(&db, &id)?;
+    let (spec, startup) = session_spec(&db, &id)?;
     let detail = spec.destination();
-    logged(&db, &row, "session", &detail, remotes::session::open(app, &registry, &spec))
+    let opened = remotes::session::open(app, &registry, &spec, startup.as_deref(), Some(&id));
+    logged(&db, &row, "session", &detail, opened)
 }
 
 /// A one-off session against a spec that hasn't been saved yet — the "Test" button in the host
@@ -267,7 +322,7 @@ pub fn remote_open_draft_session(
     registry: State<TerminalRegistry>,
     spec: RemoteHostSpec,
 ) -> Result<String, String> {
-    remotes::session::open(app, &registry, &spec)
+    remotes::session::open(app, &registry, &spec, None, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -580,10 +635,23 @@ pub fn remote_parse_azure_connection(text: String) -> Option<ParsedAzureConnecti
 }
 
 /// The identities this machine already has — keys in `~/.ssh` plus whatever the agent holds.
-/// Read-only by design; see [`remotes::keys`].
+/// Discovered, never stored; see [`remotes::keys`].
 #[tauri::command]
 pub fn remote_list_keys() -> Vec<remotes::keys::SshKey> {
     remotes::keys::list()
+}
+
+/// Makes a new ed25519 key at `~/.ssh/<name>` with `ssh-keygen`, refusing any name that exists.
+/// The key is the user's, in `~/.ssh`, like one they made in a terminal — see [`remotes::keys`].
+#[tauri::command]
+pub async fn remote_generate_key(
+    name: String,
+    passphrase: String,
+    comment: String,
+) -> Result<remotes::keys::SshKey, String> {
+    tokio::task::spawn_blocking(move || remotes::keys::generate(&name, &passphrase, &comment))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Round-trip time to a host's SSH port, or `null` when there is no direct route from here.
@@ -695,6 +763,29 @@ pub async fn remote_rename_file(
 #[tauri::command]
 pub async fn remote_close_files(host_id: String) {
     remotes::files::close(&host_id).await;
+}
+
+/// Asks a running transfer to stop. It stops at its next chunk, removes the partial file it was
+/// writing, and answers [`remotes::files::TRANSFER_CANCELLED`]. A no-op for one that has ended.
+#[tauri::command]
+pub fn remote_cancel_transfer(id: String) {
+    remotes::files::cancel(&id);
+}
+
+/// Which of `paths` already exist — on the host, or on this machine when `local` is set. What the
+/// browser asks before a transfer that would overwrite; see [`remotes::files::exist`].
+#[tauri::command]
+pub async fn remote_paths_exist(
+    db: State<'_, Db>,
+    host_id: String,
+    paths: Vec<String>,
+    local: bool,
+) -> Result<Vec<bool>, String> {
+    if local {
+        return remotes::files::exist(&host_id, &RemoteHostSpec::default(), &paths, true).await;
+    }
+    let (_, spec) = load(&db, &host_id)?;
+    remotes::files::exist(&host_id, &spec, &paths, false).await
 }
 
 // ---------------------------------------------------------------------------
@@ -941,4 +1032,152 @@ pub async fn remote_discover_azure(tenant: String) -> Result<Vec<DiscoveredHost>
         .into_iter()
         .map(|account| DiscoveredHost { spec: account.spec(), account })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remotes::{RemoteKind, RemoteOs};
+
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (id, name, created_at, sort_order) VALUES ('w1', 'W', 't', 0)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn host(snippet: &str) -> RemoteHostSpec {
+        RemoteHostSpec {
+            host: "web-01.example.com".into(),
+            user: "deploy".into(),
+            startup_snippet_id: snippet.into(),
+            ..Default::default()
+        }
+    }
+
+    /// What a session on this host would send as its remote command — the two halves the command
+    /// layer puts together, the snippet from the database and the form from `session`.
+    fn session_command(conn: &rusqlite::Connection, spec: &RemoteHostSpec) -> Option<String> {
+        let script = startup_script(conn, spec).unwrap();
+        remotes::session::remote_command(spec, script.as_deref())
+    }
+
+    #[test]
+    fn a_host_without_a_snippet_opens_a_plain_login_shell() {
+        let conn = db();
+        assert_eq!(startup_script(&conn, &host("")).unwrap(), None);
+        assert_eq!(session_command(&conn, &host("")), None);
+    }
+
+    /// The reported bug, end to end: "run on connect" used to *be* the remote command, so the
+    /// session ended with the snippet — and its newlines were flattened into `; `.
+    #[test]
+    fn a_startup_snippet_arrives_whole_and_is_followed_by_the_login_shell() {
+        let conn = db();
+        let body = "# first line is a comment\nif true; then\n  echo ready\nfi";
+        let snippet = remote_queries::create_snippet(&conn, "w1", "boot", body).unwrap();
+        let spec = host(&snippet.id);
+
+        assert_eq!(startup_script(&conn, &spec).unwrap().as_deref(), Some(body));
+        let command = session_command(&conn, &spec).unwrap();
+        assert!(command.starts_with("eval \"$(printf '"), "{command}");
+        assert!(command.ends_with("')\"; exec $SHELL -l"), "the session carries on: {command}");
+        assert!(!command.contains("; if"), "the lines were not joined into one: {command}");
+    }
+
+    #[test]
+    fn a_windows_host_runs_its_snippet_as_a_batch_file_and_keeps_the_prompt() {
+        let conn = db();
+        let snippet = remote_queries::create_snippet(&conn, "w1", "boot", "cd /d D:\\app\nset A=1").unwrap();
+        let mut spec = host(&snippet.id);
+        spec.os = RemoteOs::Windows;
+        let command = session_command(&conn, &spec).unwrap();
+        assert!(command.starts_with("powershell -NoProfile -NonInteractive -EncodedCommand "), "{command}");
+        assert!(command.contains(" && cmd /d /k \"%TEMP%\\codeflow-startup-"), "{command}");
+    }
+
+    #[test]
+    fn a_deleted_or_blank_snippet_connects_as_if_there_were_none() {
+        let conn = db();
+        assert_eq!(startup_script(&conn, &host("gone")).unwrap(), None);
+        let blank = remote_queries::create_snippet(&conn, "w1", "blank", "  \n").unwrap();
+        assert_eq!(startup_script(&conn, &host(&blank.id)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_saved_command_still_runs_after_the_snippet() {
+        let conn = db();
+        let snippet = remote_queries::create_snippet(&conn, "w1", "boot", "cd /srv").unwrap();
+        let mut spec = host(&snippet.id);
+        spec.command = "docker compose logs -f".into();
+        let command = session_command(&conn, &spec).unwrap();
+        assert!(command.ends_with("')\"; docker compose logs -f"), "{command}");
+    }
+
+    #[test]
+    fn only_an_edit_to_how_a_host_is_reached_closes_its_file_session() {
+        let before = serde_json::to_string(&host("")).unwrap();
+        let mut spec = host("");
+        spec.tags = vec!["prod".into()];
+        spec.notes = "rebooted on Friday".into();
+        spec.command = "htop".into();
+        assert!(!connection_changed(&before, &serde_json::to_string(&spec).unwrap()));
+
+        for change in [
+            |s: &mut RemoteHostSpec| s.host = "web-02.example.com".into(),
+            |s: &mut RemoteHostSpec| s.port = 2222,
+            |s: &mut RemoteHostSpec| s.user = "root".into(),
+            |s: &mut RemoteHostSpec| s.kind = RemoteKind::Ftp,
+            |s: &mut RemoteHostSpec| s.jump = "bastion".into(),
+            |s: &mut RemoteHostSpec| s.ftp.passive = false,
+        ] {
+            let mut spec = host("");
+            change(&mut spec);
+            assert!(connection_changed(&before, &serde_json::to_string(&spec).unwrap()));
+        }
+        assert!(connection_changed("{not json", &before), "unreadable counts as changed");
+    }
+
+    #[test]
+    fn a_blob_only_command_takes_an_azure_blob_path_and_refuses_everything_else() {
+        let mut azure = RemoteHostSpec { kind: RemoteKind::Azure, ..Default::default() };
+        azure.azure.account = "contoso".into();
+        assert_eq!(blob_path(&azure, "/blob/photos/cat.jpg").unwrap(), "/photos/cat.jpg");
+        assert!(blob_path(&azure, "/files/share/report.xlsx").unwrap_err().contains("file share"));
+        assert!(blob_path(&azure, "/elsewhere").is_err());
+
+        let s3 = RemoteHostSpec { kind: RemoteKind::S3, ..Default::default() };
+        assert_eq!(blob_path(&s3, "/blob/photos").unwrap_err(), RemoteKind::S3.refuses("do this"));
+    }
+
+    /// The secret rides beside the spec, never inside it — the spec is JSON in the workspace
+    /// database, the secret goes to the keychain.
+    #[test]
+    fn a_pasted_connection_string_becomes_an_account_whose_secret_is_kept_apart() {
+        let parsed = remote_parse_azure_connection(
+            "DefaultEndpointsProtocol=https;AccountName=contoso;AccountKey=a2V5LWJ5dGVz;EndpointSuffix=core.windows.net"
+                .into(),
+        )
+        .unwrap();
+        assert_eq!(parsed.name, "contoso");
+        assert_eq!(parsed.auth, remotes::AzureAuth::AccountKey);
+        assert_eq!(parsed.secret, "a2V5LWJ5dGVz");
+        assert_eq!(parsed.spec.kind, RemoteKind::Azure);
+        assert_eq!(parsed.spec.azure.account, "contoso");
+        assert!(!serde_json::to_string(&parsed.spec).unwrap().contains("a2V5LWJ5dGVz"));
+
+        let sas = remote_parse_azure_connection(
+            "https://contoso.blob.core.windows.net/photos?sv=2021-08-06&sig=abc".into(),
+        )
+        .unwrap();
+        assert_eq!(sas.auth, remotes::AzureAuth::Sas);
+        assert_eq!(sas.secret, "sv=2021-08-06&sig=abc");
+        assert_eq!(sas.spec.azure.auth, remotes::AzureAuth::Sas);
+
+        assert!(remote_parse_azure_connection("ssh deploy@web-01".into()).is_none());
+    }
 }

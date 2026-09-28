@@ -17,9 +17,9 @@ import { pushErrorToast } from "../state/toastStore";
 import { useUiStore } from "../state/uiStore";
 import { useUpdateStore } from "../state/updateStore";
 import { useTourStore } from "../state/tourStore";
-
-/** Where "Documentation" and "Report an Issue" go. */
-const REPO_URL = "https://github.com/sorodriguezz/code-flow";
+// Where "Documentation" and "Report an Issue" go — shared with Settings › About, which offers the
+// same two on every platform.
+import { REPO_URL } from "./diagnostics";
 
 export function listenToAppMenu(): Promise<() => void> {
   return listen<string>("cf://menu", ({ payload }) => {

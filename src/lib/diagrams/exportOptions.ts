@@ -30,8 +30,13 @@ import type { ExportFormat } from "./exportFile";
  *   seventeen: `size` is the thirteenth and `grid` has no parameter there at all.
  *
  * That fork is the entire matrix. Grid and size are PNG because only the canvas path can express
- * them; appearance is SVG and PDF because only `getSvg` is handed a theme (the canvas path derives
- * one from `keepTheme`, which is a different question — "match the app" rather than "be light").
+ * them; appearance is SVG because only `getSvg` is handed a theme (the canvas path derives one from
+ * `keepTheme`, which is a different question — "match the app" rather than "be light").
+ *
+ * **PDF is asked for as a PNG.** The fork above means `format: "pdf"` came back as an SVG, which
+ * was written under a `.pdf` name and opened nowhere. The PDF is now built on this side from the
+ * canvas path's PNG (`lib/diagrams/pdf.ts` says why the PNG and not the SVG), so it takes the PNG
+ * options — grid and size — and not appearance.
  *
  * # Why there is no DPI, and no "selection"
  *
@@ -115,9 +120,9 @@ export type PendingExport =
  * reason the table says what it says.
  */
 const RESTRICTED_TO: Partial<Record<ExportOptionKey, readonly ImageExportFormat[]>> = {
-  grid: ["png"],
-  size: ["png"],
-  appearance: ["svg", "pdf"],
+  grid: ["png", "pdf"],
+  size: ["png", "pdf"],
+  appearance: ["svg"],
 };
 
 /** Whether an option means anything for this format. Anything not in the table applies to all. */
@@ -152,7 +157,8 @@ export function supportsOption(format: ImageExportFormat, option: ExportOptionKe
  */
 export function exportMessage(format: ImageExportFormat, options: ImageExportOptions): EmbedAction {
   const { zoom, border, transparent, shadow, grid, size, appearance } = options;
-  if (format === "png") {
+  // A PDF is built from exactly the PNG a PNG export would produce — see the module note.
+  if (format === "png" || format === "pdf") {
     return {
       action: "export",
       format: "png",

@@ -8,9 +8,9 @@ import type { Project, VcsProvider } from "../types/domain";
  * on; if this disagreed with it, the Pipelines tab would offer one host and the request behind it
  * would go to another — silently, because both answers are individually plausible.
  *
- * So the precedence is the same hard order, **GitHub → GitLab → Azure**, and so are the guards,
- * including the asymmetry between them: GitHub is accepted on the two columns merely being
- * present, GitLab requires a non-blank path. That asymmetry exists in the Rust; copying it is the
+ * So the precedence is the same hard order, **GitHub → GitLab → Bitbucket → Azure**, and so are the
+ * guards, including the asymmetry between them: GitHub is accepted on the two columns merely being
+ * present, GitLab requires a non-blank path and Bitbucket two non-blank ones. That asymmetry exists in the Rust; copying it is the
  * point. (It is also why `unlink_project` clears all eight columns at once rather than the ones
  * for one provider — an orphaned column would still satisfy this order and route work to the
  * wrong host.)
@@ -19,6 +19,7 @@ export function linkedProvider(project: Project | null | undefined): VcsProvider
   if (!project) return null;
   if (project.github_owner && project.github_repo) return "github";
   if (project.gitlab_project && project.gitlab_project.trim() !== "") return "gitlab";
+  if (project.bitbucket_workspace?.trim() && project.bitbucket_repo?.trim()) return "bitbucket";
   if (project.ado_org && project.ado_project && project.ado_repo_id) return "azure";
   return null;
 }
@@ -37,6 +38,10 @@ export function linkedHost(project: Project | null | undefined): string | null {
       return project.github_host ?? "github.com";
     case "gitlab":
       return project.gitlab_host ?? "gitlab.com";
+    // The workspace is what a Bitbucket credential is saved under — the thing a "not connected"
+    // message has to name, as the organization is for Azure.
+    case "bitbucket":
+      return project.bitbucket_workspace;
     case "azure":
       return project.ado_org;
     default:

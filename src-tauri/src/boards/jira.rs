@@ -249,6 +249,34 @@ pub struct JiraProject {
 struct RawProjectSearch {
     #[serde(default)]
     values: Vec<RawProjectSummary>,
+    /// Jira Cloud's own "this was the last page". Absent on hosts that page without saying so.
+    #[serde(rename = "isLast", default)]
+    is_last: Option<bool>,
+    #[serde(default)]
+    total: Option<usize>,
+}
+
+/// Projects asked for per page. Jira Cloud caps `/project/search` at 50 whatever is requested, so
+/// asking for more would only make a short page look like the last one.
+const PROJECT_PAGE: usize = 50;
+
+/// How many pages are followed before giving up — 5 000 projects, far past any picker anybody
+/// scrolls, and a bound so a host that never says "last" cannot keep this looping.
+const MAX_PROJECT_PAGES: usize = 100;
+
+/// Where the next page of `/project/search` starts, or `None` when `page` (which began at `start`)
+/// was the last one. Every signal Jira may or may not send is honoured: `isLast`, then `total`, then
+/// a page shorter than asked for.
+fn next_project_page(page: &RawProjectSearch, start: usize) -> Option<usize> {
+    if page.values.is_empty() || page.is_last == Some(true) {
+        return None;
+    }
+    let next = start + page.values.len();
+    match (page.is_last, page.total) {
+        (_, Some(total)) if next >= total => None,
+        (None, None) if page.values.len() < PROJECT_PAGE => None,
+        _ => Some(next),
+    }
 }
 
 #[derive(Deserialize)]
@@ -265,18 +293,35 @@ struct RawProjectSummary {
 /// `/project` in favour of `/project/search`, and Jira Server never shipped `/project/search` at
 /// all — so a single call is wrong on one host or the other, and which host this is is exactly what
 /// the app does not want to make the user declare.
+///
+/// **Every page of it.** The paged endpoint returns at most 50 projects however many are asked for,
+/// and this used to read only the first page — so on a site with more, the project a user wanted
+/// was simply not in the picker, with nothing to say the list was cut. A later page that fails is
+/// an error rather than a shorter list, for the same reason.
 pub async fn list_projects(site: &str, auth: &BoardAuth) -> Result<Vec<JiraProject>, String> {
     let site = normalize_site(site);
     if site.is_empty() {
         return Err("Falta el sitio de Jira".to_string());
     }
-    let paged: Result<RawProjectSearch, String> = get_json(
-        &format!("{site}/rest/api/2/project/search?maxResults=200&orderBy=name"),
-        auth,
-    )
-    .await;
-    let summaries = match paged {
-        Ok(found) => found.values,
+    let page_url = |start: usize| {
+        format!("{site}/rest/api/2/project/search?startAt={start}&maxResults={PROJECT_PAGE}&orderBy=name")
+    };
+    let summaries = match get_json::<RawProjectSearch>(&page_url(0), auth).await {
+        Ok(first) => {
+            let mut next = next_project_page(&first, 0);
+            let mut all = first.values;
+            let mut pages = 1;
+            while let Some(start) = next {
+                if pages >= MAX_PROJECT_PAGES {
+                    break;
+                }
+                let page: RawProjectSearch = get_json(&page_url(start), auth).await?;
+                next = next_project_page(&page, start);
+                all.extend(page.values);
+                pages += 1;
+            }
+            all
+        }
         Err(_) => get_json::<Vec<RawProjectSummary>>(&format!("{site}/rest/api/2/project"), auth).await?,
     };
     Ok(summaries
@@ -982,5 +1027,44 @@ mod tests {
     fn an_issue_type_travels_as_an_id_when_it_is_one() {
         assert_eq!(issue_type_ref("10001"), serde_json::json!({ "id": "10001" }));
         assert_eq!(issue_type_ref("Story"), serde_json::json!({ "name": "Story" }));
+    }
+
+    fn project_page(count: usize, is_last: Option<bool>, total: Option<usize>) -> RawProjectSearch {
+        RawProjectSearch {
+            values: (0..count)
+                .map(|i| RawProjectSummary { key: format!("P{i}"), name: format!("Proyecto {i}") })
+                .collect(),
+            is_last,
+            total,
+        }
+    }
+
+    /// The picker used to stop at the first page — 50 projects on Jira Cloud — with nothing saying
+    /// the list was cut. Every signal the host may send decides whether there is another page.
+    #[test]
+    fn the_project_list_follows_every_page_and_stops_at_the_last() {
+        // Cloud says it outright.
+        assert_eq!(next_project_page(&project_page(50, Some(false), None), 0), Some(50));
+        assert_eq!(next_project_page(&project_page(50, Some(true), None), 50), None);
+        // Or gives a total instead.
+        assert_eq!(next_project_page(&project_page(50, None, Some(120)), 50), Some(100));
+        assert_eq!(next_project_page(&project_page(20, None, Some(120)), 100), None);
+        // Or says nothing, and a short page is the end of it.
+        assert_eq!(next_project_page(&project_page(50, None, None), 0), Some(50));
+        assert_eq!(next_project_page(&project_page(3, None, None), 50), None);
+        // An empty page ends it whatever else it claims.
+        assert_eq!(next_project_page(&project_page(0, Some(false), Some(500)), 50), None);
+    }
+
+    /// The wire shape as Cloud sends it.
+    #[test]
+    fn a_project_search_page_reads_its_paging_fields() {
+        let page: RawProjectSearch = serde_json::from_str(
+            r#"{"startAt":0,"maxResults":50,"total":72,"isLast":false,"values":[{"key":"WEB","name":"Web"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(page.values.len(), 1);
+        assert_eq!(page.is_last, Some(false));
+        assert_eq!(page.total, Some(72));
     }
 }

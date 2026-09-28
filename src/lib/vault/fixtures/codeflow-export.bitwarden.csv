@@ -1,0 +1,10 @@
+folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp
+Trabajo,1,login,"Correo, del equipo","línea 1
+línea 2",PIN: 1234,0,https://mail.example.test,ana@example.test,"p""ss,word",otpauth://totp/x?secret=JBSWY3DPEHPK3PXP
+Trabajo/Bases,,login,Prod,,"engine: postgres
+host: db.example.test",0,,app,s3cret,
+,,note,Visa,,"cardholder: Ana Pérez
+cardNumber: 4111111111111111
+cvv: 123
+expiry: 08/29",0,,,,
+,,note,API,rotar en enero,apiKey: sk-test-123,0,,,,

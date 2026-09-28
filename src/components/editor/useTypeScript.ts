@@ -1,25 +1,42 @@
 import { useEffect } from "react";
-import type { IRange, editor as MonacoEditorNS, languages, Position } from "monaco-editor";
+import type { CancellationToken, IDisposable, IRange, editor as MonacoEditorNS, languages, Position } from "monaco-editor";
 import type { Monaco } from "@monaco-editor/react";
 import {
   TS_LANGUAGES,
+  onTsEvent,
   partsToText,
   scriptKind,
+  setTsRunning,
+  setTsServed,
+  signatureLabel,
   tsAbsolute,
+  tsCandidateFile,
+  tsFileOf,
+  tsIsRunning,
   tsNotify,
   tsOpenFiles,
+  tsRelPath,
   tsRequest,
+  tsRunningRoot,
   tsStart,
   type TsCompletionDetail,
   type TsCodeFixAction,
   type TsDiagnostic,
+  type TsDiagnosticEventBody,
   type TsCompletionInfo,
   type TsDefinitionInfo,
   type TsQuickInfo,
+  type TsReferencesResponse,
+  type TsRenameResponse,
+  type TsSignatureHelpItems,
 } from "../../lib/tsserver";
-import { modelPathForId, relPathFromModelUri } from "../../lib/editorModel";
+import { modelPathForId } from "../../lib/editorModel";
 import { isInstallableName } from "../../lib/packageScripts";
+import { planTsRename } from "../../lib/workspaceEdit";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { reportSoon, useProblemsStore, type Problem } from "../../state/problemsStore";
+import { useEditorPanelStore } from "../../state/editorPanelStore";
+import { applyRename } from "./renameFlow";
 
 /**
  * Real TypeScript IntelliSense in the editor, from the project's own `tsserver`.
@@ -65,11 +82,24 @@ import type { TranslationKey } from "../../lib/i18n/translations";
  *
  * The compiler does. `semanticDiagnosticsSync` is the same check `tsc` runs, over the same
  * `tsconfig.json`, so what is underlined here is what the build will say — and it arrives as an
- * ordinary request, one file at a time, rather than through the `geterr` event stream the reader in
- * `tsserver.rs` drops.
+ * ordinary request, one file at a time. The event-driven `geterr` feeds the Problems panel instead
+ * (below), where an answer per file whenever it is ready is exactly the shape wanted.
  *
  * Syntax stays with Monaco's worker, which is right about it by construction and answers on every
  * keystroke without a round trip.
+ *
+ * # The Problems panel hears about every open file, and about the project on request
+ *
+ * The markers are the file on screen's. The panel is fed separately: `geterr` over every file the
+ * server holds after each settled edit — an edit here can break a file open beside it — and
+ * `geterrForProject` when the panel's "check whole project" is pressed. Both answer with events
+ * (`tsserver.rs` forwards them), one list per file per kind, into `problemsStore`.
+ *
+ * # One source of truth
+ *
+ * Rename, find references and signature help come from here too, and Monaco's isolated worker is
+ * silent for any file this server holds — see `lib/tsWorkerFallback` for why that used to be a
+ * toggle that never took effect, and what replaced it.
  */
 
 interface Options {
@@ -113,30 +143,297 @@ interface Current {
 
 let current: Current | null = null;
 
-/** Whether the server came up. Providers stay registered either way — they simply return nothing
- *  — so a project without TypeScript installed behaves exactly as it did before. */
-let running = false;
+/**
+ * Whether the server came up for the project on screen. Providers stay registered either way — they
+ * simply return nothing — so a project without TypeScript installed behaves exactly as it did
+ * before. The state itself lives in `lib/tsserver` (`setTsRunning`), because Monaco's isolated
+ * worker, registered at startup, has to ask the same question.
+ */
+const running = () => tsIsRunning();
 
 let installed = false;
 
 /**
  * The file a model belongs to, or `null` when it is not one tsserver was told about.
  *
- * Through `relPathFromModelUri`, and that is the whole of this function's history. Models here
- * are addressed as `codeflow:/<projectId>/<relPath>` — not as paths on disk — so reading
- * `uri.path` directly yielded `<projectId>/src/x.ts`, which still ends in `.ts` and therefore
- * sailed past the kind check before being pasted onto the repo root. The absolute path that came
- * out had the project id wedged into the middle of it and matched nothing in `opened`, so every
- * request returned null and Monaco fell back to word-from-the-document suggestions: the list of
- * `abc and`, `abc are`, `abc Array` scraped out of the file you were editing.
+ * Through `relPathFromModelUri` (inside `tsFileOf`), and that is the whole of this function's
+ * history. Models here are addressed as `codeflow:/<projectId>/<relPath>` — not as paths on disk —
+ * so reading `uri.path` directly yielded `<projectId>/src/x.ts`, which still ends in `.ts` and
+ * therefore sailed past the kind check before being pasted onto the repo root. The absolute path
+ * that came out had the project id wedged into the middle of it and matched nothing in `opened`, so
+ * every request returned null and Monaco fell back to word-from-the-document suggestions: the list
+ * of `abc and`, `abc are`, `abc Array` scraped out of the file you were editing.
  */
 function fileOf(model: MonacoEditorNS.ITextModel): string | null {
-  const project = current;
-  if (!project) return null;
-  const relative = relPathFromModelUri(model.uri, project.projectId);
-  if (!relative || !scriptKind(relative)) return null;
-  const file = absolute(project.repoPath, relative);
-  return tsOpenFiles.has(file) ? file : null;
+  return tsFileOf(model.uri);
+}
+
+/**
+ * Where each open file's text ended the last time it was sent — the end of the range the next full
+ * `change` replaces.
+ *
+ * Not `lineCount + 1`, which is what the sync used to send as the end: tsserver clamps a line past
+ * the last to the *start* of the last line, so a file without a trailing newline kept its old last
+ * line and grew a copy of it on every keystroke, in the server's copy only. Completions, errors and
+ * — worst — rename offsets then described a file that was not the one on screen.
+ */
+const sentEnd = new Map<string, { line: number; offset: number }>();
+
+/** The position just past the end of `text`, counted the way the compiler counts lines — which
+ *  includes the two Unicode separators. */
+function endOf(text: string): { line: number; offset: number } {
+  const lines = text.split(/\r\n|[\r\n\u2028\u2029]/);
+  return { line: lines.length, offset: lines[lines.length - 1].length + 1 };
+}
+
+/** Hands a model of the served project to the server, once. */
+function openInServer(model: MonacoEditorNS.ITextModel): void {
+  if (!running()) return;
+  const file = tsCandidateFile(model.uri);
+  const kind = file ? scriptKind(file) : null;
+  if (!file || !kind || tsOpenFiles.has(file)) return;
+  const text = model.getValue();
+  tsOpenFiles.add(file);
+  sentEnd.set(file, endOf(text));
+  void tsNotify("open", {
+    file,
+    fileContent: text,
+    scriptKindName: kind,
+    // The project the file belongs to is left to tsserver to work out from the path, which is what
+    // makes `tsconfig.json`, `paths` and project references apply — the whole reason this is a real
+    // server rather than a worker fed a pile of `.d.ts`.
+  }).catch(() => undefined);
+}
+
+/** The buffer's whole text, replacing what the server last had. */
+function sendChange(model: MonacoEditorNS.ITextModel): void {
+  const file = fileOf(model);
+  if (!file || !running()) return;
+  const end = sentEnd.get(file);
+  if (!end) {
+    // Nothing recorded to replace up to: hand the whole file over again instead.
+    tsOpenFiles.delete(file);
+    openInServer(model);
+    return;
+  }
+  const text = model.getValue();
+  sentEnd.set(file, endOf(text));
+  void tsNotify("change", {
+    file,
+    line: 1,
+    offset: 1,
+    endLine: end.line,
+    endOffset: end.offset,
+    insertString: text,
+  }).catch(() => undefined);
+}
+
+/**
+ * Every model the served project owns, kept told — not only the file in the focused pane.
+ *
+ * The sync used to be per pane, for the active file, so a tab in the background that changed — a
+ * rename landing in it, a split editing it — left the server holding an older copy until the tab was
+ * shown again. A rename planned against that copy writes its edits at offsets that moved. Driven off
+ * Monaco's model registry instead, installed once, the way `useLanguageServer`'s sync is; a file
+ * leaves the server (`close`, back to what is on disk) when its model is disposed with its tab.
+ */
+let syncInstalled = false;
+
+function installDocumentSync(monaco: Monaco): void {
+  if (syncInstalled) return;
+  syncInstalled = true;
+  const listening = new Map<string, IDisposable>();
+
+  const attach = (model: MonacoEditorNS.ITextModel) => {
+    const key = model.uri.toString();
+    if (listening.has(key)) return;
+    listening.set(
+      key,
+      model.onDidChangeContent(() => {
+        sendChange(model);
+        scheduleOpenFileDiagnostics();
+      }),
+    );
+    openInServer(model);
+  };
+
+  for (const model of monaco.editor.getModels()) attach(model);
+  monaco.editor.onDidCreateModel(attach);
+  monaco.editor.onWillDisposeModel((model: MonacoEditorNS.ITextModel) => {
+    const key = model.uri.toString();
+    listening.get(key)?.dispose();
+    listening.delete(key);
+    const file = fileOf(model);
+    if (!file) return;
+    tsOpenFiles.delete(file);
+    sentEnd.delete(file);
+    void tsNotify("close", { file }).catch(() => undefined);
+    const path = tsRelPath(file);
+    if (!path) return;
+    // Its errors were about the buffer, which is gone. After a project check the file is still part
+    // of what was asked about, so it is checked again as it is on disk; otherwise it simply leaves.
+    if (projectChecked) void tsNotify("geterr", { files: [file], delay: 0 }).catch(() => undefined);
+    else useProblemsStore.getState().forgetFile("tsserver:", path);
+  });
+}
+
+/** Every model of the served project handed to the server — what a (re)start runs, since the
+ *  models created before it came up were never told about. */
+function sweep(monaco: Monaco): void {
+  for (const model of monaco.editor.getModels()) openInServer(model);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics for the Problems panel
+// ---------------------------------------------------------------------------
+
+/** Set once a project-wide check has run this session: from then on a closed file keeps its
+ *  (re-checked) problems, since the project's list is what the user asked for. */
+let projectChecked = false;
+/** The `seq` of the project check in flight, to recognise its `requestCompleted`. */
+let projectCheckSeq: number | null = null;
+/** `requestCompleted` events that arrived before their `seq` was known — the event and the reply to
+ *  `ts_notify` take two different routes back and either may land first. */
+const completedSeqs: number[] = [];
+
+/** tsserver's `category` as a Problems severity; suggestions are not problems. */
+function problemSeverity(category?: string): Problem["severity"] | null {
+  switch (category) {
+    case "error":
+      return "error";
+    case "warning":
+      return "warning";
+    case "message":
+      return "info";
+    default:
+      return null;
+  }
+}
+
+function toProblems(diagnostics: TsDiagnostic[]): Problem[] {
+  return diagnostics.flatMap((entry) => {
+    const severity = problemSeverity(entry.category);
+    if (!severity) return [];
+    return [
+      {
+        line: entry.start.line,
+        column: entry.start.offset,
+        endLine: entry.end.line,
+        endColumn: entry.end.offset,
+        severity,
+        message: entry.text,
+        code: entry.code === undefined ? undefined : `TS${entry.code}`,
+        source: "ts",
+      },
+    ];
+  });
+}
+
+let openDiagnosticsTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * `geterr` over every file the server holds, once edits have settled. More than the file being
+ * typed in, because an edit here is how a file open beside it breaks — a renamed export, a changed
+ * signature — and the Problems panel should say so before the other tab is looked at.
+ */
+function scheduleOpenFileDiagnostics(): void {
+  if (openDiagnosticsTimer) clearTimeout(openDiagnosticsTimer);
+  openDiagnosticsTimer = setTimeout(() => {
+    openDiagnosticsTimer = null;
+    if (!running()) return;
+    const files = [...tsOpenFiles].filter((file) => tsRelPath(file) !== null);
+    if (files.length > 0) void tsNotify("geterr", { files, delay: 0 }).catch(() => undefined);
+  }, 900);
+}
+
+let eventsInstalled = false;
+
+function installDiagnosticEvents(): void {
+  if (eventsInstalled) return;
+  eventsInstalled = true;
+  void onTsEvent((event) => {
+    // Another window's server, or this window's previous one.
+    if (event.root !== tsRunningRoot()) return;
+    if (event.event === "requestCompleted") {
+      const seq = (event.body as { request_seq?: number } | null)?.request_seq;
+      if (typeof seq !== "number") return;
+      if (seq === projectCheckSeq) {
+        finishProjectCheck();
+      } else {
+        completedSeqs.push(seq);
+        if (completedSeqs.length > 20) completedSeqs.shift();
+      }
+      return;
+    }
+    if (event.event !== "semanticDiag" && event.event !== "syntaxDiag") return;
+    const body = event.body as TsDiagnosticEventBody | null;
+    const path = body ? tsRelPath(body.file) : null;
+    if (!body || !path) return;
+    reportSoon(event.event === "semanticDiag" ? "tsserver:semantic" : "tsserver:syntax", path, toProblems(body.diagnostics));
+  });
+}
+
+function finishProjectCheck(): void {
+  projectCheckSeq = null;
+  useEditorPanelStore.getState().setProjectCheck({ checkingProject: false });
+}
+
+/**
+ * Checks every file of the project the open files belong to — the Problems panel's "check whole
+ * project". Answers `false` when no server is running for it. The results arrive as events and
+ * land in the panel file by file; `requestCompleted` ends the spinner.
+ */
+export function checkTsProject(): boolean {
+  if (!running()) return false;
+  const file = [...tsOpenFiles].find((candidate) => tsRelPath(candidate) !== null);
+  if (!file) return false;
+  projectChecked = true;
+  useEditorPanelStore.getState().setProjectCheck({ checkingProject: true });
+  void tsNotify("geterrForProject", { file, delay: 0 })
+    .then((seq) => {
+      if (completedSeqs.includes(seq)) finishProjectCheck();
+      else projectCheckSeq = seq;
+    })
+    .catch(() => finishProjectCheck());
+  return true;
+}
+
+/**
+ * Every reference to the symbol at `position`, across the project, with the text of each line —
+ * for the results panel. `null` when the server does not hold the file (the caller asks the
+ * language servers instead).
+ */
+export async function tsReferences(
+  model: MonacoEditorNS.ITextModel,
+  position: Position,
+): Promise<{ symbol: string; hits: { path: string; range: IRange; text: string }[] } | null> {
+  const file = fileOf(model);
+  if (!file || !running()) return null;
+  const answer = await tsRequest<TsReferencesResponse>("references", {
+    file,
+    line: position.lineNumber,
+    offset: position.column,
+  }).catch(() => null);
+  if (!answer) return { symbol: model.getWordAtPosition(position)?.word ?? "", hits: [] };
+  return {
+    symbol: answer.symbolName,
+    hits: answer.refs.flatMap((ref) => {
+      const path = tsRelPath(ref.file);
+      if (!path) return [];
+      return [
+        {
+          path,
+          range: {
+            startLineNumber: ref.start.line,
+            startColumn: ref.start.offset,
+            endLineNumber: ref.end.line,
+            endColumn: ref.end.offset,
+          },
+          text: (ref.lineText ?? "").trim(),
+        },
+      ];
+    }),
+  };
 }
 
 /**
@@ -220,7 +517,7 @@ async function compilerFixes(
   context: languages.CodeActionContext,
 ): Promise<languages.CodeAction[]> {
   const file = fileOf(model);
-  if (!file || !running) return [];
+  if (!file || !running()) return [];
   // A request for one specific kind — the "fix all on save" family, `source.*` — is not this. Left
   // unguarded it would be a tsserver round trip per save that can only ever produce quick fixes
   // Monaco then filters out.
@@ -344,7 +641,7 @@ function installProviders(monaco: Monaco): void {
     triggerCharacters: [".", '"', "'", "`", "/", "@", "<", "#", " "],
     provideCompletionItems: async (model: MonacoEditorNS.ITextModel, position: Position) => {
       const file = fileOf(model);
-      if (!file || !running) return { suggestions: [] };
+      if (!file || !running()) return { suggestions: [] };
       const info = await tsRequest<TsCompletionInfo>("completionInfo", {
         file,
         line: position.lineNumber,
@@ -386,7 +683,7 @@ function installProviders(monaco: Monaco): void {
      */
     resolveCompletionItem: async (item: languages.CompletionItem) => {
       const carried = (item as languages.CompletionItem & { _ts?: TsCarried })._ts;
-      if (!carried || !running) return item;
+      if (!carried || !running()) return item;
       const details = await tsRequest<TsCompletionDetail[]>("completionEntryDetails", {
         file: carried.file,
         line: carried.position.lineNumber,
@@ -425,7 +722,7 @@ function installProviders(monaco: Monaco): void {
   monaco.languages.registerHoverProvider(TS_LANGUAGES, {
     provideHover: async (model: MonacoEditorNS.ITextModel, position: Position) => {
       const file = fileOf(model);
-      if (!file || !running) return null;
+      if (!file || !running()) return null;
       const info = await tsRequest<TsQuickInfo>("quickinfo", {
         file,
         line: position.lineNumber,
@@ -454,7 +751,7 @@ function installProviders(monaco: Monaco): void {
   monaco.languages.registerDefinitionProvider(TS_LANGUAGES, {
     provideDefinition: async (model: MonacoEditorNS.ITextModel, position: Position) => {
       const file = fileOf(model);
-      if (!file || !running) return null;
+      if (!file || !running()) return null;
       const found = await tsRequest<TsDefinitionInfo>("definitionAndBoundSpan", {
         file,
         line: position.lineNumber,
@@ -477,6 +774,124 @@ function installProviders(monaco: Monaco): void {
             : null;
         })
         .filter((location) => location !== null);
+    },
+  });
+
+  /**
+   * Every reference, across the project — Monaco's own "Go to References" and its peek.
+   *
+   * The isolated worker used to answer this, and it only knows the files that happen to be open.
+   * The peek can preview only a file that has a model, so the full list with each line's text is
+   * the results panel's (`tsReferences`, behind "Find All References").
+   */
+  monaco.languages.registerReferenceProvider(TS_LANGUAGES, {
+    provideReferences: async (model: MonacoEditorNS.ITextModel, position: Position) => {
+      const project = current;
+      const found = project ? await tsReferences(model, position) : null;
+      if (!found || !project) return null;
+      return found.hits.map((hit) => ({
+        uri: monaco.Uri.parse(modelPathForId(project.projectId, hit.path)),
+        range: hit.range,
+      }));
+    },
+  });
+
+  /**
+   * Rename, from the compiler, across the whole program — applied by `renameFlow`, not by Monaco,
+   * whose standalone bulk edit refuses every file without a model.
+   *
+   * `rename` is asked twice for one F2, the way VS Code's TypeScript extension asks: once to find
+   * out whether the symbol *can* be renamed (a keyword, a symbol from a library's `.d.ts`), which
+   * is what lets the input box refuse with the compiler's own sentence instead of after typing;
+   * and once for the locations. The first answer is kept and reused when nothing moved in between,
+   * so on a large project the second round trip usually does not happen at all.
+   */
+  let asked: { key: string; answer: TsRenameResponse } | null = null;
+  const renameKey = (file: string, model: MonacoEditorNS.ITextModel, position: Position) =>
+    `${file}:${model.getAlternativeVersionId()}:${position.lineNumber}:${position.column}`;
+  const askRename = (file: string, position: Position) =>
+    tsRequest<TsRenameResponse>("rename", {
+      file,
+      line: position.lineNumber,
+      offset: position.column,
+      findInStrings: false,
+      findInComments: false,
+    }).catch(() => null);
+
+  monaco.languages.registerRenameProvider(TS_LANGUAGES, {
+    resolveRenameLocation: async (model: MonacoEditorNS.ITextModel, position: Position) => {
+      const file = fileOf(model);
+      if (!file || !running()) return undefined;
+      const answer = await askRename(file, position);
+      if (!answer) return undefined;
+      const span = answer.info.triggerSpan;
+      const word = model.getWordAtPosition(position);
+      const range = span
+        ? new monaco.Range(span.start.line, span.start.offset, span.end.line, span.end.offset)
+        : new monaco.Range(position.lineNumber, word?.startColumn ?? position.column, position.lineNumber, word?.endColumn ?? position.column);
+      if (!answer.info.canRename) {
+        return { range, text: model.getValueInRange(range), rejectReason: answer.info.localizedErrorMessage };
+      }
+      asked = { key: renameKey(file, model, position), answer };
+      return { range, text: model.getValueInRange(range) };
+    },
+    provideRenameEdits: async (
+      model: MonacoEditorNS.ITextModel,
+      position: Position,
+      newName: string,
+      token: CancellationToken,
+    ) => {
+      const file = fileOf(model);
+      const project = current;
+      if (!file || !running() || !project) return null;
+      const reuse = asked?.key === renameKey(file, model, position) ? asked.answer : null;
+      asked = null;
+      const answer = reuse ?? (await askRename(file, position));
+      // Monaco cancels the rename when the buffer or the caret moves while it waits: the locations
+      // describe text that is no longer there.
+      if (token.isCancellationRequested) return { edits: [] };
+      if (!answer) return null;
+      if (!answer.info.canRename) return { edits: [], rejectReason: answer.info.localizedErrorMessage };
+      await applyRename(planTsRename(answer.locs, newName, tsRelPath), project.repoPath, newName);
+      return { edits: [] };
+    },
+  });
+
+  /**
+   * Parameter hints. The worker used to be the only source, so turning it off for files this server
+   * holds (see `lib/tsWorkerFallback`) would have taken them away — they come from the compiler now,
+   * which also means they know the signatures of what was imported.
+   */
+  monaco.languages.registerSignatureHelpProvider(TS_LANGUAGES, {
+    signatureHelpTriggerCharacters: ["(", ",", "<"],
+    signatureHelpRetriggerCharacters: [")"],
+    provideSignatureHelp: async (model: MonacoEditorNS.ITextModel, position: Position) => {
+      const file = fileOf(model);
+      if (!file || !running()) return null;
+      const help = await tsRequest<TsSignatureHelpItems>("signatureHelp", {
+        file,
+        line: position.lineNumber,
+        offset: position.column,
+      }).catch(() => null);
+      if (!help?.items?.length) return null;
+      return {
+        value: {
+          signatures: help.items.map((item) => {
+            const { label, parameters } = signatureLabel(item);
+            return {
+              label,
+              documentation: partsToText(item.documentation) || undefined,
+              parameters: parameters.map((parameter) => ({
+                label: parameter.label,
+                documentation: parameter.documentation || undefined,
+              })),
+            };
+          }),
+          activeSignature: help.selectedItemIndex,
+          activeParameter: help.argumentIndex,
+        },
+        dispose: () => {},
+      };
     },
   });
 
@@ -547,13 +962,18 @@ export function useTypeScript(
    * than either.
    */
   useEffect(() => {
-    if (repoPath) current = { repoPath, projectId, install: onInstallPackage, t };
+    if (!repoPath) return;
+    current = { repoPath, projectId, install: onInstallPackage, t };
+    setTsServed({ repoPath, projectId });
   });
 
   // Installed before the server and independently of it: the providers answer nothing until it is
   // up, which is exactly how a repository with no TypeScript in it should behave.
   useEffect(() => {
-    if (monaco) installProviders(monaco);
+    if (!monaco) return;
+    installProviders(monaco);
+    installDocumentSync(monaco);
+    installDiagnosticEvents();
   }, [monaco]);
 
   // One server per repository, started when a file that needs it is first shown.
@@ -563,69 +983,34 @@ export function useTypeScript(
     void tsStart(repoPath)
       .then(() => {
         if (!alive) return;
-        running = true;
-        // A restart invalidates every `open` the previous server was told about.
-        tsOpenFiles.clear();
-        isolatedWorker(monaco, false);
+        // `ts_start` hands back the running server when it already serves this repository, so only
+        // a server that is new to this window invalidates what the previous one was told.
+        const fresh = tsRunningRoot() !== repoPath;
+        setTsRunning(repoPath);
+        if (fresh) {
+          tsOpenFiles.clear();
+          sentEnd.clear();
+          // Rename keeps shorthand properties working (`{ foo }` becomes `{ foo: bar }`, not
+          // `{ bar }`, which would change the object's key) and never renames an import path.
+          void tsRequest("configure", {
+            preferences: { providePrefixAndSuffixTextForRename: true, allowRenameOfImportPath: false },
+          }).catch(() => undefined);
+        }
+        sweep(monaco);
+        scheduleOpenFileDiagnostics();
+        useEditorPanelStore.getState().setProjectCheck({ canCheckProject: true });
       })
       .catch(() => {
         // No TypeScript in the project. Not an error to surface: it is the ordinary state of a repo
-        // that is not a TypeScript project, and a toast on every file opened would be noise.
-        running = false;
-        isolatedWorker(monaco, true);
+        // that is not a TypeScript project, and a toast on every file opened would be noise. Not
+        // gated on `alive`: `ts_start` stopped whatever server was running before it failed.
+        setTsRunning(null);
+        useEditorPanelStore.getState().setProjectCheck({ canCheckProject: false, checkingProject: false });
       });
     return () => {
       alive = false;
     };
   }, [monaco, repoPath, activePath]);
-
-  // Keep the server's copy of the open file in step with the buffer.
-  useEffect(() => {
-    if (!editor || !monaco || !repoPath || !activePath) return;
-    const kind = scriptKind(activePath);
-    if (!kind) return;
-    const model = editor.getModel();
-    if (!model) return;
-
-    const file = absolute(repoPath, activePath);
-    let disposed = false;
-
-    const send = () => {
-      if (!running || disposed) return;
-      if (tsOpenFiles.has(file)) {
-        void tsNotify("change", {
-          file,
-          line: 1,
-          offset: 1,
-          endLine: model.getLineCount() + 1,
-          endOffset: 1,
-          insertString: model.getValue(),
-        }).catch(() => undefined);
-      } else {
-        tsOpenFiles.add(file);
-        void tsNotify("open", {
-          file,
-          fileContent: model.getValue(),
-          scriptKindName: kind,
-          // The project the file belongs to. Left to tsserver to work out from the path, which is
-          // what makes `tsconfig.json`, `paths` and project references apply — the whole reason
-          // this is a real server rather than a worker fed a pile of `.d.ts`.
-        }).catch(() => undefined);
-      }
-    };
-
-    // The first send may race the start above; a short retry covers the cold-start case without a
-    // subscription, and every later edit goes through the change listener.
-    send();
-    const retry = setTimeout(send, 400);
-    const changed = model.onDidChangeContent(() => send());
-
-    return () => {
-      disposed = true;
-      clearTimeout(retry);
-      changed.dispose();
-    };
-  }, [editor, monaco, repoPath, activePath]);
 
   /**
    * What is wrong with the file, and what is merely unused.
@@ -652,9 +1037,9 @@ export function useTypeScript(
    * same fact as a semantic error — which is what `noUnusedLocals` makes it — keeps its squiggle,
    * because at that point the build does fail on it.
    *
-   * These are the `Sync` commands, so they answer as ordinary requests. The event-driven `geterr` is
-   * what the header calls unwired, and it stays that way: this needs an answer about one file at a
-   * time, which is exactly what these return.
+   * These are the `Sync` commands, so they answer as ordinary requests: this needs an answer about
+   * one file at a time, which is exactly what these return. The event-driven `geterr` is the Problems
+   * panel's, for every other open file (`scheduleOpenFileDiagnostics`).
    */
   useEffect(() => {
     if (!editor || !monaco || !repoPath || !activePath || !scriptKind(activePath)) return;
@@ -663,11 +1048,11 @@ export function useTypeScript(
 
     const draw = async () => {
       const model = editor.getModel();
-      if (disposed || !model || !running) return;
+      if (disposed || !model || !running()) return;
       const file = absolute(repoPath, activePath);
-      // The buffer has to have reached the server first; the sync effect above sends it and retries,
-      // so a miss here simply waits for the next pass rather than asking about a file tsserver has
-      // never heard of.
+      // The buffer has to have reached the server first — the document sync opens every model once
+      // the server is up — so a miss here simply waits for the next pass rather than asking about a
+      // file tsserver has never heard of.
       if (!tsOpenFiles.has(file)) return;
       const [suggested, semantic] = await Promise.all([
         tsRequest<TsDiagnostic[]>("suggestionDiagnosticsSync", { file }).catch(() => []),
@@ -678,6 +1063,9 @@ export function useTypeScript(
       if (disposed || editor.getModel() !== model) return;
       const all = [...suggested, ...semantic];
       if (all.length > 0) answered = true;
+      // The same answer for the Problems panel, which then asks about every other open file too.
+      reportSoon("tsserver:semantic", activePath, toProblems(semantic));
+      scheduleOpenFileDiagnostics();
 
       /**
        * The markers, owned by this file's own key so a later pass replaces them wholesale rather
@@ -762,55 +1150,6 @@ export function useTypeScript(
       if (model) monaco.editor.setModelMarkers(model, "tsserver", []);
     };
   }, [editor, monaco, repoPath, activePath]);
-}
-
-/**
- * Turns Monaco's own TypeScript worker on or off as a source of *answers about types*.
- *
- * # Why it has to be turned off
- *
- * The worker type-checks each file alone: no `tsconfig.json`, no `node_modules`, no siblings. So
- * `pool.query<RuleRow>(…)` — whose type comes from a package — is `any` to it, and it says so, in a
- * hover box stacked on top of the compiler's own. Two answers to one question, one of them wrong,
- * and the wrong one is the one that reads `any`. That is not a display bug to hide; it is a second
- * opinion from something that cannot see the project.
- *
- * Diagnostics were already off for this reason (see `monacoSetup`). This is the rest of it:
- * hovers, completions, definitions, signature help, quick fixes and inlay hints all come from the
- * same isolated view, and every one of them is now answered by tsserver instead.
- *
- * # What stays on
- *
- * Formatting, document symbols and highlights. None of them ask what a type *is* — they are about
- * the shape of the text — so the isolated view is a perfectly good source, and turning them off
- * would take away the only formatter this editor has.
- *
- * # And why it is a toggle rather than a line in the bootstrap
- *
- * A repository with no TypeScript installed gets no server, and there the worker's isolated
- * answers, wrong as they are about imports, are the only ones there are. Off while a compiler is
- * running, back on when there is none.
- */
-function isolatedWorker(monaco: Monaco, enabled: boolean) {
-  const typed = {
-    completionItems: enabled,
-    hovers: enabled,
-    definitions: enabled,
-    references: enabled,
-    signatureHelp: enabled,
-    codeActions: enabled,
-    inlayHints: enabled,
-    rename: enabled,
-    // Not about types, and the only formatter the editor has.
-    documentSymbols: true,
-    documentHighlights: true,
-    documentFormattingEdits: true,
-    documentRangeFormattingEdits: true,
-    onTypeFormattingEdits: true,
-    diagnostics: false,
-  };
-  monaco.typescript.typescriptDefaults.setModeConfiguration(typed);
-  monaco.typescript.javascriptDefaults.setModeConfiguration(typed);
 }
 
 /**

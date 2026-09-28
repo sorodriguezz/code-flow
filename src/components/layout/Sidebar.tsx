@@ -11,6 +11,7 @@ import {
   Cloud,
   Code2,
   Eye,
+  FolderGit2,
   FolderInput,
   FolderX,
   GitBranch,
@@ -65,8 +66,10 @@ import {
 } from "../../lib/tauri/commands";
 import { loadGithubConnections } from "../../lib/githubConnections";
 import { loadGitlabConnections } from "../../lib/gitlabConnections";
+import { loadBitbucketConnections } from "../../lib/bitbucketConnections";
 import { loadAdoConnections } from "../../lib/adoConnections";
 import type {
+  BitbucketConnection,
   BranchInfo,
   GithubConnection,
   GitlabConnection,
@@ -85,11 +88,14 @@ import { CloneRepoModal } from "./CloneRepoModal";
 import { ImportReposModal } from "./ImportReposModal";
 import { CreateBranchModal } from "./CreateBranchModal";
 import { ContextMenu } from "../common/ContextMenu";
+import { SubmodulesSection, TagsSection, WorktreesSection } from "../git/RepoSections";
+import { useGitToolsStore } from "../../state/gitToolsStore";
 import { projectMenuItems } from "./projectMenu";
 import { MoveProjectModal } from "./MoveProjectModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
 import { ConnectGitlabModal } from "./ConnectGitlabModal";
+import { ConnectBitbucketModal } from "./ConnectBitbucketModal";
 import { CreatePrModal } from "./CreatePrModal";
 import { StashDiffModal } from "./StashDiffModal";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
@@ -102,6 +108,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import { buttonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
+import { isValidRemoteName, looksLikeGitUrl } from "../../lib/gitErrors";
 import { ReturnBurst, useWindowReturn } from "./ReturnBurst";
 
 // The hover-revealed actions on a project row: the same square chip the "clone"/"add repository"
@@ -646,6 +653,8 @@ function RemoteBranchesSection({ branches }: { branches: BranchInfo[] }) {
   const checkoutRemoteBranch = useRepoStore((s) => s.checkoutRemoteBranch);
   const checkoutDetached = useRepoStore((s) => s.checkoutDetached);
   const checkingOutBranch = useRepoStore((s) => s.checkingOutBranch);
+  const remoteOp = useRepoStore((s) => s.remoteOp);
+  const deleteRemoteBranch = useGitToolsStore((s) => s.deleteRemoteBranch);
   const remoteBranches = branches.filter((b) => b.is_remote);
   const t = useT();
   const repoPath = useRepoStore((s) => s.repoPath);
@@ -686,6 +695,18 @@ function RemoteBranchesSection({ branches }: { branches: BranchInfo[] }) {
               >
                 <Unlink size={12} />
               </button>
+              {/* Deletes the branch *on the remote* — confirmed in the store, naming the remote, and
+                  refused for a name a branch lock covers. */}
+              {!b.name.endsWith("/HEAD") && (
+                <button
+                  title={t("remoteBranch.delete")}
+                  disabled={checkingOutBranch !== null || remoteOp !== null}
+                  onClick={() => void deleteRemoteBranch(b.name)}
+                  className="hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] group-hover:block"
+                >
+                  <Trash2 size={12} />
+                </button>
+              )}
             </div>
           );
         })}
@@ -771,43 +792,161 @@ function RemoteUrlEditModal({
   );
 }
 
-function RemoteUrlSection() {
+/**
+ * `git remote add`, from the remotes section. Name and URL, checked as they are typed — a name git
+ * would refuse, one already taken, a URL that is plainly not one — so the confirm button is only
+ * reachable with something `add_remote` will take. `origin` is offered when the repository does not
+ * have one yet, which is the case this form mostly exists for: a project started locally that now
+ * needs somewhere to be pushed.
+ */
+function AddRemoteModal({ onClose }: { onClose: () => void }) {
   const remotes = useRepoStore((s) => s.remotes);
-  const [editing, setEditing] = useState<string | null>(null);
+  const addRemote = useRepoStore((s) => s.addRemote);
+  const [name, setName] = useState(remotes.some((r) => r.name === "origin") ? "" : "origin");
+  const [url, setUrl] = useState("");
+  const [saving, setSaving] = useState(false);
   const t = useT();
 
-  if (remotes.length === 0) return null;
+  const trimmedName = name.trim();
+  const trimmedUrl = url.trim();
+  const nameProblem =
+    trimmedName && !isValidRemoteName(trimmedName)
+      ? t("remote.nameInvalid")
+      : remotes.some((r) => r.name === trimmedName)
+        ? t("remote.nameTaken")
+        : null;
+  const urlProblem = trimmedUrl && !looksLikeGitUrl(trimmedUrl) ? t("remote.urlInvalid") : null;
+  const ready = !!trimmedName && !!trimmedUrl && !nameProblem && !urlProblem && !saving;
+
+  const confirm = async () => {
+    if (!ready) return;
+    setSaving(true);
+    try {
+      if (await addRemote(trimmedName, trimmedUrl)) onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") void confirm();
+    if (e.key === "Escape") onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[420px] rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
+      >
+        <h3 className="mb-3 text-[15px] font-semibold">{t("sidebar.addRemote")}</h3>
+
+        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
+          {t("sidebar.remoteName")}
+        </label>
+        <input
+          autoFocus
+          value={name}
+          spellCheck={false}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={onKeyDown}
+          className={fieldClass({ className: "w-full font-mono" })}
+        />
+        {nameProblem && <p className="pt-1 text-[11px] text-[var(--cf-danger)]">{nameProblem}</p>}
+
+        <label className="mb-1 mt-3 block text-[12px] font-medium text-[var(--cf-text-muted)]">
+          {t("sidebar.remoteUrlLabel")}
+        </label>
+        <input
+          value={url}
+          spellCheck={false}
+          placeholder="https://example.com/owner/repo.git"
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={onKeyDown}
+          className={fieldClass({ className: "w-full font-mono" })}
+        />
+        {urlProblem && <p className="pt-1 text-[11px] text-[var(--cf-danger)]">{urlProblem}</p>}
+
+        <div className="mt-4 flex justify-end gap-2">
+          <button onClick={onClose} className={buttonClass({ variant: "ghost" })}>
+            {t("common.cancel")}
+          </button>
+          <button onClick={() => void confirm()} disabled={!ready} className={buttonClass({ variant: "primary" })}>
+            {saving ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+            {t("sidebar.addRemote")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RemoteUrlSection() {
+  const remotes = useRepoStore((s) => s.remotes);
+  const removeRemote = useRepoStore((s) => s.removeRemote);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const t = useT();
 
   const editingRemote = remotes.find((r) => r.name === editing);
 
+  // Shown with no remotes too — that is exactly when "+" is needed — and then it is only its header
+  // and that button, per the rule that an empty state is its buttons.
   return (
-    <CollapsibleSection icon={Cloud} title={t("sidebar.remoteUrl")}>
-      <div className="space-y-0.5">
-        {remotes.map((r, at) => (
-          <div
-            key={r.name}
-            style={riseDelay(at)}
-            className="cf-rise group flex items-center gap-1.5 rounded-md px-1.5 py-1 leading-none text-[13px] hover:bg-[var(--cf-hover)]"
+    <>
+      <CollapsibleSection
+        icon={Cloud}
+        title={t("sidebar.remoteUrl")}
+        action={({ expand }) => (
+          <button
+            onClick={() => {
+              expand();
+              setAdding(true);
+            }}
+            className="flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            title={t("sidebar.addRemote")}
           >
-            <span className="shrink-0 font-medium leading-none text-[var(--cf-text-muted)]">{r.name}</span>
-            <span className="flex-1 truncate font-mono text-[12px] leading-none text-[var(--cf-text-muted)]">
-              {r.url}
-            </span>
-            <button
-              title={t("sidebar.changeRemoteUrl")}
-              onClick={() => setEditing(r.name)}
-              className="hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+            <Plus size={14} />
+          </button>
+        )}
+      >
+        <div className="space-y-0.5">
+          {remotes.map((r, at) => (
+            <div
+              key={r.name}
+              style={riseDelay(at)}
+              className="cf-rise group flex items-center gap-1.5 rounded-md px-1.5 py-1 leading-none text-[13px] hover:bg-[var(--cf-hover)]"
             >
-              <Pencil size={12} />
-            </button>
-          </div>
-        ))}
-      </div>
+              <span className="shrink-0 font-medium leading-none text-[var(--cf-text-muted)]">{r.name}</span>
+              <span className="flex-1 truncate font-mono text-[12px] leading-none text-[var(--cf-text-muted)]">
+                {r.url}
+              </span>
+              <button
+                title={t("sidebar.changeRemoteUrl")}
+                onClick={() => setEditing(r.name)}
+                className="hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+              >
+                <Pencil size={12} />
+              </button>
+              <button
+                title={t("sidebar.removeRemote")}
+                // Confirmed in the store: the remote-tracking branches go with it.
+                onClick={() => void removeRemote(r.name)}
+                className="hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] group-hover:block"
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
 
-      {editingRemote && (
-        <RemoteUrlEditModal name={editingRemote.name} currentUrl={editingRemote.url} onClose={() => setEditing(null)} />
-      )}
-    </CollapsibleSection>
+        {editingRemote && (
+          <RemoteUrlEditModal name={editingRemote.name} currentUrl={editingRemote.url} onClose={() => setEditing(null)} />
+        )}
+      </CollapsibleSection>
+      {/* Outside the section's children, which are not mounted while it is folded. */}
+      {adding && <AddRemoteModal onClose={() => setAdding(false)} />}
+    </>
   );
 }
 
@@ -838,6 +977,8 @@ interface HostingState {
   github: GithubConnection[];
   /** Configured GitLab connections (gitlab.com and/or self-managed instances). */
   gitlab: GitlabConnection[];
+  /** Configured Bitbucket connections, one per workspace. */
+  bitbucket: BitbucketConnection[];
 }
 
 function PullRequestsSection({ project }: { project: Project }) {
@@ -846,6 +987,12 @@ function PullRequestsSection({ project }: { project: Project }) {
   const loading = usePrStore((s) => s.loadingProjectId === project.id);
   const loadError = usePrStore((s) => s.loadErrorByProject[project.id]);
   const loadPullRequests = usePrStore((s) => s.loadPullRequests);
+  const loadMorePullRequests = usePrStore((s) => s.loadMorePullRequests);
+  const ensurePrScope = usePrStore((s) => s.ensurePrScope);
+  // How far the host's list has been read, per scope: open pull requests load with the section,
+  // merged and closed ones when one of their groups is unfolded, and each pages on from there.
+  const openPages = usePrStore((s) => s.prPagesByProject[project.id]?.open);
+  const closedPages = usePrStore((s) => s.prPagesByProject[project.id]?.closed);
   // The row tinted is the pull request of *this* repository that the assistant is showing — its
   // tab names the project, so another repository's "#42" can never light this one's up.
   const shownPrId = useVisiblePrId(project.id);
@@ -907,7 +1054,8 @@ function PullRequestsSection({ project }: { project: Project }) {
   const initiallyLinked = Boolean(
     (project.ado_org && project.ado_project && project.ado_repo_id) ||
       (project.github_owner && project.github_repo) ||
-      project.gitlab_project,
+      project.gitlab_project ||
+      (project.bitbucket_workspace && project.bitbucket_repo),
   );
   const [linkState, setLinkState] = useState<LinkState>(
     initiallyLinked ? { status: "linked" } : { status: "checking" },
@@ -920,7 +1068,8 @@ function PullRequestsSection({ project }: { project: Project }) {
       const ado = await loadAdoConnections().catch(() => []);
       const github = await loadGithubConnections().catch(() => []);
       const gitlab = await loadGitlabConnections().catch(() => []);
-      if (!cancelled) setHosting({ ado: ado.map((c) => c.org), github, gitlab });
+      const bitbucket = await loadBitbucketConnections().catch(() => []);
+      if (!cancelled) setHosting({ ado: ado.map((c) => c.org), github, gitlab, bitbucket });
     })();
     return () => {
       cancelled = true;
@@ -970,6 +1119,16 @@ function PullRequestsSection({ project }: { project: Project }) {
     if (linkState.status === "linked") void loadPullRequests(project.id);
   }, [linkState.status, project.id, activated]);
 
+  // Merged and closed pull requests are read only once one of their groups is unfolded: they are
+  // history, and a busy repository has pages of it nobody asked to see. A refresh forgets how far
+  // they had been read, so an unfolded group reads them again by itself.
+  const finishedWanted = Boolean(openGroups.merged || openGroups.closed);
+  const finishedRead = closedPages !== undefined;
+  useEffect(() => {
+    if (!activated || linkState.status !== "linked" || !finishedWanted || finishedRead) return;
+    void ensurePrScope(project.id, "closed");
+  }, [activated, linkState.status, finishedWanted, finishedRead, project.id, ensurePrScope]);
+
   // Re-detect when Settings closes: a token/connection may have just been added there, so the
   // repo should bind to its host on its own — no manual "connect" click and no switching away
   // and back to trigger it.
@@ -989,8 +1148,9 @@ function PullRequestsSection({ project }: { project: Project }) {
       const ado = await loadAdoConnections().catch(() => []);
       const github = await loadGithubConnections().catch(() => []);
       const gitlab = await loadGitlabConnections().catch(() => []);
+      const bitbucket = await loadBitbucketConnections().catch(() => []);
       if (ref.current) return;
-      setHosting({ ado: ado.map((c) => c.org), github, gitlab });
+      setHosting({ ado: ado.map((c) => c.org), github, gitlab, bitbucket });
       await runAutoDetect(ref);
     })();
     return () => {
@@ -1103,7 +1263,9 @@ function PullRequestsSection({ project }: { project: Project }) {
             ? t("sidebar.needsGithubToken")
             : provider === "gitlab"
               ? t("sidebar.needsGitlabToken", { host: linkState.identifier })
-              : t("sidebar.needsTokenFor", { org: linkState.identifier })}{" "}
+              : provider === "bitbucket"
+                ? t("sidebar.needsBitbucketToken", { workspace: linkState.identifier })
+                : t("sidebar.needsTokenFor", { org: linkState.identifier })}{" "}
           <button onClick={() => openSettings("azure", provider)} className="text-[var(--cf-accent)] hover:underline">
             {t("statusbar.settings")}
           </button>
@@ -1116,7 +1278,8 @@ function PullRequestsSection({ project }: { project: Project }) {
     linkState.status === "notDetected" &&
     hosting.ado.length === 0 &&
     hosting.github.length === 0 &&
-    hosting.gitlab.length === 0
+    hosting.gitlab.length === 0 &&
+    hosting.bitbucket.length === 0
   ) {
     return (
       <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} onOpenChange={onOpenChange}>
@@ -1157,6 +1320,15 @@ function PullRequestsSection({ project }: { project: Project }) {
             {t("sidebar.linkGitlabRepo")}
           </button>
         )}
+        {hosting.bitbucket.length > 0 && (
+          <button
+            onClick={() => setShowConnect("bitbucket")}
+            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-[var(--cf-hover)]"
+          >
+            <FolderGit2 size={12} />
+            {t("sidebar.linkBitbucketRepo")}
+          </button>
+        )}
         {hosting.ado.length > 0 && (
           <button
             onClick={() => setShowConnect("azure")}
@@ -1186,6 +1358,14 @@ function PullRequestsSection({ project }: { project: Project }) {
           <ConnectGitlabModal
             projectId={project.id}
             hosts={hosting.gitlab.map((c) => c.host)}
+            onConnected={onConnected}
+            onClose={() => setShowConnect(false)}
+          />
+        )}
+        {showConnect === "bitbucket" && (
+          <ConnectBitbucketModal
+            projectId={project.id}
+            workspaces={hosting.bitbucket.map((c) => c.workspace)}
             onConnected={onConnected}
             onClose={() => setShowConnect(false)}
           />
@@ -1221,6 +1401,10 @@ function PullRequestsSection({ project }: { project: Project }) {
       ) : (
         <div className="space-y-2">
           {PR_SECTIONS.map((section) => {
+            // Which of the host's lists this group is fed from: open and draft pull requests come from
+            // the open one, merged and closed from the other.
+            const scopePages = section.key === "open" || section.key === "draft" ? openPages : closedPages;
+            const scope = section.key === "open" || section.key === "draft" ? "open" : "closed";
             // `filter` already returns a fresh array, so sorting it in place cannot touch the store's.
             // `Date.parse`, not string comparison: the three hosts hand over different precisions of the
             // same ISO-8601 instant — whole seconds, milliseconds, variable fractional digits — and `.`
@@ -1243,7 +1427,8 @@ function PullRequestsSection({ project }: { project: Project }) {
                   className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
                 >
                   <span className="min-w-0 flex-1 truncate">
-                    {t(section.labelKey)} ({items.length})
+                    {t(section.labelKey)} ({items.length}
+                    {scopePages?.hasMore ? "+" : ""})
                   </span>
                   {open ? (
                     <ChevronDown size={11} className="shrink-0" />
@@ -1270,13 +1455,27 @@ function PullRequestsSection({ project }: { project: Project }) {
                         <span className="min-w-0 flex-1 truncate">{pr.title}</span>
                       </button>
                     ))}
-                    {items.length === 0 && !loading && (
+                    {items.length === 0 &&
+                      (scope === "open" ? !loading : scopePages !== undefined && !scopePages.loading && !scopePages.error) && (
                       <p className="px-1.5 text-[11px] text-[var(--cf-text-muted)]">{t("sidebar.noPRsInSection")}</p>
                     )}
                     <ShowMoreRow
                       hidden={items.length - shown}
                       onClick={() => revealMore(section.key, shown)}
                     />
+                    {/* Past what is loaded, the host's next page — only once every loaded row of
+                        this group is showing, so the two "more" rows never stand side by side. */}
+                    {items.length - shown <= 0 && scopePages?.hasMore && (
+                      <button
+                        onClick={() => void loadMorePullRequests(project.id, scope)}
+                        disabled={scopePages.loading}
+                        title={scopePages.error ?? t("sidebar.loadMorePrsHint")}
+                        className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1 text-center text-[11px] font-medium text-[var(--cf-accent)] hover:bg-[var(--cf-hover)] disabled:opacity-50"
+                      >
+                        {scopePages.loading && <RefreshCw size={10} className="animate-spin" />}
+                        {t("sidebar.loadMorePrs")}
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -1889,7 +2088,13 @@ function ProjectRow({
 
           <RemoteUrlSection />
 
+          <TagsSection />
+
           <StashesSection />
+
+          <SubmodulesSection />
+
+          <WorktreesSection />
 
           <PullRequestsSection project={project} />
         </div>

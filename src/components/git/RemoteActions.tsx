@@ -4,6 +4,7 @@ import { useFetchTimerStore } from "../../state/fetchTimerStore";
 import { useT } from "../../state/languageStore";
 import { canPublish, canPull, canPush, fetchNow, pullNow, pushNow } from "../../lib/gitActions";
 import { useShortcutHint } from "../../lib/useShortcutHint";
+import { GitDialogs } from "./GitDialogs";
 
 /**
  * Fetch, pull and push — the three things you do to a repository's remote — as one control.
@@ -193,6 +194,10 @@ export function RemoteActions() {
           />
         </>
       )}
+      {/* The questions a pull or a commit can stop to ask (diverged branches, a missing identity).
+          Here because this control is rendered exactly once in every window that has a repository
+          open — the status bar in main, the title bar in a satellite — and the dialogs portal out. */}
+      <GitDialogs />
     </div>
   );
 }

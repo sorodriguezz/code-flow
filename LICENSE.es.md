@@ -129,6 +129,13 @@ El Software incluye componentes de terceros distribuidos bajo sus propias
 licencias (MIT, Apache-2.0, MPL-2.0 y otras). Esas licencias rigen esos
 componentes, y nada aquí limita ni modifica los derechos que te otorgan.
 
+Esos componentes están listados en
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), en la raíz del Repositorio
+Oficial, con su versión, su licencia y dónde conseguirlos. Ese archivo lleva
+además los avisos que algunas de esas licencias obligan al Licenciante a darte —
+entre ellos, para los componentes bajo MPL-2.0 y para el runtime de Java que va
+dentro de las Compilaciones Oficiales, dónde obtener su código fuente sin coste.
+
 ## 7. Vigencia y terminación
 
 Esta Licencia rige mientras la cumplas, y termina automáticamente y sin aviso

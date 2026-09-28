@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ListChecks, Minus } from "lucide-react";
 import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
+import { useEnforcesReadOnly } from "../../lib/readOnlyEngines";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -75,6 +76,10 @@ export function ChatCapabilities({
   const [open, setOpen] = useState(false);
   const box = useRef<HTMLDivElement>(null);
   const caps = providerCapabilities(provider);
+  // Whether "only text" is a limit this engine's CLI enforces or merely something it is asked —
+  // the backend's answer (`ai_read_only_engines`), never assumed. Unknown reads as enforced for the
+  // instant before the answer lands, so the row does not flicker between two sentences.
+  const enforced = useEnforcesReadOnly(provider) ?? true;
 
   useEffect(() => {
     if (!open) return;
@@ -125,7 +130,13 @@ export function ChatCapabilities({
             <Ability
               yes={canWriteFiles}
               label={t("chat.capFilesOut")}
-              detail={canWriteFiles ? t("chat.capFilesOutYes") : t("chat.capFilesOutNo")}
+              detail={
+                canWriteFiles
+                  ? t("chat.capFilesOutYes")
+                  : enforced
+                    ? t("chat.capFilesOutNo")
+                    : t("chat.capFilesOutNoAsked", { provider: name })
+              }
             />
             <Ability
               yes={caps.streamsTokens}
@@ -136,12 +147,14 @@ export function ChatCapabilities({
               Where the sidebar's warning triangle went, and a better home for it.
 
               It used to be a yellow ⚠ on every Gemini row whenever a second Gemini conversation
-              existed — permanent, unactionable, and explained only by a hover. The fact is real
-              and worth knowing (agy answers a headless caller with the fixed `agy-last` sentinel
-              and continues from whatever it ran last, so two open chats cross), but it is a
-              property of the engine, which is exactly what this panel is for. Cline is the other
-              half of the same question and was never said anywhere: it has no resume at all, so
-              every turn re-sends the whole transcript and a long chat costs more each time.
+              existed — permanent, unactionable, and explained only by a hover. The fact was real
+              then (agy gave a headless caller only the fixed `agy-last` sentinel and continued
+              from whatever it ran last, so two open chats crossed) and it was a property of the
+              engine, which is exactly what this panel is for. agy now resumes by conversation id
+              (see `gemini.rs`), so no engine sets `resumeIsAmbiguous` today; the row keeps the
+              branch for the next one that does. Cline is the other half of the same question: it
+              has no resume at all, so every turn re-sends the whole transcript and a long chat
+              costs more each time.
             */}
             <Ability
               yes={caps.resumesSessions && !caps.resumeIsAmbiguous}

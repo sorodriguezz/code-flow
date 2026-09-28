@@ -3,6 +3,7 @@ import { WINDOW } from "./windowIdentity";
 // Type-only: this module must stay a leaf, or the store that imports it to broadcast would import
 // it back through this line.
 import type { AiRunAbout } from "../state/aiRunStore";
+import type { UnsavedItem } from "./unsavedWork";
 
 /**
  * How the windows tell each other things.
@@ -112,7 +113,25 @@ export type WindowMessage =
    * is addressable by its own id from any workspace and the receiving window has nowhere to move
    * to.
    */
-  | { kind: "open-chat"; to: string; conversationId: string };
+  | { kind: "open-chat"; to: string; conversationId: string }
+  /**
+   * What a satellite has unsaved, sent whenever the set changes — see `lib/unsavedWork.ts`.
+   *
+   * Never a row, which is why it rides here: an editor buffer nobody saved exists only in the
+   * webview holding it. The main window keeps the last list per window, because it is the one that
+   * asks before a quit, and a satellite's buffers die with the process like anything else.
+   */
+  | { kind: "unsaved-state"; items: UnsavedItem[] }
+  /** The main window asking every satellite to send its list again — after a reload of its own. */
+  | { kind: "unsaved-refresh" }
+  /**
+   * "Save what you listed" / "the user chose to lose it", addressed to one satellite and answered
+   * with `unsaved-done` — waited for, because the process ends right after: a discard is the
+   * satellite clearing its crash journal, and that write has to land first.
+   */
+  | { kind: "unsaved-save" | "unsaved-discard"; to: string; requestId: string }
+  /** The answer to either: the labels that could not be saved (always empty for a discard). */
+  | { kind: "unsaved-done"; requestId: string; failed: string[] };
 
 interface Frame {
   from: string;

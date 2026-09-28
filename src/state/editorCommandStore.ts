@@ -35,6 +35,8 @@ export type EditorCommand =
   | "closeTab"
   | "nextTab"
   | "prevTab"
+  // Every unsaved tab of the project, through the same checked save — see `saveAll` in `EditorView`.
+  | "saveAll"
   // Walking the open file's uncommitted hunks, opening the change peek at each stop. Through this bus
   // rather than as a Monaco action because standalone monaco has no dirty-diff navigation to bind —
   // the hunks come from `repoStore`, and the panel that shows them is ours.

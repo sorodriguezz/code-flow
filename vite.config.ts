@@ -4,6 +4,7 @@ import type { Plugin } from "vite";
 import { configDefaults, defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { contentSecurityPolicy } from "./src/lib/csp";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -65,9 +66,40 @@ function assertNoChunkCycles(): Plugin {
   };
 }
 
+/**
+ * Writes the app's Content-Security-Policy into the two HTML entries — at build time only.
+ *
+ * The policy, and why it is a `<meta>` written here rather than Tauri's `security.csp` (which would
+ * reach the bundled draw.io pages too) and never in dev (the React-refresh preamble is an inline
+ * script), are in `src/lib/csp.ts`. The phone's page is another Vite project and never passes
+ * through this plugin.
+ *
+ * Right after `<meta charset>` rather than at the very top of `<head>`: a policy governs only what
+ * comes after it, and the charset has to stay within the document's first 1024 bytes, which a
+ * 700-character policy in front of it would push it past. A page with no charset line is an error
+ * rather than a page shipped without its policy.
+ */
+function contentSecurityPolicyMeta(): Plugin {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy()}" />`;
+  return {
+    name: "codeflow-content-security-policy",
+    apply: "build",
+    transformIndexHtml: {
+      order: "post",
+      handler(html, ctx) {
+        const charset = /<meta\s+charset=["']?utf-8["']?\s*\/?>/i;
+        if (!charset.test(html)) {
+          throw new Error(`${ctx.path}: no <meta charset> to put the Content-Security-Policy after`);
+        }
+        return html.replace(charset, (tag) => `${tag}\n    ${meta}`);
+      },
+    },
+  };
+}
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss(), assertNoChunkCycles()],
+  plugins: [react(), tailwindcss(), assertNoChunkCycles(), contentSecurityPolicyMeta()],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

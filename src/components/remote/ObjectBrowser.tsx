@@ -60,13 +60,17 @@ import {
   remoteBlobRestoreSnapshot,
   remoteBlobSnapshot,
   remoteBlobSnapshots,
+  remoteCancelTransfer,
   remoteDownloadFile,
   remoteListFiles,
   remoteMakeDir,
+  remotePathsExist,
   remoteRemoveFile,
   remoteRenameFile,
   remoteUploadFile,
 } from "../../lib/tauri/remoteCommands";
+import { isCancelled, resolveTransfers, type ResolvedTransfer } from "../../lib/remote/transfers";
+import { conflictQuestions } from "./transferQuestions";
 import type { BlobProperties, BlobSnapshot, RemoteFile } from "../../types/remote";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import {
@@ -271,6 +275,8 @@ export function ObjectBrowser({
 
   const transferId = useRef(0);
   const paneId = useId();
+  /** The transfer the bar's cancel stops, while one runs. */
+  const running = useRef<string | null>(null);
 
   /**
    * One token for the listing, shared by the first page and its continuations.
@@ -449,6 +455,18 @@ export function ObjectBrowser({
     setHistory([root]);
     setHistoryAt(0);
   }, [load, root]);
+
+  // A save that changed which account this is — its name, its endpoint, its credential — lists it
+  // again from the top: the folder on screen belongs to what the row used to point at.
+  const reached = useRemoteStore((s) => s.connectionEpoch[hostId] ?? 0);
+  const seenReached = useRef(reached);
+  useEffect(() => {
+    if (reached === seenReached.current) return;
+    seenReached.current = reached;
+    void load(root, "");
+    setHistory([root]);
+    setHistoryAt(0);
+  }, [reached, load, root]);
 
   // -------------------------------------------------------------------------
   // Columns
@@ -652,8 +670,12 @@ export function ObjectBrowser({
       try {
         await run(item);
       } catch (failure) {
-        failed += 1;
-        if (failed === 1) pushErrorToast(String(failure));
+        // A transfer the user cancelled is not a failure to report, and the cancel has set
+        // `stopped` too, so the loop ends at the top of the next pass.
+        if (!isCancelled(failure)) {
+          failed += 1;
+          if (failed === 1) pushErrorToast(String(failure));
+        }
       }
       setWorking({ done: at + 1, total: items.length, label });
     }
@@ -664,18 +686,37 @@ export function ObjectBrowser({
   const transfer = async (run: (id: string) => Promise<void>) => {
     if (busy) return;
     const id = `${paneId}-${++transferId.current}`;
+    running.current = id;
     setBusy(true);
     setProgress(null);
     try {
       await run(id);
       await load(path, search);
     } catch (failure) {
-      pushErrorToast(String(failure));
+      // A cancel is the user's own doing, and the file it was half way through is already gone.
+      if (!isCancelled(failure)) pushErrorToast(String(failure));
+      else void load(path, search);
     } finally {
+      running.current = null;
       setBusy(false);
       setProgress(null);
     }
   };
+
+  /**
+   * Which of these would land on a name that is already taken, and what the user wants done about
+   * it — asked once for a batch, before anything moves. `null` when they called it off.
+   */
+  const settle = (items: { source: string; name: string; isDir: boolean }[], dir: string, local: boolean) =>
+    resolveTransfers(
+      items.map((item) => ({ ...item, dir })),
+      (paths) => remotePathsExist(hostId, paths, local),
+      conflictQuestions,
+      local ? joinLocal : joinRemote,
+    ).catch((failure) => {
+      pushErrorToast(String(failure));
+      return null;
+    });
 
   /**
    * Upload, which is a loop exactly when the picker returned more than one thing.
@@ -695,13 +736,20 @@ export function ObjectBrowser({
     });
     const locals = Array.isArray(chosen) ? chosen : chosen ? [chosen] : [];
     if (locals.length === 0) return;
+    // Asked before anything moves: an upload onto an existing name would replace it silently.
+    const plan = await settle(
+      locals.map((local) => ({ source: local, name: basename(local), isDir: directory })),
+      path,
+      false,
+    );
+    if (!plan || plan.length === 0) return;
     await transfer(async (id) => {
-      if (locals.length === 1) {
-        await remoteUploadFile(id, hostId, locals[0], joinRemote(path, basename(locals[0])));
+      if (plan.length === 1) {
+        await remoteUploadFile(id, hostId, plan[0].source, plan[0].dest);
         return;
       }
-      const failed = await eachWithBar(locals, t("remote.objUploading"), (local) =>
-        remoteUploadFile(id, hostId, local, joinRemote(path, basename(local))),
+      const failed = await eachWithBar(plan, t("remote.objUploading"), (item: ResolvedTransfer) =>
+        remoteUploadFile(id, hostId, item.source, item.dest),
       );
       if (failed > 1) pushErrorToast(t("remote.objUploadFailedSome", { n: failed }));
     });
@@ -724,13 +772,19 @@ export function ObjectBrowser({
     const chosen = await openDialog({ directory: true, title: t("remote.objDownloadTitle") });
     const target = Array.isArray(chosen) ? chosen[0] : chosen;
     if (!target) return;
+    const plan = await settle(
+      targets.map((entry) => ({ source: entry.path, name: entry.name, isDir: entry.is_dir })),
+      target,
+      true,
+    );
+    if (!plan || plan.length === 0) return;
     await transfer(async (id) => {
-      if (targets.length === 1) {
-        await remoteDownloadFile(id, hostId, targets[0].path, joinLocal(target, targets[0].name));
+      if (plan.length === 1) {
+        await remoteDownloadFile(id, hostId, plan[0].source, plan[0].dest);
         return;
       }
-      const failed = await eachWithBar(targets, t("remote.objDownloading"), (entry) =>
-        remoteDownloadFile(id, hostId, entry.path, joinLocal(target, entry.name)),
+      const failed = await eachWithBar(plan, t("remote.objDownloading"), (item: ResolvedTransfer) =>
+        remoteDownloadFile(id, hostId, item.source, item.dest),
       );
       // The loop swallowed each failure so the rest of the pile could carry on, which makes this the
       // only place the size of what did not arrive can be said. One failure already spoke for itself.
@@ -1580,7 +1634,17 @@ export function ObjectBrowser({
         )}
       </div>
 
-      {progress && <TransferBar progress={progress} />}
+      {progress && (
+        <TransferBar
+          progress={progress}
+          onCancel={() => {
+            // The whole pile, not only the file moving now: a batch the user stopped does not
+            // carry on to its next item.
+            stopped.current = true;
+            if (running.current) void remoteCancelTransfer(running.current);
+          }}
+        />
+      )}
 
       {menu && (
         <ContextMenu

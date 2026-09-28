@@ -98,6 +98,7 @@ export function DiagramsView() {
     (s) => s.diagrams.find((d) => d.id === s.activeId)?.origin_project_id ?? "",
   );
   const fileError = useDiagramsStore((s) => s.fileError);
+  const fileConflict = useDiagramsStore((s) => s.fileConflict);
   /**
    * Which editor the open diagram calls for.
    *
@@ -309,6 +310,8 @@ export function DiagramsView() {
                   path={originPath}
                   projectId={originProjectId}
                   fileError={fileError}
+                  conflict={fileConflict === activeId}
+                  schema={isSchema}
                 />
               )}
               {status && (
@@ -422,11 +425,17 @@ function LinkedFileChip({
   path,
   projectId,
   fileError,
+  conflict,
+  schema,
 }: {
   diagramId: string;
   path: string;
   projectId: string;
   fileError: string;
+  /** The file changed on disk under an unsaved edit — the save is waiting on the user's answer. */
+  conflict: boolean;
+  /** A DBML diagram, which can be compared with the file rather than only reloaded or overwritten. */
+  schema: boolean;
 }) {
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -438,7 +447,7 @@ function LinkedFileChip({
         (p) => p.id === projectId,
       )?.name ?? "",
   );
-  const broken = fileError !== "";
+  const broken = fileError !== "" || conflict;
 
   const unlink = async () => {
     // `danger: false` — nothing is destroyed by this. The diagram keeps its document, its
@@ -456,7 +465,9 @@ function LinkedFileChip({
         type="button"
         onClick={(event) => setMenu({ x: event.clientX, y: event.clientY })}
         title={
-          broken
+          conflict
+            ? `${t("editor.diskChanged")} — ${path}`
+            : broken
             ? `${fileError}\n${t("diagrams.linkedMissingHint")}`
             : // Without a repository name — a project removed from the workspace since — the "in
               // {repo}" half would read as a sentence with a hole in it. The path alone is still
@@ -483,7 +494,31 @@ function LinkedFileChip({
         <ContextMenu
           x={menu.x}
           y={menu.y}
-          items={[{ label: t("diagrams.unlink"), danger: true, onClick: () => void unlink() }]}
+          items={[
+            // While a save is waiting on "changed on disk", the chip carries the question's answers.
+            ...(conflict
+              ? [
+                  ...(schema
+                    ? [
+                        {
+                          label: t("editor.diskCompare"),
+                          onClick: () => useDiagramsStore.getState().requestCompare(diagramId, "disk"),
+                        },
+                      ]
+                    : []),
+                  {
+                    label: t("editor.diskReload"),
+                    onClick: () => void useDiagramsStore.getState().resolveFileConflict("reload"),
+                  },
+                  {
+                    label: t("editor.diskOverwrite"),
+                    danger: true,
+                    onClick: () => void useDiagramsStore.getState().resolveFileConflict("overwrite"),
+                  },
+                ]
+              : []),
+            { label: t("diagrams.unlink"), danger: true, separated: conflict, onClick: () => void unlink() },
+          ]}
           onClose={() => setMenu(null)}
         />
       )}

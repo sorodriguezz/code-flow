@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { isTopLayer, useDialog } from "../../lib/useFocusTrap";
+import { focusPlace } from "../common/dialogKeys";
 import { Briefcase, Check, FolderInput, Loader2 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
@@ -30,24 +32,41 @@ export function MoveProjectModal({ project, onClose }: { project: Project; onClo
   const target = options.find((w) => w.id === targetId);
   const [moving, setMoving] = useState(false);
 
-  const submit = async () => {
-    if (!targetId || moving) return;
+  const submit = async (id: string = targetId) => {
+    if (!id || moving) return;
+    setTargetId(id);
     setMoving(true);
     try {
-      await moveProject(project.id, project.workspace_id, targetId);
+      await moveProject(project.id, project.workspace_id, id);
       onClose();
     } finally {
       setMoving(false);
     }
   };
 
+  // Tab stays in the dialog; Escape closes it while it is on top and nothing is moving.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, true, moving ? null : onClose);
+
   // On the window rather than the dialog, for the reason `CreateBranchModal` gives: the card isn't
   // focusable, so a handler bound to it goes deaf the moment anything inside is clicked.
+  //
+  // Enter on a destination commits that destination; Enter on Cancel is Cancel's. It used to move
+  // the project whatever had the focus — Cancel included — the same bug `ConfirmModal` had.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (moving) return;
-      if (e.key === "Escape") onClose();
-      if (e.key === "Enter") void submit();
+      if (moving || e.key !== "Enter" || e.defaultPrevented || !isTopLayer(panelRef.current)) return;
+      const active = document.activeElement as HTMLElement | null;
+      const row = active?.closest<HTMLElement>("[data-move-target]");
+      if (row && panelRef.current?.contains(row)) {
+        e.preventDefault();
+        void submit(row.dataset.moveTarget);
+        return;
+      }
+      if (focusPlace(panelRef.current, active) === "control") return;
+      e.preventDefault();
+      void submit();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -62,6 +81,10 @@ export function MoveProjectModal({ project, onClose }: { project: Project; onClo
       onClick={() => !moving && onClose()}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
         // Matched to the other dialogs that draw the flow diagram — its two pills carry workspace
         // names here, which run as long as branch names do.
@@ -72,7 +95,7 @@ export function MoveProjectModal({ project, onClose }: { project: Project; onClo
             <FolderInput size={16} />
           </span>
           <div className="min-w-0 flex-1">
-            <h3 className="text-[15px] font-semibold">{t("sidebar.moveToWorkspace")}</h3>
+            <h3 id={titleId} className="text-[15px] font-semibold">{t("sidebar.moveToWorkspace")}</h3>
             <p className="mt-0.5 text-[12px] leading-snug text-[var(--cf-text-muted)]">
               {t("sidebar.moveProjectHint", { name: project.name })}
             </p>
@@ -96,6 +119,7 @@ export function MoveProjectModal({ project, onClose }: { project: Project; onClo
           {options.map((ws) => (
             <button
               key={ws.id}
+              data-move-target={ws.id}
               onClick={() => setTargetId(ws.id)}
               aria-pressed={targetId === ws.id}
               // The same sliding pill the rails and tabs use, so picking a destination reads as the
@@ -128,7 +152,7 @@ export function MoveProjectModal({ project, onClose }: { project: Project; onClo
             {t("common.cancel")}
           </button>
           <button
-            onClick={submit}
+            onClick={() => void submit()}
             disabled={!targetId || moving}
             className={buttonClass({ variant: "primary" })}
           >

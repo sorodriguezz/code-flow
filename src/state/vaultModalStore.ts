@@ -9,6 +9,7 @@ import { create } from "zustand";
  */
 export type VaultModal =
   | { kind: "import" }
+  | { kind: "export" }
   | { kind: "settings" };
 
 interface VaultModalState {

@@ -153,6 +153,15 @@ pub async fn service_detect(path: String) -> Vec<Candidate> {
         .unwrap_or_default()
 }
 
+/// The env files in a service's folder, for the form to offer — `.env` first. See
+/// [`crate::services::envfile::list`].
+#[tauri::command]
+pub async fn service_env_files(path: String) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || crate::services::envfile::list(Path::new(path.trim())))
+        .await
+        .unwrap_or_default()
+}
+
 /// One repository's suggestions, for the importer.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -319,6 +328,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
             detected_ports: "[]".into(),
+            env_files: "[]".into(),
         }
     }
 

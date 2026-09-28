@@ -30,11 +30,12 @@ export const focusSatellite = (label: string) => invoke<void>("focus_satellite",
 export const listSatellites = () => invoke<SatelliteInfo[]>("list_satellites");
 
 /**
- * Reopens the satellites the last session ended with, and answers with how many came back.
+ * Puts back the satellites the tray put away, and answers with how many came back.
  *
- * Called from the main window's boot, not from Rust's `setup`: the main window having booted is
- * this app's own evidence that the database migrated and the session is worth restoring. A window
- * whose repository has since been deleted simply does not come back.
+ * Called when the main window returns from the tray (`app:foreground`), and only then — a launch
+ * restores nothing. Windows that were hidden because they held unsaved work are shown again; the
+ * rest are reopened. A window whose repository has since been deleted simply does not come back.
+ * See `restore_satellites` in `windows.rs`.
  */
 export const restoreSatellites = () => invoke<number>("restore_satellites");
 
@@ -61,3 +62,40 @@ export const showMainWindow = () => invoke<void>("show_main_window");
  */
 export const setWindowGlass = (enabled: boolean, theme: "light" | "dark" | "system") =>
   invoke<void>("set_window_glass", { enabled, theme });
+
+/**
+ * Tells the backend whether this window holds unsaved work, so putting the app in the tray hides it
+ * instead of closing it — see `set_window_unsaved` and `close_all` in `windows.rs`. The label comes
+ * from the calling webview; the main window's answer is ignored there.
+ */
+export const setWindowUnsaved = (unsaved: boolean) => invoke<void>("set_window_unsaved", { unsaved });
+
+/** Raises the hotkey ask box, building it if needed. */
+export const quickAskOpen = () => invoke<string>("quick_ask_open");
+
+/** The quick-ask hotkey as stored: the chord bound now (`null` when switched off), and this
+ *  platform's default. */
+export interface QuickAskShortcut {
+  accelerator: string | null;
+  defaultAccelerator: string;
+}
+
+export const getQuickAskShortcut = () => invoke<QuickAskShortcut>("get_quick_ask_shortcut");
+
+/** Binds the system-wide chord. Rejects with a readable reason when the chord does not parse or
+ *  another application owns it — the caller shows it and does not save the choice. */
+export const registerQuickAskShortcut = (accelerator: string) =>
+  invoke<void>("register_quick_ask_shortcut", { accelerator });
+
+export const unregisterQuickAskShortcut = () => invoke<void>("unregister_quick_ask_shortcut");
+
+/** The first-close notice's "keep it in the tray": records that it was seen, then hides the main
+ *  window exactly as the close button does. See `tray::close_action`. */
+export const hideMainToTray = () => invoke<void>("hide_main_to_tray");
+
+/** Launch at login. `setAutostart` answers with what the system says afterwards. */
+export const autostartEnabled = () => invoke<boolean>("autostart_enabled");
+export const setAutostart = (enabled: boolean) => invoke<boolean>("set_autostart", { enabled });
+
+/** The operating system's locale (`es-CL`, `en-US`…), or `null` when it cannot be read. */
+export const systemLocale = () => invoke<string | null>("system_locale");

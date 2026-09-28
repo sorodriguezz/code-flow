@@ -36,6 +36,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { featureFileName, lintBatch, parseCriteria, toFeatureFile } from "../../lib/gherkin";
 import { useT } from "../../state/languageStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
+import { boardLabelKey } from "../../lib/boardLabel";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 
 /**
@@ -85,7 +86,15 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
   const { icon: SourceIcon } = SOURCE_KIND[batch.source_kind];
   const generatedOn = Boolean(batch.generated_at && batch.provider);
 
-  const generate = () => void useStoriesStore.getState().generate(batchId);
+  // Asks first when it would delete work: every unpublished story goes, the edited and hand-added
+  // ones included — see `confirmRegenerate`.
+  const generate = () =>
+    void useStoriesStore
+      .getState()
+      .confirmRegenerate(batchId)
+      .then((ok) => {
+        if (ok) void useStoriesStore.getState().generate(batchId);
+      });
 
   const copyFeature = () => {
     void navigator.clipboard
@@ -401,7 +410,7 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
             className="ml-auto flex shrink-0 items-center gap-1 hover:text-[var(--cf-accent)]"
           >
             <ExternalLink size={11} />
-            {t("stories.openInBoards")}
+            {t("stories.openInBoards", { board: t(boardLabelKey(batch.board_provider)) })}
           </button>
         </footer>
       )}

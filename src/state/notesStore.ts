@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import {
+  notesCountLinks,
   notesCreateBook,
   notesCreateNote,
   notesCreateTemplate,
@@ -7,13 +8,18 @@ import {
   notesDeleteNote,
   notesDeleteTemplate,
   notesDuplicateNote,
+  notesEmptyTrash,
   notesGetNote,
+  notesListTrash,
   notesLoadTree,
   notesMoveBook,
   notesMoveNote,
+  notesPurgeNote,
   notesRenameBook,
   notesReorderBooks,
   notesReorderNotes,
+  notesRestoreNote,
+  notesRewriteLinks,
   notesSaveNote,
   notesSearch,
   notesMoveBookToWorkspace,
@@ -25,8 +31,11 @@ import {
 import { serializeTags, parseTags } from "../lib/notes/tags";
 import { builtInTemplates, toTemplate } from "../lib/notes/templates";
 import { descendantIds } from "../lib/notes/tree";
+import type { ImportedMarkdown } from "../lib/notes/importMarkdown";
+import { notifyUnsavedChanged, registerUnsavedProvider } from "../lib/unsavedWork";
+import { confirmAction } from "./confirmStore";
 import { translate } from "./languageStore";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, useToastStore } from "./toastStore";
 import { useAiRunStore } from "./aiRunStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type {
@@ -39,6 +48,7 @@ import type {
   NoteSort,
   NoteTemplate,
   NoteTemplateRow,
+  NoteTrashRow,
   NoteViewMode,
 } from "../types/notes";
 
@@ -260,6 +270,12 @@ interface NotesState {
   /** The outline panel's visibility. */
   outlineOpen: boolean;
 
+  /** Whether the main area shows the trash rather than the gallery. Session state, like a search. */
+  trashOpen: boolean;
+  /** The trash as last read, `null` until the trash is opened — it is read on demand, never with
+   *  the tree, because nothing else on screen needs it. */
+  trash: NoteTrashRow[] | null;
+
   /**
    * Points the whole workspace at `workspaceId`, dropping everything the outgoing one had on
    * screen. `null` — the state a deleted workspace leaves behind — empties it and loads nothing.
@@ -361,8 +377,32 @@ interface NotesState {
     parentId: string | null,
     anchor: { id: string; after: boolean } | null,
   ) => Promise<void>;
-  /** Deletes the book, its subbooks **and every note inside them**. Confirm before calling. */
+  /** Deletes the book and its subbooks, and moves every note inside them to the trash. Confirm
+   *  before calling — the message says how many notes are moving. */
   deleteBook: (id: string) => Promise<void>;
+
+  openTrash: () => Promise<void>;
+  closeTrash: () => void;
+  /** Takes a note out of the trash — into its book, or the workspace's first one when that is gone. */
+  restoreFromTrash: (id: string) => Promise<void>;
+  /** Deletes one trashed note for good, history included. Confirm before calling. */
+  purgeFromTrash: (id: string) => Promise<void>;
+  /** Empties the trash this workspace sees, for good. Confirm before calling. */
+  emptyTrash: () => Promise<void>;
+
+  /**
+   * A note's title just changed from `oldTitle` to `newTitle`: if other notes link to the old one,
+   * ask — once, with the count — whether to point them at the new title, and do it in one write.
+   *
+   * Links resolve by title, so without this a rename breaks every `[[link]]` to the note in
+   * silence. Called when the title field is left, not per keystroke: "Ret", "Retr", "Retro" are
+   * not three renames.
+   */
+  offerLinkRewrite: (noteId: string, oldTitle: string, newTitle: string) => Promise<void>;
+
+  /** Writes Markdown files in as notes of `bookId` (`null`: wherever `createNote` would put one).
+   *  Answers with how many were created. */
+  importMarkdown: (bookId: string | null, files: ImportedMarkdown[]) => Promise<number>;
 
   /** Saves a template from explicit content, so both callers — "save this note as a template" and
    *  "duplicate a built-in into mine" — go through one action rather than two shapes of the same
@@ -442,6 +482,8 @@ function clearedWorkspaceState(): Partial<NotesState> {
     viewMode: "split",
     galleryView: "grid",
     sort: "manual",
+    trashOpen: false,
+    trash: null,
   };
 }
 
@@ -485,6 +527,8 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   viewMode: "split",
   galleryView: "grid",
   outlineOpen: false,
+  trashOpen: false,
+  trash: null,
 
   setWorkspace: async (workspaceId) => {
     if (pendingLoad?.workspaceId === workspaceId) return pendingLoad.promise;
@@ -695,6 +739,7 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   // ---------- the open note ----------
 
   openNote: async (id) => {
+    if (get().trashOpen) set({ trashOpen: false });
     if (get().activeId === id) return;
     // The outgoing note first, and awaited: opening B before A's last sentence has been written
     // would race the two saves.
@@ -920,6 +965,7 @@ export const useNotesStore = create<NotesState>((set, get) => ({
         activeId: note.id,
         draft: { id: note.id, title, content, tags: note.tags, dirty: false },
         savedAt: note.updated_at,
+        trashOpen: false,
         ...cacheBody(state, note.id, content),
       }));
       // A note created into a closed book must be visible, or the button appears to do nothing
@@ -936,6 +982,8 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   deleteNote: async (id) => {
     stopNoteAiRuns(get().aiByNote, [id]);
     try {
+      // Into the trash, history and all — see `note_queries::trash_note`. Which is why there is no
+      // confirmation in front of this any more: it is undone from the trash.
       await notesDeleteNote(id);
       set((state) => {
         const bodies = { ...state.bodies };
@@ -952,11 +1000,14 @@ export const useNotesStore = create<NotesState>((set, get) => ({
           aiByNote,
           bodyOrder: state.bodyOrder.filter((bodyId) => bodyId !== id),
           activeId: state.activeId === id ? null : state.activeId,
-          // Dropped without flushing: the row is gone, so writing the draft would either fail or
-          // — worse — be the one thing that could bring it back.
+          // Dropped without flushing: the row is in the trash, where a write cannot reach it, and
+          // an edit arriving after the delete is not one the user meant to keep.
           draft: state.draft?.id === id ? null : state.draft,
+          // Stale the moment a note arrives in it; read again when it is next opened.
+          trash: null,
         };
       });
+      useToastStore.getState().pushToast(translate("notes.movedToTrash"), "info");
     } catch (error) {
       pushErrorToast(String(error));
     }
@@ -1281,9 +1332,9 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     stopNoteAiRuns(get().aiByNote, doomedNotes.map((note) => note.id));
     try {
       await notesDeleteBook(id);
-      // Everything written inside goes with it — there is nowhere for a note to survive to. Re-read
-      // rather than patched locally, because working out which notes were in which descendant book
-      // is exactly what the query just did.
+      // Everything written inside goes to the trash with it. Re-read rather than patched locally,
+      // because working out which notes were in which descendant book is exactly what the query
+      // just did.
       await get().refresh();
       set((state) => {
         const aiByNote = { ...state.aiByNote };
@@ -1298,11 +1349,138 @@ export const useNotesStore = create<NotesState>((set, get) => ({
           activeId: state.notes.some((note) => note.id === state.activeId) ? state.activeId : null,
           draft: state.notes.some((note) => note.id === state.draft?.id) ? state.draft : null,
           aiByNote,
+          trash: null,
         };
       });
     } catch (error) {
       pushErrorToast(String(error));
     }
+  },
+
+  // ---------- trash ----------
+
+  openTrash: async () => {
+    const { workspaceId } = get();
+    if (!workspaceId) return;
+    // The open note is closed rather than left behind the trash: its draft is written first, the
+    // same as every other way of leaving a note.
+    if (get().activeId !== null) await get().closeNote();
+    set({ trashOpen: true });
+    try {
+      const trash = await notesListTrash(workspaceId);
+      if (get().workspaceId === workspaceId) set({ trash });
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  closeTrash: () => set({ trashOpen: false }),
+
+  restoreFromTrash: async (id) => {
+    const { workspaceId } = get();
+    try {
+      const row = await notesRestoreNote(id, translate("notes.restoredBook"));
+      set((state) => ({ trash: state.trash?.filter((entry) => entry.id !== id) ?? null }));
+      if (!row) return;
+      // The tree, not just the row: a note whose book was deleted may have been given a new one.
+      if (get().workspaceId === workspaceId) await get().refresh();
+      if (row.book_id) get().expandBook(row.book_id);
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  purgeFromTrash: async (id) => {
+    try {
+      await notesPurgeNote(id);
+      set((state) => ({ trash: state.trash?.filter((entry) => entry.id !== id) ?? null }));
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  emptyTrash: async () => {
+    const { workspaceId } = get();
+    if (!workspaceId) return;
+    try {
+      await notesEmptyTrash(workspaceId);
+      if (get().workspaceId === workspaceId) set({ trash: [] });
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  // ---------- renaming ----------
+
+  offerLinkRewrite: async (noteId, oldTitle, newTitle) => {
+    const workspaceId = get().workspaceId;
+    const before = oldTitle.trim();
+    const after = newTitle.trim();
+    if (!workspaceId || !before || !after || before === after) return;
+    // A title a link cannot carry is not offered: `]]` would close the link and `|` start its label.
+    if (after.includes("]]") || after.includes("|")) return;
+    // Another note still answers to the old title, so the links still resolve — to that note. Pointing
+    // them at this one would change what they mean rather than repair them.
+    if (get().notes.some((note) => note.id !== noteId && foldTitle(note.title) === foldTitle(before))) return;
+    try {
+      const count = await notesCountLinks(workspaceId, before, noteId);
+      if (count === 0) return;
+      const ok = await confirmAction(
+        translate("notes.rewriteLinksConfirm", { count, from: before, to: after }),
+        false,
+        translate("notes.rewriteLinks"),
+      );
+      if (!ok || get().workspaceId !== workspaceId) return;
+      const rows = await notesRewriteLinks(workspaceId, before, after, noteId);
+      const changed = new Map(rows.map((row) => [row.id, toNote(row)]));
+      set((state) => {
+        // Their bodies changed under the cache: dropped, so the next open reads the new text.
+        const bodies = { ...state.bodies };
+        for (const id of changed.keys()) delete bodies[id];
+        return {
+          notes: state.notes.map((note) => changed.get(note.id) ?? note),
+          bodies,
+          bodyOrder: state.bodyOrder.filter((id) => !changed.has(id)),
+        };
+      });
+      useToastStore
+        .getState()
+        .pushToast(translate("notes.linksRewritten", { count: rows.length }), "success");
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  },
+
+  // ---------- import ----------
+
+  importMarkdown: async (bookId, files) => {
+    const { workspaceId } = get();
+    if (!workspaceId || files.length === 0) return 0;
+    await get().flush();
+    const book = bookId ?? (await resolveBook(get, translate("notes.defaultBook")));
+    if (!book) return 0;
+    const created: Note[] = [];
+    // One at a time: the backend appends each note to its book, and racing writes would leave the
+    // order to whichever landed first rather than the order the files were picked in.
+    for (const file of files) {
+      try {
+        const row = await notesCreateNote(
+          workspaceId,
+          book,
+          file.title,
+          file.content,
+          serializeTags(file.tags),
+        );
+        created.push(toNote(row));
+      } catch (error) {
+        pushErrorToast(String(error));
+      }
+    }
+    if (created.length > 0 && get().workspaceId === workspaceId) {
+      set((state) => ({ notes: [...created, ...state.notes] }));
+      get().expandBook(book);
+    }
+    return created.length;
   },
 
   // ---------- templates ----------
@@ -1469,6 +1647,51 @@ useWorkspaceStore.subscribe((state, previous) => {
   const { workspaceId, loading } = useNotesStore.getState();
   if (workspaceId === null && !loading) return;
   void useNotesStore.getState().setWorkspace(state.activeWorkspaceId);
+});
+
+/**
+ * What the open note holds that SQLite does not have yet — asked by the quit guard
+ * (`lib/unsavedWork.ts`) before the process ends.
+ *
+ * The autosave runs `AUTOSAVE_MS` after the last keystroke, so a quit inside that window used to
+ * end the process with the last words only in the webview. A save **in flight** counts as unsaved
+ * too: `flush` marks the draft clean before its write lands, and a quit in between would otherwise
+ * be told there was nothing to keep. `saveAll` is `flush`, run until the draft is clean or a pass
+ * fails; it never asks anything, per the registry's contract.
+ */
+function unsavedNote(state: NotesState): { label: string } | null {
+  const { draft } = state;
+  if (!draft || !(draft.dirty || state.saving)) return null;
+  return { label: draft.title.trim() || translate("notes.untitled") };
+}
+
+registerUnsavedProvider({
+  id: "notes",
+  unsaved: () => {
+    const item = unsavedNote(useNotesStore.getState());
+    return item ? [{ ...item, detail: translate("notes.title") }] : [];
+  },
+  saveAll: async () => {
+    for (let pass = 0; pass < MAX_FLUSH_PASSES; pass++) {
+      await useNotesStore.getState().flush();
+      if (!unsavedNote(useNotesStore.getState())) return [];
+    }
+    const left = unsavedNote(useNotesStore.getState());
+    return left ? [left.label] : [];
+  },
+  discard: () => {
+    // Nothing is journalled; the only thing to stop is a debounced write racing the exit.
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = undefined;
+  },
+});
+
+// Told when the answer to "is anything unsaved?" flips — not per keystroke, which is what a
+// satellite window's report to the main one costs.
+useNotesStore.subscribe((state, previous) => {
+  const now = unsavedNote(state) ? state.draft?.id : null;
+  const before = unsavedNote(previous) ? previous.draft?.id : null;
+  if (now !== before) notifyUnsavedChanged();
 });
 
 /**

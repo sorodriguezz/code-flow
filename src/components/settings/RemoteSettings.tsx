@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ShieldCheck, ShieldX, Smartphone, TerminalSquare, Trash2, X } from "lucide-react";
+import { Lock, ShieldCheck, ShieldX, Smartphone, TerminalSquare, Trash2, X } from "lucide-react";
 import qrcode from "qrcode-generator";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -22,6 +22,7 @@ import {
   remotectlSetAllowTerminal,
   remotectlSetEnabled,
   remotectlSetPort,
+  remotectlSetTls,
   remotectlStartPairing,
   remotectlStatus,
 } from "../../lib/tauri/commands";
@@ -85,6 +86,37 @@ function AddressQr({ url }: { url: string }) {
         />
       ))}
     </svg>
+  );
+}
+
+/**
+ * The certificate's SHA-256, to hold up against the one the phone's browser shows when it warns about
+ * the certificate — the one moment that proves nobody is sitting between the two.
+ *
+ * Four rows of eight pairs, the grouping browsers print, so two 95-character strings are compared a
+ * row at a time rather than in one breath. Selectable, for the user who would rather paste it into a
+ * message to themselves than squint.
+ */
+function Fingerprint({ value }: { value: string }) {
+  const t = useT();
+  const pairs = value.split(":");
+  const rows = [0, 8, 16, 24].map((start) => pairs.slice(start, start + 8).join(":")).filter(Boolean);
+  return (
+    <Tooltip label={t("remote.fingerprint")} description={t("remote.fingerprintHint")}>
+      <span className="mt-2.5 flex max-w-full items-start gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+        <ShieldCheck size={13} className="mt-px shrink-0 text-[var(--cf-success)]" />
+        <span className="min-w-0">
+          <span className="block">{t("remote.fingerprint")}</span>
+          <code className="mt-0.5 block select-text font-mono text-[10.5px] leading-snug tabular-nums text-[var(--cf-text)]">
+            {rows.map((row) => (
+              <span key={row} className="block">
+                {row}
+              </span>
+            ))}
+          </code>
+        </span>
+      </span>
+    </Tooltip>
   );
 }
 
@@ -172,6 +204,11 @@ export function RemoteSettings() {
       const next = await remotectlSetEnabled(enabled);
       setStatus(next);
       if (!enabled) setCode(null);
+    });
+
+  const toggleTls = (enabled: boolean) =>
+    guard(async () => {
+      setStatus(await remotectlSetTls(enabled));
     });
 
   const commitPort = () =>
@@ -270,6 +307,31 @@ export function RemoteSettings() {
                 </span>
               </div>
 
+              {/* The transport's own switch, beside the port it applies to. On unless turned off — see
+                  `SETTING_TLS` in `remotectl/mod.rs` — and turning it off says what that costs. */}
+              <label className="mt-2.5 flex cursor-pointer items-start gap-2.5">
+                <Checkbox
+                  checked={status?.tls ?? true}
+                  onChange={(next) => void toggleTls(next)}
+                  disabled={busy || !status}
+                  className="mt-0.5"
+                />
+                <span className="min-w-0">
+                  <span className="flex items-center gap-1.5 text-[13px] text-[var(--cf-text)]">
+                    <Lock size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+                    {t("remote.tls")}
+                  </span>
+                  <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("remote.tlsHint")}
+                  </span>
+                </span>
+              </label>
+              {status && !status.tls && (
+                <div className="mt-2">
+                  <Note tone="warning">{t("remote.tlsOff")}</Note>
+                </div>
+              )}
+
               {/* The one disagreement worth surfacing: the setting says on, nothing is bound. */}
               {status?.enabled && !live && (
                 <div className="mt-2">
@@ -300,6 +362,7 @@ export function RemoteSettings() {
                       <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
                         {t("remote.scanHint")}
                       </p>
+                      {status.fingerprint && <Fingerprint value={status.fingerprint} />}
 
                       {code ? (
                         <div className="mt-3">

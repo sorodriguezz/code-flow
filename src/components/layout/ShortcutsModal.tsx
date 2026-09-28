@@ -1,10 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
 import { Keyboard, Settings, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import { useShortcutsStore, bindingFor } from "../../state/shortcutsStore";
+import { useQuickAskHotkeyStore } from "../../state/quickAskHotkeyStore";
 import { SHORTCUT_COMMANDS, SHORTCUT_GROUP_LABELS, type ShortcutGroup } from "../../lib/shortcuts";
 import { chordKeycaps } from "../../lib/keys";
+import { acceleratorKeycaps } from "../../lib/globalHotkey";
+import { isMac } from "../../lib/platform";
+import { useDialog } from "../../lib/useFocusTrap";
 import { buttonClass, iconButtonClass } from "../common/Button";
 
 const GROUP_ORDER: ShortcutGroup[] = [
@@ -26,14 +30,15 @@ export function Keycap({ children }: { children: string }) {
   );
 }
 
-function Row({ label, chord }: { label: string; chord: string | null }) {
+function Row({ label, chord, keys }: { label: string; chord: string | null; keys?: string[] }) {
   const t = useT();
+  const caps = keys ?? (chord ? chordKeycaps(chord) : null);
   return (
     <div className="flex min-h-[26px] items-center gap-3">
       <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--cf-text)]">{label}</span>
       <span className="flex shrink-0 items-center gap-1">
-        {chord ? (
-          chordKeycaps(chord).map((key, i) => <Keycap key={`${key}-${i}`}>{key}</Keycap>)
+        {caps ? (
+          caps.map((key, i) => <Keycap key={`${key}-${i}`}>{key}</Keycap>)
         ) : (
           <span className="text-[12px] italic text-[var(--cf-text-faint)]">{t("shortcuts.unbound")}</span>
         )}
@@ -57,22 +62,33 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
   const openSettings = useUiStore((s) => s.openSettings);
   const scope = useUiStore((s) => s.shortcutsModalGroups);
   const groups = scope ?? GROUP_ORDER;
+  const quickAsk = useQuickAskHotkeyStore((s) => s.accelerator);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    void useQuickAskHotkeyStore.getState().load();
+  }, []);
+
+  // Tab stays in the sheet and Escape closes it — only while it is the top layer.
+  useDialog(panelRef, true, onClose);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        // ⌘⌥K closes it again — the one app chord that may run over it.
+        data-shortcut-owner="app.shortcuts"
         onClick={(e) => e.stopPropagation()}
         className="flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)]"
       >
         <div className="flex min-h-[52px] items-center gap-2.5 border-b border-[var(--cf-border)] py-2 pl-4 pr-3">
           <Keyboard size={15} className="text-[var(--cf-accent)]" />
-          <h2 className="text-[15px] font-semibold">{t("shortcuts.title")}</h2>
+          <h2 id={titleId} className="text-[15px] font-semibold">{t("shortcuts.title")}</h2>
           <button
             onClick={() => {
               openSettings("keybindings");
@@ -98,6 +114,10 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
                   {t(SHORTCUT_GROUP_LABELS[group])}
                 </p>
                 <div className="space-y-1">
+                  {/* The system-wide one, with the app's own general chords: it is the other way in. */}
+                  {group === "general" && quickAsk && (
+                    <Row label={t("quickAsk.hotkeyLabel")} chord={null} keys={acceleratorKeycaps(quickAsk, isMac())} />
+                  )}
                   {commands.map((command) => (
                     <Row
                       key={command.id}

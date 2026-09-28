@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronRight, ExternalLink, Plus, Trash2, TriangleAlert } from "lucide-react";
+import { ChevronRight, ExternalLink, LoaderCircle, Plus, Trash2, TriangleAlert, UploadCloud } from "lucide-react";
 import { PRIORITIES, STORY_POINTS, STORY_STATUS } from "./storyStatus";
 import {
   CriterionVerdictRow,
@@ -16,6 +16,8 @@ import { riseDelay } from "../../lib/rise";
 import { useT } from "../../state/languageStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
+import { boardLabelKey } from "../../lib/boardLabel";
+import { Tooltip } from "../common/Tooltip";
 import type { StoryDraft } from "../../types/domain";
 import { fieldClass } from "../common/recipes";
 
@@ -59,6 +61,8 @@ export function StoryCard({
   const t = useT();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<StoryEdits>(() => editsFrom(story));
+  const [updatingBoard, setUpdatingBoard] = useState(false);
+  const board = t(boardLabelKey(useStoriesStore((s) => s.batches.find((b) => b.id === batchId)?.board_provider)));
 
   // The row can be replaced underneath the card — a publish rewrites every story of the batch, and
   // a re-generation replaces the unpublished ones outright. Following the row is only safe while
@@ -104,6 +108,19 @@ export function StoryCard({
   };
 
   const patch = (fields: Partial<StoryEdits>) => setDraft((current) => ({ ...current, ...fields }));
+
+  /** Sends the draft over the item it was published as. What is on screen is saved first — the
+   * update reads the stored draft, and a field still being typed is part of what the user means. */
+  const updateBoard = async () => {
+    if (updatingBoard) return;
+    setUpdatingBoard(true);
+    try {
+      if (!sameEdits(draft, editsFrom(story))) await useStoriesStore.getState().saveStory(batchId, story.id, draft);
+      await useStoriesStore.getState().updateOnBoard(batchId, story.id);
+    } finally {
+      setUpdatingBoard(false);
+    }
+  };
 
   const setCriterion = (i: number, value: string) =>
     patch({ acceptanceCriteria: draft.acceptanceCriteria.map((c, at) => (at === i ? value : c)) });
@@ -199,7 +216,27 @@ export function StoryCard({
 
       {open && (
         <div className="space-y-2.5 border-t border-[var(--cf-border)] px-3 py-2.5">
-          {published && <p className="text-[11px] text-[var(--cf-text-muted)]">{t("stories.editPublishedHint")}</p>}
+          {/* A published story is edited here as a draft; this is the way those edits reach the item.
+              The confirmation lists what would change against the board as it is now, so a
+              colleague's edit there is something the user sees before overwriting it. */}
+          {published && (
+            <div className="flex items-center gap-2">
+              <p className="min-w-0 flex-1 text-[11px] text-[var(--cf-text-muted)]">
+                {t("stories.editPublishedHint", { board })}
+              </p>
+              <Tooltip label={t("stories.updateOnBoardHint")}>
+                <button
+                  type="button"
+                  disabled={updatingBoard}
+                  onClick={() => void updateBoard()}
+                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-50"
+                >
+                  {updatingBoard ? <LoaderCircle size={11} className="animate-spin" /> : <UploadCloud size={11} />}
+                  {t("stories.updateOnBoard")}
+                </button>
+              </Tooltip>
+            </div>
+          )}
 
           {/* What is wrong with the story *as a story* — INVEST, not Gherkin. First, because it is
               the part a refinement session argues about, and because a story that fails "valuable"
@@ -376,6 +413,7 @@ export function StoryCard({
                 void confirmAction(
                   t(published ? "stories.deleteStoryPublishedConfirm" : "stories.deleteStoryConfirm", {
                     name: draft.title || t("stories.untitledStory"),
+                    board,
                   }),
                 ).then((ok) => {
                   if (ok) void useStoriesStore.getState().removeStory(batchId, story.id);

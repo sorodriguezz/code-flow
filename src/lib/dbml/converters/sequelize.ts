@@ -4,12 +4,21 @@ import {
   baseType,
   codeName,
   codegenRefs,
+  defaultOf,
+  findingLines,
   incoming,
+  isComposite,
+  isKeyColumn,
+  isNowExpression,
+  isUuidExpression,
+  jsLiteral,
   lengthOf,
   NOTHING_TO_CONVERT,
   outgoing,
   pascal,
   precisionOf,
+  quotedLiteral,
+  type DefaultValue,
 } from "./shared";
 
 const TS_TYPE: Record<string, string> = {
@@ -47,6 +56,17 @@ function dataType(type: string): string {
   }
 }
 
+/**
+ * A default as Sequelize takes it. An expression is `Sequelize.literal(…)` — as a bare string it
+ * would be inserted as the text "now()" — except the two Sequelize has its own words for.
+ */
+function defaultValue(value: DefaultValue): string {
+  if (value.kind !== "expression") return jsLiteral(value);
+  if (isNowExpression(value.sql)) return "DataTypes.NOW";
+  if (isUuidExpression(value.sql)) return "DataTypes.UUIDV4";
+  return `Sequelize.literal(${quotedLiteral(value.sql)})`;
+}
+
 /** Sequelize models, typed with `InferAttributes` so the class is usable rather than just present. */
 export function toSequelize(schema: DbmlSchema): string {
   if (schema.tables.length === 0) return NOTHING_TO_CONVERT;
@@ -55,6 +75,7 @@ export function toSequelize(schema: DbmlSchema): string {
   const lines: string[] = [
     banner("Sequelize models"),
     "",
+    ...findingLines(schema),
     "import {",
     "  CreationOptional,",
     "  DataTypes,",
@@ -89,11 +110,14 @@ export function toSequelize(schema: DbmlSchema): string {
     lines.push("      {");
     for (const field of table.fields) {
       const props = [`type: ${dataType(field.type)}`];
-      if (field.pk) props.push("primaryKey: true");
+      // Marked on every column of a composite key, which is how Sequelize declares one — and without
+      // any it adds an `id` column of its own.
+      if (isKeyColumn(table, field)) props.push("primaryKey: true");
       if (field.increment) props.push("autoIncrement: true");
       if (!field.notNull && !field.pk) props.push("allowNull: true");
       if (field.unique && !field.pk) props.push("unique: true");
-      if (field.default !== null && !field.increment) props.push(`defaultValue: ${field.default}`);
+      const value = field.increment ? null : defaultOf(field);
+      if (value) props.push(`defaultValue: ${defaultValue(value)}`);
       lines.push(`        ${field.name}: { ${props.join(", ")} },`);
     }
     lines.push("      },");
@@ -105,24 +129,34 @@ export function toSequelize(schema: DbmlSchema): string {
     lines.push("    );");
     lines.push("  }");
 
-    const out = outgoing(refs, table).filter((ref) => ref.kind !== "many-to-many");
-    const back = incoming(refs, table).filter((ref) => ref.kind !== "many-to-many");
+    // Sequelize's associations take one `foreignKey`; a composite reference has no spelling there,
+    // so it is named in a comment instead of being emitted over its first column.
+    const composite = [...outgoing(refs, table), ...incoming(refs, table)].filter(
+      (ref) => ref.kind !== "many-to-many" && isComposite(ref),
+    );
+    const out = outgoing(refs, table).filter((ref) => ref.kind !== "many-to-many" && !isComposite(ref));
+    const back = incoming(refs, table).filter((ref) => ref.kind !== "many-to-many" && !isComposite(ref));
     const many = refs.filter(
       (ref) => ref.kind === "many-to-many" && (ref.fkTable.id === table.id || ref.pkTable.id === table.id),
     );
-    if (out.length > 0 || back.length > 0 || many.length > 0) {
+    if (out.length > 0 || back.length > 0 || many.length > 0 || composite.length > 0) {
       lines.push("");
       lines.push("  static associate(models: Record<string, typeof Model>): void {");
+      for (const ref of composite) {
+        lines.push(
+          `    // ${ref.fkTable.name}.(${ref.fkFields.join(", ")}) -> ${ref.pkTable.name}.(${ref.pkFields.join(", ")}): Sequelize cannot associate on a composite key.`,
+        );
+      }
       for (const ref of out) {
         lines.push(
-          `    ${cls}.belongsTo(models.${pascal(codeName(ref.pkTable))}, { foreignKey: '${ref.fkField}', as: '${ref.pkTable.name}' });`,
+          `    ${cls}.belongsTo(models.${pascal(codeName(ref.pkTable))}, { foreignKey: '${ref.fkFields[0]}', as: '${ref.pkTable.name}' });`,
         );
       }
       for (const ref of back) {
         const relation = ref.kind === "one-to-one" ? "hasOne" : "hasMany";
         const alias = ref.kind === "one-to-one" ? ref.fkTable.name : `${ref.fkTable.name}s`;
         lines.push(
-          `    ${cls}.${relation}(models.${pascal(codeName(ref.fkTable))}, { foreignKey: '${ref.fkField}', as: '${alias}' });`,
+          `    ${cls}.${relation}(models.${pascal(codeName(ref.fkTable))}, { foreignKey: '${ref.fkFields[0]}', as: '${alias}' });`,
         );
       }
       for (const ref of many) {

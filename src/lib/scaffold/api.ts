@@ -109,5 +109,13 @@ export const checkDest = (parent: string, name: string) => invoke<DestCheck>("sc
 export const writeFiles = (root: string, files: FileSpec[]) =>
   invoke<void>("scaffold_write_files", { root, files });
 
+/** Marks `root` as the folder a run is about to create — refused unless it is free. Only a claimed
+ *  folder can be discarded afterwards. */
+export const claimRoot = (root: string) => invoke<void>("scaffold_claim", { root });
+
+/** Deletes what a failed run left at a claimed `root`: the folder it created, or the contents of the
+ *  empty one it was given. */
+export const discardRoot = (root: string) => invoke<void>("scaffold_discard", { root });
+
 /** Starts `script` in a pty from `cwd`; resolves with the terminal session id. */
 export const runScript = (cwd: string, script: string) => invoke<string>("scaffold_run", { cwd, script });

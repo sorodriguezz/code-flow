@@ -11,7 +11,19 @@ import { useApiStore } from "../../state/apiStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
-import { applyAuth, fetchOAuth2Token, isOAuth2TokenExpired, resolveEffectiveAuth } from "../../lib/api/auth";
+import {
+  applyAuth,
+  authorizeInBrowser,
+  fetchOAuth2Token,
+  isLoopbackRedirect,
+  isOAuth2TokenExpired,
+  needsBrowser,
+  refreshOAuth2Token,
+  resolveEffectiveAuth,
+  resolveOAuth2,
+  tokenNetworkOptions,
+} from "../../lib/api/auth";
+import { apiCancelHttp, apiOAuthAuthorize } from "../../lib/tauri/apiCommands";
 import { resolve, type VariableContext } from "../../lib/api/variables";
 import { defaultAuth } from "../../types/api";
 import { confirmAction } from "../../state/confirmStore";
@@ -22,12 +34,10 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import type {
   ApiCollection,
   ApiFolder,
-  ApiSettings,
   AuthConfig,
   AuthType,
   JwtAlgorithm,
   JwtAuth,
-  NetworkOptions,
   OAuth2Auth,
   OAuth2GrantType,
 } from "../../types/api";
@@ -236,39 +246,54 @@ type OAuth2Field =
 const GRANTS: {
   id: OAuth2GrantType;
   label: TranslationKey;
-  /** `auth.ts` implements the back-channel grants only; the rest need a browser redirect. */
-  supported: boolean;
   fields: OAuth2Field[];
 }[] = [
   {
     id: "authorization_code",
     label: "api.auth.grant.authorizationCode",
-    supported: false,
-    fields: ["authUrl", "accessTokenUrl", "clientId", "clientSecret", "redirectUri", "scope", "state", "clientAuth"],
+    fields: [
+      "authUrl",
+      "accessTokenUrl",
+      "clientId",
+      "clientSecret",
+      "redirectUri",
+      "scope",
+      "state",
+      "audience",
+      "resource",
+      "clientAuth",
+    ],
   },
   {
     id: "authorization_code_pkce",
     label: "api.auth.grant.pkce",
-    supported: false,
-    fields: ["authUrl", "accessTokenUrl", "clientId", "clientSecret", "redirectUri", "scope", "state", "clientAuth"],
+    fields: [
+      "authUrl",
+      "accessTokenUrl",
+      "clientId",
+      "clientSecret",
+      "redirectUri",
+      "scope",
+      "state",
+      "audience",
+      "resource",
+      "clientAuth",
+    ],
   },
   {
     id: "client_credentials",
     label: "api.auth.grant.clientCredentials",
-    supported: true,
     fields: ["accessTokenUrl", "clientId", "clientSecret", "scope", "audience", "resource", "clientAuth"],
   },
   {
     id: "password",
     label: "api.auth.grant.password",
-    supported: true,
     fields: ["accessTokenUrl", "username", "password", "clientId", "clientSecret", "scope", "clientAuth"],
   },
   {
     id: "implicit",
     label: "api.auth.grant.implicit",
-    supported: false,
-    fields: ["authUrl", "clientId", "redirectUri", "scope", "state"],
+    fields: ["authUrl", "clientId", "redirectUri", "scope", "state", "audience", "resource"],
   },
 ];
 
@@ -626,6 +651,8 @@ function AuthFields({
     case "oauth2":
       return (
         <OAuth2Fields
+          // Per buffer: a browser sign-in waiting in one tab must not show as waiting in the next.
+          key={bufferKey}
           oauth2={auth.oauth2}
           onChange={(oauth2) => onChange({ ...auth, oauth2 })}
           ctx={ctx}
@@ -875,35 +902,50 @@ function OAuth2Fields({
   const t = useT();
   const settings = useApiStore((s) => s.settings);
   const [busy, setBusy] = useState(false);
+  /** The browser sign-in in flight, so Cancel can reach it. */
+  const [flowId, setFlowId] = useState<string | null>(null);
 
   const grant = GRANTS.find((entry) => entry.id === oauth2.grantType) ?? GRANTS[2];
   const shows = (field: OAuth2Field) => grant.fields.includes(field);
   const hasRefreshToken = oauth2.refreshToken.trim() !== "";
   const expired = isOAuth2TokenExpired(oauth2);
+  const browser = needsBrowser(oauth2.grantType);
+  // Judged on the resolved value: a `{{redirectUri}}` is fine as long as what it holds is loopback.
+  const redirectUsable = !browser || isLoopbackRedirect(resolve(oauth2.redirectUri, ctx));
 
-  const requestToken = async (viaRefresh: boolean) => {
+  const requestToken = async (mode: "new" | "refresh") => {
     setBusy(true);
+    // Every field resolved against the active environment, collection and globals — the form keeps
+    // its `{{templates}}`, only the call gets the values.
+    const resolved = resolveOAuth2(oauth2, (text) => resolve(text, ctx));
+    const options = tokenNetworkOptions(settings);
     try {
-      const config: OAuth2Auth = viaRefresh
-        ? // `fetchOAuth2Token` only maps a stored refresh token onto the `refresh_token` grant for
-          // the redirect flows; naming one here is how its public API is asked to exchange the
-          // token we already hold instead of minting a brand new one.
-          { ...oauth2, grantType: "authorization_code" }
-        : oauth2;
-      const token = await fetchOAuth2Token(config, tokenNetworkOptions(settings));
+      let token;
+      if (mode === "refresh") {
+        token = await refreshOAuth2Token(resolved, options);
+      } else if (browser) {
+        const id = `oauth-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        setFlowId(id);
+        token = await authorizeInBrowser(resolved, options, id, apiOAuthAuthorize);
+      } else {
+        token = await fetchOAuth2Token(resolved, options);
+      }
       onChange({
         ...oauth2,
         accessToken: token.accessToken,
-        refreshToken: token.refreshToken,
+        // The token call falls back to the refresh token it was given when the response carries
+        // none — which is the *resolved* one. Keep the stored field (maybe a `{{variable}}`) then.
+        refreshToken: token.refreshToken === resolved.refreshToken ? oauth2.refreshToken : token.refreshToken,
         expiresAt: token.expiresAt,
       });
       useToastStore.getState().pushToast(t("api.auth.tokenObtained"), "success");
     } catch (error) {
-      pushErrorToast(
-        t("api.auth.tokenFailed", { error: error instanceof Error ? error.message : String(error) }),
-      );
+      const message = error instanceof Error ? error.message : String(error);
+      // Cancelling is an answer, not a failure worth a red toast.
+      if (message !== "Sign-in cancelled") pushErrorToast(t("api.auth.tokenFailed", { error: message }));
     } finally {
       setBusy(false);
+      setFlowId(null);
     }
   };
 
@@ -913,16 +955,14 @@ function OAuth2Fields({
       onChange={set}
       ctx={ctx}
       secret={secret}
-      readOnly={readOnly}
+      // Locked while a token call is out: its answer is written over this config when it lands, and
+      // an edit made meanwhile would be lost under it.
+      readOnly={readOnly || busy}
       placeholder={placeholder}
     />
   );
 
-  const grantOptions: SelectItems = GRANTS.map((entry) => ({
-    value: entry.id,
-    label: entry.supported ? t(entry.label) : `${t(entry.label)} — ${t("api.auth.grantUnsupported")}`,
-    disabled: !entry.supported,
-  }));
+  const grantOptions: SelectItems = GRANTS.map((entry) => ({ value: entry.id, label: t(entry.label) }));
 
   const expiredToken = oauth2.accessToken.trim() !== "" && expired;
 
@@ -932,7 +972,7 @@ function OAuth2Fields({
           <Select
             size="field"
             className="max-w-[320px]"
-            disabled={readOnly}
+            disabled={readOnly || busy}
             ariaLabel={t("api.auth.grantType")}
             value={oauth2.grantType}
             onChange={(value) => onChange({ ...oauth2, grantType: value as OAuth2GrantType })}
@@ -967,13 +1007,24 @@ function OAuth2Fields({
         {shows("redirectUri") && (
           <Row label={t("api.auth.redirectUri")}>
             {text(oauth2.redirectUri, (redirectUri) => onChange({ ...oauth2, redirectUri }))}
+            {!redirectUsable && (
+              <div className="mt-1">
+                <Tooltip label={t("api.auth.redirectLoopback")} description={t("api.auth.redirectLoopbackHint")}>
+                  <div>
+                    <Note tone="warning">{t("api.auth.redirectLoopback")}</Note>
+                  </div>
+                </Tooltip>
+              </div>
+            )}
           </Row>
         )}
         {shows("scope") && (
           <Row label={t("api.auth.scope")}>{text(oauth2.scope, (scope) => onChange({ ...oauth2, scope }))}</Row>
         )}
         {shows("state") && (
-          <Row label={t("api.auth.state")}>{text(oauth2.state, (state) => onChange({ ...oauth2, state }))}</Row>
+          <Row label={t("api.auth.state")}>
+            {text(oauth2.state, (state) => onChange({ ...oauth2, state }), false, t("api.auth.stateAuto"))}
+          </Row>
         )}
         {shows("audience") && (
           <Row label={t("api.auth.audience")}>{text(oauth2.audience, (audience) => onChange({ ...oauth2, audience }))}</Row>
@@ -986,7 +1037,7 @@ function OAuth2Fields({
             <Select
               size="field"
               className="max-w-[280px]"
-              disabled={readOnly}
+              disabled={readOnly || busy}
               ariaLabel={t("api.auth.clientAuth")}
               value={oauth2.clientAuth}
               onChange={(value) => onChange({ ...oauth2, clientAuth: value as "header" | "body" })}
@@ -1008,7 +1059,7 @@ function OAuth2Fields({
           <Select
             size="field"
             className="max-w-[200px]"
-            disabled={readOnly}
+            disabled={readOnly || busy}
             ariaLabel={t("api.auth.addTo")}
             value={oauth2.addTo}
             onChange={(value) => onChange({ ...oauth2, addTo: value as "header" | "query" })}
@@ -1027,20 +1078,39 @@ function OAuth2Fields({
         {!readOnly && (
           <Aside>
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                disabled={busy || (!grant.supported && !hasRefreshToken)}
-                onClick={() => void requestToken(!grant.supported)}
-                className={buttonClass({ variant: "primary", size: "sm" })}
+              <Tooltip
+                label={t("api.auth.getNewToken")}
+                description={browser ? t("api.auth.browserHint") : undefined}
+                disabled={!browser}
               >
-                {busy ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />}
-                {busy ? t("api.auth.gettingToken") : t("api.auth.getNewToken")}
-              </button>
-              {hasRefreshToken && (
+                <button
+                  type="button"
+                  disabled={busy || !redirectUsable}
+                  onClick={() => void requestToken("new")}
+                  className={buttonClass({ variant: "primary", size: "sm" })}
+                >
+                  {busy ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />}
+                  {flowId !== null
+                    ? t("api.auth.waitingForBrowser")
+                    : busy
+                      ? t("api.auth.gettingToken")
+                      : t("api.auth.getNewToken")}
+                </button>
+              </Tooltip>
+              {flowId !== null && (
+                <button
+                  type="button"
+                  onClick={() => void apiCancelHttp(flowId).catch(() => {})}
+                  className={buttonClass({ variant: "ghost", size: "sm" })}
+                >
+                  {t("common.cancel")}
+                </button>
+              )}
+              {hasRefreshToken && flowId === null && (
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => void requestToken(true)}
+                  onClick={() => void requestToken("refresh")}
                   title={t("api.auth.refresh")}
                   className={buttonClass({ variant: "secondary", size: "sm" })}
                 >
@@ -1060,32 +1130,8 @@ function OAuth2Fields({
                       : ""}
               </span>
             </div>
-            {!grant.supported && (
-              <div className="mt-2">
-                <Note tone="warning">{t("api.auth.grantUnsupportedHint")}</Note>
-              </div>
-            )}
           </Aside>
         )}
     </Grid>
   );
-}
-
-/** The token call is a back-channel POST to the identity provider, not to the request's own host:
- * the cookie jar and the per-host client certificate are matched against the *request* URL, so
- * neither applies here, while the proxy and the custom CA are network-wide and do. */
-function tokenNetworkOptions(settings: ApiSettings): NetworkOptions {
-  return {
-    timeout_ms: settings.timeoutMs,
-    follow_redirects: settings.followRedirects,
-    max_redirects: settings.maxRedirects,
-    verify_ssl: settings.verifySsl,
-    keep_auth_on_redirect: false,
-    proxy_url: settings.proxyEnabled ? settings.proxyUrl : "",
-    client_cert_path: "",
-    client_cert_password: "",
-    ca_cert_path: settings.caCertPath,
-    cookies: [],
-    max_response_bytes: 1024 * 1024,
-  };
 }

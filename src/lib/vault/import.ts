@@ -297,6 +297,16 @@ export function parseBitwardenCsv(text: string): ImportResult {
       totp: at(row, "login_totp"),
       notes: at(row, "notes"),
     };
+    // `fields` holds the custom fields as `name: value` lines — the only place a CSV row can carry
+    // them, and where this app's own Bitwarden export puts every value a CSV has no column for.
+    // The CSV does not say which were hidden, so none are marked secret.
+    const custom = (at(row, "fields") ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.match(/^([^:]+):\s?(.*)$/))
+      .filter((match): match is RegExpMatchArray => match !== null)
+      .map((match) => ({ name: match[1].trim(), value: match[2], secret: false }))
+      .filter((field) => field.name || field.value);
+    if (custom.length) secret.custom = custom;
     result.items.push({
       kind: bitwardenKind(at(row, "type") === "note" ? 2 : 1),
       title,

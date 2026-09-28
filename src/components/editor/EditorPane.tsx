@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Editor, { DiffEditor, type Monaco, type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
@@ -17,15 +17,23 @@ import {
   Eye,
   FileCode,
   GitCompare,
+  HardDrive,
   Loader2,
+  Lock,
   Play,
   Save,
   SplitSquareHorizontal,
+  TriangleAlert,
   Workflow,
   X,
+  Braces,
+  NotebookPen,
 } from "lucide-react";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { DbmlDiagram } from "./DbmlDiagram";
+import { FileNoticeView } from "./FileNoticeView";
+import { isWritable, type FileNotice, type ReadOnlyReason } from "../../lib/editorFiles";
+import type { DiskVersion } from "../../lib/tauri/commands";
 import { EditorTabs, type EditorTabItem, type TabMenuActions } from "./EditorTabs";
 import { InlineEditWidget } from "./InlineEditWidget";
 import { ChangePeek, peekHeightOf } from "./ChangePeek";
@@ -45,6 +53,7 @@ import { anchorColor, anchorTagClass, parseAnchors } from "../../lib/anchors";
 import { blameLabel, blameStatusText } from "../../lib/blameText";
 import { formatWhen } from "../remote/remoteChrome";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
+import { useBreakpointGutter } from "./useBreakpointGutter";
 import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useBlameStore } from "../../state/blameStore";
 import { useCursorBlameStore } from "../../state/cursorBlameStore";
@@ -65,6 +74,8 @@ import { usePackageJsonLens } from "./usePackageJsonLens";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { CsvSeparatorPicker } from "./CsvSeparatorPicker";
 import { useTypeScript } from "./useTypeScript";
+import { formatModel, isComponentFile } from "./formatDocument";
+import { findAllReferences } from "./findReferences";
 import { useLanguageServer } from "./useLanguageServer";
 import { useInlineCompletion } from "./useInlineCompletion";
 import { useImportCost } from "./useImportCost";
@@ -79,6 +90,14 @@ import { usePackageManagerStore } from "../../state/packageManagerStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import { useNpmInstallStore } from "../../state/npmInstallStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { isNotebookPath, notebookKey } from "../../lib/notebook/host";
+import { notebookActions, useNotebookStore } from "../../state/notebookStore";
+
+/**
+ * The notebook view for `.ipynb` files — its own chunk, fetched the first time a notebook is opened,
+ * the way the DBML parser below is: the cells, outputs and kernel UI are nothing most sessions use.
+ */
+const NotebookView = lazy(() => import("./notebook/NotebookView"));
 
 /**
  * The DBML parser, once any pane has pulled it in.
@@ -205,7 +224,7 @@ async function loadFullFileDiff(
   return file;
 }
 
-export type PreviewKind = "markdown" | "dbml" | null;
+export type PreviewKind = "markdown" | "dbml" | "svg" | null;
 /** `preview`/`split` are the rendered-output modes, and only mean anything for a file with a
  * `PreviewKind`. `diff` is orthogonal to both: any file with uncommitted changes can be shown as
  * before-vs-after, so it's offered on its own toggle rather than as a fourth button in that group. */
@@ -236,7 +255,26 @@ export interface OpenTab {
    * teaching `openDiffTab` about groups.
    */
   compare: { oid: string; short_id: string; summary: string } | null;
+  /**
+   * The file as this buffer last saw it on disk — read, saved or reloaded — which is what a save
+   * checks the disk against (`write_editor_file`). `null` for a scratch buffer, or a read that failed.
+   */
+  version: DiskVersion | null;
+  /** What the tab shows instead of an editor — an error, a binary file, an image, a file too large
+   *  to open. Such a tab has no buffer at all; see `FileNotice`. */
+  notice: FileNotice | null;
+  /** Text shown and never saved — see `ReadOnlyReason`. */
+  readOnly: ReadOnlyReason | null;
+  /** A dirty buffer whose file changed on disk after it was read. Set by the disk sweep and by a
+   *  save the disk refused; cleared by a save, a reload, or the disk changing back. */
+  diskChanged: boolean;
+  /** The file's text on disk, laid beside the buffer while the diff view compares the two — the
+   *  "Compare" answer to a changed file. `null` the rest of the time. */
+  diskText: string | null;
 }
+
+/** The three answers to a file that changed under its buffer. */
+export type DiskAction = "compare" | "reload" | "overwrite";
 
 /** A jump requested from outside the editor — a search hit, an anchor, a stack frame. Carries a
  * `nonce` so asking for the *same* position twice still fires: the second request is a real
@@ -297,6 +335,8 @@ export function previewKindFor(path: string | null): PreviewKind {
   const lower = path.toLowerCase();
   if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
   if (lower.endsWith(".dbml")) return "dbml";
+  // SVG is text, and editable as text; the preview is the image it draws.
+  if (lower.endsWith(".svg")) return "svg";
   return null;
 }
 
@@ -487,6 +527,13 @@ function contentTextTarget(
     : null;
 }
 
+/** Each answer to a changed file, as the words on its button. */
+const DISK_ACTION_LABEL = {
+  compare: "editor.diskCompare",
+  reload: "editor.diskReload",
+  overwrite: "editor.diskOverwrite",
+} as const;
+
 /** VS Code-style path bar under the tabs: the folders leading to the open file, then the
  * file itself in its language color. */
 function Breadcrumb({
@@ -494,6 +541,7 @@ function Breadcrumb({
   dirty,
   loading,
   compare,
+  comparingDisk,
 }: {
   path: string;
   dirty: boolean;
@@ -502,6 +550,9 @@ function Breadcrumb({
    *  commit diff is not visually identical to a working diff, which is the only place the two could
    *  be confused. */
   compare: OpenTab["compare"];
+  /** The diff on screen is the disk against the buffer, not a git change — named for the same
+   *  reason `compare` is. */
+  comparingDisk: boolean;
 }) {
   const t = useT();
   // A scratch tab (`lib/scratchTabs`) has no folders to lead to — its path is `/name` — so where they
@@ -531,6 +582,65 @@ function Breadcrumb({
           <span className="truncate">{compare.summary}</span>
         </span>
       )}
+      {comparingDisk && (
+        <span className="ml-1.5 flex min-w-0 items-center gap-1.5">
+          <HardDrive size={12} className="shrink-0" />
+          <span className="truncate">{t("editor.diskCompareCrumb")}</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A strip under the breadcrumb for what is true of this tab and must not be missed: the file changed
+ * on disk under unsaved edits, or the text is shown read-only.
+ *
+ * Its own row rather than a chip in the breadcrumb, which clips on the right — a long path would
+ * have hidden exactly the part that matters.
+ */
+function PaneNotice({
+  tone,
+  icon,
+  label,
+  hint,
+  children,
+}: {
+  tone: "warning" | "muted";
+  icon: React.ReactNode;
+  label: string;
+  hint: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`flex h-[28px] shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-3.5 text-[12px] ${
+        tone === "warning"
+          ? "bg-[color-mix(in_oklab,var(--cf-warning)_10%,var(--cf-surface))] text-[var(--cf-warning)]"
+          : "bg-[var(--cf-sunken)] text-[var(--cf-text-muted)]"
+      }`}
+    >
+      <Tooltip side="bottom" label={label} description={hint}>
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="flex shrink-0 items-center">{icon}</span>
+          <span className="truncate">{label}</span>
+        </span>
+      </Tooltip>
+      {children && <span className="ml-auto flex shrink-0 items-center gap-0.5 pl-2">{children}</span>}
+    </div>
+  );
+}
+
+/** An SVG drawn as the image it is. As an `<img>`, which is what keeps it inert: a script inside the
+ *  file does not run there, where it would inline. */
+function SvgPreview({ source, name }: { source: string; name: string }) {
+  return (
+    <div className="flex h-full items-center justify-center overflow-auto p-6">
+      <img
+        alt={name}
+        src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(source)}`}
+        className="max-h-full max-w-full object-contain"
+      />
     </div>
   );
 }
@@ -564,6 +674,8 @@ export function EditorPane({
   onChange,
   onViewMode,
   onSave,
+  onReload,
+  onDiskAction,
   onOpenInDiagrams,
   onCodeSnap,
   onOpenCommitDiff,
@@ -602,6 +714,10 @@ export function EditorPane({
   onChange: (path: string, value: string) => void;
   onViewMode: (path: string, mode: ViewMode) => void;
   onSave: () => void;
+  /** Reads the file again — a notice's Retry, or its "open anyway" with `allowLarge`. */
+  onReload: (path: string, opts?: { allowLarge?: boolean }) => void;
+  /** One of the three answers to a file that changed on disk under this buffer. */
+  onDiskAction: (path: string, action: DiskAction) => void;
   /**
    * Hand this `.dbml` file to the Diagrams app, where it becomes a diagram that stays in step
    * with the file — see `lib/dbmlBridge.ts`.
@@ -842,7 +958,10 @@ export function EditorPane({
    *  it was opened, so typing never re-colours it. See `useFileLanguage`. */
   const editorLanguage = useFileLanguage(activeTab?.path ?? null, activeTab?.originalContent ?? "", activeModelPath);
   const dirty = activeTab ? activeTab.content !== activeTab.originalContent : false;
-  const previewKind = previewKindFor(activePath);
+  /** What the tab shows instead of an editor, when it is not a text buffer at all. */
+  const notice = activeTab?.notice ?? null;
+  // A file with nothing readable in it has nothing to preview either.
+  const previewKind = notice ? null : previewKindFor(activePath);
   /** The parser, held in state so its arrival re-renders. `useState`'s initialiser form is what
    * stores a *function* rather than calling it — same for `setParseDbml` below. */
   const [parseDbml, setParseDbml] = useState<((source: string) => DbmlSchema) | null>(() => dbmlParser);
@@ -897,16 +1016,35 @@ export function EditorPane({
   // under it — falls back to the code rather than to an empty pane. A tab aimed at a *commit* is
   // exempt: that change exists whether or not the file is currently dirty, and without this clause a
   // commit diff of a clean file would close itself the moment it opened.
+  //
+  // A disk comparison is exempt for the same reason: it is the buffer against the file as it is on
+  // disk now, which has nothing to do with whether git sees a change.
+  const diskText = activeTab?.diskText ?? null;
   const viewMode: ViewMode =
-    activeTab?.viewMode === "diff" && !activeDiff && !compare ? "code" : (activeTab?.viewMode ?? "code");
+    activeTab?.viewMode === "diff" && !activeDiff && !compare && diskText === null
+      ? "code"
+      : (activeTab?.viewMode ?? "code");
+
+  /** A `.ipynb` the notebook view can edit: a readable, writable file of the project. Anything else
+   *  with that extension — read-only text, a notice — stays what the editor would show for it. */
+  const isNotebook =
+    !!activeTab && isNotebookPath(activeTab.path) && !notice && activeTab.readOnly === null && !isScratchPath(activeTab.path);
+  const notebookSessionKey = activeTab ? notebookKey(project.local_path, activeTab.path) : "";
+  const notebookMode = useNotebookStore((s) => (isNotebook ? (s.modes[notebookSessionKey] ?? "notebook") : "json"));
+  /** The notebook instead of its JSON — unless the diff is up, which is about the file as git has it. */
+  const showNotebook = isNotebook && notebookMode === "notebook" && viewMode !== "diff";
 
   // The Editor's status line — caret, indentation, line endings, language — for as long as this pane
   // has focus and Monaco is what it shows (code and split; not preview, diff or a file still loading).
   useEditorStatus(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {
     groupId,
     focused,
-    path: activeTab && !activeTab.loading && (viewMode === "code" || viewMode === "split") ? activeTab.path : null,
+    path:
+      activeTab && !activeTab.loading && !notice && !showNotebook && (viewMode === "code" || viewMode === "split")
+        ? activeTab.path
+        : null,
     fileKey: activeModelPath ?? null,
+    encoding: activeTab?.readOnly?.kind === "encoding" ? activeTab.readOnly.encoding.toUpperCase() : "UTF-8",
   });
 
   /**
@@ -971,9 +1109,16 @@ export function EditorPane({
     fullDiff && fullDiff.path === activePath && (!compare || fullDiff.key === activeDiffKey)
       ? fullDiff.file
       : null;
+  // A disk comparison needs no fetch: both sides are already here — the disk's text as it was read
+  // for the comparison, and the buffer as it stands.
   const diffSides = useMemo(
-    () => (viewMode === "diff" && fullActiveDiff ? reconstructSides(fullActiveDiff) : null),
-    [viewMode, fullActiveDiff],
+    () =>
+      viewMode === "diff" && diskText !== null
+        ? { original: diskText, modified: content }
+        : viewMode === "diff" && fullActiveDiff
+          ? reconstructSides(fullActiveDiff)
+          : null,
+    [viewMode, fullActiveDiff, diskText, content],
   );
 
   const tRef = useRef(t);
@@ -985,7 +1130,6 @@ export function EditorPane({
     () => (activePath ? normalizePath(`${project.local_path}/${activePath}`) : null),
     [project.local_path, activePath],
   );
-  const breakpoints = useDebugStore((s) => s.breakpoints);
   // Monaco's mouse handler is registered once, at mount; a ref is how it sees the *current*
   // file rather than whichever one was open when it was wired up.
   const activeAbsolutePathRef = useRef<string | null>(null);
@@ -994,7 +1138,10 @@ export function EditorPane({
   // breakpoint above is absolute because that is what a debug adapter speaks.
   const activePathRef = useRef<string | null>(null);
   activePathRef.current = activePath;
-  const pausedFrame = useDebugStore((s) => (s.status === "paused" ? s.frames[s.selectedFrame] : undefined));
+  // The project, for the actions registered at mount (formatting, find references) — a pane stays
+  // mounted across a project switch.
+  const projectRef = useRef(project);
+  projectRef.current = project;
 
   /**
    * The file's change, cut into hunks (what the peek pages through) and gutter marks (what opens it).
@@ -1376,34 +1523,9 @@ export function EditorPane({
     openPeekRef.current(current.blockIndex, { reveal: false });
   }, [blocks, closePeek]);
 
-  // Breakpoints and the stopped line are their own decoration set: they change on a completely
-  // different rhythm from the git markers, and mixing them would make each update clobber the
-  // other's ids.
-  const debugDecorationsRef = useRef<string[]>([]);
-  useEffect(() => {
-    const ed = editorRef.current;
-    const mon = monacoRef.current;
-    if (!ed || !mon || !ed.getModel()) return;
-    const lines = activeAbsolutePath ? (breakpoints[activeAbsolutePath] ?? []) : [];
-    const decorations: MonacoEditorNS.IModelDeltaDecoration[] = lines.map((line) => ({
-      range: new mon.Range(line, 1, line, 1),
-      options: { isWholeLine: false, glyphMarginClassName: "cf-breakpoint-glyph" },
-    }));
-    // Only when the *selected* frame is this file: stepping through a call shows where you are,
-    // not a stale highlight in a file you happen to have open.
-    const pausedHere = pausedFrame && activeAbsolutePath && normalizePath(pausedFrame.file) === activeAbsolutePath;
-    if (pausedHere && pausedFrame) {
-      decorations.push({
-        range: new mon.Range(pausedFrame.line, 1, pausedFrame.line, 1),
-        options: {
-          isWholeLine: true,
-          className: "cf-debug-current-line",
-          glyphMarginClassName: "cf-debug-current-glyph",
-        },
-      });
-    }
-    debugDecorationsRef.current = ed.deltaDecorations(debugDecorationsRef.current, decorations);
-  }, [breakpoints, activeAbsolutePath, pausedFrame, editorReady, activeTab?.loading]);
+  // Breakpoints (which follow the code as it is edited) and the stopped line: their own decoration
+  // set, on their own rhythm — see the hook.
+  useBreakpointGutter(editorRef, monacoRef, activeAbsolutePath, editorReady, activeTab?.loading);
 
   /**
    * Bookmarked lines, in the lines-decorations lane rather than the glyph margin.
@@ -1855,7 +1977,7 @@ export function EditorPane({
   /** Captures what should end up in the image: the selection when there is one (expanded to whole
    * lines, so a snapshot never starts mid-token), otherwise the entire file. */
   const captureSnapshot = useCallback(() => {
-    if (!activeTab || activeTab.loading) return;
+    if (!activeTab || activeTab.loading || activeTab.notice) return;
     const ed = editorRef.current;
     const model = ed?.getModel();
     const selection = ed?.getSelection();
@@ -2040,19 +2162,42 @@ export function EditorPane({
       label: tRef.current("shortcuts.formatDocument"),
       contextMenuGroupId: "1_modification",
       contextMenuOrder: 1.5,
-      run: (ed) => {
-        const action = ed.getAction("editor.action.formatDocument");
-        if (!action || !action.isSupported()) {
-          pushErrorToast(tRef.current("editor.noFormatter", { language: ed.getModel()?.getLanguageId() ?? "" }));
-          return;
+      // The repository's own Prettier first, when it has one — see `formatDocument`.
+      run: async (ed) => {
+        const model = ed.getModel();
+        const path = activePathRef.current;
+        if (!model || !path || ed.getOption(monacoInstance.editor.EditorOption.readOnly)) return;
+        const result = await formatModel(model, projectRef.current.local_path, path, ed);
+        if (result === "none") {
+          // A component file is named by its own kind, not by the HTML it is coloured as.
+          const language = isComponentFile(path) ? (path.split(".").pop() ?? "") : model.getLanguageId();
+          pushErrorToast(tRef.current("editor.noFormatter", { language }));
         }
-        void action.run();
+      },
+    });
+    /**
+     * Every reference to the symbol under the caret, across the project, in the panel under the
+     * editor — see `findReferences`. Beside Monaco's own "Go to References" in the menu; that one's
+     * peek can only preview files that are open.
+     */
+    editorInstance.addAction({
+      id: "cf-find-references",
+      label: tRef.current("editor.findReferences"),
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 1.45,
+      run: (ed) => {
+        const model = ed.getModel();
+        const position = ed.getPosition();
+        if (model && position) void findAllReferences(model, position, projectRef.current);
       },
     });
     editorInstance.addAction({
       id: "cf-inline-edit",
       label: tRef.current("shortcuts.inlineEdit"),
       run: () => {
+        // The rewrite lands through the model, which Monaco's read-only flag does not guard — so a
+        // file shown read-only (another encoding, a large file) is refused here instead.
+        if (editorInstance.getOption(monacoInstance.editor.EditorOption.readOnly)) return;
         const model = editorInstance.getModel();
         const selection = editorInstance.getSelection();
         const path = activePathRef.current;
@@ -2367,6 +2512,7 @@ export function EditorPane({
       tabs.map((tab) => ({
         path: tab.path,
         dirty: tab.content !== tab.originalContent,
+        stale: tab.diskChanged,
         preview: tab.preview,
         pinned: pinnedPaths.includes(tab.path),
       })),
@@ -2377,7 +2523,8 @@ export function EditorPane({
   // create the model empty and the subsequent fill would land in the undo stack, one
   // Ctrl+Z away from blanking the file.
   const editorPane =
-    activeTab && !activeTab.loading ? (
+    // Nor for a tab with a notice: there is no text to put in a model.
+    activeTab && !activeTab.loading && !activeTab.notice ? (
       <Editor
         height="100%"
         path={modelPathFor(project, activeTab.path)}
@@ -2441,6 +2588,10 @@ export function EditorPane({
            * is a 36px lane: the chevron centred in it, the icon flush left, no overlap.
            */
           lineDecorationsWidth: 20,
+          // Text the editor will not write back — decoded from another encoding, or a large file
+          // opened anyway. Read-only in Monaco too, so typing into it is refused where it happens
+          // rather than silently dropped on the way to the tab.
+          readOnly: activeTab.readOnly !== null,
         }}
       />
     ) : null;
@@ -2478,6 +2629,21 @@ export function EditorPane({
                     file={activeModelPath}
                     text={activeTab.originalContent}
                     language={editorLanguage}
+                  />
+                )}
+                {isNotebook && (
+                  // A notebook or its file: the JSON is still one click away, and switching back
+                  // reads whatever was typed there as the notebook.
+                  <Segmented<"notebook" | "json">
+                    size="sm"
+                    layoutId={`cf-editor-notebook-${groupId}`}
+                    value={notebookMode}
+                    onChange={(mode) => notebookActions.setMode(notebookSessionKey, mode)}
+                    options={[
+                      { value: "notebook", icon: NotebookPen, title: t("notebook.viewNotebook") },
+                      { value: "json", icon: Braces, title: t("notebook.viewJson") },
+                    ]}
+                    className="mr-1"
                   />
                 )}
                 {previewKind && (
@@ -2528,7 +2694,7 @@ export function EditorPane({
                     Leaving diff view is what forgets the commit (see `onViewMode` in `EditorView`), so
                     pressing this twice from a commit diff lands on the ordinary working diff rather than
                     on the same commit for the rest of the tab's life. */}
-                {(activeDiff || compare) && (
+                {!notice && (activeDiff || compare || diskText !== null) && (
                   <Tooltip side="bottom" label={t("editor.viewDiff")}>
                     <button
                       onClick={() => onViewMode(activeTab.path, viewMode === "diff" ? "code" : "diff")}
@@ -2543,7 +2709,8 @@ export function EditorPane({
                 <Tooltip side="bottom" label={t("codesnap.action")} trailing={keyCap("editor.codeSnap")}>
                   <button
                     onClick={captureSnapshot}
-                    disabled={activeTab.loading}
+                    // A notebook shows no code editor of this pane's to photograph.
+                    disabled={activeTab.loading || notice !== null || showNotebook}
                     aria-label={t("codesnap.action")}
                     className={iconButtonClass({ size: "sm" })}
                   >
@@ -2576,7 +2743,10 @@ export function EditorPane({
                     onClick={onSave}
                     // A scratch tab can always be saved: its save is a Save As, and a clean one — a
                     // tree fresh out of "Generate Tree" — is the one most worth keeping as a file.
-                    disabled={(!dirty && !isScratchPath(activeTab.path)) || saving}
+                    // A notice or read-only text never can: there is nothing of the user's to write.
+                    disabled={
+                      (!dirty && !isScratchPath(activeTab.path)) || !isWritable(activeTab) || saving
+                    }
                     className={buttonClass({ variant: "secondary", size: "sm", className: "ml-1" })}
                   >
                     {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
@@ -2595,7 +2765,42 @@ export function EditorPane({
             // but the breadcrumb's job is to name the thing being read, and a commit named over the
             // editable file would be the worst possible way to find that invariant had broken.
             compare={viewMode === "diff" ? compare : null}
+            comparingDisk={viewMode === "diff" && diskText !== null}
           />
+          {activeTab.diskChanged && dirty && (
+            <PaneNotice
+              tone="warning"
+              icon={<TriangleAlert size={12} />}
+              label={t("editor.diskChanged")}
+              hint={t("editor.diskChangedHint")}
+            >
+              {(["compare", "reload", "overwrite"] as const).map((action) => (
+                <button
+                  key={action}
+                  onClick={() => onDiskAction(activeTab.path, action)}
+                  className={buttonClass({ variant: action === "overwrite" ? "danger-ghost" : "ghost", size: "sm" })}
+                >
+                  {t(DISK_ACTION_LABEL[action])}
+                </button>
+              ))}
+            </PaneNotice>
+          )}
+          {activeTab.readOnly && !notice && (
+            <PaneNotice
+              tone="muted"
+              icon={<Lock size={12} />}
+              label={
+                activeTab.readOnly.kind === "encoding"
+                  ? t("editor.readOnlyEncoding", { encoding: activeTab.readOnly.encoding })
+                  : t("editor.readOnlyLarge")
+              }
+              hint={
+                activeTab.readOnly.kind === "encoding"
+                  ? t("editor.readOnlyEncodingHint")
+                  : t("editor.readOnlyLargeHint")
+              }
+            />
+          )}
           {/* `relative` anchors the inline-edit widget over the code, the way an editor
               floats its own peek widgets. */}
           <div className="relative min-h-0 flex-1" {...bodyDropProps}>
@@ -2604,6 +2809,14 @@ export function EditorPane({
               <div className="flex h-full items-center justify-center">
                 <BouncingDots />
               </div>
+            ) : notice ? (
+              <FileNoticeView
+                notice={notice}
+                path={activeTab.path}
+                repoPath={project.local_path}
+                onRetry={() => onReload(activeTab.path)}
+                onOpenAnyway={() => onReload(activeTab.path, { allowLarge: true })}
+              />
             ) : viewMode === "diff" ? (
               diffSides ? (
                 /* Read-only on purpose: this is the change as git has it, and the editable copy is
@@ -2635,9 +2848,28 @@ export function EditorPane({
                   <BouncingDots />
                 </div>
               )
+            ) : showNotebook ? (
+              <Suspense
+                fallback={
+                  <div className="flex h-full items-center justify-center">
+                    <BouncingDots />
+                  </div>
+                }
+              >
+                <NotebookView
+                  project={project}
+                  path={activeTab.path}
+                  content={content}
+                  focused={focused}
+                  monacoTheme={monacoTheme}
+                  onSave={onSave}
+                />
+              </Suspense>
             ) : viewMode === "preview" ? (
               previewKind === "markdown" ? (
                 <MarkdownPreview content={content} />
+              ) : previewKind === "svg" ? (
+                <SvgPreview source={content} name={activeTab.path} />
               ) : (
                 <DbmlDiagram schema={dbmlSchema} loading={dbmlLoading} />
               )
@@ -2645,8 +2877,11 @@ export function EditorPane({
               <div className="flex h-full">
                 <div className="min-w-0 flex-1 border-r border-[var(--cf-border)]">{editorPane}</div>
                 <div className="min-w-0 flex-1">
+                  {/* No scroll sync for an image: its height has nothing to do with the source's. */}
                   {previewKind === "markdown" ? (
                     <MarkdownPreview content={content} ref={previewScrollRef} />
+                  ) : previewKind === "svg" ? (
+                    <SvgPreview source={content} name={activeTab.path} />
                   ) : (
                     <DbmlDiagram schema={dbmlSchema} loading={dbmlLoading} ref={previewScrollRef} />
                   )}

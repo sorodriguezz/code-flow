@@ -14,6 +14,7 @@ use futures_util::StreamExt;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::{AsyncMessage, Client, SimpleQueryMessage};
 
+use super::entra;
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
     describe_db_error_at, read_only_guard, read_only_refusal, split_statements, DbColumn,
@@ -40,13 +41,38 @@ pub struct PgSession {
     version: String,
     port: u16,
     read_only: bool,
+    /// Whether the server itself was told to refuse writes — see [`PgSession::open`]. `None` on a
+    /// connection that isn't read-only.
+    read_only_on_server: Option<bool>,
 }
 
 impl PgSession {
     pub async fn open(config: &DbConnectionConfig, database: Option<&str>) -> Result<Self, String> {
         let mut config = config.clone();
         config.resolve_password();
+        // Azure Database for PostgreSQL signs in with a Microsoft Entra ID token *as the password*,
+        // the way SQL Server's `AuthMethod::aad_token` does it over TDS. Fetched per connect — see
+        // `entra` for why tokens are never cached.
+        let entra_login = if config.auth_method.is_entra() {
+            let token = entra::access_token(&config, entra::POSTGRES_RESOURCE).await?;
+            let login = entra_role(&config, &token)?;
+            config.password = token;
+            // A bearer token in cleartext is a credential anyone on the path can replay, so TLS is
+            // not the connection's to turn off here — the same rule `tds_config` applies.
+            if config.ssl == DbSslMode::Disable {
+                config.ssl = DbSslMode::Require;
+            }
+            Some(login)
+        } else {
+            None
+        };
         let mut pg = pg_config(&config, database)?;
+        if let Some(login) = &entra_login {
+            pg.user(login);
+            pg.password(&config.password);
+            // `Prefer`, the default, falls back to plaintext when the server offers no TLS.
+            pg.ssl_mode(SslMode::Require);
+        }
         if pg.get_application_name().is_none() {
             pg.application_name("CodeFlow");
         }
@@ -96,7 +122,21 @@ impl PgSession {
             version: String::new(),
             port: config.effective_port(),
             read_only: config.read_only,
+            read_only_on_server: None,
         };
+
+        // The server's own read-only mode: every transaction this session starts refuses to write,
+        // including the ones the keyword guard cannot see — a function called from a `SELECT` that
+        // deletes rows. The guard stays in front of it and refuses the statements that would lift
+        // it again (`SET … READ WRITE`, `RESET ALL`, `set_config`). A refusal here doesn't fail the
+        // connection, the same bargain the MySQL driver makes; `info` says which guard is in force.
+        if config.read_only {
+            let set = session
+                .client
+                .simple_query("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+                .await;
+            session.read_only_on_server = Some(set.is_ok());
+        }
 
         // One round trip for everything the status bar shows, rather than three.
         let rows = session
@@ -124,6 +164,24 @@ impl PgSession {
                  for a session that needs them."
                     .to_string(),
             );
+        }
+        match self.read_only_on_server {
+            // Transaction pooling hands each transaction to whichever server connection is free, so
+            // a session setting holds for one of them at best.
+            Some(true) if self.kind == DbKind::Supabase && self.port == 6543 => notes.push(
+                "Read-only is enforced by this app only: the transaction pooler can't hold the \
+                 session's read-only setting between statements."
+                    .to_string(),
+            ),
+            Some(true) => {
+                notes.push("Transactions on this connection are read-only on the server.".to_string())
+            }
+            Some(false) => notes.push(
+                "The server didn't accept a read-only session, so read-only is enforced by this app \
+                 only."
+                    .to_string(),
+            ),
+            None => {}
         }
         DbServerInfo {
             kind: self.kind,
@@ -271,7 +329,7 @@ impl PgSession {
         // say which one broke, and each result gets its own timing this way.
         let mut results = Vec::new();
         for statement in split_statements(sql, Some(DIALECT)) {
-            if let Err(refused) = read_only_guard(&statement, self.read_only) {
+            if let Err(refused) = read_only_guard(&statement, self.read_only, DIALECT) {
                 results.push(DbStatementResult::failed(&statement, refused));
                 break;
             }
@@ -864,6 +922,59 @@ impl PgSession {
         Ok(result)
     }
 
+    /// One statement's rows, handed to `sink` as the server sends them — the "export everything"
+    /// path, which must never hold the result in memory. The simple protocol streams, so this is the
+    /// same read `run_one` does without the row limit and without the `Vec`.
+    pub async fn stream_rows(
+        &self,
+        sql: &str,
+        ctx: &DbExecContext,
+        sink: &mut dyn super::export::RowSink,
+    ) -> Result<(), String> {
+        self.apply_search_path(ctx).await;
+        let statement = split_statements(sql, Some(DIALECT))
+            .into_iter()
+            .next()
+            .ok_or_else(|| "There is no statement to export.".to_string())?;
+        let stream = self.client.simple_query_raw(&statement).await.map_err(pg_error)?;
+        let mut stream = Box::pin(stream);
+        let mut described = false;
+        while let Some(message) = stream.next().await {
+            match message.map_err(pg_error)? {
+                SimpleQueryMessage::RowDescription(columns) => {
+                    let columns: Vec<DbColumn> =
+                        columns.iter().map(|c| DbColumn::new(c.name(), String::new())).collect();
+                    sink.columns(&columns)?;
+                    described = true;
+                }
+                SimpleQueryMessage::Row(row) => {
+                    if !described {
+                        let columns: Vec<DbColumn> =
+                            row.columns().iter().map(|c| DbColumn::new(c.name(), String::new())).collect();
+                        sink.columns(&columns)?;
+                        described = true;
+                    }
+                    let values: Vec<Option<String>> =
+                        (0..row.len()).map(|i| row.get(i).map(str::to_string)).collect();
+                    sink.row(&values)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Every row of a table under the grid's filter and sort, streamed. See [`Self::stream_rows`].
+    pub async fn export_table(
+        &self,
+        request: &DbTableDataRequest,
+        sink: &mut dyn super::export::RowSink,
+    ) -> Result<(), String> {
+        let sql = sqlgen::select_all(&request.node, DIALECT, &request.filter, &request.sort)?;
+        let ctx = DbExecContext { database: request.node.database.clone(), schema: None, max_rows: 0 };
+        self.stream_rows(&sql, &ctx, sink).await
+    }
+
     pub async fn row_count(&self, node: &DbNodeRef, filter: &str) -> Result<i64, String> {
         let sql = sqlgen::count_rows(node, DIALECT, filter)?;
         Ok(self.scalar(&sql).await?.and_then(|v| v.parse().ok()).unwrap_or_default())
@@ -888,15 +999,47 @@ impl PgSession {
         }
 
         self.client.simple_query("BEGIN").await.map_err(pg_error)?;
+        // Apply runs on a session of its own, apart from the consoles (see `DbRegistry`), so a row
+        // a console has locked in an open transaction makes this wait for that console's COMMIT.
+        // Bounded, and local to this transaction: a stuck Apply becomes an error that says so.
+        let _ = self.client.simple_query("SET LOCAL lock_timeout = '15s'").await;
         let mut applied = 0u32;
-        for statement in &statements {
-            if let Err(e) = self.client.simple_query(statement).await {
-                let _ = self.client.simple_query("ROLLBACK").await;
-                return Ok(DbEditResult {
-                    applied: 0,
-                    statements: statements.clone(),
-                    error: Some(format!("{}\n\n{statement}", pg_error(e))),
-                });
+        let total = statements.len();
+        for (index, (statement, edit)) in statements.iter().zip(edits).enumerate() {
+            let messages = match self.client.simple_query(statement).await {
+                Ok(messages) => messages,
+                Err(e) => {
+                    let _ = self.client.simple_query("ROLLBACK").await;
+                    let mut message = pg_error(e);
+                    if message.contains("lock timeout") {
+                        message.push_str(
+                            "\nAnother session holds a lock on this row — an open transaction in a \
+                             console, perhaps. Commit or roll it back and apply again.",
+                        );
+                    }
+                    return Ok(DbEditResult {
+                        applied: 0,
+                        statements: statements.clone(),
+                        error: Some(format!("{message}\n\n{statement}")),
+                    });
+                }
+            };
+            if super::edit_expects_one_row(edit) {
+                let affected = messages
+                    .iter()
+                    .find_map(|message| match message {
+                        SimpleQueryMessage::CommandComplete(count) => Some(*count),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                if affected != 1 {
+                    let _ = self.client.simple_query("ROLLBACK").await;
+                    return Ok(DbEditResult {
+                        applied: 0,
+                        statements: statements.clone(),
+                        error: Some(super::wrong_row_count(index + 1, total, affected, statement)),
+                    });
+                }
             }
             applied += 1;
         }
@@ -1156,6 +1299,33 @@ pub(super) fn cell(row: &[Option<String>], index: usize) -> String {
 // ---------------------------------------------------------------------------
 // Connection plumbing
 // ---------------------------------------------------------------------------
+
+/// The Postgres role an Entra ID sign-in logs in as.
+///
+/// A person (`az login`) logs in as their own account — the user field when it is filled, otherwise
+/// the account the token was issued to. An application has no such name in its token, and its
+/// `user` field already holds the client id the token was requested with, so the role comes from the
+/// `entra_role` option — or is the client id itself, which is what a role created for it with
+/// `pgaadauth_create_principal_with_oid` is often called.
+fn entra_role(config: &DbConnectionConfig, token: &str) -> Result<String, String> {
+    match config.auth_method {
+        super::DbAuthMethod::EntraServicePrincipal => Ok(config
+            .option("entra_role")
+            .map(str::to_string)
+            .unwrap_or_else(|| config.user.trim().to_string())),
+        _ => {
+            let typed = config.user.trim();
+            if !typed.is_empty() {
+                return Ok(typed.to_string());
+            }
+            entra::token_login(token).ok_or_else(|| {
+                "The Azure CLI's token doesn't name an account to log in as. Enter the PostgreSQL \
+                 role (usually your Entra ID user name) in the user field."
+                    .to_string()
+            })
+        }
+    }
+}
 
 /// Postgres wraps a server error in its own type whose `Display` is already the sentence the
 /// server sent; what it drops is the detail and hint lines, which are often the actionable part.
@@ -1665,6 +1835,30 @@ mod tests {
 
         let named = stray_at_sign(&config, &host).expect("the mangled host is named outright");
         assert!(named.contains("db.example.com"), "{named}");
+    }
+
+    /// Who an Entra ID sign-in logs in as: the typed role, else the token's account for a person; the
+    /// `entra_role` option, else the client id, for an application.
+    #[test]
+    fn an_entra_sign_in_picks_its_postgres_role() {
+        use base64::Engine as _;
+        let encode = |text: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+        let token = format!("{}.{}.sig", encode("{}"), encode(r#"{"upn":"ana@contoso.example"}"#));
+
+        let mut config = config();
+        config.auth_method = crate::datasource::DbAuthMethod::EntraCli;
+        config.user = String::new();
+        assert_eq!(entra_role(&config, &token).unwrap(), "ana@contoso.example");
+        config.user = "reporting_group".into();
+        assert_eq!(entra_role(&config, &token).unwrap(), "reporting_group");
+        config.user = String::new();
+        assert!(entra_role(&config, "opaque").is_err(), "no account to log in as");
+
+        config.auth_method = crate::datasource::DbAuthMethod::EntraServicePrincipal;
+        config.user = "11111111-2222-3333-4444-555555555555".into();
+        assert_eq!(entra_role(&config, "opaque").unwrap(), "11111111-2222-3333-4444-555555555555");
+        config.options = vec![("entra_role".into(), "etl_app".into())];
+        assert_eq!(entra_role(&config, "opaque").unwrap(), "etl_app");
     }
 
     /// With no URL there is nothing to read back, and the fields are the answer.

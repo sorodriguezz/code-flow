@@ -34,7 +34,10 @@
 //! - [`sshconfig`] — reading `~/.ssh/config`, because nobody's first host should be typed in.
 //! - [`parse`] — turning a pasted `ssh user@host -p 2222` into a spec, because that is the shape an
 //!   address actually arrives in.
+//! - [`pool`] — the held file sessions, and noticing when one has died under a sleeping laptop.
+//! - [`askpass`] — handing a saved password to a background `ssh`, once, without writing it down.
 
+pub mod askpass;
 pub mod files;
 pub mod forward;
 pub mod ftp;
@@ -43,6 +46,7 @@ pub mod keys;
 pub mod cloud;
 pub mod parse;
 pub mod ping;
+mod pool;
 pub mod screen;
 pub mod session;
 pub mod sftp;
@@ -386,9 +390,10 @@ pub enum RemoteAuth {
     Agent,
     /// A named private key, offered exclusively (`IdentitiesOnly=yes`).
     Key,
-    /// Keyboard-interactive. The password is *not* stored in the spec — it is in the OS keychain,
-    /// and it is typed into the pty by the user, since `ssh` deliberately refuses to read one from
-    /// anywhere a program could supply it.
+    /// Keyboard-interactive. The password is *not* stored in the spec — it is in the OS keychain.
+    /// `ssh` deliberately refuses to read one from anywhere a program could supply it, so a session
+    /// has it typed into its pty (the session tab's key button), and a background `ssh` is handed
+    /// it once through `SSH_ASKPASS` ([`askpass`]).
     Password,
 }
 
@@ -652,6 +657,25 @@ impl RemoteHostSpec {
         args
     }
 
+    /// The flags for an `ssh` with no terminal behind it — a file session, a forward, a screen's
+    /// tunnel — which is either never allowed to prompt or, with `askpass`, allowed to ask for this
+    /// host's password exactly once (see [`askpass`]).
+    ///
+    /// Out of batch mode only as far as that one question: `NumberOfPasswordPrompts=1` so a wrong
+    /// password costs one failed attempt rather than three against a server that counts them, and
+    /// `ForwardX11=no` because the placeholder display an old `ssh` needs to ask anything must not
+    /// be mistaken for a real one by a config that forwards X.
+    pub fn background_args(&self, askpass: bool) -> Vec<String> {
+        let mut args = self.base_args(askpass);
+        if askpass {
+            for option in ["NumberOfPasswordPrompts=1", "ForwardX11=no"] {
+                args.push("-o".into());
+                args.push(option.into());
+            }
+        }
+        args
+    }
+
     /// The one validation worth doing before spawning anything: a host with no address produces an
     /// `ssh` invocation whose error names no host, which is the least useful failure available.
     pub fn require_host(&self) -> Result<(), String> {
@@ -699,9 +723,88 @@ impl RemoteHostSpec {
     /// and handing that to `ssh -l` would fail for a reason nothing on screen explains. The tunnel
     /// therefore connects as `~/.ssh/config` says, which is what an SSH row with an empty user does
     /// too. A tunnel that needs a different one says so in `jump` (`me@box`) or in an `-o User=`.
+    ///
+    /// `auth` goes back to the agent for the same reason: the password saved on a screen row is the
+    /// *screen's*, and handing a VNC password to `ssh` would be a failed login on somebody's server.
     pub fn tunnel_via(&self) -> Self {
-        Self { kind: RemoteKind::Ssh, port: 0, user: String::new(), ..self.clone() }
+        Self {
+            kind: RemoteKind::Ssh,
+            port: 0,
+            user: String::new(),
+            auth: RemoteAuth::Agent,
+            ..self.clone()
+        }
     }
+}
+
+/// The saved password a background `ssh` for this host should be handed, when it can be.
+///
+/// Only for a host that signs in with a password, only where [`askpass`] works, and only when one
+/// is saved — otherwise `None`, and the `ssh` stays in batch mode as it always was.
+pub(crate) fn background_password(host_id: &str, spec: &RemoteHostSpec) -> Option<String> {
+    if spec.auth != RemoteAuth::Password || !askpass::supported() {
+        return None;
+    }
+    crate::secrets::get_secret(&password_key(host_id))
+        .ok()
+        .flatten()
+        .filter(|password| !password.is_empty())
+}
+
+/// The sentence a failed background connection adds for a password host that could not be handed
+/// its password — which is the likeliest reason it failed.
+pub(crate) fn password_note(spec: &RemoteHostSpec, handed: bool) -> &'static str {
+    if spec.auth != RemoteAuth::Password || handed {
+        ""
+    } else if askpass::supported() {
+        " This host signs in with a password and none is saved — add it in the host's settings."
+    } else {
+        " This host signs in with a password, which a background ssh on this system can't be \
+         given — use a key or the agent for files and forwards."
+    }
+}
+
+/// What `ssh` said, turned into the sentence the UI acts on — when it refused because of the host's
+/// key.
+///
+/// An unknown key starts with [`crate::known_hosts::HOST_KEY_UNKNOWN`] followed by the host as `ssh`
+/// named it (`name` on port 22, `[name]:port` otherwise): the frontend matches the one and reads the
+/// other to open the trust dialog on the right machine. That is not always this host — with a
+/// `jump` it is as likely to be the bastion — which is why the name comes from `ssh`'s own words
+/// when it said one. A *changed* key is the case that must not be clicked through, so it only
+/// explains, and names the `ssh-keygen -R` that clears the old entry once the change is confirmed.
+pub(crate) fn host_key_failure(spec: &RemoteHostSpec, said: &str) -> Option<String> {
+    use crate::known_hosts::{host_key_problem, known_hosts_pattern, HostKeyProblem};
+    let fallback = known_hosts_pattern(spec.host.trim(), spec.port, None);
+    match host_key_problem(said)? {
+        HostKeyProblem::Unknown => {
+            let named = between(said, "host key is known for ", " and").unwrap_or(fallback);
+            Some(format!(
+                "{}: {named} isn't in your known_hosts file, so ssh refused to connect. Check its key \
+                 and trust it to continue.{said}",
+                crate::known_hosts::HOST_KEY_UNKNOWN
+            ))
+        }
+        HostKeyProblem::Changed => {
+            let named = between(said, "Host key for ", " has changed").unwrap_or(fallback);
+            Some(format!(
+                "{}: {named} presented a different key from the one known_hosts has for it. That is \
+                 what an intercepted connection looks like, so nothing was sent. If the server really \
+                 was rebuilt, confirm its new key with whoever runs it, then remove the old entry with \
+                 `ssh-keygen -R '{named}'` and connect again.{said}",
+                crate::known_hosts::HOST_KEY_CHANGED
+            ))
+        }
+    }
+}
+
+/// The text between two markers, trimmed — one word, or nothing. `ssh`'s messages quote a host
+/// name there, and a "name" with a space in it is the marker matching something else.
+fn between(text: &str, start: &str, end: &str) -> Option<String> {
+    let from = text.find(start)? + start.len();
+    let to = text[from..].find(end)? + from;
+    let found = text[from..to].trim();
+    (!found.is_empty() && !found.contains(char::is_whitespace)).then(|| found.to_string())
 }
 
 /// The keychain key a host's password or key passphrase is stored under.
@@ -814,6 +917,74 @@ mod tests {
         // What reaching the machine needs survives; what logging into the screen needs does not.
         assert_eq!(via.jump, "bastion");
         assert!(!via.base_args(false).contains(&"-p".to_string()));
+    }
+
+    /// A screen row's saved password is the screen's; the `ssh` under its tunnel must not be handed
+    /// it as a login password.
+    #[test]
+    fn a_screen_tunnel_never_signs_in_with_the_screens_password() {
+        let mut s = spec();
+        s.kind = RemoteKind::Vnc;
+        s.auth = RemoteAuth::Password;
+        assert_eq!(s.tunnel_via().auth, RemoteAuth::Agent);
+    }
+
+    #[test]
+    fn a_background_ssh_is_batch_unless_it_may_ask_once_for_the_password() {
+        let batch = spec().background_args(false);
+        assert!(batch.contains(&"BatchMode=yes".to_string()));
+        assert!(!batch.contains(&"NumberOfPasswordPrompts=1".to_string()));
+
+        let asking = spec().background_args(true);
+        assert!(!asking.contains(&"BatchMode=yes".to_string()), "batch mode disables askpass too");
+        assert!(asking.windows(2).any(|w| w == ["-o", "NumberOfPasswordPrompts=1"]));
+        assert!(asking.windows(2).any(|w| w == ["-o", "ForwardX11=no"]));
+    }
+
+    #[test]
+    fn an_unknown_key_names_the_host_ssh_named_so_the_dialog_scans_the_right_machine() {
+        // Behind a jump host it is often the bastion that is new, not the host the row names.
+        let mut s = spec();
+        s.jump = "bastion.example.com".into();
+        let said = " ssh said: No ED25519 host key is known for bastion.example.com and you have \
+                    requested strict checking.\r\nHost key verification failed.";
+        let message = host_key_failure(&s, said).unwrap();
+        assert!(message.starts_with(crate::known_hosts::HOST_KEY_UNKNOWN), "{message}");
+        assert!(message.contains(": bastion.example.com isn't in your known_hosts"), "{message}");
+
+        // A non-default port comes back in brackets, the way known_hosts records it.
+        let said = "No ECDSA host key is known for [db.example.com]:2222 and you have requested \
+                    strict checking.\nHost key verification failed.";
+        assert!(host_key_failure(&s, said).unwrap().contains(": [db.example.com]:2222 isn't"));
+
+        // An `ssh` that said only the last line falls back to the row's own address.
+        let mut s = spec();
+        s.port = 2200;
+        let message = host_key_failure(&s, "Host key verification failed.").unwrap();
+        assert!(message.contains(": [web-01.example.com]:2200 isn't"), "{message}");
+
+        assert!(host_key_failure(&s, "Permission denied (publickey).").is_none());
+    }
+
+    /// The case that must never be offered as a click: only explained, never marked as trustable.
+    #[test]
+    fn a_changed_key_is_explained_and_never_offered_for_trust() {
+        let said = "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n\
+                    Host key for web-01.example.com has changed and you have requested strict checking.\n\
+                    Host key verification failed.";
+        let message = host_key_failure(&spec(), said).unwrap();
+        assert!(message.starts_with(crate::known_hosts::HOST_KEY_CHANGED), "{message}");
+        assert!(!message.contains(crate::known_hosts::HOST_KEY_UNKNOWN));
+        assert!(message.contains("ssh-keygen -R 'web-01.example.com'"), "{message}");
+    }
+
+    #[test]
+    fn only_a_password_host_that_was_not_handed_one_gets_a_password_note() {
+        assert_eq!(password_note(&spec(), false), "");
+        let mut s = spec();
+        s.auth = RemoteAuth::Password;
+        assert_eq!(password_note(&s, true), "");
+        assert!(!password_note(&s, false).is_empty());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseClaudeError } from "./claudeError";
+import { parseClaudeError, quotaRetryNote } from "./claudeError";
 
 /**
  * The three messages below are verbatim from a real session — the failures a user actually hit on
@@ -120,6 +120,47 @@ describe("the quota path still behaves", () => {
     );
     expect(billing.kind).toBe("billing");
     expect(billing.actionUrl).toBe("https://example.com/billing");
+  });
+
+  it("keeps Claude Code's own session-limit wording whole, reset time included", () => {
+    // What the backend now marks as a quota refusal (`ai::limit_refusal`). The notice shows these
+    // words as they are; a parsed "N hours" was all that used to survive of them.
+    const info = parseClaudeError("QUOTA_EXCEEDED::You've hit your session limit · resets 12am (America/Santiago)");
+    expect(info.isQuotaExceeded).toBe(true);
+    expect(info.kind).toBe("usage");
+    expect(info.message).toBe("You've hit your session limit · resets 12am (America/Santiago)");
+    // The words already say when, so nothing vaguer is added under them.
+    expect(quotaRetryNote(info)).toBeNull();
+  });
+
+  it("reads Claude's bought allowances as billing, not as a window", () => {
+    for (const text of [
+      "API Error: 400 You're out of extra usage. Add more at claude.ai/settings/usage",
+      "You're out of usage credits",
+      "Your org is out of usage · contact your admin",
+    ]) {
+      expect(parseClaudeError(`QUOTA_EXCEEDED::${text}`).kind).toBe("billing");
+    }
+  });
+
+  it("turns the old trailing epoch into a reset time instead of showing the number", () => {
+    const info = parseClaudeError("QUOTA_EXCEEDED::Claude AI usage limit reached|1751234567");
+    expect(info.message).toBe("Claude AI usage limit reached");
+    expect(info.resetsAt).toBe(1751234567);
+    expect(quotaRetryNote(info)?.key).toBe("changes.quotaResetsAt");
+  });
+
+  it("offers 'try again later' only when the provider named no time at all", () => {
+    expect(quotaRetryNote(parseClaudeError("QUOTA_EXCEEDED::Claude AI usage limit reached"))).toEqual({
+      key: "changes.quotaRetryLater",
+    });
+    expect(quotaRetryNote(parseClaudeError("QUOTA_EXCEEDED::limit reached, try again in 3 hours"))).toEqual({
+      key: "changes.quotaRetry",
+      params: { hint: "3 hours" },
+    });
+    // Billing has its own advice; an ordinary error has none of this.
+    expect(quotaRetryNote(parseClaudeError("QUOTA_EXCEEDED::Insufficient balance"))).toBeNull();
+    expect(quotaRetryNote(parseClaudeError("the model returned an empty response"))).toBeNull();
   });
 
   it("reads opencode Zen's own wording as billing rather than as a window that will reopen", () => {

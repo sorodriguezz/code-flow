@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { homeDir } from "@tauri-apps/api/path";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Code2, FolderOpen, FolderSearch, Rocket, X } from "lucide-react";
+import { Code2, FolderOpen, FolderSearch, RotateCcw, Rocket, Trash2, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { sourceKey, useScaffoldStore } from "../../state/scaffoldStore";
 import { startTerminalRouter } from "../../state/terminalStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { confirmAction } from "../../state/confirmStore";
 import { useFocusTrap } from "../../lib/useFocusTrap";
 import { currentPlatform } from "../../lib/platform";
 import { onTerminalExit } from "../../lib/tauri/events";
@@ -15,6 +16,8 @@ import { closeTerminal, defaultCloneDir, openInVsCode, revealInFileManager } fro
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import {
   checkDest,
+  claimRoot,
+  discardRoot,
   fetchVersions,
   runScript,
   springGenerate,
@@ -69,6 +72,9 @@ type Phase =
       error: string | null;
       /** Set once a project exists: where it is and what to do with it. */
       result?: { root: string; workspace: string | null; run: string | null };
+      /** A failed generation left something at the project's folder — which "delete and retry"
+       *  takes away. Only ever set on a `create` run, which claimed that folder first. */
+      leftover?: boolean;
     };
 
 /** The workspace picker's two values that are not workspaces. */
@@ -488,6 +494,12 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
 
   const create = async () => {
     if (!canCreate) return;
+    await generate();
+  };
+
+  /** The generation itself — `create` once the form allows it, and "retry" after a failure, when the
+   *  form's own destination check would refuse the folder the failure left behind. */
+  const generate = async () => {
     const plan = template.plan(ctx);
     savePrefs({
       template: template.id,
@@ -517,7 +529,15 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       stage: null,
       error: null,
     });
+    /** After a failure: whether the folder holds anything now, which decides what "retry" offers. */
+    const failed = async (patch: Partial<Extract<Phase, { kind: "run" }>>) => {
+      const check = await checkDest(parent, name).catch(() => null);
+      patchRun({ ...patch, status: "failed", leftover: !!check?.problem });
+    };
     try {
+      // Claimed before anything is written, so that "delete and retry" can only ever delete what
+      // this run made — see `scaffold::run::claim`.
+      await claimRoot(root);
       if (plan.spring) {
         patchRun({ stage: t("scaffold.run.spring") });
         await springGenerate(plan.spring, trimmedParent, name);
@@ -529,7 +549,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       const script = buildScript(shellFor(platform), [...plan.steps, ...gitSteps(root, (key) => t(key), commit)], labels);
       const code = await runShell(trimmedParent, script);
       if (code !== 0) {
-        patchRun({ status: "failed", code });
+        await failed({ code });
         return;
       }
 
@@ -562,8 +582,23 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       }
       patchRun({ status: "ok", stage: null, result: { root, workspace, run: plan.run ?? null } });
     } catch (e) {
-      patchRun({ status: "failed", error: String(e) });
+      await failed({ error: String(e) });
     }
+  };
+
+  /** Takes away what the failed run left — after saying exactly which folder — and runs it again. */
+  const retry = async (discard: boolean) => {
+    if (discard) {
+      const ok = await confirmAction(t("scaffold.run.discardConfirm", { path: root }), true, t("scaffold.run.discardRetry"));
+      if (!ok) return;
+      try {
+        await discardRoot(root);
+      } catch (e) {
+        pushErrorToast(String(e));
+        return;
+      }
+    }
+    await generate();
   };
 
   const stop = () => {
@@ -652,11 +687,19 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                 </Button>
               ) : phase.status === "failed" ? (
                 <>
-                  {phase.purpose === "create" && root && (
+                  {phase.purpose === "create" && root && phase.leftover && (
                     <Button variant="ghost" onClick={() => void revealInFileManager(root).catch((e) => pushErrorToast(String(e)))}>
                       <FolderSearch size={13} />
                       {t("scaffold.done.reveal")}
                     </Button>
+                  )}
+                  {phase.purpose === "create" && root && (
+                    <Tooltip label={phase.leftover ? root : t("scaffold.run.retry")} side="top">
+                      <Button variant={phase.leftover ? "danger-ghost" : "ghost"} onClick={() => void retry(!!phase.leftover)}>
+                        {phase.leftover ? <Trash2 size={13} /> : <RotateCcw size={13} />}
+                        {phase.leftover ? t("scaffold.run.discardRetry") : t("scaffold.run.retry")}
+                      </Button>
+                    </Tooltip>
                   )}
                   <Button variant="primary" onClick={backToForm}>
                     {t("scaffold.run.back")}

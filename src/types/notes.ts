@@ -47,6 +47,21 @@ export interface NoteRow extends NoteMetaRow {
   content: string;
 }
 
+/** A note in the trash, as the trash lists it. Mirrors `note_queries::NoteTrashRow`. */
+export interface NoteTrashRow {
+  id: string;
+  workspace_id: string;
+  book_id: string | null;
+  /** The book it was in, or `""` when that book was deleted too. */
+  book_name: string;
+  title: string;
+  excerpt: string;
+  word_count: number;
+  scope: RowScope;
+  /** When it was trashed, ISO. */
+  deleted_at: string;
+}
+
 export interface NoteBookRow {
   id: string;
   workspace_id: string;

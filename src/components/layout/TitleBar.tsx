@@ -5,6 +5,7 @@ import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { useLayoutStore } from "../../state/layoutStore";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 import { ChromeScope } from "./TabBar";
+import { useT } from "../../state/languageStore";
 
 const win = getCurrentWindow();
 
@@ -78,6 +79,7 @@ function WindowsControls() {
    * change on macOS doesn't re-render these three buttons for nothing.
    */
   const maximized = useSyncExternalStore(subscribeWindowStatus, () => getWindowStatus().maximized);
+  const t = useT();
 
   return (
     // `data-window-control` on each button: these three belong to the window rather than to the
@@ -89,7 +91,7 @@ function WindowsControls() {
     // floating 4px inside the row turned that throw into a miss.
     <div className="flex self-stretch">
       <button
-        aria-label="Minimize"
+        aria-label={t("windows.minimize")}
         data-window-control="minimize"
         onClick={() => win.minimize()}
         className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-[var(--cf-press)]"
@@ -97,7 +99,7 @@ function WindowsControls() {
         <Minus size={14} />
       </button>
       <button
-        aria-label={maximized ? "Restore" : "Maximize"}
+        aria-label={maximized ? t("windows.restore") : t("windows.maximize")}
         data-window-control="maximize"
         // Rejections are logged rather than dropped: every window command here is gated by the
         // capability file, and a missing one fails as a rejected promise with nothing on screen
@@ -108,7 +110,7 @@ function WindowsControls() {
         {maximized ? <Copy size={11} className="-scale-x-100" /> : <Square size={12} />}
       </button>
       <button
-        aria-label="Close"
+        aria-label={t("common.close")}
         data-window-control="close"
         onClick={() => win.close()}
         className="flex h-full w-[46px] items-center justify-center text-[var(--cf-text)]/70 hover:bg-red-500 hover:text-white"

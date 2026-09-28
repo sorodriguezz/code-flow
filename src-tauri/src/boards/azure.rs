@@ -194,6 +194,10 @@ pub struct AdoWikiPageDetail {
     /// unknown rather than merely old, and `created_*` stay empty instead of naming whichever
     /// commit happened to be last in the window.
     pub history_truncated: bool,
+    /// The version tag of exactly the content above, as Azure quoted it. A document imported from
+    /// this page keeps it, and its next publish sends it back as `If-Match` — see [`WikiWrite`].
+    /// Empty when the host did not send one.
+    pub etag: String,
 }
 
 /// How far back the page history is read. Ten years of a wiki page is a handful of commits; the
@@ -267,7 +271,7 @@ pub async fn get_wiki_page_detail(
         "https://dev.azure.com/{org_enc}/{project_enc}/_apis/wiki/wikis/{wiki_enc}/pages\
          ?path={path_enc}&includeContent=true&api-version={API_VERSION}"
     );
-    let page: RawWikiPage = get_json(&url, pat).await?;
+    let (page, etag) = get_page_with_etag(&url, pat).await?;
 
     let repository_id = list_wikis(org, project, pat)
         .await
@@ -305,7 +309,51 @@ pub async fn get_wiki_page_detail(
         modified_at,
         revisions: commits.len() as i64,
         history_truncated: truncated,
+        etag,
     })
+}
+
+/// [`get_json`] for a wiki page, keeping the `ETag` header the JSON body does not carry.
+///
+/// The tag is only worth anything when it belongs to the content read with it — a second request
+/// for the tag alone could land after somebody's edit and vouch for a version nobody here has seen.
+async fn get_page_with_etag(url: &str, pat: &str) -> Result<(RawWikiPage, String), String> {
+    let res = client()
+        .get(url)
+        .header("Authorization", auth_header(pat))
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {body}"));
+    }
+    // Same trap as `get_json`: a bad PAT is answered with the sign-in page and a 203.
+    let is_html = res
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim_start().starts_with("text/html"));
+    if status.as_u16() == 203 || is_html {
+        return Err(crate::ado::BAD_CREDENTIALS.to_string());
+    }
+    let etag = etag_of(res.headers());
+    let page = res
+        .json::<RawWikiPage>()
+        .await
+        .map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
+    Ok((page, etag))
+}
+
+/// The `ETag` header, exactly as sent — Azure quotes it, and `If-Match` wants it back quotes
+/// included. Empty when absent.
+fn etag_of(headers: &reqwest::header::HeaderMap) -> String {
+    headers
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// Where a published page ended up.
@@ -318,21 +366,48 @@ pub struct AdoWikiPageRef {
     /// Whether the page existed already. The caller says "created" or "updated" from this rather
     /// than guessing, because the two are genuinely different news to somebody publishing.
     pub updated: bool,
+    /// The version the write produced — what the *next* write from this document has to name. Empty
+    /// when Azure did not send one, which makes that next write ask rather than assume.
+    pub etag: String,
 }
 
+/// Prefix of the error a wiki write fails with when the page is not the version the caller expected.
+/// A marker rather than a sentence, like `ai_locks::BUSY_MARKER`: the frontend turns it into a
+/// choice (overwrite / reload / keep editing), which a sentence it had to pattern-match could not
+/// survive being reworded.
+pub const WIKI_CONFLICT_MARKER: &str = "WIKI_CONFLICT::";
+
+/// What a wiki write may do to a page that is already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WikiWrite<'a> {
+    /// Only over the version this caller last read or wrote — `If-Match` with that tag. A page
+    /// somebody changed since refuses the write with 412, which becomes a
+    /// [`WIKI_CONFLICT_MARKER`] error instead of their edit silently disappearing.
+    IfMatch(&'a str),
+    /// Only when there is no page at that path yet. The honest mode for a document that has never
+    /// been read from the wiki: whatever is there, nobody here has seen it.
+    CreateOnly,
+    /// Over whatever is there now. The user's explicit answer to a conflict, and the only mode that
+    /// still reads the tag immediately before the write.
+    Overwrite,
+}
+
+/// Whatever the write's body says about the new version: a string or a one-element array depending
+/// on the API version, so it is read loosely rather than bet on one shape.
 #[derive(Deserialize)]
 struct RawPutPage {
     #[serde(rename = "eTag", default)]
-    _etag: Option<String>,
+    etag: Option<serde_json::Value>,
 }
 
 /// The current version tag of a page, or `None` if it does not exist yet.
 ///
 /// Azure's wiki write is a conditional PUT: creating wants no `If-Match`, and updating *requires*
-/// the page's current ETag — a PUT without one against an existing page is refused with 412 rather
-/// than overwriting it. That refusal is a feature (it is what stops this app clobbering an edit
-/// somebody made a minute ago), so the ETag is read immediately before the write, and a page that
-/// changed in between fails loudly instead of silently winning.
+/// the page's ETag — a PUT without one against an existing page is refused rather than overwriting
+/// it. That refusal is a feature (it is what stops this app clobbering an edit somebody made a
+/// minute ago), which is why only [`WikiWrite::Overwrite`] reads the tag here, right before the
+/// write: reading it there for every publish made the conditional PUT vouch for a version the user
+/// had never seen, and the protection became last-writer-wins.
 async fn wiki_page_etag(
     org_enc: &str,
     project_enc: &str,
@@ -371,9 +446,9 @@ async fn wiki_page_etag(
 /// Creates or overwrites one wiki page.
 ///
 /// The one thing in this module that changes a page somebody else may be reading, which is why it
-/// is conditional (see [`wiki_page_etag`]) and why the caller shows the user the target before it
-/// runs. Azure creates missing parent folders on its own, so `/Producto/Checkout/Errores` works
-/// without three round trips.
+/// is conditional — `mode` says on what, see [`WikiWrite`] — and why the caller shows the user the
+/// target before it runs. Azure creates missing parent folders on its own, so
+/// `/Producto/Checkout/Errores` works without three round trips.
 pub async fn put_wiki_page(
     org: &str,
     project: &str,
@@ -381,6 +456,7 @@ pub async fn put_wiki_page(
     path: &str,
     content: &str,
     pat: &str,
+    mode: WikiWrite<'_>,
 ) -> Result<AdoWikiPageRef, String> {
     if path.trim().is_empty() || !path.starts_with('/') {
         return Err("La ruta de la página tiene que empezar por «/»".to_string());
@@ -389,7 +465,11 @@ pub async fn put_wiki_page(
     let org_enc = encode_segment(&normalize_org(org));
     let project_enc = encode_segment(project);
     let wiki_enc = encode_segment(wiki);
-    let etag = wiki_page_etag(&org_enc, &project_enc, &wiki_enc, path, pat).await?;
+    let etag = match mode {
+        WikiWrite::IfMatch(tag) => Some(tag.to_string()),
+        WikiWrite::CreateOnly => None,
+        WikiWrite::Overwrite => wiki_page_etag(&org_enc, &project_enc, &wiki_enc, path, pat).await?,
+    };
 
     let path_enc = encode_query(path);
     let url = format!(
@@ -410,19 +490,30 @@ pub async fn put_wiki_page(
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
         return Err(match status {
-            // The one failure worth translating: it means the page moved under us between the read
-            // and the write, and "412" tells the user nothing about what to do next.
-            reqwest::StatusCode::PRECONDITION_FAILED => {
-                "Esa página cambió en Azure DevOps mientras se publicaba. Vuelve a intentarlo para \
-                 escribir sobre la versión actual."
-                    .to_string()
+            // The one failure worth a marker: the page is not the version this write was made
+            // against — changed since it was read (412), or already there when the write expected
+            // to create it (Azure answers that with 409 or 412 depending on the path taken). Either
+            // way the user decides what happens next, not this function.
+            reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::CONFLICT => {
+                format!("{WIKI_CONFLICT_MARKER}{status}: {body}")
             }
             _ => format!("Azure DevOps returned {status}: {body}"),
         });
     }
-    // The body is read and discarded: what the caller needs is "it landed", and the page URL is
-    // built from the path rather than from the response, which does not carry a browser link.
-    let _: RawPutPage = res.json().await.unwrap_or(RawPutPage { _etag: None });
+    // The new version is what the next write has to name. Azure sends it as a header; the body's
+    // `eTag` array is the fallback for a proxy that dropped the header.
+    let header_tag = etag_of(res.headers());
+    let body: RawPutPage = res.json().await.unwrap_or(RawPutPage { etag: None });
+    let new_tag = match header_tag.is_empty() {
+        false => header_tag,
+        true => match body.etag {
+            Some(serde_json::Value::String(tag)) => tag,
+            Some(serde_json::Value::Array(tags)) => {
+                tags.into_iter().find_map(|tag| tag.as_str().map(str::to_string)).unwrap_or_default()
+            }
+            _ => String::new(),
+        },
+    };
 
     Ok(AdoWikiPageRef {
         url: format!(
@@ -430,6 +521,7 @@ pub async fn put_wiki_page(
         ),
         path: path.to_string(),
         updated: etag.is_some(),
+        etag: new_tag,
     })
 }
 

@@ -129,6 +129,12 @@ impl MysqlSession {
         self.alive.load(Ordering::SeqCst)
     }
 
+    /// The dialect as this session speaks it — whether a backslash escapes depends on the server's
+    /// `sql_mode`, read at connect.
+    pub fn dialect(&self) -> SqlDialect {
+        self.dialect
+    }
+
     pub fn poison(&self) {
         self.alive.store(false, Ordering::SeqCst);
     }
@@ -223,7 +229,7 @@ impl MysqlSession {
         }
         let mut results = Vec::new();
         for statement in split_statements(sql, Some(self.dialect)) {
-            if let Err(refused) = read_only_guard(&statement, self.read_only) {
+            if let Err(refused) = read_only_guard(&statement, self.read_only, self.dialect) {
                 results.push(DbStatementResult::failed(&statement, refused));
                 break;
             }
@@ -658,6 +664,70 @@ impl MysqlSession {
         Ok(result)
     }
 
+    /// One statement's rows, handed to `sink` as they come off the socket — the "export
+    /// everything" path. A failure part-way leaves the rest of the result on the socket, so the
+    /// session is poisoned rather than handed to the next caller to misread.
+    pub async fn stream_rows(
+        &self,
+        sql: &str,
+        ctx: &DbExecContext,
+        sink: &mut dyn super::export::RowSink,
+    ) -> Result<(), String> {
+        let statement = split_statements(sql, Some(self.dialect))
+            .into_iter()
+            .next()
+            .ok_or_else(|| "There is no statement to export.".to_string())?;
+        let mut conn = self.conn.lock().await;
+        if let Some(target) = ctx.schema.as_deref().or(ctx.database.as_deref()) {
+            self.use_database(&mut conn, target).await?;
+        }
+        let outcome = async {
+            let mut result = conn.query_iter(statement.as_str()).await.map_err(|e| {
+                self.note_failure(&e);
+                e.to_string()
+            })?;
+            let columns = result.columns().filter(|c| !c.is_empty());
+            let Some(columns) = columns else {
+                result.drop_result().await.map_err(|e| e.to_string())?;
+                return Err("That statement returns no rows to export.".to_string());
+            };
+            let described: Vec<DbColumn> =
+                columns.iter().map(|c| DbColumn::new(c.name_str().to_string(), type_name(c))).collect();
+            let binary: Vec<bool> = columns.iter().map(is_binary).collect();
+            sink.columns(&described)?;
+            while let Some(row) = result.next().await.map_err(|e| {
+                self.note_failure(&e);
+                e.to_string()
+            })? {
+                let values: Vec<Option<String>> = (0..row.len())
+                    .map(|index| {
+                        row.as_ref(index)
+                            .and_then(|value| text_of(value, binary.get(index).copied().unwrap_or(false)))
+                    })
+                    .collect();
+                sink.row(&values)?;
+            }
+            result.drop_result().await.map_err(|e| e.to_string())
+        }
+        .await;
+        if outcome.is_err() {
+            self.poison();
+        }
+        outcome
+    }
+
+    /// Every row of a table under the grid's filter and sort, streamed.
+    pub async fn export_table(
+        &self,
+        request: &DbTableDataRequest,
+        sink: &mut dyn super::export::RowSink,
+    ) -> Result<(), String> {
+        let node = self.qualified(&request.node)?;
+        let sql = sqlgen::select_all(&node, self.dialect, &request.filter, &request.sort)?;
+        let ctx = DbExecContext { database: None, schema: None, max_rows: 0 };
+        self.stream_rows(&sql, &ctx, sink).await
+    }
+
     /// The node with its database as the schema, so `sqlgen` qualifies it as `` `db`.`table` ``.
     fn qualified(&self, node: &DbNodeRef) -> Result<DbNodeRef, String> {
         let mut node = node.clone();
@@ -686,11 +756,21 @@ impl MysqlSession {
             return Ok(DbEditResult { applied: 0, statements, error: Some(e.to_string()) });
         }
         let mut applied = 0u32;
-        for statement in &statements {
+        let total = statements.len();
+        for (index, (statement, edit)) in statements.iter().zip(edits).enumerate() {
             if let Err(e) = conn.query_drop(statement).await {
                 self.note_failure(&e);
                 let _ = conn.query_drop("ROLLBACK").await;
                 return Ok(DbEditResult { applied: 0, statements: statements.clone(), error: Some(format!("{e}\n\n{statement}")) });
+            }
+            let affected = conn.affected_rows();
+            if super::edit_expects_one_row(edit) && affected != 1 {
+                let _ = conn.query_drop("ROLLBACK").await;
+                return Ok(DbEditResult {
+                    applied: 0,
+                    statements: statements.clone(),
+                    error: Some(super::wrong_row_count(index + 1, total, affected, statement)),
+                });
             }
             applied += 1;
         }
@@ -934,6 +1014,10 @@ fn connection_opts(config: &DbConnectionConfig, database: Option<&str>) -> Resul
         .db_name(database.filter(|d| !d.is_empty()).map(str::to_string).or_else(|| Some(config.database.clone()).filter(|d| !d.is_empty())))
         // Prepared statements are never used — see the module note — so there is nothing to cache.
         .stmt_cache_size(0)
+        // An UPDATE's count is the rows it *matched*, not the rows whose value changed — the number
+        // JDBC reports too. Without it, re-saving a value that was already there reads as "matched
+        // nothing", and the data editor's one-row check (`edit_expects_one_row`) would refuse it.
+        .client_found_rows(true)
         .init(startup_statements(config));
     builder = builder.ssl_opts(ssl_opts(config)?);
     Ok(builder.into())

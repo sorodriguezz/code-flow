@@ -35,6 +35,29 @@ use crate::proc::command;
 /// and the OAuth `scope` (as `{resource}/.default`) are built from it.
 pub const SQL_RESOURCE: &str = "https://database.windows.net";
 
+/// The audience for Azure Database for PostgreSQL. The token is sent as the *password*, over the
+/// ordinary Postgres login — the server validates it against the directory.
+pub const POSTGRES_RESOURCE: &str = "https://ossrdbms-aad.database.windows.net";
+
+/// The account a token was issued to, from its claims — the login a Postgres server expects next to
+/// it, for a person signed in with `az login`.
+///
+/// Read without verifying the signature, and that is fine for what it is used for: this is the name
+/// to *send*, and the server checks the token itself. A service principal's token names no user
+/// (it carries an application id), which is why that path takes the role from the connection.
+pub fn token_login(token: &str) -> Option<String> {
+    use base64::Engine as _;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    ["upn", "unique_name", "preferred_username", "email"]
+        .iter()
+        .find_map(|claim| claims.get(*claim)?.as_str().filter(|value| !value.is_empty()))
+        .map(str::to_string)
+}
+
 /// An access token for `resource`, however this connection is configured to get one.
 ///
 /// `config` must already have been through `resolve_password`, since the service-principal path
@@ -178,4 +201,28 @@ async fn service_principal_token(
     let parsed: TokenResponse = serde_json::from_str(&body)
         .map_err(|e| format!("Microsoft Entra ID's answer wasn't the JSON we expected: {e}"))?;
     Ok(parsed.access_token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn token_with(claims: &str) -> String {
+        let encode = |text: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text);
+        format!("{}.{}.signature", encode(r#"{"alg":"none"}"#), encode(claims))
+    }
+
+    /// The Postgres login is the signed-in account, read from whichever claim the token carries it in.
+    #[test]
+    fn the_login_comes_from_the_token_claims() {
+        assert_eq!(token_login(&token_with(r#"{"upn":"ana@contoso.example"}"#)).as_deref(), Some("ana@contoso.example"));
+        assert_eq!(
+            token_login(&token_with(r#"{"unique_name":"live.com#ana@example.com","upn":""}"#)).as_deref(),
+            Some("live.com#ana@example.com")
+        );
+        // An application's token names no user.
+        assert_eq!(token_login(&token_with(r#"{"appid":"00000000-0000-0000-0000-000000000000"}"#)), None);
+        assert_eq!(token_login("not-a-token"), None);
+    }
 }
