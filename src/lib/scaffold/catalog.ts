@@ -19,6 +19,10 @@ import type { ToolId } from "./tools";
  * - create-vue is interactive unless at least one feature flag is given → `--default` when none is.
  * - create-next-app remembers answers between runs → every choice is passed, plus `--yes`.
  * - Expo initialises its own git repository; harmless, since the runner's `git init` re-initialises.
+ * - `bun init` asks for a template, a package name and an entry point → `--yes` takes the defaults,
+ *   and `--react[=tailwind|shadcn]` picks a React template without asking — from Bun 1.2.14 on (see
+ *   `BUN_INIT_FLOOR`). It also writes CLAUDE.md, or a Cursor rule, for the agents it finds installed
+ *   → `BUN_AGENT_RULE_DISABLED=1` when that option is off.
  *
  * Anything a future release adds is still only a question in the terminal the dialog shows, which is
  * why the commands run in a pty at all (see `src-tauri/src/scaffold/run.rs`).
@@ -302,6 +306,23 @@ function pythonRun(ctx: TemplateContext, uvCommand: string, venvCommand: string)
 }
 
 const VALID_GO_MODULE = /^[a-z0-9][a-z0-9._~/-]*$/;
+
+/**
+ * The oldest Bun whose `bun init` builds every template below from flags alone. 1.2.13 reads no
+ * `--react=…`: it opens its template menu instead and, with nobody there to answer, prints
+ * "Cancelled" and exits 0 — leaving an empty folder the runner would go on to make a repository of
+ * (checked 2026-09-28 against 1.2.13, 1.2.14 and 1.4.2). A fact about Bun's history, not a version
+ * to install: an install always takes the current release.
+ */
+const BUN_INIT_FLOOR = ">=1.2.14";
+
+/** `bun init`'s flag for each template. The blank one's is `--yes`: every default taken — the
+ *  folder's name for the package, `index.ts` for the entry point — instead of asked for. */
+function bunInitFlag(template: OptionValue | undefined): string {
+  if (template === "react") return "--react";
+  if (template === "tailwind" || template === "shadcn") return `--react=${template}`;
+  return "--yes";
+}
 
 // ── The catalogue ───────────────────────────────────────────────────────────────────────────────
 
@@ -749,6 +770,46 @@ export const TEMPLATES: Template[] = [
     },
   },
   {
+    id: "bun",
+    name: "Bun",
+    category: "backend",
+    logo: "bun",
+    descriptionKey: "scaffold.tpl.bun",
+    defaultName: "bun-app",
+    npmName: true,
+    options: [
+      {
+        id: "template",
+        kind: "choice",
+        labelKey: "scaffold.opt.template",
+        choices: [
+          { value: "blank", labelKey: "scaffold.opt.blank" },
+          { value: "react", label: "React" },
+          { value: "tailwind", label: "React + Tailwind" },
+          { value: "shadcn", label: "React + shadcn/ui" },
+        ],
+        default: "blank",
+      },
+      // Named for what it writes on a machine with the Claude CLI; the same switch also stops the
+      // Cursor rule it writes when Cursor is installed.
+      { id: "agents", kind: "toggle", label: "CLAUDE.md", default: true },
+    ],
+    requirements: (ctx) => [{ tool: "bun", range: BUN_INIT_FLOOR, because: `bun init ${bunInitFlag(ctx.opts.template)}` }],
+    plan: (ctx) => ({
+      steps: [
+        // Makes the folder, writes the project and runs `bun install` itself; it starts no repository.
+        inParent(
+          ctx,
+          "scaffold.step.generate",
+          ["bun", "init", bunInitFlag(ctx.opts.template), ctx.name],
+          ctx.opts.agents ? undefined : { BUN_AGENT_RULE_DISABLED: "1" },
+        ),
+      ],
+      // What `bun init` itself says to run: the blank project has no scripts, the React ones a `dev`.
+      run: bunInitFlag(ctx.opts.template) === "--yes" ? "bun run index.ts" : "bun dev",
+    }),
+  },
+  {
     id: "express",
     name: "Express",
     category: "backend",
@@ -1134,6 +1195,10 @@ export const CATEGORY_LABELS: Record<Category, TranslationKey> = {
 };
 
 export const CATEGORY_ORDER: Category[] = ["frontend", "backend", "mobile"];
+
+/** Where the dialog opens: the top of its list, which is grouped by `CATEGORY_ORDER` — never the
+ *  template used last, which sat mid-list with nothing on screen saying why. */
+export const FIRST_TEMPLATE = TEMPLATES.find((template) => template.category === CATEGORY_ORDER[0]) ?? TEMPLATES[0];
 
 /** The git steps every plan ends with. `commit` is optional-tolerant: a machine with no git identity
  *  still gets a repository, just without the first commit, and is told so in the terminal. */

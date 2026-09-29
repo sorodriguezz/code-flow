@@ -56,10 +56,10 @@ function afterFailure<T>(previous: Loadable<T> | null | undefined, error: unknow
     : { status: "error", data: null, error: String(error), fetchedAt: 0 };
 }
 
-/** What is remembered between projects: the last template, where projects go, each template's own
- *  choices, and which install route the user took for a tool. One JSON setting. */
+/** What is remembered between projects: where projects go, each template's own choices, and which
+ *  install route the user took for a tool. One JSON setting. Not the last template — the dialog
+ *  always opens at the top of its list. */
 export interface ScaffoldPrefs {
-  template?: string;
   parent?: string;
   pm?: PackageManager;
   commit?: boolean;

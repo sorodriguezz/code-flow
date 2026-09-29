@@ -28,6 +28,7 @@ import {
   type VersionLine,
 } from "../../lib/scaffold/api";
 import {
+  FIRST_TEMPLATE,
   TEMPLATES,
   gitSteps,
   npmNameProblem,
@@ -125,8 +126,8 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   const platform = detectedPlatform ?? localPlatform();
 
   const [ready, setReady] = useState(false);
-  const [templateId, setTemplateId] = useState(TEMPLATES[0].id);
-  const [name, setName] = useState(TEMPLATES[0].defaultName);
+  const [templateId, setTemplateId] = useState(FIRST_TEMPLATE.id);
+  const [name, setName] = useState(FIRST_TEMPLATE.defaultName);
   const [nameEdited, setNameEdited] = useState(false);
   const [parent, setParent] = useState("");
   const [sep, setSep] = useState("/");
@@ -141,10 +142,11 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   const [dest, setDest] = useState<DestCheck | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
 
-  const template = TEMPLATES.find((candidate) => candidate.id === templateId) ?? TEMPLATES[0];
+  const template = TEMPLATES.find((candidate) => candidate.id === templateId) ?? FIRST_TEMPLATE;
   const running = phase.kind === "run" && (phase.status === "preparing" || phase.status === "running");
 
   // ── Boot: remembered choices, where projects go, and one detection pass per app session ──
+  // The template is not one of them: every opening starts at the top of the list (`FIRST_TEMPLATE`).
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -152,11 +154,6 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       if (cancelled) return;
       setSep(base.separator);
       setParent(prefs.parent || base.root);
-      const remembered = TEMPLATES.find((candidate) => candidate.id === prefs.template);
-      if (remembered) {
-        setTemplateId(remembered.id);
-        setName(remembered.defaultName);
-      }
       if (prefs.pm) setPm(prefs.pm);
       if (prefs.commit !== undefined) setCommit(prefs.commit);
       if (prefs.options) setOptionsById(prefs.options);
@@ -502,7 +499,6 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   const generate = async () => {
     const plan = template.plan(ctx);
     savePrefs({
-      template: template.id,
       parent: trimmedParent,
       pm: effectivePm,
       commit,

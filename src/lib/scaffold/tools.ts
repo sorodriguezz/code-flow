@@ -261,6 +261,10 @@ export function recipesFor(tool: ToolId, ctx: InstallContext): Recipe[] {
       break;
     }
     case "bun": {
+      // Already here, so only too old for a template's floor (`BUN_INIT_FLOOR`): upgraded in place.
+      // Another install through npm or Homebrew would land elsewhere on the PATH, and the copy found
+      // first — the old one, in ~/.bun/bin for anyone who used bun.sh — would still be the one run.
+      if (has("bun")) recipes.push({ id: "upgrade", label: "bun upgrade", steps: [{ title: "bun upgrade", argv: ["bun", "upgrade"] }] });
       if (has("node")) recipes.push({ id: "npm", label: "npm", steps: [{ title: "npm -g bun", argv: ["npm", "install", "--global", "bun"] }] });
       if (unix && has("brew")) recipes.push({ id: "brew", label: "Homebrew", steps: [{ title: "brew bun", argv: ["brew", "install", "oven-sh/bun/bun"] }] });
       recipes.push({

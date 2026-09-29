@@ -51,6 +51,12 @@ describe("install recipes", () => {
     expect(text).not.toMatch(/nvm\/v\d/);
   });
 
+  it("upgrade a Bun that is here in place, and install one that is not", () => {
+    const upgrade = (present: string[]) => recipesFor("bun", { platform: "macos", present: new Set(present) }).map((r) => r.id);
+    expect(upgrade(["bun", "node", "brew"])[0]).toBe("upgrade");
+    expect(upgrade(["node", "brew"])).not.toContain("upgrade");
+  });
+
   it("skip php.new for the lines it has no binaries for", () => {
     expect(commands("php", "8.3")).not.toContain("php.new");
     expect(commands("php", "8.4")).toContain("php.new/install/mac/8.4");

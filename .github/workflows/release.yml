@@ -150,6 +150,25 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+
+          # The same helper as `updater-json` below, for the reason given there: GitHub's API has a
+          # bad minute now and then. v2.0.6 is what this job cost without it. Its POST created the
+          # draft (`github-actions[bot]`, 00:25:11) and the response came back empty, so
+          # `gh … --jq .id` died on "unexpected end of JSON input" and both builds were skipped
+          # for a release that existed.
+          retry() {
+            local attempt=1 max=5
+            until "$@"; do
+              if [ "$attempt" -ge "$max" ]; then
+                echo "::error::\`$*\` failed $max times — see the attempts above"
+                return 1
+              fi
+              echo "attempt $attempt of $max failed; retrying in $((attempt * 5))s"
+              sleep $((attempt * 5))
+              attempt=$((attempt + 1))
+            done
+          }
+
           # `gh api` rather than `gh release view`: a draft has no tag, so it is only findable by
           # its `tag_name` field through the API.
           #
@@ -157,18 +176,40 @@ jobs:
           # after one line, `gh` takes SIGPIPE and exits 141, and `pipefail` turns that into a
           # failed step — but only once the output is large enough to fill the pipe buffer, which
           # is to say only once this repository has accumulated enough releases. `awk` drains it.
-          id=$(gh api --paginate "/repos/$REPO/releases" \
-                 --jq ".[] | select(.tag_name==\"$TAG\") | .id" | awk 'NR==1')
-          if [ -z "$id" ]; then
-            jq -n --arg t "$TAG" --arg n "$RELEASE_NAME" --arg b "$NOTES" --arg s "$SHA" \
-              '{tag_name:$t,name:$n,body:$b,target_commitish:$s,draft:true,prerelease:false}' \
-              > payload.json
-            id=$(gh api -X POST "/repos/$REPO/releases" --input payload.json --jq .id)
-            echo "Created draft release $id for $TAG"
-          else
-            echo "Reusing existing release $id for $TAG"
-          fi
-          echo "release-id=$id" >> "$GITHUB_OUTPUT"
+          find_release() {
+            gh api --paginate "/repos/$REPO/releases" \
+              --jq ".[] | select(.tag_name==\"$TAG\") | .id" | awk 'NR==1' > release-id
+          }
+
+          # The lookup comes first on *every* attempt, and that is what makes retrying the POST
+          # safe: a POST that reached GitHub and lost its response has already made the draft, and
+          # the next attempt adopts it instead of opening a second one for the same tag. The id is
+          # read out of the saved body rather than through `--jq`, so an empty answer is a failed
+          # attempt to retry, not a parse error that ends the job.
+          #
+          # Every step says `|| return 1` because `set -e` does not apply here: `retry` calls this
+          # as the condition of an `until`, where bash suspends it.
+          ensure_release() {
+            find_release || return 1
+            if [ -s release-id ]; then
+              echo "Reusing existing release $(cat release-id) for $TAG"
+              return 0
+            fi
+            gh api -X POST "/repos/$REPO/releases" --input payload.json > created.json || return 1
+            jq -r '.id // empty' created.json > release-id 2>/dev/null || true
+            if [ -s release-id ]; then
+              echo "Created draft release $(cat release-id) for $TAG"
+              return 0
+            fi
+            echo "The POST answered without a release id ($(wc -c < created.json) bytes); looking it up by tag next"
+            return 1
+          }
+
+          jq -n --arg t "$TAG" --arg n "$RELEASE_NAME" --arg b "$NOTES" --arg s "$SHA" \
+            '{tag_name:$t,name:$n,body:$b,target_commitish:$s,draft:true,prerelease:false}' \
+            > payload.json
+          retry ensure_release
+          echo "release-id=$(cat release-id)" >> "$GITHUB_OUTPUT"
 
   release:
     needs: [check-version, create-release]
@@ -282,10 +323,8 @@ jobs:
           # `jlink` emits a runtime for whatever platform ran it, so the OS is part of the identity,
           # and so is the JDK that `setup-java` above pins. The script carries the driver's version
           # and its pinned checksum and the module list, so hashing the script covers all three;
-          # `src-tauri/java` is the bridge's own source. The vendored terms are in the key for the
-          # reason the llama key below covers its vendored license: the script copies them into the
-          # directory being cached.
-          key: iris-runtime-${{ runner.os }}-jdk17-${{ hashFiles('scripts/build-iris-runtime.mjs', 'scripts/assets/InterSystems-External-Repository-Terms-of-Use.pdf', 'src-tauri/java/**') }}
+          # `src-tauri/java` is the bridge's own source.
+          key: iris-runtime-${{ runner.os }}-jdk17-${{ hashFiles('scripts/build-iris-runtime.mjs', 'src-tauri/java/**') }}
 
       # `tauri build` runs this again through `beforeBuildCommand`, where it is an incremental
       # no-op. Doing it here first is for the log: when the Java toolchain is the thing that broke,
