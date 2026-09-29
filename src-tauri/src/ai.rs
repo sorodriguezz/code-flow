@@ -167,7 +167,7 @@ pub(crate) fn refusal_reply(text: &str, output_tokens: Option<i64>) -> bool {
 /// The agent chains are the reason this exists: a plan that runs out of quota halfway should park
 /// and wait for the window to reopen, one whose CLI is signed out should ask for a sign-in, and
 /// neither should be retried into the same wall or reported as the model failing. Serialized in
-/// `snake_case` — `"quota"`, `"auth_required"`, `"cli_missing"`, `"overloaded"`, `"other"`. The
+/// `snake_case` — `"quota"`, `"auth_required"`, `"cli_missing"`, `"cli_busy"`, `"overloaded"`, `"other"`. The
 /// frontend asks this same classifier through `claude_cmd::ai_classify_failure`
 /// (`aiClassifyFailure` in `lib/tauri/commands.ts`) rather than keeping a copy of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -180,6 +180,11 @@ pub enum AiFailureKind {
     AuthRequired,
     /// The CLI could not be started at all — not installed, or not where the setting says.
     CliMissing,
+    /// The CLI is installed but could not be started *right now*: its executable was locked or
+    /// part-way through being replaced (on Windows, another Claude Code session updating itself).
+    /// Trying again in a few seconds is the whole remedy — unlike [`Self::CliMissing`], which
+    /// needs an install and parks a chain until someone does it.
+    CliBusy,
     /// The provider is having a bad moment (`529 Overloaded`, a `500`): asking again later is the
     /// whole remedy, and it says nothing about the account.
     Overloaded,
@@ -227,6 +232,17 @@ const AUTH_SIGNALS: [&str; 14] = [
     "unauthorized",
     "session expired",
     "token expired",
+];
+
+/// A CLI that is there but could not be started this instant. The first entry is this app's own
+/// [`LAUNCH_BUSY_HINT`]; the rest are Windows' wording for a file another process holds open, in
+/// English and Spanish, and its error codes for the same thing.
+const BUSY_SIGNALS: [&str; 5] = [
+    "the executable is locked or being replaced",
+    "being used by another process",
+    "está siendo utilizado por otro proceso",
+    "(os error 32)",
+    "(os error 33)",
 ];
 
 /// A CLI that could not be started. `failed to launch` is [`spawn_once`]'s own wording; the rest are
@@ -289,6 +305,9 @@ pub fn classify_failure(error: &str) -> AiFailure {
     // it is a line or two: a long log that mentions `src/billing/` has said nothing about money.
     let kind = if marked || (short && quota_signal(message)) {
         AiFailureKind::Quota
+    } else if says(&BUSY_SIGNALS) {
+        // Before "missing": a busy launch still begins "failed to launch".
+        AiFailureKind::CliBusy
     } else if says(&MISSING_SIGNALS) {
         AiFailureKind::CliMissing
     } else if says(&AUTH_SIGNALS) {
@@ -880,6 +899,15 @@ pub struct AiInvocation<'a> {
     /// The files the engine wrote to hand over its prompt, deleted once the run is over. Engines
     /// write through this rather than to the temp directory — see [`crate::ai_prompt_files`].
     pub prompt_files: crate::ai_prompt_files::PromptFiles,
+    /// The user's own MCP servers this turn keeps out, by the name the CLI knows them by: Claude
+    /// drops their tools from what the model sees (`--disallowedTools mcp__<server>`), Codex starts
+    /// without them (`-c mcp_servers.<name>.enabled=false`). Only the chats set it — see
+    /// `crate::chat_mcp` — and a read-only run loads no server to begin with.
+    pub mcp_block: Vec<String>,
+    /// MCP servers declared in CodeFlow that this turn runs with, secrets resolved — handed to the
+    /// CLI in its own terms by its engine (Claude `--mcp-config`, Codex `-c mcp_servers.cf_*`).
+    /// Only the chats set it; see `crate::mcp_registry`.
+    pub app_mcp: Vec<crate::mcp_registry::LiveServer>,
 }
 
 /// The feature labels recorded against a run's usage.
@@ -995,6 +1023,8 @@ impl<'a> AiInvocation<'a> {
             stream_deltas: None,
             read_only: false,
             prompt_files: crate::ai_prompt_files::PromptFiles::default(),
+            mcp_block: Vec::new(),
+            app_mcp: Vec::new(),
         }
     }
 }
@@ -1124,13 +1154,20 @@ pub trait AiEngine: Send + Sync {
         format!("{}{}", inv.skills_note, inv.stdin_content)
     }
 
-    /// Whether the engine finds `<cwd>/.claude/skills` on its own.
+    /// Where under its working directory this engine discovers skills on its own, if anywhere.
     ///
-    /// Only Claude Code does. For everyone else [`run`] describes the synced skills in the payload
-    /// instead — the files are on disk either way, and an engine with file tools can open them once
-    /// it knows they exist.
-    fn reads_claude_skills(&self) -> bool {
-        false
+    /// Verified per CLI rather than assumed, because they disagree: Claude Code reads
+    /// `.claude/skills`; Codex reads `.agents/skills` and **not** `.claude/skills` (its own
+    /// `debug prompt-input` lists `<cwd>/.agents/skills` as a skill root and nothing else in the
+    /// project); Grok reads both (`grok inspect` shows project skills from each) and is pointed at
+    /// the first. Everyone else is blind to skill folders, and for them [`run`] describes the synced
+    /// skills in the payload instead ([`skills_note`]) — the files are on disk either way, and an
+    /// engine with file tools can open them once it knows they exist.
+    ///
+    /// A folder the app owns (a chat's own) is synced into this root directly; a repository keeps
+    /// receiving `.claude/skills`, and the note covers whatever the engine would not find there.
+    fn native_skills_dir(&self) -> Option<&'static str> {
+        None
     }
 
     /// Whether the engine carries a conversation forward on its own side between turns (the CLIs'
@@ -1361,15 +1398,41 @@ pub fn context_window_for(model: &str) -> Option<i64> {
     if id.is_empty() {
         return None;
     }
+    // What the CLI itself said, on a real run, beats anything a name implies. See
+    // [`record_context_window`].
+    if let Some(reported) = reported_windows().lock().ok().and_then(|windows| windows.get(&id).copied()) {
+        return Some(reported);
+    }
+    // Claude Code's `[1m]` — `opus[1m]`, `claude-sonnet-4-6[1m]` — is the one variant suffix that
+    // decides the window on its own. Any bracketed tail is taken off before the family is read, so
+    // `claude-opus-4-6[1m]` is still Opus 4.6 below and not an unknown id.
+    let (id, variant) = match id.find('[') {
+        Some(at) => (id[..at].to_string(), Some(id[at..].to_string())),
+        None => (id, None),
+    };
+    if variant.as_deref() == Some("[1m]") {
+        return Some(1_000_000);
+    }
     // `provider/model`, the shape opencode and cline use. Only the tail names a family — and one of
     // those providers is the user's own machine.
     let name = id.rsplit('/').next().unwrap_or(&id);
 
     // Longest match wins, so a family that later needs splitting can be split without the shorter
     // prefix silently answering for both halves.
-    const WINDOWS: [(&str, i64); 10] = [
-        // Anthropic has held 200k across every generation these CLIs can address.
+    const WINDOWS: &[(&str, i64)] = &[
+        // Anthropic held 200k through the 4.5 generation (Opus 4.5 and 4.1, Sonnet 4.5, Haiku 4.5
+        // all stay there), and moved to 1M with Opus 4.6 and Sonnet 4.6: every family below is 1M
+        // in Anthropic's own model table, the 5.x lines and Fable included. Each is a prefix, so
+        // `claude-opus-5` also answers for `claude-opus-5-5` and its dated ids.
         ("claude-", 200_000),
+        ("claude-opus-4-6", 1_000_000),
+        ("claude-opus-4-7", 1_000_000),
+        ("claude-opus-4-8", 1_000_000),
+        ("claude-opus-5", 1_000_000),
+        ("claude-sonnet-4-6", 1_000_000),
+        ("claude-sonnet-5", 1_000_000),
+        ("claude-fable-5", 1_000_000),
+        ("claude-mythos-5", 1_000_000),
         // Gemini's 1M is the headline of the 1.5 line onwards; the flash tiers share it.
         ("gemini-", 1_000_000),
         // OpenAI: the 4o generation is 128k, the 4.1 line moved to ~1M, the 5 line sits at 400k.
@@ -1388,6 +1451,30 @@ pub fn context_window_for(model: &str) -> Option<i64> {
         .filter(|(prefix, _)| name.starts_with(prefix))
         .max_by_key(|(prefix, _)| prefix.len())
         .map(|(_, tokens)| *tokens)
+}
+
+/// The windows the CLIs reported for themselves on real runs, by lower-cased model id.
+fn reported_windows() -> &'static Mutex<HashMap<String, i64>> {
+    static WINDOWS: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+    WINDOWS.get_or_init(Mutex::default)
+}
+
+/// Files the context window a CLI stated for `model` on a run it just finished.
+///
+/// Claude Code puts one on every model in its result's `modelUsage` (`contextWindow`, computed by the
+/// CLI for the model *and* the betas it ran with), which is the one number here that cannot drift
+/// from the truth: a plan without the 1M window, or a `[1m]` variant, is whatever the CLI says it is.
+/// So it overrides the family table in [`context_window_for`] from then on — for the gauge and the
+/// automatic compaction alike, since both ask there. Kept for the life of the process; the table is
+/// what answers before the first run of a model.
+pub fn record_context_window(model: &str, tokens: i64) {
+    let id = model.trim().to_ascii_lowercase();
+    if id.is_empty() || tokens <= 0 {
+        return;
+    }
+    if let Ok(mut windows) = reported_windows().lock() {
+        windows.insert(id, tokens);
+    }
 }
 
 /// The one thing worth saying about a CLI that was killed outright and wrote nothing.
@@ -1525,8 +1612,8 @@ impl AiEngine for AccountEngine {
     fn stdin_payload(&self, inv: &AiInvocation) -> String {
         self.with(|e| e.stdin_payload(inv))
     }
-    fn reads_claude_skills(&self) -> bool {
-        self.with(|e| e.reads_claude_skills())
+    fn native_skills_dir(&self) -> Option<&'static str> {
+        self.with(|e| e.native_skills_dir())
     }
     fn resumes_sessions(&self) -> bool {
         self.with(|e| e.resumes_sessions())
@@ -1679,6 +1766,11 @@ fn resolve_binary(binary: &str, _dirs: &[std::path::PathBuf]) -> String {
 fn resolve_binary(binary: &str, dirs: &[std::path::PathBuf]) -> String {
     use std::path::Path;
     if binary.contains('/') || binary.contains('\\') || Path::new(binary).extension().is_some() {
+        if !Path::new(binary).is_file() {
+            if let Some(installed) = mid_update_fallback(binary) {
+                return installed.to_string_lossy().into_owned();
+            }
+        }
         return binary.to_string();
     }
     for dir in dirs {
@@ -1689,7 +1781,193 @@ fn resolve_binary(binary: &str, dirs: &[std::path::PathBuf]) -> String {
             }
         }
     }
+    if let Some(installed) = mid_update_fallback(binary) {
+        return installed.to_string_lossy().into_owned();
+    }
     binary.to_string()
+}
+
+/// A Claude Code install caught part-way through replacing itself, and the version to run instead.
+///
+/// **What happens on Windows, read out of the 2.1.266 binary rather than guessed.** The native
+/// installer's updater cannot overwrite a running `claude.exe`, so it renames it out of the way
+/// (`claude.exe.old.<ms>`, beside the original) and then puts the new ~200 MB executable in its
+/// place; its own failure wording includes "Auto-update failed: claude.exe in use (close other
+/// Claude Code sessions, including VS Code)" and "could not be restored (no preserved copy found)".
+/// Between the rename and the copy — and for good when the copy fails — `~\.local\bin\claude.exe`
+/// does not exist. The updater lives in the *interactive* CLI, so the trigger is a `claude` the user
+/// has open in a terminal or an editor while this app has one of its own running; what the user saw
+/// was every other launch here failing as "not installed" and the limits panel dropping Claude.
+///
+/// Every version it installed is still on disk as `<data>\claude\versions\<version>\claude.exe`,
+/// complete, so the newest one is what runs in the meantime. Claude only: no other CLI here
+/// replaces itself this way. `None` everywhere but Windows, where the launcher is a symlink that the
+/// updater swaps in one step and there is no gap to cover.
+#[cfg(target_os = "windows")]
+fn mid_update_fallback(binary: &str) -> Option<std::path::PathBuf> {
+    let stem = std::path::Path::new(binary).file_stem()?.to_string_lossy().to_ascii_lowercase();
+    if stem != "claude" {
+        return None;
+    }
+    newest_installed_version(&claude_versions_root()?, "claude.exe")
+}
+
+/// Where Claude Code's native installer keeps every version it has installed. `XDG_DATA_HOME` moves
+/// it, as it moves the rest of that installer's state; otherwise it is `~/.local/share` on every
+/// platform, Windows included (its launcher is `~\.local\bin\claude.exe` for the same reason).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn claude_versions_root() -> Option<std::path::PathBuf> {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("share")))?;
+    Some(data.join("claude").join("versions"))
+}
+
+/// The newest complete version under an installer's `versions` folder, as the file to execute.
+///
+/// A version is a folder holding `executable` (the Windows layout) or, elsewhere, a file that *is*
+/// the executable. Only names that are dot-separated numbers count: the updater's staging folder, a
+/// half-written download and a renamed `.old.<ms>` leftover all live near here and none of them is a
+/// version to run. Compared numerically, so `2.1.100` is newer than `2.1.99`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn newest_installed_version(root: &std::path::Path, executable: &str) -> Option<std::path::PathBuf> {
+    let mut newest: Option<(Vec<u64>, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(root).ok()?.flatten() {
+        let Some(version) = version_key(&entry.file_name().to_string_lossy()) else { continue };
+        let path = entry.path();
+        let file = if path.is_dir() {
+            path.join(executable)
+        } else if cfg!(target_os = "windows") {
+            // A bare file with no `.exe` is not something Windows will start.
+            continue;
+        } else {
+            path
+        };
+        if !file.is_file() {
+            continue;
+        }
+        if newest.as_ref().is_none_or(|(seen, _)| version > *seen) {
+            newest = Some((version, file));
+        }
+    }
+    newest.map(|(_, file)| file)
+}
+
+/// `2.1.266` → `[2, 1, 266]`, or `None` for a name that is not a version.
+fn version_key(name: &str) -> Option<Vec<u64>> {
+    let parts = name.split('.').map(|part| part.parse::<u64>().ok()).collect::<Option<Vec<u64>>>()?;
+    (parts.len() >= 2).then_some(parts)
+}
+
+/// Whether `executable` was just renamed away by an in-place self-update — a sibling named
+/// `<file>.old.<something>` is what Claude Code's updater leaves when it moves a running
+/// executable aside. Used only to phrase a failure: see [`launch_error`].
+fn replaced_mid_update(executable: &std::path::Path) -> bool {
+    let (Some(dir), Some(name)) = (executable.parent(), executable.file_name()) else {
+        return false;
+    };
+    let prefix = format!("{}.old.", name.to_string_lossy());
+    std::fs::read_dir(dir)
+        .map(|entries| entries.flatten().any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix)))
+        .unwrap_or(false)
+}
+
+/// What a launch that never started is reported as, and the one extra sentence Windows sometimes
+/// needs.
+///
+/// The OS's own words stay, because they are what a person searches for. What is added is the
+/// reading of them that the words alone get wrong: a locked executable, or one renamed away by an
+/// update, is *not* a missing CLI — [`classify_failure`] used to file both as
+/// [`AiFailureKind::CliMissing`], so a busy `claude.exe` showed an "install Claude Code" card and
+/// parked chains as if nothing were installed. [`LAUNCH_BUSY_HINT`] is what both sides match on.
+fn launch_error(binary: &str, program: &str, error: &std::io::Error) -> String {
+    let mut message = format!("failed to launch '{binary}': {error}");
+    if cfg!(target_os = "windows") {
+        let resolved = std::path::Path::new(program).is_absolute();
+        let beside = if resolved {
+            std::path::PathBuf::from(program)
+        } else {
+            match dirs::home_dir() {
+                Some(home) => home.join(".local").join("bin").join(format!("{binary}.exe")),
+                None => std::path::PathBuf::new(),
+            }
+        };
+        let locked = matches!(error.raw_os_error(), Some(5) | Some(32) | Some(33));
+        if locked || replaced_mid_update(&beside) {
+            message.push_str(LAUNCH_BUSY_HINT);
+        }
+    }
+    message
+}
+
+/// Appended to a launch failure when the executable is momentarily unavailable rather than absent.
+/// Matched by [`classify_failure`] ([`AiFailureKind::CliBusy`]) and by the frontend's
+/// `parseSetupProblem`, so its wording is load-bearing: change it in all three places or none.
+pub const LAUNCH_BUSY_HINT: &str = " — the executable is locked or being replaced (usually a \
+     self-update in progress, sometimes an antivirus scan); try again in a few seconds";
+
+/// The pauses between attempts to start a binary that is momentarily locked or being replaced —
+/// about nine seconds in all, which covers the copy of a ~200 MB executable and the antivirus scan
+/// that follows it without making a genuinely broken install wait long to be reported.
+const LAUNCH_RETRY_MS: [u64; 5] = [400, 800, 1_500, 2_500, 4_000];
+
+/// Whether an OS error from starting a process is worth another attempt in a moment.
+///
+/// Windows codes, and meaningful only there: a sharing or lock violation (32, 33) is someone
+/// holding the file open to write it — a copy in progress, an antivirus scan — and access denied (5)
+/// is what a file part-way through being replaced can answer. A missing file (2, 3) counts only when
+/// `resolved`, i.e. the path was found a moment ago: a bare name that never resolved is a CLI that is
+/// not installed, and waiting would only delay saying so.
+fn transient_launch_code(code: Option<i32>, resolved: bool) -> bool {
+    match code {
+        Some(5) | Some(32) | Some(33) => true,
+        Some(2) | Some(3) => resolved,
+        _ => false,
+    }
+}
+
+/// Starts `cmd`, giving a Windows binary that is being swapped out under us a few seconds to come
+/// back before calling it a failure. See [`LAUNCH_RETRY_MS`] and [`mid_update_fallback`].
+///
+/// Stops waiting the moment the run is cancelled or the app starts quitting, and reports that as
+/// the cancellation it is.
+async fn spawn_patiently(
+    cmd: &mut Command,
+    binary: &str,
+    program: &str,
+    cancel: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<tokio::process::Child, String> {
+    let resolved = std::path::Path::new(program).is_absolute();
+    let mut waits = LAUNCH_RETRY_MS.iter();
+    loop {
+        let error = match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) => error,
+        };
+        let retry = cfg!(target_os = "windows") && transient_launch_code(error.raw_os_error(), resolved);
+        match waits.next() {
+            Some(ms) if retry && !ai_runs::stopping() => {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(*ms)) => {}
+                    _ = ai_runs::cancelled(cancel) => return Err(ai_runs::CANCELLED_MARKER.to_string()),
+                }
+            }
+            _ => return Err(launch_error(binary, program, &error)),
+        }
+    }
+}
+
+/// [`spawn_patiently`] for the auxiliary calls, which collect a whole output and have no run to be
+/// cancelled with.
+pub(crate) async fn output_patiently(
+    cmd: &mut Command,
+    binary: &str,
+    program: &str,
+) -> Result<std::process::Output, String> {
+    let mut none = None;
+    let child = spawn_patiently(cmd, binary, program, &mut none).await?;
+    child.wait_with_output().await.map_err(|e| format!("failed to read '{binary}': {e}"))
 }
 
 /// Locates `binary` the same way [`run`] will: an explicit path is checked as-is, a bare name is
@@ -1702,7 +1980,15 @@ fn resolve_binary(binary: &str, dirs: &[std::path::PathBuf]) -> String {
 pub(crate) fn find_on_path(binary: &str) -> Option<std::path::PathBuf> {
     let path = std::path::Path::new(binary);
     if path.is_absolute() || binary.contains('/') || binary.contains('\\') {
-        return path.is_file().then(|| path.to_path_buf());
+        if path.is_file() {
+            return Some(path.to_path_buf());
+        }
+        // A configured `…\claude.exe` that an update has just renamed away still has a version
+        // installed beside it to run. See `mid_update_fallback`.
+        #[cfg(target_os = "windows")]
+        return mid_update_fallback(binary);
+        #[cfg(not(target_os = "windows"))]
+        return None;
     }
     #[cfg(target_os = "windows")]
     let extensions: &[&str] = &["exe", "cmd", "bat", ""];
@@ -1716,6 +2002,13 @@ pub(crate) fn find_on_path(binary: &str) -> Option<std::path::PathBuf> {
                 return Some(candidate);
             }
         }
+    }
+    // Same fallback as a run's, so the Settings badge and the limits panel keep a Claude Code that
+    // is part-way through updating itself instead of reporting it uninstalled for the length of the
+    // copy — which is how "ver límites" lost Claude while another session updated it.
+    #[cfg(target_os = "windows")]
+    if let Some(installed) = mid_update_fallback(binary) {
+        return Some(installed);
     }
     None
 }
@@ -1950,7 +2243,10 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
 /// pipes `stdin_content` in, streams its output while it runs, and hands the result back to the
 /// engine to interpret. Cancellable at any point when the caller wrapped this in
 /// [`ai_runs::scoped`].
-/// Describes the skills sitting in `<cwd>/.claude/skills` for an engine that doesn't look there.
+/// Describes the skills sitting in `<cwd>/.claude/skills` that the engine will not find on its own
+/// — none for an engine whose `native` root is `.claude/skills`, and only the ones missing from its
+/// own root for one that reads another (Codex in a repository, where skills are still synced to
+/// `.claude/skills`).
 ///
 /// **Pointers, not bodies** — name, one-line description, path — because every engine the app can
 /// run is an agent with its own file tools and opens what it needs. A skill is a directory of
@@ -1960,7 +2256,10 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
 /// There used to be a second shape here that inlined the bodies, for the completion-API engine that
 /// had no file tools and for which a pointer named something it could never reach. That engine is
 /// gone (see `cline.rs`), and with it the only caller that ever asked for it.
-fn skills_note(cwd: &str) -> String {
+fn skills_note(cwd: &str, native: Option<&str>) -> String {
+    if native == Some(".claude/skills") {
+        return String::new();
+    }
     let root = std::path::Path::new(cwd).join(".claude").join("skills");
     let Ok(entries) = std::fs::read_dir(&root) else {
         return String::new();
@@ -1972,6 +2271,12 @@ fn skills_note(cwd: &str) -> String {
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
+        // Already where this engine looks: telling it again costs context on every turn.
+        if let Some(native) = native {
+            if std::path::Path::new(cwd).join(native).join(&name).join("SKILL.md").is_file() {
+                continue;
+            }
+        }
         let body = std::fs::read_to_string(entry.path().join("SKILL.md")).unwrap_or_default();
         found.push((name, body));
     }
@@ -1982,8 +2287,8 @@ fn skills_note(cwd: &str) -> String {
 
     let mut out = String::from(
         "=== SKILLS DISPONIBLES ===\n\
-         Instrucciones reutilizables ya presentes en este repositorio. Si alguna aplica a lo que \
-         se te pide, ábrela y síguela antes de improvisar.\n\n",
+         Instrucciones reutilizables disponibles en tu directorio de trabajo. Si alguna aplica a \
+         lo que se te pide, ábrela y síguela antes de improvisar.\n\n",
     );
     for (name, body) in found {
         out.push_str(&format!(".claude/skills/{name}/SKILL.md"));
@@ -1996,37 +2301,19 @@ fn skills_note(cwd: &str) -> String {
     out
 }
 
-/// The `description:` line of a SKILL.md front-matter block, if it has one.
-///
-/// Deliberately a scan for the key rather than a YAML parse: the front matter is written by hand,
-/// this runs on every invocation, and a skill whose header is malformed should lose its one-line
-/// summary, not its listing.
+/// The `description:` of a SKILL.md, collapsed to one line — through [`crate::skill_meta`], which
+/// reads the folded `description: >` blocks a line scan used to return as the single character `>`.
+/// A skill whose header is malformed loses its one-line summary, never its listing.
 fn skill_description(text: &str) -> Option<String> {
-    let mut lines = text.lines();
-    if lines.next()?.trim() != "---" {
-        return None;
-    }
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed == "---" {
-            return None;
-        }
-        if let Some(value) = trimmed.strip_prefix("description:") {
-            let value = value.trim().trim_matches('"').trim_matches('\'').trim();
-            return (!value.is_empty()).then(|| value.to_string());
-        }
-    }
-    None
+    crate::skill_meta::parse(text).description
 }
 
 async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> Result<AiRun, String> {
     // Derived here, from the directory rather than from what a caller believes it synced: this is
     // the one place every engine passes through, so a skill added to the note is one that is
     // provably on disk, and no flow can forget to mention them.
-    if !engine.reads_claude_skills() {
-        if let Some(cwd) = inv.cwd {
-            inv.skills_note = skills_note(cwd);
-        }
+    if let Some(cwd) = inv.cwd {
+        inv.skills_note = skills_note(cwd, engine.native_skills_dir());
     }
 
     let ctx = ai_runs::current();
@@ -2112,9 +2399,18 @@ async fn spawn_once(
     // `ai_runs::kill_tree`, which is the other half.
     crate::proc::own_process_group(&mut cmd);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to launch '{binary}': {e}"))?;
+    // A Claude Code run must never start the updater that swaps `claude.exe` out from under the
+    // other runs. By engine as well as by file name, so a binary configured under another name is
+    // covered too. See `keep_claude_from_updating`.
+    if engine.id() == "claude" {
+        cmd.env("DISABLE_AUTOUPDATER", "1");
+    } else {
+        keep_claude_from_updating(&mut cmd, &program);
+    }
+
+    // Patiently, because on Windows the executable can be mid-replacement for a few seconds while
+    // another Claude Code session updates itself — see `spawn_patiently`.
+    let mut child = spawn_patiently(&mut cmd, binary, &program, cancel).await?;
     // On the quit path's list from its first instant to its last. Quitting holds no `Child` of ours
     // and runs no destructor, so this list is the only way it can find this process — and the
     // process group it leads — to stop it. See `ai_runs::stop_all`.
@@ -2236,6 +2532,13 @@ async fn spawn_once(
         &stdout_text,
         &stderr_text,
     ));
+    // What the install reported about itself — its skills, plugins and servers — for the chat's
+    // `/` menu. Only from a chat turn that ran with the user's full setup: a read-only one loaded no
+    // servers, and a commit message or a review says nothing a menu needs.
+    if engine.id() == "claude" && inv.task == task::CHAT && !inv.read_only {
+        let key = engine.account().map(|env| env.key()).unwrap_or_else(|| "claude".to_string());
+        crate::claude::record_install_from_run(&key, inv.cwd, &stdout_text);
+    }
     // Filed here because this is the one place every subprocess engine passes through, so nothing
     // that spends tokens can forget to say so — an answer through its own report, a failure
     // through what the CLI said it spent before failing.
@@ -2320,13 +2623,13 @@ async fn capture_as(
     args: &[String],
     account: Option<&crate::ai_accounts::AccountEnv>,
 ) -> Result<std::process::Output, String> {
-    let mut cmd = aux_command(binary);
+    let (mut cmd, program) = aux_command_resolved(binary);
     if let Some(account) = account {
         account.apply(&mut cmd);
     }
     cmd.args(args);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    cmd.output().await.map_err(|e| format!("failed to launch '{binary}': {e}"))
+    output_patiently(&mut cmd, binary, &program).await
 }
 
 /// Builds a command for a read-only auxiliary CLI call, prepared exactly as a real run prepares one.
@@ -2339,11 +2642,37 @@ async fn capture_as(
 /// `pub(crate)` for [`crate::ai_quota`], which runs a CLI of its own to read a plan limit and must
 /// do it the same way — it is the same binary, started for a smaller reason.
 pub(crate) fn aux_command(binary: &str) -> tokio::process::Command {
+    aux_command_resolved(binary).0
+}
+
+/// [`aux_command`], plus the program it resolved to — what [`output_patiently`] needs to tell a
+/// binary that vanished a moment ago from one that was never there.
+pub(crate) fn aux_command_resolved(binary: &str) -> (tokio::process::Command, String) {
     let dirs = search_dirs();
     let program = resolve_binary(binary, &dirs);
     let mut cmd = crate::proc::command(&program);
     apply_path(&mut cmd, &dirs);
-    cmd
+    keep_claude_from_updating(&mut cmd, &program);
+    (cmd, program)
+}
+
+/// Keeps a Claude Code process this app starts from updating itself.
+///
+/// The updater replaces the executable in place, and on Windows that leaves a window in which
+/// `claude.exe` does not exist (see [`mid_update_fallback`]) — so a process started to write a
+/// commit message must never be the one that opens it under another run. The verified updater lives
+/// in the interactive CLI and headless runs are not expected to start it; this is the guarantee that
+/// they never will, whatever a later version does. `DISABLE_AUTOUPDATER` is the switch the 2.1.266
+/// binary reads (beside `DISABLE_UPDATES`). The user's own sessions — a terminal, an editor — are
+/// not touched and keep updating as they always have.
+pub(crate) fn keep_claude_from_updating(cmd: &mut tokio::process::Command, program: &str) {
+    let stem = std::path::Path::new(program)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    if stem == "claude" {
+        cmd.env("DISABLE_AUTOUPDATER", "1");
+    }
 }
 
 /// Lists the models the engine's CLI reports as available (one id per line). Returns an empty list
@@ -5435,6 +5764,10 @@ pub struct ChatTurn<'a> {
     /// The turn must write nothing — see [`AiInvocation::read_only`]. Never set together with
     /// `auto_approve_edits`; if both are, read-only wins.
     pub read_only: bool,
+    /// The user's MCP servers this turn keeps out — see [`AiInvocation::mcp_block`].
+    pub mcp_block: Vec<String>,
+    /// The app's MCP servers this turn runs with — see [`AiInvocation::app_mcp`].
+    pub app_mcp: Vec<crate::mcp_registry::LiveServer>,
 }
 
 /// Runs one [`ChatTurn`].
@@ -5486,6 +5819,8 @@ pub async fn chat_turn(
     inv.effort = turn.effort;
     inv.attachments = turn.attachments;
     inv.task = task::CHAT;
+    inv.mcp_block = turn.mcp_block;
+    inv.app_mcp = turn.app_mcp;
     run(engine, binary, inv).await
 }
 
@@ -5515,6 +5850,8 @@ pub async fn chat_with_repo(
     cwd: &str,
     stream_deltas: Option<DeltaSink>,
     read_only: bool,
+    mcp_block: Vec<String>,
+    app_mcp: Vec<crate::mcp_registry::LiveServer>,
 ) -> Result<AiRun, String> {
     let read_only_tools = if read_only { engine.read_only_tools() } else { Vec::new() };
     chat_turn(
@@ -5535,6 +5872,8 @@ pub async fn chat_with_repo(
             effort: None,
             attachments: &[],
             read_only,
+            mcp_block,
+            app_mcp,
         },
     )
     .await
@@ -5670,6 +6009,106 @@ mod tests {
         assert_eq!(kind("REPO_BUSY::rate limit service"), AiFailureKind::Other);
         // A reset is only ever read off a quota.
         assert_eq!(classify_failure("Connection reset by peer").resets, None);
+    }
+
+    /// A `claude.exe` that another session is replacing is busy, not missing — the distinction that
+    /// decides between "try again in a moment" and an "install Claude Code" card plus a parked chain.
+    #[test]
+    fn a_locked_or_replaced_executable_is_busy_not_missing() {
+        let kind = |error: &str| classify_failure(error).kind;
+        let hinted = format!("failed to launch 'claude': Access is denied. (os error 5){LAUNCH_BUSY_HINT}");
+        assert_eq!(kind(&hinted), AiFailureKind::CliBusy);
+        assert_eq!(
+            kind("failed to launch 'claude': El proceso no tiene acceso al archivo porque está siendo utilizado por otro proceso. (os error 32)"),
+            AiFailureKind::CliBusy
+        );
+        assert_eq!(
+            kind("failed to launch 'claude': The process cannot access the file because it is being used by another process. (os error 32)"),
+            AiFailureKind::CliBusy
+        );
+        // And it does not park a chain: the step's own retries are the remedy.
+        assert_eq!(crate::db::queries::chain_pause_reason(&hinted), None);
+        // A plainly absent binary is still missing.
+        assert_eq!(kind("failed to launch 'claude': program not found"), AiFailureKind::CliMissing);
+    }
+
+    /// Only a Windows code that means "held open" or "being replaced" earns another attempt, and a
+    /// missing file only when the path was found a moment ago — never for a CLI that is simply not
+    /// installed, which must be reported without a nine-second wait.
+    #[test]
+    fn only_a_momentary_launch_failure_is_retried() {
+        assert!(transient_launch_code(Some(32), false), "sharing violation");
+        assert!(transient_launch_code(Some(33), true), "lock violation");
+        assert!(transient_launch_code(Some(5), true), "access denied mid-replacement");
+        assert!(transient_launch_code(Some(2), true), "renamed away after it was resolved");
+        assert!(!transient_launch_code(Some(2), false), "a bare name that never resolved");
+        assert!(!transient_launch_code(Some(193), true), "not a valid application");
+        assert!(!transient_launch_code(None, true));
+    }
+
+    /// The installer's `versions` folder holds complete versions beside staging folders and renamed
+    /// leftovers; only a real, complete version may be picked, and the newest by number.
+    #[test]
+    fn the_newest_complete_installed_version_is_the_fallback() {
+        let root = std::env::temp_dir().join(format!("cf-claude-versions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        // The Windows layout: a folder per version holding the executable.
+        for version in ["2.1.99", "2.1.100", "2.0.300"] {
+            std::fs::create_dir_all(root.join(version)).unwrap();
+            std::fs::write(root.join(version).join("claude.exe"), b"MZ").unwrap();
+        }
+        // Newer by number, but incomplete — the download never finished.
+        std::fs::create_dir_all(root.join("2.1.101")).unwrap();
+        // Not versions at all.
+        std::fs::create_dir_all(root.join("staging")).unwrap();
+        std::fs::write(root.join("claude.exe.old.1727600000000"), b"MZ").unwrap();
+
+        let picked = newest_installed_version(&root, "claude.exe").unwrap();
+        assert_eq!(picked, root.join("2.1.100").join("claude.exe"));
+        assert!(newest_installed_version(&root.join("nope"), "claude.exe").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(version_key("2.1.266"), Some(vec![2, 1, 266]));
+        assert_eq!(version_key("staging"), None);
+        assert_eq!(version_key("2"), None, "one number is not a version name here");
+        assert_eq!(version_key("2.1.266.old"), None);
+    }
+
+    /// The note lists only what the engine would not find by itself: nothing for one that reads
+    /// `.claude/skills`, and for one that reads `.agents/skills` only what is missing there.
+    #[test]
+    fn the_skills_note_skips_what_the_engine_reads_natively() {
+        let cwd = std::env::temp_dir().join(format!("cf-note-{}", uuid::Uuid::new_v4()));
+        for (root, name) in [(".claude/skills", "pdf"), (".claude/skills", "xlsx"), (".agents/skills", "xlsx")] {
+            std::fs::create_dir_all(cwd.join(root).join(name)).unwrap();
+            std::fs::write(
+                cwd.join(root).join(name).join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: >\n  Works with {name}\n  files.\n---\n"),
+            )
+            .unwrap();
+        }
+        let dir = cwd.to_string_lossy().to_string();
+        assert_eq!(skills_note(&dir, Some(".claude/skills")), "", "Claude and Grok read them already");
+        let codex = skills_note(&dir, Some(".agents/skills"));
+        assert!(codex.contains(".claude/skills/pdf/SKILL.md — Works with pdf files."), "{codex}");
+        assert!(!codex.contains("xlsx"), "already in Codex's own root: {codex}");
+        let agy = skills_note(&dir, None);
+        assert!(agy.contains("pdf") && agy.contains("xlsx"), "{agy}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// The mark a self-update leaves beside the executable it moved aside.
+    #[test]
+    fn an_executable_renamed_by_an_update_is_recognised() {
+        let dir = std::env::temp_dir().join(format!("cf-claude-bin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("claude.exe");
+        assert!(!replaced_mid_update(&exe));
+        std::fs::write(dir.join("claude.exe.old.1727600000000"), b"MZ").unwrap();
+        assert!(replaced_mid_update(&exe));
+        // Another CLI's leftovers say nothing about this one.
+        assert!(!replaced_mid_update(&dir.join("codex.exe")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A long log that merely mentions a sign-in — or a billing module — is not that problem. The
@@ -6496,6 +6935,31 @@ mod tests {
         assert_eq!(context_window_for("gpt-4.1-mini"), Some(1_000_000));
         assert_eq!(context_window_for("gpt-4o-mini"), Some(128_000));
 
+        // Claude split at 4.6: everything from there on is 1M, the 4.5 generation and Haiku stay at
+        // 200k — the boundary a single `claude-` row used to hide, compacting 1M conversations at 160k.
+        for id in [
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8-20260101",
+            "claude-opus-5",
+            "claude-opus-5-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-5",
+            "claude-sonnet-5-5",
+            "claude-fable-5",
+            "claude-fable-5-1",
+            "anthropic/claude-sonnet-4-6",
+        ] {
+            assert_eq!(context_window_for(id), Some(1_000_000), "{id}");
+        }
+        for id in ["claude-opus-4-5-20251101", "claude-sonnet-4-5", "claude-haiku-4-5-20251001", "claude-opus-4-1"] {
+            assert_eq!(context_window_for(id), Some(200_000), "{id}");
+        }
+        // `[1m]` decides by itself, and a bracketed tail never hides the family underneath.
+        assert_eq!(context_window_for("opus[1m]"), Some(1_000_000));
+        assert_eq!(context_window_for("claude-sonnet-4-5[1m]"), Some(1_000_000));
+        assert_eq!(context_window_for("claude-haiku-4-5[beta]"), Some(200_000));
+
         // And silence everywhere else. The local ones are the point: ollama serves a nominally
         // 128k model at whatever `num_ctx` says, so the name is not evidence.
         for unknown in [
@@ -6509,6 +6973,21 @@ mod tests {
         ] {
             assert_eq!(context_window_for(unknown), None, "{unknown} must not get a number");
         }
+    }
+
+    /// A window the CLI reported beats the table — the table is only a guess by family.
+    #[test]
+    fn a_reported_window_overrides_the_family_table() {
+        // An id no real run will ever report, so this cannot disturb another test's answer.
+        let model = "claude-opus-4-6-cf-window-test";
+        assert_eq!(context_window_for(model), Some(1_000_000));
+        record_context_window(model, 200_000);
+        assert_eq!(context_window_for(model), Some(200_000));
+        assert_eq!(context_window_for("CLAUDE-OPUS-4-6-CF-WINDOW-TEST"), Some(200_000), "ids compare case-blind");
+        // Nonsense is not filed.
+        record_context_window(model, 0);
+        record_context_window("", 5);
+        assert_eq!(context_window_for(model), Some(200_000));
     }
 
     /// Anything outside the four levels is dropped rather than forwarded.

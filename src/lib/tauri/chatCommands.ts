@@ -136,7 +136,80 @@ export interface ChatMessageRow {
 export interface ProviderCommand {
   name: string;
   description: string;
-  source: "cli-reported" | "documented" | "app";
+  /** Set for the commands the app describes itself (Claude's verified built-ins): a translation key,
+   *  so the row reads in the reader's language. `null` when the command's own file described it. */
+  description_key: string | null;
+  /** `builtin` is verified against the CLI; `user`/`project`/`plugin` is a custom command on disk;
+   *  `documented` was read from the CLI's docs; `cli-reported` came from its handshake. */
+  source: "builtin" | "user" | "project" | "plugin" | "cli-reported" | "documented" | "app";
+}
+
+/** Mirrors `provider_skills::ProviderSkill` — one skill a person can pick in the composer. */
+export interface ProviderSkill {
+  /** As it is invoked: `pdf`, `vercel:deploy`. */
+  name: string;
+  description: string;
+  source: "app" | "user" | "project" | "plugin" | "bundled";
+  plugin: string | null;
+  path: string | null;
+  /** `false` when the skill forbids the model from starting it — only a typed `/name` runs it. */
+  model_invocable: boolean;
+}
+
+/** Mirrors `chat_mcp::McpServerView` — one of the user's own MCP servers, with its state here. */
+export interface McpServerView {
+  /** What its switch is stored under: the name for a CLI's own server, `app:<name>` for one declared
+   *  in CodeFlow. */
+  key: string;
+  name: string;
+  /** `connected` | `pending` | `needs-auth` | `failed` (Claude), `enabled` | `disabled` (Codex),
+   *  `untrusted` (a declared server waiting for approval), or `""` when nothing has said. */
+  status: string;
+  source: "connector" | "user" | "app";
+  /** Whether turns here run with it. */
+  enabled: boolean;
+  /** Whether the app can switch it for this engine (Claude and Codex; not Grok). */
+  togglable: boolean;
+}
+
+/** The user's own MCP servers for `provider`, each with whether turns here run with it. A free chat
+ *  names `conversationId`; the panel's repository chat names `projectId`. */
+export const chatMcpServers = (
+  provider: string,
+  scope: {
+    accountId?: string | null;
+    workspaceId?: string | null;
+    projectId?: string | null;
+    conversationId?: string | null;
+  },
+) =>
+  invoke<McpServerView[]>("chat_mcp_servers", {
+    provider,
+    accountId: scope.accountId ?? null,
+    workspaceId: scope.workspaceId ?? null,
+    projectId: scope.projectId ?? null,
+    conversationId: scope.conversationId ?? null,
+  });
+
+/** Switches one server on or off for a conversation or a repository; `null` puts it back to its
+ *  default. */
+export const chatMcpSet = (
+  scope: { projectId?: string | null; conversationId?: string | null },
+  server: string,
+  enabled: boolean | null,
+) =>
+  invoke<void>("chat_mcp_set", {
+    conversationId: scope.conversationId ?? null,
+    projectId: scope.projectId ?? null,
+    server,
+    enabled,
+  });
+
+/** A skill picked for one turn, as `chat_send` / `send_chat_message` receive it. */
+export interface SkillPick {
+  name: string;
+  source: ProviderSkill["source"];
+  path: string | null;
 }
 
 /** One hit from the sidebar's search: enough to render a row and open it, and no transcript. */
@@ -356,6 +429,8 @@ export const chatSend = (
   /** Attachment ids staged for this turn — file names under the conversation's own folder, never
    *  paths, so the frontend cannot name a file outside it. */
   attachments?: string[],
+  /** A skill picked in the composer: told to the engine for this turn, never stored as the question. */
+  skill?: SkillPick | null,
 ) =>
   invoke<ChatReply>("chat_send", {
     conversationId,
@@ -365,6 +440,7 @@ export const chatSend = (
     provider: provider ?? null,
     model: model ?? null,
     stream: stream ?? null,
+    skill: skill ?? null,
   });
 
 // ---------- provider surface ----------
@@ -378,8 +454,38 @@ export const chatSend = (
  * is the honest answer — the menu then offers app-level commands and a way into the real CLI
  * instead of inventing a surface that would fail on send.
  */
-export const chatProviderCommands = (provider: string) =>
-  invoke<ProviderCommand[]>("chat_provider_commands", { provider });
+export const chatProviderCommands = (
+  provider: string,
+  scope: { accountId?: string | null; workspaceId?: string | null; projectId?: string | null } = {},
+) =>
+  invoke<ProviderCommand[]>("chat_provider_commands", {
+    provider,
+    accountId: scope.accountId ?? null,
+    workspaceId: scope.workspaceId ?? null,
+    projectId: scope.projectId ?? null,
+  });
+
+/**
+ * The skills a person can pick for a turn: the workspace's own, then the ones the provider's CLI
+ * brings (Claude Code's, Codex's, Grok's, agy's). `projectId` adds the repository's own skills;
+ * `conversationId` is a free chat's folder, whose copies of the workspace's skills are the app's.
+ */
+export const chatProviderSkills = (
+  provider: string,
+  scope: {
+    accountId?: string | null;
+    workspaceId?: string | null;
+    projectId?: string | null;
+    conversationId?: string | null;
+  } = {},
+) =>
+  invoke<ProviderSkill[]>("chat_provider_skills", {
+    provider,
+    accountId: scope.accountId ?? null,
+    workspaceId: scope.workspaceId ?? null,
+    projectId: scope.projectId ?? null,
+    conversationId: scope.conversationId ?? null,
+  });
 
 // ---------- groups ----------
 

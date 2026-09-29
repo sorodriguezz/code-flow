@@ -33,6 +33,7 @@ pub mod secrets_cmd;
 pub mod sandbox_cmd;
 pub mod services_cmd;
 pub mod settings;
+pub mod mcp_cmd;
 pub mod skills_cmd;
 pub mod ssh_cmd;
 pub mod stories_cmd;

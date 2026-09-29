@@ -60,6 +60,7 @@ pub const TABLES: &[&str] = &[
     "workspace_skills",
     "workspace_agents",
     "workspace_mcps",
+    "mcp_servers",
     "workspace_chain_templates",
     "workspace_chain_template_steps",
     "agent_projects",
@@ -179,13 +180,18 @@ pub const TABLES: &[&str] = &[
 /// "get my settings back". Re-pairing is a six-digit code and thirty seconds; a restored token is
 /// a door nobody remembers opening.
 ///
+/// `mcp_trust` is the third, for the same kind of reason: it is the set of MCP launch specs the
+/// user approved *on this machine*, and a program is exactly the thing a restore must not start on
+/// its own authority. A restore also empties it (see [`apply`]), so a declared server that starts a
+/// program waits to be approved again.
+///
 /// Read only by [`covers_every_table`], and that is the point rather than an oversight: nothing at
 /// runtime consults this, because excluding a table is *not* an action the exporter takes — it is
 /// [`TABLES`] not naming it. This list is the written-down reason, and the test is what makes
 /// writing it down compulsory.
 #[allow(dead_code)]
 pub const NEVER_BACKED_UP: &[&str] =
-    &["workspace_terminals", "workspace_bench_tabs", "remote_devices"];
+    &["workspace_terminals", "workspace_bench_tabs", "remote_devices", "mcp_trust"];
 
 // ---------------------------------------------------------------------------
 // What the user chose to include
@@ -218,6 +224,7 @@ pub const CORE_TABLES: &[&str] = &[
     "workspace_skills",
     "workspace_agents",
     "workspace_mcps",
+    "mcp_servers",
     "workspace_chain_templates",
     "workspace_chain_template_steps",
     "agent_projects",
@@ -779,6 +786,9 @@ pub fn apply(
         // After the writes, so this machine's own destination wins even against a file that somehow
         // carries one.
         merge_backup_settings(&tx, local.as_deref())?;
+        // Nothing restored is trusted to run: every declared MCP server that starts a program waits
+        // for the user's approval again. See `crate::mcp_registry`.
+        tx.execute("DELETE FROM mcp_trust", [])?;
         tx.commit()
     })();
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;

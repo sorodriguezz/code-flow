@@ -54,6 +54,12 @@ const POINTER: &str =
 pub struct CodexEngine;
 
 impl AiEngine for CodexEngine {
+    /// `<cwd>/.agents/skills` — and not `.claude/skills`: `codex debug prompt-input`, run in a folder
+    /// holding both, lists a project skill root for the first and nothing for the second.
+    fn native_skills_dir(&self) -> Option<&'static str> {
+        Some(".agents/skills")
+    }
+
     fn id(&self) -> &'static str {
         "codex"
     }
@@ -121,6 +127,27 @@ impl AiEngine for CodexEngine {
         // forever. Set through `-c` rather than `--ask-for-approval`, which `codex exec` dropped
         // (it errors with "unexpected argument" on 0.145+); the config key works on every version.
         cmd.arg("-c").arg("approval_policy=\"never\"");
+        // The user's own servers this conversation switched off, for this run only — nothing is
+        // written to their config. A name that is not a bare TOML key would need quoting inside a
+        // dotted `-c` path, which the flag does not document; such a server is left as it is.
+        // The app's own servers, for this run only — prefixed `cf_`, their secrets in this
+        // process's environment rather than on the command line. See `mcp_registry::codex_args`.
+        if !inv.read_only && !inv.app_mcp.is_empty() {
+            let (args, vars) = crate::mcp_registry::codex_args(&inv.app_mcp);
+            cmd.args(args);
+            for (name, value) in vars {
+                cmd.env(name, value);
+            }
+        }
+        // In every mode, read-only included: keeping a server out is always safe, and a read-only
+        // turn is exactly when the caller lists every server — the sandbox confines the model's own
+        // tools, not the programs its config starts (`-c mcp_servers={}` merges rather than empties,
+        // so each one has to be switched off by name).
+        for server in &inv.mcp_block {
+            if !server.is_empty() && server.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                cmd.arg("-c").arg(format!("mcp_servers.{server}.enabled=false"));
+            }
+        }
         // Events as JSONL on stdout — the only place `codex exec` states what a turn spent. Without
         // it the run is unaccountable and Codex is simply missing from the usage screen, which is
         // what it was until this flag went in. [`interpret_output`] falls back to reading stdout as
@@ -485,6 +512,23 @@ fn parse_usage(reported: &serde_json::Value) -> Option<AiUsage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A text-only turn switches Codex's own servers off by name — its sandbox does not reach the
+    /// programs its config starts — and a name that is not a bare TOML key is left alone.
+    #[test]
+    fn a_read_only_turn_switches_the_users_servers_off() {
+        let mut inv = AiInvocation::new("hola", "");
+        inv.read_only = true;
+        inv.mcp_block = vec!["node_repl".into(), "bad name".into()];
+        let args: Vec<String> = CodexEngine
+            .build_command("codex", &inv)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "mcp_servers.node_repl.enabled=false"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("bad name")), "{args:?}");
+    }
 
     /// Captured verbatim from `codex exec --json` on 0.147.0.
     const EVENTS: &str = concat!(

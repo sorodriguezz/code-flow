@@ -133,6 +133,11 @@ function SetupRemedy({
     return <p className={`mt-2 ${subSize} text-[var(--cf-text-muted)]`}>{t("ai.setupUntrustedDir")}</p>;
   }
 
+  if (setup.kind === "binary-busy") {
+    const name = setup.binary ?? option?.defaultBinary ?? provider ?? "";
+    return <p className={`mt-2 ${subSize} text-[var(--cf-text-muted)]`}>{t("ai.setupBinaryBusy", { binary: name })}</p>;
+  }
+
   if (setup.kind === "binary-missing") {
     const name = setup.binary ?? option?.defaultBinary ?? provider ?? "";
     return (

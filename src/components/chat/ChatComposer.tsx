@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowUp, Paperclip, Square } from "lucide-react";
+import { ArrowUp, Paperclip, Puzzle, Square, X } from "lucide-react";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { EffortPicker } from "./EffortPicker";
 import { AttachmentBar } from "./AttachmentBar";
 import { ChatCapabilities } from "./ChatCapabilities";
 import { ContextMeter, type ContextReading } from "./ContextMeter";
 import { CavemanChip } from "./CavemanChip";
-import type { ChatAttachment } from "../../lib/tauri/chatCommands";
-import { CommandMenu, appCommandFor, type ChatAppCommand } from "./CommandMenu";
+import { McpMenu } from "./McpMenu";
+import type { ChatAttachment, SkillPick } from "../../lib/tauri/chatCommands";
+import { CommandMenu, appCommandFor, type ChatAppCommand, type CommandSurface } from "./CommandMenu";
 import { COLUMN_GUTTER, READING_COLUMN } from "./chatChrome";
 import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
 import { useT } from "../../state/languageStore";
@@ -62,6 +63,8 @@ export function ChatComposer({
   caveman,
   disabled,
   disabledReason,
+  surface = "chat",
+  skillScope,
 }: {
   provider: string;
   /** The model this conversation runs on. Its own prop rather than read from the workspace routing:
@@ -98,7 +101,8 @@ export function ChatComposer({
   turns: number;
   draft: string;
   onDraftChange: (value: string) => void;
-  onSend: (message: string) => void;
+  /** `skill` is the one picked from the `/` menu for this message, if any. */
+  onSend: (message: string, skill?: SkillPick | null) => void;
   onStop: () => void;
   /** Runs one of the app's own commands. `args` is whatever followed the name, empty for the
    *  commands that take none — see `appCommandFor`. */
@@ -112,10 +116,20 @@ export function ChatComposer({
   caveman?: { level: string; levels: string[]; onPick: (level: string) => void };
   disabled?: boolean;
   disabledReason?: string;
+  /** Which composer this is — decides which app commands the `/` menu offers. */
+  surface?: CommandSurface;
+  /** Whose skills the `/` menu offers. Absent where a surface takes no skill (the ask box). */
+  skillScope?: { accountId?: string | null; workspaceId?: string | null; conversationId?: string | null };
 }) {
   const t = useT();
   const boxRef = useRef<HTMLTextAreaElement>(null);
   const [imageNotice, setImageNotice] = useState<string | null>(null);
+  // The skill staged for the next message. Dropped when the engine changes: a skill is one CLI's,
+  // and carrying it across would tell the next engine to use something it may not have.
+  const [skill, setSkill] = useState<SkillPick | null>(null);
+  useEffect(() => {
+    setSkill(null);
+  }, [provider]);
   const caps = providerCapabilities(provider);
 
   // Autosize. Height is reset to `auto` first because `scrollHeight` of an element already sized to
@@ -163,15 +177,16 @@ export function ChatComposer({
     // sent those seven characters to the model — the menu could only be used by clicking a row,
     // which is the one way nobody uses a slash command. See `appCommandFor` for what counts as one;
     // anything that does not is an ordinary message, including a line that merely starts with `/`.
-    const command = appCommandFor(trimmed);
+    const command = appCommandFor(trimmed, surface);
     if (command) {
       onDraftChange("");
       onRunAppCommand(command.id, command.args);
       return;
     }
-    onSend(trimmed);
+    onSend(trimmed, skill);
     onDraftChange("");
-  }, [draft, sending, disabled, onSend, onDraftChange, onRunAppCommand]);
+    setSkill(null);
+  }, [draft, sending, disabled, onSend, onDraftChange, onRunAppCommand, surface, skill]);
 
   /** The `/` menu is open while the draft is a single token beginning with a slash. It closes the
    *  moment a space is typed, because by then the user is writing arguments, not choosing. */
@@ -239,6 +254,10 @@ export function ChatComposer({
           <CommandMenu
             query={slash ?? ""}
             provider={provider}
+            surface={surface}
+            // A conversation stamped with no account runs as the system one, which is not the same
+            // question as "automatic" — resolution could land on a default account instead.
+            scope={{ ...skillScope, accountId: account === null ? "system" : (account ?? skillScope?.accountId ?? null) }}
             onRunApp={(command) => {
               onDraftChange("");
               // No arguments from a click: the row was picked before anything could be typed after
@@ -249,6 +268,21 @@ export function ChatComposer({
               onDraftChange(`${name} `);
               boxRef.current?.focus();
             }}
+            onPickSkill={
+              skillScope
+                ? (picked) => {
+                    // A Claude skill that forbids the model from starting it runs only when a
+                    // person types it, so it goes into the message as its own slash command.
+                    if (!picked.model_invocable && provider === "claude") {
+                      onDraftChange(`/${picked.name} `);
+                    } else {
+                      setSkill({ name: picked.name, source: picked.source, path: picked.path });
+                      onDraftChange("");
+                    }
+                    boxRef.current?.focus();
+                  }
+                : undefined
+            }
             onOpenTerminal={onOpenTerminal}
           />
         )}
@@ -277,6 +311,7 @@ export function ChatComposer({
             canSeeImages={caps.acceptsImages}
             onRemove={(id) => onRemoveAttachment?.(id)}
           />
+          {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
           <textarea
             ref={boxRef}
             value={draft}
@@ -327,6 +362,19 @@ export function ChatComposer({
               effortSupported={effortSupported}
               canWriteFiles={canWriteFiles}
             />
+            {/* The user's own MCP servers, switched per conversation. Only where a conversation can
+                be named — the ask box has none — and said to be unavailable, not hidden, on a turn
+                that may not write: those load no server at all. */}
+            {skillScope && (
+              <McpMenu
+                provider={provider}
+                scope={{
+                  ...skillScope,
+                  accountId: account === null ? "system" : (account ?? skillScope.accountId ?? null),
+                }}
+                unavailableReason={canWriteFiles ? undefined : t("chat.mcpReadOnly")}
+              />
+            )}
 
             {/* Last of the four, and deliberately the one nearest the send button: it is the only
                 control here that describes what the *next* press will cost rather than how it will
@@ -397,6 +445,32 @@ export function ChatComposer({
             `ConversationSidebar`), which is where two of them are visible side by side and where
             the warning can actually be acted on. */}
       </div>
+    </div>
+  );
+}
+
+/** The skill staged for the next message, above the box like an attachment: it is an ingredient of
+ *  what is about to be sent, and it can be taken back until then. */
+export function SkillChip({ name, onRemove }: { name: string; onRemove: () => void }) {
+  const t = useT();
+  return (
+    <div className="flex px-1">
+      <span
+        title={t("chat.skillPicked")}
+        className="flex max-w-full items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-press)] py-0.5 pl-1.5 pr-0.5 text-[11.5px] text-[var(--cf-text)]"
+      >
+        <Puzzle size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+        <span className="min-w-0 truncate font-mono">{name}</span>
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={t("chat.skillRemove")}
+          title={t("chat.skillRemove")}
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        >
+          <X size={10} />
+        </button>
+      </span>
     </div>
   );
 }

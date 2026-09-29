@@ -49,6 +49,7 @@ import {
   type ChatMessageRow,
   type ChatOutput,
   type ChatSearchHit,
+  type SkillPick,
 } from "../lib/tauri/chatCommands";
 import { isRepoBusy, notifyStateChange, REPO_BUSY_MARKER } from "../lib/tauri/commands";
 import { onAiChatDelta, onAiDone, onStateInvalidate, type AiChatDeltaEvent } from "../lib/tauri/events";
@@ -119,6 +120,8 @@ export interface ConversationMessage extends Omit<ChatMessageRow, "trace"> {
   /** Files this turn wrote, by path relative to the conversation's working directory. Parsed from
    *  the row; see `pathsOf`. */
   outputs?: string[];
+  /** On a question sent in this session: the skill it was sent with (see `ChatBubbleMessage.skill`). */
+  skill?: string;
 }
 
 /**
@@ -592,7 +595,12 @@ interface ConversationState {
    *  lost nor misfiled if the user has moved on. Several conversations may be in flight at once;
    *  only a second turn *within one conversation* is refused, since its engine session can only be
    *  resumed once at a time. */
-  send: (conversationId: string, message: string, over?: { provider?: string; model?: string }) => void;
+  /** `over.skill` is a skill picked in the composer: told to the engine for this turn only. */
+  send: (
+    conversationId: string,
+    message: string,
+    over?: { provider?: string; model?: string; skill?: SkillPick | null },
+  ) => void;
   /**
    * Asks the question behind the answer at `turn` again, in the selected conversation.
    *
@@ -662,7 +670,9 @@ interface ConversationState {
    */
   windowByModel: Record<string, number | null>;
   /** Asks the backend about one model, once. Fire-and-forget, like {@link ensureEffortSupport}. */
-  ensureContextWindow: (model: string) => void;
+  /** Asks for this model's window once. `refresh` asks again even when it is known — after a turn,
+   *  when the CLI may have just reported the real number (see `ai::record_context_window`). */
+  ensureContextWindow: (model: string, refresh?: boolean) => void;
   /**
    * The reasoning level the *next* conversation will be created with.
    *
@@ -1288,6 +1298,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       createdAt: askedAt,
       isError: false,
       isCancelled: false,
+      skill: over?.skill?.name,
     };
 
     set((s) => ({
@@ -1338,7 +1349,16 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     if (staged.length > 0) {
       set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
     }
-    void chatSend(conversationId, trimmed, runId, over?.provider ?? null, over?.model ?? null, true, staged)
+    void chatSend(
+      conversationId,
+      trimmed,
+      runId,
+      over?.provider ?? null,
+      over?.model ?? null,
+      true,
+      staged,
+      over?.skill ?? null,
+    )
       .then((reply) => {
         const trace = snapshotTrace(runId);
         const messageId = reply.message_id;
@@ -1610,13 +1630,14 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
 
   windowByModel: {},
 
-  ensureContextWindow: (model) => {
+  ensureContextWindow: (model, refresh = false) => {
     const key = model.trim();
     // Same two guards as `ensureEffortSupport`, for the same reason: the map answers "already
     // known", `asking` answers "already in flight". The key is prefixed so it cannot collide with
-    // an effort key in the shared set.
+    // an effort key in the shared set. A refresh skips only the first: the known answer stays on
+    // screen until the new one replaces it, so the bar never blinks out.
     const flight = `window:${key}`;
-    if (key in get().windowByModel || asking.has(flight)) return;
+    if ((!refresh && key in get().windowByModel) || asking.has(flight)) return;
     asking.add(flight);
     void chatContextWindow(key)
       .then((tokens) => set((s) => ({ windowByModel: { ...s.windowByModel, [key]: tokens } })))

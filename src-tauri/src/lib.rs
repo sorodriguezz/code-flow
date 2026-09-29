@@ -14,6 +14,7 @@ mod backup;
 mod boot_guard;
 mod caveman;
 mod chain_memory;
+mod chat_mcp;
 mod git_exclude;
 mod ci;
 mod boards;
@@ -37,6 +38,7 @@ mod gitlab;
 mod jupyter;
 mod npm;
 mod localai;
+mod mcp_registry;
 mod lsp;
 mod migrate;
 mod native_dialog;
@@ -48,6 +50,7 @@ mod power;
 mod pr_link;
 mod prettier;
 mod proc;
+mod provider_skills;
 mod quit_guard;
 mod remote;
 mod sandbox;
@@ -70,6 +73,7 @@ mod shell_profiles;
 mod shutdown;
 /// AWS request signing, shared by the API client and the Remote workspace's S3 transport.
 mod sigv4;
+mod skill_meta;
 mod supabase;
 mod sysload;
 mod keyvault;
@@ -774,6 +778,15 @@ pub fn run() {
             commands::chat_cmd::chat_set_archived,
             commands::chat_cmd::chat_search_conversations,
             commands::chat_cmd::chat_provider_commands,
+            commands::chat_cmd::chat_provider_skills,
+            commands::chat_cmd::chat_mcp_servers,
+            commands::chat_cmd::chat_mcp_set,
+            commands::mcp_cmd::mcp_list,
+            commands::mcp_cmd::mcp_save,
+            commands::mcp_cmd::mcp_delete,
+            commands::mcp_cmd::mcp_approve,
+            commands::mcp_cmd::mcp_import_candidates,
+            commands::mcp_cmd::mcp_import,
             commands::chat_cmd::chat_branch_conversation,
             commands::chat_cmd::chat_compact,
             commands::chat_cmd::chat_context_window,

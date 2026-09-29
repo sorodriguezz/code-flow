@@ -130,6 +130,13 @@ impl AiEngine for GeminiEngine {
             }
         }
         brief.push_str(inv.prompt);
+        // The skills this CLI would not find by itself. It reads no stdin, so the default
+        // `stdin_payload` that carries the note for other engines never reaches it — without this
+        // line every skill synced for it was a folder nobody mentioned.
+        if !inv.skills_note.is_empty() {
+            brief.push_str("\n\n");
+            brief.push_str(inv.skills_note.trim_end());
+        }
         if !inv.stdin_content.trim().is_empty() {
             brief.push_str("\n\n----- INPUT -----\n\n");
             brief.push_str(inv.stdin_content);
@@ -537,6 +544,17 @@ mod tests {
         assert!(args.iter().any(|a| a == "--sandbox"), "{args:?}");
         let prompt = &args[args.iter().position(|a| a == "-p").unwrap() + 1];
         assert!(prompt.contains("Responde en texto."), "the brief itself, not a pointer: {prompt}");
+    }
+
+    /// agy reads no stdin either, so the skills note belongs in the brief it is handed.
+    #[test]
+    fn the_skills_note_rides_the_brief() {
+        let mut inv = AiInvocation::new("¿qué es esto?", "");
+        inv.skills_note = "=== SKILLS DISPONIBLES ===\n.claude/skills/pdf/SKILL.md — PDFs\n".to_string();
+        inv.read_only = true;
+        let args = args_of(&inv, "/usr/local/bin/agy");
+        let prompt = &args[args.iter().position(|a| a == "-p").unwrap() + 1];
+        assert!(prompt.contains(".claude/skills/pdf/SKILL.md"), "{prompt}");
     }
 
     /// Where the command line cannot carry it — a batch shim, or a brief past the limit — the file

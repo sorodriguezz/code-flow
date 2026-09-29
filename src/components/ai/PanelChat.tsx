@@ -1,5 +1,11 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Clock, Download, FilePen, Lock, Square, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, Lock, Square, UsersRound } from "lucide-react";
+import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
+import { SkillChip } from "../chat/ChatComposer";
+import { McpMenu } from "../chat/McpMenu";
+import { openNewChat } from "../../lib/aiPanelNav";
+import { openTerminal } from "../../lib/tauri/commands";
+import { pushErrorToast } from "../../state/toastStore";
 import { useIsQueued, repoHolder } from "../../lib/repoQueue";
 import { resolveAccount } from "../../lib/aiAccounts";
 import { ChatMessageBubble, dayDivider } from "../chat/ChatMessageBubble";
@@ -7,7 +13,7 @@ import { exportMenuItems, exportRepoConversation } from "../chat/exportChat";
 import { ContextMenu } from "../common/ContextMenu";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
-import { EMPTY_CHAT, engineFor, useChatStore, type ChatEngine } from "../../state/chatStore";
+import { EMPTY_CHAT, engineFor, useChatStore, type ChatEngine, type ChatSkillPick } from "../../state/chatStore";
 import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activityStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useAiPanelStore } from "../../state/aiPanelStore";
@@ -162,14 +168,45 @@ export function PanelChat({
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, MAX_COMPOSER_HEIGHT)}px`;
   }, [draft]);
+  // The skill staged for the next question — dropped when the engine changes, since a skill is one
+  // CLI's and the next engine may not have it.
+  const [skill, setSkill] = useState<ChatSkillPick | null>(null);
+  useEffect(() => {
+    setSkill(null);
+  }, [provider]);
+
+  /** The panel's own commands — see `CommandSurface`. Everything else behind a slash is the CLI's. */
+  const runAppCommand = (command: ChatAppCommand) => {
+    if (command === "new") {
+      openNewChat(projectId);
+    } else if (command === "clear") {
+      useChatStore.getState().clearContext(conversationId);
+    } else if (command === "export" && session.persisted && session.messages.length > 0) {
+      const rect = boxRef.current?.getBoundingClientRect();
+      setExportMenu({ x: rect ? rect.left + 8 : 16, y: rect ? rect.top - 8 : 16 });
+    }
+  };
+
   const submit = () => {
     const text = draft.trim();
     if (!text || session.sending) return;
-    send(projectId, conversationId, text);
+    // A typed app command runs instead of being sent — `/clear` must not reach a model as seven
+    // characters. Anything else starting with a slash is the CLI's, and goes through as written.
+    const command = appCommandFor(text, "panel");
+    if (command) {
+      setDraft("");
+      runAppCommand(command.id);
+      return;
+    }
+    send(projectId, conversationId, text, skill);
     setDraft("");
+    setSkill(null);
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
+  /** The `/` menu is open while the draft is one token that begins with a slash. */
+  const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
+  const menuOpen = slash !== null && !slash.includes(" ");
   const stop = () => {
     if (session.runId) void useAiRunStore.getState().cancel(session.runId);
   };
@@ -240,6 +277,10 @@ export function PanelChat({
                     })}
                   />
                 )}
+                {message.contextReset && (
+                  // Where `/clear` took effect: the engine started again from here.
+                  <ContextBreak label={t("assistant.contextCleared")} />
+                )}
                 <ChatMessageBubble
                   message={message}
                   actions={message.isError ? { onPickModel: (next) => pickEngine(provider, next) } : undefined}
@@ -288,7 +329,45 @@ export function PanelChat({
             <span className="min-w-0 truncate">{t("assistant.repoBusy", { holder })}</span>
           </p>
         )}
+        {session.resetPending && !session.sending && (
+          <p className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11px] text-[var(--cf-text-muted)]" title={t("assistant.contextClearedHint")}>
+            <Eraser size={11} className="shrink-0" />
+            <span className="min-w-0 truncate">{t("assistant.contextCleared")}</span>
+          </p>
+        )}
+        {menuOpen && (
+          <CommandMenu
+            query={slash ?? ""}
+            provider={provider}
+            surface="panel"
+            scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }}
+            onRunApp={(command) => {
+              setDraft("");
+              runAppCommand(command);
+            }}
+            onInsert={(name) => {
+              setDraft(`${name} `);
+              boxRef.current?.focus();
+            }}
+            onPickSkill={(picked) => {
+              // A Claude skill only a person may start runs as its own slash command.
+              if (!picked.model_invocable && provider === "claude") {
+                setDraft(`/${picked.name} `);
+              } else {
+                setSkill({ name: picked.name, source: picked.source, path: picked.path });
+                setDraft("");
+              }
+              boxRef.current?.focus();
+            }}
+            onOpenTerminal={
+              project
+                ? () => void openTerminal(project.local_path).catch((error: unknown) => pushErrorToast(String(error)))
+                : undefined
+            }
+          />
+        )}
         <div className="flex flex-col gap-1.5 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1.5 focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]">
+          {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
           <textarea
             ref={boxRef}
             value={draft}
@@ -313,6 +392,8 @@ export function PanelChat({
               bound={{ provider, model, account }}
               onPick={pickEngine}
             />
+            {/* The CLI's own MCP servers, switched for this repository. */}
+            <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />
             <span className="flex-1" />
             {session.sending ? (
               <button
@@ -337,6 +418,20 @@ export function PanelChat({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The line drawn above the first question after `/clear`: the engine started again from here. */
+function ContextBreak({ label }: { label: string }) {
+  return (
+    <div role="separator" aria-label={label} className="flex items-center gap-2 pt-1.5">
+      <div className="h-px flex-1 bg-[var(--cf-border)]" />
+      <span className="flex min-w-0 items-center gap-1 text-[10.5px] font-medium text-[var(--cf-text-muted)]">
+        <Eraser size={10} className="shrink-0" />
+        <span className="truncate">{label}</span>
+      </span>
+      <div className="h-px flex-1 bg-[var(--cf-border)]" />
     </div>
   );
 }

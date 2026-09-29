@@ -66,6 +66,13 @@ const INLINE_LIMIT: usize = 12_000;
 pub struct GrokEngine;
 
 impl AiEngine for GrokEngine {
+    /// Grok reads project skills from both `.agents/skills` and `.claude/skills` (its guide's skills
+    /// page, and `grok inspect` in a folder holding each). Pointed at the Claude one so a repository,
+    /// which the app syncs there, needs no second copy — and so no skill is listed to it twice.
+    fn native_skills_dir(&self) -> Option<&'static str> {
+        Some(".claude/skills")
+    }
+
     fn id(&self) -> &'static str {
         "grok"
     }

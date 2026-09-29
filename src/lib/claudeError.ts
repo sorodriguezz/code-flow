@@ -51,6 +51,10 @@ export type SetupProblem =
   | { kind: "model-not-found"; model: string | null; suggestions: string[] }
   /** The binary is not on the app's `PATH`. Distinct from not-signed-in: nothing to log into yet. */
   | { kind: "binary-missing"; binary: string | null }
+  /** The binary is installed but was locked or part-way through being replaced when the app tried
+   *  to start it — on Windows, another Claude Code session updating itself. Waiting is the remedy,
+   *  so this must never render as "install it". */
+  | { kind: "binary-busy"; binary: string | null }
   /** The CLI refused to run in the directory it was given. Codex does this outside a Git work
    *  tree. Kept as a class even though `codex.rs` now passes `--skip-git-repo-check` where it
    *  applies, because a stale build, a different CLI or a future version can still say it, and
@@ -159,6 +163,14 @@ function modelNotFound(message: string): { model: string | null; suggestions: st
  * a missing binary first, because logging into something that is not installed is not a step. */
 function parseSetupProblem(message: string): SetupProblem | null {
   if (message.length > MAX_SETUP_CHARS) return null;
+
+  // Before "missing", because a busy launch still begins with the same "failed to launch". The
+  // first phrase is the backend's own `ai::LAUNCH_BUSY_HINT`; the others are Windows' wording for a
+  // file another process holds open, which no locale of this app should read as "not installed".
+  if (/the executable is locked or being replaced|being used by another process|está siendo utilizado por otro proceso|\(os error 3[23]\)/i.test(message)) {
+    const binary = message.match(/\b(claude|codex|grok|agy|gemini|opencode|cline)\b/i)?.[1]?.toLowerCase() ?? null;
+    return { kind: "binary-busy", binary };
+  }
 
   // `ai::probe` reports the binary it looked for when it is not on `PATH`; a spawn that got past
   // the probe fails with the OS's own wording.

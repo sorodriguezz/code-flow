@@ -143,8 +143,11 @@ export function AzureDevOpsSettings() {
                   {state && "account" in state ? (
                     <p className="truncate text-[12px] text-[var(--cf-text-muted)]">{state.account}</p>
                   ) : failed ? (
-                    <p className="select-text break-words text-[12px] leading-snug text-[var(--cf-danger)]">
-                      {state.error}
+                    <p
+                      title={state.error}
+                      className="line-clamp-3 select-text break-words text-[12px] leading-snug text-[var(--cf-danger)]"
+                    >
+                      {adoErrorText(state.error, t)}
                     </p>
                   ) : (
                     <p className="font-mono text-[12px] tracking-widest text-[var(--cf-text-muted)]">••••••••••••</p>
@@ -230,8 +233,11 @@ export function AzureDevOpsSettings() {
               <p className="text-[12px] font-medium text-[var(--cf-danger)]">{t("settings.adoVerifyFailed")}</p>
               {/* Azure's own words, selectable — they name the failure precisely enough to be
                   worth searching for, and nothing here has a copy button. */}
-              <p className="mt-0.5 select-text break-words text-[12px] leading-snug text-[var(--cf-text-muted)]">
-                {error}
+              <p
+                title={error}
+                className="mt-0.5 line-clamp-4 select-text break-words text-[12px] leading-snug text-[var(--cf-text-muted)]"
+              >
+                {adoErrorText(error, t)}
               </p>
             </div>
           </div>
@@ -263,4 +269,17 @@ export function AzureDevOpsSettings() {
       />
     </section>
   );
+}
+
+/**
+ * Azure's two ways of refusing a token, in the reader's language; anything else as Azure said it.
+ *
+ * The backend already boils the answer down to one sentence (`ado::describe_failure` — an expired
+ * token used to arrive as its whole HTML error page), and these two sentences are the ones with a
+ * remedy worth spelling out. Matched on the backend's own wording, which is fixed.
+ */
+function adoErrorText(error: string, t: ReturnType<typeof useT>): string {
+  if (/personal access token because it has expired/i.test(error)) return t("settings.adoPatExpired");
+  if (/rejected the credentials/i.test(error)) return t("settings.adoPatRejected");
+  return error;
 }

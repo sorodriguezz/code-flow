@@ -606,6 +606,11 @@ fn describe(
             return format!("Bitbucket returned {status}: {message}");
         }
     }
+    // Azure answers an expired or revoked token with a whole HTML page; its reader takes the
+    // page's title (and says an expired token outright) instead of 300 characters of markup.
+    if provider == Provider::Azure {
+        return crate::ado::describe_failure(status, body);
+    }
     // GitHub and Azure both put a sentence in `message` — GitHub's 422 for a dispatch says exactly
     // which input was wrong — and that sentence beats the raw JSON around it.
     if let Some(message) = host_message(body) {

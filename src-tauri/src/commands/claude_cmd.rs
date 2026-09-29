@@ -798,6 +798,7 @@ pub async fn send_chat_message(
     agent_prompt: Option<String>,
     agent_account: Option<String>,
     stream: Option<bool>,
+    skill: Option<crate::provider_skills::SkillPick>,
 ) -> Result<ChatReply, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -871,6 +872,48 @@ pub async fn send_chat_message(
     }
 
 
+    // A skill picked in the composer goes to the engine, never into the stored question — see
+    // `provider_skills::instruction`. An app skill is pointed at its copy synced into this checkout
+    // above, which is always under `.claude/skills` in a repository.
+    let engine_message = match skill.as_ref().filter(|pick| !pick.name.trim().is_empty()) {
+        Some(pick) => {
+            let local = (pick.source == "app").then(|| format!(".claude/skills/{}/SKILL.md", pick.name.trim()));
+            format!(
+                "{message}\n\n{}",
+                crate::provider_skills::instruction(&config.provider, pick, local.as_deref())
+            )
+        }
+        None => message.clone(),
+    };
+    // Claude Code denies, in `-p`, any tool nobody pre-approved, and `Skill` is the one that opens a
+    // skill — so the panel's chat has it whatever the saved tool list says, as the free chat does.
+    let mut tools = config.tools.clone();
+    if config.provider == "claude" && !tools.iter().any(|tool| tool == "Skill") {
+        tools.push("Skill".to_string());
+    }
+    // The user's own MCP servers, as switched for this repository in the panel — see
+    // `crate::chat_mcp`. A story's read-only analysis loads none, so it plans none.
+    let turn_mcp = if analysis {
+        // A story's analysis promises to write nothing; on Codex that includes its own servers.
+        let block = if config.provider == "codex" {
+            let env = config.engine.account().cloned().unwrap_or_else(|| ai_accounts::AccountEnv::system(&config.provider));
+            crate::chat_mcp::codex_read_only_block(&config.binary, &env).await
+        } else {
+            Vec::new()
+        };
+        crate::chat_mcp::TurnMcp { block, ..Default::default() }
+    } else {
+        let overrides = db
+            .0
+            .lock()
+            .ok()
+            .and_then(|conn| queries::get_setting(&conn, &crate::chat_mcp::panel_setting_key(&project_id)).ok().flatten())
+            .unwrap_or_default();
+        let env = config.engine.account().cloned().unwrap_or_else(|| ai_accounts::AccountEnv::system(&config.provider));
+        crate::commands::chat_cmd::mcp_plan(&db, &workspace_id, &config.provider, &config.binary, &env, &overrides).await
+    };
+    tools.extend(turn_mcp.allow_rules.iter().cloned());
+
     // Timed around the engine call only, so it reflects how long the model actually took —
     // not the surrounding DB reads or IPC.
     let started = std::time::Instant::now();
@@ -891,12 +934,14 @@ pub async fn send_chat_message(
             &config.binary,
             &config.model,
             &enabled_contexts,
-            &message,
+            &engine_message,
             session_id.as_deref(),
-            &config.tools,
+            &tools,
             &project.local_path,
             stream_deltas,
             analysis,
+            turn_mcp.block.clone(),
+            turn_mcp.app.clone(),
         )
         .await
     })

@@ -268,6 +268,10 @@ export interface AiModelOption {
   id: string;
   label?: string;
   labelKey?: TranslationKey;
+  /** A previous generation, still served and still selectable, listed after a divider so it never
+   *  reads as the one to pick by default. Not a price signal: on the providers' own price lists the
+   *  older models cost the same or more per token than their successors. */
+  legacy?: boolean;
 }
 
 /** Which models each provider offers, keyed by provider id — the settings dropdown and the
@@ -289,6 +293,13 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "claude-opus-4-8", label: "Opus 4.8" },
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
     { id: "claude-fable-5-1", label: "Fable 5.1" },
+    // Earlier generations, still served. Opus 3 is not here and cannot be: Anthropic retired
+    // `claude-3-opus-20240229` on 2026-01-05, so every turn would fail with "model not found".
+    // `claude-fable-5` has to stay *after* `claude-fable-5-1` — see the note at the top of the list.
+    { id: "claude-fable-5", label: "Fable 5", legacy: true },
+    { id: "claude-opus-4-7", label: "Opus 4.7", legacy: true },
+    { id: "claude-opus-4-6", label: "Opus 4.6", legacy: true },
+    { id: "claude-sonnet-4-6", label: "Sonnet 4.6", legacy: true },
   ],
   // Fallback only — shown when `agy models` can't be queried (agy not installed / not signed in).
   // When it can, the Settings picker is populated live from the CLI, so these need not stay current.
@@ -349,10 +360,23 @@ export function modelDisplayLabel(
 ): string {
   const trimmed = modelId.trim();
   if (!trimmed) return t("ai.modelDefault");
+  // Claude Code's `[1m]` names the 1M-context variant of a model (`claude-opus-4-6[1m]`), and a run
+  // reports it back that way. The bracket is not part of the family, so it is matched without it
+  // and said after the label rather than turning a known model into a raw id.
+  const bracket = trimmed.indexOf("[");
+  const base = bracket > 0 ? trimmed.slice(0, bracket) : trimmed;
+  const variant = bracket > 0 ? trimmed.slice(bracket) : "";
   const models = PROVIDER_MODELS[providerId] ?? [];
-  const known = models.find((m) => m.id === trimmed) ?? models.find((m) => sameModelFamily(m.id, trimmed));
+  const known = models.find((m) => m.id === base) ?? models.find((m) => sameModelFamily(m.id, base));
   if (!known) return trimmed;
-  return known.label ?? (known.labelKey ? t(known.labelKey) : trimmed);
+  const label = known.label ?? (known.labelKey ? t(known.labelKey) : base);
+  if (!variant) return label;
+  return variant.toLowerCase() === "[1m]" ? `${label} · 1M` : `${label} ${variant}`;
+}
+
+/** Whether a catalog id is a previous generation — see `AiModelOption.legacy`. */
+export function isLegacyModel(providerId: string, modelId: string): boolean {
+  return (PROVIDER_MODELS[providerId] ?? []).some((m) => m.id === modelId && m.legacy === true);
 }
 
 /** Whether two model ids name the same model at different levels of precision, e.g. the

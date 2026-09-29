@@ -327,7 +327,7 @@ async fn get_page_with_etag(url: &str, pat: &str) -> Result<(RawWikiPage, String
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
+        return Err(crate::ado::describe_failure(status, &body));
     }
     // Same trap as `get_json`: a bad PAT is answered with the sign-in page and a 203.
     let is_html = res
@@ -433,7 +433,7 @@ async fn wiki_page_etag(
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
+        return Err(crate::ado::describe_failure(status, &body));
     }
     // Azure quotes the tag and `If-Match` wants it back exactly as it was given, quotes included.
     Ok(res
@@ -497,7 +497,7 @@ pub async fn put_wiki_page(
             reqwest::StatusCode::PRECONDITION_FAILED | reqwest::StatusCode::CONFLICT => {
                 format!("{WIKI_CONFLICT_MARKER}{status}: {body}")
             }
-            _ => format!("Azure DevOps returned {status}: {body}"),
+            _ => crate::ado::describe_failure(status, &body),
         });
     }
     // The new version is what the next write has to name. Azure sends it as a header; the body's
@@ -877,7 +877,7 @@ async fn post_create(
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
         return Err(CreateFailed {
-            message: format!("Azure DevOps returned {status}: {body}"),
+            message: crate::ado::describe_failure(status, &body),
             refused: true,
         });
     }
@@ -1106,7 +1106,7 @@ pub async fn update_work_item(
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
+        return Err(crate::ado::describe_failure(status, &body));
     }
 
     Ok(ItemRef {

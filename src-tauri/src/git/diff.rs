@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::path::Path;
 
-use git2::{Delta, Diff, DiffOptions, IndexAddOption, Signature};
+use git2::{Delta, Diff, DiffDelta, DiffHunk, DiffOptions, IndexAddOption, Patch, Signature};
 use serde::{Deserialize, Serialize};
 
 use super::repo::open;
@@ -58,35 +58,20 @@ fn collect_diff(diff: &Diff) -> Result<Vec<FileDiffInfo>, String> {
 
     diff.foreach(
         &mut |delta, _progress| {
-            files.borrow_mut().push(FileDiffInfo {
-                old_path: delta.old_file().path().map(|p| p.display().to_string()),
-                new_path: delta.new_file().path().map(|p| p.display().to_string()),
-                status: diff_status_label(delta.status()).to_string(),
-                binary: delta.flags().is_binary(),
-                hunks: Vec::new(),
-            });
+            files.borrow_mut().push(file_info(&delta));
             true
         },
         None,
         Some(&mut |_delta, hunk| {
-            let header = String::from_utf8_lossy(hunk.header()).trim_end().to_string();
             if let Some(file) = files.borrow_mut().last_mut() {
-                file.hunks.push(DiffHunkInfo { header, lines: Vec::new() });
+                file.hunks.push(hunk_info(&hunk));
             }
             true
         }),
         Some(&mut |_delta, _hunk, line| {
-            let content = String::from_utf8_lossy(line.content())
-                .trim_end_matches('\n')
-                .to_string();
             if let Some(file) = files.borrow_mut().last_mut() {
                 if let Some(hunk) = file.hunks.last_mut() {
-                    hunk.lines.push(DiffLine {
-                        origin: (line.origin() as char).to_string(),
-                        content,
-                        old_lineno: line.old_lineno(),
-                        new_lineno: line.new_lineno(),
-                    });
+                    hunk.lines.push(line_info(&line));
                 }
             }
             true
@@ -95,6 +80,84 @@ fn collect_diff(diff: &Diff) -> Result<Vec<FileDiffInfo>, String> {
     .map_err(|e| e.message().to_string())?;
 
     Ok(files.into_inner())
+}
+
+fn file_info(delta: &DiffDelta) -> FileDiffInfo {
+    FileDiffInfo {
+        old_path: delta.old_file().path().map(|p| p.display().to_string()),
+        new_path: delta.new_file().path().map(|p| p.display().to_string()),
+        status: diff_status_label(delta.status()).to_string(),
+        binary: delta.flags().is_binary(),
+        hunks: Vec::new(),
+    }
+}
+
+fn hunk_info(hunk: &DiffHunk) -> DiffHunkInfo {
+    DiffHunkInfo {
+        header: String::from_utf8_lossy(hunk.header()).trim_end().to_string(),
+        lines: Vec::new(),
+    }
+}
+
+fn line_info(line: &git2::DiffLine) -> DiffLine {
+    DiffLine {
+        origin: (line.origin() as char).to_string(),
+        content: String::from_utf8_lossy(line.content()).trim_end_matches('\n').to_string(),
+        old_lineno: line.old_lineno(),
+        new_lineno: line.new_lineno(),
+    }
+}
+
+/// What libgit2 says when it reads a path as a file and finds a directory there.
+const DIRECTORY_READ: &str = "requested file is a directory";
+
+/// [`collect_diff`] for a diff that reads the working tree, where one entry that cannot be read must
+/// not sink the rest.
+///
+/// With `core.symlinks` off — Git for Windows' default — libgit2 loads a link's content by reading
+/// the link *as a file* (`diff_file_content_load_workdir_symlink_fake`), and on Windows it files every
+/// reparse point it can read, junctions included, as a link. Reading one that points at a directory
+/// fails with [`DIRECTORY_READ`], and `foreach` ends the whole diff there. pnpm on Windows fills
+/// `node_modules` with exactly those — a junction per dependency — so a `node_modules` that was not
+/// ignored turned every refresh of the Changes list into that error.
+///
+/// Only then is the same diff walked again one file at a time, and such an entry comes back as itself
+/// with no lines. The common case pays for one walk, as before.
+fn collect_working_diff(diff: &Diff) -> Result<Vec<FileDiffInfo>, String> {
+    match collect_diff(diff) {
+        Err(error) if error.contains(DIRECTORY_READ) => collect_diff_file_by_file(diff),
+        other => other,
+    }
+}
+
+/// [`collect_diff`] one delta at a time: the same entries, hunks and lines, except that an entry whose
+/// content reads as a directory is kept without its lines instead of ending the walk.
+fn collect_diff_file_by_file(diff: &Diff) -> Result<Vec<FileDiffInfo>, String> {
+    let mut files = Vec::new();
+    for (index, delta) in diff.deltas().enumerate() {
+        let patch = match Patch::from_diff(diff, index) {
+            Ok(Some(patch)) => patch,
+            // A delta `foreach` skips too (unmodified, or a kind the options leave out).
+            Ok(None) => continue,
+            Err(error) if error.message().contains(DIRECTORY_READ) => {
+                files.push(file_info(&delta));
+                continue;
+            }
+            Err(error) => return Err(error.message().to_string()),
+        };
+        let mut file = file_info(&patch.delta());
+        for h in 0..patch.num_hunks() {
+            let (hunk, count) = patch.hunk(h).map_err(|e| e.message().to_string())?;
+            let mut info = hunk_info(&hunk);
+            for l in 0..count {
+                let line = patch.line_in_hunk(h, l).map_err(|e| e.message().to_string())?;
+                info.lines.push(line_info(&line));
+            }
+            file.hunks.push(info);
+        }
+        files.push(file);
+    }
+    Ok(files)
 }
 
 /// Large enough that every hunk effectively covers the whole file — the Changes tab
@@ -133,7 +196,7 @@ pub fn get_working_diff_with_context(
     let diff = repo
         .diff_index_to_workdir(None, Some(&mut opts))
         .map_err(|e| e.message().to_string())?;
-    collect_diff(&diff)
+    collect_working_diff(&diff)
 }
 
 /// The staged diff at a caller-chosen context. `None` means [`FULL_FILE_CONTEXT_LINES`].
@@ -172,7 +235,7 @@ pub fn get_uncommitted_diff(path: &str, context_lines: Option<u32>) -> Result<Ve
     let diff = repo
         .diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut opts))
         .map_err(|e| e.message().to_string())?;
-    collect_diff(&diff)
+    collect_working_diff(&diff)
 }
 
 /// One file's diff — the split view's and the editor diff tab's supply, and what an expanded row in
@@ -215,7 +278,7 @@ pub fn get_file_diff(
     }
     .map_err(|e| e.message().to_string())?;
 
-    let files = collect_diff(&diff)?;
+    let files = collect_working_diff(&diff)?;
     // A pathspec can still match more than one delta (a rename reports both sides), so pick the one
     // that actually names the file rather than trusting the first entry. Falling back to index 0
     // covers a rename whose delta carries neither the old nor the new path verbatim; on an empty
@@ -885,6 +948,52 @@ mod tests {
         assert_eq!(added_lines, vec!["edited after staging"], "measured from HEAD to what is on disk");
         let scratch = all.iter().find(|f| f.new_path.as_deref() == Some("scratch.txt")).expect("untracked file listed");
         assert!(!scratch.hunks.is_empty(), "with its content");
+    }
+
+    /// Git for Windows turns `core.symlinks` off and pnpm fills `node_modules` with junctions — links
+    /// to directories. libgit2 reads such a link *as a file* to diff it and, finding a directory,
+    /// failed the whole list with "requested file is a directory". Now the link comes back as itself
+    /// with no lines, and every other entry exactly as it would have without it.
+    #[cfg(unix)]
+    #[test]
+    fn an_untracked_link_to_a_directory_does_not_sink_the_diff() {
+        let (dir, repo) = fixture();
+        let root = dir.to_str().unwrap();
+        repo.config().unwrap().set_bool("core.symlinks", false).unwrap();
+        fs::create_dir_all(dir.join("store/pkg")).unwrap();
+        fs::write(dir.join("store/pkg/index.js"), "module.exports = 1;\n").unwrap();
+        fs::write(dir.join("scratch.txt"), "untracked\n").unwrap();
+        fs::write(dir.join("tracked.txt"), "edited\n").unwrap();
+        let lists = || [get_working_diff_with_context(root, Some(3)).unwrap(), get_uncommitted_diff(root, Some(3)).unwrap()];
+        let json = |files: &[FileDiffInfo]| serde_json::to_string(files).unwrap();
+        let without_link = lists();
+
+        fs::create_dir_all(dir.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(dir.join("store/pkg"), dir.join("node_modules/pkg")).unwrap();
+
+        // The premise, on a handle opened after the config change (a repository caches it): libgit2
+        // still trips over the link. The day this fails, the fallback can go.
+        let fresh = Repository::open(&dir).unwrap();
+        let mut opts = DiffOptions::new();
+        opts.include_untracked(true).show_untracked_content(true).recurse_untracked_dirs(true);
+        let raw = fresh
+            .diff_index_to_workdir(None, Some(&mut opts))
+            .map_err(|e| e.message().to_string())
+            .and_then(|diff| collect_diff(&diff));
+        assert!(raw.is_err_and(|e| e.contains(DIRECTORY_READ)), "libgit2 no longer fails on it");
+
+        for (mut files, before) in lists().into_iter().zip(&without_link) {
+            let at = files
+                .iter()
+                .position(|f| f.new_path.as_deref() == Some("node_modules/pkg"))
+                .expect("the link is listed");
+            let link = files.remove(at);
+            assert!(link.hunks.is_empty() && !link.binary);
+            assert_eq!(json(&files), json(before), "everything else exactly as without the link");
+        }
+
+        let link = get_file_diff(root, "node_modules/pkg", false, Some(3)).unwrap().expect("its row opens");
+        assert!(link.hunks.is_empty());
     }
 
     /// The bug this function was rewritten for: an untracked file is not in the index, so the

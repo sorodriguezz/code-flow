@@ -101,6 +101,13 @@ impl AiEngine for OpenCodeEngine {
             }
         }
         brief.push_str(inv.prompt);
+        // The skills this CLI would not find by itself. It reads no stdin, so the default
+        // `stdin_payload` that carries the note for other engines never reaches it — without this
+        // line every skill synced for it was a folder nobody mentioned.
+        if !inv.skills_note.is_empty() {
+            brief.push_str("\n\n");
+            brief.push_str(inv.skills_note.trim_end());
+        }
         if !inv.stdin_content.trim().is_empty() {
             brief.push_str("\n\n----- INPUT -----\n\n");
             brief.push_str(inv.stdin_content);
@@ -648,6 +655,18 @@ mod tests {
         inv.read_only = true;
         assert!(!args_of(&inv).iter().any(|a| a == "--dangerously-skip-permissions"));
         assert!(!OpenCodeEngine.enforces_read_only());
+    }
+
+    /// opencode reads no stdin, so the skills note has to be in the brief itself or it is lost.
+    #[test]
+    fn the_skills_note_rides_the_brief() {
+        let mut inv = AiInvocation::new("pregunta", "datos");
+        inv.skills_note = "=== SKILLS DISPONIBLES ===\n.claude/skills/pdf/SKILL.md — PDFs\n".to_string();
+        let args = args_of(&inv);
+        let path = std::path::PathBuf::from(&args[args.iter().position(|a| a == "--file").unwrap() + 1]);
+        let brief = std::fs::read_to_string(&path).unwrap();
+        assert!(brief.contains(".claude/skills/pdf/SKILL.md"), "{brief}");
+        assert!(brief.find("SKILLS").unwrap() < brief.find("datos").unwrap(), "before the data");
     }
 
     /// The attached brief is private and goes with the run.

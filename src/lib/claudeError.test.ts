@@ -78,6 +78,17 @@ describe("setup problems", () => {
     });
   });
 
+  it("reads a locked or mid-update executable as busy, never as missing", () => {
+    // What Windows answers while another Claude Code session renames `claude.exe` away to update
+    // it. Offering "install Claude Code" here sent people to reinstall a CLI that was fine.
+    const hinted =
+      "failed to launch 'claude': Access is denied. (os error 5) — the executable is locked or being replaced (usually a self-update in progress, sometimes an antivirus scan); try again in a few seconds";
+    expect(parseClaudeError(hinted).setup).toEqual({ kind: "binary-busy", binary: "claude" });
+    const spanish =
+      "failed to launch 'claude': El proceso no tiene acceso al archivo porque está siendo utilizado por otro proceso. (os error 32)";
+    expect(parseClaudeError(spanish).setup?.kind).toBe("binary-busy");
+  });
+
   it("prefers a missing binary over the login command in the same message", () => {
     // Telling someone to run `claude login` for a CLI that is not installed is a step they cannot
     // take, and it hides the step they can.

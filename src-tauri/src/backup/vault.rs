@@ -181,6 +181,18 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
         push_unique(&mut keys, key);
     }
 
+    // The MCP servers declared in CodeFlow keep every environment and header value in the keychain,
+    // the row holding only a marker; without these a restored server would arrive with its tokens
+    // blank. (Restoring still asks for the server to be approved before it runs — `mcp_registry`.)
+    for text in column(conn, "SELECT env FROM mcp_servers UNION ALL SELECT headers FROM mcp_servers") {
+        let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&text).unwrap_or_default();
+        for value in map.values() {
+            if let Some(key) = value.strip_prefix(crate::db::api_secrets::MARKER) {
+                push_unique(&mut keys, key.to_string());
+            }
+        }
+    }
+
     // The key the cookie jar is sealed with. `api_cookies` travels as it is stored — sealed — so
     // without this a jar restored onto another machine would arrive unreadable. Fixed, like the
     // passphrase above: one key per install, whether or not a cookie was ever stored under it.

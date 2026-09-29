@@ -60,10 +60,10 @@ fn write_system_prompt_file(inv: &AiInvocation, sp: &str) -> Option<std::path::P
 pub struct ClaudeEngine;
 
 impl AiEngine for ClaudeEngine {
-    /// The only engine that does: it reads `<cwd>/.claude/skills` itself, so describing them in the
-    /// payload would be telling it something it already knows.
-    fn reads_claude_skills(&self) -> bool {
-        true
+    /// It reads `<cwd>/.claude/skills` itself, so describing them in the payload would be telling
+    /// it something it already knows.
+    fn native_skills_dir(&self) -> Option<&'static str> {
+        Some(".claude/skills")
     }
 
     fn id(&self) -> &'static str {
@@ -132,11 +132,36 @@ impl AiEngine for ClaudeEngine {
         // built-in tools exist at all for this run, where `--allowedTools` only decides which of the
         // existing ones run without asking. See the module docs.
         if inv.read_only {
-            cmd.arg("--tools").arg(self.read_only_tools().join(","));
+            let mut tools = self.read_only_tools();
+            // `Skill` only when the caller asked for it — the chat does, compaction and story
+            // analysis do not. A skill is instructions: with no shell and no writer beside it here,
+            // it can guide the answer and nothing else.
+            if inv.allowed_tools.iter().any(|tool| tool == "Skill") {
+                tools.push("Skill".to_string());
+            }
+            cmd.arg("--tools").arg(tools.join(","));
             cmd.arg("--strict-mcp-config");
         }
         if !inv.allowed_tools.is_empty() {
             cmd.arg("--allowedTools").arg(inv.allowed_tools.join(","));
+        }
+        // The user's servers this conversation keeps out: denied by rule, which also takes their
+        // tools off the list the model is shown — context a turn no longer pays for.
+        if !inv.mcp_block.is_empty() && !inv.read_only {
+            let rules: Vec<String> = inv.mcp_block.iter().map(|server| mcp_rule(server)).collect();
+            cmd.arg("--disallowedTools").arg(rules.join(","));
+        }
+        // The app's own servers: a private document of `${VAR}`s, deleted with the run, and the
+        // values in this process's environment — never on the command line, never in the file.
+        // Additive to the user's own servers (no `--strict-mcp-config` here).
+        if !inv.app_mcp.is_empty() && !inv.read_only {
+            let (document, vars) = crate::mcp_registry::claude_config(&inv.app_mcp);
+            if let Some(path) = inv.prompt_files.write("claude-mcp", "json", &document) {
+                cmd.arg("--mcp-config").arg(path);
+                for (name, value) in vars {
+                    cmd.env(name, value);
+                }
+            }
         }
         if inv.auto_approve_edits && !inv.read_only {
             cmd.arg("--permission-mode").arg("acceptEdits");
@@ -192,6 +217,31 @@ impl AiEngine for ClaudeEngine {
     fn parse_delta(&self, line: &str) -> Vec<AiDelta> {
         parse_delta_line(line)
     }
+}
+
+/// The permission rule covering every tool of one MCP server, as Claude Code names them.
+///
+/// The server name with anything outside `[A-Za-z0-9_-]` turned into `_` — and, for a claude.ai
+/// connector (`claude.ai Gmail`), runs of `_` collapsed and the ends trimmed — behind `mcp__`. Read
+/// out of the 2.1.266 binary rather than guessed, because a rule that misses by one character
+/// allows nothing and says nothing: `claude.ai Gmail` is `mcp__claude_ai_Gmail`, not
+/// `mcp__claude_ai__Gmail`.
+pub fn mcp_rule(server: &str) -> String {
+    let mut name: String = server
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+    if server.starts_with("claude.ai ") {
+        let mut collapsed = String::with_capacity(name.len());
+        for c in name.chars() {
+            if c == '_' && collapsed.ends_with('_') {
+                continue;
+            }
+            collapsed.push(c);
+        }
+        name = collapsed.trim_matches('_').to_string();
+    }
+    format!("mcp__{name}")
 }
 
 /// Pulls the text/thinking chunks out of one line of `--include-partial-messages` output.
@@ -252,47 +302,17 @@ fn str_field<'v>(value: &'v serde_json::Value, key: &str) -> Option<&'v str> {
     value.get(key).and_then(serde_json::Value::as_str)
 }
 
-/// What the most recent `claude` run said about itself beyond its answer.
-///
-/// **Why a cache and not two more fields on [`AiRun`]**: `AiRun` is built with struct literals by
-/// all six engines, so a field added to it is a compile error in five files this change does not
-/// own. The contract asked for `AiRun.rate_limit` and `AiRun.slash_commands`; this is the closest
-/// shape that keeps the tree building, and it is also what the only consumer actually wants — the
-/// provider-command menu asks "what does this install support", which is a property of the CLI and
-/// not of any one turn, and the quota meter asks "how full am I now".
-#[derive(Debug, Clone, Default)]
-pub struct ClaudeRunMeta {
-    /// How full the plan windows were when the last run finished, if it said. Free here; the same
-    /// number costs `ai_quota.rs` a keychain read and an HTTPS call.
-    pub rate_limit: Option<AiRateLimit>,
-    /// Every slash command this install offers, **as reported — with no leading `/`** (114 of them
-    /// on the machine this was verified against, plugins and user commands included). A caller
-    /// building a menu row adds the slash.
-    pub slash_commands: Vec<String>,
-}
-
-fn meta_cell() -> &'static Mutex<ClaudeRunMeta> {
-    static META: OnceLock<Mutex<ClaudeRunMeta>> = OnceLock::new();
-    META.get_or_init(Mutex::default)
-}
-
 /// The last plan windows each **account** reported, with when — keyed by
 /// [`crate::ai_accounts::AccountEnv::key`] (`claude` for the system account).
 ///
-/// Kept apart from [`meta_cell`] because the two answer different questions. The command list is
-/// a fact about the installed binary, and the latest run of any account is as good as another. The
-/// windows are a fact about one account's plan, and reporting the work account's week under the
-/// personal one would be a wrong number on the one panel whose only value is being trusted.
+/// Per account because the windows are a fact about one account's plan, and reporting the work
+/// account's week under the personal one would be a wrong number on the one panel whose only value
+/// is being trusted. Why a cache and not a field on [`AiRun`]: `AiRun` is built with struct
+/// literals by all six engines, and the only consumer asks "how full am I now", a property of the
+/// account rather than of any one turn.
 fn limits_cell() -> &'static Mutex<std::collections::HashMap<String, (AiRateLimit, String)>> {
     static LIMITS: OnceLock<Mutex<std::collections::HashMap<String, (AiRateLimit, String)>>> = OnceLock::new();
     LIMITS.get_or_init(Mutex::default)
-}
-
-/// The most recent run's report. Empty before the first `claude` run of this process, which is a
-/// real state and the reason the command menu renders app commands alone until then rather than
-/// asserting this install has none.
-pub fn last_run_meta() -> ClaudeRunMeta {
-    meta_cell().lock().map(|m| m.clone()).unwrap_or_default()
 }
 
 /// The plan windows `account_key` last reported and the instant it did, if it has run in this
@@ -302,29 +322,36 @@ pub fn last_rate_limit(account_key: &str) -> Option<(AiRateLimit, String)> {
     limits_cell().lock().ok()?.get(account_key).cloned()
 }
 
-/// Files what a finished run reported about itself.
-///
-/// **Each half is only replaced by a run that actually said something.** A run that failed to
-/// launch, or one whose output was cut short, prints neither the init event nor a rate-limit one;
-/// letting that overwrite a good answer with an empty one would make the command menu flicker
-/// empty on the first failed turn and stay that way.
+/// Files what a finished run reported about itself: the windows it ran in and the context window
+/// of each model it used. A run that failed to launch, or whose output was cut short, prints
+/// neither — and replaces nothing. (What the install offers — skills, commands, servers — is filed
+/// by [`record_install_from_run`], from chat turns only.)
 fn record_run_meta(stdout: &str) {
-    let rate_limit = parse_rate_limit(stdout);
-    let slash_commands = parse_slash_commands(stdout);
-    if let Some(limit) = rate_limit {
-        // Filed under the account the run was — `interpret` is called inside `with_account` by an
-        // engine bound to one, and outside it for the system account.
+    record_context_windows(stdout);
+    // Filed under the account the run was — `interpret` is called inside `with_account` by an
+    // engine bound to one, and outside it for the system account.
+    if let Some(limit) = parse_rate_limit(stdout) {
         let key = crate::ai_accounts::current().map(|env| env.key()).unwrap_or_else(|| "claude".to_string());
         if let Ok(mut limits) = limits_cell().lock() {
             limits.insert(key, (limit, chrono::Utc::now().to_rfc3339()));
         }
     }
-    let Ok(mut meta) = meta_cell().lock() else { return };
-    if rate_limit.is_some() {
-        meta.rate_limit = rate_limit;
-    }
-    if !slash_commands.is_empty() {
-        meta.slash_commands = slash_commands;
+}
+
+/// Files the context window the CLI stated for each model it ran, so the chat's gauge and its
+/// automatic compaction measure against the CLI's number rather than the family table's guess.
+///
+/// Claude Code builds every `modelUsage` entry with `contextWindow` (and `maxOutputTokens`) for the
+/// model and the betas it actually used — read out of the 2.1.266 binary, where the entry is
+/// `{...usage, contextWindow, maxOutputTokens}`. A run that reports none (an older CLI, a failure
+/// before the first call) files nothing and the table keeps answering. See
+/// [`crate::ai::record_context_window`].
+fn record_context_windows(stdout: &str) {
+    let Some(result) = result_payload(stdout) else { return };
+    for (model, usage) in &result.model_usage {
+        if let Some(window) = usage.get("contextWindow").and_then(serde_json::Value::as_i64) {
+            crate::ai::record_context_window(model, window);
+        }
     }
 }
 
@@ -366,29 +393,6 @@ fn parse_rate_limit(stdout: &str) -> Option<AiRateLimit> {
         });
     }
     found
-}
-
-/// The `slash_commands` array of the `system`/`init` event — every command this install can
-/// expand, including the ones plugins and the user added, which is why it is read from the run
-/// instead of curated here.
-///
-/// The first init wins: a run emits exactly one, and it is the eighth line or so of a stream whose
-/// first entries are hook events.
-fn parse_slash_commands(stdout: &str) -> Vec<String> {
-    for line in stdout.lines() {
-        let line = line.trim();
-        if !line.starts_with('{') || !line.contains("\"slash_commands\"") {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<InitEvent>(line) else { continue };
-        if event.event_type != "system" || event.subtype.as_deref() != Some("init") {
-            continue;
-        }
-        if !event.slash_commands.is_empty() {
-            return event.slash_commands;
-        }
-    }
-    Vec::new()
 }
 
 /// Both shapes are defaulted end to end on purpose: these events are telemetry riding along with
@@ -434,6 +438,165 @@ struct InitEvent {
     subtype: Option<String>,
     #[serde(default)]
     slash_commands: Vec<String>,
+    /// The skills this run could use — the user's, the plugins' (`vercel:deploy`) and the ones built
+    /// into the CLI, which exist nowhere on disk and are known only from here.
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    mcp_servers: Vec<McpServerState>,
+    #[serde(default)]
+    plugins: Vec<PluginRef>,
+    /// The tools that existed for the run, which says whether its MCP list can be trusted: a run
+    /// restricted with `--tools`/`--strict-mcp-config` reports no servers because it loaded none.
+    #[serde(default)]
+    tools: Vec<String>,
+}
+
+/// One MCP server as the `init` event reports it — `connected`, `pending`, `needs-auth`, `failed`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct McpServerState {
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+}
+
+/// An installed plugin as the `init` event names it: where its skills and commands live on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct PluginRef {
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+}
+
+/// What a Claude Code install told the most recent **full** chat-capable run about itself, per
+/// account — the half of `init` that describes the machine rather than the turn.
+///
+/// Kept per account because each `CLAUDE_CONFIG_DIR` has its own skills, plugins and servers, and
+/// on disk in the cache root because a menu opened right after a restart should not be empty until
+/// the next turn: this describes this machine, so it lives with the regenerable cache and never
+/// travels in a backup.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct ClaudeInstallReport {
+    #[serde(default)]
+    pub slash_commands: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub plugins: Vec<PluginRef>,
+    /// `None` until a run that loaded the user's servers has reported them — a restricted run's
+    /// empty list is not an answer, and must not erase one.
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<McpServerState>>,
+    /// When it was reported, RFC 3339.
+    #[serde(default)]
+    pub reported_at: String,
+}
+
+fn reports_cell() -> &'static Mutex<Option<BTreeMap<String, ClaudeInstallReport>>> {
+    static REPORTS: OnceLock<Mutex<Option<BTreeMap<String, ClaudeInstallReport>>>> = OnceLock::new();
+    REPORTS.get_or_init(|| Mutex::new(None))
+}
+
+fn reports_file() -> std::path::PathBuf {
+    // Tests feed `interpret` fixtures that carry `init` events; none of them may reach the file the
+    // app reads its menus from.
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("cf-claude-install-reports-{}.json", std::process::id()));
+    #[cfg(not(test))]
+    crate::paths::cache_dir().join("claude-install-reports.json")
+}
+
+/// What `account_key` (see `AccountEnv::key`, `claude` for the system account) last reported, if it
+/// has ever run here — from memory, or from the cache file after a restart.
+pub fn install_report(account_key: &str) -> Option<ClaudeInstallReport> {
+    let mut cell = reports_cell().lock().ok()?;
+    let reports = cell.get_or_insert_with(|| {
+        std::fs::read_to_string(reports_file())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    });
+    reports.get(account_key).cloned()
+}
+
+/// Files a run's `init` under its account. Commands, skills and plugins are replaced by any run
+/// that reported them; the server list only by a run that actually loaded the user's servers.
+fn record_install_report(account_key: &str, init: InitEvent) {
+    let Ok(mut cell) = reports_cell().lock() else { return };
+    let reports = cell.get_or_insert_with(|| {
+        std::fs::read_to_string(reports_file())
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    });
+    let entry = reports.entry(account_key.to_string()).or_default();
+    if !init.slash_commands.is_empty() {
+        entry.slash_commands = init.slash_commands;
+    }
+    if !init.skills.is_empty() {
+        entry.skills = init.skills;
+    }
+    if !init.plugins.is_empty() {
+        entry.plugins = init.plugins;
+    }
+    // A run whose tool set was cut down (`--tools`, which the read-only paths use together with
+    // `--strict-mcp-config`) loaded no servers by design; only one with the ordinary writers in hand
+    // speaks for what the user has configured.
+    let full_run = init.tools.iter().any(|tool| tool == "Edit" || tool == "Bash" || tool == "Write");
+    if full_run {
+        entry.mcp_servers = Some(init.mcp_servers);
+    }
+    entry.reported_at = chrono::Utc::now().to_rfc3339();
+    if let Ok(text) = serde_json::to_string(&*reports) {
+        let file = reports_file();
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(file, text);
+    }
+}
+
+/// Files what a chat turn's `init` said about the install, under `account_key`.
+///
+/// The project's own skills and commands are taken out first — the ones in `<cwd>/.claude` — since
+/// the report stands for the *install*, and a repository's `.claude/skills` would otherwise be
+/// listed in every other conversation as if it came with the CLI.
+pub fn record_install_from_run(account_key: &str, cwd: Option<&str>, stdout: &str) {
+    let Some(mut init) = parse_init(stdout) else { return };
+    if let Some(cwd) = cwd {
+        let project = std::path::Path::new(cwd).join(".claude");
+        let names = |dir: &std::path::Path, strip_md: bool| -> std::collections::HashSet<String> {
+            std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| entry.file_name().to_string_lossy().to_string())
+                        .map(|name| if strip_md { name.trim_end_matches(".md").to_string() } else { name })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let skills = names(&project.join("skills"), false);
+        let commands = names(&project.join("commands"), true);
+        init.skills.retain(|name| !skills.contains(name));
+        init.slash_commands.retain(|name| !skills.contains(name) && !commands.contains(name));
+    }
+    record_install_report(account_key, init);
+}
+
+/// The `init` event of a run, whole. The first one wins — a run emits exactly one.
+fn parse_init(stdout: &str) -> Option<InitEvent> {
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') || !line.contains("\"init\"") {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<InitEvent>(line) else { continue };
+        if event.event_type == "system" && event.subtype.as_deref() == Some("init") {
+            return Some(event);
+        }
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -875,6 +1038,50 @@ mod tests {
         assert_eq!(run.model, None);
     }
 
+    /// The rule has to be the CLI's own spelling or it allows nothing, silently.
+    #[test]
+    fn an_mcp_rule_names_the_server_the_way_claude_does() {
+        assert_eq!(mcp_rule("trello"), "mcp__trello");
+        assert_eq!(mcp_rule("my.server name"), "mcp__my_server_name");
+        assert_eq!(mcp_rule("claude.ai Gmail"), "mcp__claude_ai_Gmail");
+        assert_eq!(mcp_rule("claude.ai Google Drive"), "mcp__claude_ai_Google_Drive");
+    }
+
+    /// Kept-out servers are denied by rule; a read-only run loads none, so it says nothing.
+    #[test]
+    fn blocked_servers_are_denied_and_read_only_runs_leave_them_alone() {
+        let mut inv = AiInvocation::new("hola", "");
+        inv.mcp_block = vec!["trello".into(), "claude.ai Gmail".into()];
+        let args: Vec<String> = ClaudeEngine
+            .build_command("claude", &inv)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let at = args.iter().position(|a| a == "--disallowedTools").expect("denied");
+        assert_eq!(args[at + 1], "mcp__trello,mcp__claude_ai_Gmail");
+        inv.read_only = true;
+        let args: Vec<String> = ClaudeEngine
+            .build_command("claude", &inv)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(!args.iter().any(|a| a == "--disallowedTools"), "{args:?}");
+    }
+
+    /// The window a run states replaces the family table's guess for that model.
+    #[test]
+    fn the_window_a_run_reports_is_what_the_gauge_measures_against() {
+        let model = "claude-sonnet-4-6-cf-reported-window-test";
+        let stdout = format!(
+            r#"{{"type":"result","subtype":"success","is_error":false,"result":"ok","modelUsage":{{"{model}":{{"outputTokens":3,"contextWindow":200000,"maxOutputTokens":64000}}}}}}"#
+        );
+        assert_eq!(crate::ai::context_window_for(model), Some(1_000_000), "the family table first");
+        record_run_meta(&stdout);
+        assert_eq!(crate::ai::context_window_for(model), Some(200_000), "then the CLI's own word");
+    }
+
     /// Older/edge payloads simply omit the field — that must not break parsing.
     #[test]
     fn a_missing_model_usage_field_is_not_an_error() {
@@ -1023,7 +1230,7 @@ mod tests {
             r#"{"type":"system","subtype":"init","session_id":"s-1","model":"claude-haiku-4-5-20251001","slash_commands":["compact","model","deep-research"],"tools":["Read"]}"#,
         );
         let stdout = stdout.as_str();
-        assert_eq!(parse_slash_commands(stdout), vec!["compact", "model", "deep-research"]);
+        assert_eq!(parse_init(stdout).unwrap().slash_commands, vec!["compact", "model", "deep-research"]);
         // …and the same buffer still yields the rate limit, since both scans are independent.
         assert!(parse_rate_limit(stdout).is_some());
     }
@@ -1032,8 +1239,8 @@ mod tests {
     /// app's own commands alone, which is honest; asserting this install has none is not.
     #[test]
     fn a_run_without_an_init_event_reports_no_commands() {
-        assert!(parse_slash_commands(STREAM_JSON_STDOUT).is_empty());
-        assert!(parse_slash_commands("").is_empty());
+        assert!(parse_init(STREAM_JSON_STDOUT).is_none_or(|init| init.slash_commands.is_empty()));
+        assert!(parse_init("").is_none());
     }
 
     /// The flag is what turns the event log into one frame per token. Every non-chat flow through

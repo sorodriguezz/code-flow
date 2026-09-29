@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Lock, Settings2 } from "lucide-react";
-import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
+import { AI_PROVIDERS, isLegacyModel, modelDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "./ProviderGlyph";
 import { modelOptionsFor } from "../settings/modelPicker";
 import { MODELS_MAX_AGE_MS, useAiModelsStore } from "../../state/aiModelsStore";
@@ -455,13 +455,20 @@ export function ChatModelPicker({
                         selected={browsing === providerId && !configuredModel}
                         onClick={() => void pick(browsing, "")}
                       />
-                      {versions.map((id) => (
-                        <VersionItem
-                          key={id}
-                          label={modelDisplayLabel(browsing, id, t)}
-                          selected={browsing === providerId && configuredModel === id}
-                          onClick={() => void pick(browsing, id)}
-                        />
+                      {versions.map((id, index) => (
+                        <div key={id}>
+                          {/* One divider, above the first earlier-generation model. */}
+                          {isLegacyModel(browsing, id) && !isLegacyModel(browsing, versions[index - 1] ?? "") && (
+                            <p className="px-2 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+                              {t("chat.modelsEarlier")}
+                            </p>
+                          )}
+                          <VersionItem
+                            label={modelDisplayLabel(browsing, id, t)}
+                            selected={browsing === providerId && configuredModel === id}
+                            onClick={() => void pick(browsing, id)}
+                          />
+                        </div>
                       ))}
                       {versions.length === 0 && (
                         <p className="px-2 py-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">

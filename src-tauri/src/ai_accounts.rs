@@ -478,6 +478,23 @@ pub fn prepare_dir(provider: &str, id: &str, copy_config: bool) -> std::io::Resu
     Ok(dir)
 }
 
+/// Where `env`'s Claude Code keeps its configuration — skills, plugins, commands, settings: the
+/// account's own `CLAUDE_CONFIG_DIR`, or the system account's.
+pub fn claude_config_dir(env: &AccountEnv) -> Option<PathBuf> {
+    match env.var("CLAUDE_CONFIG_DIR") {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => system_claude_dir(),
+    }
+}
+
+/// Where `env`'s Codex keeps its configuration: the account's own `CODEX_HOME`, or the system one.
+pub fn codex_home_dir(env: &AccountEnv) -> Option<PathBuf> {
+    match env.var("CODEX_HOME") {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => system_codex_home(),
+    }
+}
+
 /// Where the system account's Claude Code state lives: the app's own `CLAUDE_CONFIG_DIR` when it
 /// was launched with one, else `~/.claude`.
 fn system_claude_dir() -> Option<PathBuf> {
@@ -616,16 +633,17 @@ pub async fn probe(binary: &str, env: &AccountEnv) -> AccountStatus {
     // it behind the answer — so a second ask is the honest reading.
     let attempts = if env.provider == "grok" { 2 } else { 1 };
     for attempt in 0..attempts {
-        let mut cmd = crate::ai::aux_command(binary);
+        let (mut cmd, program) = crate::ai::aux_command_resolved(binary);
         cmd.args(&args);
         env.apply(&mut cmd);
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let output = match tokio::time::timeout(std::time::Duration::from_secs(25), cmd.output()).await {
+        let launch = crate::ai::output_patiently(&mut cmd, binary, &program);
+        let output = match tokio::time::timeout(std::time::Duration::from_secs(25), launch).await {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => {
-                status.error = e.to_string();
+                status.error = e;
                 return status;
             }
             Err(_) => {
@@ -878,18 +896,19 @@ pub async fn logout(binary: &str, env: &AccountEnv) -> Result<(), String> {
     if crate::ai::find_on_path(binary).is_none() {
         return Err("not_installed".into());
     }
-    let mut cmd = crate::ai::aux_command(binary);
+    let (mut cmd, program) = crate::ai::aux_command_resolved(binary);
     cmd.args(args);
     env.apply(&mut cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    match tokio::time::timeout(std::time::Duration::from_secs(20), cmd.output()).await {
+    let launch = crate::ai::output_patiently(&mut cmd, binary, &program);
+    match tokio::time::timeout(std::time::Duration::from_secs(20), launch).await {
         Ok(Ok(output)) if output.status.success() => Ok(()),
         // The CLI's own sentence when it has one ("not logged in"), rather than an exit code.
         Ok(Ok(output)) => Err(first_line(&crate::ai::strip_ansi(&String::from_utf8_lossy(&output.stderr)))
             .unwrap_or_else(|| format!("{binary} {}", output.status))),
-        Ok(Err(e)) => Err(e.to_string()),
+        Ok(Err(e)) => Err(e),
         Err(_) => Err("timeout".into()),
     }
 }

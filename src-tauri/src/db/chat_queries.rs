@@ -49,7 +49,8 @@ const CONVERSATION_COLUMNS: &str = "c.id, c.workspace_id, c.project_id, p.name, 
                                     c.compacted_summary, c.compacted_through_turn, \
                                     c.context_tokens, c.caveman_level, c.engine_session_id, \
                                     c.pinned_at, c.archived_at, c.parent_conversation_id, \
-                                    c.branched_at_turn, c.created_at, c.updated_at, c.account_id";
+                                    c.branched_at_turn, c.created_at, c.updated_at, c.account_id, \
+                                    c.mcp_overrides";
 
 /// A **LEFT** join, and that is the whole point of writing it once: `project_id` is nullable and
 /// usually null, so an inner join would return an empty sidebar on a correctly working app.
@@ -113,6 +114,7 @@ fn map_conversation(row: &rusqlite::Row) -> rusqlite::Result<ChatConversation> {
         created_at: row.get(21)?,
         updated_at: row.get(22)?,
         account_id: row.get(23)?,
+        mcp_overrides: row.get(24)?,
     })
 }
 
@@ -432,6 +434,13 @@ pub fn update_session(
 ///
 /// `updated_at` is bumped: this changes what every future answer looks like, which is work on the
 /// conversation in the sense the sidebar's order means.
+/// Stores which MCP servers this conversation switched on or off — a JSON object by server name,
+/// written whole. Does not touch `updated_at`: a switch is not activity, and the sidebar sorts by it.
+pub fn set_mcp_overrides(conn: &Connection, id: &str, overrides: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE chat_conversations SET mcp_overrides = ?2 WHERE id = ?1", params![id, overrides])?;
+    Ok(())
+}
+
 pub fn set_caveman_level(conn: &Connection, id: &str, level: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE chat_conversations SET caveman_level = ?2, updated_at = ?3 WHERE id = ?1",

@@ -6,6 +6,7 @@ import { GitHostingSettings } from "./GitHostingSettings";
 import { ClaudeSettings } from "./ClaudeSettings";
 import { ReviewSettings } from "./ReviewSettings";
 import { SkillsSettings } from "./SkillsSettings";
+import { McpSettings } from "./McpSettings";
 import { GitSettings } from "./GitSettings";
 import { TerminalSettings } from "./TerminalSettings";
 import { GeneralSettings } from "./GeneralSettings";
@@ -672,6 +673,7 @@ export function SettingsView() {
               {section === "backup" && <BackupSettings />}
               {section === "review" && <ReviewSettings />}
               {section === "skills" && <SkillsSettings />}
+              {section === "mcp" && <McpSettings />}
             </div>
           </div>
         </div>

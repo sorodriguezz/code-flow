@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { Check, Copy, GitBranch, Pencil, RefreshCw, Square, type LucideIcon } from "lucide-react";
+import { Check, Copy, GitBranch, Pencil, Puzzle, RefreshCw, Square, type LucideIcon } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
 import { parseClaudeError } from "../../lib/claudeError";
 import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
@@ -51,6 +51,9 @@ export interface ChatBubbleMessage {
    *  banner can re-derive the billing link when a past conversation is reopened. */
   isError?: boolean;
   isCancelled?: boolean;
+  /** On a question: the skill it was sent with, picked in the composer. Told to the engine, never
+   *  part of `content` — this is the one place the transcript says it was used. */
+  skill?: string;
 }
 
 /** The turn-level actions the chat workspace hangs off a bubble. All three are "fresh session,
@@ -166,9 +169,16 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   const streaming = streamText !== undefined;
   const body = streaming ? streamText : message.content;
 
+  // An answer with no text at all is what a CLI command replies with when it just *does* something —
+  // Claude's `/clear` answers with an empty result. Said as done rather than drawn as a blank bubble.
+  const emptyReply =
+    message.role === "assistant" && !message.isError && !message.isCancelled && !streaming && !body.trim();
   const html = useMemo(
-    () => (message.role === "assistant" && !message.isError && !streaming ? renderMarkdown(body) : null),
-    [message.role, message.isError, streaming, body],
+    () =>
+      message.role === "assistant" && !message.isError && !streaming
+        ? renderMarkdown(emptyReply ? `*${t("chat.emptyReply")}*` : body)
+        : null,
+    [message.role, message.isError, streaming, body, emptyReply, t],
   );
   // Parsed at render, not stored: a reopened conversation gets the same billing link and retry
   // advice as the moment it failed, from the raw text kept in the transcript.
@@ -245,6 +255,12 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         // string here and would otherwise be the one kind of message you couldn't quote back.
         className={`group relative select-text ${shell}`}
       >
+        {isUser && message.skill && (
+          <span className="mb-1 flex items-center gap-1 font-mono text-[11px] text-[var(--cf-text-muted)]">
+            <Puzzle size={11} className="shrink-0" />
+            {message.skill}
+          </span>
+        )}
         {html !== null ? (
           <div
             ref={bodyRef}

@@ -152,6 +152,58 @@ pub(crate) const BAD_CREDENTIALS: &str = "Azure DevOps rejected the credentials 
 organization name is right and that the personal access token is valid, not expired, and has the \
 scopes CodeFlow needs (Code, Project and Team, and Work Items / Wiki if you use those)";
 
+/// An expired personal access token, said as what it is. Azure answers it with a whole HTML page
+/// ("Access Denied: The Personal Access Token used has expired."), which [`describe_failure`] reads
+/// the title of instead of pasting the page — style sheet and all — into the settings row.
+pub(crate) const PAT_EXPIRED: &str = "Azure DevOps rejected the personal access token because it has \
+expired — create a new one and connect the organization again";
+
+/// A failed Azure DevOps request as one readable sentence.
+///
+/// The body is whatever the service had to hand: `{"message": …}` from the REST API, or — for a
+/// token that expired or was revoked — a complete HTML error page, which used to reach the screen
+/// verbatim. The page's `<title>` is its sentence and the rest is markup; a JSON error's `message`
+/// is its sentence and the rest is ids. A 401 is always the token, and gets the sentence that says
+/// what to do about it.
+pub(crate) fn describe_failure(status: reqwest::StatusCode, body: &str) -> String {
+    let detail = failure_detail(body);
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        let expired = detail.as_deref().is_some_and(|d| d.to_ascii_lowercase().contains("expired"));
+        return if expired { PAT_EXPIRED } else { BAD_CREDENTIALS }.to_string();
+    }
+    match detail {
+        Some(detail) => format!("Azure DevOps returned {status}: {detail}"),
+        None => format!("Azure DevOps returned {status}"),
+    }
+}
+
+/// The sentence inside an error body, one line and at most 300 characters. `None` for a body with
+/// nothing readable in it (an HTML page with no title, or nothing at all).
+fn failure_detail(body: &str) -> Option<String> {
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let one_line = |text: &str| -> Option<String> {
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!text.is_empty()).then(|| text.chars().take(300).collect())
+    };
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(message) = value.get("message").and_then(serde_json::Value::as_str) {
+            return one_line(message);
+        }
+    }
+    let lower = body.to_ascii_lowercase();
+    if lower.starts_with("<!doctype") || lower.starts_with("<html") || lower.contains("<html") {
+        // ASCII lower-casing keeps every byte where it was, so the offsets found in `lower` are
+        // offsets into `body` too.
+        let start = lower.find("<title>")? + "<title>".len();
+        let end = start + lower[start..].find("</title>")?;
+        return one_line(&body[start..end]);
+    }
+    one_line(body)
+}
+
 pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, pat: &str) -> Result<T, String> {
     let res = client()
         .get(url)
@@ -162,7 +214,7 @@ pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, pat: &str)
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
+        return Err(describe_failure(status, &body));
     }
 
     // The trap this exists for: a wrong or expired PAT does **not** get a 401 out of
@@ -635,7 +687,7 @@ pub async fn create_pull_request(
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {text}"));
+        return Err(describe_failure(status, &text));
     }
     let pr: RawPullRequest =
         res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
@@ -757,7 +809,7 @@ pub async fn search_work_items(
     let status = res.status();
     if !status.is_success() {
         let text = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {text}"));
+        return Err(describe_failure(status, &text));
     }
     let found: RawWiqlResult =
         res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
@@ -1135,7 +1187,7 @@ async fn post_thread(url: &str, body: &serde_json::Value, pat: &str) -> Result<i
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
+        return Err(describe_failure(status, &body));
     }
     let created: ThreadCreated = res.json().await.map_err(|e| format!("couldn't read Azure DevOps response: {e}"))?;
     Ok(created.id)
@@ -1169,7 +1221,7 @@ pub async fn reply_pr_thread(
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
+        return Err(describe_failure(status, &body));
     }
     Ok(())
 }
@@ -1202,7 +1254,7 @@ pub async fn set_pr_thread_status(
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
+        return Err(describe_failure(status, &body));
     }
     Ok(())
 }
@@ -1316,7 +1368,7 @@ pub async fn set_reviewer_vote(
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
+        return Err(describe_failure(status, &body));
     }
     Ok(())
 }
@@ -1374,7 +1426,7 @@ pub async fn abandon_pull_request(
     let status = res.status();
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
+        return Err(describe_failure(status, &body));
     }
     Ok(())
 }
@@ -1925,6 +1977,29 @@ pub async fn list_pr_comment_threads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What Azure actually sends for an expired token — a whole HTML page — is said in one sentence.
+    #[test]
+    fn an_expired_token_is_one_sentence_not_a_page() {
+        let page = "<!DOCTYPE html > <html> <head> <title>Access Denied: The Personal Access Token used has expired.</title> <style type=\"text/css\">html { height: 100%; } body { font-family: -apple-system; }</style></head><body>...</body></html>";
+        assert_eq!(describe_failure(reqwest::StatusCode::UNAUTHORIZED, page), PAT_EXPIRED);
+        // Any other 401 is still the credentials, and never the page.
+        assert_eq!(describe_failure(reqwest::StatusCode::UNAUTHORIZED, "<html><body>no</body></html>"), BAD_CREDENTIALS);
+        // A page on another status is its title.
+        assert_eq!(
+            describe_failure(reqwest::StatusCode::SERVICE_UNAVAILABLE, "<html><head><title>Service\n  Unavailable</title></head></html>"),
+            "Azure DevOps returned 503 Service Unavailable: Service Unavailable"
+        );
+        // The REST API's own sentence beats its JSON.
+        assert_eq!(
+            describe_failure(reqwest::StatusCode::BAD_REQUEST, r#"{"$id":"1","message":"TF401019: The Git repository does not exist.","typeKey":"GitRepositoryNotFoundException"}"#),
+            "Azure DevOps returned 400 Bad Request: TF401019: The Git repository does not exist."
+        );
+        // And nothing at all is still a sentence.
+        assert_eq!(describe_failure(reqwest::StatusCode::FORBIDDEN, "  "), "Azure DevOps returned 403 Forbidden");
+        let long = "x".repeat(900);
+        assert!(describe_failure(reqwest::StatusCode::BAD_REQUEST, &long).chars().count() < 340);
+    }
 
     /// Azure has no "give me the diff" endpoint, so the whole repo-less review of an Azure PR
     /// rests on this rendering two blobs into something a diff parser (and the model) reads the

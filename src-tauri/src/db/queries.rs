@@ -527,7 +527,7 @@ fn rehome_global_rows(conn: &Connection, from: &str) -> rusqlite::Result<()> {
     // Nothing left to be global *to*. The cascade is the right answer here.
     let Some(into) = into else { return Ok(()) };
 
-    for table in ["note_books", "notes", "api_collections", "db_connections"] {
+    for table in ["note_books", "notes", "api_collections", "db_connections", "mcp_servers"] {
         conn.execute(
             &format!(
                 "UPDATE {table} SET workspace_id = ?2 WHERE workspace_id = ?1 AND scope = 'global'"
@@ -1389,7 +1389,11 @@ pub fn chain_pause_reason(error: &str) -> Option<&'static str> {
         crate::ai::AiFailureKind::Quota => Some("chain.pausedQuota"),
         crate::ai::AiFailureKind::AuthRequired => Some("chain.pausedAuth"),
         crate::ai::AiFailureKind::CliMissing => Some("chain.pausedCliMissing"),
-        crate::ai::AiFailureKind::Overloaded | crate::ai::AiFailureKind::Other => None,
+        // A busy executable comes back by itself in seconds, so the step's ordinary retries are
+        // the right answer — parking the plan on it would wait for a fix nobody has to make.
+        crate::ai::AiFailureKind::CliBusy
+        | crate::ai::AiFailureKind::Overloaded
+        | crate::ai::AiFailureKind::Other => None,
     }
 }
 

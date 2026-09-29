@@ -452,27 +452,11 @@ fn ignored_archive_path(name: &str) -> bool {
     })
 }
 
-/// The `name:` from a `SKILL.md`'s YAML front matter, if it has one.
-///
-/// Deliberately not a YAML parse. A skill's front matter is a handful of scalars and the one field
-/// wanted here is a bare string on its own line; a parser would be a dependency and a fresh set of
-/// failure modes in exchange for a `k: v` split. Stops at the closing `---` so a `name:` down in
-/// the instructions cannot be mistaken for the skill's own.
+/// The `name:` from a `SKILL.md`'s YAML front matter, if it has one — read by
+/// [`crate::skill_meta`], the one front-matter reader, which stops at the closing `---` so a
+/// `name:` down in the instructions cannot be mistaken for the skill's own.
 fn front_matter_name(skill_md: &str) -> Option<String> {
-    // The BOM first: a `SKILL.md` written by a Windows editor starts with one, and it would
-    // otherwise make the `---` test fail and cost the skill its real name for no visible reason.
-    let rest = skill_md.trim_start_matches('\u{feff}').strip_prefix("---")?;
-    let body = rest.strip_prefix("\r\n").or_else(|| rest.strip_prefix('\n'))?;
-    for line in body.lines() {
-        if line.trim() == "---" {
-            return None;
-        }
-        if let Some(value) = line.strip_prefix("name:") {
-            let value = value.trim().trim_matches(['"', '\'']).trim();
-            return (!value.is_empty()).then(|| value.to_string());
-        }
-    }
-    None
+    crate::skill_meta::parse(skill_md).name
 }
 
 /// Lists every file inside a skill's folder (relative paths, `/`-separated) — the file tree the
@@ -510,6 +494,11 @@ pub fn write_skill_file(
 pub fn delete_skill_file(workspace_id: String, skill_name: String, rel_path: String) -> Result<(), String> {
     let path = safe_skill_path(&workspace_id, &skill_name, &rel_path)?;
     std::fs::remove_file(&path).map_err(|e| e.to_string())
+}
+
+/// An app skill's `SKILL.md` in the workspace's store.
+pub(crate) fn app_skill_file(workspace_id: &str, name: &str) -> std::path::PathBuf {
+    skill_dir(workspace_id, name).join("SKILL.md")
 }
 
 fn skills_root(workspace_id: &str) -> std::path::PathBuf {
@@ -593,6 +582,110 @@ pub fn sync_skills_into_project(skills: &[WorkspaceSkill], workspace_id: &str, p
         copy_dir_recursive(&entry.path(), &dest_root.join(name)).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// The file every skill folder the app copies into a working directory carries, holding the source
+/// tree's fingerprint.
+///
+/// It is what makes a folder *ours*: [`mirror_skills_into_workdir`] only ever replaces or removes a
+/// folder that has it, so a skill a model wrote into its own working directory — or one a user put
+/// there — is never touched. And it is what spares a turn the copy: a fingerprint that still matches
+/// the source means nothing changed since the last turn copied it.
+pub(crate) const SYNC_MARKER: &str = ".codeflow-skill";
+
+/// Every root an engine here reads skills from — see `AiEngine::native_skills_dir`.
+const SKILL_ROOTS: [&str; 2] = [".claude/skills", ".agents/skills"];
+
+/// Mirrors the workspace's enabled skills into a working directory **the app owns** — a chat's own
+/// folder — under the one root the engine about to run reads natively.
+///
+/// Unlike [`sync_skills_into_project`] this may make the directory match exactly, because nothing
+/// else in it is anybody's: a skill disabled or deleted since the last turn is removed, and so is a
+/// copy made under another root for the engine a conversation used before it switched — Grok reads
+/// both roots, and would otherwise be shown the same skill twice. Only folders carrying
+/// [`SYNC_MARKER`] are ever touched. Nothing is excluded from git: there is no repository here.
+pub fn mirror_skills_into_workdir(
+    skills: &[WorkspaceSkill],
+    workspace_id: &str,
+    dir: &Path,
+    root: &str,
+) -> Result<(), String> {
+    mirror_skills_from(&skills_root(workspace_id), skills, dir, root)
+}
+
+/// [`mirror_skills_into_workdir`] from an explicit skill store — the part worth testing, without a
+/// test writing into the app's real state directory.
+fn mirror_skills_from(src_root: &Path, skills: &[WorkspaceSkill], dir: &Path, root: &str) -> Result<(), String> {
+    let enabled: std::collections::HashSet<&str> =
+        skills.iter().filter(|s| s.enabled).map(|s| s.skill_name.as_str()).collect();
+
+    for managed in SKILL_ROOTS {
+        let Ok(entries) = std::fs::read_dir(dir.join(managed)) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.join(SYNC_MARKER).is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if managed != root || !enabled.contains(name.as_str()) {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+    }
+
+    if enabled.is_empty() || !src_root.is_dir() {
+        return Ok(());
+    }
+    let dest_root = dir.join(root);
+    std::fs::create_dir_all(&dest_root).map_err(|e| e.to_string())?;
+    for name in enabled {
+        let src = src_root.join(name);
+        if !src.join("SKILL.md").is_file() {
+            continue;
+        }
+        let fingerprint = tree_fingerprint(&src);
+        let dest = dest_root.join(name);
+        let marker = dest.join(SYNC_MARKER);
+        if dest.exists() {
+            if !marker.is_file() {
+                // Somebody else's folder under the same name — the model's, or the user's. Theirs
+                // wins; the engine reads that one.
+                continue;
+            }
+            if std::fs::read_to_string(&marker).ok().as_deref() == Some(fingerprint.as_str()) {
+                continue;
+            }
+            std::fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
+        }
+        copy_dir_recursive(&src, &dest).map_err(|e| e.to_string())?;
+        std::fs::write(&marker, &fingerprint).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// A fingerprint of a skill folder's contents: every file's relative path, size and modification
+/// time. Cheap — no file is read — and enough to notice an edit made in the app's skill editor, an
+/// import that replaced a file, or a file added or removed.
+fn tree_fingerprint(dir: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut files = Vec::new();
+    let _ = collect_files(dir, dir, &mut files);
+    files.sort();
+    let mut hasher = Sha256::new();
+    for rel in files {
+        let meta = std::fs::metadata(dir.join(&rel)).ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        hasher.update(rel.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(size.to_le_bytes());
+        hasher.update(modified.to_le_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
@@ -759,6 +852,58 @@ mod tests {
         // …and the front matter is still what answers when the archive has no folder to read.
         let md = read_archive_text(&mut zip, at).unwrap();
         assert_eq!(front_matter_name(&md).as_deref(), Some("Working with PDFs"));
+    }
+
+    /// The chat's folder mirrors the enabled set under the engine's own root: copied once, skipped
+    /// while unchanged, moved when the engine changes, removed when disabled — and a folder the app
+    /// did not put there is never touched.
+    #[test]
+    fn a_workdir_mirrors_the_enabled_skills_under_the_engines_root() {
+        let store = scratch();
+        for name in ["alpha", "beta"] {
+            std::fs::create_dir_all(store.join(name)).unwrap();
+            std::fs::write(store.join(name).join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
+        }
+        let dir = scratch();
+        std::fs::create_dir_all(&dir).unwrap();
+        let row = |name: &str, enabled: bool| WorkspaceSkill {
+            id: name.to_string(),
+            workspace_id: "w".to_string(),
+            skill_name: name.to_string(),
+            source_repo: "custom".to_string(),
+            enabled,
+            installed_at: String::new(),
+        };
+
+        // Codex: `.agents/skills`, enabled ones only.
+        let skills = vec![row("alpha", true), row("beta", false)];
+        mirror_skills_from(&store, &skills, &dir, ".agents/skills").unwrap();
+        assert!(dir.join(".agents/skills/alpha/SKILL.md").is_file());
+        assert!(!dir.join(".agents/skills/beta").exists());
+
+        // Unchanged source, unchanged copy: the marker's fingerprint still matches.
+        let marker = std::fs::read_to_string(dir.join(".agents/skills/alpha").join(SYNC_MARKER)).unwrap();
+        mirror_skills_from(&store, &skills, &dir, ".agents/skills").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(".agents/skills/alpha").join(SYNC_MARKER)).unwrap(), marker);
+
+        // The conversation switches to Claude: the copy moves, none is left behind.
+        let skills = vec![row("alpha", true), row("beta", true)];
+        mirror_skills_from(&store, &skills, &dir, ".claude/skills").unwrap();
+        assert!(dir.join(".claude/skills/alpha/SKILL.md").is_file());
+        assert!(dir.join(".claude/skills/beta/SKILL.md").is_file());
+        assert!(!dir.join(".agents/skills/alpha").exists());
+
+        // A folder the model wrote itself, under a managed root, is its own business.
+        std::fs::create_dir_all(dir.join(".claude/skills/handmade")).unwrap();
+        std::fs::write(dir.join(".claude/skills/handmade/SKILL.md"), "x").unwrap();
+        // Disabled: gone. The handmade one stays.
+        let skills = vec![row("alpha", false), row("beta", true)];
+        mirror_skills_from(&store, &skills, &dir, ".claude/skills").unwrap();
+        assert!(!dir.join(".claude/skills/alpha").exists());
+        assert!(dir.join(".claude/skills/handmade/SKILL.md").is_file());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&store);
     }
 
     #[test]

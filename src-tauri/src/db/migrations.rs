@@ -1777,6 +1777,9 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- `crate::caveman`: it is a prompt, not a flag, so unlike `effort` every engine
             -- honours it and no engine has to support anything.
             caveman_level TEXT NOT NULL DEFAULT '',
+            -- JSON object of MCP servers switched on or off in this thread, by server name; empty
+            -- for none, i.e. every server at its engine's default. See `crate::chat_mcp`.
+            mcp_overrides TEXT NOT NULL DEFAULT '',
             -- Which folder this thread is filed under, or NULL for the ungrouped list at the top.
             --
             -- ON DELETE SET NULL, and that is the whole design of deleting a group: removing a
@@ -1959,7 +1962,42 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     // Only initial values are shared now; a current value that merely repeats its initial would
     // shadow a teammate's change to it — see `api_sync::split_current_values`.
     super::api_sync::migrate_variable_split(conn)?;
+    add_mcp_registry(conn)?;
     Ok(())
+}
+
+/// The MCP servers declared in CodeFlow for every model — see `crate::mcp_registry`.
+///
+/// `mcp_servers` follows the row-scope pattern (`scope` global | workspace, `workspace_id` its home,
+/// re-homed when that workspace is deleted — see `queries::rehome_global_rows`). Its `env` and
+/// `headers` hold keychain markers, never values. `mcp_trust` is the set of launch specs the user
+/// approved: it never travels in a backup, and a restore empties it, so a server that arrives any
+/// other way than being written here has to be approved before it runs.
+fn add_mcp_registry(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mcp_servers (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            scope        TEXT NOT NULL DEFAULT 'global',
+            name         TEXT NOT NULL,
+            transport    TEXT NOT NULL DEFAULT 'stdio',
+            command      TEXT NOT NULL DEFAULT '',
+            args         TEXT NOT NULL DEFAULT '[]',
+            env          TEXT NOT NULL DEFAULT '{}',
+            url          TEXT NOT NULL DEFAULT '',
+            headers      TEXT NOT NULL DEFAULT '{}',
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            default_on   INTEGER NOT NULL DEFAULT 0,
+            excluded     TEXT NOT NULL DEFAULT '[]',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mcp_servers_workspace ON mcp_servers(workspace_id);
+        CREATE TABLE IF NOT EXISTS mcp_trust (
+            hash       TEXT PRIMARY KEY,
+            trusted_at TEXT NOT NULL
+        );",
+    )
 }
 
 /// Several accounts per AI CLI — see `crate::ai_accounts` for what an account is.
@@ -2510,6 +2548,13 @@ fn add_compaction_to_chat_conversations(conn: &Connection) -> rusqlite::Result<(
     if !has_column(conn, "chat_conversations", "caveman_level")? {
         conn.execute_batch(
             "ALTER TABLE chat_conversations ADD COLUMN caveman_level TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    // Empty is "no overrides" — every MCP server at its engine's default, which is what every
+    // conversation that existed before this ran with.
+    if !has_column(conn, "chat_conversations", "mcp_overrides")? {
+        conn.execute_batch(
+            "ALTER TABLE chat_conversations ADD COLUMN mcp_overrides TEXT NOT NULL DEFAULT '';",
         )?;
     }
     Ok(())

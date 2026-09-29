@@ -74,3 +74,21 @@ describe("appCommandFor", () => {
     expect(appCommandFor("/compact    sé breve")).toEqual({ id: "compact", args: "sé breve" });
   });
 });
+
+describe("appCommandFor, per composer", () => {
+  it("gives the panel its own /clear and leaves /compact to the CLI", () => {
+    // In a repository conversation `/compact` is Claude's own command, sent through as written, and
+    // `/clear` is the app's: the next question simply starts a fresh engine session.
+    expect(appCommandFor("/clear", "panel")).toEqual({ id: "clear", args: "" });
+    expect(appCommandFor("/compact", "panel")).toBeNull();
+    expect(appCommandFor("/new", "panel")).toEqual({ id: "new", args: "" });
+    expect(appCommandFor("/caveman", "panel")).toBeNull();
+  });
+
+  it("keeps the free chat's commands as they were", () => {
+    expect(appCommandFor("/compact")).toEqual({ id: "compact", args: "" });
+    // The free chat has no `/clear` of its own — typed there, it goes to the CLI.
+    expect(appCommandFor("/clear")).toBeNull();
+    expect(appCommandFor("/clear", "chat")).toBeNull();
+  });
+});

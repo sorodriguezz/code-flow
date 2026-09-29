@@ -53,6 +53,11 @@ export interface ChatMessage {
    * account than the turn before (see `turnsToMessages`). Who answered from here on, for the line
    * the transcript draws above it. */
   accountBreak?: { provider: string; accountId: string | null };
+  /** On a question: the first one after `/clear`, which started a fresh engine session. Live only —
+   * the stored turns do not record it, so a reopened conversation shows no line here. */
+  contextReset?: boolean;
+  /** On a question: the skill it was sent with, picked in the composer. Live only, like the above. */
+  skill?: string;
 }
 
 /** One conversation, live in memory for as long as the app runs.
@@ -110,6 +115,15 @@ export interface ChatSession {
   /** A question taken back before it ever ran — stopped while it was queued behind another run.
    *  The composer puts it back where it was typed and clears this. */
   restored: string | null;
+  /** `/clear` was run: the next question starts a fresh engine session and draws the line above it. */
+  resetPending: boolean;
+}
+
+/** A skill picked for one turn — the same shape `chat_send` takes (see `SkillPick`). */
+export interface ChatSkillPick {
+  name: string;
+  source: string;
+  path: string | null;
 }
 
 /** Which engine a conversation runs on, when it has been pinned rather than left to the routing. */
@@ -136,6 +150,7 @@ function newSession(projectId: string, conversationId: string): ChatSession {
     persisted: false,
     streamText: "",
     restored: null,
+    resetPending: false,
   };
 }
 
@@ -353,7 +368,10 @@ interface ChatState {
    * time). A turn that finds the repository busy — another conversation, an analysis, a fix all
    * hold the same lease — waits for it instead of failing: see `lib/repoQueue`.
    */
-  send: (projectId: string, conversationId: string, message: string) => void;
+  send: (projectId: string, conversationId: string, message: string, skill?: ChatSkillPick | null) => void;
+  /** `/clear`: the next question in this conversation starts a fresh engine session — on every
+   *  engine, since it is the app that simply stops passing the old session on. */
+  clearContext: (conversationId: string) => void;
   /**
    * Makes sure a conversation is in memory, reading it back from disk when it is not (or when the
    * copy here may be stale). One still in flight, or never persisted, is left exactly as it is —
@@ -407,7 +425,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   byConversation: {},
   engineByConversation: {},
 
-  send: (projectId, conversationId, message) => {
+  send: (projectId, conversationId, message, skill) => {
     const trimmed = message.trim();
     if (!trimmed) return;
 
@@ -451,7 +469,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...base,
           // Stamped client-side: the turn isn't persisted until the reply lands, and the question
           // was asked now, not whenever the engine finishes answering it.
-          messages: [...base.messages, { role: "user", content: trimmed, createdAt: new Date().toISOString() }],
+          messages: [
+            ...base.messages,
+            {
+              role: "user",
+              content: trimmed,
+              createdAt: new Date().toISOString(),
+              contextReset: base.resetPending && base.messages.length > 0 ? true : undefined,
+              skill: skill?.name,
+            },
+          ],
+          resetPending: false,
           title: base.title || liveTitle(trimmed),
           sending: true,
           runId,
@@ -482,7 +510,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const engine = engineFor(base, get().engineByConversation[conversationId]);
     const agent = engine ? { provider: engine.provider, model: engine.model, prompt: "", account: engine.account ?? null } : null;
     void whenRepoFree(projectId, runId, () =>
-      sendChatMessage(projectId, trimmed, base.sessionId, conversationId, runId, agent, true),
+      sendChatMessage(
+        projectId,
+        trimmed,
+        // `/clear` is exactly this: no session handed on, so the engine starts a fresh one.
+        base.resetPending ? null : base.sessionId,
+        conversationId,
+        runId,
+        agent,
+        true,
+        skill ?? null,
+      ),
     )
       .then((reply) => {
         // The live log is already in memory and formatted; attaching it to the message is what
@@ -749,6 +787,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (!s.byConversation[conversationId]) return s;
       const { [conversationId]: _dropped, ...rest } = s.byConversation;
       return { byConversation: rest };
+    });
+  },
+
+  clearContext: (conversationId) => {
+    set((s) => {
+      const session = s.byConversation[conversationId];
+      if (!session || session.sending) return s;
+      return { byConversation: { ...s.byConversation, [conversationId]: { ...session, resetPending: true } } };
     });
   },
 

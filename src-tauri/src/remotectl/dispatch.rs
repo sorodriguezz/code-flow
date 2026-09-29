@@ -1055,6 +1055,8 @@ pub async fn dispatch(
                 None,
                 // No streaming: deltas are never forwarded to a phone.
                 None,
+                // The phone has no skill picker.
+                None,
             )
             .await?,
             Invalidate::Chat,

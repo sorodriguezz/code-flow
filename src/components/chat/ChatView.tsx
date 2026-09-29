@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { FolderGit2, MessagesSquare, Pencil, ShieldCheck } from "lucide-react";
 import { ChatTranscript } from "./ChatTranscript";
@@ -11,7 +11,7 @@ import { COLUMN_GUTTER, READING_COLUMN } from "./chatChrome";
 import type { ChatAppCommand } from "./CommandMenu";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { openTerminal, writeFileBytes } from "../../lib/tauri/commands";
-import { chatAttachBytes, chatAttachFile, type ChatAttachment } from "../../lib/tauri/chatCommands";
+import { chatAttachBytes, chatAttachFile, type ChatAttachment, type SkillPick } from "../../lib/tauri/chatCommands";
 import { EMPTY_CONVERSATION, effortKey, useConversationStore } from "../../state/conversationStore";
 import { estimateTokens } from "../../lib/contextWindow";
 import { appendQuote, passageForNewChat } from "../../lib/quoteSelection";
@@ -360,6 +360,14 @@ export function ChatView() {
   useEffect(() => {
     if (model) ensureContextWindow(model);
   }, [model, ensureContextWindow]);
+  // And again when a turn ends: the CLI reports the window it actually ran with (Claude's
+  // `modelUsage.contextWindow`), which beats the family table the first answer came from.
+  const sending = session.sending;
+  const wasSending = useRef(sending);
+  useEffect(() => {
+    if (wasSending.current && !sending && model) ensureContextWindow(model, true);
+    wasSending.current = sending;
+  }, [sending, model, ensureContextWindow]);
   const compact = useConversationStore((s) => s.compact);
   const uncompact = useConversationStore((s) => s.uncompact);
 
@@ -499,18 +507,23 @@ export function ChatView() {
    * composer says exactly that; what it must not do is look like a rewind.
    */
   const onSend = useCallback(
-    (message: string) => {
+    (message: string, skill?: SkillPick | null) => {
       setEditingTurn(null);
+      const over = skill ? { skill } : undefined;
       if (activeId) {
-        send(activeId, message);
+        send(activeId, message, over);
         return;
       }
       void create(null, provider, routedModel).then((id) => {
-        if (id) send(id, message);
+        if (id) send(id, message, over);
       });
     },
     [activeId, send, create, provider, routedModel, setEditingTurn],
   );
+  // Whose skills the `/` menu offers: the conversation's workspace (a chat is stamped with one, and
+  // the app's skills are that workspace's), or the one in front before the first message.
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const skillWorkspace = session.workspaceId || activeWorkspaceId || null;
 
   const onStop = useCallback(() => {
     if (activeId) stopTurn(activeId);
@@ -747,6 +760,7 @@ export function ChatView() {
               canWriteFiles={writable || fileGeneration}
               onRunAppCommand={runAppCommand}
               onOpenTerminal={onOpenTerminal}
+              skillScope={{ workspaceId: skillWorkspace }}
             />
           </div>
         ) : (
@@ -801,6 +815,7 @@ export function ChatView() {
               canWriteFiles={writable || fileGeneration}
               onRunAppCommand={runAppCommand}
               onOpenTerminal={onOpenTerminal}
+              skillScope={{ workspaceId: skillWorkspace, conversationId: activeId ?? null }}
               context={contextReading}
               caveman={{
                 level: conversation?.cavemanLevel ?? "",

@@ -52,6 +52,7 @@ import {
   MonitorDot,
   Network,
   PackagePlus,
+  Plug,
   Palette,
   PanelsTopLeft,
   QrCode,
@@ -467,6 +468,13 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: PackagePlus,
     group: "workspace",
     searchKey: "settings.searchTermsSkills",
+  },
+  {
+    id: "mcp",
+    labelKey: "settings.mcp",
+    icon: Plug,
+    group: "workspace",
+    searchKey: "settings.searchTermsMcp",
   },
 ];
 

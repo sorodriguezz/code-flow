@@ -144,7 +144,12 @@ pub struct ProviderCommand {
     /// With its leading slash, as the user would type it — `"/model"`.
     pub name: String,
     pub description: String,
-    /// `"cli-reported"` | `"documented"` | `"app"`.
+    /// A translation key for the description, for the commands this app describes itself (Claude's
+    /// verified built-ins) — the frontend renders it in the reader's language. `None` when the
+    /// description came from the command's own file.
+    pub description_key: Option<String>,
+    /// `"builtin"` (verified here against the CLI) | `"user"` | `"project"` | `"plugin"` (a custom
+    /// command on disk) | `"documented"` (read from a docs page) | `"cli-reported"` | `"app"`.
     ///
     /// Shown to the user, and not decoration: "cli-reported" means this came out of that binary's
     /// own handshake on this machine and is therefore true of the *installed* version, while
@@ -1001,6 +1006,7 @@ pub async fn chat_send(
     model: Option<String>,
     stream: Option<bool>,
     attachments: Option<Vec<String>>,
+    skill: Option<crate::provider_skills::SkillPick>,
 ) -> Result<ChatReply, String> {
     let conversation = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -1187,13 +1193,12 @@ pub async fn chat_send(
             }
         }
 
-        let skills = match project.as_ref() {
-            Some(_) => queries::list_workspace_skills(&conn, &conversation.workspace_id)
-                .map_err(|e| e.to_string())?,
-            // Skills are synced *into a repository*, which is the one thing this conversation does
-            // not have. Nothing to sync and nowhere to sync it.
-            None => Vec::new(),
-        };
+        // The workspace's skills, with or without a repository. This used to be empty whenever the
+        // conversation had no project — which is every conversation here — so the sync below into
+        // the chat's own folder copied nothing, ever, and the skills a user installed for the
+        // workspace never reached a single chat turn.
+        let skills = queries::list_workspace_skills(&conn, &conversation.workspace_id)
+            .map_err(|e| e.to_string())?;
 
         (contexts, skills)
     };
@@ -1281,6 +1286,31 @@ pub async fn chat_send(
         // profile, `write_file` and `bash` included.
         None => config.engine.read_only_tools(),
     };
+    // Claude Code denies, in `-p`, any tool nobody pre-approved — and `Skill` is the tool that opens
+    // one. Every chat turn gets it, in both modes: with no shell and no writer in a read-only tool
+    // set, all a skill can do there is guide the answer. Added here and not in the engine's generic
+    // read-only set, because compaction and story analysis share that set and have no use for a
+    // skills listing in every one of their fresh sessions.
+    let mut allowed_tools = allowed_tools;
+    if config.provider == "claude" && !allowed_tools.iter().any(|tool| tool == "Skill") {
+        allowed_tools.push("Skill".to_string());
+    }
+    // The user's own MCP servers, as this conversation switched them — see `crate::chat_mcp`. Not
+    // for a turn that may not write: that one loads no server at all.
+    let env = config.engine.account().cloned().unwrap_or_else(|| ai_accounts::AccountEnv::system(&config.provider));
+    let turn_mcp = if project.is_some() || may_generate_files {
+        mcp_plan(&db, &conversation.workspace_id, &config.provider, &config.binary, &env, &conversation.mcp_overrides).await
+    } else if config.provider == "codex" {
+        // Text only, on Codex: what makes that promise true is switching its own servers off too.
+        crate::chat_mcp::TurnMcp {
+            block: crate::chat_mcp::codex_read_only_block(&config.binary, &env).await,
+            ..Default::default()
+        }
+    } else {
+        crate::chat_mcp::TurnMcp::default()
+    };
+    allowed_tools.extend(turn_mcp.allow_rules.iter().cloned());
+
     // Auto-approval, not "may write": an engine that has to ask permission it has no way to be
     // granted is an engine that stops halfway and narrates a file it never created — which is
     // exactly what this conversation's first attempt at a spreadsheet did.
@@ -1306,12 +1336,26 @@ pub async fn chat_send(
         }
     };
 
-    // Skills, for a repo-less turn that may write. `sync_skills_into_project` above covers the
-    // repository case; this is the same thing for the working directory, and it is what makes
-    // "give me an .xlsx" reach a skill that knows how to build one. Best-effort: a skill that
-    // fails to copy is a capability the turn does not have, not a turn that must not run.
-    if may_generate_files {
-        let _ = sync_skills_into_project(&skills, &conversation.workspace_id, &cwd);
+    // Skills, for a repo-less turn, in either mode — a skill is instructions, and a read-only turn
+    // can follow instructions. `sync_skills_into_project` above covers the repository case; this is
+    // the chat's own folder, mirrored under the root *this* engine reads by itself (Codex's is not
+    // Claude's), so a switch of engine mid-conversation moves the copies rather than doubling them.
+    // Best-effort: a skill that fails to copy is a capability the turn does not have, not a turn
+    // that must not run.
+    if project.is_none() {
+        let root = config.engine.native_skills_dir().unwrap_or(".claude/skills");
+        let _ = crate::commands::skills_cmd::mirror_skills_into_workdir(
+            &skills,
+            &conversation.workspace_id,
+            std::path::Path::new(&cwd),
+            root,
+        );
+    }
+    // Grok's only per-run channel is a config file in its working directory, which here is the
+    // chat's own folder. Written for a Grok turn, removed when there is nothing to hand it — and
+    // only ever servers with no secrets in them, since the model can read the file.
+    if project.is_none() && config.provider == "grok" {
+        write_grok_mcp(std::path::Path::new(&cwd), &turn_mcp.app);
     }
 
     // The system prompt for this turn: the base one, plus the project's standing instructions when
@@ -1356,10 +1400,19 @@ pub async fn chat_send(
     // What the engine is actually asked, which is the user's question plus the style rules when the
     // conversation is in a mode. Built here, after the question has been persisted above, so the
     // two can never be confused: `message` is what was asked, `engine_message` is what was sent.
-    let engine_message = match caveman.as_deref() {
+    let mut engine_message = match caveman.as_deref() {
         Some(rules) => format!("{message}\n\n{rules}"),
         None => message.clone(),
     };
+    // A skill picked in the composer, said to the engine and not to the transcript — the same split
+    // as the style rules above. An app skill is pointed at the copy synced into this very folder,
+    // under the root this engine reads (see `mirror_skills_into_workdir` above).
+    if let Some(pick) = skill.as_ref().filter(|pick| !pick.name.trim().is_empty()) {
+        let root = config.engine.native_skills_dir().unwrap_or(".claude/skills");
+        let local = (pick.source == "app").then(|| format!("{root}/{}/SKILL.md", pick.name.trim()));
+        engine_message.push_str("\n\n");
+        engine_message.push_str(&crate::provider_skills::instruction(&config.provider, pick, local.as_deref()));
+    }
 
     let started = std::time::Instant::now();
 
@@ -1401,6 +1454,8 @@ pub async fn chat_send(
                 // A turn that may not write asks its engine for the strongest read-only mode that
                 // engine's CLI enforces — see the module docs, §1, for which ones that is.
                 read_only: !write_access,
+                mcp_block: turn_mcp.block.clone(),
+                app_mcp: turn_mcp.app.clone(),
             },
         )
         .await
@@ -1892,6 +1947,8 @@ async fn run_compaction(
                 attachments: &[],
                 // It reads a transcript and writes a paragraph; nothing else is its business.
                 read_only: true,
+                mcp_block: Vec::new(),
+                app_mcp: Vec::new(),
             },
         )
         .await
@@ -2071,10 +2128,40 @@ fn checkpoint_after(repo_path: &str, checkpoint: Option<String>) {
 /// ignored the instruction. Three of the six providers therefore return nothing at all, and the UI
 /// offers "open in terminal" for those instead — which is the true answer: those commands exist,
 /// they are just not reachable from `-p`.
+///
+/// Skills are not here: they have their own section and their own list, [`chat_provider_skills`].
 #[tauri::command]
-pub fn chat_provider_commands(provider: String) -> Vec<ProviderCommand> {
-    match provider.as_str() {
-        "claude" => claude_slash_commands(),
+pub fn chat_provider_commands(
+    db: State<'_, Db>,
+    provider: String,
+    account_id: Option<String>,
+    workspace_id: Option<String>,
+    project_id: Option<String>,
+) -> Vec<ProviderCommand> {
+    let (env, repo) = match db.0.lock() {
+        Ok(conn) => (
+            ai_accounts::resolve(
+                &conn,
+                &provider,
+                Some("chat"),
+                workspace_id.as_deref(),
+                ai_accounts::Choice::parse(account_id.as_deref()),
+            ),
+            project_id
+                .as_deref()
+                .and_then(|id| queries::get_project(&conn, id).ok().flatten())
+                .map(|project| std::path::PathBuf::from(project.local_path)),
+        ),
+        Err(_) => (ai_accounts::AccountEnv::system(&provider), None),
+    };
+    provider_commands(&provider, &env, repo.as_deref())
+}
+
+/// [`chat_provider_commands`] once the account and the repository are known — testable without a
+/// database.
+fn provider_commands(provider: &str, env: &ai_accounts::AccountEnv, repo: Option<&std::path::Path>) -> Vec<ProviderCommand> {
+    match provider {
+        "claude" => claude_commands(env, repo),
         "grok" => grok_slash_commands(),
         "gemini" => gemini_slash_commands(),
         // codex, opencode, cline — and anything unknown. See the doc above.
@@ -2082,24 +2169,297 @@ pub fn chat_provider_commands(provider: String) -> Vec<ProviderCommand> {
     }
 }
 
-/// Claude's, from the handshake of the most recent run **in this process**.
+/// Claude Code's built-in commands that do something useful in `-p`, each verified against the
+/// installed CLI (2.1.266) rather than copied from a list: `/clear` answers with a
+/// `conversation_reset` and a fresh session, `/context` with its usage table, `/compact` compacts
+/// the resumed session ("Not enough messages to compact." on an empty one), `/usage` with the plan's
+/// windows — all four without calling the model. `/init` and `/security-review` are prompts, so
+/// they run like a question; both are about a repository, which is why they need one.
 ///
-/// The one source in this file that is true of the installed binary rather than of a document: the
-/// CLI prints its whole command list in the `system`/`init` event of every run, plugins and the
-/// user's own `~/.claude/commands` included, so this is a free and exact answer — for an install
-/// that has run at least one turn. Before that it is empty, deliberately: guessing at a list this
-/// app can simply be told is how a stale default outlives the version it was copied from.
-fn claude_slash_commands() -> Vec<ProviderCommand> {
-    crate::claude::last_run_meta()
-        .slash_commands
-        .into_iter()
-        .map(|name| ProviderCommand {
-            // Stored without one (see `ClaudeRunMeta::slash_commands`); the slash is this layer's.
-            name: format!("/{name}"),
-            description: String::new(),
-            source: "cli-reported".to_string(),
+/// Most of the hundred-odd commands the handshake lists are interactive — `/config`, `/model`,
+/// `/help` ("isn't available in this environment") — which is why this is an allow-list and the
+/// handshake only confirms the install still has each one.
+const CLAUDE_BUILTINS: [(&str, &str, bool); 6] = [
+    ("/compact", "chat.cliCompact", false),
+    ("/clear", "chat.cliClear", false),
+    ("/context", "chat.cliContext", false),
+    ("/usage", "chat.cliUsage", false),
+    ("/init", "chat.cliInit", true),
+    ("/security-review", "chat.cliSecurityReview", true),
+];
+
+/// Claude's: the verified built-ins, then the custom commands on disk — the user's, the
+/// repository's and the enabled plugins' (`provider_skills::claude_commands`).
+fn claude_commands(env: &ai_accounts::AccountEnv, repo: Option<&std::path::Path>) -> Vec<ProviderCommand> {
+    let report = crate::claude::install_report(&env.key());
+    let reported = |name: &str| {
+        report.as_ref().is_none_or(|report| {
+            report.slash_commands.is_empty() || report.slash_commands.iter().any(|known| known == name.trim_start_matches('/'))
         })
-        .collect()
+    };
+    let mut out: Vec<ProviderCommand> = CLAUDE_BUILTINS
+        .iter()
+        .filter(|(_, _, needs_repo)| repo.is_some() || !needs_repo)
+        .filter(|(name, _, _)| reported(name))
+        .map(|(name, key, _)| ProviderCommand {
+            name: name.to_string(),
+            description: String::new(),
+            description_key: Some(key.to_string()),
+            source: "builtin".to_string(),
+        })
+        .collect();
+    if let Some(config) = ai_accounts::claude_config_dir(env) {
+        for command in crate::provider_skills::claude_commands(&config, repo, report.as_ref()) {
+            if out.iter().any(|known| known.name == command.name) {
+                continue;
+            }
+            out.push(ProviderCommand {
+                name: command.name,
+                description: command.description,
+                description_key: None,
+                source: command.source,
+            });
+        }
+    }
+    out
+}
+
+/// The MCP plan for one turn of `provider`, run as `env`, with `overrides` as stored — the user's
+/// own servers switched as they were, plus the app's declared ones for `workspace_id` that are on.
+pub(crate) async fn mcp_plan(
+    db: &Db,
+    workspace_id: &str,
+    provider: &str,
+    binary: &str,
+    env: &ai_accounts::AccountEnv,
+    overrides: &str,
+) -> crate::chat_mcp::TurnMcp {
+    let overrides = crate::chat_mcp::parse_overrides(overrides);
+    let app = match db.0.lock() {
+        Ok(conn) => {
+            let store = crate::db::api_secrets::os_store();
+            let _ = crate::mcp_registry::absorb_legacy(&conn, &store);
+            crate::mcp_registry::live_servers(&conn, &store, workspace_id, provider, &overrides)
+        }
+        Err(_) => Vec::new(),
+    };
+    let (servers, allowed) = native_mcp(provider, binary, env, None).await;
+    crate::chat_mcp::plan(provider, &servers, &overrides, &allowed, app)
+}
+
+/// Writes — or removes — the managed `.grok/config.toml` in a chat's folder. A file there that the
+/// app did not write is left alone.
+fn write_grok_mcp(dir: &std::path::Path, app: &[crate::mcp_registry::LiveServer]) {
+    let file = dir.join(".grok").join("config.toml");
+    let ours = std::fs::read_to_string(&file).map(|text| text.starts_with("# Managed by CodeFlow")).unwrap_or(true);
+    if !ours {
+        return;
+    }
+    match crate::mcp_registry::grok_config(app) {
+        Some(text) => {
+            let _ = std::fs::create_dir_all(dir.join(".grok"));
+            let _ = std::fs::write(&file, text);
+        }
+        None => {
+            let _ = std::fs::remove_file(&file);
+        }
+    }
+}
+
+/// The user's own MCP servers for `provider`, and — for Claude — the ones their settings already
+/// allow. See `crate::chat_mcp`.
+async fn native_mcp(
+    provider: &str,
+    binary: &str,
+    env: &ai_accounts::AccountEnv,
+    cwd: Option<&std::path::Path>,
+) -> (Vec<(String, String)>, std::collections::HashSet<String>) {
+    match provider {
+        "claude" => {
+            let allowed = ai_accounts::claude_config_dir(env)
+                .map(|config| crate::chat_mcp::claude_allowed_servers(&config))
+                .unwrap_or_default();
+            (crate::chat_mcp::claude_servers(env), allowed)
+        }
+        "codex" => (crate::chat_mcp::codex_servers(binary, env).await, Default::default()),
+        "grok" => (
+            crate::chat_mcp::parse_grok_servers(&crate::provider_skills::grok_inspect_json(binary, cwd).await),
+            Default::default(),
+        ),
+        _ => (Vec::new(), Default::default()),
+    }
+}
+
+/// The user's own MCP servers for `provider`, each with whether turns here run with it — for the
+/// composer's switch list. `conversation_id` reads a free chat's switches; `project_id` a
+/// repository's, for the panel. See `crate::chat_mcp`.
+#[tauri::command]
+pub async fn chat_mcp_servers(
+    db: State<'_, Db>,
+    provider: String,
+    account_id: Option<String>,
+    workspace_id: Option<String>,
+    project_id: Option<String>,
+    conversation_id: Option<String>,
+) -> Result<Vec<crate::chat_mcp::McpServerView>, String> {
+    let (env, overrides, binary, cwd) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let env = ai_accounts::resolve(
+            &conn,
+            &provider,
+            Some("chat"),
+            workspace_id.as_deref(),
+            ai_accounts::Choice::parse(account_id.as_deref()),
+        );
+        let overrides = match (conversation_id.as_deref(), project_id.as_deref()) {
+            (Some(conversation), _) => chat_queries::get_conversation(&conn, conversation)
+                .ok()
+                .flatten()
+                .map(|c| c.mcp_overrides)
+                .unwrap_or_default(),
+            (None, Some(project)) => queries::get_setting(&conn, &crate::chat_mcp::panel_setting_key(project))
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+            (None, None) => String::new(),
+        };
+        let binary = queries::get_setting(&conn, &format!("{provider}_binary_path"))
+            .ok()
+            .flatten()
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_else(|| ai::engine_for(&provider).default_binary().to_string());
+        let cwd = project_id
+            .as_deref()
+            .and_then(|id| queries::get_project(&conn, id).ok().flatten())
+            .map(|project| std::path::PathBuf::from(project.local_path));
+        (env, overrides, binary, cwd)
+    };
+    let (servers, allowed) = native_mcp(&provider, &binary, &env, cwd.as_deref()).await;
+    let overrides = crate::chat_mcp::parse_overrides(&overrides);
+    let mut views = crate::chat_mcp::views(&provider, &servers, &overrides, &allowed);
+    // The app's declared servers, after the CLI's own — minus any the CLI has by the same name,
+    // which is the one that would run.
+    if let (Some(workspace), Ok(conn)) = (workspace_id.as_deref(), db.0.lock()) {
+        let _ = crate::mcp_registry::absorb_legacy(&conn, &crate::db::api_secrets::os_store());
+        for view in crate::mcp_registry::switch_views(&conn, workspace, &provider, &overrides) {
+            if !servers.iter().any(|(name, _)| name == &view.name) {
+                views.push(view);
+            }
+        }
+    }
+    Ok(views)
+}
+
+/// Switches one MCP server on or off for a free chat (`conversation_id`) or for a repository's
+/// panel chat (`project_id`) — `enabled: None` puts it back to its default.
+#[tauri::command]
+pub fn chat_mcp_set(
+    db: State<'_, Db>,
+    conversation_id: Option<String>,
+    project_id: Option<String>,
+    server: String,
+    enabled: Option<bool>,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    match (conversation_id.as_deref(), project_id.as_deref()) {
+        (Some(conversation), _) => {
+            let current = chat_queries::get_conversation(&conn, conversation)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "conversation not found".to_string())?
+                .mcp_overrides;
+            let next = crate::chat_mcp::with_override(&current, &server, enabled);
+            chat_queries::set_mcp_overrides(&conn, conversation, &next).map_err(|e| e.to_string())
+        }
+        (None, Some(project)) => {
+            let key = crate::chat_mcp::panel_setting_key(project);
+            let current = queries::get_setting(&conn, &key).map_err(|e| e.to_string())?.unwrap_or_default();
+            let next = crate::chat_mcp::with_override(&current, &server, enabled);
+            queries::set_setting(&conn, &key, &next).map_err(|e| e.to_string())
+        }
+        (None, None) => Err("nothing to switch: name a conversation or a project".to_string()),
+    }
+}
+
+/// The skills a person can pick in the composer: the workspace's own first, then the ones the
+/// provider's CLI brings — Claude Code's (its own, claude.ai's synced ones, its plugins' and the
+/// built-in ones), Codex's, Grok's, agy's. See `provider_skills` for where each is read.
+///
+/// `project_id` makes the repository's own skills part of the answer (the panel's chat);
+/// `conversation_id` points at a free chat's folder, whose copies of the workspace's skills are the
+/// app's and are listed once, as such.
+#[tauri::command]
+pub async fn chat_provider_skills(
+    db: State<'_, Db>,
+    provider: String,
+    account_id: Option<String>,
+    workspace_id: Option<String>,
+    project_id: Option<String>,
+    conversation_id: Option<String>,
+) -> Result<Vec<crate::provider_skills::ProviderSkill>, String> {
+    let (app_skills, env, cwd, binary) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let app_skills = match workspace_id.as_deref() {
+            Some(workspace) => queries::list_workspace_skills(&conn, workspace).map_err(|e| e.to_string())?,
+            None => Vec::new(),
+        };
+        let env = ai_accounts::resolve(
+            &conn,
+            &provider,
+            Some("chat"),
+            workspace_id.as_deref(),
+            ai_accounts::Choice::parse(account_id.as_deref()),
+        );
+        let cwd = match (project_id.as_deref(), conversation_id.as_deref()) {
+            (Some(project), _) => queries::get_project(&conn, project)
+                .ok()
+                .flatten()
+                .map(|project| std::path::PathBuf::from(project.local_path)),
+            (None, Some(conversation)) => Some(crate::paths::chat_conversation_outputs_dir(conversation)),
+            (None, None) => None,
+        };
+        let binary = queries::get_setting(&conn, &format!("{provider}_binary_path"))
+            .ok()
+            .flatten()
+            .filter(|path| !path.trim().is_empty())
+            .unwrap_or_else(|| ai::engine_for(&provider).default_binary().to_string());
+        (app_skills, env, cwd, binary)
+    };
+
+    let mut skills: Vec<crate::provider_skills::ProviderSkill> = app_skills
+        .iter()
+        .filter(|skill| skill.enabled)
+        .filter_map(|skill| {
+            let file = crate::commands::skills_cmd::app_skill_file(&skill.workspace_id, &skill.skill_name);
+            let meta = crate::skill_meta::parse(&std::fs::read_to_string(&file).ok()?);
+            Some(crate::provider_skills::ProviderSkill {
+                name: skill.skill_name.clone(),
+                description: meta.description.clone().unwrap_or_default(),
+                source: "app".to_string(),
+                plugin: None,
+                path: Some(file.to_string_lossy().into_owned()),
+                model_invocable: meta.model_may_invoke(),
+            })
+        })
+        .collect();
+
+    let provided = match provider.as_str() {
+        "claude" => match ai_accounts::claude_config_dir(&env) {
+            Some(config) => {
+                let report = crate::claude::install_report(&env.key());
+                crate::provider_skills::claude(&config, cwd.as_deref(), report.as_ref())
+            }
+            None => Vec::new(),
+        },
+        "codex" => match ai_accounts::codex_home_dir(&env) {
+            Some(home) => crate::provider_skills::codex(&home, cwd.as_deref()),
+            None => Vec::new(),
+        },
+        "grok" => crate::provider_skills::grok(&binary, cwd.as_deref()).await,
+        "gemini" => crate::provider_skills::gemini(),
+        _ => Vec::new(),
+    };
+    skills.extend(provided);
+    Ok(skills)
 }
 
 /// Grok's, read out of the guide its own installer ships.
@@ -2118,6 +2478,7 @@ fn grok_slash_commands() -> Vec<ProviderCommand> {
         .map(|(name, description)| ProviderCommand {
             name,
             description,
+            description_key: None,
             source: "documented".to_string(),
         })
         .collect()
@@ -2140,6 +2501,7 @@ fn gemini_slash_commands() -> Vec<ProviderCommand> {
     .map(|(name, description)| ProviderCommand {
         name: name.to_string(),
         description: description.to_string(),
+        description_key: None,
         source: "documented".to_string(),
     })
     .collect()
@@ -2511,15 +2873,21 @@ mod tests {
         );
     }
 
-    /// Claude's list carries no slash (see `ClaudeRunMeta`), and the menu's does. The prefix is
-    /// added exactly once, here.
+    /// Claude's built-ins are the verified ones, each with its slash exactly once and a description
+    /// the reader's language renders; the repository ones only where there is a repository.
     #[test]
-    fn claude_commands_are_prefixed_once() {
-        for command in claude_slash_commands() {
-            assert!(command.name.starts_with('/'), "{} has no slash", command.name);
-            assert!(!command.name.starts_with("//"), "{} was prefixed twice", command.name);
-            assert_eq!(command.source, "cli-reported");
+    fn claudes_builtins_are_the_verified_ones() {
+        let env = ai_accounts::AccountEnv::system("claude");
+        let free = provider_commands("claude", &env, None);
+        let names: Vec<&str> = free.iter().filter(|c| c.source == "builtin").map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["/compact", "/clear", "/context", "/usage"]);
+        for command in &free {
+            assert!(command.name.starts_with('/') && !command.name.starts_with("//"), "{}", command.name);
         }
+        assert!(free.iter().filter(|c| c.source == "builtin").all(|c| c.description_key.is_some()));
+        let repo = std::env::temp_dir();
+        let with_repo = provider_commands("claude", &env, Some(&repo));
+        assert!(with_repo.iter().any(|c| c.name == "/init") && with_repo.iter().any(|c| c.name == "/security-review"));
     }
 
     /// The three that publish nothing publish nothing. The UI's "open in terminal" row depends on
@@ -2527,8 +2895,9 @@ mod tests {
     #[test]
     fn providers_without_a_headless_command_surface_return_none() {
         for provider in ["codex", "opencode", "cline", "something-new"] {
+            let env = ai_accounts::AccountEnv::system(provider);
             assert!(
-                chat_provider_commands(provider.to_string()).is_empty(),
+                provider_commands(provider, &env, None).is_empty(),
                 "{provider} must not invent a command surface"
             );
         }

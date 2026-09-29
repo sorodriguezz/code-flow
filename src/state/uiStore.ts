@@ -72,6 +72,7 @@ export type SettingsSectionId =
   | "pipelines"
   | "review"
   | "skills"
+  | "mcp"
   | "api";
 
 /**

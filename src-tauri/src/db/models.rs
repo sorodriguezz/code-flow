@@ -1581,6 +1581,10 @@ pub struct ChatConversation {
     /// because the session lives in the old account's directory. See `crate::ai_accounts`.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// MCP servers switched on or off in this thread, as a JSON object by server name — empty for
+    /// none. See `crate::chat_mcp`.
+    #[serde(default)]
+    pub mcp_overrides: String,
 }
 
 /// A folder in the chat sidebar.

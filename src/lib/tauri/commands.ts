@@ -1337,7 +1337,7 @@ export const aiReadOnlyEngines = () => invoke<string[]>("ai_read_only_engines");
 
 /** Mirrors `ai::AiFailure` — one failed run, classified. See `aiClassifyFailure`. */
 export interface AiFailure {
-  kind: "quota" | "auth_required" | "cli_missing" | "overloaded" | "other";
+  kind: "quota" | "auth_required" | "cli_missing" | "cli_busy" | "overloaded" | "other";
   /** The provider's own words, marker stripped — "…· resets 12am (America/Santiago)" survives. */
   message: string;
   /** When the window reopens, as the provider phrased it ("12am (America/Santiago)", "in 3 hours"). */
@@ -1449,6 +1449,8 @@ export const sendChatMessage = (
   runId?: string,
   agent?: ChatAgentOverride | null,
   stream?: boolean,
+  /** A skill picked in the composer — see `chatSend`. */
+  skill?: { name: string; source: string; path: string | null } | null,
 ) =>
   invoke<ChatReply>("send_chat_message", {
     projectId,
@@ -1461,6 +1463,7 @@ export const sendChatMessage = (
     agentPrompt: agent?.prompt ?? null,
     agentAccount: agent?.account ?? null,
     stream: stream ?? null,
+    skill: skill ?? null,
   });
 
 // ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------

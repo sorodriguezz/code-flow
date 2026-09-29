@@ -53,6 +53,10 @@ const TOOL_OPTIONS: ToolOption[] = [
   { id: "Glob", descriptionKey: "settings.toolGlobDesc", recommended: true },
   { id: "WebFetch", descriptionKey: "settings.toolWebFetchDesc" },
   { id: "WebSearch", descriptionKey: "settings.toolWebSearchDesc" },
+  // Recommended: headless Claude denies any tool nobody pre-approved, and this is the one that
+  // opens a skill. The free chat grants it on every turn by itself; this is the switch for the
+  // repository flows (the panel chat, reviews), where the list below is what the run gets.
+  { id: "Skill", descriptionKey: "settings.toolSkillDesc", recommended: true },
   { id: "Bash", descriptionKey: "settings.toolBashDesc" },
   { id: "Edit", descriptionKey: "settings.toolEditDesc" },
   { id: "Write", descriptionKey: "settings.toolWriteDesc" },
